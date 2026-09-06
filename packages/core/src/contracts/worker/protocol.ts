@@ -709,6 +709,37 @@ export const HeartbeatRequestSchema = Type.Object({
 });
 
 /**
+ * The heartbeat's reply, and the only channel the gateway has back into a run
+ * it has already handed to a worker. A claimed run belongs to whichever fleet
+ * worker holds its lease, and the gateway cannot address that process — so
+ * anything it needs to tell a turn in flight rides the beat the worker is
+ * already making.
+ *
+ * `continue: false` means stop: the run left `running` under this worker's
+ * lease, because a human cancelled it or the lease was lost. The worker
+ * finishes through its normal completion path rather than abandoning the run,
+ * so the terminal row and the client's reply are still written by the lane
+ * that owns them.
+ *
+ * `steer` carries a message that arrived while this turn was running and is
+ * meant for the model now rather than for the next turn. Absent on every beat
+ * that has nothing to inject, which is nearly all of them.
+ */
+export const HeartbeatResponseSchema = Type.Object({
+  continue: Type.Boolean(),
+  /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
+  stop_reason: Type.Optional(
+    Type.Union([Type.Literal("cancelled"), Type.Literal("lease_lost")])
+  ),
+  steer: Type.Optional(
+    Type.Object({
+      message_id: Type.String(),
+      text: Type.String(),
+    })
+  ),
+});
+
+/**
  * Request the gateway dispatch a chrome connector action on behalf of a
  * running sync. Scoped to the parent run's org.
  */
@@ -786,6 +817,7 @@ export type PollAuthSignalResponse = Static<
   typeof PollAuthSignalResponseSchema
 >;
 export type HeartbeatRequest = Static<typeof HeartbeatRequestSchema>;
+export type HeartbeatResponse = Static<typeof HeartbeatResponseSchema>;
 export type DispatchChromeActionRequest = Static<
   typeof DispatchChromeActionRequestSchema
 >;

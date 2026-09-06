@@ -13,6 +13,7 @@ import {
   SpanStatusCode,
 } from "@lobu/core";
 import { z } from "zod";
+import { isExplicitCancelMessage, isSteerableHumanMessage } from "@lobu/core";
 import type { WorkerConfig, WorkerExecutor } from "../core/types";
 import { invalidateSessionContextCache } from "../runtime/session-context";
 import { LobuAgentWorker } from "../runtime/worker";
@@ -1171,48 +1172,4 @@ export class GatewayClient {
   }
 }
 
-const AUTOMATION_SOURCES = new Set([
-  "automation-run",
-  "scheduled-job",
-  "connector-repair",
-  "internal",
-  "automation",
-]);
-
-export function isSteerableHumanMessage(payload: MessagePayload): boolean {
-  if (
-    payload.platformMetadata?.automationId &&
-    payload.platformMetadata?.automationActiveRunPolicy !== "steer"
-  ) {
-    return false;
-  }
-  // `/new` must run after the active turn: it flushes memory, deletes the
-  // transcript, and purges durable snapshots. Steering it into the current Pi
-  // session would treat the control command as ordinary text and preserve the
-  // history the user explicitly asked to reset.
-  if (payload.platformMetadata?.sessionReset === true) return false;
-  // A `!`-bash message is a control action, not model input: steering it into an
-  // active turn would feed the raw `!cmd` text to the model instead of running
-  // it. Queue it as its own turn (the worker intercept runs the shell).
-  if (payload.platformMetadata?.bangBash) return false;
-  const source = payload.platformMetadata?.source;
-  if (typeof source === "string" && AUTOMATION_SOURCES.has(source)) {
-    return false;
-  }
-  const files = payload.platformMetadata?.files;
-  return !Array.isArray(files) || files.length === 0;
-}
-
-export function isExplicitCancelMessage(payload: MessagePayload): boolean {
-  const metadata = payload.platformMetadata;
-  if (metadata?.control === "cancel") return true;
-  const intent = metadata?.intent;
-  if (
-    typeof intent === "object" &&
-    intent !== null &&
-    (intent as Record<string, unknown>).kind === "cancel"
-  ) {
-    return true;
-  }
-  return payload.messageText.trim().toLowerCase() === "/cancel";
-}
+export { isExplicitCancelMessage, isSteerableHumanMessage };

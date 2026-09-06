@@ -23,6 +23,10 @@ function trimTrailingSlashes(value: string): string {
 export interface ExecutorClient {
   readonly id: string;
   poll(capacityAvailable?: number): Promise<PollResponse>;
+  /**
+   * Beat, and read what the gateway says back. The response is the only channel
+   * into a run this worker already holds: `continue: false` means stop.
+   */
   heartbeat(
     runId: number,
     progress?: {
@@ -31,7 +35,7 @@ export interface ExecutorClient {
       elapsed_ms?: number;
     },
     agentSession?: NonNullable<HeartbeatRequest['agent_session']>
-  ): Promise<void>;
+  ): Promise<HeartbeatResponse>;
   stream(batch: StreamBatch): Promise<void>;
   complete(req: CompleteRequest): Promise<void>;
   completeAction(req: CompleteActionRequest): Promise<void>;
@@ -103,6 +107,7 @@ export type {
   EmbedEvent,
   EmitAuthArtifactRequest,
   HeartbeatRequest,
+  HeartbeatResponse,
   OAuthCredentials,
   PollAuthSignalRequest,
   PollAuthSignalResponse,
@@ -125,6 +130,7 @@ import type {
   EmbedEvent,
   EmitAuthArtifactRequest,
   HeartbeatRequest,
+  HeartbeatResponse,
   PollAuthSignalRequest,
   PollAuthSignalResponse,
   PollResponse,
@@ -385,8 +391,8 @@ export class WorkerClient implements ExecutorClient {
       elapsed_ms?: number;
     },
     agentSession?: NonNullable<HeartbeatRequest['agent_session']>
-  ): Promise<void> {
-    await this.requestVoid('/api/workers/heartbeat', {
+  ): Promise<HeartbeatResponse> {
+    return this.requestJson<HeartbeatResponse>('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: this.workerId,
       progress,

@@ -4,6 +4,7 @@
 
 export * from "./agent-policy";
 export * from "./tool-policy";
+export * from "./turn-control";
 // Agent store interface (unified storage abstraction)
 export type {
   AgentAccessStore,

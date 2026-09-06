@@ -45,6 +45,12 @@
       "import": "./dist/tool-policy.js",
       "require": "./dist/tool-policy.js"
     },
+    "./turn-control": {
+      "types": "./dist/turn-control.d.ts",
+      "bun": "./src/turn-control.ts",
+      "import": "./dist/turn-control.js",
+      "require": "./dist/turn-control.js"
+    },
     "./errors": {
       "types": "./dist/errors.d.ts",
       "bun": "./src/errors.ts",

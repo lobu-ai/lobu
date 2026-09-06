@@ -15,6 +15,7 @@ import type {
 	CompleteRequest,
 	EmitAuthArtifactRequest,
 	HeartbeatRequest,
+	HeartbeatResponse,
 	PollAuthSignalRequest,
 	StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
@@ -255,10 +256,28 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
       RETURNING id
     `;
 		if (updated.length === 0) {
+			// The fence requires `status = 'running'`, so a cancelled run fails it
+			// exactly like a lost lease does. The worker has to tell those apart:
+			// on a cancel it still owns the run and must finish through its normal
+			// completion path so the terminal row and the client's reply get
+			// written; on a lost lease another worker owns it and this one must
+			// touch nothing. Re-read on ownership alone to say which.
+			const [owned] = (await sql`
+        SELECT status FROM runs
+        WHERE id = ${run_id}
+          ${runOwnerFence(sql, worker_id)}
+        LIMIT 1
+      `) as unknown as Array<{ status: string } | undefined>;
+			if (owned?.status === 'cancelled') {
+				return c.json<HeartbeatResponse>({
+					continue: false,
+					stop_reason: 'cancelled',
+				});
+			}
 			return c.json({ error: 'Run is not in progress' }, 409);
 		}
 
-		return c.json({ continue: true });
+		return c.json<HeartbeatResponse>({ continue: true });
 	} catch (err: unknown) {
 		return c.json({ error: errorMessage(err) }, 500);
 	}

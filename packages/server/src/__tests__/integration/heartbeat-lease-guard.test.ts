@@ -116,6 +116,54 @@ describe('heartbeat lease guard', () => {
     expect(run.run_metadata?.device_agent_session).toBeUndefined();
   });
 
+  // The gateway cannot address a fleet worker that already holds a run, so the
+  // heartbeat's response is its only way to tell a turn in flight to stop. A
+  // cancelled run fails the lease fence exactly like a lost lease does (the
+  // fence requires status='running'), and the worker has to tell them apart:
+  // on a cancel it still owns the run and must finish through its normal
+  // completion path so the client still gets an answer; on a lost lease
+  // another worker owns the run and this one must not touch it.
+  it('tells the run\'s own worker to stop when a human cancelled it', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT);
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+    await heartbeat(ctx);
+
+    expect(result().status).toBe(200);
+    expect(result().body).toEqual({ continue: false, stop_reason: 'cancelled' });
+    // Still a refusal to write: the cancelled run's liveness clock stays clear,
+    // so this answer cannot keep a dead run off the reaper's next sweep.
+    const run = await readRun(runId);
+    expect(String(run.status)).toBe('cancelled');
+    expect(run.last_heartbeat_at).toBeNull();
+  });
+
+  it('does NOT report cancellation to a worker that no longer owns the run', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT);
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: OTHER });
+    await heartbeat(ctx);
+
+    // OTHER is not the claimant, so it learns nothing about this run beyond
+    // "not yours" — the ownership fence gates the cancel signal too.
+    expect(result().status).toBe(409);
+  });
+
+  it('keeps answering continue:true while the run is healthy', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'running', CLAIMANT);
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+    await heartbeat(ctx);
+
+    expect(result().status).toBe(200);
+    expect(result().body).toEqual({ continue: true });
+    const run = await readRun(runId);
+    expect(run.last_heartbeat_at).not.toBeNull();
+  });
+
   it('does NOT let a non-claimant pin its agent session onto a running run', async () => {
     const org = await createTestOrganization();
     const runId = await insertRun(org.id, 'running', CLAIMANT);
