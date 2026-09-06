@@ -117,12 +117,9 @@ type BuiltinTool = NonNullable<TurnTools["builtin"]>[number];
  * — the guest selects by name out of the package, so a name added there does
  * not silently reach an agent until it is added here too.
  *
- * The other two plugin lanes are deliberately absent, and each for a reason:
- * `lobu-memory` publishes NO tools (its recall and capture are hooks that call
- * `search_memory`/`save_memory` on the `lobu` MCP server, which this lane
- * already reaches), and `lobu-media`'s `upload_file` reads the file off a real
- * disk through `node:fs` — the isolate has no such disk, so porting it means
- * making the upload read the turn's own in-memory workspace first.
+ * `lobu-media`'s tools are named separately in `MEDIA_TOOLS` below, and
+ * `lobu-memory` publishes no tools at all — its recall and capture are hooks,
+ * carried on the envelope's `memory` field rather than in any tool list.
  */
 const GATEWAY_TOOLS = [
   "list_conversations",
@@ -145,6 +142,27 @@ const GATEWAY_TOOLS = [
  * `bash`. Adding either means writing an in-isolate implementation first.
  */
 const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "ls", "find"];
+
+/**
+ * The media tools the isolate lane carries — `@lobu/plugin-media`'s own.
+ *
+ * Named here rather than imported for the same reason as `GATEWAY_TOOLS`: the
+ * producer states exactly which tools it will hand a turn, so a tool added to
+ * the package does not silently reach an agent.
+ *
+ * `upload_file` is listed unconditionally and filtered by the POLICY like the
+ * rest; whether the turn actually gets it also depends on it having a
+ * workspace to read from, which the guest decides — there is no filesystem on
+ * this lane other than the turn's own in-memory one.
+ */
+const MEDIA_TOOLS = ["upload_file", "generate_image", "generate_audio"] as const;
+
+/**
+ * The MCP server `@lobu/plugin-memory`'s two hooks call. Lobu's own server,
+ * which every agent on this lane already reaches — the hooks are not a second
+ * integration, they are two more calls on the route the turn already uses.
+ */
+const MEMORY_MCP_ID = "lobu";
 
 export interface AgentTurnShadowDeps {
   /** Reads the agent's identity/soul/user layers. Absent → no shadow. */
@@ -207,6 +225,7 @@ function composeShadowSystemPrompt(
   },
   mcpInstructions: string[],
   workspace: boolean,
+  canUpload: boolean,
   toolNames: readonly string[]
 ): string {
   const sections: string[] = [];
@@ -221,7 +240,7 @@ function composeShadowSystemPrompt(
   // them, which is how the model learns the rule the guest enforces.
   const policyRules = renderAlwaysOnToolPolicyRulesFor(toolNames);
   if (policyRules) sections.push(policyRules);
-  if (workspace) sections.push(WORKSPACE_INSTRUCTIONS);
+  if (workspace) sections.push(workspaceInstructions(canUpload));
   for (const instructions of mcpInstructions) {
     const text = instructions.trim();
     if (text) sections.push(text);
@@ -231,18 +250,28 @@ function composeShadowSystemPrompt(
 
 /**
  * What the model must know about the workspace its tools act on, and only
- * that: it is private to this turn, starts empty, and has no network. The
- * subprocess lane's own file-IO block is not reused — it instructs the model
- * to hand every generated file to `upload_file`, a tool this lane does not
- * carry.
+ * that: it is private to this turn, starts empty, and has no network.
+ *
+ * The `upload_file` line is appended only when the turn actually carries that
+ * tool — the workspace does not persist, so a file the user should see has to
+ * be handed over during the turn that produced it, and a model told to call a
+ * tool it was not given would just fail.
  */
-const WORKSPACE_INSTRUCTIONS = [
-  "## Workspace",
-  "",
-  "Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.",
-  "It starts empty on every turn and nothing written there persists after the turn ends.",
-  "It has no network access and no package manager; use your other tools to reach data.",
-].join("\n");
+function workspaceInstructions(canUpload: boolean): string {
+  const lines = [
+    "## Workspace",
+    "",
+    "Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.",
+    "It starts empty on every turn and nothing written there persists after the turn ends.",
+    "It has no network access and no package manager; use your other tools to reach data.",
+  ];
+  if (canUpload) {
+    lines.push(
+      "Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends."
+    );
+  }
+  return lines.join("\n");
+}
 
 type HistoryMessage = Record<string, unknown> & { role: string };
 
@@ -541,7 +570,12 @@ async function resolveTurnTools(
     workerToken: string;
     policy: ToolPolicy;
   }
-): Promise<{ tools: TurnTools | undefined; instructions: string[] }> {
+): Promise<{
+  tools: TurnTools | undefined;
+  instructions: string[];
+  /** Whether the agent actually has the memory MCP server mounted. */
+  hasMemoryServer: boolean;
+}> {
   const tokenData = verifyWorkerToken(args.workerToken);
   if (!tokenData) throw new Error("the turn's own worker token does not verify");
   const servers = await mcp.configService.getMcpStatus(args.agentId, args.organizationId);
@@ -577,6 +611,11 @@ async function resolveTurnTools(
   return {
     tools: definitions.length > 0 ? { gateway_url: args.gatewayUrl, definitions } : undefined,
     instructions,
+    // Read off the SERVER list, not the tool list: the memory hooks call
+    // `search_memory`/`save_memory` directly, and those two are routinely
+    // filtered out of the model's own manifest by the tool policy without the
+    // server being any less reachable.
+    hasMemoryServer: servers.some((server) => server.id === MEMORY_MCP_ID),
   };
 }
 
@@ -671,6 +710,8 @@ export async function enqueueAgentTurnShadow(
     if (!provider) return;
 
     let tools: TurnTools | undefined;
+    // Memory is off unless the agent actually has the server its hooks call.
+    let hasMemoryServer = false;
     let mcpInstructions: string[] = [];
     const policy = turnToolPolicy(data.agentOptions);
     const toolsConfig = data.agentOptions?.toolsConfig as ToolsConfig | undefined;
@@ -699,6 +740,7 @@ export async function enqueueAgentTurnShadow(
       });
       tools = resolved.tools;
       mcpInstructions = resolved.instructions;
+      hasMemoryServer = resolved.hasMemoryServer;
     }
 
     // The workspace tools the policy admits. `bash` carries its prefix policy
@@ -708,7 +750,9 @@ export async function enqueueAgentTurnShadow(
     // same patterns that decide them on the subprocess lane — so an agent that
     // denies `ask_user` denies it on both lanes.
     const gateway = GATEWAY_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    if (builtin.length > 0 || gateway.length > 0) {
+    // The media tools the policy admits, through the same builder again.
+    const media = MEDIA_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
+    if (builtin.length > 0 || gateway.length > 0 || media.length > 0) {
       tools = {
         gateway_url: gatewayUrl,
         // Accumulated, not replaced: an agent can have MCP tools and workspace
@@ -726,10 +770,12 @@ export async function enqueueAgentTurnShadow(
             }
           : {}),
         // The conversation rides with them: every one of these tools addresses
-        // a channel, and the guest must never infer routing.
-        ...(gateway.length > 0
+        // a channel, and the guest must never infer routing. Both families
+        // need it, so it is emitted once for either.
+        ...(gateway.length > 0 ? { gateway: [...gateway] } : {}),
+        ...(media.length > 0 ? { media: [...media] } : {}),
+        ...(gateway.length > 0 || media.length > 0
           ? {
-              gateway: [...gateway],
               conversation: {
                 channel_id: data.channelId,
                 conversation_id: data.conversationId,
@@ -765,11 +811,14 @@ export async function enqueueAgentTurnShadow(
         settings ?? {},
         mcpInstructions,
         builtin.length > 0,
+        // The guest drops `upload_file` when the turn has no workspace, so the
+        // prompt must not promise it either.
+        builtin.length > 0 && media.includes("upload_file"),
         // Every tool the model will actually be offered, whichever family it
         // came from: an MCP server's `search_memory` earns the thread-history
         // rule exactly as the conversation plugin's `send_message` earns the
         // channel-participation one.
-        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...builtin]
+        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin]
       ),
       messages: snapshot ? historyMessages(snapshot) : [],
       provider: {
@@ -780,6 +829,13 @@ export async function enqueueAgentTurnShadow(
         input: provider.input,
       },
       ...(tools ? { tools } : {}),
+      // The memory hooks, when the agent has the server they call. They are
+      // not tools and carry no schema: the guest runs
+      // `@lobu/plugin-memory`'s own two hooks over the MCP route the turn
+      // already uses.
+      ...(hasMemoryServer
+        ? { memory: { mcp_id: MEMORY_MCP_ID, agent_id: data.agentId } }
+        : {}),
       // DENY-ALL. A connector's allowlist defaults open; an agent turn's does
       // not. The gateway is the only host this turn has any business
       // reaching: the provider is behind its proxy and the tools behind its
@@ -828,6 +884,8 @@ export async function enqueueAgentTurnShadow(
         tools: tools?.definitions.length ?? 0,
         workspaceTools: builtin,
         gatewayTools: gateway,
+        mediaTools: media,
+        memory: hasMemoryServer,
       },
       "Enqueued a shadow agent turn on the isolate lane"
     );

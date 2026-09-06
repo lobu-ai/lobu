@@ -98,6 +98,18 @@ export type AgentTurnGatewayTool =
   | 'suggest_actions';
 
 /**
+ * A media tool the turn may call — `@lobu/plugin-media`'s own.
+ *
+ * As with the gateway tools, the producer names them and the guest runs the
+ * plugin package's OWN implementation. `upload_file` differs from the other two
+ * in one respect only: it reads a file, and the two lanes hold the agent's
+ * workspace in different places, so the guest injects a read port over the
+ * turn's in-memory filesystem. The tool, its schema and its prose are the
+ * plugin's on both lanes.
+ */
+export type AgentTurnMediaTool = 'upload_file' | 'generate_image' | 'generate_audio';
+
+/**
  * The agent's bash prefix policy, in the shape `@lobu/core/tool-policy`
  * enforces. Restated rather than imported on purpose: this file is the
  * host-side contract, and a type import here would be the first step toward a
@@ -125,7 +137,18 @@ export interface AgentTurnTools {
    * the plugin package, so the wire carries only the names.
    */
   gateway?: AgentTurnGatewayTool[];
-  /** Conversation routing the gateway tools post into. Required whenever `gateway` is non-empty. */
+  /**
+   * Media tools the agent's policy admits, by name. Same contract as
+   * `gateway`: names only, because the routing lives in the plugin package.
+   * `upload_file` additionally needs `builtin` to include a workspace tool —
+   * with no filesystem there is no file to show — and the guest drops it if
+   * the turn has none.
+   */
+  media?: AgentTurnMediaTool[];
+  /**
+   * Conversation routing the gateway and media tools post into. Required
+   * whenever `gateway` or `media` is non-empty.
+   */
   conversation?: AgentTurnConversation;
 }
 
@@ -166,6 +189,27 @@ export interface AgentTurnInput {
   files?: AgentTurnFile[];
   /** Absent → the turn runs with no tools. */
   tools?: AgentTurnTools;
+  /**
+   * Long-term memory for this turn: recall before the model runs, capture
+   * after it answers. Absent → the turn runs with no memory, which is what a
+   * turn whose agent has no `lobu` MCP server gets.
+   *
+   * Both hooks are `@lobu/plugin-memory`'s own and reach `search_memory` /
+   * `save_memory` over the MCP route this turn already calls, so no extra
+   * credential and no extra host is involved.
+   */
+  memory?: AgentTurnMemory;
+}
+
+/** Whether this turn recalls and captures long-term memory, and as whom. */
+export interface AgentTurnMemory {
+  /**
+   * The MCP server id the memory tools live on. Carried rather than assumed so
+   * a turn whose Lobu server is mounted elsewhere still recalls.
+   */
+  mcpId: string;
+  /** The agent the capture is attributed to. */
+  agentId: string;
 }
 
 /** What the guest streams out while the turn runs. */
@@ -174,7 +218,14 @@ export type AgentTurnEvent =
   | { type: 'thinking_delta'; delta: string }
   | { type: 'message_end' }
   | { type: 'tool_call_start'; toolCallId: string; name: string; args: unknown }
-  | { type: 'tool_call_end'; toolCallId: string; name: string; isError: boolean; output: string };
+  | { type: 'tool_call_end'; toolCallId: string; name: string; isError: boolean; output: string }
+  /**
+   * A file `upload_file` delivered, with the gateway's own reply for it. The
+   * subprocess lane raises the same payload as its `file-uploaded` custom
+   * event; on this lane it rides the turn's one event stream, so the guest
+   * still needs no second channel out of the isolate.
+   */
+  | { type: 'file_uploaded'; data: Record<string, unknown> };
 
 /** What the turn produced. */
 export interface AgentTurnOutput {

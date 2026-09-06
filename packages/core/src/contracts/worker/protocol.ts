@@ -451,9 +451,21 @@ export const AgentTurnPollPayloadSchema = Type.Object({
          */
         gateway: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
         /**
+         * The media tools the agent's tool policy admits, by NAME only —
+         * `upload_file`, `generate_image`, `generate_audio` from
+         * `@lobu/plugin-media`. Same contract as `gateway` above: the guest
+         * runs that package's own implementation, so the routes and schemas
+         * live there and never on this wire.
+         *
+         * `upload_file` additionally needs `builtin` to be non-empty. It reads
+         * a file, and on this lane the only filesystem is the turn's in-memory
+         * workspace; a turn without one is offered the other two and not it.
+         */
+        media: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        /**
          * Which conversation those tools post into. Required whenever
-         * `gateway` is non-empty: a tool that addresses a channel cannot
-         * default one, and the guest must never infer routing.
+         * `gateway` or `media` is non-empty: a tool that addresses a channel
+         * cannot default one, and the guest must never infer routing.
          */
         conversation: Type.Optional(
           Type.Object({
@@ -462,6 +474,24 @@ export const AgentTurnPollPayloadSchema = Type.Object({
             platform: Type.String({ minLength: 1 }),
           })
         ),
+      })
+    ),
+    /**
+     * Long-term memory for this turn: `@lobu/plugin-memory`'s recall hook
+     * before the model runs and its capture hook after it answers. Both reach
+     * `search_memory` / `save_memory` on the named MCP server, over the SAME
+     * route and the SAME bearer every other tool call takes — so a turn with
+     * memory still carries exactly one credential and reaches one host.
+     *
+     * Absent → the turn recalls nothing and captures nothing, which is what a
+     * turn whose agent has no Lobu MCP server gets.
+     */
+    memory: Type.Optional(
+      Type.Object({
+        /** The MCP server the two memory tools are mounted on. */
+        mcp_id: Type.String({ minLength: 1 }),
+        /** The agent a captured observation is attributed to. */
+        agent_id: Type.String({ minLength: 1 }),
       })
     ),
     /**

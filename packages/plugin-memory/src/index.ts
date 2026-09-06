@@ -1,4 +1,8 @@
-import { defineLobuPlugin, type PluginRuntimeContext } from "@lobu/plugin-api";
+import {
+  defineLobuPlugin,
+  type LobuPlugin,
+  type PluginRuntimeContext,
+} from "@lobu/plugin-api";
 import {
   joinTextContent,
   type GatewayParams,
@@ -54,13 +58,38 @@ function lastMessage(
   return null;
 }
 
+/**
+ * A plugin whose background work can be waited on.
+ *
+ * `agentEnd` starts the `save_memory` write and returns without waiting, and
+ * that is deliberate: the capture is best-effort bookkeeping, and blocking a
+ * turn's tail on it would add the tool's whole timeout budget to the latency
+ * of every single reply.
+ *
+ * The problem is that "returns without waiting" only works on a runtime that
+ * OUTLIVES the turn. The subprocess lane's worker process does; the isolate
+ * lane's isolate does not — it is disposed the moment `runAgentTurn` resolves,
+ * which cancels the in-flight write and silently stops memory from
+ * accumulating for every agent on that lane. So the promise is not dropped on
+ * the floor: it is kept here, and a runtime that is about to tear itself down
+ * awaits it through `settle()` while one that is not simply never calls it.
+ *
+ * `settle()` never rejects. A failed capture is already logged where it
+ * happens, and a teardown path is the worst possible place to learn about it.
+ */
+export interface CapturingPlugin {
+  settle(): Promise<void>;
+}
+
 export function createMemoryPlugin(
   gateway: GatewayParams,
   invokeTool: MemoryToolInvoker
-) {
+): LobuPlugin<ToolDefinition> & CapturingPlugin {
   let promptForCapture = "";
+  /** The capture started by the most recent `agentEnd`, if it is still running. */
+  let capture: Promise<void> | null = null;
 
-  return defineLobuPlugin<ToolDefinition>({
+  const plugin = defineLobuPlugin<ToolDefinition>({
     manifest: {
       name: "lobu-memory",
       version: "1.0.0",
@@ -115,7 +144,9 @@ export function createMemoryPlugin(
         const combined = `User: ${userText}\nAssistant: ${assistant.text}`;
         if (combined.length < 16) return;
 
-        void invokeTool(
+        // Started, not awaited: see `CapturingPlugin`. The promise is retained
+        // so a runtime that disposes at the end of the turn can wait for it.
+        capture = invokeTool(
           gateway,
           "lobu",
           "save_memory",
@@ -135,4 +166,19 @@ export function createMemoryPlugin(
       },
     },
   });
+
+  // `settle` rides ALONGSIDE the plugin contract rather than inside it: it is
+  // a property of this implementation's background work, not a hook every
+  // plugin has, and `PluginHost` neither knows nor needs to know about it.
+  return {
+    ...plugin,
+    settle: async () => {
+      // Read once and cleared: settling twice must not wait on a promise that
+      // already resolved, and a later turn's capture is a later turn's to wait
+      // for.
+      const pending = capture;
+      capture = null;
+      if (pending) await pending;
+    },
+  };
 }

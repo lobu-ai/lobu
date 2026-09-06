@@ -174,10 +174,34 @@ function looksBinary(bytes: Uint8Array): boolean {
 }
 
 /**
+ * The turn's filesystem, and the tools that act on it.
+ *
+ * Returned together because more than the file tools need the FS: `upload_file`
+ * reads the very same in-memory tree, so the workspace the model wrote with
+ * `bash` is the workspace it can hand to the user. Handing out the `InMemoryFs`
+ * is what keeps that one filesystem, rather than giving the media port a second
+ * one that would always look empty.
+ */
+export interface AgentWorkspace {
+  /** The turn's filesystem. Empty at the start of the turn, gone at the end. */
+  fs: InMemoryFs;
+  /** Resolved once the root directory exists; every tool awaits it first. */
+  ready: Promise<unknown>;
+  tools: AgentTool[];
+  /**
+   * Resolve a model-supplied path inside the workspace root, or throw.
+   * Exported so a non-file tool that takes a path — `upload_file` — enforces
+   * containment through the SAME check the file tools do, rather than a second
+   * implementation that could drift from it.
+   */
+  resolve(path: string | undefined): string;
+}
+
+/**
  * Build the workspace tools the turn admits, over one fresh filesystem. The
  * shell and every file tool share it, so what `bash` writes `read` sees.
  */
-export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bashPolicy?: AgentTurnBashPolicy): AgentTool[] {
+export function createWorkspace(names: readonly AgentTurnBuiltinTool[], bashPolicy?: AgentTurnBashPolicy): AgentWorkspace {
   const fs = new InMemoryFs();
   const ready = fs.mkdir(WORKSPACE_ROOT, { recursive: true });
   const shell = new Bash({ fs, cwd: WORKSPACE_ROOT, executionLimits: BASH_LIMITS });
@@ -391,5 +415,18 @@ export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bas
     },
   };
 
-  return names.filter((name, index) => name in tools && names.indexOf(name) === index).map((name) => tools[name]);
+  return {
+    fs,
+    ready,
+    resolve,
+    tools: names.filter((name, index) => name in tools && names.indexOf(name) === index).map((name) => tools[name]),
+  };
+}
+
+/**
+ * The turn's workspace tools alone, for a caller that has no use for the
+ * filesystem behind them.
+ */
+export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bashPolicy?: AgentTurnBashPolicy): AgentTool[] {
+  return createWorkspace(names, bashPolicy).tools;
 }

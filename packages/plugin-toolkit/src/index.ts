@@ -6,6 +6,8 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static, TSchema } from "@sinclair/typebox";
 
+export type { ToolLogger } from "@lobu/core/agent-tooling";
+
 /**
  * Where this package's tool-failure lines go.
  *
@@ -27,6 +29,22 @@ let logger: ToolLogger = {
 export function setToolLogger(next: ToolLogger): void {
   logger = next;
 }
+
+/**
+ * The lane's logger, for the plugin packages that log outside a tool wrapper.
+ *
+ * A live view rather than the value: `setToolLogger` runs at worker startup,
+ * which may be after a plugin module was first imported, so a package that
+ * captured `logger` at import time would keep the console fallback forever.
+ * Every method forwards on each call, so the swap is picked up wherever it
+ * happens.
+ */
+export const toolLogger: ToolLogger = {
+  error: (message, ...args) => logger.error(message, ...args),
+  warn: (message, ...args) => logger.warn(message, ...args),
+  info: (message, ...args) => logger.info(message, ...args),
+  debug: (message, ...args) => logger.debug(message, ...args),
+};
 
 export interface TextResult {
   [key: string]: unknown;

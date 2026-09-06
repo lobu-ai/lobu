@@ -15,7 +15,7 @@ import {
   TURN_DELTA_MAX_CHARS,
 } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
-import type { AgentTurnEvent, AgentTurnGatewayTool } from '../agent-turn/types.js';
+import type { AgentTurnEvent, AgentTurnGatewayTool, AgentTurnMediaTool } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import type { ExecutorClient } from './client.js';
@@ -284,19 +284,36 @@ export async function executeAgentTurnRun(
                   // Names only; the guest selects them out of the plugin
                   // package, which is where their routing and schemas live.
                   // Without the conversation they address there is nothing to
-                  // post into, so the pair travels together or not at all.
-                  ...(turn.tools.gateway && turn.tools.gateway.length > 0 && turn.tools.conversation
+                  // post into, so the names travel with it or not at all —
+                  // which is why the conversation is mapped once, below, for
+                  // whichever of the two families the turn carries.
+                  ...(turn.tools.conversation
                     ? {
-                        gateway: turn.tools.gateway as AgentTurnGatewayTool[],
-                        conversation: {
-                          channelId: turn.tools.conversation.channel_id,
-                          conversationId: turn.tools.conversation.conversation_id,
-                          platform: turn.tools.conversation.platform,
-                        },
+                        ...(turn.tools.gateway && turn.tools.gateway.length > 0
+                          ? { gateway: turn.tools.gateway as AgentTurnGatewayTool[] }
+                          : {}),
+                        ...(turn.tools.media && turn.tools.media.length > 0
+                          ? { media: turn.tools.media as AgentTurnMediaTool[] }
+                          : {}),
+                        ...((turn.tools.gateway && turn.tools.gateway.length > 0) ||
+                        (turn.tools.media && turn.tools.media.length > 0)
+                          ? {
+                              conversation: {
+                                channelId: turn.tools.conversation.channel_id,
+                                conversationId: turn.tools.conversation.conversation_id,
+                                platform: turn.tools.conversation.platform,
+                              },
+                            }
+                          : {}),
                       }
                     : {}),
                 },
               }
+            : {}),
+          // The memory hooks reach the same MCP route the tools do, so they
+          // need nothing on the wire but which server and which agent.
+          ...(turn.memory
+            ? { memory: { mcpId: turn.memory.mcp_id, agentId: turn.memory.agent_id } }
             : {}),
         },
         config: {},

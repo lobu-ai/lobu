@@ -253,6 +253,14 @@ describe("executeAgentTurnRun", () => {
   });
 
   test("hands the guest the turn's attachments, and the model's own modalities, in the guest's shape", async () => {
+  /**
+   * The media tools and the memory hooks cross the same wire the gateway tools
+   * do: names only for the tools, and two ids for the hooks. What is pinned
+   * here is the MAPPING — snake_case envelope in, camelCase guest input out —
+   * and the rule that the conversation travels with EITHER tool family, not
+   * just the gateway one.
+   */
+  test("maps the media tools and the memory hooks onto the guest input", async () => {
     const reported: Reported = { calls: [] };
     let seen: ExecutorJob | undefined;
     const executor: SyncExecutor = {
@@ -269,6 +277,14 @@ describe("executeAgentTurnRun", () => {
     turn.message_images = [{ mime_type: "image/png", data: "aGVsbG8=" }];
     turn.message_files = [{ name: "report.pdf", mime_type: "application/pdf", size: 2048 }];
     (turn.provider as Record<string, unknown>).input = ["text", "image"];
+    turn.tools = {
+      gateway_url: "https://gateway.test.invalid/lobu",
+      definitions: [],
+      builtin: ["bash"],
+      media: ["upload_file", "generate_image", "generate_audio"],
+      conversation: { channel_id: "C1", conversation_id: "conv-1", platform: "slack" },
+    };
+    turn.memory = { mcp_id: "lobu", agent_id: "agent-under-test" };
 
     await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
 
@@ -279,6 +295,19 @@ describe("executeAgentTurnRun", () => {
   });
 
   test("leaves attachments and modalities off the job when the envelope carries none", async () => {
+    expect(seen.turn.tools).toEqual({
+      gatewayUrl: "https://gateway.test.invalid/lobu",
+      definitions: [],
+      builtin: ["bash"],
+      media: ["upload_file", "generate_image", "generate_audio"],
+      // Carried even though this turn has no GATEWAY tools: the media tools
+      // address a conversation too, and the guest must never infer routing.
+      conversation: { channelId: "C1", conversationId: "conv-1", platform: "slack" },
+    });
+    expect(seen.turn.memory).toEqual({ mcpId: "lobu", agentId: "agent-under-test" });
+  });
+
+  test("drops the media names when the envelope carries no conversation to post into", async () => {
     const reported: Reported = { calls: [] };
     let seen: ExecutorJob | undefined;
     const executor: SyncExecutor = {
@@ -300,6 +329,37 @@ describe("executeAgentTurnRun", () => {
     expect("images" in seen.turn).toBe(false);
     expect("files" in seen.turn).toBe(false);
     expect("input" in seen.turn.provider).toBe(false);
+    const job = turnJob();
+    (job.payload as { turn: Record<string, unknown> }).turn.tools = {
+      gateway_url: "https://gateway.test.invalid/lobu",
+      definitions: [],
+      media: ["upload_file"],
+    };
+
+    await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
+
+    if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
+    expect(seen.turn.tools).toEqual({
+      gatewayUrl: "https://gateway.test.invalid/lobu",
+      definitions: [],
+    });
+  });
+
+  test("a turn with no memory field reaches the guest without one", async () => {
+    const reported: Reported = { calls: [] };
+    let seen: ExecutorJob | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, job) => {
+        seen = job;
+        return {
+          mode: "agent_turn",
+          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+        };
+      },
+    };
+    await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, cfgWith(executor));
+    if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
+    expect("memory" in seen.turn).toBe(false);
   });
 
   test("reports a guest failure instead of returning it, because the run is claimed", async () => {
