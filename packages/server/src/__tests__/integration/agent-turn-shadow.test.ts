@@ -1158,6 +1158,11 @@ describe('agent turn completion', () => {
     `;
   }
 
+  /** Just the delta spans of a set of thread_response rows, in order. */
+  function rows_delta(rows: Array<Record<string, unknown>>): unknown[] {
+    return rows.filter((row) => row.delta !== undefined).map((row) => row.delta);
+  }
+
   /** The queued thread_response rows, oldest first. */
   async function threadResponses(): Promise<Array<Record<string, unknown>>> {
     const sql = getTestDb();
@@ -1174,18 +1179,26 @@ describe('agent turn completion', () => {
     const runId = await claimedShadowRun(workerId);
     await makeAuthoritative(runId);
 
-    // The worker beats twice as the reply grows. The text is CUMULATIVE, so
-    // the second beat restates the first rather than continuing it.
+    // The worker beats twice as the reply grows. The text is INCREMENTAL: the
+    // second beat CONTINUES the first rather than restating it, because every
+    // renderer of a delta appends (`ApiResponseRenderer` -> the SPA's
+    // `textOut += content`), exactly as the subprocess lane's
+    // `sendStreamDelta(delta, false)` intends.
     const first = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: workerId,
       turn_delta: { text: 'the isolate', sequence: 1 },
     });
     expect(first.status).toBe(200);
+    // The ack is what lets the worker retire the span it sent. Without one it
+    // must re-send the same text under the same sequence.
+    expect(await first.json()).toMatchObject({
+      turn_delta_ack: { sequence: 1, published: true },
+    });
     const second = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: workerId,
-      turn_delta: { text: 'the isolate lane answered', sequence: 2 },
+      turn_delta: { text: ' lane answered', sequence: 2 },
     });
     expect(second.status).toBe(200);
 
@@ -1200,14 +1213,15 @@ describe('agent turn completion', () => {
       userId: 'user-shadow',
       platform: 'api',
       delta: 'the isolate',
-      // Each snapshot supersedes the last, which is what makes a cumulative
-      // delta safe against a dropped or reordered heartbeat.
-      isFullReplacement: true,
+      // Not a replacement: the client appends this span to what it has.
+      isFullReplacement: false,
     });
     expect(rows[1]).toMatchObject({
-      delta: 'the isolate lane answered',
-      isFullReplacement: true,
+      delta: ' lane answered',
+      isFullReplacement: false,
     });
+    // Appending the spans — all the client does — rebuilds the reply exactly.
+    expect(rows.map((row) => row.delta).join('')).toBe('the isolate lane answered');
     // A delta is not terminal: it carries no finalText and discharges nothing,
     // so the turn is still awaiting its completion.
     expect(rows[1].finalText).toBeUndefined();
@@ -1216,7 +1230,7 @@ describe('agent turn completion', () => {
     expect(row.status).toBe('running');
   });
 
-  it('never walks the visible reply backwards on a retried or reordered heartbeat', async () => {
+  it('never publishes the same span twice on a retried or reordered heartbeat', async () => {
     const workerId = 'fleet-reorder';
     const runId = await claimedShadowRun(workerId);
     await makeAuthoritative(runId);
@@ -1224,10 +1238,15 @@ describe('agent turn completion', () => {
     await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: workerId,
-      turn_delta: { text: 'the isolate lane answered', sequence: 2 },
+      turn_delta: { text: 'the isolate', sequence: 1 },
+    });
+    await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: ' lane answered', sequence: 2 },
     });
     // An older sequence arriving late (at-least-once delivery) would otherwise
-    // publish a shorter reply over the longer one the user is already reading.
+    // append a span the client has already read, a second time.
     const stale = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: workerId,
@@ -1236,15 +1255,28 @@ describe('agent turn completion', () => {
     // The heartbeat itself still succeeds — liveness is its job, and a dropped
     // delta must never get a live turn reaped.
     expect(stale.status).toBe(200);
-    // A redelivery of the SAME sequence is likewise not republished.
-    await postAsFleet('/api/workers/heartbeat', {
+    // And it is ACKNOWLEDGED, as not-published: there is nothing more the
+    // worker can do about a sequence the run has already passed, so it retires
+    // the batch rather than re-sending it forever.
+    expect(await stale.json()).toMatchObject({
+      turn_delta_ack: { sequence: 1, published: false },
+    });
+    // A redelivery of the newest sequence is likewise not republished.
+    const redelivered = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: workerId,
-      turn_delta: { text: 'the isolate lane answered', sequence: 2 },
+      turn_delta: { text: ' lane answered', sequence: 2 },
+    });
+    expect(await redelivered.json()).toMatchObject({
+      turn_delta_ack: { sequence: 2, published: false },
     });
 
-    const rows = await threadResponses();
-    expect(rows.map((row) => row.delta)).toEqual(['the isolate lane answered']);
+    // Exactly the two spans, each once: the retry duplicated nothing and the
+    // reorder erased nothing.
+    expect(rows_delta(await threadResponses())).toEqual([
+      'the isolate',
+      ' lane answered',
+    ]);
   });
 
   it('does not stream a shadow turn, and refuses a delta from a worker that did not claim the run', async () => {
@@ -1257,17 +1289,146 @@ describe('agent turn completion', () => {
       turn_delta: { text: 'an observational copy', sequence: 1 },
     });
     expect(shadowBeat.status).toBe(200);
+    // Acknowledged as not-published, so the worker stops re-sending text that
+    // by definition has nowhere to go.
+    expect(await shadowBeat.json()).toMatchObject({
+      turn_delta_ack: { sequence: 1, published: false },
+    });
 
     const claimantRunId = await claimedShadowRun('fleet-claimant-stream');
     await makeAuthoritative(claimantRunId);
     // Not this worker's run: its text must not reach another turn's client.
-    await postAsFleet('/api/workers/heartbeat', {
+    // The lease fence refuses it, and — critically — it gets NO ack, because
+    // an ack would tell a worker to drop text it may legitimately still owe.
+    const impostor = await postAsFleet('/api/workers/heartbeat', {
       run_id: claimantRunId,
       worker_id: 'fleet-impostor-stream',
       turn_delta: { text: 'not mine to publish', sequence: 1 },
     });
+    expect(await impostor.json()).not.toMatchObject({
+      turn_delta_ack: { published: true },
+    });
 
     expect(await threadResponses()).toEqual([]);
+  });
+
+  it('publishes a finished tool call as the tool_use event both lanes use', async () => {
+    const workerId = 'fleet-tool-trace';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [
+        {
+          tool_call_id: 'call-1',
+          name: 'search_memory',
+          is_error: false,
+          output: '3 results',
+        },
+      ],
+    });
+    expect(beat.status).toBe(200);
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // The SAME customEvent name the subprocess lane emits per
+    // `tool_execution_end`, so every consumer already subscribed to `tool_use`
+    // sees this lane's tools without learning a second shape.
+    expect(rows[0]).toMatchObject({
+      conversationId: 'conv-shadow',
+      customEvent: {
+        name: 'tool_use',
+        data: { toolCallId: 'call-1', name: 'search_memory', isError: false },
+      },
+    });
+  });
+
+  it('does not publish a tool trace for a shadow turn', async () => {
+    const workerId = 'fleet-tool-shadow';
+    const runId = await claimedShadowRun(workerId);
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [
+        { tool_call_id: 'c1', name: 'bash', is_error: false, output: 'ok' },
+      ],
+    });
+    expect(beat.status).toBe(200);
+    expect(await threadResponses()).toEqual([]);
+  });
+
+  it('stamps repliedInBand so an in-band reply is not delivered twice', async () => {
+    const workerId = 'fleet-in-band';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    // The agent called `send_message` into the conversation it is answering,
+    // so the user has already READ the answer. The guest reports it; without
+    // this flag the completion route would queue `text` as well and the user
+    // would see the same answer twice.
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'I posted the summary above.',
+      replied_in_band: true,
+      transcript: [],
+    });
+    expect(response.status).toBe(200);
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // The row still carries the reply — it is the authoritative record and
+    // other consumers read it — but it is marked, and the renderers' existing
+    // suppression (`chat-response-bridge`) is what drops the delivery.
+    expect(rows[0]).toMatchObject({
+      finalText: 'I posted the summary above.',
+      repliedInBand: true,
+    });
+  });
+
+  it('leaves an ordinary turn unmarked, so only a positive signal suppresses', async () => {
+    const workerId = 'fleet-not-in-band';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'here is the answer',
+      transcript: [],
+    });
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // Absent, not false: suppression acts on a positive signal only, never on
+    // silence, so an older worker still gets its reply delivered.
+    expect(rows[0].repliedInBand).toBeUndefined();
+  });
+
+  it('never marks a FAILED turn as replied in band', async () => {
+    const workerId = 'fleet-in-band-failed';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'failed',
+      error: 'provider refused',
+      replied_in_band: true,
+    });
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // An error is not a duplicate of the reply and must always surface, so the
+    // flag never rides an error row — suppressing it would leave the user with
+    // no message at all.
+    expect(rows[0].repliedInBand).toBeUndefined();
+    expect(rows[0].error).toBe('provider refused');
   });
 
   it('a shadow turn still delivers nothing', async () => {

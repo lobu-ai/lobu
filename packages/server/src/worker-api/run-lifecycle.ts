@@ -82,7 +82,10 @@ import {
 	deviceProviderQuotaResetNotBefore,
 } from "../automations/schedule-cursor";
 import { recordScheduledExecutionFailure } from "../automations/scheduled-failure-policy";
-import { publishTurnDeltaBestEffort } from "./agent-turn";
+import {
+	publishTurnDeltaBestEffort,
+	publishTurnToolEventsBestEffort,
+} from "./agent-turn";
 import { authorizeRunForWorker } from "./shared";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { runLeaseFence, runOwnerFence } from "../runs/run-lease";
@@ -216,8 +219,14 @@ async function reactivateProfileCascade(
  */
 export async function heartbeat(c: Context<{ Bindings: Env }>) {
 	try {
-		const { run_id, worker_id, progress, agent_session, turn_delta } =
-			await c.req.json<HeartbeatRequest>();
+		const {
+			run_id,
+			worker_id,
+			progress,
+			agent_session,
+			turn_delta,
+			turn_tool_events,
+		} = await c.req.json<HeartbeatRequest>();
 
 		const denied = await authorizeRunForWorker(c, run_id, worker_id);
 		if (denied) return denied;
@@ -227,9 +236,33 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// for the length of the turn. Best-effort and awaited: the publish is
 		// fenced on the same lease the heartbeat below re-asserts, and a failure
 		// must never fail the heartbeat itself.
-		if (turn_delta) {
-			await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta);
+		//
+		// The outcome is answered rather than swallowed. The worker holds the
+		// text it sent until this ack names its sequence, so an unacknowledged
+		// batch is re-sent instead of lost; `undefined` here (the publish threw)
+		// deliberately produces no ack.
+		const turnDeltaAck = turn_delta
+			? await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta)
+			: undefined;
+		// Tool traces ride the same beat. They are not acknowledged: a trace is a
+		// VIEW of the turn, not its answer, so the worker drops one it could not
+		// deliver rather than growing a queue against a failing gateway.
+		if (turn_tool_events && turn_tool_events.length > 0) {
+			await publishTurnToolEventsBestEffort(
+				run_id,
+				worker_id,
+				turn_tool_events
+			);
 		}
+		const ackBody: Pick<HeartbeatResponse, "turn_delta_ack"> =
+			turn_delta && turnDeltaAck
+				? {
+						turn_delta_ack: {
+							sequence: turn_delta.sequence,
+							published: turnDeltaAck.published,
+						},
+					}
+				: {};
 
 		const sql = getDb();
 		// Stamped with the reporting worker so poll can only resume an agent
@@ -287,7 +320,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			return c.json({ error: 'Run is not in progress' }, 409);
 		}
 
-		return c.json<HeartbeatResponse>({ continue: true });
+		return c.json<HeartbeatResponse>({ continue: true, ...ackBody });
 	} catch (err: unknown) {
 		return c.json({ error: errorMessage(err) }, 500);
 	}

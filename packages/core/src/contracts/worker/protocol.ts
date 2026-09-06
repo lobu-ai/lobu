@@ -752,6 +752,18 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
   transcript: Type.Optional(
     Type.Array(Type.Record(Type.String(), Type.Unknown()))
   ),
+  /**
+   * The turn already posted its answer INTO the conversation it is replying to,
+   * through the `send_message`/`present_event` conversation tool. The user has
+   * read that message, so delivering `text` as well is the double-post.
+   *
+   * The guest learns this from the plugin's own `onInBandReplyDelivered` hook —
+   * the same hook the subprocess lane threads into `recordInBandReply` — and it
+   * travels here so the completion route can stamp `repliedInBand` on the
+   * terminal `thread_response`, where the renderers' existing suppression
+   * (`chat-response-bridge`) already acts on it.
+   */
+  replied_in_band: Type.Optional(Type.Boolean()),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   exit_reason: Type.Optional(WorkerExitReasonSchema),
 });
@@ -784,13 +796,37 @@ export const PollAuthSignalResponseSchema = Type.Object({
 });
 
 /**
- * Ceiling on a single streamed turn delta, in characters.
+ * Ceiling on ONE streamed turn delta batch, in characters.
  *
- * The same bound the terminal reply takes (`TURN_MESSAGE_CHARS`); a delta is a
- * prefix of that reply, so anything longer is not a longer answer but a
- * runaway. The guest clamps to it, and the schema rejects past it.
+ * A delta is INCREMENTAL — the span of reply the client has not been sent yet,
+ * not the reply so far — so this bounds one batch, never the answer. Text the
+ * cap holds back stays queued on the worker and rides the next batch, so a
+ * reply longer than this arrives in several batches rather than losing its
+ * head. (The whole reply's own bound is `TURN_MESSAGE_CHARS`, applied by the
+ * gateway to the terminal text; the two are deliberately unrelated numbers.)
  */
 export const TURN_DELTA_MAX_CHARS = 24_000;
+
+/** What of a tool's output travels with its trace. */
+export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
+
+/**
+ * One finished tool call on an `agent_turn`, as the client should see it.
+ *
+ * The server renders this into the SAME `tool_use` custom event the subprocess
+ * lane emits per `tool_execution_end`, so the SPA, the promptfoo provider and
+ * the menubar read one shape for both lanes rather than learning a second.
+ *
+ * Best-effort like the delta it rides with, and for the same reason: a tool
+ * trace is a VIEW of the turn, never the turn's answer, so a dropped one costs
+ * visibility and nothing else.
+ */
+export const TurnToolEventSchema = Type.Object({
+  tool_call_id: Type.String({ maxLength: 256 }),
+  name: Type.String({ maxLength: 256 }),
+  is_error: Type.Boolean(),
+  output: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
+});
 
 /**
  * `POST /api/workers/heartbeat`. `progress` is a coarse liveness counter, not an
@@ -817,7 +853,7 @@ export const HeartbeatRequestSchema = Type.Object({
     })
   ),
   /**
-   * The assistant text an `agent_turn` has produced SO FAR, so a client
+   * The next span of assistant text an `agent_turn` has produced, so a client
    * watching the conversation sees the answer arrive instead of a blank screen
    * for the length of the turn.
    *
@@ -827,10 +863,19 @@ export const HeartbeatRequestSchema = Type.Object({
    * connector `/stream` route is not the vehicle: that one ingests connector
    * EVENTS into an org's memory, which a chat delta is not.
    *
-   * `text` is CUMULATIVE, not incremental. A heartbeat is best-effort and may
-   * be dropped or retried, and a lost incremental chunk would leave a hole in
-   * the reply that nothing later repairs; a cumulative snapshot is idempotent,
-   * so the newest one that arrives is always correct on its own.
+   * `text` is INCREMENTAL, and that is a contract with the renderers, not a
+   * preference: every consumer of a `thread_response` delta APPENDS it
+   * (`ApiResponseRenderer` → the SPA's `textOut += content`), exactly as the
+   * subprocess lane's `sendStreamDelta(delta, false)` intends. A cumulative
+   * snapshot sent down the same path renders as the reply repeated back to
+   * itself, so this lane sends increments like the lane it replaces.
+   *
+   * A dropped batch cannot leave a hole, because the worker only retires text
+   * the server has ACKNOWLEDGED (`turn_delta_ack`): an unacknowledged batch is
+   * re-sent on the next beat under the SAME sequence, and the server's
+   * sequence fence makes the duplicate a no-op. The turn's terminal `finalText`
+   * remains the authoritative repair for anything lost below that (a delta row
+   * claimed on a pod that does not hold the client's socket).
    *
    * Routing is deliberately absent. The server reads where to deliver from the
    * run's own row, never from this body — a worker may be compromised, and the
@@ -840,44 +885,22 @@ export const HeartbeatRequestSchema = Type.Object({
     Type.Object({
       text: Type.String({ maxLength: TURN_DELTA_MAX_CHARS }),
       /**
-       * Monotonic per turn. The server keeps the highest it has seen and drops
-       * anything older, so a retried or reordered heartbeat can never walk the
-       * visible reply backwards.
+       * Monotonic per turn, and STABLE across a retry of the same batch. The
+       * server keeps the highest it has published and refuses anything at or
+       * below it, so a retried or reordered heartbeat can neither duplicate a
+       * span of the visible reply nor walk it backwards.
        */
       sequence: Type.Integer({ minimum: 0 }),
     })
   ),
-});
-
-/**
- * The heartbeat's reply, and the only channel the gateway has back into a run
- * it has already handed to a worker. A claimed run belongs to whichever fleet
- * worker holds its lease, and the gateway cannot address that process — so
- * anything it needs to tell a turn in flight rides the beat the worker is
- * already making.
- *
- * `continue: false` means stop: the run left `running` under this worker's
- * lease, because a human cancelled it or the lease was lost. The worker
- * finishes through its normal completion path rather than abandoning the run,
- * so the terminal row and the client's reply are still written by the lane
- * that owns them.
- *
- * `steer` carries a message that arrived while this turn was running and is
- * meant for the model now rather than for the next turn. Absent on every beat
- * that has nothing to inject, which is nearly all of them.
- */
-export const HeartbeatResponseSchema = Type.Object({
-  continue: Type.Boolean(),
-  /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
-  stop_reason: Type.Optional(
-    Type.Union([Type.Literal("cancelled"), Type.Literal("lease_lost")])
-  ),
-  steer: Type.Optional(
-    Type.Object({
-      message_id: Type.String(),
-      text: Type.String(),
-    })
-  ),
+  /**
+   * Tool calls this `agent_turn` finished since the last beat, oldest first.
+   *
+   * Rides the same beat as `turn_delta` rather than a route of its own, for
+   * the same reason: the turn already reports on this interval, and where the
+   * traces are delivered is read from the run's own row, never from this body.
+   */
+  turn_tool_events: Type.Optional(Type.Array(TurnToolEventSchema)),
 });
 
 /**
@@ -959,6 +982,57 @@ export type PollAuthSignalResponse = Static<
 >;
 export type HeartbeatRequest = Static<typeof HeartbeatRequestSchema>;
 export type HeartbeatResponse = Static<typeof HeartbeatResponseSchema>;
+export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
+/**
+ * The heartbeat's reply, and the only channel the gateway has back into a run
+ * it has already handed to a worker. A claimed run belongs to whichever fleet
+ * worker holds its lease, and the gateway cannot address that process — so
+ * anything it needs to tell a turn in flight rides the beat the worker is
+ * already making.
+ *
+ * `continue` is optional because a worker older than this schema answers with a
+ * body that has no such field; absent means "keep going", so the flag only ever
+ * has to be sent to stop something.
+ *
+ * `continue: false` means stop: the run left `running` under this worker's
+ * lease, because a human cancelled it or the lease was lost. The worker
+ * finishes through its normal completion path rather than abandoning the run,
+ * so the terminal row and the client's reply are still written by the lane
+ * that owns them.
+ *
+ * `steer` carries a message that arrived while this turn was running and is
+ * meant for the model now rather than for the next turn. Absent on every beat
+ * that has nothing to inject, which is nearly all of them.
+ *
+ * `turn_delta_ack` is the honest answer to "did that batch land". The worker
+ * does not retire the text it sent until the sequence comes back acknowledged,
+ * so a publish that failed, was fenced out by a lost lease, or never reached
+ * the database is re-sent rather than silently dropped.
+ *
+ * `published: false` is a real outcome, not an error: a shadow turn and a turn
+ * whose sequence was already passed both acknowledge without publishing, and
+ * the worker retires the batch in both cases — there is nothing more it can do
+ * about either. Only the ABSENCE of an ack keeps the text queued.
+ */
+export const HeartbeatResponseSchema = Type.Object({
+  continue: Type.Optional(Type.Boolean()),
+  /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
+  stop_reason: Type.Optional(
+    Type.Union([Type.Literal("cancelled"), Type.Literal("lease_lost")])
+  ),
+  steer: Type.Optional(
+    Type.Object({
+      message_id: Type.String(),
+      text: Type.String(),
+    })
+  ),
+  turn_delta_ack: Type.Optional(
+    Type.Object({
+      sequence: Type.Integer({ minimum: 0 }),
+      published: Type.Boolean(),
+    })
+  ),
+});
 export type DispatchChromeActionRequest = Static<
   typeof DispatchChromeActionRequestSchema
 >;

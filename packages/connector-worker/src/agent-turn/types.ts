@@ -183,4 +183,12 @@ export interface AgentTurnOutput {
   usage: { input: number; output: number } | null;
   /** The transcript after the turn, to persist and resume from. */
   messages: AgentTurnMessage[];
+  /**
+   * The turn posted its answer INTO the conversation it is replying to, with
+   * `send_message`/`present_event`. `text` is then a report about a message the
+   * user has already read, so the terminal reply must not be delivered as well
+   * — the completion route stamps `repliedInBand` and the renderers' existing
+   * suppression does the rest.
+   */
+  repliedInBand?: boolean;
 }

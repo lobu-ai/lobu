@@ -8,13 +8,49 @@
  * and reporting the result.
  */
 
-import { type AgentTurnPollPayload, type PollResponse, TURN_DELTA_MAX_CHARS } from '@lobu/core/contracts/worker/protocol';
+import {
+  type AgentTurnPollPayload,
+  type AgentTurnToolEvent,
+  type PollResponse,
+  TURN_DELTA_MAX_CHARS,
+} from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
 import type { AgentTurnEvent, AgentTurnGatewayTool } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import type { ExecutorClient } from './client.js';
 import { log } from './log.js';
+
+/**
+ * How often a streaming turn pushes what it has produced.
+ *
+ * This is the DELTA cadence, deliberately separate from the liveness heartbeat
+ * (30s in production, shared with five other lanes). A reply delivered in 30s
+ * clumps is not streaming, and lowering the shared interval to fix that would
+ * multiply heartbeat write load across every lane that does not need it. Only
+ * a turn that is actively producing text beats this often, and each beat is
+ * the same request the liveness beat would have made.
+ */
+const TURN_DELTA_FLUSH_MS = 400;
+
+/**
+ * How many batches the pre-completion drain will push before giving up.
+ *
+ * A bound, not a budget for the whole reply: the terminal `finalText` is
+ * authoritative and repairs anything left behind, so waiting longer here buys
+ * a cosmetic improvement at the cost of the completion the client is blocked
+ * on.
+ */
+const TURN_DELTA_DRAIN_BATCHES = 4;
+
+/**
+ * How many tool traces a turn will hold for the next beat.
+ *
+ * A tool trace is a view of the turn, not its answer, so a backlog is dropped
+ * rather than grown: past this many the OLDEST go, because what a client wants
+ * to see is what the agent is doing now.
+ */
+const TURN_TOOL_EVENT_QUEUE_MAX = 20;
 
 function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;
@@ -51,43 +87,124 @@ export async function executeAgentTurnRun(
     return fail('agent turn run arrived without its provider credential');
   }
 
-  let deltas = 0;
   let toolCalls = 0;
-  // The reply as it stands. Sent CUMULATIVELY on the heartbeat rather than as
-  // increments: a heartbeat is best-effort, and a dropped increment would
-  // leave a hole in the visible reply that nothing later repairs, whereas the
-  // newest snapshot is always correct on its own.
-  let replySoFar = '';
-  // Only beat a delta when the text actually moved. A turn spends most of its
-  // wall clock inside a tool call, and republishing an unchanged reply would
-  // write a `thread_response` row per beat for no visible change. Counting
-  // deltas rather than comparing lengths: once `replySoFar` saturates at the
-  // cap its length stops changing while its CONTENT keeps moving, and a
-  // length check would silently stop streaming exactly on the long turns that
-  // most need it. Starts at 0, not -1: a turn that has streamed nothing yet
-  // has nothing to publish, and an empty first delta would write a
-  // `thread_response` row that renders as a blank reply.
-  let publishedDeltas = 0;
+  // Text the guest has produced that the SERVER has not acknowledged yet.
+  //
+  // Incremental, because that is what every renderer of a `thread_response`
+  // delta does with it — the API renderer broadcasts the span and the SPA
+  // appends it, exactly as the subprocess lane's `sendStreamDelta(delta,
+  // false)` intends. A cumulative snapshot down the same path renders as the
+  // reply repeated back to itself.
+  //
+  // Nothing leaves this queue until the server names its sequence in the
+  // heartbeat's ack, so a beat that fails or is fenced out re-sends the same
+  // span rather than dropping it. The server's own sequence fence makes the
+  // duplicate a no-op, which is what lets a retry be safe.
+  let pending = '';
+  // The batch currently in flight, and the sequence it was sent under. A retry
+  // reuses BOTH: a new sequence for the same text would be a second span the
+  // server's fence has no reason to refuse.
+  let inFlight: { text: string; sequence: number } | null = null;
   let deltaSequence = 0;
+  let sending = false;
+  // Tool traces waiting for the next beat, oldest first.
+  let toolEvents: AgentTurnToolEvent[] = [];
+
+  /**
+   * Send the next batch, if there is one and none is already in flight.
+   *
+   * Serial by construction (`sending`): two batches in parallel would race to
+   * the same run row and the loser's span would be fenced out and — because
+   * its ack would still name its own sequence — retired unwritten. One batch,
+   * one ack, then the next.
+   */
+  const flushDelta = async (): Promise<void> => {
+    if (sending) return;
+    if (!inFlight) {
+      if (!pending) {
+        // Nothing to say about the text, but a tool may have finished. That
+        // still rides a beat — just without a delta.
+        if (toolEvents.length === 0) return;
+      } else {
+        // Bounded per batch, never per reply: the text this cap holds back
+        // stays in `pending` and rides the next batch. Slicing the HEAD is what
+        // makes that true — the tail is the part not sent yet.
+        const text = pending.slice(0, TURN_DELTA_MAX_CHARS);
+        pending = pending.slice(text.length);
+        inFlight = { text, sequence: (deltaSequence += 1) };
+      }
+    }
+    sending = true;
+    const batch = inFlight;
+    // Taken before the await so a trace arriving mid-flight queues for the
+    // next beat rather than being dropped by the reset below.
+    const traces = toolEvents;
+    toolEvents = [];
+    try {
+      const ack = await client.heartbeat(
+        runId,
+        { items_collected_so_far: deltaSequence },
+        undefined,
+        batch ?? undefined,
+        traces.length > 0 ? traces : undefined
+      );
+      // Retire the batch only on a positive ack for ITS sequence. `published:
+      // false` is an ack too — a shadow turn and an already-passed sequence
+      // are both answers, and there is nothing more the worker can do about
+      // either. No ack at all (an older gateway, or a publish that threw)
+      // keeps the text queued for the next beat.
+      if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
+    } catch (err) {
+      // The batch stays in flight and is re-sent under the same sequence. The
+      // traces are not: they are a view of the turn, not its answer, and
+      // re-queueing them would grow without bound against a failing gateway.
+      log.debug('[agent-turn] delta beat failed:', err);
+    } finally {
+      sending = false;
+    }
+  };
+
+  /**
+   * Flush what is left before the completion row lands, so the last span of
+   * the reply arrives as a delta rather than as a jump at completion.
+   *
+   * Bounded on BOTH axes. `TURN_DELTA_DRAIN_BATCHES` caps how many batches it
+   * will push, so a long reply cannot make the turn's completion wait on its
+   * whole backlog; and the loop stops the moment a batch fails to retire, so a
+   * server that is refusing cannot spin here. Whatever is left is not lost —
+   * the terminal `finalText` is the authoritative reply and repairs it.
+   */
+  const drainDeltas = async (): Promise<void> => {
+    for (let batch = 0; batch < TURN_DELTA_DRAIN_BATCHES; batch += 1) {
+      if (!pending && !inFlight && toolEvents.length === 0) return;
+      const before = inFlight;
+      await flushDelta();
+      // No progress — the batch is still in flight under the same sequence —
+      // means the server is not taking it, and retrying inline would only
+      // delay the completion the client is actually waiting for.
+      if (inFlight && inFlight === before) return;
+    }
+  };
+
+  // The delta cadence, which is NOT the liveness cadence. The reaper's
+  // contract is satisfied by a beat every `cfg.heartbeatIntervalMs` (30s in
+  // production), but a reply that arrives in 30s clumps is not streaming — so
+  // deltas run on their own short timer and the liveness beat below only fires
+  // when the turn has produced nothing to say. Both call the same endpoint, so
+  // a delta beat IS a liveness beat; this adds write load only while a turn is
+  // actively streaming, and only on this lane.
+  const deltaTimer = setInterval(() => {
+    void flushDelta();
+  }, Math.min(TURN_DELTA_FLUSH_MS, cfg.heartbeatIntervalMs));
   // The connector-lane reaper writes a claimed run off once its heartbeat goes
   // stale, and a turn's wall clock is far longer than that threshold. Beat on
   // the same interval every other lane does, so a live turn is never reaped and
-  // a crashed worker's turn still is.
+  // a crashed worker's turn still is. Skipped while a delta beat is in flight
+  // or due: that beat already proves the same thing.
   const heartbeat = setInterval(() => {
-    const moved = deltas !== publishedDeltas;
-    if (moved) publishedDeltas = deltas;
+    if (sending || inFlight || pending || toolEvents.length > 0) return;
     void client
-      .heartbeat(
-        runId,
-        { items_collected_so_far: deltas },
-        undefined,
-        moved
-          ? {
-              text: replySoFar,
-              sequence: (deltaSequence += 1),
-            }
-          : undefined
-      )
+      .heartbeat(runId, { items_collected_so_far: deltaSequence })
       .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
   }, cfg.heartbeatIntervalMs);
   try {
@@ -190,19 +307,46 @@ export async function executeAgentTurnRun(
       {
         onTurnEvent: (event: AgentTurnEvent) => {
           if (event.type === 'text_delta') {
-            deltas += 1;
-            // Bounded at the source, keeping the tail. A turn can stream for
-            // its whole wall clock, and an unbounded accumulator is memory the
-            // fleet worker holds for every concurrent turn.
-            replySoFar = (replySoFar + event.delta).slice(-TURN_DELTA_MAX_CHARS);
+            // Queued, not accumulated: the next batch carries what the server
+            // has not acknowledged, and nothing here is ever discarded. The
+            // per-batch cap lives in `flushDelta`.
+            pending += event.delta;
+            return;
           }
-          if (event.type === 'tool_call_start') toolCalls += 1;
+          if (event.type === 'tool_call_start') {
+            toolCalls += 1;
+            return;
+          }
+          if (event.type === 'tool_call_end') {
+            // The turn's tool trace, queued onto the same beat the text takes.
+            // The server turns it into the SAME `tool_use` custom event the
+            // subprocess lane emits per `tool_execution_end`, so every consumer
+            // that already reads that — the SPA, the promptfoo provider, the
+            // menubar — sees this lane's tools without learning a second shape.
+            //
+            // Bounded, and the newest are the ones kept: a tool trace is a view
+            // of the turn, not its answer, and a turn that spends its budget on
+            // tool calls must not grow an unbounded queue in the worker.
+            toolEvents.push({
+              tool_call_id: event.toolCallId,
+              name: event.name,
+              is_error: event.isError,
+              output: event.output,
+            });
+            if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) toolEvents.shift();
+          }
         },
       }
     );
     if (result.mode !== 'agent_turn') {
       return fail(`agent turn produced a ${result.mode} result`);
     }
+    // Everything the guest streamed, before the completion row lands. The
+    // terminal reply is authoritative and repairs any delta the client missed,
+    // so this is not correctness — it is the last span arriving as a delta
+    // rather than as a jump at completion. Bounded so a turn cannot hang on a
+    // queue the server keeps refusing.
+    await drainDeltas();
     await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
@@ -211,13 +355,17 @@ export async function executeAgentTurnRun(
       stop_reason: result.turn.stopReason,
       usage: result.turn.usage,
       transcript: result.turn.messages,
+      ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
       exit_reason: 'ok',
     });
-    log.info(`[agent-turn] run ${runId} completed after ${deltas} deltas and ${toolCalls} tool calls`);
+    log.info(
+      `[agent-turn] run ${runId} completed after ${deltaSequence} delta batches and ${toolCalls} tool calls`
+    );
     return { itemsCollected: 0 };
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   } finally {
+    clearInterval(deltaTimer);
     clearInterval(heartbeat);
   }
 }

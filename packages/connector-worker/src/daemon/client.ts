@@ -35,7 +35,8 @@ export interface ExecutorClient {
       elapsed_ms?: number;
     },
     agentSession?: NonNullable<HeartbeatRequest['agent_session']>,
-    turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>
+    turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>,
+    turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>
   ): Promise<HeartbeatResponse>;
   stream(batch: StreamBatch): Promise<void>;
   complete(req: CompleteRequest): Promise<void>;
@@ -393,11 +394,17 @@ export class WorkerClient implements ExecutorClient {
     },
     agentSession?: NonNullable<HeartbeatRequest['agent_session']>,
     /**
-     * An agent turn's reply so far. Rides the heartbeat because the turn
-     * already beats to say it is alive, and this is that statement carrying
-     * its evidence — see `HeartbeatRequestSchema.turn_delta`.
+     * The next span of an agent turn's reply. Rides the heartbeat because the
+     * turn already beats to say it is alive, and this is that statement
+     * carrying its evidence — see `HeartbeatRequestSchema.turn_delta`.
+     *
+     * The reply's `turn_delta_ack` is what lets the caller retire the span it
+     * sent; without one it must send the same span, under the same sequence,
+     * on the next beat.
      */
-    turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>
+    turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>,
+    /** Tool calls the turn finished since the last beat. */
+    turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>
   ): Promise<HeartbeatResponse> {
     return this.requestJson<HeartbeatResponse>('/api/workers/heartbeat', {
       run_id: runId,
@@ -405,6 +412,9 @@ export class WorkerClient implements ExecutorClient {
       progress,
       ...(agentSession ? { agent_session: agentSession } : {}),
       ...(turnDelta ? { turn_delta: turnDelta } : {}),
+      ...(turnToolEvents && turnToolEvents.length > 0
+        ? { turn_tool_events: turnToolEvents }
+        : {}),
     });
   }
 

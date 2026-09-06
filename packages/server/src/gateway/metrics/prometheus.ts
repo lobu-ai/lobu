@@ -152,6 +152,20 @@ function initializeMetrics() {
     "Terminal thread_response rows rendered locally after the owner-gate retry budget was exhausted",
     "counter"
   );
+  // Delta publishes that threw on the heartbeat path. The failure is absorbed
+  // so a cosmetic path can never get a live turn reaped, and the worker retries
+  // the batch — but a persistently broken delta path would otherwise be
+  // indistinguishable from a working one, which is what this counts.
+  registerMetric(
+    "lobu_turn_delta_publish_failed_total",
+    "Agent-turn streamed delta publishes that failed on the worker heartbeat path",
+    "counter"
+  );
+  registerMetric(
+    "lobu_turn_tool_event_publish_failed_total",
+    "Agent-turn tool-trace publishes that failed on the worker heartbeat path",
+    "counter"
+  );
 
   // Scheduler + Automation health. These back the prod alerting rules
   // (charts/lobu PrometheusRule): a silent scheduler / failing Automation tick is

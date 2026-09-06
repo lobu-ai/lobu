@@ -34,6 +34,13 @@ import type { AgentTurnConversation, AgentTurnGatewayTool } from './types.js';
  * lane: pi is told the user's click arrives as a new inbound message. The
  * caller uses it to stop the loop for the same reason, so a model that asks a
  * question does not then keep talking to itself.
+ *
+ * `onInBandReplyDelivered` fires when `send_message`/`present_event` posted
+ * into the conversation this turn is ALREADY answering. The user has read that
+ * message, so the turn's terminal reply would be the same answer a second
+ * time. The subprocess lane threads this same hook to `recordInBandReply`; on
+ * this lane it travels out on the turn result, and the completion route stamps
+ * `repliedInBand` so the renderers' existing suppression acts on it unchanged.
  */
 export function createGatewayTools(
   allowed: readonly AgentTurnGatewayTool[],
@@ -42,6 +49,7 @@ export function createGatewayTools(
     credential: string;
     conversation: AgentTurnConversation;
     onAskUserPosted: () => void;
+    onInBandReplyDelivered: () => void;
   }
 ): AgentTool[] {
   const wanted = new Set<string>(allowed);
@@ -53,11 +61,7 @@ export function createGatewayTools(
     conversationId: args.conversation.conversationId,
     platform: args.conversation.platform,
     onAskUserPosted: args.onAskUserPosted,
-    // No `onInBandReplyDelivered`: on this lane the turn's terminal reply is
-    // published by the completion route from the run row, not by the guest, so
-    // there is no in-flight delivery for `send_message` to suppress. A turn
-    // that posts in-band and then answers is the subprocess lane's problem to
-    // dedupe, and it keeps its own hook for it.
+    onInBandReplyDelivered: args.onInBandReplyDelivered,
   });
   return tools.filter((tool) => wanted.has(tool.name)) as unknown as AgentTool[];
 }

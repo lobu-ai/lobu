@@ -562,6 +562,43 @@ describe("agent turn on the isolate lane", () => {
 		expect(end?.output).toContain("Posted 1 suggested action(s)");
 	}, 120_000);
 
+	it("reports an in-band reply, so the terminal delivery is not the same answer twice", async () => {
+		hits = [];
+		// The gateway's send route matched the target against this run's own
+		// conversation, so it says the post landed IN BAND. On the subprocess lane
+		// this is what sets `repliedInBand` and suppresses the terminal reply; the
+		// isolate lane must reach the same place through the same plugin hook.
+		internalReply = { status: 200, body: { messageId: "m_inband", deliveredInBand: true } };
+		toolScript = [
+			{ id: "toolu_ib1", name: "send_message", input: { target: "conv_test", text: "Here is the summary." } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["send_message"]));
+
+		expect(hits[1]?.url).toBe("/lobu/internal/conversations/send");
+		// The guest carries the plugin's own signal out on the turn result, which
+		// is what the completion route stamps onto the terminal thread_response.
+		expect(run.output.repliedInBand).toBe(true);
+		// And the model is told not to repeat it, by the plugin's own prose.
+		const end = run.events.find((e) => e.type === "tool_call_end") as { output: string } | undefined;
+		expect(end?.output).toContain("This in-band post is your reply for the turn");
+	}, 120_000);
+
+	it("leaves an out-of-band send unmarked, so a normal reply is still delivered", async () => {
+		hits = [];
+		// A post into a DIFFERENT conversation: the user reading THIS thread has
+		// not seen it, so the terminal reply must still arrive.
+		internalReply = { status: 200, body: { messageId: "m_other", deliveredInBand: false } };
+		toolScript = [
+			{ id: "toolu_ib2", name: "send_message", input: { target: "some_other_thread", text: "FYI" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["send_message"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.output.repliedInBand).toBeUndefined();
+	}, 120_000);
+
 	it("ends the turn when the model asks the user a question", async () => {
 		hits = [];
 		internalReply = { status: 200, body: { id: "int_ask" } };

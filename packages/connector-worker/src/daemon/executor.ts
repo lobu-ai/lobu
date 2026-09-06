@@ -146,7 +146,13 @@ export interface ExecutorConfig {
   binaryOverrides?: Partial<Record<AgentKind, string>>;
 }
 
-const DEFAULT_CONFIG: ExecutorConfig = {
+/**
+ * What a lane runs with when its caller overrides nothing — which is what the
+ * fleet entrypoint (`embedded-connector-worker.ts`) does. Exported so a test
+ * can assert what a lane does under the SHIPPED configuration instead of a
+ * copy of these numbers that is free to drift away from them.
+ */
+export const DEFAULT_CONFIG: ExecutorConfig = {
   batchSize: 10,
   heartbeatIntervalMs: 30000,
   generateEmbeddings: true,

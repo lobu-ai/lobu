@@ -137,7 +137,8 @@ async function callMcpTool(
 function buildTools(
   input: AgentTurnInput,
   credential: string,
-  onAskUserPosted: () => void
+  onAskUserPosted: () => void,
+  onInBandReplyDelivered: () => void
 ): AgentTool[] {
   const tools = input.tools;
   if (!tools) return [];
@@ -149,6 +150,7 @@ function buildTools(
           credential,
           conversation: tools.conversation,
           onAskUserPosted,
+          onInBandReplyDelivered,
         })
       : [];
   const mcp: AgentTool[] = tools.definitions.map((tool) => ({
@@ -229,14 +231,27 @@ export async function runAgentTurn(
   // (`onAskUserPosted`); this lane must too, or the model keeps calling tools
   // and answering a question nobody has read yet.
   let askedUser = false;
+  // `send_message`/`present_event` posted into the conversation this turn is
+  // already answering, so the user has READ the answer and the terminal reply
+  // would be the same message twice. The subprocess lane suppresses the
+  // terminal delivery on exactly this signal; this lane reports it out so the
+  // completion route can stamp the flag the renderers already act on.
+  let repliedInBand = false;
   const agent = new Agent({
     initialState: {
       systemPrompt: input.systemPrompt,
       model: model as never,
       messages: input.messages as never,
-      tools: buildTools(input, credential, () => {
-        askedUser = true;
-      }),
+      tools: buildTools(
+        input,
+        credential,
+        () => {
+          askedUser = true;
+        },
+        () => {
+          repliedInBand = true;
+        }
+      ),
     },
     // pi hands the loop's own options through; the key rides here rather than
     // in the model so it never lands in a transcript entry.
@@ -333,5 +348,6 @@ export async function runAgentTurn(
     stopReason,
     usage,
     messages: agent.state.messages as unknown as AgentTurnOutput['messages'],
+    ...(repliedInBand ? { repliedInBand: true } : {}),
   };
 }
