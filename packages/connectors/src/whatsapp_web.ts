@@ -304,7 +304,16 @@ async function invokeAdapter<T extends object>(
 }
 
 const LOGGED_OUT_PATTERN = /logged_out|qr_code_visible/;
-const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling/i;
+/**
+ * `hydrating`/`stores_settling` are the adapter's own words for "the page is
+ * still coming up". `timed out` covers the case where the page never answered
+ * at all: WhatsApp's `require()` blocks rather than throwing while its module
+ * graph registers, so the evaluation is abandoned by its CDP timeout and the
+ * adapter never gets to name a state. Both mean "try again", not "this feed is
+ * broken" -- unclassified, they count toward the consecutive-failure budget and
+ * walk a recoverable feed toward a hard pause.
+ */
+const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling|timed out/i;
 const DEPENDENCY_UNAVAILABLE_PREFIX =
   "[lobu:dependency_unavailable:browser_source_hydrating]";
 
