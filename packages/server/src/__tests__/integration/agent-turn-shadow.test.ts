@@ -286,16 +286,16 @@ describe('agent turn shadow producer', () => {
     });
     expect(envelope.turn.system_prompt).toBe(
       '## Agent Identity\n\nI am the shadow agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
-        // The always-on tool rules, NARROWED to what this turn carries. Both of
-        // these are about tools it has; the `upload_file` and `generate_image`
-        // rules are absent because this lane offers neither, and instructing a
-        // model to deliver a file with a tool it was never given is how a turn
-        // comes to claim it sent something it could not.
+        // Policy text must match the tools this envelope actually offers.
         '## Built-In Tool Policies\n\n' +
         '### Structured User Choices\nTools: `ask_user`\n' +
         '- Use ask_user when you need the user to choose from a short list of options or approvals.\n' +
         '- Use plain text only for open-ended clarifications or when you need a free-form value.\n' +
         "- After calling ask_user, stop. The user's answer arrives as the next message.\n\n" +
+        '### Share Created Files\nTools: `upload_file`\n' +
+        '- If you create a file that helps answer the request, use upload_file so the user can access it in-thread.\n' +
+        '- Never claim a file was sent unless upload_file actually succeeded in this turn.\n' +
+        '- Never show sandbox:, workspace, or local filesystem links to the user as if they are downloadable attachments.\n\n' +
         '### Participate In Your Channels\nTools: `list_conversations`, `read_conversation`, `send_message`\n' +
         '- You can participate in chat channels you are bound to, even on a scheduled/automated run with no one messaging you. Call list_conversations to see them.\n' +
         '- To act in a channel: read_conversation to catch up on what people said, then send_message to post. Pass a conversation handle to post to the channel, or a thread handle (returned by a previous send_message) to reply in that thread.\n' +
@@ -303,17 +303,20 @@ describe('agent turn shadow producer', () => {
         '## Workspace\n\n' +
         'Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.\n' +
         'It starts empty on every turn and nothing written there persists after the turn ends.\n' +
-        'It has no network access and no package manager; use your other tools to reach data.'
+        'It has no network access and no package manager; use your other tools to reach data.\n' +
+        'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.'
     );
     expect(envelope.turn.messages).toEqual([]);
     // With no tool policy every workspace tool is admitted, bash with the
     // default package-manager denylist and no allowlist.
     const tools = envelope.turn.tools as {
       definitions: unknown[];
+      media: string[];
       builtin: string[];
       bash_policy: { allow_all: boolean; allow_prefixes: string[]; deny_prefixes: string[] };
     };
     expect(tools.definitions).toEqual([]);
+    expect(tools.media).toEqual(['upload_file', 'generate_image', 'generate_audio']);
     expect(tools.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
     expect(tools.bash_policy.allow_all).toBe(false);
     expect(tools.bash_policy.allow_prefixes).toEqual([]);
@@ -324,6 +327,23 @@ describe('agent turn shadow producer', () => {
     // ever sees a provider key.
     expect(envelope.credential).toBe('lobu_secret_11111111-2222-3333-4444-555555555555');
     expect(JSON.stringify(envelope.turn)).not.toContain('lobu_secret_');
+  });
+
+  it('omits file-delivery instructions when upload_file is denied', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.agentOptions = { ...message.agentOptions, disallowedTools: 'upload_file' };
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn;
+    expect(turn.tools.media).toEqual(['generate_image', 'generate_audio']);
+    expect(turn.tools.builtin).toContain('write');
+    expect(turn.system_prompt).not.toContain('### Share Created Files');
+    expect(turn.system_prompt).not.toContain('call upload_file before the turn ends');
   });
 
   it('hands the turn its tools, its one credential being a worker token both gateway routes accept', async () => {
