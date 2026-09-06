@@ -185,6 +185,31 @@ export function renderAlwaysOnToolPolicyRules(): string {
   return ["## Built-In Tool Policies", ...rules.map(renderRule)].join("\n\n");
 }
 
+/**
+ * The always-on tool-policy block, narrowed to the tools a lane actually
+ * carries.
+ *
+ * `renderAlwaysOnToolPolicyRules` emits every always-on rule because the
+ * subprocess lane composes essentially all of them. The isolate lane does not:
+ * it has no `upload_file`, so telling its model to deliver files with a tool
+ * it was never offered produces a turn that claims to have sent something it
+ * could not. A rule survives only when the lane carries at least one of the
+ * tools it is about — the same rules, the same prose, one renderer.
+ */
+export function renderAlwaysOnToolPolicyRulesFor(
+  availableTools: readonly string[]
+): string {
+  const available = new Set(availableTools);
+  const rules = TOOL_INTENT_RULES.filter(
+    (rule) =>
+      rule.alwaysInclude && rule.tools.some((tool) => available.has(tool))
+  ).sort((a, b) => a.priority - b.priority);
+  if (rules.length === 0) {
+    return "";
+  }
+  return ["## Built-In Tool Policies", ...rules.map(renderRule)].join("\n\n");
+}
+
 export function detectToolIntentRules(prompt: string): ToolIntentRule[] {
   const normalizedPrompt = prompt.trim();
   if (!normalizedPrompt) {

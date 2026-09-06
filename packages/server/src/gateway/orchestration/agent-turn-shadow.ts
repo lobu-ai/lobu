@@ -40,6 +40,7 @@ import {
   isToolAllowedByPolicy,
   type MessagePayload,
   parseSessionEntries,
+  renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
   type ToolPolicy,
   type ToolsConfig,
@@ -103,6 +104,35 @@ type TurnTools = NonNullable<TurnEnvelope["tools"]>;
 type BuiltinTool = NonNullable<TurnTools["builtin"]>[number];
 
 /**
+ * The gateway tools the isolate lane carries, in the order the model is
+ * offered them.
+ *
+ * This is `@lobu/plugin-conversations`' own tool set. It is named here rather
+ * than imported so the producer states exactly which tools it will hand a turn
+ * — the guest selects by name out of the package, so a name added there does
+ * not silently reach an agent until it is added here too.
+ *
+ * The other two plugin lanes are deliberately absent, and each for a reason:
+ * `lobu-memory` publishes NO tools (its recall and capture are hooks that call
+ * `search_memory`/`save_memory` on the `lobu` MCP server, which this lane
+ * already reaches), and `lobu-media`'s `upload_file` reads the file off a real
+ * disk through `node:fs` — the isolate has no such disk, so porting it means
+ * making the upload read the turn's own in-memory workspace first.
+ */
+const GATEWAY_TOOLS = [
+  "list_conversations",
+  "read_conversation",
+  "send_message",
+  "present_event",
+  "schedule_followup",
+  "react",
+  "edit_message",
+  "delete_message",
+  "ask_user",
+  "suggest_actions",
+] as const;
+
+/**
  * The workspace tools the guest can run, in the order the model is offered
  * them. `grep` and `edit` are absent on purpose: pi's `grep` spawns ripgrep as
  * a child process, which an isolate cannot do, and neither tool is needed to
@@ -163,7 +193,8 @@ function composeShadowSystemPrompt(
     userMd?: string | null;
   },
   mcpInstructions: string[],
-  workspace: boolean
+  workspace: boolean,
+  toolNames: readonly string[]
 ): string {
   const sections: string[] = [];
   const identity = layers.identityMd?.trim();
@@ -172,6 +203,11 @@ function composeShadowSystemPrompt(
   if (identity) sections.push(`## Agent Identity\n\n${identity}`);
   if (soul) sections.push(`## Agent Instructions\n\n${soul}`);
   if (user) sections.push(`## User Context\n\n${user}`);
+  // The same always-on tool rules the subprocess lane composes, narrowed to
+  // the tools THIS turn carries — `ask_user`'s "after calling it, stop" among
+  // them, which is how the model learns the rule the guest enforces.
+  const policyRules = renderAlwaysOnToolPolicyRulesFor(toolNames);
+  if (policyRules) sections.push(policyRules);
   if (workspace) sections.push(WORKSPACE_INSTRUCTIONS);
   for (const instructions of mcpInstructions) {
     const text = instructions.trim();
@@ -611,17 +647,36 @@ export async function enqueueAgentTurnShadow(
     // The workspace tools the policy admits. `bash` carries its prefix policy
     // with it; the file tools need none beyond being admitted.
     const builtin = WORKSPACE_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    if (builtin.length > 0) {
+    // The gateway tools the policy admits, through the SAME builder and the
+    // same patterns that decide them on the subprocess lane — so an agent that
+    // denies `ask_user` denies it on both lanes.
+    const gateway = GATEWAY_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
+    if (builtin.length > 0 || gateway.length > 0) {
       tools = {
         gateway_url: gatewayUrl,
+        // Accumulated, not replaced: an agent can have MCP tools and workspace
+        // tools and conversation tools, and dropping the MCP set here is how
+        // the model silently loses the 90% of calls that go through it.
         definitions: tools?.definitions ?? [],
-        builtin,
+        ...(builtin.length > 0 ? { builtin } : {}),
         ...(builtin.includes("bash")
           ? {
               bash_policy: {
                 allow_all: policy.bashPolicy.allowAll,
                 allow_prefixes: policy.bashPolicy.allowPrefixes,
                 deny_prefixes: policy.bashPolicy.denyPrefixes,
+              },
+            }
+          : {}),
+        // The conversation rides with them: every one of these tools addresses
+        // a channel, and the guest must never infer routing.
+        ...(gateway.length > 0
+          ? {
+              gateway: [...gateway],
+              conversation: {
+                channel_id: data.channelId,
+                conversation_id: data.conversationId,
+                platform: data.platform,
               },
             }
           : {}),
@@ -643,7 +698,16 @@ export async function enqueueAgentTurnShadow(
       conversation_id: data.conversationId,
       message_id: data.messageId,
       message_text: data.messageText.slice(0, TURN_MESSAGE_CHARS),
-      system_prompt: composeShadowSystemPrompt(settings ?? {}, mcpInstructions, builtin.length > 0),
+      system_prompt: composeShadowSystemPrompt(
+        settings ?? {},
+        mcpInstructions,
+        builtin.length > 0,
+        // Every tool the model will actually be offered, whichever family it
+        // came from: an MCP server's `search_memory` earns the thread-history
+        // rule exactly as the conversation plugin's `send_message` earns the
+        // channel-participation one.
+        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...builtin]
+      ),
       messages: snapshot ? historyMessages(snapshot) : [],
       provider: {
         api: provider.api,
@@ -697,6 +761,7 @@ export async function enqueueAgentTurnShadow(
         history: turn.messages.length,
         tools: tools?.definitions.length ?? 0,
         workspaceTools: builtin,
+        gatewayTools: gateway,
       },
       "Enqueued a shadow agent turn on the isolate lane"
     );

@@ -23,6 +23,7 @@ import { Agent } from '@mariozechner/pi-agent-core';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
 import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
+import { createGatewayTools } from './gateway-tools.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool } from './types.js';
 import { createWorkspaceTools } from './workspace.js';
 
@@ -121,11 +122,30 @@ async function callMcpTool(
   return text || `${tool.name} completed.`;
 }
 
-/** pi's tool objects for the turn's manifest: the gateway's MCP tools, then the workspace's own. */
-function buildTools(input: AgentTurnInput, credential: string): AgentTool[] {
+/**
+ * pi's tool objects for the turn's manifest: the gateway's MCP tools, then its
+ * conversation tools, then the workspace's own.
+ *
+ * `onAskUserPosted` is threaded through because `ask_user` ends the turn — see
+ * `createGatewayTools`.
+ */
+function buildTools(
+  input: AgentTurnInput,
+  credential: string,
+  onAskUserPosted: () => void
+): AgentTool[] {
   const tools = input.tools;
   if (!tools) return [];
   const workspace = tools.builtin ? createWorkspaceTools(tools.builtin, tools.bashPolicy) : [];
+  const gateway =
+    tools.gateway && tools.gateway.length > 0 && tools.conversation
+      ? createGatewayTools(tools.gateway, {
+          gatewayUrl: tools.gatewayUrl,
+          credential,
+          conversation: tools.conversation,
+          onAskUserPosted,
+        })
+      : [];
   const mcp: AgentTool[] = tools.definitions.map((tool) => ({
     name: tool.name,
     label: `${tool.mcpId}/${tool.name}`,
@@ -137,7 +157,7 @@ function buildTools(input: AgentTurnInput, credential: string): AgentTool[] {
       details: {},
     }),
   }));
-  return [...mcp, ...workspace];
+  return [...mcp, ...gateway, ...workspace];
 }
 
 function clip(text: string): string {
@@ -161,12 +181,20 @@ export async function runAgentTurn(
   const stream = input.provider.api === 'anthropic-messages' ? streamAnthropic : streamOpenAICompletions;
 
   let toolCalls = 0;
+  // `ask_user` hands the conversation back to the human: the question is posted
+  // as buttons and the click returns as a NEW inbound message, which is a new
+  // turn. The subprocess lane stops its session at that point
+  // (`onAskUserPosted`); this lane must too, or the model keeps calling tools
+  // and answering a question nobody has read yet.
+  let askedUser = false;
   const agent = new Agent({
     initialState: {
       systemPrompt: input.systemPrompt,
       model: model as never,
       messages: input.messages as never,
-      tools: buildTools(input, credential),
+      tools: buildTools(input, credential, () => {
+        askedUser = true;
+      }),
     },
     // pi hands the loop's own options through; the key rides here rather than
     // in the model so it never lands in a transcript entry.
@@ -176,6 +204,12 @@ export async function runAgentTurn(
         apiKey: credential,
       })) as never,
     beforeToolCall: async () => {
+      if (askedUser) {
+        return {
+          block: true,
+          reason: 'You have already asked the user a question; this turn is over. Stop and wait for their reply.',
+        };
+      }
       toolCalls += 1;
       if (toolCalls <= MAX_TOOL_CALLS_PER_TURN) return undefined;
       return {

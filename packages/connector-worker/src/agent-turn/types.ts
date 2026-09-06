@@ -45,6 +45,29 @@ export interface AgentTurnTool {
 export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'ls' | 'find';
 
 /**
+ * A gateway tool the turn may call — `ask_user`, `send_message`,
+ * `suggest_actions` and the rest of `@lobu/plugin-conversations`.
+ *
+ * The producer names them; the guest runs the plugin package's OWN
+ * implementation, bundled in. They are not reimplemented here and not proxied
+ * through a second route: each one is already a plain `fetch` to an
+ * `/internal/...` gateway endpoint under the same bearer the MCP route takes,
+ * so the turn still carries exactly one credential and reaches exactly one
+ * host.
+ */
+export type AgentTurnGatewayTool =
+  | 'list_conversations'
+  | 'read_conversation'
+  | 'send_message'
+  | 'present_event'
+  | 'schedule_followup'
+  | 'react'
+  | 'edit_message'
+  | 'delete_message'
+  | 'ask_user'
+  | 'suggest_actions';
+
+/**
  * The agent's bash prefix policy, in the shape `@lobu/core/tool-policy`
  * enforces. Restated rather than imported on purpose: this file is the
  * host-side contract, and a type import here would be the first step toward a
@@ -67,6 +90,25 @@ export interface AgentTurnTools {
    */
   builtin?: AgentTurnBuiltinTool[];
   bashPolicy?: AgentTurnBashPolicy;
+  /**
+   * Gateway tools the agent's policy admits, by name. Their routing lives in
+   * the plugin package, so the wire carries only the names.
+   */
+  gateway?: AgentTurnGatewayTool[];
+  /** Conversation routing the gateway tools post into. Required whenever `gateway` is non-empty. */
+  conversation?: AgentTurnConversation;
+}
+
+/**
+ * What `@lobu/plugin-conversations` calls `GatewayParams` minus the two the
+ * guest already holds (the URL and the credential): who this turn is talking
+ * to. The plugin's tools read these off their params to address the
+ * conversation they post into.
+ */
+export interface AgentTurnConversation {
+  channelId: string;
+  conversationId: string;
+  platform: string;
 }
 
 /**

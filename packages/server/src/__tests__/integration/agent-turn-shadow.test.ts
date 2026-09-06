@@ -252,7 +252,22 @@ describe('agent turn shadow producer', () => {
       allowed_hosts: ['gateway.test.invalid'],
     });
     expect(envelope.turn.system_prompt).toBe(
-      '## Agent Identity\n\nI am the shadow agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n## Workspace\n\n' +
+      '## Agent Identity\n\nI am the shadow agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
+        // The always-on tool rules, NARROWED to what this turn carries. Both of
+        // these are about tools it has; the `upload_file` and `generate_image`
+        // rules are absent because this lane offers neither, and instructing a
+        // model to deliver a file with a tool it was never given is how a turn
+        // comes to claim it sent something it could not.
+        '## Built-In Tool Policies\n\n' +
+        '### Structured User Choices\nTools: `ask_user`\n' +
+        '- Use ask_user when you need the user to choose from a short list of options or approvals.\n' +
+        '- Use plain text only for open-ended clarifications or when you need a free-form value.\n' +
+        "- After calling ask_user, stop. The user's answer arrives as the next message.\n\n" +
+        '### Participate In Your Channels\nTools: `list_conversations`, `read_conversation`, `send_message`\n' +
+        '- You can participate in chat channels you are bound to, even on a scheduled/automated run with no one messaging you. Call list_conversations to see them.\n' +
+        '- To act in a channel: read_conversation to catch up on what people said, then send_message to post. Pass a conversation handle to post to the channel, or a thread handle (returned by a previous send_message) to reply in that thread.\n' +
+        '- Only what you send_message reaches the channel — your normal reply text does not. Decide deliberately what and where to post; it is fine to post nothing.\n\n' +
+        '## Workspace\n\n' +
         'Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.\n' +
         'It starts empty on every turn and nothing written there persists after the turn ends.\n' +
         'It has no network access and no package manager; use your other tools to reach data.'
@@ -409,6 +424,64 @@ describe('agent turn shadow producer', () => {
     expect(turn.tools?.bash_policy.allow_prefixes).toEqual(['git', 'ls']);
     expect(turn.tools?.bash_policy.deny_prefixes.slice(-1)).toEqual(['rm']);
     expect(turn.tools?.bash_policy.deny_prefixes).toContain('npm install ');
+  });
+
+  it('hands the turn the conversation tools its policy admits, addressed at this conversation', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as {
+      tools?: { gateway?: string[]; conversation?: Record<string, string> };
+    };
+    expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
+    // With no policy every conversation tool is admitted. Names only: the
+    // routing and the schemas live in `@lobu/plugin-conversations`, which the
+    // guest runs directly, so nothing about the tools crosses this wire.
+    expect(turn.tools?.gateway).toEqual([
+      'list_conversations',
+      'read_conversation',
+      'send_message',
+      'present_event',
+      'schedule_followup',
+      'react',
+      'edit_message',
+      'delete_message',
+      'ask_user',
+      'suggest_actions',
+    ]);
+    // Every one of them addresses a channel, so the routing travels with them
+    // rather than being inferred inside the isolate.
+    expect(turn.tools?.conversation).toEqual({
+      channel_id: message.channelId,
+      conversation_id: message.conversationId,
+      platform: message.platform,
+    });
+  });
+
+  it('denies a conversation tool the agent policy denies, on the same patterns the subprocess lane reads', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.agentOptions = {
+      model: 'claude/claude-opus-4-8',
+      toolsConfig: { deniedTools: ['ask_user', 'send_message'] },
+    };
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as { tools?: { gateway?: string[] } };
+    expect(turn.tools?.gateway).not.toContain('ask_user');
+    expect(turn.tools?.gateway).not.toContain('send_message');
+    expect(turn.tools?.gateway).toContain('suggest_actions');
   });
 
   it('runs the turn without tools when it cannot honour them, and still enqueues it', async () => {

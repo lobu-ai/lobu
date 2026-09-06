@@ -1,9 +1,32 @@
-import { createLogger, getCustomToolDescription } from "@lobu/core";
+import {
+  getCustomToolDescription,
+  type ToolLogger,
+} from "@lobu/core/agent-tooling";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static, TSchema } from "@sinclair/typebox";
 
-const logger = createLogger("plugin-toolkit");
+/**
+ * Where this package's tool-failure lines go.
+ *
+ * Deliberately NOT `createLogger` from the `@lobu/core` root: that barrel
+ * reaches winston, and a gateway tool now also runs inside the connector
+ * isolate, whose bundle cannot contain a Node builtin. The default is the
+ * console every lane has; the agent worker installs core's real logger through
+ * `setToolLogger` at startup, so its lines keep the shape and redaction they
+ * have always had.
+ */
+let logger: ToolLogger = {
+  error: (message, ...args) => console.error(message, ...args),
+  warn: (message, ...args) => console.warn(message, ...args),
+  info: (message, ...args) => console.info(message, ...args),
+  debug: (message, ...args) => console.debug(message, ...args),
+};
+
+/** Install the host lane's logger. Called once, at startup, before any tool runs. */
+export function setToolLogger(next: ToolLogger): void {
+  logger = next;
+}
 
 export interface TextResult {
   [key: string]: unknown;

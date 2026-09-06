@@ -1,4 +1,4 @@
-import { sanitizeSuggestionPrompts } from "@lobu/core";
+import { sanitizeSuggestionPrompts } from "@lobu/core/agent-tooling";
 import { defineLobuPlugin } from "@lobu/plugin-api";
 import {
   defineGatewayTool,

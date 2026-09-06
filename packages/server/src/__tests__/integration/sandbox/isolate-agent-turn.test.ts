@@ -22,7 +22,11 @@
  *     back with the call and its result in it;
  *  6. the workspace tools run inside the isolate against a filesystem the
  *     turn owns: a `bash` write is visible to `read`, and no request leaves
- *     the guest for either.
+ *     the guest for either;
+ *  7. the GATEWAY tools (`ask_user` and the rest of
+ *     `@lobu/plugin-conversations`) run the plugin package's OWN code inside
+ *     the guest — same route, same body, same one credential the MCP call
+ *     uses — and `ask_user` ends the turn, as it does on the subprocess lane.
  *
  * Runs under Node (vitest); like the other lane suites it FAILS rather than
  * skips when `isolated-vm` cannot load.
@@ -150,6 +154,9 @@ let toolReply: { status: number; body: unknown } = {
 	body: { content: [{ type: "text", text: "3 entities" }] },
 };
 
+/** What the fake gateway answers on its `/internal/...` routes. */
+let internalReply: { status: number; body: unknown } = { status: 200, body: { id: "int_1" } };
+
 /**
  * The tool calls the fake model makes, in order, one per provider round; the
  * round after the last one answers with text. The MCP scenario is the default.
@@ -185,6 +192,13 @@ beforeAll(async () => {
 			if (req.url === TOOL_ROUTE) {
 				res.writeHead(toolReply.status, { "content-type": "application/json" });
 				res.end(JSON.stringify(toolReply.body));
+				return;
+			}
+			// The gateway's own internal routes, which the conversation plugin's
+			// tools call directly rather than through the MCP proxy.
+			if (req.url?.startsWith("/lobu/internal/")) {
+				res.writeHead(internalReply.status, { "content-type": "application/json" });
+				res.end(JSON.stringify(internalReply.body));
 				return;
 			}
 			// The fake model follows its script: one tool call per round until
@@ -484,6 +498,101 @@ describe("agent turn on the isolate lane", () => {
 		]);
 		const roles = run.output.messages.map((m) => (m as { role: string }).role);
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult", "assistant"]);
+	}, 120_000);
+
+	/** A turn carrying the conversation plugin's tools, addressed at one conversation. */
+	function gatewayToolJob(gateway: string[], overrides: Partial<AgentTurnInput> = {}): ExecutorJob {
+		return turnJob({
+			tools: {
+				gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+				definitions: [],
+				gateway: gateway as never,
+				conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+			},
+			...overrides,
+		});
+	}
+
+	it("runs the conversation plugin's own tools in the guest, on the same route and the same one credential", async () => {
+		hits = [];
+		internalReply = { status: 200, body: { success: true } };
+		toolScript = [
+			{
+				id: "toolu_s1",
+				name: "suggest_actions",
+				input: { prompts: [{ title: "Next", message: "What should I do next?" }] },
+			},
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["suggest_actions", "send_message"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The model was offered exactly the two the producer named, with the
+		// descriptions the plugin package ships — not a copy written here. The
+		// ORDER is the plugin's own declaration order, not the producer's
+		// request order: the guest selects out of `createConversationTools`
+		// rather than rebuilding the list, which is what keeps one tool set.
+		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string; description: string }> };
+		expect(offered.tools?.map((t) => t.name)).toEqual(["send_message", "suggest_actions"]);
+		expect(offered.tools?.find((t) => t.name === "suggest_actions")?.description).toContain("chip");
+
+		// The call went to the gateway's own internal route — the plugin's route,
+		// not the MCP proxy's — under the same bearer the provider hop resolves.
+		expect(hits.map((h) => `${h.method} ${h.url}`)).toEqual([
+			"POST /v1/messages",
+			"POST /lobu/internal/suggestions/create",
+			"POST /v1/messages",
+		]);
+		expect(hits[1]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
+		expect(JSON.parse(hits[1]?.body ?? "{}")).toEqual({
+			prompts: [{ title: "Next", message: "What should I do next?" }],
+		});
+
+		// And the model got the plugin's own result prose back.
+		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean; output: string } | undefined;
+		expect(end?.isError).toBe(false);
+		expect(end?.output).toContain("Posted 1 suggested action(s)");
+	}, 120_000);
+
+	it("ends the turn when the model asks the user a question", async () => {
+		hits = [];
+		internalReply = { status: 200, body: { id: "int_ask" } };
+		// The model tries to keep working after asking. It must not get to.
+		toolScript = [
+			{ id: "toolu_a1", name: "ask_user", input: { question: "Which one?", options: ["A", "B"] } },
+			{ id: "toolu_a2", name: "suggest_actions", input: { prompts: [{ title: "T", message: "M" }] } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["ask_user", "suggest_actions"]));
+
+		expect(hits[1]?.url).toBe("/lobu/internal/interactions/create");
+		expect(JSON.parse(hits[1]?.body ?? "{}")).toEqual({
+			interactionType: "question",
+			question: "Which one?",
+			options: ["A", "B"],
+		});
+
+		// The second tool call was refused rather than run: no second internal hit.
+		expect(hits.filter((h) => h.url.startsWith("/lobu/internal/")).length).toBe(1);
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{ name: string; isError: boolean; output: string }>;
+		expect(ends[0]?.name).toBe("ask_user");
+		expect(ends[0]?.output).toContain("Your turn is now ending");
+		expect(ends[1]?.isError).toBe(true);
+		expect(ends[1]?.output).toContain("already asked the user a question");
+	}, 120_000);
+
+	it("hands a failed gateway tool to the model as text and lets the turn finish", async () => {
+		hits = [];
+		internalReply = { status: 500, body: { error: "interaction service unavailable" } };
+		toolScript = [{ id: "toolu_a3", name: "ask_user", input: { question: "Which one?", options: ["A"] } }];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["ask_user"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The plugin answers a failure as an ordinary text result, so the turn
+		// continues and is NOT ended by an ask_user that never posted.
+		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean; output: string } | undefined;
+		expect(end?.output).toContain("interaction service unavailable");
 	}, 120_000);
 
 	it("enforces the bash policy inside the guest and starts every turn from an empty workspace", async () => {

@@ -361,6 +361,30 @@ export const AgentTurnPollPayloadSchema = Type.Object({
             deny_prefixes: Type.Array(Type.String()),
           })
         ),
+        /**
+         * The gateway tools the agent's tool policy admits, by NAME only —
+         * `ask_user`, `send_message`, `suggest_actions` and the rest of
+         * `@lobu/plugin-conversations`. The guest runs that package's own
+         * implementation, so the route, the request body and the schema live
+         * there and never on this wire; sending a name the package does not
+         * define drops the tool rather than inventing one.
+         *
+         * They reach the SAME gateway on the SAME bearer as the MCP tools
+         * above, so a turn with them still carries exactly one credential.
+         */
+        gateway: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        /**
+         * Which conversation those tools post into. Required whenever
+         * `gateway` is non-empty: a tool that addresses a channel cannot
+         * default one, and the guest must never infer routing.
+         */
+        conversation: Type.Optional(
+          Type.Object({
+            channel_id: Type.String({ minLength: 1 }),
+            conversation_id: Type.String({ minLength: 1 }),
+            platform: Type.String({ minLength: 1 }),
+          })
+        ),
       })
     ),
     /**

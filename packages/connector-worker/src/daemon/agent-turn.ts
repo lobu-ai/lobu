@@ -10,7 +10,7 @@
 
 import type { AgentTurnPollPayload, PollResponse } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
-import type { AgentTurnEvent } from '../agent-turn/types.js';
+import type { AgentTurnEvent, AgentTurnGatewayTool } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import type { ExecutorClient } from './client.js';
@@ -107,6 +107,20 @@ export async function executeAgentTurnRun(
                           allowAll: turn.tools.bash_policy.allow_all,
                           allowPrefixes: turn.tools.bash_policy.allow_prefixes,
                           denyPrefixes: turn.tools.bash_policy.deny_prefixes,
+                        },
+                      }
+                    : {}),
+                  // Names only; the guest selects them out of the plugin
+                  // package, which is where their routing and schemas live.
+                  // Without the conversation they address there is nothing to
+                  // post into, so the pair travels together or not at all.
+                  ...(turn.tools.gateway && turn.tools.gateway.length > 0 && turn.tools.conversation
+                    ? {
+                        gateway: turn.tools.gateway as AgentTurnGatewayTool[],
+                        conversation: {
+                          channelId: turn.tools.conversation.channel_id,
+                          conversationId: turn.tools.conversation.conversation_id,
+                          platform: turn.tools.conversation.platform,
                         },
                       }
                     : {}),
