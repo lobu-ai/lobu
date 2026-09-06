@@ -201,6 +201,56 @@ describe("executeAgentTurnRun", () => {
     });
   });
 
+  test("hands the guest the turn's attachments, and the model's own modalities, in the guest's shape", async () => {
+    const reported: Reported = { calls: [] };
+    let seen: ExecutorJob | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, job) => {
+        seen = job;
+        return {
+          mode: "agent_turn",
+          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+        };
+      },
+    };
+    const job = turnJob();
+    const turn = (job.payload as { turn: Record<string, unknown> }).turn;
+    turn.message_images = [{ mime_type: "image/png", data: "aGVsbG8=" }];
+    turn.message_files = [{ name: "report.pdf", mime_type: "application/pdf", size: 2048 }];
+    (turn.provider as Record<string, unknown>).input = ["text", "image"];
+
+    await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
+
+    if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
+    expect(seen.turn.images).toEqual([{ mimeType: "image/png", data: "aGVsbG8=" }]);
+    expect(seen.turn.files).toEqual([{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }]);
+    expect(seen.turn.provider.input).toEqual(["text", "image"]);
+  });
+
+  test("leaves attachments and modalities off the job when the envelope carries none", async () => {
+    const reported: Reported = { calls: [] };
+    let seen: ExecutorJob | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, job) => {
+        seen = job;
+        return {
+          mode: "agent_turn",
+          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+        };
+      },
+    };
+
+    await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, cfgWith(executor));
+
+    if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
+    // Absent, not empty: the guest's own default for `input` is text-only, and
+    // an empty images array would read as "resolved to nothing" rather than
+    // "there were none".
+    expect("images" in seen.turn).toBe(false);
+    expect("files" in seen.turn).toBe(false);
+    expect("input" in seen.turn.provider).toBe(false);
+  });
+
   test("reports a guest failure instead of returning it, because the run is claimed", async () => {
     const reported: Reported = { calls: [] };
     const executor: SyncExecutor = {

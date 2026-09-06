@@ -56,7 +56,12 @@ function buildModel(input: AgentTurnInput): Record<string, unknown> {
     provider: input.provider.provider,
     baseUrl: input.provider.baseUrl,
     reasoning: false,
-    input: ['text'],
+    // The gateway resolves this from pi-ai's model registry and puts it on the
+    // wire; pi reads it to decide whether an image block survives into the
+    // request (`transformMessages` downgrades every one to a placeholder when
+    // `'image'` is absent). Defaulting to text only means a turn never sends an
+    // image to a model nobody said could read one.
+    input: input.provider.input ?? ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     // Only read to decide when to compact, which this lane never does: one
     // turn, one request, and the gateway owns the history it sends.
@@ -162,6 +167,43 @@ function buildTools(
 
 function clip(text: string): string {
   return text.length > TOOL_EVENT_OUTPUT_CHARS ? `${text.slice(0, TOOL_EVENT_OUTPUT_CHARS)}…` : text;
+}
+
+/**
+ * One line per non-image attachment, appended to the user turn.
+ *
+ * The subprocess lane names the user's uploads in the prompt and leaves the
+ * bytes on the worker's disk for `cat`; this lane has no disk, so it names them
+ * the same way and says plainly that it cannot open them. Silently dropping
+ * them would let the model answer a question about a file it was never told
+ * existed.
+ */
+function describeFiles(files: AgentTurnInput['files']): string {
+  if (!files || files.length === 0) return '';
+  const listing = files.map((file) => `- ${file.name} (${file.mimeType})`).join('\n');
+  return `The user attached ${files.length} non-image file(s) that this turn cannot open:\n${listing}`;
+}
+
+/**
+ * The user turn pi is prompted with.
+ *
+ * Built as a message rather than passed to `prompt(text, images)` because that
+ * overload always emits a text block, empty text included — which is exactly
+ * the attachment-only turn. The Anthropic adapter drops a blank block on its
+ * way out, but the OpenAI one maps every block through, so the empty one would
+ * reach the provider and be rejected. Omitting it here fixes both lanes at
+ * once, and leaves the image-only user turn as just its image, which is a
+ * request both providers accept.
+ */
+function buildUserMessage(input: AgentTurnInput): Record<string, unknown> {
+  const content: Array<Record<string, unknown>> = [];
+  const text = [input.userMessage, describeFiles(input.files)].filter((part) => part.trim().length > 0).join('\n\n');
+  if (text.length > 0) content.push({ type: 'text', text });
+  // pi's `ImageContent`: the base64 payload and its media type, nothing else.
+  for (const image of input.images ?? []) {
+    content.push({ type: 'image', data: image.data, mimeType: image.mimeType });
+  }
+  return { role: 'user', content, timestamp: Date.now() };
 }
 
 /**
@@ -275,7 +317,11 @@ export async function runAgentTurn(
     }
   });
 
-  await agent.prompt(input.userMessage);
+  const userMessage = buildUserMessage(input);
+  if ((userMessage.content as unknown[]).length === 0) {
+    throw new Error('the agent turn reached the guest with neither text nor a readable attachment');
+  }
+  await agent.prompt(userMessage as never);
   await agent.waitForIdle();
 
   const stateError = (agent.state as { errorMessage?: string }).errorMessage;

@@ -47,6 +47,7 @@ import {
   verifyWorkerToken,
 } from "@lobu/core";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
+import { getModel, type Model } from "@mariozechner/pi-ai";
 import { getDb } from "../../db/client.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
@@ -54,6 +55,10 @@ import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.j
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import { readSnapshotJsonl } from "../services/transcript-snapshot.js";
+import {
+  type AgentTurnArtifactReader,
+  resolveTurnAttachments,
+} from "./agent-turn-attachments.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-shadow");
@@ -163,6 +168,14 @@ export interface AgentTurnShadowDeps {
    * shadow, because there is no URL to hand the worker.
    */
   gatewayUrl?: string;
+  /**
+   * The gateway's artifact store, which is where an inbound attachment's bytes
+   * already live. Absent → an image attachment travels as its name only, and
+   * the resolver logs why. Injected rather than reached for through
+   * `getLobuCoreServices()` for the same reason `gatewayUrl` is: the caller
+   * owns the lookup, and a test can vary it.
+   */
+  artifacts?: AgentTurnArtifactReader;
 }
 
 function shadowSelects(agentId: string): boolean {
@@ -340,6 +353,33 @@ interface ShadowProvider {
   baseUrl: string;
   credential: string;
   host: string;
+  /** pi-ai's `Model.input` for this model — which modalities it accepts. */
+  input: ("text" | "image")[];
+}
+
+/**
+ * Which modalities this model accepts, from pi-ai's own model registry.
+ *
+ * SAME source of truth the subprocess lane uses: it resolves a registry model
+ * through `getModelDynamic` when there is one and otherwise builds a dynamic
+ * entry that declares `["text", "image"]` (`agent-worker`'s
+ * `buildDynamicOpenAIModel`). Both rules are reproduced rather than
+ * re-decided, so an agent's vision support does not depend on which lane ran
+ * its turn — and neither lane hardcodes a per-model guess. pi is what enforces
+ * the answer: `transformMessages` replaces every image block with a
+ * "model does not support images" placeholder when `"image"` is missing.
+ */
+function modelInputModalities(
+  registryProvider: string,
+  modelId: string
+): ("text" | "image")[] {
+  // `getModel` is typed over pi-ai's static registry and cannot take the
+  // strings Lobu resolves at runtime without a cast; it answers undefined for
+  // a model the registry does not carry.
+  const model = getModel(registryProvider as never, modelId as never) as
+    | Model<never>
+    | undefined;
+  return model?.input ? [...model.input] : ["text", "image"];
 }
 
 /**
@@ -449,17 +489,19 @@ async function resolveShadowProvider(
     return null;
   }
 
+  const modelId = bareModelId(
+    args.modelRef,
+    module.providerId,
+    module.getUpstreamConfig?.()?.slug
+  );
   return {
     api: protocol.api,
     provider: protocol.registryAlias,
-    modelId: bareModelId(
-      args.modelRef,
-      module.providerId,
-      module.getUpstreamConfig?.()?.slug
-    ),
+    modelId,
     baseUrl,
     credential,
     host,
+    input: modelInputModalities(protocol.registryAlias, modelId),
   };
 }
 
@@ -550,13 +592,28 @@ export async function enqueueAgentTurnShadow(
     if (!data.agentId || !shadowSelects(data.agentId)) return;
     if (!data.organizationId) return;
 
-    // An attachment-only message has no text for this lane to send, and both
-    // providers reject an empty user turn — so it would enqueue a run that can
-    // only fail. The isolate lane carries no attachments yet.
-    if (!data.messageText?.trim()) {
+    // The turn's attachments, resolved host-side out of the gateway's own
+    // artifact store. Done BEFORE the empty-text check, because an
+    // attachment-only message is a real turn once its images are resolved —
+    // it is only unsendable when nothing at all came through.
+    const attachments = await resolveTurnAttachments(
+      data.platformMetadata,
+      deps.artifacts,
+      { agentId: data.agentId, messageId: data.messageId }
+    );
+
+    // Nothing to send: no text, no image the model can see, and no attachment
+    // worth naming. Both providers reject an empty user turn, so this would
+    // enqueue a run that can only fail.
+    const messageText = data.messageText?.trim() ?? "";
+    if (
+      !messageText &&
+      attachments.images.length === 0 &&
+      attachments.files.length === 0
+    ) {
       logger.info(
         { agentId: data.agentId, messageId: data.messageId },
-        "Agent turn shadow skipped: the message carries no text for the turn to send"
+        "Agent turn shadow skipped: the message carries neither text nor a resolvable attachment for the turn to send"
       );
       return;
     }
@@ -697,7 +754,13 @@ export async function enqueueAgentTurnShadow(
       agent_id: data.agentId,
       conversation_id: data.conversationId,
       message_id: data.messageId,
-      message_text: data.messageText.slice(0, TURN_MESSAGE_CHARS),
+      message_text: (data.messageText ?? "").slice(0, TURN_MESSAGE_CHARS),
+      // Bytes, already read out of the artifact store. An attachment URL never
+      // reaches the guest, so a turn cannot be talked into dialling one.
+      ...(attachments.images.length > 0 ? { message_images: attachments.images } : {}),
+      // Names and types only, which is also all the subprocess lane sends the
+      // model for a non-image upload. This is NOT a file capability.
+      ...(attachments.files.length > 0 ? { message_files: attachments.files } : {}),
       system_prompt: composeShadowSystemPrompt(
         settings ?? {},
         mcpInstructions,
@@ -714,6 +777,7 @@ export async function enqueueAgentTurnShadow(
         provider: provider.provider,
         model_id: provider.modelId,
         base_url: provider.baseUrl,
+        input: provider.input,
       },
       ...(tools ? { tools } : {}),
       // DENY-ALL. A connector's allowlist defaults open; an agent turn's does
@@ -759,6 +823,8 @@ export async function enqueueAgentTurnShadow(
         provider: provider.provider,
         model: provider.modelId,
         history: turn.messages.length,
+        images: attachments.images.length,
+        files: attachments.files.length,
         tools: tools?.definitions.length ?? 0,
         workspaceTools: builtin,
         gatewayTools: gateway,

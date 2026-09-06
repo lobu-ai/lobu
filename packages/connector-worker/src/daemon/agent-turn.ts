@@ -86,10 +86,36 @@ export async function executeAgentTurnRun(
             modelId: turn.provider.model_id,
             baseUrl: turn.provider.base_url,
             ...(turn.provider.max_tokens !== undefined ? { maxTokens: turn.provider.max_tokens } : {}),
+            // pi-ai's own `Model.input`, resolved by the gateway from pi-ai's
+            // model registry. Passed through untouched: pi is what enforces it.
+            ...(turn.provider.input ? { input: turn.provider.input } : {}),
           },
           systemPrompt: turn.system_prompt,
           messages: turn.messages,
           userMessage: turn.message_text,
+          // Attachment bytes the gateway already resolved out of its artifact
+          // store. The guest fetches nothing: an attachment URL never reaches
+          // it, so a turn cannot be talked into dialling one.
+          ...(turn.message_images && turn.message_images.length > 0
+            ? {
+                images: turn.message_images.map((image) => ({
+                  mimeType: image.mime_type,
+                  data: image.data,
+                })),
+              }
+            : {}),
+          // Non-image attachments, by name and type only — the same thing the
+          // subprocess lane tells the model, minus the disk it could read them
+          // from.
+          ...(turn.message_files && turn.message_files.length > 0
+            ? {
+                files: turn.message_files.map((file) => ({
+                  name: file.name,
+                  mimeType: file.mime_type,
+                  ...(file.size !== undefined ? { size: file.size } : {}),
+                })),
+              }
+            : {}),
           ...(turn.tools
             ? {
                 tools: {

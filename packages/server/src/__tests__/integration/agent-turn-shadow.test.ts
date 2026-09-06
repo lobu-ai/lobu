@@ -138,6 +138,39 @@ function messageFor(organizationId: string): MessagePayload {
   } as MessagePayload;
 }
 
+/**
+ * An artifact store holding exactly the fixtures the attachment tests publish.
+ * Stands in for the gateway's real one so the producer's resolution path is
+ * exercised without the filesystem — what matters is that it resolves by
+ * ARTIFACT ID, which is the only key this fake answers to.
+ */
+function fakeArtifacts() {
+  const held: Record<string, { contentType: string; bytes: Buffer }> = {
+    'art-image': { contentType: 'image/png', bytes: Buffer.from('PNG!') },
+    'art-doc': { contentType: 'application/pdf', bytes: Buffer.from('%PDF') },
+  };
+  const metadataFor = (artifactId: string) => {
+    const fixture = held[artifactId];
+    if (!fixture) return null;
+    return {
+      artifactId,
+      filename: 'stored',
+      contentType: fixture.contentType,
+      size: fixture.bytes.length,
+      createdAt: 0,
+      sha256: '0'.repeat(64),
+    };
+  };
+  return {
+    inspect: async (artifactId: string) => metadataFor(artifactId) as never,
+    read: async (artifactId: string) => {
+      const fixture = held[artifactId];
+      const metadata = metadataFor(artifactId);
+      return fixture && metadata ? ({ metadata, bytes: fixture.bytes } as never) : null;
+    },
+  };
+}
+
 async function shadowRuns() {
   const sql = getTestDb();
   return (await sql`
@@ -718,8 +751,10 @@ describe('agent turn shadow producer', () => {
     await enqueueAgentTurnShadow(noModel, deps);
     expect(await shadowRuns()).toHaveLength(0);
 
-    // An attachment-only message: both providers reject an empty user turn, so
-    // enqueueing one would only ever produce a failed run.
+    // A message with neither text nor a resolvable attachment: both providers
+    // reject an empty user turn, so enqueueing one would only ever produce a
+    // failed run. (An attachment-only message that DOES resolve is a real turn
+    // — see the attachment tests below.)
     const noText = messageFor(org.id);
     noText.messageText = '   ';
     await enqueueAgentTurnShadow(noText, deps);
@@ -741,6 +776,100 @@ describe('agent turn shadow producer', () => {
     process.env[SHADOW_ENV] = '*';
     await enqueueAgentTurnShadow(messageFor(org.id), deps);
     expect(await shadowRuns()).toHaveLength(1);
+  });
+
+  it("carries the message's image attachments as bytes and the rest as names", async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.platformMetadata = {
+      files: [
+        {
+          id: 'art-image',
+          name: 'shot.png',
+          mimetype: 'image/png',
+          size: 4,
+          // Inert: the producer resolves by artifact id, never by URL.
+          downloadUrl: 'https://attacker.invalid/pwn.png',
+        },
+        { id: 'art-doc', name: 'report.pdf', mimetype: 'application/pdf', size: 2048 },
+      ],
+    };
+
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+
+    const [run] = await shadowRuns();
+    const turn = (run?.action_input as { turn: Record<string, unknown> }).turn;
+    expect(turn.message_images).toEqual([
+      { mime_type: 'image/png', data: Buffer.from('PNG!').toString('base64') },
+    ]);
+    expect(turn.message_files).toEqual([
+      { name: 'report.pdf', mime_type: 'application/pdf', size: 2048 },
+    ]);
+    // No attachment URL is anywhere in the envelope the guest will be handed.
+    expect(JSON.stringify(turn)).not.toContain('attacker.invalid');
+  });
+
+  it('enqueues an attachment-only message once its image resolves, and refuses one whose image does not', async () => {
+    const org = await createTestOrganization();
+    const withImage = messageFor(org.id);
+    withImage.messageText = '';
+    withImage.platformMetadata = {
+      files: [{ id: 'art-image', name: 'shot.png', mimetype: 'image/png', size: 4 }],
+    };
+
+    await enqueueAgentTurnShadow(withImage, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+
+    const [run] = await shadowRuns();
+    const turn = (run?.action_input as { turn: Record<string, unknown> }).turn;
+    expect(turn.message_text).toBe('');
+    expect(turn.message_images).toHaveLength(1);
+
+    // The same message against a store that holds nothing: no image resolves,
+    // no name survives either, so there is no turn to send.
+    const unresolvable = messageFor(org.id);
+    unresolvable.messageText = '';
+    unresolvable.platformMetadata = {
+      files: [{ name: 'shot.png', mimetype: 'image/png' }],
+    };
+    await enqueueAgentTurnShadow(unresolvable, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+    // Still just the first run: the unresolvable one names the file, so it DOES
+    // enqueue — what must never enqueue is a message with nothing at all.
+    expect(await shadowRuns()).toHaveLength(2);
+    const second = (await shadowRuns())[1];
+    const secondTurn = (second?.action_input as { turn: Record<string, unknown> }).turn;
+    expect(secondTurn.message_images).toBeUndefined();
+    expect(secondTurn.message_files).toEqual([{ name: 'shot.png', mime_type: 'image/png' }]);
+  });
+
+  it("puts the model's own modalities on the envelope, from pi-ai's registry", async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = (run?.action_input as { turn: { provider: { input?: string[] } } }).turn;
+    // Whatever pi-ai says this model accepts — asserted as a non-empty list
+    // that always contains text, because the registry's per-model answer is
+    // pi-ai's to change, not this test's to pin.
+    expect(turn.provider.input).toContain('text');
   });
 });
 

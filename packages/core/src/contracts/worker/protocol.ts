@@ -295,13 +295,76 @@ export const DeviceChatPollPayloadSchema = Type.Object({
  * gateway's secret proxy at `base_url` can resolve — the worker never holds a
  * real provider key at either hop.
  */
+/**
+ * Base64 length of the largest image one turn may carry.
+ *
+ * The byte cap itself lives with the producer that enforces it
+ * (`MAX_TURN_IMAGE_BYTES`, 5 MiB, in the server's `agent-turn-attachments.ts`);
+ * this is the same number expressed in the units the wire field is measured
+ * in, so the schema can reject an oversized payload without importing the
+ * server into the contract package.
+ */
+const MAX_TURN_IMAGE_BASE64_CHARS = Math.ceil((5 * 1024 * 1024) / 3) * 4;
+
 export const AgentTurnPollPayloadSchema = Type.Object({
   turn: Type.Object({
     agent_id: Type.String({ minLength: 1 }),
     conversation_id: Type.String({ minLength: 1 }),
     message_id: Type.String({ minLength: 1 }),
-    /** What the human said, verbatim. */
+    /** What the human said, verbatim. May be empty when the turn is attachments only. */
     message_text: Type.String({ maxLength: 32_000 }),
+    /**
+     * Image attachments of THIS message, already resolved to bytes by the
+     * gateway and inlined here as base64.
+     *
+     * They are inlined rather than referenced because the guest must never
+     * fetch an attachment: the producer reads each one out of the artifact
+     * store by the artifact id the gateway itself minted for this message, so
+     * the bytes the model sees are bytes Lobu already owns, and no attachment
+     * URL — signed or not — ever crosses into the isolate. Bounded per image
+     * and in total by the producer; an attachment over the bound is dropped
+     * with a log line rather than truncated, exactly as the subprocess lane
+     * skips an oversized image.
+     *
+     * The bounds here RESTATE the producer's own caps
+     * (`agent-turn-attachments.ts`: 8 images, 5 MiB each) so the contract is
+     * checkable on its own rather than only as a property of the one producer
+     * that writes it. `maxLength` is the base64 length of a capped image —
+     * 4 characters per 3 bytes, rounded up to the padded quantum.
+     */
+    message_images: Type.Optional(
+      Type.Array(
+        Type.Object({
+          /** `image/png`, `image/jpeg`, … — the artifact's own stored content type. */
+          mime_type: Type.String({ minLength: 1, maxLength: 128 }),
+          /** The artifact's bytes, base64. */
+          data: Type.String({
+            minLength: 1,
+            maxLength: MAX_TURN_IMAGE_BASE64_CHARS,
+          }),
+        }),
+        { maxItems: 8 }
+      )
+    ),
+    /**
+     * The message's NON-IMAGE attachments, as metadata only.
+     *
+     * The subprocess lane does not send these to the model either — it writes
+     * them into the worker's `input/` directory and names them in the prompt.
+     * This lane has no such directory, so it carries the same names and types
+     * and says so in the prompt; the bytes are deliberately absent, and this
+     * field must not be read as a general file capability.
+     */
+    message_files: Type.Optional(
+      Type.Array(
+        Type.Object({
+          name: Type.String({ minLength: 1, maxLength: 512 }),
+          mime_type: Type.String({ minLength: 1, maxLength: 128 }),
+          size: Type.Optional(Type.Integer({ minimum: 0 })),
+        }),
+        { maxItems: 32 }
+      )
+    ),
     system_prompt: Type.String(),
     /** The transcript this turn continues, oldest first, in pi's message shape. */
     messages: Type.Array(Type.Record(Type.String(), Type.Unknown())),
@@ -315,6 +378,20 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       /** The gateway's agent-scoped secret-proxy base URL. */
       base_url: Type.String({ minLength: 1 }),
       max_tokens: Type.Optional(Type.Integer({ minimum: 1 })),
+      /**
+       * The modalities this model accepts, in pi-ai's own `Model.input`
+       * vocabulary and resolved from pi-ai's model registry — NOT guessed
+       * here. pi reads it to decide whether an image survives to the wire: a
+       * model without `"image"` has every image block replaced by
+       * "(image omitted: model does not support images)" before the request is
+       * built, which is what a non-vision model must get. Absent →
+       * the guest assumes text only.
+       */
+      input: Type.Optional(
+        Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]), {
+          minItems: 1,
+        })
+      ),
     }),
     /**
      * Tools the turn may call. Each is an MCP tool the gateway proxies, reached

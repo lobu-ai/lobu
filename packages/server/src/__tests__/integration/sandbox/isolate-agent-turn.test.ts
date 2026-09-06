@@ -58,6 +58,14 @@ let hits: ProviderHit[] = [];
 const GATEWAY_PLACEHOLDER = "lobu_secret_00000000-0000-4000-8000-000000000000";
 
 /**
+ * A 1x1 PNG, base64 — the shape the producer resolves an image attachment into
+ * after reading it out of the artifact store. Small enough to assert on
+ * verbatim in the request body the fake provider captured.
+ */
+const PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/**
  * Resolved by the test when the HOST has seen its first token. The fake
  * provider will not finish its response until then, so a lane that buffered the
  * body and only handed the tokens over at the end would deadlock here rather
@@ -593,6 +601,138 @@ describe("agent turn on the isolate lane", () => {
 		// continues and is NOT ended by an ask_user that never posted.
 		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean; output: string } | undefined;
 		expect(end?.output).toContain("interaction service unavailable");
+	}, 120_000);
+
+	it("puts an image attachment on the wire as the provider's own image block", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				userMessage: "what is in this?",
+				provider: {
+					api: "anthropic-messages",
+					provider: "anthropic",
+					modelId: "claude-test",
+					baseUrl: `http://127.0.0.1:${port}`,
+					maxTokens: 64,
+					// pi-ai's own `Model.input`, resolved by the gateway from its
+					// model registry. Without "image" pi downgrades the block.
+					input: ["text", "image"],
+				},
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
+		};
+		// `cache_control` is the adapter's own prompt-caching stamp on the last
+		// block; the shape under test is the text-then-image pair.
+		expect(sent.messages[0]?.content).toMatchObject([
+			{ type: "text", text: "what is in this?" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG_BASE64 } },
+		]);
+	}, 120_000);
+
+	it("sends an attachment-only turn as a valid request: an image block and no empty text block", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				// What the composer produces when the user uploads and says nothing.
+				userMessage: "",
+				provider: {
+					api: "anthropic-messages",
+					provider: "anthropic",
+					modelId: "claude-test",
+					baseUrl: `http://127.0.0.1:${port}`,
+					maxTokens: 64,
+					input: ["text", "image"],
+				},
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
+		};
+		const content = sent.messages[0]?.content ?? [];
+		// pi-ai's Anthropic adapter supplies the placeholder an image-only user
+		// turn needs. What must NOT be there is an EMPTY text block, which is
+		// what `Agent.prompt(text, images)` would have produced and which the
+		// provider rejects with a 400.
+		expect(content.some((block) => block.type === "text" && block.text === "")).toBe(false);
+		expect(content.filter((block) => block.type === "image")).toMatchObject([
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG_BASE64 } },
+		]);
+		// The whole user turn is the image, and that is a valid request: Lobu
+		// invents no prose the user never wrote.
+		expect(content.length).toBe(1);
+	}, 120_000);
+
+	it("sends no image to a model whose declared modalities do not include one", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				userMessage: "what is in this?",
+				// The lane's default when the gateway resolved no modalities: text
+				// only. `input` is deliberately omitted here rather than set to
+				// ["text"], so the guest's own default is what is under test.
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ role: string; content: unknown }>;
+		};
+		const body = hits.at(-1)?.body ?? "";
+		// pi replaces the block with its own placeholder before the request is
+		// built, so the bytes never leave the isolate.
+		expect(body).not.toContain(PNG_BASE64);
+		expect(JSON.stringify(sent.messages[0]?.content)).toContain("model does not support images");
+	}, 120_000);
+
+	it("names a non-image attachment for the model without sending anything it cannot open", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ content: Array<Record<string, unknown>> }>;
+		};
+		// One text block: what the user said, then what they attached. No image
+		// block and no bytes, because this lane cannot open a PDF and says so
+		// rather than pretending the attachment was not there.
+		expect(sent.messages[0]?.content).toMatchObject([
+			{
+				type: "text",
+				text: "summarize this\n\nThe user attached 1 non-image file(s) that this turn cannot open:\n- report.pdf (application/pdf)",
+			},
+		]);
+	}, 120_000);
+
+	it("fails a turn that reached the guest with neither text nor a readable attachment", async () => {
+		hits = [];
+		toolScript = [];
+		const { error } = await failTurn(turnJob({ userMessage: "" }), ["127.0.0.1"]);
+
+		expect(error.message).toContain("neither text nor a readable attachment");
+		// It never reached the provider, so no invalid request was ever made.
+		expect(hits.length).toBe(0);
 	}, 120_000);
 
 	it("enforces the bash policy inside the guest and starts every turn from an empty workspace", async () => {

@@ -30,6 +30,36 @@ export interface AgentTurnProvider {
    */
   apiKey?: string;
   maxTokens?: number;
+  /**
+   * The modalities the model accepts, in pi-ai's `Model.input` vocabulary. The
+   * gateway resolves it from pi-ai's registry; the guest only passes it
+   * through, because pi is what enforces it — `transformMessages` replaces
+   * every image block with a "model does not support images" placeholder when
+   * `"image"` is absent. Undefined → text only, which is the safe default: a
+   * turn never sends an image to a model nobody said could read one.
+   */
+  input?: Array<'text' | 'image'>;
+}
+
+/** One image attachment of the turn's message, resolved to bytes by the host. */
+export interface AgentTurnImage {
+  mimeType: string;
+  /** Base64 of the artifact's bytes. The guest never fetches an attachment itself. */
+  data: string;
+}
+
+/**
+ * A NON-IMAGE attachment of the turn's message, by name and type only.
+ *
+ * The subprocess lane does not send these bytes to the model either; it names
+ * the files in the prompt and leaves them on the worker's disk. This lane has
+ * no disk, so it carries the same names and says so. Do not read this as a
+ * file capability.
+ */
+export interface AgentTurnFile {
+  name: string;
+  mimeType: string;
+  size?: number;
 }
 
 /** One tool the turn may call, as the gateway's MCP proxy published it. */
@@ -124,8 +154,16 @@ export interface AgentTurnInput {
   systemPrompt: string;
   /** The transcript this turn continues, oldest first. */
   messages: AgentTurnMessage[];
-  /** What the human just said. */
+  /** What the human just said. Empty when the turn carries only attachments. */
   userMessage: string;
+  /**
+   * The message's image attachments, already resolved to base64 by the host.
+   * The guest puts them in the user turn beside the text; pi drops them for a
+   * model whose `provider.input` does not include `'image'`.
+   */
+  images?: AgentTurnImage[];
+  /** The message's non-image attachments, named for the model but not sent to it. */
+  files?: AgentTurnFile[];
   /** Absent → the turn runs with no tools. */
   tools?: AgentTurnTools;
 }
