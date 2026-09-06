@@ -8,7 +8,7 @@
  * and reporting the result.
  */
 
-import type { AgentTurnPollPayload, PollResponse } from '@lobu/core/contracts/worker/protocol';
+import { type AgentTurnPollPayload, type PollResponse, TURN_DELTA_MAX_CHARS } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
 import type { AgentTurnEvent, AgentTurnGatewayTool } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
@@ -53,13 +53,41 @@ export async function executeAgentTurnRun(
 
   let deltas = 0;
   let toolCalls = 0;
+  // The reply as it stands. Sent CUMULATIVELY on the heartbeat rather than as
+  // increments: a heartbeat is best-effort, and a dropped increment would
+  // leave a hole in the visible reply that nothing later repairs, whereas the
+  // newest snapshot is always correct on its own.
+  let replySoFar = '';
+  // Only beat a delta when the text actually moved. A turn spends most of its
+  // wall clock inside a tool call, and republishing an unchanged reply would
+  // write a `thread_response` row per beat for no visible change. Counting
+  // deltas rather than comparing lengths: once `replySoFar` saturates at the
+  // cap its length stops changing while its CONTENT keeps moving, and a
+  // length check would silently stop streaming exactly on the long turns that
+  // most need it. Starts at 0, not -1: a turn that has streamed nothing yet
+  // has nothing to publish, and an empty first delta would write a
+  // `thread_response` row that renders as a blank reply.
+  let publishedDeltas = 0;
+  let deltaSequence = 0;
   // The connector-lane reaper writes a claimed run off once its heartbeat goes
   // stale, and a turn's wall clock is far longer than that threshold. Beat on
   // the same interval every other lane does, so a live turn is never reaped and
   // a crashed worker's turn still is.
   const heartbeat = setInterval(() => {
+    const moved = deltas !== publishedDeltas;
+    if (moved) publishedDeltas = deltas;
     void client
-      .heartbeat(runId, { items_collected_so_far: deltas })
+      .heartbeat(
+        runId,
+        { items_collected_so_far: deltas },
+        undefined,
+        moved
+          ? {
+              text: replySoFar,
+              sequence: (deltaSequence += 1),
+            }
+          : undefined
+      )
       .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
   }, cfg.heartbeatIntervalMs);
   try {
@@ -161,7 +189,13 @@ export async function executeAgentTurnRun(
       },
       {
         onTurnEvent: (event: AgentTurnEvent) => {
-          if (event.type === 'text_delta') deltas += 1;
+          if (event.type === 'text_delta') {
+            deltas += 1;
+            // Bounded at the source, keeping the tail. A turn can stream for
+            // its whole wall clock, and an unbounded accumulator is memory the
+            // fleet worker holds for every concurrent turn.
+            replySoFar = (replySoFar + event.delta).slice(-TURN_DELTA_MAX_CHARS);
+          }
           if (event.type === 'tool_call_start') toolCalls += 1;
         },
       }

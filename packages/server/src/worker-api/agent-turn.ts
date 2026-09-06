@@ -137,6 +137,122 @@ async function appendTurnSnapshot(
   `;
 }
 
+/**
+ * Publish what an in-flight `agent_turn` has written so far, so the client
+ * watching the conversation sees the answer arrive instead of a blank screen
+ * for the length of the turn.
+ *
+ * Called from the heartbeat the turn already sends. Everything about WHERE the
+ * text goes is read from the run's own row, never from the worker's body: a
+ * worker may be compromised, and this is the same rule `/worker/response`
+ * applies when it rebuilds routing from the signed token.
+ *
+ * The row is the ordinary non-terminal `thread_response` the subprocess lane's
+ * deltas take, so every renderer — web, Slack, Telegram — already knows how to
+ * present it, and it inherits that queue's multi-replica delivery. It is
+ * emphatically not the connector `/stream` events path: a chat delta is not an
+ * event to ingest into an org's memory.
+ *
+ * `isFullReplacement` is what makes a CUMULATIVE delta correct. Each snapshot
+ * supersedes the last rather than appending to it, so a heartbeat that is
+ * dropped, retried or delivered out of order cannot leave a hole or a
+ * duplicated span in the visible reply.
+ *
+ * Silent no-op for a shadow turn (nothing it produces is delivered) and for a
+ * turn whose sequence has already been passed. Best-effort by construction:
+ * the caller must never fail a heartbeat because a delta could not be
+ * published — that would let a cosmetic path reap a live turn.
+ */
+async function publishTurnDelta(
+	runId: number,
+	workerId: string,
+	delta: { text: string; sequence: number }
+): Promise<void> {
+	const sql = getDb();
+	const emitted = await sql.begin(async (tx) => {
+		// One statement, fenced on the lease, so a run cancelled or re-claimed
+		// between the read and the write cannot have a stale worker's text
+		// published into its conversation. The sequence is kept on the
+		// run row itself: it is per-run state with the same lifetime as the run,
+		// and an in-memory counter would be invisible to the other replicas that
+		// can serve the next heartbeat.
+		const rows = (await tx`
+      UPDATE public.runs
+      SET run_metadata = jsonb_set(
+            COALESCE(run_metadata, '{}'::jsonb),
+            '{turn_delta_sequence}',
+            ${sql.json(delta.sequence)}::jsonb,
+            true
+          )
+      WHERE id = ${runId}
+        AND run_type = 'agent_turn'
+        AND status IN ('claimed', 'running')
+        AND COALESCE((run_metadata->>'turn_delta_sequence')::bigint, -1) < ${delta.sequence}
+        ${runLeaseFence(tx, workerId)}
+      RETURNING action_input, organization_id
+    `) as unknown as Array<{
+			action_input: {
+				turn?: { shadow?: boolean; conversation_id?: string };
+				reply?: TurnReply;
+			} | null;
+			organization_id: string | null;
+		}>;
+		const row = rows[0];
+		if (!row) return false;
+		const envelope = row.action_input ?? {};
+		// A shadow turn delivers nothing, by definition — it exists to be
+		// compared against the subprocess lane, not to answer anyone. Same
+		// predicate the completion route applies to the same field.
+		if (envelope.turn?.shadow === true) return false;
+		const reply = envelope.reply;
+		if (!reply) return false;
+		await insertThreadResponseRow(
+			tx,
+			{
+				messageId: reply.message_id,
+				channelId: reply.channel_id,
+				conversationId: String(envelope.turn?.conversation_id ?? ""),
+				userId: reply.user_id,
+				teamId: reply.team_id ?? "api",
+				platform: reply.platform,
+				organizationId: row.organization_id,
+				platformMetadata: reply.platform_metadata,
+				delta: delta.text,
+				// Cumulative: this snapshot REPLACES what came before it.
+				isFullReplacement: true,
+				timestamp: Date.now(),
+			},
+			row.organization_id
+		);
+		return true;
+	});
+	// Outside the transaction, as the completion route does: the listener must
+	// not be woken for a row a rollback would take back.
+	if (emitted) await notifyThreadResponse();
+}
+
+/**
+ * Publish an in-flight turn's delta, swallowing any failure.
+ *
+ * The heartbeat's own job is to prove the turn is alive; a delta is a
+ * best-effort passenger on it. Letting a failed publish fail the heartbeat
+ * would let a cosmetic path get a live turn reaped by the stale sweep.
+ */
+export async function publishTurnDeltaBestEffort(
+	runId: number,
+	workerId: string,
+	delta: { text: string; sequence: number }
+): Promise<void> {
+	try {
+		await publishTurnDelta(runId, workerId, delta);
+	} catch {
+		// Deliberately swallowed, and deliberately not logged: a turn beats
+		// every few seconds, so a persistent failure here would be thousands of
+		// identical lines. The turn's own reply is unaffected — it is published
+		// by the completion route from the run row, not from these deltas.
+	}
+}
+
 export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 	let rawBody: unknown;
 	try {

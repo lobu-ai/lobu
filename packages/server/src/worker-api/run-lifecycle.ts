@@ -82,6 +82,7 @@ import {
 	deviceProviderQuotaResetNotBefore,
 } from "../automations/schedule-cursor";
 import { recordScheduledExecutionFailure } from "../automations/scheduled-failure-policy";
+import { publishTurnDeltaBestEffort } from "./agent-turn";
 import { authorizeRunForWorker } from "./shared";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { runLeaseFence, runOwnerFence } from "../runs/run-lease";
@@ -215,11 +216,20 @@ async function reactivateProfileCascade(
  */
 export async function heartbeat(c: Context<{ Bindings: Env }>) {
 	try {
-		const { run_id, worker_id, progress, agent_session } =
+		const { run_id, worker_id, progress, agent_session, turn_delta } =
 			await c.req.json<HeartbeatRequest>();
 
 		const denied = await authorizeRunForWorker(c, run_id, worker_id);
 		if (denied) return denied;
+
+		// An agent turn rides its streamed reply on the heartbeat it already
+		// sends, so the client sees the answer arrive rather than a blank screen
+		// for the length of the turn. Best-effort and awaited: the publish is
+		// fenced on the same lease the heartbeat below re-asserts, and a failure
+		// must never fail the heartbeat itself.
+		if (turn_delta) {
+			await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta);
+		}
 
 		const sql = getDb();
 		// Stamped with the reporting worker so poll can only resume an agent

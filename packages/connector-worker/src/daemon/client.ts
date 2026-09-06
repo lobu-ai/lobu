@@ -34,7 +34,8 @@ export interface ExecutorClient {
       current_page?: number;
       elapsed_ms?: number;
     },
-    agentSession?: NonNullable<HeartbeatRequest['agent_session']>
+    agentSession?: NonNullable<HeartbeatRequest['agent_session']>,
+    turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>
   ): Promise<HeartbeatResponse>;
   stream(batch: StreamBatch): Promise<void>;
   complete(req: CompleteRequest): Promise<void>;
@@ -390,13 +391,20 @@ export class WorkerClient implements ExecutorClient {
       current_page?: number;
       elapsed_ms?: number;
     },
-    agentSession?: NonNullable<HeartbeatRequest['agent_session']>
+    agentSession?: NonNullable<HeartbeatRequest['agent_session']>,
+    /**
+     * An agent turn's reply so far. Rides the heartbeat because the turn
+     * already beats to say it is alive, and this is that statement carrying
+     * its evidence — see `HeartbeatRequestSchema.turn_delta`.
+     */
+    turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>
   ): Promise<HeartbeatResponse> {
     return this.requestJson<HeartbeatResponse>('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: this.workerId,
       progress,
       ...(agentSession ? { agent_session: agentSession } : {}),
+      ...(turnDelta ? { turn_delta: turnDelta } : {}),
     });
   }
 

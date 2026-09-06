@@ -784,6 +784,15 @@ export const PollAuthSignalResponseSchema = Type.Object({
 });
 
 /**
+ * Ceiling on a single streamed turn delta, in characters.
+ *
+ * The same bound the terminal reply takes (`TURN_MESSAGE_CHARS`); a delta is a
+ * prefix of that reply, so anything longer is not a longer answer but a
+ * runaway. The guest clamps to it, and the schema rejects past it.
+ */
+export const TURN_DELTA_MAX_CHARS = 24_000;
+
+/**
  * `POST /api/workers/heartbeat`. `progress` is a coarse liveness counter, not an
  * authoritative item count (that arrives on `/stream` + `/complete`).
  */
@@ -805,6 +814,37 @@ export const HeartbeatRequestSchema = Type.Object({
   progress: Type.Optional(
     Type.Object({
       items_collected_so_far: Type.Optional(Type.Integer()),
+    })
+  ),
+  /**
+   * The assistant text an `agent_turn` has produced SO FAR, so a client
+   * watching the conversation sees the answer arrive instead of a blank screen
+   * for the length of the turn.
+   *
+   * It rides the heartbeat rather than a route of its own because the turn
+   * already beats on an interval for exactly this reason — to say it is still
+   * alive — and a delta is that same statement carrying its evidence. The
+   * connector `/stream` route is not the vehicle: that one ingests connector
+   * EVENTS into an org's memory, which a chat delta is not.
+   *
+   * `text` is CUMULATIVE, not incremental. A heartbeat is best-effort and may
+   * be dropped or retried, and a lost incremental chunk would leave a hole in
+   * the reply that nothing later repairs; a cumulative snapshot is idempotent,
+   * so the newest one that arrives is always correct on its own.
+   *
+   * Routing is deliberately absent. The server reads where to deliver from the
+   * run's own row, never from this body — a worker may be compromised, and the
+   * same rule already governs `/worker/response`.
+   */
+  turn_delta: Type.Optional(
+    Type.Object({
+      text: Type.String({ maxLength: TURN_DELTA_MAX_CHARS }),
+      /**
+       * Monotonic per turn. The server keeps the highest it has seen and drops
+       * anything older, so a retried or reordered heartbeat can never walk the
+       * visible reply backwards.
+       */
+      sequence: Type.Integer({ minimum: 0 }),
     })
   ),
 });

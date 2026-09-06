@@ -25,15 +25,27 @@ interface Reported {
   calls: CompleteAgentTurnRequest[];
 }
 
+/** One heartbeat the arm sent, and the turn delta it carried (if any). */
+interface HeartbeatCall {
+  turnDelta?: { text: string; sequence: number };
+}
+
 /**
  * The narrow slice of `ExecutorClient` this arm touches. Typed through
  * `unknown` rather than stubbing the whole client: what matters is which
  * endpoint gets called with what, not the transport.
  */
-function fakeClient(reported: Reported) {
+function fakeClient(reported: Reported, beats?: HeartbeatCall[]) {
   return {
     id: WORKER_ID,
-    heartbeat: async () => {},
+    heartbeat: async (
+      _runId: number,
+      _progress?: unknown,
+      _agentSession?: unknown,
+      turnDelta?: { text: string; sequence: number }
+    ) => {
+      beats?.push({ turnDelta });
+    },
     completeAgentTurn: async (req: CompleteAgentTurnRequest) => {
       reported.calls.push(req);
       return { ok: true as const, status: "completed" as const };
@@ -356,5 +368,87 @@ describe("executeAgentTurnRun", () => {
     const settled = beats.length;
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(beats.length).toBe(settled);
+  });
+});
+
+describe("executeAgentTurnRun streaming", () => {
+  /**
+   * The guest streams; the arm has to get that text out of the worker while
+   * the turn is still open, or the user watches a blank screen for the length
+   * of the turn. It rides the heartbeat the arm already sends.
+   */
+  test("beats the reply so far, cumulatively, and only when it moved", async () => {
+    const reported: Reported = { calls: [] };
+    const beats: HeartbeatCall[] = [];
+    // The executor drives the guest's events and the clock: it emits, waits
+    // for a beat, emits again, then finishes.
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+        hooks?.onTurnEvent?.({ type: "text_delta", delta: "the isolate" });
+        await settle();
+        hooks?.onTurnEvent?.({ type: "text_delta", delta: " lane answered" });
+        await settle();
+        // No new text: this beat must carry no delta rather than republish.
+        await settle();
+        return {
+          mode: "agent_turn",
+          turn: {
+            text: "the isolate lane answered",
+            stopReason: "stop",
+            usage: null,
+            messages: [],
+          },
+        };
+      },
+    };
+
+    await executeAgentTurnRun(
+      fakeClient(reported, beats) as never,
+      turnJob(),
+      {},
+      { ...cfgWith(executor), heartbeatIntervalMs: 10 }
+    );
+
+    const sent = beats.filter((beat) => beat.turnDelta).map((beat) => beat.turnDelta);
+    expect(sent.length).toBeGreaterThanOrEqual(2);
+    // CUMULATIVE: the second restates the first rather than continuing it, so
+    // a dropped beat cannot leave a hole in the reply the user reads.
+    expect(sent[0]?.text).toBe("the isolate");
+    expect(sent[sent.length - 1]?.text).toBe("the isolate lane answered");
+    // Monotonic, so the server can drop a reordered or retried beat.
+    const sequences = sent.map((delta) => delta?.sequence ?? 0);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+    expect(new Set(sequences).size).toBe(sequences.length);
+    // The reply text is never republished once it stops moving: every beat
+    // would otherwise write a thread_response row for no visible change.
+    expect(sent.filter((delta) => delta?.text === "the isolate lane answered")).toHaveLength(1);
+    // And the turn still reports normally.
+    expect(reported.calls[0]).toMatchObject({ status: "completed", text: "the isolate lane answered" });
+  });
+
+  test("sends no delta for a turn that streams nothing", async () => {
+    const reported: Reported = { calls: [] };
+    const beats: HeartbeatCall[] = [];
+    const executor: SyncExecutor = {
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return {
+          mode: "agent_turn",
+          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+        };
+      },
+    };
+
+    await executeAgentTurnRun(
+      fakeClient(reported, beats) as never,
+      turnJob(),
+      {},
+      { ...cfgWith(executor), heartbeatIntervalMs: 10 }
+    );
+
+    // Beats still happen — liveness is their real job — but they carry nothing.
+    expect(beats.length).toBeGreaterThan(0);
+    expect(beats.every((beat) => beat.turnDelta === undefined)).toBe(true);
   });
 });
