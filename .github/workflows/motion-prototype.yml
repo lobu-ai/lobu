@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-and-capture:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -39,11 +39,11 @@ jobs:
       - name: Build isolated motion entry
         run: cd packages/owletto && bun run build:motion
 
-      - name: Capture deterministic review frames
+      - name: Capture review frames and render MP4
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p motion-artifacts
+          mkdir -p motion-artifacts motion-frames
           python3 -m http.server 4173 --directory packages/owletto/dist-motion \
             >/tmp/lobu-motion-http.log 2>&1 &
           SERVER_PID=$!
@@ -62,34 +62,103 @@ jobs:
             echo "Google Chrome is required for deterministic frame capture" >&2
             exit 1
           fi
+          export CHROME
 
-          capture() {
-            local name="$1"
-            local frame="$2"
-            "$CHROME" \
-              --headless=new \
-              --no-sandbox \
-              --disable-gpu \
-              --disable-dev-shm-usage \
-              --hide-scrollbars \
-              --force-device-scale-factor=1 \
-              --window-size=1920,1080 \
-              --virtual-time-budget=2000 \
-              --screenshot="$GITHUB_WORKSPACE/motion-artifacts/$name.png" \
-              "http://127.0.0.1:4173/motion.html?render=1&frame=$frame"
+          node --input-type=module <<'NODE'
+          import { mkdir } from 'node:fs/promises';
+          import { createRequire } from 'node:module';
+          import { resolve } from 'node:path';
+
+          const require = createRequire(resolve('packages/cli/package.json'));
+          const { chromium } = require('playwright-vanilla');
+          const browser = await chromium.launch({
+            executablePath: process.env.CHROME,
+            headless: true,
+            args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+          });
+
+          try {
+            const page = await browser.newPage({
+              viewport: { width: 1920, height: 1080 },
+              deviceScaleFactor: 1,
+            });
+            await page.goto('http://127.0.0.1:4173/motion.html?render=1&frame=0', {
+              waitUntil: 'networkidle',
+            });
+            await page.waitForFunction(() => Boolean(window.__LOBU_MOTION__));
+            await page.evaluate(() => document.fonts.ready);
+            await mkdir('motion-frames', { recursive: true });
+
+            const reviewFrames = new Map([
+              [45, '01-intro'],
+              [150, '02-connectors'],
+              [300, '03-memory'],
+              [450, '04-automations'],
+              [550, '05-agents'],
+              [585, '06-outro'],
+            ]);
+
+            for (let frame = 0; frame < 600; frame += 1) {
+              await page.evaluate((nextFrame) => {
+                window.__LOBU_MOTION__?.setFrame(nextFrame);
+              }, frame);
+              await page.waitForFunction(
+                (expected) => window.__LOBU_MOTION__?.getFrame() === expected,
+                frame,
+              );
+              await page.evaluate(
+                () => new Promise((resolveFrame) =>
+                  requestAnimationFrame(() => requestAnimationFrame(resolveFrame)),
+                ),
+              );
+
+              const framePath = `motion-frames/frame-${String(frame).padStart(4, '0')}.jpg`;
+              await page.screenshot({
+                path: framePath,
+                type: 'jpeg',
+                quality: 96,
+                animations: 'disabled',
+              });
+
+              const reviewName = reviewFrames.get(frame);
+              if (reviewName) {
+                await page.screenshot({
+                  path: `motion-artifacts/${reviewName}.png`,
+                  type: 'png',
+                  animations: 'disabled',
+                });
+              }
+            }
+          } finally {
+            await browser.close();
           }
+          NODE
 
-          capture 01-intro 45
-          capture 02-connectors 150
-          capture 03-memory 300
-          capture 04-automations 450
-          capture 05-agents 550
-          capture 06-outro 585
+          command -v ffmpeg >/dev/null || {
+            echo "ffmpeg is required for MP4 rendering" >&2
+            exit 1
+          }
+          ffmpeg -hide_banner -loglevel warning -y \
+            -framerate 30 \
+            -i motion-frames/frame-%04d.jpg \
+            -c:v libx264 \
+            -preset medium \
+            -crf 18 \
+            -pix_fmt yuv420p \
+            -movflags +faststart \
+            motion-artifacts/lobu-motion-prototype.mp4
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 \
+            motion-artifacts/lobu-motion-prototype.mp4 \
+            > motion-artifacts/video-metadata.txt
 
           cp -R packages/owletto/dist-motion motion-artifacts/site
           printf '%s\n' \
-            'Lobu motion prototype review frames' \
-            '1920x1080, 30 fps, 20 seconds' \
+            'Lobu motion prototype' \
+            '1920x1080, 30 fps, 20 seconds, silent' \
             'Frames: 45, 150, 300, 450, 550, 585' \
             > motion-artifacts/README.txt
 
