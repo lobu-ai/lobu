@@ -71,6 +71,8 @@ jobs:
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     timeout-minutes: 25
+    outputs:
+      tested-version: ${{ steps.tested-version.outputs.version }}
     steps:
       - name: Install prerequisites
         run: |
@@ -112,6 +114,19 @@ jobs:
               bash scripts/published-artifact-smoke.sh"
           fi
 
+      - name: Record the installed CLI version
+        id: tested-version
+        if: always()
+        run: |
+          for file in /tmp/lobu-artifact-smoke*/version.txt; do
+            [ -f "$file" ] || continue
+            version=$(cat "$file")
+            if echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "version=$version" >> "$GITHUB_OUTPUT"
+              break
+            fi
+          done
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -120,3 +135,23 @@ jobs:
           path: /tmp/lobu-artifact-smoke*/**
           if-no-files-found: ignore
           retention-days: 7
+
+  report:
+    needs: smoke
+    if: always() && (github.event_name == 'schedule' || needs.smoke.result != 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report published CLI and daemon smoke
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERSION: ${{ needs.smoke.outputs.tested-version || 'install failed before version detection' }}
+          RESULT: ${{ needs.smoke.result }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_DEPLOY_WEBHOOK_URL not set; notification unavailable."
+            exit 0
+          fi
+          payload=$(jq -nc --arg text "CLI and daemon MCP smoke: ${RESULT}. Tested CLI: ${VERSION}. Four Linux environments. Results and failure logs: ${RUN_URL}" '{text: $text}')
+          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"

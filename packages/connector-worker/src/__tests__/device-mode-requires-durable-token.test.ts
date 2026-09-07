@@ -101,7 +101,7 @@ describe("device mode requires a durable token", () => {
     expect(stderr).toContain("Starting worker daemon");
     expect(stderr).toContain("device mode: platform=macos");
     expect(stderr).toContain(
-      "Manage action permissions (Approval vs Auto) at: http://127.0.0.1:1/test-org/connectors"
+      "Manage action permissions (Approval vs Auto) at: http://127.0.0.1:1/test-org/connectors/device/test-device"
     );
   }, 20000);
 
