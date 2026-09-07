@@ -55,14 +55,12 @@ restore_on_failure() {
 # Quiescing scales the app to zero for the length of a pod restart, which the
 # ingress answers with 503. Only a schema change the old code cannot run
 # against needs that window, and most deploys ship none, so ask the ledger
-# first. Fail closed: only the check's two definitive "safe" statuses skip the
-# quiesce -- 3 (nothing pending) and 4 (everything pending is marked
-# backward-compatible). An unset check or any other status, including a crash,
-# still quiesces.
+# first, including its read-only prerequisite checks. Only a successful check
+# permits deployment. An unknown answer aborts before touching old replicas.
 migrations_pending() {
   if [ -z "$pending_check" ]; then
-    echo 'no pending-migration check configured; quiescing'
-    return 0
+    echo 'ERROR: no pending-migration check configured; aborting before quiesce' >&2
+    exit 1
   fi
   set +e
   # Word splitting is intended: the check is configured as a full command line.
@@ -76,7 +74,8 @@ migrations_pending() {
     return 1
   fi
   if [ "$pending_status" -ne 0 ]; then
-    echo "pending-migration check failed with status $pending_status; quiescing" >&2
+    echo "ERROR: pending-migration check failed with status $pending_status; aborting before quiesce" >&2
+    exit "$pending_status"
   fi
   return 0
 }

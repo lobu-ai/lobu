@@ -1,6 +1,6 @@
 # Migrations
 
-dbmate-managed SQL under `db/migrations/`. Names are `<UTC-yyyymmddHHMMSS>_<slug>.sql` with a `-- migrate:up` / `-- migrate:down` split. Pre-upgrade Helm hook runs `dbmate up` against the prod database before the app rolls.
+dbmate-managed SQL under `db/migrations/`. Names are `<UTC-yyyymmddHHMMSS>_<slug>.sql` with a `-- migrate:up` / `-- migrate:down` split. The pre-upgrade Helm hook invokes `docker/app/start.sh migrate`, which runs `scripts/migrate-up.mjs` against the database before the app rolls. The runner records versions in the dbmate-compatible ledger.
 
 Most migrations are routine: an additive column, a small index, a view bump. The risk lives in the ones that **rewrite a hot table** or **rebuild a large index**. Get those wrong and prod stalls under `ACCESS EXCLUSIVE` until the database's `statement_timeout` fires, after which dbmate exits non-zero, the migration leaves no row in `schema_migrations`, and the app deploys forward into a schema it expects but doesn't have. That's the 2026-05-16 outage in one sentence ([PR #767](https://github.com/lobu-ai/lobu/pull/767)).
 
@@ -35,9 +35,21 @@ Rules:
 - The marker must be **its own comment line**. Prose mentioning it does not arm it.
 - It asserts something about the **application**, not the DDL: that the code running *before* this deploy keeps working against the post-migration schema. Nothing inspects your SQL, because backward compatibility is a property of sequencing rather than of the DDL verbs — a `DROP COLUMN` is safe once nothing reads that column, and a widened `CHECK` constraint is safe because it only ever accepts more. Only you know where the migration sits in that sequence.
 - **Every** pending migration in the deploy must carry it, or the whole batch quiesces. One unmarked migration removes the fast path for all of them.
-- Everything fails closed. Unmarked, unreadable, unparseable, or a pending-check that crashes all quiesce exactly as before.
+- An unmarked migration quiesces only after validation succeeds. An unreadable migration, failed prerequisite, or crashed pending check aborts deployment before any scaling. A missing pending-check command also aborts.
 
 Leave the marker off when the running code would actually break: a column it still reads is going away, a constraint is being tightened under it, or a new `NOT NULL` column has no `DEFAULT` to fill in for inserts that predate it. That is what the window exists for.
+
+---
+
+## External migration prerequisites
+
+When a migration requires an operator to complete work **before deployment**, add a SQL sidecar at `db/migrations/preconditions/<exact migration filename>`. The runner executes sidecars for pending migrations in a read-only transaction with a 10-second statement timeout, before the upgrade hook stops any replicas. A failed assertion, SQL error, timeout, or unreadable file blocks deployment. A sidecar with no matching migration is an error.
+
+Use `DO` / `RAISE EXCEPTION` with an actionable message to assert a prerequisite. A successful statement passes; returning `false` from a `SELECT` does **not** fail a check. Sidecars cannot backfill or change the schema. They must handle the schema before *any* pending migration runs, including a fresh install where an earlier expand migration has not created the table or column yet. The classifier contract sidecar is an example of an external backfill check.
+
+Do not declare an external prerequisite when the migration itself repairs the data. The runner does not infer prerequisites by scanning `SET NOT NULL`: a migration can legitimately clear, rebuild, or backfill those NULLs before adding its constraint. Keep assertions about intermediate migration state inside that migration.
+
+The same runner checks prerequisites under its existing advisory lock before applying migrations, including direct startup and fresh installs. This recheck can catch a prerequisite that changed after the hook's check; it is not a guarantee that concurrent writers cannot invalidate data later. Applied migrations do not rerun their sidecars. Keep sidecars with their owning migrations when squashing or removing history; historical migration SQL remains immutable.
 
 ---
 
