@@ -15,7 +15,7 @@ import { Type } from "@sinclair/typebox";
 import type { Env } from "../../index";
 import { setCurrentMcpConversationTitle } from "../../lobu/stores/mcp-client-conversations";
 import { manageConversations } from "../../tools/admin/manage_conversations";
-import type { ToolContext } from "../../tools/registry";
+import type { AccountToolContext, ToolContext } from "../../tools/registry";
 import { withValidatedArgs } from "../../tools/validate-args";
 import { createValidatedSdkMethod } from "../sdk-preflight";
 import { createActionCaller } from "./action-call";
@@ -41,6 +41,16 @@ export function buildConversationsNamespace(
     ctx,
     "conversations",
   );
+  return {
+    setTitle: buildMcpConversationTitle(ctx),
+    manage,
+    list: method("list"),
+    get: method("get"),
+    send: method("send", { checkFailure: false }),
+  };
+}
+
+export function buildMcpConversationTitle(ctx: AccountToolContext): ConversationsNamespace["setTitle"] {
   const setTitle = withValidatedArgs(
     "client.conversations.setTitle",
     SetTitleSchema,
@@ -48,18 +58,8 @@ export function buildConversationsNamespace(
       setCurrentMcpConversationTitle(ctx, input.title),
   );
 
-  return {
-    setTitle: createValidatedSdkMethod(setTitle, [], {
-      path: "conversations.setTitle",
-      prepareArgs: (input) => input,
-    }),
-    manage,
-    list: method("list"),
-    get: method("get"),
-    // `send` returns a discriminated result whose `status` is part of the
-    // contract — "error" and "timeout" are NON-throwing outcomes the caller
-    // must branch on. Disable the named-method failure conversion for this one
-    // method; genuine handler faults still throw.
-    send: method("send", { checkFailure: false }),
-  };
+  return createValidatedSdkMethod(setTitle, [], {
+    path: "conversations.setTitle",
+    prepareArgs: (input) => input,
+  });
 }

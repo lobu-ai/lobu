@@ -84,6 +84,7 @@ export function resolveSdkAccessGuidance(
 	methodAccess: SdkMethodAccessInput,
 	memberRole: string | null | undefined,
 	scopes: readonly string[] | null | undefined,
+	accountScope = false,
 ): SdkAccessGuidance {
 	const requiredTier = effectiveSdkRequiredTier(methodAccess);
 	const requiredAccess: ToolAccessLevel =
@@ -92,16 +93,16 @@ export function resolveSdkAccessGuidance(
 			: requiredTier === "operate"
 				? "write"
 				: "read";
-	const currentAccess = resolveMaxAccessLevel(memberRole, scopes);
+	const currentAccess = resolveMaxAccessLevel(memberRole, scopes, accountScope);
 	const available =
 		TOOL_ACCESS_RANK[currentAccess] >= TOOL_ACCESS_RANK[requiredAccess];
 	if (available) return { requiredTier, available };
 
 	if (requiredTier === "administer") {
-		const isWorkspaceAdmin = memberRole === "owner" || memberRole === "admin";
+		const isWorkspaceAdmin = accountScope || memberRole === "owner" || memberRole === "admin";
 		const progressivelyAuthorizable =
 			isWorkspaceAdmin &&
-			TOOL_ACCESS_RANK[resolveSdkMaxAccessLevel(memberRole, scopes)] >=
+			TOOL_ACCESS_RANK[resolveSdkMaxAccessLevel(memberRole, scopes, accountScope)] >=
 				TOOL_ACCESS_RANK.admin;
 		return {
 			requiredTier,
@@ -119,7 +120,7 @@ export function resolveSdkAccessGuidance(
 		return {
 			requiredTier,
 			available,
-			instruction: memberRole
+			instruction: memberRole || accountScope
 				? "This action requires operate access (mcp:write). Reconnect or reauthorize this MCP connection with mcp:write, then repeat search_sdk."
 				: "This action requires operate access (workspace member + mcp:write). Ask a workspace member to continue.",
 		};

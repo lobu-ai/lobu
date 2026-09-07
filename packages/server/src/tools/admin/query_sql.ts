@@ -24,7 +24,6 @@ import {
   QUERY_SQL_RESULT_MAX_BYTES,
   finalizeDynamicQueryRows,
 } from '../../utils/content-read-bounds';
-import { resolveGrantedWorkspaceTarget } from '../../auth/oauth/workspace-grants';
 
 export const QuerySqlSchema = Type.Object({
   title: Type.Optional(
@@ -369,51 +368,9 @@ export async function querySqlImpl(
     );
   }
 
-  // Resolve the target organization. By default, the caller's bound org. When
-  // `org_slug` is supplied: only a bare /mcp OAuth context with a live explicit
-  // grant may select a workspace. Agent/Automation-bound identities,
-  // scoped MCP, PAT, and session auth are pinned to one workspace.
-  let targetOrgId = ctx.organizationId;
-  // Members may query their own org's operational tables; the auth/identity
-  // tables stay admin-only (enforced via restrictedTables below).
-  let callerIsAdmin = isAdminOrOwnerRole(ctx.memberRole);
-  if (args.org_slug) {
-    if (!ctx.allowCrossOrg) {
-      if (ctx.scopedToOrg) {
-        return fail(
-          '`org_slug` is not allowed on /mcp/{slug} connections. Reconnect to /mcp to query a different workspace, or omit `org_slug`.'
-        );
-      }
-      return fail('`org_slug` is not available for this authorization.');
-    }
-    if (!ctx.userId) {
-      return fail('`org_slug` requires an authenticated user context.');
-    }
-    const targetOrg = await resolveGrantedWorkspaceTarget({
-      userId: ctx.userId,
-      grantedOrganizationIds: ctx.grantedOrganizationIds ?? [],
-      slugOrId: args.org_slug,
-    });
-    if (!targetOrg) {
-      return fail('Workspace is not available for this authorization.');
-    }
-    const role = targetOrg.role;
-    targetOrgId = targetOrg.id;
-    // Reaching into ANOTHER workspace stays owner/admin-only. Passing your OWN
-    // org slug is just an explicit form of the default and stays read-tier —
-    // don't reject a member or silently escalate them to admin. Either way the
-    // role is re-validated against the *target* org, not the bound-org role.
-    if (targetOrg.id !== ctx.organizationId) {
-      if (role !== 'owner' && role !== 'admin') {
-        return fail(
-          `Cross-org query_sql requires owner or admin access in '${args.org_slug}'.`
-        );
-      }
-      callerIsAdmin = true; // cross-org already required owner/admin in the target
-    } else {
-      callerIsAdmin = isAdminOrOwnerRole(role);
-    }
-  }
+  // Dispatch resolves explicit targets before this workspace handler runs.
+  const targetOrgId = ctx.organizationId;
+  const callerIsAdmin = isAdminOrOwnerRole(ctx.memberRole);
 
   // External pushdown: when a connection is named, the SQL runs LIVE against that
   // connection's database via its connector (no internal org-scoping — it's the

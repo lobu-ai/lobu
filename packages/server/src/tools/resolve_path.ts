@@ -32,9 +32,9 @@ import { buildDefaultEntityTemplate } from '../utils/default-entity-template';
 import { measureColumns as inferMeasureColumns } from '../utils/infer-measures';
 import { RESERVED_PATHS_SET } from '../utils/reserved';
 import { getWorkspaceProvider } from '../workspace';
-import { isAdminOrOwnerRole, isInProcessSystemCall } from './access-control';
+import { isAdminOrOwnerRole, isInProcessSystemCall, requireWorkspaceContext } from './access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
-import type { ToolContext } from './registry';
+import type { AccountToolContext, ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
 
 export const ResolvePathSchema = Type.Object({
@@ -362,7 +362,7 @@ function parsePathAndQuery(rawPath: string): { path: string; query: Record<strin
 export const resolvePath = withValidatedArgs(
   'resolve_path',
   ResolvePathSchema,
-  (args: ResolvePathArgs, _env: Env, ctx: ToolContext): Promise<ResolvePathResult> =>
+  (args: ResolvePathArgs, _env: Env, ctx: AccountToolContext): Promise<ResolvePathResult> =>
     Sentry.startSpan(
       { name: 'resolve_path', op: 'function', attributes: { path: args.path } },
       () => _resolvePath(args, ctx)
@@ -371,7 +371,7 @@ export const resolvePath = withValidatedArgs(
 
 async function _resolvePath(
   args: ResolvePathArgs,
-  ctx: ToolContext
+  ctx: AccountToolContext
 ): Promise<ResolvePathResult> {
   const { path: normalized, query: urlQuery } = parsePathAndQuery(args.path);
   const segments = normalized
@@ -418,7 +418,7 @@ async function _resolvePath(
   // The request boundary has already freshly verified this token/session's
   // membership in ctx.organizationId. Only body-selected foreign targets need
   // the additional grant/public resolution below.
-  let workspaceCtx = ctx;
+  let resolvedCtx = ctx;
   if (workspace.id !== ctx.organizationId) {
     const grantedTarget =
       ctx.allowCrossOrg &&
@@ -433,7 +433,7 @@ async function _resolvePath(
           })
         : null;
     if (grantedTarget) {
-      workspaceCtx = {
+      resolvedCtx = {
         ...ctx,
         organizationId: grantedTarget.id,
         memberRole: grantedTarget.role,
@@ -457,7 +457,7 @@ async function _resolvePath(
       // Cross-workspace public browse is intentionally readable, but never
       // inherits the caller's role or grant capabilities from the URL-bound
       // workspace.
-      workspaceCtx = {
+      resolvedCtx = {
         ...ctx,
         organizationId: workspace.id,
         memberRole: null,
@@ -468,6 +468,7 @@ async function _resolvePath(
     }
   }
 
+  const workspaceCtx = requireWorkspaceContext(resolvedCtx);
   const roleInResolvedWorkspace = workspaceCtx.memberRole;
   // Workspace-identity audit + template events: owner/admin of THIS workspace
   // (or trusted system) only.

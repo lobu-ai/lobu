@@ -17,7 +17,7 @@ import {
   MAX_SCRIPT_TIMEOUT_MS,
   runScript,
 } from "../sandbox/run-script";
-import type { ToolContext } from "./registry";
+import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 import { mcpResourceLinksForSdkReturnValue } from "../mcp-media-resources";
 import { attachMcpResultContent } from "./mcp-result-content";
@@ -26,7 +26,7 @@ import { attachMcpResultMeta } from "./mcp-result-meta";
 const SCRIPT_FIELDS = {
   script: Type.String({
     description:
-      "TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.",
+      "TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.",
     minLength: 1,
     maxLength: 100_000,
   }),
@@ -397,7 +397,7 @@ async function runSandbox(
   mode: SDKMode,
   args: RunArgs | QueryArgs,
   env: Env,
-  ctx: ToolContext,
+  ctx: AccountToolContext,
 ): Promise<unknown> {
   const allowCrossOrg = ctx.allowCrossOrg;
   const agentDryRun = "dry_run" in args ? args.dry_run === true : false;
@@ -411,11 +411,12 @@ async function runSandbox(
     sdk: (abortSignal) => buildClientSDK(ctx, env, { mode, allowCrossOrg, abortSignal }),
     sdkMode: mode,
     allowCrossOrg,
-    // The default workspace is not an authorization ceiling for unscoped
-    // OAuth. Target SDK contexts enforce their own membership at each call.
+    // Account scripts are scope-bounded; selected SDK clients enforce the
+    // current target membership at each leaf call.
     maxAccessLevel: resolveSdkMaxAccessLevel(
-      ctx.allowCrossOrg ? "owner" : ctx.memberRole,
+      ctx.memberRole,
       ctx.scopes,
+      ctx.allowCrossOrg,
     ),
     dryRun,
     dryRunDispatchPaths:
@@ -501,11 +502,11 @@ async function runSandbox(
 export const runSdkScript = withValidatedArgs(
   "run_sdk",
   RunSchema,
-  (args: RunArgs, env: Env, ctx: ToolContext) => runSandbox("full", args, env, ctx),
+  (args: RunArgs, env: Env, ctx: AccountToolContext) => runSandbox("full", args, env, ctx),
 );
 
 export const querySdkScript = withValidatedArgs(
   "query_sdk",
   QuerySchema,
-  (args: QueryArgs, env: Env, ctx: ToolContext) => runSandbox("read", args, env, ctx),
+  (args: QueryArgs, env: Env, ctx: AccountToolContext) => runSandbox("read", args, env, ctx),
 );

@@ -20,7 +20,8 @@
 import { manageCatalog } from './admin/manage_catalog';
 import { manageConnections } from './admin/manage_connections';
 import type { Env } from '../index';
-import type { ToolContext } from './registry';
+import type { AccountToolContext } from './registry';
+import { requireWorkspaceContext } from './access-control';
 import { getWorkspaceProvider } from '../workspace';
 import type { OrgInfo } from '../workspace/types';
 import { METHOD_METADATA } from '../sandbox/method-metadata';
@@ -34,7 +35,7 @@ export interface ConnectorDiscoveryDeps {
   listLiveGrantedOrganizations: (
     userId: string,
     grantedOrganizationIds: readonly string[]
-  ) => Promise<Array<{ id: string }>>;
+  ) => ReturnType<typeof listLiveGrantedMemberWorkspaces>;
 }
 
 const DEFAULT_DEPS: ConnectorDiscoveryDeps = {
@@ -84,7 +85,7 @@ function matchesQueryTokens(query: string, ...fields: Array<string | null | unde
 function lifecycleForCaller(
   methodPaths: readonly string[],
   lifecycle: string,
-  ctx: ToolContext
+  ctx: AccountToolContext
 ): string {
   // Whole metadata, not the bare `access` marker: a connector lifecycle
   // includes `feeds.trigger`, an `external` method whose manage_feeds action is
@@ -112,7 +113,7 @@ function lifecycleForCaller(
 export async function searchLiveConnectors(
   query: string,
   env: Env,
-  ctx: ToolContext,
+  ctx: AccountToolContext,
   deps: ConnectorDiscoveryDeps = DEFAULT_DEPS
 ): Promise<string[]> {
   const { manageCatalog, manageConnections } = deps;
@@ -127,13 +128,25 @@ export async function searchLiveConnectors(
   // NOT reliably populated on scoped `/mcp/{slug}` sessions, so gating on it
   // would wrongly suppress discovery for a legitimate member.
   if (!ctx.userId) return [];
+  if (!ctx.organizationId) {
+    if (!ctx.allowCrossOrg || !Array.isArray(ctx.grantedOrganizationIds)) return [];
+    const workspaces = await deps.listLiveGrantedOrganizations(ctx.userId, ctx.grantedOrganizationIds);
+    const matches = await Promise.all(workspaces.map(async (workspace) => {
+      const hits = await searchLiveConnectors(query, env, {
+        ...ctx, organizationId: workspace.id, memberRole: workspace.role,
+      }, deps);
+      return hits.map((hit) => `Workspace ${workspace.slug}: use await client.org(${JSON.stringify(workspace.slug)}); the lifecycle below assumes that selected client. ${hit}`);
+    }));
+    return matches.flat();
+  }
+  const workspaceCtx = requireWorkspaceContext(ctx);
   const lines: string[] = [];
   try {
     const [inst, cat, organizations] = await Promise.all([
-      manageCatalog({ action: 'list_installed', kinds: ['connectors'] } as never, env, ctx) as Promise<{
+      manageCatalog({ action: 'list_installed', kinds: ['connectors'] } as never, env, workspaceCtx) as Promise<{
         installed?: { connectors?: { items?: unknown } };
       }>,
-      manageCatalog({ action: 'list_catalog', kinds: ['connectors'] } as never, env, ctx) as Promise<{
+      manageCatalog({ action: 'list_catalog', kinds: ['connectors'] } as never, env, workspaceCtx) as Promise<{
         catalogs?: { connectors?: { entries?: unknown } };
       }>,
       // Managed-auth offers enrich the normal connector result, but they are
@@ -218,7 +231,7 @@ export async function searchLiveConnectors(
       const res = (await manageConnections(
         { action: 'list', connector_key: connectorKey, ...(status ? { status } : {}), limit: 1 } as never,
         env,
-        ctx
+        workspaceCtx
       )) as { connections?: unknown };
       return asArray<{ status: string }>(res.connections);
     };

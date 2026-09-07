@@ -1,4 +1,4 @@
-import type { ToolContext } from "../tools/registry";
+import type { AccountToolContext, ToolContext } from "../tools/registry";
 import { ToolUserError } from "../utils/errors";
 import {
 	type McpAppCapabilityBinding,
@@ -137,13 +137,13 @@ export function issueTemplateActionCapabilityWindow(
 export function assertTemplateActionCapability(
 	token: string | null | undefined,
 	sourceEventId: number,
-	ctx: ToolContext,
-): void {
+	ctx: AccountToolContext,
+): string {
 	const capability = readMcpAppCapability(token);
 	if (
 		!isTemplateActionCapability(capability) ||
 		!capability.sourceEventIds.includes(sourceEventId) ||
-		capability.organizationId !== ctx.organizationId ||
+		(ctx.organizationId !== null && capability.organizationId !== ctx.organizationId) ||
 		!mcpAppCapabilityMatchesHost(capability, ctx)
 	) {
 		throw new ToolUserError(
@@ -151,4 +151,5 @@ export function assertTemplateActionCapability(
 			403,
 		);
 	}
+	return capability.organizationId;
 }

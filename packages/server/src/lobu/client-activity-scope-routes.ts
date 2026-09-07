@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { hasRequiredMcpScope } from "../auth/tool-access";
 import { mcpAuth } from "../auth/middleware";
 import { getDb, pgTextArray } from "../db/client";
 import type { Env } from "../index";
@@ -52,6 +53,9 @@ routes.get("/", mcpAuth, async (c) => {
 	const userId = c.var.mcpAuthInfo?.userId ?? c.var.session?.userId ?? c.var.user?.id;
 	if (!userId || c.var.mcpAuthInfo?.agentId) {
 		return c.json({ error: "Authenticated user required" }, 401);
+	}
+	if (c.var.mcpAuthInfo && !hasRequiredMcpScope("read", c.var.mcpAuthInfo.scopes)) {
+		return c.json({ error: "MCP read access required" }, 403);
 	}
 	const rawLimit = Number.parseInt(c.req.query("limit") ?? "20", 10);
 	const limit = Math.min(

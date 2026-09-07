@@ -1,4 +1,4 @@
-/** Account-owned MCP audit detail, rendered by the existing events UI. */
+/** Account-owned MCP audit detail: the actor's own tool-invocation rows, read without a workspace. */
 import { Type, type Static } from '@sinclair/typebox';
 import { hasRequiredMcpScope } from '../../auth/tool-access';
 import { getDb, pgBigintArray, pgTextArray } from '../../db/client';

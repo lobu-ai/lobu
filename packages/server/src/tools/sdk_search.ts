@@ -25,7 +25,7 @@ import {
 	sdkMethodVisible,
 	type SdkDiscoveryMode,
 } from "../sandbox/sdk-method-access";
-import type { ToolContext } from "./registry";
+import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 import { searchLiveConnectors } from "./connector-discovery";
 
@@ -116,7 +116,7 @@ export const SdkSearchResultSchema = Type.Object({
 export type SdkSearchResult = Static<typeof SdkSearchResultSchema>;
 
 async function agentConfigBlanketDenied(
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 	action: WriteAction
 ): Promise<boolean> {
 	if (!ctx.organizationId || (!ctx.agentId && !ctx.actingAutomationId)) {
@@ -143,7 +143,7 @@ async function agentConfigBlanketDenied(
 }
 
 /** Paths hidden for this agent principal by agent_config blanket policy. */
-async function deniedAgentsSdkPaths(ctx: ToolContext): Promise<Set<string>> {
+async function deniedAgentsSdkPaths(ctx: AccountToolContext): Promise<Set<string>> {
 	const denied = new Set<string>();
 	if (!ctx.agentId && !ctx.actingAutomationId) return denied;
 
@@ -165,12 +165,13 @@ async function deniedAgentsSdkPaths(ctx: ToolContext): Promise<Set<string>> {
 }
 
 async function catalogForCaller(
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 	mode: SdkDiscoveryMode
 ): Promise<Array<[string, MethodMetadata]>> {
 	const callerMax = resolveSdkMaxAccessLevel(
-		ctx.allowCrossOrg ? "owner" : ctx.memberRole,
+		ctx.memberRole,
 		ctx.scopes,
+		ctx.allowCrossOrg,
 	);
 	const policyDenied = await deniedAgentsSdkPaths(ctx);
 	return Object.entries(SDK_DISCOVERY_METADATA).filter(([path, meta]) => {
@@ -185,7 +186,7 @@ function hiddenMethodNote(
 	meta: MethodMetadata,
 	mode: SdkDiscoveryMode,
 	policyDenied: Set<string>,
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 ): string {
 	if (policyDenied.has(path)) {
 		return `${path} is blocked by this agent's agent_config permissions.`;
@@ -196,8 +197,9 @@ function hiddenMethodNote(
 	// into a hard admin rejection.
 	const guidance = resolveSdkAccessGuidance(
 		meta,
-		ctx.allowCrossOrg ? "owner" : ctx.memberRole,
+		ctx.memberRole,
 		ctx.scopes,
+		ctx.allowCrossOrg,
 	);
 	if (mode === "read" && meta.access !== "read") {
 		if (guidance.available || guidance.progressivelyAuthorizable) {
@@ -294,7 +296,7 @@ export const sdkSearch = withValidatedArgs(
 async function sdkSearchImpl(
 	args: SdkSearchArgs,
 	env: Env,
-	ctx: ToolContext
+	ctx: AccountToolContext
 ): Promise<SdkSearchResult> {
 	// Unified-catalog search (executor pattern): a query like "website" or "slack"
 	// names a CONNECTOR, not an SDK method, so pure method search returns nothing
@@ -313,6 +315,12 @@ async function sdkSearchImpl(
 		? []
 		: await searchLiveConnectors(q, env, ctx);
 	const methodResult = await sdkMethodSearch(args, env, ctx);
+	if (!ctx.organizationId && ctx.allowCrossOrg) {
+		methodResult.notes = [
+			"Workspace examples assume a selected client: const workspace = await client.org(target), then use workspace.<method>. Root organizations discovery, log, and conversations.setTitle need no workspace.",
+			methodResult.notes,
+		].filter(Boolean).join(" ");
+	}
 	if (connectorHits.length === 0) return methodResult;
 
 	// Cap the COMBINED list at the same limit the method search honors, so
@@ -349,7 +357,7 @@ async function sdkSearchImpl(
 async function sdkMethodSearch(
 	args: SdkSearchArgs,
 	_env: Env,
-	ctx: ToolContext
+	ctx: AccountToolContext
 ): Promise<SdkSearchResult> {
 	const limit = Math.min(args.limit ?? 20, 100);
 	const query = args.query.trim();
@@ -362,8 +370,9 @@ async function sdkMethodSearch(
 	const catalog = await catalogForCaller(ctx, mode);
 	const policyDenied = await deniedAgentsSdkPaths(ctx);
 	const callerMax = resolveSdkMaxAccessLevel(
-		ctx.allowCrossOrg ? "owner" : ctx.memberRole,
+		ctx.memberRole,
 		ctx.scopes,
+		ctx.allowCrossOrg,
 	);
 	const isMultiMethodQuery =
 		terms.length > 1 &&
@@ -487,8 +496,9 @@ async function sdkMethodSearch(
 					.join(", ");
 				const guidance = resolveSdkAccessGuidance(
 					accesses,
-					ctx.allowCrossOrg ? "owner" : ctx.memberRole,
+					ctx.memberRole,
 					ctx.scopes,
+					ctx.allowCrossOrg,
 				);
 				const nextStep = guidance.available
 					? "Retry with mode='full' and call the returned methods via run_sdk."

@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
@@ -23,12 +24,13 @@ import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
-import { enforceRoleScopeAccess } from './access-control';
+import { enforceRoleScopeAccess, requireWorkspaceContext } from './access-control';
 import { recordToolInvocationAudit } from './audit';
-import { listOrganizations } from './organizations';
+import { getAccountContent } from './get_content';
 import {
   getTool,
   isAuthorizationReadOnly,
+  type AccountToolContext,
   type TokenType,
   type ToolContext,
   type ToolSourceContext,
@@ -37,9 +39,8 @@ import {
 export interface AuthContext {
   organizationId: string | null;
   /**
-   * Raw `organization_id` from the OAuth/PAT record itself (null for legacy
-   * tokens minted before the binding was required, and always null for
-   * session/anonymous). Distinct from `organizationId`, which is the
+   * Explicit `organization_id` from the OAuth/PAT record (null for ordinary
+   * account OAuth and session/anonymous callers). Distinct from `organizationId`, which is the
    * *resolved* org for the request and may come from a URL slug on
    * `/mcp/{slug}` even when the token has no claim of its own.
    */
@@ -63,7 +64,7 @@ export interface AuthContext {
   allowCrossOrg: boolean;
   /** Explicit OAuth workspace snapshot; null for non-OAuth identities. */
   grantedOrganizationIds: string[] | null;
-  /** Bare OAuth MCP search may fan out only when multiple grants remain. */
+  /** Bare OAuth MCP search uses its granted workspace set without an anchor. */
   directSearchFederation: boolean;
   /**
    * Persistent MCP session id (`mcp-session-id` header) when the call arrived
@@ -127,6 +128,9 @@ export function isSoftErrorResult(result: unknown): boolean {
   return typeof candidate.error === 'string' && candidate.error.length > 0;
 }
 
+/** REST route that reads the caller's own MCP audit rows without a workspace. */
+const ACCOUNT_CONTENT_PATH = '/api/me/read_knowledge';
+
 export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
   const mcpAuthInfo = c.var.mcpAuthInfo ?? null;
   const tokenType: TokenType =
@@ -134,16 +138,16 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     : mcpAuthInfo?.tokenType === 'access_token' ? 'oauth'
     : c.var.session?.userId ? 'session'
     : 'anonymous';
-  const scopedToOrg = !!c.req.param('orgSlug');
+  const scopedToOrg = !!(c.req.param('orgSlug') || c.var.subdomainOrg);
   const requestPath = new URL(c.req.url).pathname;
   const tokenOrganizationId = mcpAuthInfo?.organizationId ?? null;
   const grantedOrganizationIds =
     tokenType === 'oauth'
-      ? (mcpAuthInfo?.grantedOrganizationIds ?? (tokenOrganizationId ? [tokenOrganizationId] : []))
+      ? (mcpAuthInfo?.grantedOrganizationIds ?? [])
       : null;
 
   return {
-    organizationId: c.var.organizationId,
+    organizationId: requestPath === ACCOUNT_CONTENT_PATH ? null : c.var.organizationId,
     tokenOrganizationId,
     userId: mcpAuthInfo?.userId || c.var.session?.userId || null,
     memberRole: c.var.memberRole,
@@ -169,11 +173,10 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     scopedToOrg,
     allowCrossOrg:
       tokenType === 'oauth' &&
-      requestPath === '/mcp' &&
-      (grantedOrganizationIds?.length ?? 0) > 0,
+      requestPath === '/mcp' && !scopedToOrg && !mcpAuthInfo?.scopes?.includes('device_worker:run'),
     grantedOrganizationIds,
     directSearchFederation:
-      tokenType === 'oauth' && requestPath === '/mcp' && (grantedOrganizationIds?.length ?? 0) > 1,
+      tokenType === 'oauth' && requestPath === '/mcp' && !scopedToOrg && !mcpAuthInfo?.scopes?.includes('device_worker:run'),
     applyId: parseApplyId(c.req.header('x-lobu-apply-id')),
     rollbackOf: parseApplyId(c.req.header('x-lobu-rollback-of')),
     // Admin-tool LIMIT: only the verified worker token's per-turn allowlist
@@ -188,30 +191,8 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
 /**
  * Check access control for a tool call. Throws on denial.
  */
-const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations']);
-
-/**
- * These unscoped OAuth calls select their authoritative workspace inside the
- * handler. Let them pass the default-workspace role gate; the target-aware
- * leaf handlers still enforce the caller's real target membership and scope.
- */
-function defersWorkspaceRoleToTarget(
-  toolName: string,
-  args: unknown,
-  authCtx: AuthContext
-): boolean {
-  if (authCtx.agentId || authCtx.actingAutomationId) return false;
-  if (!authCtx.allowCrossOrg) return false;
-  if (toolName === 'run_sdk') return true;
-  if (
-    toolName === 'get_approval' &&
-    args !== null &&
-    typeof args === 'object' &&
-    typeof (args as { organization?: unknown }).organization === 'string'
-  ) {
-    return true;
-  }
-  return toolName === 'resolve_approval' && Boolean(authCtx.mcpAppApprovalCapability);
+function isAccountContentRead(toolName: string, authCtx: AuthContext): boolean {
+  return toolName === 'read_knowledge' && new URL(authCtx.requestUrl).pathname === ACCOUNT_CONTENT_PATH;
 }
 
 export function checkToolAccess(
@@ -219,35 +200,21 @@ export function checkToolAccess(
   args: unknown,
   authCtx: AuthContext
 ): ToolAccessLevel {
-  if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
-    if (!authCtx.isAuthenticated) {
-      throw new Error('Authentication required.');
-    }
-    // list_organizations is read-tier; OAuth tokens without `mcp:read`
-    // (e.g. profile-only) must not call it.
-    if (!hasRequiredMcpScope('read', authCtx.scopes)) {
-      throw new Error(
-        'This MCP session does not include read access. Reconnect with read access to list organizations.'
-      );
-    }
-    return 'read';
-  }
-
-  if (!authCtx.organizationId) {
-    throw new Error('Organization context required. Authenticate with OAuth or API key.');
-  }
-
   const tool = getTool(toolName);
-  // Genuinely unregistered → typed error so the REST proxy can fire a Sentry
-  // alert (registry/frontend drift).
-  if (!tool) {
-    throw new ToolNotRegisteredError(toolName);
+  if (!tool) throw new ToolNotRegisteredError(toolName);
+  const accountScope = tool.scope === 'account' || isAccountContentRead(toolName, authCtx);
+  if (!accountScope && !authCtx.organizationId) {
+    throw new ToolUserError(
+      'This connection has no workspace binding. Pass the tool’s explicit workspace target (for example org_slug), or run it through await client.org(target) in query_sdk/run_sdk.',
+      400
+    );
+  }
+  if (accountScope && !authCtx.organizationId && (!authCtx.isAuthenticated || !authCtx.userId)) {
+    throw new Error('Authentication required.');
   }
 
   const isReadOnly = isAuthorizationReadOnly(tool);
-  const role = defersWorkspaceRoleToTarget(toolName, args, authCtx)
-    ? 'owner'
-    : authCtx.memberRole;
+  const role = authCtx.memberRole;
   const requiredAccess = getRequiredAccessLevel(toolName, args, isReadOnly);
 
   // Admin-tools run: the per-turn allowlist is a LIMIT on which
@@ -263,6 +230,14 @@ export function checkToolAccess(
     throw new Error(
       `This agent run may not perform admin actions with ${toolName}. Allowed admin tools: ${adminAllowlist.join(', ')}.`
     );
+  }
+
+  if (accountScope && (authCtx.allowCrossOrg || !authCtx.organizationId || toolName === 'list_organizations')) {
+    if (!authCtx.isAuthenticated || !authCtx.userId) throw new Error('Authentication required.');
+    if (!hasRequiredMcpScope(requiredAccess, authCtx.scopes)) {
+      throw new Error(`This MCP session does not include ${requiredAccess} access. Reconnect with the required scope.`);
+    }
+    return requiredAccess;
   }
 
   if (!role && !isPublicReadable(toolName, args)) {
@@ -306,6 +281,14 @@ export async function executeTool(
   env: Env,
   authCtx: AuthContext
 ): Promise<unknown> {
+  const target = toolName === 'save_memory' || toolName === 'query_sql'
+    ? args.org_slug
+    : toolName === 'get_approval' ? args.organization : undefined;
+  if (target !== undefined) {
+    if (typeof target !== 'string' || !target.trim()) throw new ToolUserError('A workspace target is required.', 400);
+    const workspace = await resolveCrossOrgToolContext(target, toAccountToolContext(authCtx));
+    authCtx = { ...authCtx, organizationId: workspace.organizationId, memberRole: workspace.memberRole };
+  }
   const requiredAccess = checkToolAccess(toolName, args, authCtx);
 
   // Promotions pause, enforced where config is actually mutated. `lobu apply`
@@ -321,57 +304,8 @@ export async function executeTool(
     isReadOnly: requiredAccess === 'read',
   });
 
-  // Org-agnostic tools get a minimal context with just userId
-  if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
-    if (!authCtx.userId) {
-      throw new Error('User context required.');
-    }
-    if (toolName === 'list_organizations') {
-      // OAuth/PAT account discovery is audited even before a workspace is selected.
-      const startTime = Date.now();
-      const auditOutcome = async (outcome: {
-        result?: unknown;
-        error?: unknown;
-      }) => {
-        await recordToolInvocationAudit({
-          toolName,
-          args,
-          ...outcome,
-          durationMs: Date.now() - startTime,
-          ctx: authCtx,
-        });
-        if (authCtx.organizationId) {
-          await recordMcpConversationActivity({
-            ctx: toToolContext(authCtx),
-            toolName,
-            failed: outcome.error !== undefined || isSoftErrorResult(outcome.result),
-          });
-        }
-      };
-      try {
-        const result = await trackMCPToolCall(toolName, args, () =>
-          listOrganizations(args as any, env, {
-            userId: authCtx.userId!,
-            currentOrganizationId: authCtx.organizationId,
-            grantedOrganizationIds:
-              authCtx.agentId || authCtx.actingAutomationId
-                ? authCtx.organizationId
-                  ? [authCtx.organizationId]
-                  : []
-                : authCtx.grantedOrganizationIds,
-          })
-        );
-        await auditOutcome({ result });
-        return result;
-      } catch (error) {
-        await auditOutcome({ error });
-        throw error;
-      }
-    }
-  }
-
   const tool = getTool(toolName)!;
-  const toolContext = toToolContext(authCtx);
+  const toolContext = toAccountToolContext(authCtx);
   const startTime = Date.now();
 
   // Per-invocation correlation id (lobu#2051 Item 2). Distinct from the
@@ -393,7 +327,7 @@ export async function executeTool(
   // Skipped whenever a trusted reaction identity is present, and skipped
   // entirely when nothing was declared, so ordinary tool calls pay nothing.
   const declaredSource =
-    toolContext.actingAutomationId != null
+    toolContext.actingAutomationId != null || !toolContext.organizationId
       ? null
       : await verifiedAutomationSource(
           declaredAutomationSource(args),
@@ -410,7 +344,11 @@ export async function executeTool(
       },
       () =>
         trackMCPToolCall(toolName, args, () =>
-          tool.handler(args, env, toolContext)
+          isAccountContentRead(toolName, authCtx)
+            ? getAccountContent(args, env, authCtx)
+            : tool.scope === 'account'
+            ? tool.handler(args, env, toolContext)
+            : tool.handler(args, env, requireWorkspaceContext(toolContext))
         )
     );
 
@@ -518,9 +456,10 @@ function isRetryableToolError(err: Error): boolean {
  * Build a ToolContext from an AuthContext. Requires organizationId to be set.
  */
 export function toToolContext(authCtx: AuthContext): ToolContext {
-  if (!authCtx.organizationId) {
-    throw new Error('Organization context required. Authenticate with OAuth or API key.');
-  }
+  return requireWorkspaceContext(toAccountToolContext(authCtx));
+}
+
+export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
   const identityBound = Boolean(authCtx.agentId || authCtx.actingAutomationId);
   return {
     organizationId: authCtx.organizationId,
@@ -537,7 +476,7 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
     scopedToOrg: authCtx.scopedToOrg,
     allowCrossOrg: identityBound ? false : authCtx.allowCrossOrg,
     grantedOrganizationIds: identityBound
-      ? [authCtx.organizationId]
+      ? authCtx.organizationId ? [authCtx.organizationId] : []
       : authCtx.grantedOrganizationIds,
     directSearchFederation: identityBound ? false : authCtx.directSearchFederation,
     requestUrl: authCtx.requestUrl,

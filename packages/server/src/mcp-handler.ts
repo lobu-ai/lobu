@@ -381,15 +381,13 @@ function createServerForContext(
   // Admin flat tools stay dispatchable via tools/call and REST but are omitted
   // here so agents compose through query_sdk / run_sdk instead.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    // An unscoped OAuth session's default workspace is navigation state, not
-    // its authorization ceiling. Advertise the full scope-bounded SDK surface;
+    // An account OAuth session advertises the scope-bounded SDK surface;
     // client.org(target) resolves membership again and every leaf method gates
     // against that target role.
     const effectiveCrossOrg =
       authCtx.allowCrossOrg && !authCtx.agentId && !authCtx.actingAutomationId;
-    const discoveryRole = effectiveCrossOrg ? 'owner' : authCtx.memberRole;
-    const publicOnly = !!authCtx.organizationId && !discoveryRole;
-    const maxAccessLevel = resolveMaxAccessLevel(discoveryRole, authCtx.scopes);
+    const publicOnly = !!authCtx.organizationId && !effectiveCrossOrg && !authCtx.memberRole;
+    const maxAccessLevel = resolveMaxAccessLevel(authCtx.memberRole, authCtx.scopes, effectiveCrossOrg);
     const allTools = getMcpTools({
       publicOnly,
       maxAccessLevel,
@@ -901,7 +899,6 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
   if (workspaces.length === 0) return base || undefined;
   const labels = workspaces.map((workspace) => {
     const qualifiers = [
-      workspace.id === authCtx.organizationId ? 'primary' : null,
       workspace.personal ? 'personal' : null,
     ].filter((value): value is string => value !== null);
     return qualifiers.length > 0
@@ -911,8 +908,8 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
   const grantLine =
     `Granted workspaces: ${labels.join(', ')}. ` +
     (authCtx.directSearchFederation
-      ? 'Unqualified search searches all granted workspaces; writes default to the primary workspace unless you target one explicitly.'
-      : 'Search and writes use the primary workspace.');
+      ? 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace); direct writes and SQL require an explicit target.'
+      : 'This connection operates in its explicitly bound workspace.');
   return [base, grantLine].filter(Boolean).join('\n\n');
 }
 
@@ -995,7 +992,7 @@ async function recoverSessionAuthContext(
     // role-gated actions deny a legitimate owner/admin over `/mcp/{slug}`.
     await hydrateScopedMemberRole(c.env, authCtx);
   } else {
-    authCtx.organizationId = persisted.organizationId;
+    if (authCtx.organizationId !== persisted.organizationId) return null;
     authCtx.memberRole = await resolveMembershipRole(
       c.env,
       persisted.organizationId,
@@ -1337,6 +1334,11 @@ async function initializeRecoveredSession(
 export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response> {
   const req = normalizeAcceptHeader(c.req.raw);
   const sessionId = req.headers.get('mcp-session-id') ?? undefined;
+  const requestAuth = extractAuthContext(c);
+  if (requestAuth.tokenType === 'oauth' && !requestAuth.scopedToOrg &&
+      requestAuth.tokenOrganizationId && !requestAuth.scopes?.includes('device_worker:run')) {
+    return buildUnauthorizedResponse(req, 'This OAuth authorization uses a retired default workspace. Reauthorize the client to select workspace grants without a default target.');
+  }
 
   if (req.method === 'POST' && !sessionId) {
     const discoverId = await readServerDiscoverRequestId(req);
@@ -1457,6 +1459,10 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
         return buildJsonRpcErrorResponse('Session agent changed. Re-initialize.', null, 400);
       }
 
+      if (!session.authCtx.scopedToOrg && freshCtx.organizationId !== session.authCtx.organizationId) {
+        clearSession();
+        return buildJsonRpcErrorResponse('Session workspace binding changed. Re-initialize.', null, 400);
+      }
       restrictBoundIdentityWorkspaceAccess(session.authCtx);
 
       if (session.authCtx.scopedToOrg) {
@@ -1617,15 +1623,11 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     if (
       authCtx.isAuthenticated &&
       authCtx.userId &&
-      authCtx.tokenType !== 'session' &&
-      authCtx.tokenType !== 'anonymous' &&
+      authCtx.tokenType === 'pat' &&
       !authCtx.tokenOrganizationId
     ) {
       const reauthOrigin = resolvePublicOrigin(req.url);
-      const remediation =
-        authCtx.tokenType === 'pat'
-          ? `Reissue this PAT bound to a workspace with \`lobu token create --org <workspace>\` against ${reauthOrigin}.`
-          : `Re-authorize the OAuth client and pick a workspace at ${reauthOrigin}/oauth/authorize.`;
+      const remediation = `Reissue this PAT bound to a workspace with \`lobu token create --org <workspace>\` against ${reauthOrigin}.`;
       return buildJsonRpcErrorResponse(
         `This token has no organization binding and cannot connect to /mcp. ${remediation}`,
         initialize?.id ?? null,

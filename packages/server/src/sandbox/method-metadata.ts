@@ -73,7 +73,7 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
 		example: "const orgs = await client.organizations.list();",
 	},
 	"organizations.current": {
-		summary: "Return the session's current organization context.",
+		summary: "Return the selected workspace, or null on an account client before client.org(target).",
 		access: "read",
 		example: "const org = await client.organizations.current();",
 	},
@@ -1171,11 +1171,11 @@ export default async (_ctx, client) => {
 	},
 	org: {
 		summary:
-			"Return a new SDK bound to a different organization the caller is a member of (OAuth on /mcp only). Throws CrossOrgAccessDenied on scoped endpoints, on PAT auth, or when the caller is not a member.",
+			"Select a granted workspace and return its SDK (OAuth on bare /mcp only). Required before workspace methods on an account client. Enforces current membership and the consent grant; scoped endpoints and PATs retain their bound client.",
 		access: "read",
 		example:
 			"const otherSdk = await client.org('acme'); const rows = await otherSdk.entities.list();",
-		usageExample: `// Cross-org read of company entities (OAuth on /mcp only).
+		usageExample: `// Select an explicit workspace (OAuth on bare /mcp).
 export default async (_ctx, client) => {
   const acme = await client.org('acme');
   return acme.entities.list({ entity_type: 'company' });

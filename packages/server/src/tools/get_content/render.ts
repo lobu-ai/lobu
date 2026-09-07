@@ -99,10 +99,10 @@ const AUDIT_REQUEST_KEYS = ['request', 'request_bytes'] as const;
 
 /**
  * A tool-invocation audit row retains the caller's VERBATIM request (see
- * `recordToolInvocationAudit`), which only its author may
- * read. Content rows arrive with those keys still on `payload_data`, so this
- * strips them from EVERY audit item first — list/search results never inline
- * them, and any caller other than the author leaves them stripped.
+ * `recordToolInvocationAudit`), which only its author may read. Content rows
+ * arrive with those keys still on `payload_data`, so this strips them from
+ * EVERY audit item first — list/search results never inline them, and any
+ * caller other than the author leaves them stripped.
  * Explicit event-id reads put them back only on rows whose `created_by` clears
  * the gate. Authorship is the one thing the content row does not carry, so it
  * is the only thing re-read here; a failed re-read rejects rather than serving

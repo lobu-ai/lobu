@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Env } from "../../index";
-import type { ToolContext } from "../../tools/registry";
+import type { AccountToolContext, ToolContext } from "../../tools/registry";
 import {
 	type ConnectorDiscoveryDeps,
 	searchLiveConnectors,
@@ -73,7 +73,7 @@ function makeDeps(over?: {
 		}) as never,
 		listOrganizations: async () => (over?.organizations ?? []) as never,
 		listLiveGrantedOrganizations: async () =>
-			(over?.liveGrantedOrganizationIds ?? []).map((id) => ({ id })),
+			(over?.liveGrantedOrganizationIds ?? []).map((id) => ({ id, slug: id, name: id, role: "member", personal: false })),
 	};
 }
 
@@ -98,6 +98,25 @@ const memberCtx = {
 } as ToolContext;
 
 describe("searchLiveConnectors (search_sdk connector intent search)", () => {
+	it("discovers only live granted inventories without a default workspace", async () => {
+		const visited: string[] = [];
+		const deps = makeDeps({ liveGrantedOrganizationIds: ["alpha", "beta"] });
+		const catalog = deps.manageCatalog;
+		deps.manageCatalog = (async (args: never, env: Env, context: ToolContext) => {
+			visited.push(context.organizationId);
+			expect(context.memberRole).toBe("member");
+			return catalog(args, env, context);
+		}) as typeof catalog;
+		const account = { ...ctx, organizationId: null, memberRole: null,
+			allowCrossOrg: true, grantedOrganizationIds: ["alpha", "beta", "revoked"] } as AccountToolContext;
+		const hits = await searchLiveConnectors("website", env, account, deps);
+		expect(hits).toHaveLength(2);
+		expect(hits[0]).toContain('client.org("alpha")');
+		expect(hits[1]).toContain('client.org("beta")');
+		expect(new Set(visited)).toEqual(new Set(["alpha", "beta"]));
+		expect(JSON.stringify(hits)).not.toContain("revoked");
+	});
+
 	it("surfaces an installed-but-unconfigured connector with feed key + connect lifecycle", async () => {
 		const hits = await searchLiveConnectors("website", env, ctx, makeDeps());
 		expect(hits).toHaveLength(1);
