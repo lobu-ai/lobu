@@ -225,12 +225,15 @@ export async function recordToolInvocationAudit(
     const request = captureRequest(params);
     if (request) Object.assign(payload, request);
     const success = payload.success === true;
-    const eventParams = {
+    await insertEvent({
+      entityIds: [],
+      organizationId: params.ctx.organizationId,
       originId: `tool_invocation:${params.toolName}:${Date.now()}:${randomUUID()}`,
       title: `${params.toolName} ${success ? 'completed' : 'failed'}`,
-      payloadType: 'empty' as const,
+      payloadType: 'empty',
       payloadData: payload,
-      originType: 'tool_invocation' as const,
+      semanticType: AUDIT_SEMANTIC_TYPE,
+      originType: 'tool_invocation',
       metadata: {
         category: 'audit',
         event_type: 'tool_invocation.completed',
@@ -239,28 +242,9 @@ export async function recordToolInvocationAudit(
         agent_id: params.ctx.agentId ?? null,
         ...currentMcpActivityEventMetadata(params.ctx),
       },
+      createdBy: params.ctx.userId ?? null,
       clientId: params.ctx.clientId ?? null,
-    };
-    if (params.ctx.organizationId === null) {
-      if (params.ctx.userId === null) {
-        throw new Error('An unbound tool audit requires a user');
-      }
-      await insertEvent({
-        ...eventParams,
-        entityIds: [],
-        organizationId: null,
-        semanticType: AUDIT_SEMANTIC_TYPE,
-        createdBy: params.ctx.userId,
-      });
-    } else {
-      await insertEvent({
-        ...eventParams,
-        entityIds: [],
-        organizationId: params.ctx.organizationId,
-        semanticType: AUDIT_SEMANTIC_TYPE,
-        createdBy: params.ctx.userId ?? null,
-      });
-    }
+    });
   } catch (auditError) {
     logger.warn(
       { err: auditError, toolName: params.toolName },

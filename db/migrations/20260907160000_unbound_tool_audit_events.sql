@@ -49,7 +49,8 @@ END $$;
 
 DROP TRIGGER IF EXISTS require_unbound_tool_audit_actor ON public.events;
 CREATE TRIGGER require_unbound_tool_audit_actor BEFORE INSERT ON public.events
-FOR EACH ROW EXECUTE FUNCTION public.require_unbound_tool_audit_actor();
+FOR EACH ROW WHEN (NEW.organization_id IS NULL)
+EXECUTE FUNCTION public.require_unbound_tool_audit_actor();
 
 -- migrate:down
 -- Forward-only: existing unbound audit records must remain append-only.

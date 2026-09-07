@@ -93,7 +93,7 @@ export async function lockEventDedupIdentity(
 
 export interface InsertEventParams {
   entityIds: number[];
-  organizationId: string;
+  organizationId: string | null;
   originId: string;
 
   title?: string | null;
@@ -176,21 +176,6 @@ export interface InsertEventParams {
   createdBy?: string | null;
   clientId?: string | null;
 }
-
-type InternalInsertEventParams = Omit<InsertEventParams, 'organizationId'> & {
-  organizationId: string | null;
-};
-
-type UnboundToolInvocationAuditEventParams = Pick<
-  InsertEventParams,
-  'originId' | 'title' | 'payloadType' | 'payloadData' | 'metadata' | 'clientId'
-> & {
-  entityIds: [];
-  organizationId: null;
-  semanticType: 'audit';
-  originType: 'tool_invocation';
-  createdBy: string;
-};
 
 /**
  * How an insertEvent call settled.
@@ -342,7 +327,7 @@ function normalizedTimestamp(value?: Date | string | null): string | null {
 
 async function findCurrentEventByOrigin(
   sql: DbClient,
-  params: InternalInsertEventParams
+  params: InsertEventParams
 ): Promise<
   | {
       id: number;
@@ -392,7 +377,7 @@ async function findCurrentEventByOrigin(
 
 function isSemanticallyEqual(
   existing: NonNullable<Awaited<ReturnType<typeof findCurrentEventByOrigin>>>,
-  params: InternalInsertEventParams
+  params: InsertEventParams
 ): boolean {
   return (
     (existing.title ?? null) === (params.title ?? null) &&
@@ -455,7 +440,7 @@ function isSemanticallyEqual(
 async function applyVolatileState(
   eventId: number,
   existing: { metadata: Record<string, unknown> | null; score: number | null },
-  params: InternalInsertEventParams,
+  params: InsertEventParams,
   sql: DbClient
 ): Promise<boolean> {
   const patch = volatileMetadataPatch(params.metadata);
@@ -557,7 +542,7 @@ function nullableNumber(value: number | string | null): number | null {
 async function loadEventLineage(
   sql: DbClient,
   supersedesEventId: number,
-  params: InternalInsertEventParams
+  params: InsertEventParams
 ): Promise<EventLineage> {
   const rows = await sql`
     SELECT connector_key, connection_id, feed_key, feed_id, run_id,
@@ -626,39 +611,29 @@ function isEventsClientIdForeignKeyViolation(error: unknown): boolean {
  * instead of the singleton pool — used by the identity engine to keep its
  * fact + derivation writes atomic.
  */
-interface InsertEventOptions {
-  onConflictUpdate?: boolean;
-  sql?: DbClient;
-  /** Raw browser identity used only to supersede a pre-containment row. */
-  sourceOriginId?: string;
-  /** Transactional hook for durable derived work such as Automation runs. */
-  afterPersist?: (event: InsertedEvent, sql: DbClient) => Promise<void>;
-  /**
-   * Set only after connector attribution has scrubbed and rebuilt the
-   * server-owned identity-scope projection keys from durable identities.
-   */
-  trustedIdentityScopeProjections?: boolean;
-}
-
-export function insertEvent(
-  params: InsertEventParams,
-  options?: InsertEventOptions
-): Promise<InsertedEvent>;
-export function insertEvent(
-  params: UnboundToolInvocationAuditEventParams,
-  options?: undefined
-): Promise<InsertedEvent>;
 export async function insertEvent(
-  params: InternalInsertEventParams,
-  options?: InsertEventOptions
+  params: InsertEventParams,
+  options?: {
+    onConflictUpdate?: boolean;
+    sql?: DbClient;
+    /** Raw browser identity used only to supersede a pre-containment row. */
+    sourceOriginId?: string;
+    /** Transactional hook for durable derived work such as Automation runs. */
+    afterPersist?: (event: InsertedEvent, sql: DbClient) => Promise<void>;
+    /**
+     * Set only after connector attribution has scrubbed and rebuilt the
+     * server-owned identity-scope projection keys from durable identities.
+     */
+    trustedIdentityScopeProjections?: boolean;
+  }
 ): Promise<InsertedEvent> {
-  if (params.organizationId === null && options !== undefined) {
-    throw new Error('Unbound tool audits do not accept insert options');
+  if (params.organizationId === null && options?.afterPersist) {
+    throw new Error('Workspace activation requires an organization');
   }
   // This is the physical write funnel for event content. Connector items,
   // Automation output, and approval metadata all converge here. stripNulDeep
   // preserves Dates and other class instances.
-  params = stripNulDeep(params) as InternalInsertEventParams;
+  params = stripNulDeep(params) as InsertEventParams;
   if (!options?.trustedIdentityScopeProjections) {
     params = {
       ...params,
@@ -1236,7 +1211,7 @@ async function findConnectionlessEventByIdempotencyKey(
  * retries converge across replicas; callers never need process-local state.
  */
 export async function insertConnectionlessWorkspaceEvent(
-  params: InsertEventParams,
+  params: InsertEventParams & { organizationId: string },
   idempotencyKey: string,
   options?: { sql?: DbClient }
 ): Promise<InsertedEvent> {
@@ -1304,7 +1279,7 @@ export async function insertConnectionlessWorkspaceEvent(
  * ordinary readers and non-key updates never wait on an audit write.
  */
 async function insertAuditEventPruningDeletedEntityRefs(
-  params: InsertEventParams,
+  params: InsertEventParams & { organizationId: string },
   db: DbClient,
   afterPersist?: (event: InsertedEvent, tx: DbClient) => Promise<void>
 ): Promise<InsertedEvent> {
@@ -1351,7 +1326,7 @@ async function insertAuditEventPruningDeletedEntityRefs(
  * pass a new `subject`.
  */
 export async function insertConnectionlessAuditEvent(
-  params: InsertEventParams,
+  params: InsertEventParams & { organizationId: string },
   eventType: AuditEventType,
   options?: ConnectionlessAuditInsertOptions
 ): Promise<InsertedEvent> {
