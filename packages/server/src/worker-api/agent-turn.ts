@@ -588,7 +588,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 		const leftover = (terminal[0] as { steer?: unknown } | undefined)?.steer;
 		if (Array.isArray(leftover) && leftover.length > 0) {
 			for (let i = 0; i < leftover.length; i++) {
-				incrementCounter("agent_turn_steer_unconsumed_total");
+				incrementCounter("lobu_turn_steer_unconsumed_total");
 			}
 			logger.warn(
 				{ runId: body.run_id, count: leftover.length },

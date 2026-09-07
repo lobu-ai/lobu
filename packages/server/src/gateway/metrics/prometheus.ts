@@ -166,6 +166,15 @@ function initializeMetrics() {
     "Agent-turn tool-trace publishes that failed on the worker heartbeat path",
     "counter"
   );
+  // A follow-up parked on a running agent turn after the worker's last
+  // heartbeat took its batch is never seen by the model. Counted per message
+  // so the window is measured before the isolate lane answers conversations
+  // on its own.
+  registerMetric(
+    "lobu_turn_steer_unconsumed_total",
+    "Agent-turn steer messages still parked when the run completed",
+    "counter"
+  );
 
   // Scheduler + Automation health. These back the prod alerting rules
   // (charts/lobu PrometheusRule): a silent scheduler / failing Automation tick is
