@@ -803,19 +803,9 @@ export async function runAISession(
   const credentialStore = new Map<string, string>();
 
   const pc = context.providerConfig;
-  if (pc.credentialEnvVarName) {
-    credentialStore.set("CREDENTIAL_ENV_VAR_NAME", pc.credentialEnvVarName);
-  }
   if (pc.providerBaseUrlMappings) {
     for (const [envVar, url] of Object.entries(pc.providerBaseUrlMappings)) {
       credentialStore.set(envVar, url);
-    }
-  }
-  if (pc.credentialPlaceholders) {
-    for (const [envVar, placeholder] of Object.entries(
-      pc.credentialPlaceholders
-    )) {
-      credentialStore.set(envVar, placeholder);
     }
   }
 
@@ -1142,29 +1132,18 @@ export async function runAISession(
     bashPolicy: toolsPolicy.bashPolicy,
   }).filter((tool) => isToolAllowedByPolicy(tool.name, toolsPolicy));
 
-  // Credential injection — resolve API key from the in-memory credential store,
-  // falling back to process.env only for values that were present at startup.
+  // Select the resolved turn provider's placeholder, not the agent default's
+  // credential or another provider sharing the same SDK environment variable.
   // In-memory only — the worker injects runtime API keys below and never reads
   // or writes an on-disk auth.json (pi-ai 0.73 made the AuthStorage ctor private
   // in favour of these factories).
   const authStorage = AuthStorage.inMemory();
-  const credEnvVar = credentialStore.get("CREDENTIAL_ENV_VAR_NAME") || null;
-  const credValue = credEnvVar
-    ? credentialStore.get(credEnvVar) || process.env[credEnvVar]
-    : null;
-  if (credEnvVar && credValue) {
+  const credValue =
+    pc.credentialPlaceholders?.[providerSlug] ??
+    process.env[getApiKeyEnvVarForProvider(rawProvider)];
+  if (credValue) {
     authStorage.setRuntimeApiKey(provider, credValue);
     logger.info(`Set runtime API key for ${provider}`);
-  } else {
-    // Look up the env var by the canonical gateway slug (e.g. "gemini" → GEMINI_API_KEY),
-    // not the model-registry alias.
-    const fallbackEnvVar = getApiKeyEnvVarForProvider(rawProvider);
-    const fallbackValue =
-      credentialStore.get(fallbackEnvVar) || process.env[fallbackEnvVar];
-    if (fallbackValue) {
-      authStorage.setRuntimeApiKey(provider, fallbackValue);
-      logger.info(`Set runtime API key for ${provider}`);
-    }
   }
 
   // Re-resolve provider base URL after session context may have updated mappings

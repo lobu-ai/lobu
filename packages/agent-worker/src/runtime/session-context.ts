@@ -9,7 +9,6 @@ import {
 const logger = createLogger("runtime-session-context");
 
 interface ProviderConfig {
-  credentialEnvVarName?: string;
   defaultProvider?: string;
   /**
    * The primary provider's LOBU id (e.g. "claude"), sent only when it differs
@@ -34,7 +33,7 @@ interface ProviderConfig {
   configProviders?: Record<string, ConfigProviderMeta>;
   /** Installed Lobu provider ID → upstream runtime provider slug. */
   installedProviderRoutes?: Record<string, string>;
-  /** Credential env var placeholders for proxy mode (e.g. OPENAI_API_KEY → "lobu-proxy") */
+  /** Lobu provider ID → credential placeholder for proxy mode. */
   credentialPlaceholders?: Record<string, string>;
 }
 

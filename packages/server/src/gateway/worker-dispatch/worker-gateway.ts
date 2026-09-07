@@ -1036,7 +1036,6 @@ export class WorkerGateway {
     organizationId?: string,
     userId?: string
   ): Promise<{
-    credentialEnvVarName?: string;
     defaultProvider?: string;
     defaultProviderSlug?: string;
     defaultModel?: string;
@@ -1163,8 +1162,8 @@ export class WorkerGateway {
       }
     }
 
-    // Build credential placeholders for proxy mode — in-process workers need
-    // these so the runtime doesn't reject requests before they reach the proxy.
+    // Key placeholders by Lobu provider id: providers can share an SDK env var,
+    // and a turn can select a different provider from the agent's default.
     // Providers that authenticate via the worker JWT (e.g. Bedrock) receive
     // the worker token so their placeholder *is* a verifiable credential.
     const credentialPlaceholders: Record<string, string> = {};
@@ -1173,7 +1172,6 @@ export class WorkerGateway {
         provider.hasSystemKey() ||
         (await provider.hasCredentials(agentId, { organizationId, userId }))
       ) {
-        const credVar = provider.getCredentialEnvVarName();
         const placeholder = provider.buildCredentialPlaceholder
           ? await provider.buildCredentialPlaceholder(agentId, {
               organizationId,
@@ -1181,12 +1179,11 @@ export class WorkerGateway {
               workerToken,
             })
           : "lobu-proxy";
-        credentialPlaceholders[credVar] = placeholder;
+        credentialPlaceholders[provider.providerId] = placeholder;
       }
     }
 
     const result: {
-      credentialEnvVarName?: string;
       defaultProvider?: string;
       defaultProviderSlug?: string;
       defaultModel?: string;
@@ -1198,7 +1195,6 @@ export class WorkerGateway {
     } = {};
 
     if (primaryProvider) {
-      result.credentialEnvVarName = primaryProvider.getCredentialEnvVarName();
       const upstream = primaryProvider.getUpstreamConfig?.();
       result.defaultProvider = upstream?.slug || primaryProvider.providerId;
       // The worker is told `defaultProvider` is the UPSTREAM slug (e.g.

@@ -1,4 +1,5 @@
 import type { ModelOption } from "@lobu/core";
+import type { ProviderCredentialContext } from "../../embedded.js";
 import { BaseProviderModule } from "../base-provider-module.js";
 import { extractJwtAccountId } from "../oauth/client.js";
 import { getOAuthProviderConfig } from "../oauth/providers.js";
@@ -44,10 +45,15 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
     this.name = "chatgpt-oauth";
   }
 
-  async buildCredentialPlaceholder(agentId: string): Promise<string> {
+  async buildCredentialPlaceholder(
+    agentId: string,
+    context?: ProviderCredentialContext,
+  ): Promise<string> {
     const profile = await this.authProfilesManager.getBestProfile(
       agentId,
       this.providerId,
+      undefined,
+      context,
     );
     // Try metadata first, then extract from the stored credential JWT
     let accountId = profile?.metadata?.accountId as string | undefined;
@@ -83,9 +89,9 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
 
   async getModelOptions(
     agentId: string,
-    _userId: string,
+    userId: string,
   ): Promise<ModelOption[]> {
-    const token = await this.getCredential(agentId);
+    const token = await this.getCredential(agentId, { userId });
     if (!token) return [];
 
     return fetchModelOptions<{
