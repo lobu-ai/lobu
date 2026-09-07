@@ -1203,7 +1203,7 @@ Memory:
     )
     .option(
       "--capabilities <a,b>",
-      "Capabilities to advertise (default os.shell,os.files)"
+      "Capabilities to advertise (default os.shell)"
     )
     .option(
       "--label <name>",
