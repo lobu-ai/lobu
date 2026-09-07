@@ -1,4 +1,11 @@
-import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnSteer } from '../agent-turn/types.js';
+import type {
+  AgentTurnEvent,
+  AgentTurnInput,
+  AgentTurnOutput,
+  AgentTurnSteer,
+  RuntimeExecRequest,
+  RuntimeExecResult,
+} from '../agent-turn/types.js';
 import type {
   AuthResult,
   ConnectorWebhookSchema,
@@ -176,6 +183,12 @@ export interface ExecutionHooks {
    * result — and hands what it gets to `agent.steer()`.
    */
   takeSteering?: () => ReadonlyArray<AgentTurnSteer>;
+  /**
+   * Agent turns on a sandbox-pinned conversation: run one bash command in the
+   * remote runtime. The host owns the call — the gateway's exec route, the
+   * turn's own token — so the guest never holds a credential or an egress.
+   */
+  onRuntimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>;
   /** Sync runs: connector streamed a chunk of events (and we should persist them). */
   onEventChunk?: (events: EventEnvelope[]) => Promise<void> | void;
   /** Sync runs: connector pushed an incremental checkpoint update. */

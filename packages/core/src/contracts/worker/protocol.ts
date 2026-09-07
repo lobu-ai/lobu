@@ -433,6 +433,16 @@ export const AgentTurnPollPayloadSchema = Type.Object({
             ])
           )
         ),
+        /**
+         * Present when the conversation is pinned to a remote runtime sandbox.
+         * `bash` then runs there — the host posts each command to the gateway's
+         * `/internal/runtime/exec` with the turn's own token, whose signed claims
+         * name the provider — instead of in the in-memory workspace. The file
+         * tools stay on the workspace, as they do on the subprocess lane.
+         */
+        remote_runtime: Type.Optional(
+          Type.Object({ provider_id: Type.String({ minLength: 1 }) })
+        ),
         /** The agent's bash prefix policy, enforced before a command runs. */
         bash_policy: Type.Optional(
           Type.Object({

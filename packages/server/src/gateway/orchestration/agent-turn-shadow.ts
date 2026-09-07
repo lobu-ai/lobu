@@ -56,6 +56,7 @@ import {
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { getDb } from "../../db/client.js";
+import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
@@ -196,6 +197,12 @@ export interface AgentTurnShadowDeps {
    * owns the lookup, and a test can vary it.
    */
   artifacts?: AgentTurnArtifactReader;
+  /**
+   * The conversation's pinned runtime sandbox, resolved by the consumer for
+   * the subprocess lane's token. Present → the turn's token carries the same
+   * signed runtime claims and its `bash` runs in that sandbox.
+   */
+  runtime?: AgentRuntimeSelection;
 }
 
 function shadowSelects(agentId: string): boolean {
@@ -443,7 +450,7 @@ function modelContextWindow(registryProvider: string, modelId: string): number {
  * `deploymentName` names this lane so a token can never be mistaken for a
  * subprocess deployment's.
  */
-function mintTurnToken(data: MessagePayload): string {
+function mintTurnToken(data: MessagePayload, runtime?: AgentRuntimeSelection): string {
   return generateWorkerToken(
     data.userId,
     data.conversationId,
@@ -456,6 +463,13 @@ function mintTurnToken(data: MessagePayload): string {
         organizationId: data.organizationId,
         platform: data.platform,
         platformMetadata: data.platformMetadata,
+        // The remote runtime reads all of these off the SIGNED token, never a
+        // body: which sandbox, and the egress and package sets the org set.
+        runtimeProviderId: runtime?.runtimeProviderId,
+        sandboxId: runtime?.sandboxId,
+        allowedDomains: data.networkConfig?.allowedDomains,
+        deniedDomains: data.networkConfig?.deniedDomains,
+        nixPackages: data.nixConfig?.packages,
       }),
       messageId: data.messageId,
     }
@@ -767,7 +781,7 @@ export async function enqueueAgentTurnShadow(
       return;
     }
 
-    const workerToken = mintTurnToken(data);
+    const workerToken = mintTurnToken(data, deps.runtime);
     const provider = await resolveShadowProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
@@ -829,6 +843,9 @@ export async function enqueueAgentTurnShadow(
         // the model silently loses the 90% of calls that go through it.
         definitions: tools?.definitions ?? [],
         ...(builtin.length > 0 ? { builtin } : {}),
+        ...(builtin.includes("bash") && deps.runtime?.runtimeProviderId
+          ? { remote_runtime: { provider_id: deps.runtime.runtimeProviderId } }
+          : {}),
         ...(builtin.includes("bash")
           ? {
               bash_policy: {

@@ -353,6 +353,9 @@ const GUEST_RUNNER = String.raw`
       // Synchronous: pi drains steering between model calls, and the answer
       // is whatever the host has parked by then.
       return JSON.parse(H.sync('takeSteering'));
+    }, function (request) {
+      // A sandbox-pinned conversation's bash: the host runs it remotely.
+      return H.async('runtimeExec', JSON.stringify(request)).then(function (json) { return JSON.parse(json); });
     });
     return { mode: 'agent_turn', turn: output };
   }
@@ -769,6 +772,17 @@ export class IsolateExecutor implements SyncExecutor {
             await hooks?.onEventChunk?.(events);
           });
           return undefined;
+        },
+        runtimeExec: async (json: unknown) => {
+          if (!hooks?.onRuntimeExec) throw new Error('the remote runtime is not available in this execution context');
+          const parsed = parseGuestJson(json, 'runtimeExec');
+          const request = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+          if (typeof request.command !== 'string') throw new Error('runtimeExec: command must be a string');
+          const result = await hooks.onRuntimeExec({
+            command: request.command,
+            ...(typeof request.timeoutMs === 'number' ? { timeoutMs: request.timeoutMs } : {}),
+          });
+          return JSON.stringify(result);
         },
         emitTurnEvent: async (json: unknown) => {
           const event = parseGuestJson(json, 'emitTurnEvent') as AgentTurnEvent;
