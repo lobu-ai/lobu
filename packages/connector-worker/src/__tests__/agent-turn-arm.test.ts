@@ -555,6 +555,40 @@ describe("executeAgentTurnRun cancellation", () => {
   });
 });
 
+describe("executeAgentTurnRun steering", () => {
+  test("queues what the heartbeat carries and hands it to the guest once, in order", async () => {
+    const reported: Reported = { calls: [] };
+    let beat = 0;
+    const client = {
+      ...fakeClient(reported),
+      heartbeat: async () => {
+        beat += 1;
+        // The first two beats each carry a follow-up; every later one is quiet.
+        if (beat === 1) return { continue: true, steer: [{ message_id: "m-2", text: "also check companies" }] };
+        if (beat === 2) return { continue: true, steer: [{ message_id: "m-3", text: "and people" }] };
+        return { continue: true };
+      },
+    };
+    const taken: unknown[] = [];
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        taken.push(hooks?.takeSteering?.() ?? null);
+        taken.push(hooks?.takeSteering?.() ?? null);
+        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+      },
+    };
+    await executeAgentTurnRun(client as never, turnJob(), {}, { ...cfgWith(executor), heartbeatIntervalMs: 5 });
+    expect(taken[0]).toEqual([
+      { messageId: "m-2", text: "also check companies" },
+      { messageId: "m-3", text: "and people" },
+    ]);
+    // Taken means taken: a second ask is empty.
+    expect(taken[1]).toEqual([]);
+    expect(reported.calls[0]?.status).toBe("completed");
+  });
+});
+
 describe("executeAgentTurnRun streaming", () => {
   /**
    * The guest streams; the arm has to get that text out of the worker while

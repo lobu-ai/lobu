@@ -349,6 +349,10 @@ const GUEST_RUNNER = String.raw`
       // waiting for the host, and the host reports its own hook failures by
       // terminating the run.
       H.async('emitTurnEvent', JSON.stringify(event));
+    }, function () {
+      // Synchronous: pi drains steering between model calls, and the answer
+      // is whatever the host has parked by then.
+      return JSON.parse(H.sync('takeSteering'));
     });
     return { mode: 'agent_turn', turn: output };
   }
@@ -734,6 +738,10 @@ export class IsolateExecutor implements SyncExecutor {
         // Before the headers: the request fails with the guest's abort reason.
         // After them: the body stream errors with it, and the upstream socket
         // is released either way.
+        // Steering, pulled rather than pushed: the guest asks at the points pi
+        // drains steering messages, so nothing has to reach into a running
+        // isolate. Empty for every lane but an agent turn with a follow-up.
+        takeSteering: () => JSON.stringify(hooks?.takeSteering?.() ?? []),
         fetchAbort: (id: unknown) => {
           const active = typeof id === 'number' ? activeFetches.get(id) : undefined;
           if (active) {

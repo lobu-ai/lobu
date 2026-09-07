@@ -36,7 +36,7 @@ import {
   type SummaryRequest,
   summaryRequests,
 } from '@lobu/core/compaction';
-import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool } from './types.js';
+import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer } from './types.js';
 import { createWorkspace, type AgentWorkspace } from './workspace.js';
 
 /**
@@ -265,7 +265,8 @@ function buildUserMessage(input: AgentTurnInput, userText: string): Record<strin
  */
 export async function runAgentTurn(
   input: AgentTurnInput,
-  emit: (event: AgentTurnEvent) => void
+  emit: (event: AgentTurnEvent) => void,
+  takeSteering: () => AgentTurnSteer[] = () => []
 ): Promise<AgentTurnOutput> {
   const credential = input.provider.apiKey;
   if (!credential) throw new Error('the agent turn reached the guest with no credential');
@@ -366,7 +367,25 @@ export async function runAgentTurn(
   // must be a failed RUN, or the job completes 'successfully' with no text.
   let failure: string | null = null;
 
+  // pi drains its steering queue between model calls. Ask the host for what
+  // arrived at exactly those points — after an assistant message, after a tool
+  // result — and queue it as the user message it is, so the model sees the
+  // follow-up on this lane where the subprocess lane's session would.
+  const steer = () => {
+    if (flushing) return;
+    for (const message of takeSteering()) {
+      agent.steer({
+        role: 'user',
+        content: [{ type: 'text', text: message.text }],
+        timestamp: Date.now(),
+      } as never);
+    }
+  };
+
   agent.subscribe((event) => {
+    if (event.type === 'tool_execution_end' || (event.type === 'message_end' && (event.message as { role?: string }).role === 'assistant')) {
+      steer();
+    }
     if (flushing) return;
     if (event.type === 'message_update') {
       const partial = event.assistantMessageEvent as { type?: string; delta?: string };

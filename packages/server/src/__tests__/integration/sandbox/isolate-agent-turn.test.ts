@@ -35,7 +35,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { agentGuestBundle } from "@lobu/connector-worker/agent-turn";
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput } from "@lobu/connector-worker/agent-turn";
-import type { ExecutorJob } from "@lobu/connector-worker/executor/interface";
+import type { ExecutionHooks, ExecutorJob } from "@lobu/connector-worker/executor/interface";
 import { IsolateExecutor, type IsolateLogLevel } from "@lobu/connector-worker/executor/isolate";
 import { assertIsolateEligible } from "@lobu/connector-worker/isolate";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -358,7 +358,11 @@ interface TurnRun {
 	output: AgentTurnOutput;
 }
 
-async function runTurn(job: ExecutorJob, allowedDomains: readonly string[] = ["127.0.0.1"]): Promise<TurnRun> {
+async function runTurn(
+	job: ExecutorJob,
+	allowedDomains: readonly string[] = ["127.0.0.1"],
+	extraHooks: Partial<ExecutionHooks> = {},
+): Promise<TurnRun> {
 	const events: AgentTurnEvent[] = [];
 	const logs: { level: IsolateLogLevel; line: string }[] = [];
 	const executor = new IsolateExecutor({
@@ -367,6 +371,7 @@ async function runTurn(job: ExecutorJob, allowedDomains: readonly string[] = ["1
 		logSink: (level, line) => logs.push({ level, line }),
 	});
 	const result = await executor.execute(guestCode, job, {
+		...extraHooks,
 		onTurnEvent: (event) => {
 			events.push(event);
 			if (event.type === "text_delta") markFirstDelta();
@@ -887,6 +892,30 @@ describe("agent turn on the isolate lane", () => {
 			...overrides,
 		});
 	}
+
+	it("steers: a follow-up the host parked reaches pi between model calls, as the user's own message", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s1", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		const run = await runTurn(toolJob(), ["127.0.0.1"], {
+			// The first ask — after the tool result — finds the follow-up; later asks find nothing.
+			takeSteering: () => (asked++ === 0 ? [{ messageId: "m-2", text: "also check companies" }] : []),
+		});
+		expect(asked).toBeGreaterThan(0);
+		// The model saw the follow-up as a user message in a later request, after
+		// the tool result it was drained behind.
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+		expect(requests.length).toBeGreaterThanOrEqual(2);
+		expect(requests[0]).not.toContain("also check companies");
+		expect(requests.some((body) => body.includes("also check companies"))).toBe(true);
+		// And it is in the transcript the next turn resumes from, as pi wrote it.
+		const steered = run.output.messages.find(
+			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
+		);
+		expect(steered).toBeDefined();
+	}, 120_000);
 
 	it("compacts after answering when the context has outgrown the window, with pi's own prompts", async () => {
 		hits = [];

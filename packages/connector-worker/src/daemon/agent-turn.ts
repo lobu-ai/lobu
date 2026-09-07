@@ -15,7 +15,8 @@ import {
   TURN_DELTA_MAX_CHARS,
 } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
-import type { AgentTurnEvent, AgentTurnGatewayTool, AgentTurnMediaTool } from '../agent-turn/types.js';
+import type { HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
+import type { AgentTurnEvent, AgentTurnGatewayTool, AgentTurnMediaTool, AgentTurnSteer } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import type { ExecutorClient } from './client.js';
@@ -155,6 +156,7 @@ export async function executeAgentTurnRun(
       // keeps the text queued for the next beat.
       if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
       if (ack?.continue === false) stopTurn(ack.stop_reason);
+      queueSteering(ack?.steer);
     } catch (err) {
       // The batch stays in flight and is re-sent under the same sequence. The
       // traces are not: they are a view of the turn, not its answer, and
@@ -208,6 +210,7 @@ export async function executeAgentTurnRun(
       .heartbeat(runId, { items_collected_so_far: deltaSequence })
       .then((ack) => {
         if (ack?.continue === false) stopTurn(ack.stop_reason);
+        queueSteering(ack?.steer);
       })
       .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
   }, cfg.heartbeatIntervalMs);
@@ -216,6 +219,14 @@ export async function executeAgentTurnRun(
   // down through the executor's abort hook so the model stops mid-turn, and
   // the run — already `cancelled` on the server — is left as the server wrote
   // it, since a completion would be fenced out anyway.
+  // Messages the gateway parked on this run mid-turn, in arrival order, until
+  // the guest asks for them (`takeSteering`) and hands them to pi.
+  const steering: AgentTurnSteer[] = [];
+  const queueSteering = (batch: HeartbeatResponse['steer']) => {
+    for (const message of batch ?? []) {
+      steering.push({ messageId: message.message_id, text: message.text });
+    }
+  };
   const cancel = new AbortController();
   const stopTurn = (reason: string | undefined) => {
     if (cancel.signal.aborted) return;
@@ -361,6 +372,7 @@ export async function executeAgentTurnRun(
       },
       {
         signal: cancel.signal,
+        takeSteering: () => steering.splice(0),
         onTurnEvent: (event: AgentTurnEvent) => {
           if (event.type === 'text_delta') {
             // Queued, not accumulated: the next batch carries what the server

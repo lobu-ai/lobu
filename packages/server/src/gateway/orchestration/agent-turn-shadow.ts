@@ -37,6 +37,7 @@ import {
   createLogger,
   generateWorkerToken,
   getErrorMessage,
+  isSteerableHumanMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
   DEFAULT_COMPACTION_SETTINGS,
@@ -641,6 +642,51 @@ async function resolveTurnTools(
     // server being any less reachable.
     hasMemoryServer: servers.some((server) => server.id === MEMORY_MCP_ID),
   };
+}
+
+/**
+ * A message that arrives while this conversation's turn is still running is
+ * for the model NOW, not for a turn of its own — pi's steering, which the
+ * subprocess lane does through `agent.steer()` on its live session. This lane
+ * parks it on the running run; the worker's next heartbeat carries it in and
+ * the guest hands it to the same pi API. The predicate is the one both lanes
+ * share: automation messages, session resets, `!`-bash and attachments never
+ * steer, and the message must come from the user whose turn it is.
+ *
+ * Returns true when the message was parked, in which case it must not become
+ * a turn of its own. The lookup runs over the in-flight rows only (the status
+ * index), then matches the conversation on the envelope.
+ */
+export async function steerActiveAgentTurn(data: MessagePayload): Promise<boolean> {
+  if (!data.agentId || !data.conversationId || !data.messageText?.trim()) return false;
+  if (!isSteerableHumanMessage(data)) return false;
+  const sql = getDb();
+  const parked = (await sql`
+    UPDATE runs
+    SET run_metadata = jsonb_set(
+      COALESCE(run_metadata, '{}'::jsonb),
+      '{steer}',
+      COALESCE(run_metadata->'steer', '[]'::jsonb) || ${sql.json([{ message_id: data.messageId, text: data.messageText }])}::jsonb,
+      true
+    )
+    WHERE id = (
+      SELECT id FROM runs
+      WHERE organization_id = ${data.organizationId}
+        AND run_type = 'agent_turn'
+        AND status IN ('pending', 'claimed', 'running')
+        AND action_input->'turn'->>'conversation_id' = ${data.conversationId}
+        AND action_input->'reply'->>'user_id' = ${data.userId}
+      ORDER BY id DESC
+      LIMIT 1
+    )
+    RETURNING id
+  `) as unknown as Array<{ id: number }>;
+  if (parked.length === 0) return false;
+  logger.info(
+    { agentId: data.agentId, conversationId: data.conversationId, messageId: data.messageId, runId: parked[0]?.id },
+    "Message steered into the running agent turn on the isolate lane"
+  );
+  return true;
 }
 
 /**

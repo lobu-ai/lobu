@@ -1086,6 +1086,12 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  * nobody will read. A lost lease is not a signal here — it is the 409 the
  * heartbeat has always answered.
  *
+ * `steer` carries the messages that arrived for this conversation while the
+ * turn was running and are meant for the model now rather than for the next
+ * turn — pi's steering. The gateway parks them on the run and hands them over
+ * on the next beat, in arrival order; absent on every beat that has none,
+ * which is nearly all of them.
+ *
  * `turn_delta_ack` is the honest answer to "did that batch land". The worker
  * does not retire the text it sent until the sequence comes back acknowledged,
  * so a publish that failed, was fenced out by a lost lease, or never reached
@@ -1100,6 +1106,14 @@ export const HeartbeatResponseSchema = Type.Object({
   continue: Type.Optional(Type.Boolean()),
   /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
   stop_reason: Type.Optional(Type.Literal("cancelled")),
+  steer: Type.Optional(
+    Type.Array(
+      Type.Object({
+        message_id: Type.String(),
+        text: Type.String(),
+      })
+    )
+  ),
   turn_delta_ack: Type.Optional(
     Type.Object({
       sequence: Type.Integer({ minimum: 0 }),

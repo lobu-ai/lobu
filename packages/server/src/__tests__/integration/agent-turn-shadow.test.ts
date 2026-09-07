@@ -12,7 +12,9 @@ import {
 import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, replaySessionMessages, type MessagePayload, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { enqueueAgentTurnShadow } from '../../gateway/orchestration/agent-turn-shadow';
+import { enqueueAgentTurnShadow,
+  steerActiveAgentTurn,
+} from '../../gateway/orchestration/agent-turn-shadow';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
@@ -742,6 +744,43 @@ describe('agent turn shadow producer', () => {
     // What the compaction replaced is not replayed.
     expect(JSON.stringify(turn.messages)).not.toContain('"answer 3"');
     expect(JSON.stringify(turn.messages)).not.toContain('"question 7"');
+  });
+
+  it('parks a steerable follow-up on the running turn instead of making it a turn of its own', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+    const claimed = await pollFleet('fleet-steer', { agent_turn: true });
+    const { run_id: runId } = (await claimed.json()) as { run_id: number };
+
+    // The same human, in the same conversation, while the turn runs: parked.
+    const followUp = { ...messageFor(org.id), messageId: 'msg-2', messageText: 'also check companies' };
+    expect(await steerActiveAgentTurn(followUp)).toBe(true);
+    // Another follow-up queues behind it, in order.
+    expect(await steerActiveAgentTurn({ ...followUp, messageId: 'msg-3', messageText: 'and people' })).toBe(true);
+    const [row] = (await sql`SELECT run_metadata FROM runs WHERE id = ${runId}`) as unknown as Array<{
+      run_metadata: { steer?: unknown };
+    }>;
+    expect(row.run_metadata.steer).toEqual([
+      { message_id: 'msg-2', text: 'also check companies' },
+      { message_id: 'msg-3', text: 'and people' },
+    ]);
+    // No second run was produced for either.
+    expect(await shadowRuns()).toHaveLength(1);
+
+    // Someone else in the conversation, or an automation's message, is not a
+    // steer — the predicate both lanes share says so.
+    expect(await steerActiveAgentTurn({ ...followUp, userId: 'user-other' })).toBe(false);
+    expect(
+      await steerActiveAgentTurn({ ...followUp, platformMetadata: { source: 'automation-run' } } as typeof followUp)
+    ).toBe(false);
+    // Nothing running in another conversation: nothing to steer.
+    expect(await steerActiveAgentTurn({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
   });
 
   it('arms no turn marker and journals no run input', async () => {

@@ -241,6 +241,12 @@ export interface AgentTurnMemory {
   agentId: string;
 }
 
+/** A message that arrived mid-turn and is for the model now: pi's steering. */
+export interface AgentTurnSteer {
+  messageId: string;
+  text: string;
+}
+
 /** What the guest streams out while the turn runs. */
 export type AgentTurnEvent =
   | { type: 'text_delta'; delta: string }
