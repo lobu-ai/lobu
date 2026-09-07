@@ -1,6 +1,12 @@
+/**
+ * The published @lobu/cli tarball installs its dependencies from the registry,
+ * not from bun.lock, so caret ranges let better-auth, @better-auth/core, and
+ * @better-auth/passkey drift onto different releases. Exact, identical pins in
+ * every publishing manifest keep one Better Auth tree in the installed CLI.
+ */
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "bun:test";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
