@@ -30,7 +30,12 @@
 
 export function whatsAppWebAdapterProgram() {
   const GLOBAL_KEY = "__owlettoWhatsAppAdapterV1";
-  const ADAPTER_VERSION = 9;
+  // Bumped whenever the program changes at all, not only its RPC surface.
+  // A WhatsApp tab outlives a deploy, so the resident adapter is replaced only
+  // when this number moves: shipping a fix under the old number leaves every
+  // already-open tab running the previous code with nothing to show for it.
+  // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
+  const ADAPTER_VERSION = 10;
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",
@@ -258,42 +263,71 @@ export function whatsAppWebAdapterProgram() {
       );
   }
 
-  function contactName(collections, jid) {
-    if (!jid) return null;
-    for (const contact of models(collections?.Contact)) {
-      const row = modelData(contact);
-      if (widString(row.id ?? contact?.id) !== jid) continue;
-      return (
-        row.name ?? row.pushname ?? row.shortName ?? row.formattedName ?? null
-      );
-    }
-    return null;
+  /**
+   * Name lookups for one collect.
+   *
+   * `normalizeMessage` runs per message and used to walk a whole collection on
+   * each call -- the chat name over 947 chats, the sender name over 5323
+   * contacts. That is O(messages x collection) of SYNCHRONOUS work: measured on
+   * a live prod tab the contact scan alone projects to ~6.8s, a real collect
+   * never yielded the main thread, and the extension's 90s run fence killed the
+   * run. Every run was slower than the last as backfill grew the store.
+   *
+   * Built once per collect and thrown away with it -- no cache to invalidate,
+   * and nothing here outlives the call. Only names are indexed: they read
+   * static fields, whereas `collectionByRawId` serves the reaction paths, which
+   * mutate a model in place without changing the collection, so that one keeps
+   * scanning.
+   */
+  function nameIndex(collections) {
+    const byId = (collection) => {
+      const map = new Map();
+      for (const model of models(collection)) {
+        const id = widString(modelData(model).id ?? model?.id);
+        // First writer wins, like the scans this replaces.
+        if (id && !map.has(id)) map.set(id, model);
+      }
+      return map;
+    };
+    return { chats: byId(collections?.Chat), contacts: byId(collections?.Contact) };
   }
 
-  function chatName(collections, jid) {
+  function contactName(names, jid) {
     if (!jid) return null;
-    for (const chat of models(collections?.Chat)) {
-      const row = modelData(chat);
-      if (widString(row.id ?? chat?.id) !== jid) continue;
-      return (
-        row.name ??
-        row.formattedTitle ??
-        row.contact?.name ??
-        row.contact?.pushname ??
-        null
-      );
-    }
-    return null;
+    const contact = names?.contacts?.get(jid);
+    if (!contact) return null;
+    const row = modelData(contact);
+    return (
+      row.name ?? row.pushname ?? row.shortName ?? row.formattedName ?? null
+    );
+  }
+
+  function chatName(names, jid) {
+    if (!jid) return null;
+    const chat = names?.chats?.get(jid);
+    if (!chat) return null;
+    const row = modelData(chat);
+    return (
+      row.name ??
+      row.formattedTitle ??
+      row.contact?.name ??
+      row.contact?.pushname ??
+      null
+    );
   }
 
   async function normalizeMessage(
     model,
     eventType = "snapshot",
-    collectionsOverride = null
+    collectionsOverride = null,
+    names = null
   ) {
     const collections =
       collectionsOverride ?? requireFirst(["WAWebCollections"]);
     if (!collections) return null;
+    // A single normalise (the watch path) builds its own; a collect passes one
+    // in so the whole run shares it.
+    const nameLookup = names ?? nameIndex(collections);
     let row = modelData(model);
     let key = row.id ?? model?.id;
     let id = rawId(key);
@@ -341,11 +375,11 @@ export function whatsAppWebAdapterProgram() {
       id,
       chat_jid: chat.jid,
       chat_lid: chat.lid,
-      chat_name: chatName(collections, widString(chatRaw)),
+      chat_name: chatName(nameLookup, widString(chatRaw)),
       sender_jid: sender.jid,
       sender_lid: sender.lid,
       push_name:
-        contactName(collections, widString(senderRaw)) ??
+        contactName(nameLookup, widString(senderRaw)) ??
         row.notifyName ??
         null,
       participant: participant.jid,
@@ -813,8 +847,14 @@ export function whatsAppWebAdapterProgram() {
     );
     const normalized = [];
     const quarantined = [];
+    const names = nameIndex(collections);
     for (const model of uniqueMessageModels(collections)) {
-      const message = await normalizeMessage(model, "reconcile", collections);
+      const message = await normalizeMessage(
+        model,
+        "reconcile",
+        collections,
+        names
+      );
       if (!message) continue;
       if (message.timestamp <= 0) {
         quarantined.push({
@@ -1029,9 +1069,15 @@ export function whatsAppWebAdapterProgram() {
       });
     }
     const normalized = [];
+    const names = nameIndex(collections);
     for (const candidate of candidates) {
       const model = candidate?.msg ?? candidate?.message ?? candidate;
-      const message = await normalizeMessage(model, "search", collections);
+      const message = await normalizeMessage(
+        model,
+        "search",
+        collections,
+        names
+      );
       // The relay boundary rejects placeholder rows without a stable
       // timestamp. Exclude them before slicing/counting so a page cannot
       // collapse to zero rows after transport and replay the same cursor.
