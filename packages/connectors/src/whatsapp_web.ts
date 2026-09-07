@@ -304,7 +304,24 @@ async function invokeAdapter<T extends object>(
 }
 
 const LOGGED_OUT_PATTERN = /logged_out|qr_code_visible/;
+/**
+ * `hydrating`/`stores_settling` are the adapter's own words for "the page is
+ * still coming up", so they arrive prefixed as a WhatsAppAdapterError.
+ */
 const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling/i;
+/**
+ * The page never answered at all. WhatsApp's `require()` blocks rather than
+ * throwing while its module graph registers, so the evaluation is abandoned by
+ * its CDP timeout and the adapter never gets to name a state -- the bridge
+ * REJECTS the dispatch instead of returning an adapter-shaped error, so this
+ * message carries no connector prefix to classify on.
+ *
+ * Only the readiness phase may treat it as transient. A `collect` that times
+ * out is a real failure, and the server's dependency_unavailable branch skips
+ * `consecutive_failures` -- classifying it here would let a permanently broken
+ * collect retry forever without ever walking the feed toward its hard pause.
+ */
+const BARE_EVALUATE_TIMEOUT_PATTERN = /\btimed out\b/i;
 const DEPENDENCY_UNAVAILABLE_PREFIX =
   "[lobu:dependency_unavailable:browser_source_hydrating]";
 
@@ -313,8 +330,18 @@ const DEPENDENCY_UNAVAILABLE_PREFIX =
  * corruption, unsupported operations, and collection errors remain ordinary
  * connector failures and still count toward source health.
  */
-function classifyWhatsAppReadinessFailure(error: unknown): string | null {
+function classifyWhatsAppReadinessFailure(
+  error: unknown,
+  { allowBareTimeout = false }: { allowBareTimeout?: boolean } = {}
+): string | null {
   if (!(error instanceof Error)) return null;
+  // A dispatch the bridge abandoned never reaches the adapter, so it has no
+  // connector prefix to match. Classify it before the prefix gate below, or a
+  // hydration stall that timed out is booked as a hard failure. Readiness only:
+  // see BARE_EVALUATE_TIMEOUT_PATTERN for why collect must not opt in.
+  if (allowBareTimeout && BARE_EVALUATE_TIMEOUT_PATTERN.test(error.message)) {
+    return `${DEPENDENCY_UNAVAILABLE_PREFIX} ${error.message}`;
+  }
   // MAIN-world adapter failures may cross the extension/worker boundary without
   // preserving their prototype, so classify on the connector-owned message.
   if (!error.message.startsWith("WhatsApp Web ")) return null;
@@ -350,7 +377,9 @@ async function readyWhatsAppTab(
     }
     await new Promise((resolve) => setTimeout(resolve, READY_POLL_INTERVAL_MS));
   } while (Date.now() < deadline);
-  const transient = classifyWhatsAppReadinessFailure(lastError);
+  const transient = classifyWhatsAppReadinessFailure(lastError, {
+    allowBareTimeout: true,
+  });
   if (transient) throw new Error(transient);
   throw (
     lastError ??
