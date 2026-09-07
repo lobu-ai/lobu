@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import { mcpAuth } from "../auth/middleware";
 import { getDb, pgTextArray } from "../db/client";
 import type { Env } from "../index";
-import { requireOrgUser } from "../utils/require-org-user";
 
 /**
  * Recent materialized MCP activity identities for connected OAuth apps.
@@ -50,9 +49,10 @@ function displayAction(value: string): string {
 }
 
 routes.get("/", mcpAuth, async (c) => {
-	const auth = requireOrgUser(c);
-	if (!auth) return c.json({ error: "Organization user required" }, 401);
-	const { userId } = auth;
+	const userId = c.var.mcpAuthInfo?.userId ?? c.var.session?.userId ?? c.var.user?.id;
+	if (!userId || c.var.mcpAuthInfo?.agentId) {
+		return c.json({ error: "Authenticated user required" }, 401);
+	}
 	const rawLimit = Number.parseInt(c.req.query("limit") ?? "20", 10);
 	const limit = Math.min(
 		Math.max(Number.isNaN(rawLimit) ? 20 : rawLimit, 1),
