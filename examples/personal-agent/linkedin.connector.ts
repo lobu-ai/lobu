@@ -428,7 +428,11 @@ interface HomeFeedRow {
    * treat it as best-effort and prefer `post_identity` for durable identity.
    */
   post_url?: string;
-  /** Rendered identifier containing LinkedIn's stable shareId / ugcPostId. */
+  /**
+   * Rendered identifier carrying the stable post id: a readable shareId /
+   * ugcPostId / activity URN, or the encoded comment-tools id that
+   * `decodeHomeFeedPostIdentity` turns into a URN before ingestion.
+   */
   post_identity?: string;
   /** Every profile/company anchor in the card, each with its accessible name. */
   links?: HomeFeedLink[];
@@ -466,7 +470,51 @@ const HOME_FEED_COMMENT_COUNT_LABEL_SELECTOR =
 const HOME_FEED_POST_CONTROL_SELECTOR =
   '[role="button"]:not([id^="replaceableComment_"] *):not([componentkey^="commentsSectionContainer"] *), button:not([id^="replaceableComment_"] *):not([componentkey^="commentsSectionContainer"] *), a:not([id^="replaceableComment_"] *):not([componentkey^="commentsSectionContainer"] *)';
 const HOME_FEED_POST_IDENTITY_SELECTOR =
-  '[id*="shareId="], [id*="ugcPostId="], [id*="urn:li:activity:"]';
+  ':is([id*="shareId="], [id*="ugcPostId="], [id*="urn:li:activity:"], [id*="-replaceableCommentTools"]):not([id^="replaceableComment_"]):not([id^="replaceableComment_"] *)';
+
+/** Current comment-tool ids encode a typed post URN, followed by the recycled
+ * card key. Decode only the typed prefix: field 1 is activity, field 2 ugcPost;
+ * each contains field 1 as a protobuf sint64 (ZigZag). Native comment URNs and
+ * the corresponding live post URLs independently confirm those namespaces. */
+function decodeHomeFeedPostIdentity(
+  raw: string | undefined
+): string | undefined {
+  const marker = "-replaceableCommentTools";
+  if (!raw?.includes(marker)) return raw;
+  const invalid = () =>
+    new Error(
+      "LinkedIn returned an invalid encoded post identity. No home-feed events were persisted."
+    );
+  let bytes: string;
+  try {
+    bytes = atob(
+      raw.slice(0, raw.indexOf(marker)).replace(/-/g, "+").replace(/_/g, "/")
+    );
+  } catch {
+    throw invalid();
+  }
+  const tag = bytes.charCodeAt(0);
+  if (
+    (tag !== 10 && tag !== 18) ||
+    bytes.length < 4 ||
+    bytes.length > 13 ||
+    bytes.charCodeAt(1) !== bytes.length - 2 ||
+    bytes.charCodeAt(2) !== 8
+  ) {
+    throw invalid();
+  }
+  let encoded = 0n;
+  for (let i = 3; i < bytes.length; i++) {
+    const byte = bytes.charCodeAt(i);
+    const isLast = i === bytes.length - 1;
+    if (Boolean(byte & 128) === isLast) throw invalid();
+    encoded |= BigInt(byte & 127) << BigInt(7 * (i - 3));
+  }
+  if ((encoded & 1n) !== 0n || encoded >= 1n << 64n || encoded < 200_000n) {
+    throw invalid();
+  }
+  return `urn:li:${tag === 10 ? "activity" : "ugcPost"}:${encoded >> 1n}`;
+}
 
 /**
  * Selectors for the virtualized linkedin.com/feed/ DOM. Home-feed posts are
@@ -494,6 +542,9 @@ const HOME_FEED_SCRAPE_CONFIG = {
       selector: HOME_FEED_POST_IDENTITY_SELECTOR,
       take: "attr",
       attr: "id",
+      // Exclude the recycled card-key suffix from expansion ownership.
+      regex: "^(.*?)(?:-replaceableCommentTools|$)",
+      group: 1,
     },
     expected: {
       // Keep this aligned with the post-level comment count fields below. The
@@ -589,8 +640,8 @@ const HOME_FEED_SCRAPE_CONFIG = {
       maxWaitMs: 1500,
     },
     post_identity: {
-      // Current feed cards embed the durable id in a translatable-commentary
-      // element id even when every visible anchor points back to /feed/.
+      // Readable commentary URNs and encoded comment-tool ids both carry the
+      // durable post identity. parseRows decodes the latter before ingestion.
       selector: HOME_FEED_POST_IDENTITY_SELECTOR,
       take: "attr",
       attr: "id",
@@ -2943,7 +2994,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.11.10",
+    version: "3.11.11",
     faviconDomain: "linkedin.com",
     // Auth is `none`: every live feed authenticates implicitly through the
     // paired Owletto Chrome extension (the user's own signed-in linkedin.com
@@ -3508,7 +3559,11 @@ export default class LinkedInConnector extends ConnectorRuntime<
         ...HOME_FEED_SCRAPE_CONFIG,
         scroll: { ...HOME_FEED_SCRAPE_CONFIG.scroll, max: maxScrolls },
       },
-      parseRows: (raw) => raw as HomeFeedRow[],
+      parseRows: (raw) =>
+        (raw as HomeFeedRow[]).map((row) => ({
+          ...row,
+          post_identity: decodeHomeFeedPostIdentity(row.post_identity),
+        })),
       allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
       existingTabMatch: "linkedin.com/feed/",
       persistent: true,
