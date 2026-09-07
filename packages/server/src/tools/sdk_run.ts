@@ -6,6 +6,7 @@ import {
   type ToolErrorCode,
 } from "@lobu/core";
 import { resolveSdkMaxAccessLevel } from "../auth/tool-access";
+import { captureEffect } from "../gateway/routes/internal/capture-mode";
 import { buildMcpBearerChallenge } from "../auth/oauth/resource-indicator";
 import { DISCOVERY_SCOPES } from "../auth/oauth/scopes";
 import { isAdminOrOwnerRole } from "./access-control";
@@ -378,8 +379,10 @@ export function classifySdkScriptError(error: {
 }
 
 /**
- * SDK paths a CAPTURE run still dispatches, because the handler behind them
- * enforces capture itself (see `RunScriptOptions.dryRunDispatchPaths`).
+ * SDK paths an EVAL capture run still dispatches, because the handler behind
+ * them enforces capture itself (see `RunScriptOptions.dryRunDispatchPaths`).
+ * A native shadow capture has no window to finalize, so it skips them like
+ * any other write.
  *
  * `automations.completeWindow` is the finalize step the dispatch prompt asks for
  * (automations/automation.ts). Skipping it would leave every eval replay with no
@@ -425,7 +428,8 @@ async function runSandbox(
     ),
     dryRun,
     dryRunDispatchPaths:
-      ctx.executionMode === "capture" ? CAPTURE_DISPATCH_PATHS : undefined,
+      ctx.executionMode === "capture" && ctx.captureIdentity?.automationRunId !== undefined
+        ? CAPTURE_DISPATCH_PATHS : undefined,
     context: {
       organization_id: ctx.organizationId,
       user_id: ctx.userId,
@@ -433,6 +437,12 @@ async function runSandbox(
     },
     limits: args.timeout_ms ? { timeoutMs: args.timeout_ms } : undefined,
   });
+  if (ctx.executionMode === "capture" && result.skippedCalls > 0) {
+    await captureEffect(ctx.captureIdentity, "sdk.run", {
+      skipped_calls: result.skippedCalls,
+      side_effect_preview: result.sideEffectPreview,
+    });
+  }
   // Attach a structured code/retryable to a script error so the agent can tell a
   // transient upstream failure (worth re-running) from a permanent script fault.
   // run_sdk is never auto-retried by the wrapper (arbitrary side effects), so this

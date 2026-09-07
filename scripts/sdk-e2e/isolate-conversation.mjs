@@ -99,9 +99,10 @@ assert.deepEqual(
   [
     ["write", false],
     ["read", false],
+    ["suggest_actions", false],
   ]
 );
 assert.ok(JSON.stringify(results[1].content).includes(marker));
 console.log(
-  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; real write/read and persisted native Pi session verified (shadow=true)`
+  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; real write/read, gateway suggestion call and persisted native Pi session verified (shadow=true)`
 );

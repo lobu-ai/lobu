@@ -5,6 +5,7 @@ import {
 	type WorkerTokenData,
 } from "@lobu/core";
 import type { Context } from "hono";
+import { captureEffect } from "../../routes/internal/capture-mode.js";
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
 import type { McpTool } from "./tool-cache.js";
@@ -162,12 +163,14 @@ export function buildUpstreamHeaders(
 }
 
 /**
- * Compute the credential scope key for upstream session isolation. The only
- * configured MCP server is the internal lobu-memory server (per-user scope),
- * so the scope key is always the user id.
+ * Live upstream sessions are scoped by user. Capture runs get their own key
+ * so they cannot share a session and its policy with live turns or another
+ * capture owner.
  */
-export function computeScopeKey(userId: string): string {
-	return userId;
+export function computeScopeKey(userId: string, worker?: WorkerTokenData): string {
+	return worker?.executionMode === "capture"
+		? JSON.stringify([userId, "capture", worker.automationRunId ?? null, worker.runId ?? null])
+		: userId;
 }
 
 /**
@@ -230,4 +233,12 @@ export function sendJsonRpcError(
 		},
 		200,
 	);
+}
+
+/** Capture before MCP approval or upstream credential resolution. */
+export async function captureMcpTool(
+	worker: WorkerTokenData, mcpId: string, toolName: string, args: Record<string, unknown>,
+) {
+	const result = await captureEffect(worker, `mcp.${mcpId}.${toolName}`, args);
+	return { content: [{ type: "text", text: JSON.stringify(result) }], isError: false };
 }

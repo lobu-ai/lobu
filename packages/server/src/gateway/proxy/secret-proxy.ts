@@ -3,6 +3,7 @@ import { CREDENTIAL_PLACEHOLDER_PREFIX } from "@lobu/connector-worker/egress";
 import { createLogger, type SecretRef, verifyWorkerToken } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { getDb } from "../../db/client.js";
 import { resolveUrlInvariant } from "../auth/inference-invariant.js";
 import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import type { ProviderCredentialContext } from "../embedded.js";
@@ -561,11 +562,13 @@ export class SecretProxy {
 
   /**
    * Verified worker-token claims in resolution order: the dedicated
-   * worker-token first, then the `authorization: Bearer` credential WHEN it
-   * isn't a `lobu_secret_<uuid>` placeholder (the bearer is normally a
-   * placeholder, but legacy callers pass the worker JWT directly). Each entry
-   * is the decoded payload; callers read the first that carries the field they
-   * need, preserving the original per-field fallback precedence.
+   * worker-token first, then the `authorization: Bearer` and `x-api-key`
+   * credentials WHEN they aren't `lobu_secret_<uuid>` placeholders (those
+   * headers normally carry a placeholder, but legacy callers pass the worker
+   * JWT directly, and a native capture turn presents its signed credential in
+   * whichever header the provider protocol uses). Each entry is the decoded
+   * payload; callers read the first that carries the field they need,
+   * preserving the original per-field fallback precedence.
    */
   private verifiedWorkerClaims(
     c: Context
@@ -576,10 +579,11 @@ export class SecretProxy {
       const data = verifyWorkerToken(candidate);
       if (data) out.push(data);
     }
-    const tok = parseBearer(c.req.header("authorization"));
-    if (tok && !tok.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) {
-      const data = verifyWorkerToken(tok);
-      if (data) out.push(data);
+    for (const tok of [parseBearer(c.req.header("authorization")), c.req.header("x-api-key")]) {
+      if (tok && !tok.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) {
+        const data = verifyWorkerToken(tok);
+        if (data) out.push(data);
+      }
     }
     return out;
   }
@@ -692,6 +696,27 @@ export class SecretProxy {
       proxyIdx >= 0
         ? url.pathname.slice(proxyIdx + "/api/proxy".length)
         : url.pathname;
+
+    const capture = this.verifiedWorkerClaims(c).find((claims) => claims.executionMode === "capture");
+    if (capture && capture.automationRunId === undefined) {
+      // Exact admitted inference path: no files, batches, media or other provider.
+      const [row] = await getDb()`
+        SELECT action_input->'turn'->'provider' AS provider FROM runs
+        WHERE id = ${capture.runId ?? null} AND organization_id = ${capture.organizationId ?? null}
+          AND run_type = 'agent_turn' AND status IN ('pending', 'running')
+          AND action_input->'turn'->>'shadow' = 'true'
+          AND action_input->'turn'->>'agent_id' = ${capture.agentId ?? null}
+          AND action_input->'turn'->>'conversation_id' = ${capture.conversationId}
+      `;
+      const provider = row?.provider;
+      const suffix = provider?.api === "anthropic-messages" ? "/v1/messages"
+        : provider?.api === "openai-completions" ? "/chat/completions" : null;
+      const expected = suffix && typeof provider?.base_url === "string"
+        ? new URL(provider.base_url.replace(/\/$/, "") + suffix) : null;
+      if (!expected || c.req.method !== "POST" || url.pathname !== expected.pathname || url.search) {
+        return c.json({ error: "Provider endpoint unavailable during capture" }, 403);
+      }
+    }
 
     // Try slug-based routing: /api/proxy/{slug}/rest/of/path
     let upstreamBaseUrl = this.config.defaultUpstreamUrl;
@@ -878,6 +903,7 @@ export class SecretProxy {
       "upgrade",
       "authorization",
       "x-api-key",
+      "x-lobu-worker-token",
     ]);
     for (const [key, val] of Object.entries(c.req.header())) {
       if (val && !skip.has(key.toLowerCase())) {

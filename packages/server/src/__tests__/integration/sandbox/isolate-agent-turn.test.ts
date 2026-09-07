@@ -459,7 +459,7 @@ describe("agent turn on the isolate lane", () => {
 		// guest never saw a real key: it sent the gateway's placeholder.
 		expect(hits.length).toBe(1);
 		expect(hits[0]?.url).toBe("/v1/messages");
-		expect(hits[0]?.apiKeyHeader).toBe(GATEWAY_PLACEHOLDER);
+		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 		expect(JSON.parse(hits[0]?.body ?? "{}")).toMatchObject({ model: "claude-test", system: expect.anything() });
 	}, 120_000);
 
@@ -509,7 +509,7 @@ describe("agent turn on the isolate lane", () => {
 
 		// Upstream got the gateway's placeholder, so the secret-proxy can still
 		// resolve it...
-		expect(hits[0]?.apiKeyHeader).toBe(GATEWAY_PLACEHOLDER);
+		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 		// ...but what the guest held was a different, per-run placeholder, and the
 		// host recorded spending it. Same audit line a connector's OAuth token gets.
 		const spends = run.logs.filter((l) => l.line.startsWith("credential "));

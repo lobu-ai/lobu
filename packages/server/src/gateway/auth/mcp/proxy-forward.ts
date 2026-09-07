@@ -7,6 +7,7 @@ import type { Context } from "hono";
 import type { McpProxy } from "./proxy.js";
 import {
 	buildSessionKey,
+	captureMcpTool,
 	computeScopeKey,
 	extractSessionToken,
 	getRequestBodyAsText,
@@ -85,6 +86,29 @@ async function handleProxyRequestAuthenticated(
 		}
 	}
 
+	// Fail closed before the live parser's permissive forward-on-error path.
+	if (tokenData.executionMode === "capture") {
+		if (c.req.method !== "POST") {
+			return sendJsonRpcError(c, -32600, "Capture requests require a single JSON-RPC POST");
+		}
+		let rpc;
+		try { rpc = JSON.parse(requestBodyText); } catch {
+			return sendJsonRpcError(c, -32700, "Invalid capture request JSON");
+		}
+		if (!rpc || Array.isArray(rpc) || rpc.jsonrpc !== "2.0") {
+			return sendJsonRpcError(c, -32600, "Capture requests must be single JSON-RPC objects");
+		}
+		if (rpc.method === "tools/call" && typeof rpc.params?.name === "string") {
+			if (!httpServer.internal) {
+				return c.json({ jsonrpc: "2.0", id: rpc.id ?? null,
+					result: await captureMcpTool(tokenData, mcpId, rpc.params.name, rpc.params.arguments ?? {}),
+				});
+			}
+		} else if (!["initialize", "notifications/initialized", "ping", "tools/list"].includes(rpc.method)) {
+			return sendJsonRpcError(c, -32601, "Method unavailable during capture");
+		}
+	}
+
 	// Pre-tool guardrails + tool approval for tools/call JSON-RPC requests.
 	// The bounded body is read once and shared with forwarding. NOTE: this runs
 	// on any POST, NOT gated on grantStore —
@@ -143,7 +167,7 @@ async function handleProxyRequestAuthenticated(
 					}
 
 					// Tool approval is gated on the approval subsystem (grantStore).
-					if (proxy.grantStore) {
+					if (proxy.grantStore && tokenData.executionMode !== "capture") {
 						const approval = await proxy.evaluateToolApproval(
 							mcpId,
 							toolName,
@@ -175,7 +199,7 @@ async function handleProxyRequestAuthenticated(
 		}
 	}
 
-	const scopeKey = computeScopeKey(tokenData.userId);
+	const scopeKey = computeScopeKey(tokenData.userId, tokenData);
 
 	try {
 		return await forwardRequest(proxy, c, httpServer, agentId, mcpId, scopeKey, requestBodyText, {

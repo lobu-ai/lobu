@@ -22,6 +22,7 @@
 import { SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
 import { type Static, Type } from '@sinclair/typebox';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
+import type { CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
 import { ADMIN_TOOLS } from './admin';
@@ -150,6 +151,8 @@ export interface ToolContext {
    * Null/absent means live.
    */
   executionMode?: 'live' | 'capture' | null;
+  /** Verified capture owner; never taken from tool arguments. */
+  captureIdentity?: CaptureIdentity | null;
   /** Whether request was authenticated */
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */

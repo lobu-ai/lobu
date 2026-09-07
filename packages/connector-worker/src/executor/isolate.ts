@@ -400,6 +400,13 @@ interface RunNetwork {
   /** `placeholder\nhost` pairs already logged: one audit line per credential per host, however chatty the connector. */
   spends: Set<string>;
   log: RunLog;
+  /** Native turns use one gateway credential, pinned outside guest control. */
+  agentGateway?: {
+    origin: string;
+    credential: string;
+    inferenceUrl: string;
+    toolPrefixes: string[];
+  };
 }
 
 /**
@@ -652,7 +659,20 @@ export class IsolateExecutor implements SyncExecutor {
       return undefined;
     };
 
-    const network: RunNetwork = { egress, vault, spends: new Set<string>(), log };
+    const network: RunNetwork = {
+      egress, vault, spends: new Set<string>(), log,
+      ...(job.mode === 'agent_turn' && job.credentials?.accessToken ? {
+        agentGateway: {
+          origin: new URL(job.turn.provider.baseUrl).origin,
+          credential: job.credentials.accessToken,
+          inferenceUrl: new URL(job.turn.provider.baseUrl.replace(/\/$/, '') +
+            (job.turn.provider.api === 'anthropic-messages' ? '/v1/messages' : '/chat/completions')).href,
+          toolPrefixes: job.turn.tools
+            ? ['internal', 'mcp'].map((path) => `${job.turn.tools!.gatewayUrl.replace(/\/$/, '')}/${path}/`)
+            : [],
+        },
+      } : {}),
+    };
 
     const fetchOpen = async (request: unknown, body: unknown): Promise<HostFetchReply> => {
       const req = request as GuestFetchRequest;
@@ -844,6 +864,7 @@ export class IsolateExecutor implements SyncExecutor {
         fetchOpen,
         fetchRead,
         socketOpen: async (hostParam: unknown, portParam: unknown, optionsJson: unknown) => {
+          if (job.mode === 'agent_turn') throw refuse(log, 'native agent turns use authenticated gateway HTTP, not raw sockets');
           const rawHost = String(hostParam);
           const hostname = stripIpv6Brackets(rawHost);
           const port = typeof portParam === 'number' ? portParam : parseInt(String(portParam), 10);
@@ -1157,6 +1178,16 @@ export class IsolateExecutor implements SyncExecutor {
 
     for (let hop = 0; ; hop++) {
       await this.assertHostAllowed('fetch', url.hostname, net.log);
+      if (net.agentGateway && url.origin !== net.agentGateway.origin) {
+        throw refuse(net.log, 'native agent turns may fetch only their gateway origin');
+      }
+      if (net.agentGateway &&
+          !(method === 'POST' && url.href === net.agentGateway.inferenceUrl) &&
+          !net.agentGateway.toolPrefixes.some((prefix) => url.href.startsWith(prefix))) {
+        // Same-origin worker response, transcript and public APIs are separate
+        // capabilities. Only the admitted model and capture-aware tools belong here.
+        throw refuse(net.log, 'native agent turns require an admitted inference or tool endpoint');
+      }
       if (hop === 0) {
         // Placeholders resolve only now, with the destination admitted, and only
         // into a destination that may carry a credential: HTTPS, or the run's
@@ -1184,6 +1215,12 @@ export class IsolateExecutor implements SyncExecutor {
           net.spends.add(key);
           net.log('info', `credential ${spend.placeholder.slice(-12)} spent on ${url.hostname} in header ${spend.header}`);
         }
+      }
+      if (net.agentGateway) {
+        // The guest cannot escape capture with an absent/garbage credential or
+        // a competing API-key header. Reapply on redirects within the gateway.
+        for (const name of ['x-api-key', 'x-lobu-worker-token', 'proxy-authorization']) headers.delete(name);
+        headers.set('authorization', `Bearer ${net.agentGateway.credential}`);
       }
       let response: Response;
       try {

@@ -1370,6 +1370,15 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     // Keep the live session intact on a missing header: a compliant retry with
     // the same bearer can continue without an unnecessary re-initialize.
     const freshRequestAuthCtx = c.var.mcpIsAuthenticated ? extractAuthContext(c) : null;
+    // Never reuse live policy for capture, or mutate a concurrent capture's owner.
+    const priorCapture = session.authCtx.executionMode === 'capture';
+    const freshCapture = freshRequestAuthCtx?.executionMode === 'capture';
+    if (priorCapture !== freshCapture || (priorCapture && (
+      session.authCtx.captureIdentity?.runId !== freshRequestAuthCtx?.captureIdentity?.runId ||
+      session.authCtx.captureIdentity?.automationRunId !== freshRequestAuthCtx?.captureIdentity?.automationRunId
+    ))) {
+      return buildJsonRpcErrorResponse('MCP capture identity changed. Re-initialize.', null, 400);
+    }
     if (session.authCtx.tokenType === 'oauth' && freshRequestAuthCtx?.tokenType !== 'oauth') {
       return buildUnauthorizedResponse(
         req,

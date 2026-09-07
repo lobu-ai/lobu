@@ -365,7 +365,7 @@ function modelContextWindow(registryProvider: string, modelId: string): number {
  * `deploymentName` names this lane so a token can never be mistaken for a
  * subprocess deployment's.
  */
-function mintTurnToken(data: MessagePayload, runtime?: AgentRuntimeSelection): string {
+function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRuntimeSelection): string {
   return generateWorkerToken(
     data.userId,
     data.conversationId,
@@ -387,6 +387,10 @@ function mintTurnToken(data: MessagePayload, runtime?: AgentRuntimeSelection): s
         nixPackages: data.nixConfig?.packages,
       }),
       messageId: data.messageId,
+      executionMode: "capture",
+      // A native shadow owns its capture record, even when shadowing an eval.
+      automationRunId: undefined,
+      runId,
     }
   );
 }
@@ -444,24 +448,29 @@ async function resolveShadowProvider(
   }
   const baseUrl = routes[0];
 
-  // With the worker token in its context the base module answers the token
-  // itself, which is what makes one credential serve both hops. A module that
-  // answers something else (its own placeholder scheme) still shadows, but
-  // the turn then has no credential the MCP route would accept.
+  // Every hop must carry the same signed capture credential.
   const credential = module.buildCredentialPlaceholder
     ? await module.buildCredentialPlaceholder(args.agentId, context)
     : "lobu-proxy";
-  if (!credential) {
+  if (credential !== args.workerToken) {
     logger.info(
       { agentId: args.agentId, provider: module.providerId },
-      "Agent turn shadow skipped: the provider produced no credential placeholder"
+      "Agent turn shadow skipped: the provider does not accept the signed capture credential"
     );
     return null;
   }
 
   let host: string;
   try {
-    host = new URL(baseUrl).hostname;
+    const url = new URL(baseUrl);
+    if (url.origin !== new URL(args.gatewayUrl).origin) {
+      logger.info(
+        { agentId: args.agentId, provider: module.providerId },
+        "Agent turn shadow skipped: the provider's proxy base URL leaves the gateway origin"
+      );
+      return null;
+    }
+    host = url.hostname;
   } catch {
     logger.warn(
       { agentId: args.agentId, provider: module.providerId },
@@ -714,7 +723,13 @@ export async function enqueueAgentTurnShadow(
       return;
     }
 
-    const workerToken = mintTurnToken(data, deps.runtime);
+    const sql = getDb();
+    // Allocate identity without publishing a partially assembled pending job.
+    const [allocated] = await sql<{ id: number }>`
+      SELECT nextval(pg_get_serial_sequence('runs', 'id')) AS id
+    `;
+    const runId = allocated!.id;
+    const workerToken = mintTurnToken(data, runId, deps.runtime);
     const provider = await resolveShadowProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
@@ -740,11 +755,6 @@ export async function enqueueAgentTurnShadow(
       logger.info(
         { agentId: data.agentId },
         "Agent turn shadow: the agent exposes MCP as shell commands, which this lane does not carry yet, so the turn runs without tools"
-      );
-    } else if (provider.credential !== workerToken) {
-      logger.info(
-        { agentId: data.agentId, provider: module.providerId },
-        "Agent turn shadow: the provider answers its own credential placeholder, which the MCP route cannot authenticate, so the turn runs without tools"
       );
     } else {
       const resolved = await resolveTurnTools(deps.mcp, {
@@ -898,13 +908,12 @@ export async function enqueueAgentTurnShadow(
       platform_metadata: data.platformMetadata,
     };
 
-    const sql = getDb();
     const rows = await sql<{ id: number }>`
       INSERT INTO runs (
-        organization_id, run_type, status,
+        id, organization_id, run_type, status,
         approval_status, action_input, created_at
       ) VALUES (
-        ${data.organizationId}, 'agent_turn', 'pending',
+        ${runId}, ${data.organizationId}, 'agent_turn', 'pending',
         'auto', ${sql.json({ turn, credential: provider.credential, reply })},
         current_timestamp
       )

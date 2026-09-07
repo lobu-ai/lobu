@@ -7,6 +7,7 @@
  */
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { serve } from '@hono/node-server';
 import { executeRun, WorkerClient } from '@lobu/connector-worker/daemon';
 import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
 import {
@@ -17,6 +18,7 @@ import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload,
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
+import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurnShadow,
   steerActiveAgentTurn,
 } from '../../gateway/orchestration/agent-turn-shadow';
@@ -60,7 +62,7 @@ function claudeModule(overrides: Partial<ModelProviderModule> = {}): ModelProvid
     ) => ({
       ANTHROPIC_BASE_URL: `${proxyUrl}/anthropic/a/${agentId}/o/${context?.organizationId}/u/${context?.userId}`,
     }),
-    buildCredentialPlaceholder: () => 'lobu_secret_11111111-2222-3333-4444-555555555555',
+    buildCredentialPlaceholder: (_agentId: string, context?: { workerToken?: string }) => context?.workerToken,
     ...overrides,
   } as unknown as ModelProviderModule;
 }
@@ -257,6 +259,37 @@ describe('agent turn shadow producer', () => {
 
   afterEach(() => {
     delete process.env[SHADOW_ENV];
+  });
+
+  it('captures a real HTTP interaction made with the producer-minted shadow credential', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
+    const app = createInteractionRoutes({ postLinkButton } as never);
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
+    try {
+      if (!server.listening) await new Promise<void>((resolve) => server.once('listening', resolve));
+      const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/internal/interactions/create`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${run.action_input.credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ interactionType: 'link_button', url: 'https://example.invalid', label: 'Shadow attempt' }),
+      });
+      expect(response.status).toBe(200);
+      expect(postLinkButton).not.toHaveBeenCalled();
+      expect(await response.json()).toMatchObject({ captured: true });
+      expect(verifyWorkerToken(run.action_input.credential as string)).toMatchObject({
+        executionMode: 'capture', runId: run.id, organizationId: org.id,
+      });
+      const [captured] = await getTestDb()`SELECT dry_run_preview FROM runs WHERE id = ${run.id}`;
+      expect(captured.dry_run_preview.side_effects).toMatchObject([{ action: 'interactions.create' }]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it('executes write/edit over worker HTTP and persists the real isolate transcript', async () => {
@@ -473,7 +506,7 @@ describe('agent turn shadow producer', () => {
     // The credential rides OUTSIDE the turn so the poll can lift it onto the
     // response's `credentials` and the worker can conceal it before the guest
     // ever sees a provider key.
-    expect(envelope.credential).toBe('lobu_secret_11111111-2222-3333-4444-555555555555');
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ executionMode: 'capture', runId: rows[0].id });
     expect(JSON.stringify(envelope.turn)).not.toContain('lobu_secret_');
   });
 
@@ -718,14 +751,14 @@ describe('agent turn shadow producer', () => {
     await enqueueAgentTurnShadow(cli, { ...base, mcp: mcpFixture().mcp });
     await toolless();
 
-    // A provider that answers its own placeholder: the MCP route could not
-    // authenticate it, so the tools stay off rather than fail on every call.
+    // A separate placeholder cannot enforce the signed capture policy.
+    const before = (await shadowRuns()).length;
     await enqueueAgentTurnShadow(messageFor(org.id), {
       ...base,
-      catalog: catalogFor(claudeModule()),
+      catalog: catalogFor(claudeModule({ buildCredentialPlaceholder: () => 'lobu_secret_11111111-2222-3333-4444-555555555555' })),
       mcp: mcpFixture().mcp,
     });
-    await toolless();
+    expect(await shadowRuns()).toHaveLength(before);
 
     // Discovery failed: nothing to hand the turn, but the turn itself runs.
     await enqueueAgentTurnShadow(messageFor(org.id), { ...base, mcp: mcpFixture({ fail: true }).mcp });
@@ -1268,7 +1301,7 @@ describe('agent turn shadow producer', () => {
     expect(body.payload.turn.provider.model_id).toBe('claude-opus-4-8');
     expect(body.credentials).toEqual({
       provider: 'anthropic',
-      accessToken: 'lobu_secret_11111111-2222-3333-4444-555555555555',
+      accessToken: expect.any(String),
     });
 
     const sql = getTestDb();

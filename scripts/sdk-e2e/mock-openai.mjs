@@ -36,11 +36,22 @@ function isolateToolReply(messages) {
       name: "read",
       arguments: JSON.stringify({ file_path: "smoke.txt" }),
     };
-  } else {
-    assert.equal(results.length, 2);
+  } else if (results.length === 2) {
     assert.ok(
       JSON.stringify(results[1].content).includes(marker),
       "model did not receive the written file bytes"
+    );
+    call = {
+      name: "suggest_actions",
+      arguments: JSON.stringify({
+        prompts: [{ title: "Continue", message: marker }],
+      }),
+    };
+  } else {
+    assert.equal(results.length, 3);
+    assert.match(
+      JSON.stringify(results[2].content),
+      /Posted 1 suggested action/
     );
   }
   return call

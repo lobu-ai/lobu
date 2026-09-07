@@ -343,7 +343,7 @@ export class McpProxy {
 		}
 
 		const userId = tokenData?.userId;
-		const scopeKey = computeScopeKey(userId);
+		const scopeKey = computeScopeKey(userId, tokenData);
 
 		const discoverOnce = async (): Promise<CachedMcpServer> => {
 			this.upstream.deleteSession(buildSessionKey(agentId, mcpId, scopeKey));
