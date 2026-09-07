@@ -267,7 +267,7 @@ export async function daemonCommand(options: DaemonOptions): Promise<void> {
     defaultPlatform,
     workerId,
     label: options.label?.trim() || undefined,
-    capabilities: (options.capabilities ?? "os.shell,os.files")
+    capabilities: (options.capabilities ?? "os.shell")
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean),

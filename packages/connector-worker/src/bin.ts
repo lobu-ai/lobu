@@ -34,7 +34,7 @@ Options:
                      returns a session OAuth token that expires within 24h;
                      device mode rejects it at startup.
   --capabilities <a,b>  Comma-separated capabilities to advertise (device mode),
-                     e.g. os.files. The server drops anything the platform's
+                     e.g. os.shell. The server drops anything the platform's
                      allowlist does not grant.
   --label <name>     Human-readable device name shown on the Devices page
   --active-org <slug> Org slug used for the action-permissions link printed in device mode
@@ -59,10 +59,10 @@ Examples:
   # Worker daemon
   connector-worker daemon --api-url https://api.example.com
 
-  # Local device worker serving filesystem connectors (local takeout archives)
+  # Local headless device worker running shell commands
   WORKER_API_TOKEN=owl_pat_... connector-worker daemon \\
-    --api-url https://app.lobu.ai --platform macos \\
-    --worker-id "macos:$(hostname -s)" --capabilities os.files \\
+    --api-url https://app.lobu.ai --platform headless \\
+    --worker-id "headless:$(hostname -s)" --capabilities os.shell \\
     --label "$(hostname -s)"
 
   # Connector-runtime parity self-check (CI smoke gate)

@@ -110,6 +110,29 @@ describe("lobu daemon", () => {
     expect(start.mock.calls[0]?.[0]?.apiUrl).toBe("https://app.lobu.ai");
   });
 
+  test.each([
+    ["the os.shell default", undefined, ["os.shell"]],
+    [
+      "a normalized explicit list",
+      " os.shell, ,computer_use ",
+      ["os.shell", "computer_use"],
+    ],
+    ["an explicitly empty list", "", []],
+  ])("forwards %s", async (_case, capabilities, expected) => {
+    const start = spyOn(daemonModule, "startDaemonCommand").mockResolvedValue(
+      undefined as never
+    );
+
+    await daemonCommand({
+      apiUrl: "http://127.0.0.1:9564",
+      workerId: "headless:test-capabilities",
+      capabilities,
+      interactiveSession: false,
+    });
+
+    expect(start.mock.calls[0]?.[0]?.capabilities).toEqual(expected);
+  });
+
   test("forwards activeOrg to startDaemonCommand for permission management link", async () => {
     spyOn(context, "resolveContext").mockResolvedValue({
       name: "prod",
