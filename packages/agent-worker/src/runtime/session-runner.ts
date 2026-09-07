@@ -48,7 +48,7 @@ import {
   resolveDynamicModelApi,
   resolveModelRef,
 } from "./model-resolver";
-import { createLobuResourceLoader } from "./pi-resources";
+import { createLobuResourceLoader } from "@lobu/plugin-toolkit/pi-resources";
 import {
   createLobuSystemPromptRenderer,
   type LobuSystemPromptRenderer,
@@ -223,7 +223,7 @@ export async function buildAgentSession({
 // Memory-flush / compaction utilities
 // (also used by LobuAgentWorker.maybeRunPreCompactionMemoryFlush in worker.ts)
 // The config, the prompt-cost estimate and the state entry type live in
-// @lobu/core (`compaction`), shared with the isolate lane.
+// @lobu/core (`memory-flush`), shared with the isolate lane.
 // ---------------------------------------------------------------------------
 
 export function countCompactionsOnCurrentBranch(

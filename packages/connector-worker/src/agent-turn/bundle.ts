@@ -24,6 +24,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ISOLATE_LANE_BUILD_OPTIONS } from '../compile/index.js';
+import { piSessionBundle } from './pi-session-bundle.js';
 import { piFileToolsBundle } from './pi-file-tools-bundle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -66,6 +67,7 @@ export async function buildAgentGuest(): Promise<string> {
     logLevel: 'silent',
     plugins: [
       piFileToolsBundle(),
+      piSessionBundle(),
       {
         name: 'agent-guest-alias',
         setup(pluginBuild) {

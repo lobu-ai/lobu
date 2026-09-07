@@ -23,6 +23,13 @@ import type {
 import type { CompleteAgentTurnRequest } from "../daemon/client.js";
 
 const WORKER_ID = "fleet-test-worker";
+const SESSION_JSONL = [
+  { type: "session", version: 3, id: "native-session", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/workspace" },
+  { type: "message", id: "user-1", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: "hello", timestamp: 1 } },
+  { type: "message", id: "answer-1", parentId: "user-1", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }], timestamp: 2 } },
+  { type: "custom", id: "flush-1", parentId: "answer-1", timestamp: "2026-01-01T00:00:02.000Z", customType: "lobu.memory_flush_state", data: { compactionCount: 0, outcome: "no_reply" } },
+  { type: "compaction", id: "compact-1", parentId: "flush-1", timestamp: "2026-01-01T00:00:03.000Z", firstKeptEntryId: "user-1", summary: "Greeted the user.", tokensBefore: 10, details: { readFiles: ["a.txt"], modifiedFiles: [] } },
+].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
 
 /**
  * The heartbeat interval a fleet worker actually runs with. Read from the
@@ -104,7 +111,7 @@ function turnJob(overrides: Record<string, unknown> = {}): PollResponse {
         message_id: "msg-1",
         message_text: "hello",
         system_prompt: "be brief",
-        messages: [],
+        session_jsonl: SESSION_JSONL,
         provider: {
           api: "anthropic-messages",
           provider: "anthropic",
@@ -137,19 +144,15 @@ function executorReturning(result: ExecutorResult): SyncExecutor {
 }
 
 describe("executeAgentTurnRun", () => {
-  test("reports the transcript the guest produced", async () => {
+  test("reports the native session the guest produced without reconstructing entries", async () => {
     const reported: Reported = { calls: [] };
-    const transcript = [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: [{ type: "text", text: "hi" }] },
-    ];
     const executor = executorReturning({
       mode: "agent_turn",
       turn: {
         text: "hi",
         stopReason: "stop",
         usage: { input: 3, output: 1 },
-        messages: transcript,
+        sessionJsonl: SESSION_JSONL,
       },
     });
 
@@ -162,14 +165,15 @@ describe("executeAgentTurnRun", () => {
 
     expect(outcome.error).toBeUndefined();
     expect(reported.calls).toHaveLength(1);
-    expect(reported.calls[0]).toMatchObject({
+    expect(reported.calls[0]).toEqual({
       run_id: 4242,
       worker_id: WORKER_ID,
       status: "completed",
       text: "hi",
       stop_reason: "stop",
+      usage: { input: 3, output: 1 },
       exit_reason: "ok",
-      transcript,
+      session_jsonl: SESSION_JSONL,
     });
   });
 
@@ -181,7 +185,7 @@ describe("executeAgentTurnRun", () => {
         seen = job;
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -196,6 +200,7 @@ describe("executeAgentTurnRun", () => {
       modelId: "claude-test",
       baseUrl: "https://gateway.test.invalid/api/proxy/anthropic",
     });
+    expect(seen.turn.sessionJsonl).toBe(SESSION_JSONL);
     expect(seen.turn.systemPrompt).toBe("be brief");
     expect(seen.turn.userMessage).toBe("hello");
     // A turn without tools reaches the guest without a manifest, not with an
@@ -215,7 +220,7 @@ describe("executeAgentTurnRun", () => {
         seen = job;
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -260,7 +265,7 @@ describe("executeAgentTurnRun", () => {
         seen = job;
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -293,7 +298,7 @@ describe("executeAgentTurnRun", () => {
         seen = job;
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -337,7 +342,7 @@ describe("executeAgentTurnRun", () => {
         seen = job;
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -375,7 +380,7 @@ describe("executeAgentTurnRun", () => {
         seen = job;
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -469,7 +474,7 @@ describe("executeAgentTurnRun", () => {
         });
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -518,7 +523,7 @@ describe("executeAgentTurnRun cancellation", () => {
           });
           setTimeout(resolve, 2_000);
         });
-        return { mode: "agent_turn", turn: { text: "never", stopReason: "stop", usage: null, messages: [] } };
+        return { mode: "agent_turn", turn: { text: "never", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL } };
       },
     };
 
@@ -543,7 +548,7 @@ describe("executeAgentTurnRun cancellation", () => {
       execute: async (_code, _job, hooks) => {
         sawSignal = hooks?.signal;
         await new Promise((resolve) => setTimeout(resolve, 30));
-        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL } };
       },
     };
     await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, {
@@ -575,7 +580,7 @@ describe("executeAgentTurnRun steering", () => {
         await new Promise((resolve) => setTimeout(resolve, 60));
         taken.push(hooks?.takeSteering?.() ?? null);
         taken.push(hooks?.takeSteering?.() ?? null);
-        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL } };
       },
     };
     await executeAgentTurnRun(client as never, turnJob(), {}, { ...cfgWith(executor), heartbeatIntervalMs: 5 });
@@ -606,7 +611,7 @@ describe("executeAgentTurnRun remote runtime", () => {
       const executor: SyncExecutor = {
         execute: async (_code, _job, hooks) => {
           result = await hooks?.onRuntimeExec?.({ command: "uname -a", timeoutMs: 5_000 });
-          return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+          return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL } };
         },
       };
       const job = turnJob();
@@ -630,7 +635,7 @@ describe("executeAgentTurnRun remote runtime", () => {
     const executor: SyncExecutor = {
       execute: async (_code, _job, hooks) => {
         offered = typeof hooks?.onRuntimeExec === "function";
-        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL } };
       },
     };
     await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, cfgWith(executor));
@@ -664,7 +669,7 @@ describe("executeAgentTurnRun streaming", () => {
             text: "the isolate lane answered",
             stopReason: "stop",
             usage: null,
-            messages: [],
+            sessionJsonl: SESSION_JSONL,
           },
         };
       },
@@ -702,7 +707,7 @@ describe("executeAgentTurnRun streaming", () => {
         await new Promise((resolve) => setTimeout(resolve, 40));
         return {
           mode: "agent_turn",
-          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -738,7 +743,7 @@ describe("executeAgentTurnRun streaming", () => {
         await new Promise((resolve) => setTimeout(resolve, 1_200));
         return {
           mode: "agent_turn",
-          turn: { text: "first second", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "first second", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -787,7 +792,7 @@ describe("executeAgentTurnRun streaming", () => {
         await new Promise((resolve) => setTimeout(resolve, 400));
         return {
           mode: "agent_turn",
-          turn: { text: whole, stopReason: "stop", usage: null, messages: [] },
+          turn: { text: whole, stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -827,7 +832,7 @@ describe("executeAgentTurnRun streaming", () => {
         await new Promise((resolve) => setTimeout(resolve, 120));
         return {
           mode: "agent_turn",
-          turn: { text: "alphabeta", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "alphabeta", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -885,7 +890,7 @@ describe("executeAgentTurnRun streaming", () => {
         await new Promise((resolve) => setTimeout(resolve, 120));
         return {
           mode: "agent_turn",
-          turn: { text: "unacked", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "unacked", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -933,7 +938,7 @@ describe("executeAgentTurnRun streaming", () => {
         await new Promise((resolve) => setTimeout(resolve, 120));
         return {
           mode: "agent_turn",
-          turn: { text: "done", stopReason: "stop", usage: null, messages: [] },
+          turn: { text: "done", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
         };
       },
     };
@@ -969,7 +974,7 @@ describe("executeAgentTurnRun streaming", () => {
         text: "I posted it above.",
         stopReason: "stop",
         usage: null,
-        messages: [],
+        sessionJsonl: SESSION_JSONL,
         repliedInBand: true,
       },
     });
@@ -991,7 +996,7 @@ describe("executeAgentTurnRun streaming", () => {
     const reported: Reported = { calls: [] };
     const executor = executorReturning({
       mode: "agent_turn",
-      turn: { text: "hi", stopReason: "stop", usage: null, messages: [] },
+      turn: { text: "hi", stopReason: "stop", usage: null, sessionJsonl: SESSION_JSONL },
     });
 
     await executeAgentTurnRun(

@@ -366,8 +366,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       )
     ),
     system_prompt: Type.String(),
-    /** The transcript this turn continues, oldest first, in pi's message shape. */
-    messages: Type.Array(Type.Record(Type.String(), Type.Unknown())),
+    /** Native Pi session JSONL, read after this conversation's claim is admitted. */
+    session_jsonl: Type.String(),
     provider: Type.Object({
       api: Type.Union([
         Type.Literal("anthropic-messages"),
@@ -508,12 +508,6 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       })
     ),
     /**
-     * The stored entry each `messages[i]` replays, in the same order. A
-     * compaction the guest plans by message index is written back as pi's
-     * `firstKeptEntryId` through this list. Absent → the turn cannot compact.
-     */
-    message_entry_ids: Type.Optional(Type.Array(Type.String())),
-    /**
      * pi's compaction settings for this turn plus the model's context window,
      * which is what the trigger is measured against. Absent → no compaction.
      */
@@ -528,8 +522,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
     /**
      * Lobu's pre-compaction memory flush: a silent prompt asking the model to
      * store what it would lose, run once per compaction cycle when the next
-     * prompt would land within `soft_threshold_tokens` of compaction. `due` is
-     * false when this cycle already flushed. Absent → no flush.
+     * prompt would land within `soft_threshold_tokens` of compaction. Whether it
+     * is due is derived from the native session entries. Absent → no flush.
      */
     memory_flush: Type.Optional(
       Type.Object({
@@ -537,7 +531,6 @@ export const AgentTurnPollPayloadSchema = Type.Object({
         soft_threshold_tokens: Type.Integer({ minimum: 0 }),
         system_prompt: Type.String(),
         prompt: Type.String(),
-        due: Type.Boolean(),
       })
     ),
     /**
@@ -809,7 +802,7 @@ export const CompleteDeviceChatResponseSchema = Type.Object({
 /**
  * `POST /api/workers/complete-agent-turn`.
  *
- * `transcript` is what the turn produced, to resume the next one from. A shadow
+ * `session_jsonl` is Pi's native session state, to resume the next turn. A shadow
  * run reports it and nothing else happens; when the lane becomes authoritative
  * the same body carries the reply.
  */
@@ -825,9 +818,8 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
       Type.Null(),
     ])
   ),
-  transcript: Type.Optional(
-    Type.Array(Type.Record(Type.String(), Type.Unknown()))
-  ),
+  /** Required for success; may be absent when the guest failed before session initialization. */
+  session_jsonl: Type.Optional(Type.String()),
   /**
    * The turn already posted its answer INTO the conversation it is replying to,
    * through the `send_message`/`present_event` conversation tool. The user has
@@ -840,30 +832,6 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * (`chat-response-bridge`) already acts on it.
    */
   replied_in_band: Type.Optional(Type.Boolean()),
-  /**
-   * The turn compacted the conversation after answering: pi's summary and the
-   * index into `transcript` of the first message kept verbatim. The completion
-   * route writes it as a `compaction` entry, so the next turn — on either lane
-   * — resumes from the summary.
-   */
-  compaction: Type.Optional(
-    Type.Object({
-      summary: Type.String(),
-      first_kept_index: Type.Integer({ minimum: 0 }),
-      tokens_before: Type.Integer({ minimum: 0 }),
-    })
-  ),
-  /**
-   * The turn ran the pre-compaction memory flush before answering; its
-   * exchange sits in `transcript` up to `after_index`. Recorded as the
-   * `lobu.memory_flush_state` entry the subprocess lane writes.
-   */
-  memory_flush: Type.Optional(
-    Type.Object({
-      outcome: Type.Union([Type.Literal("stored"), Type.Literal("no_reply")]),
-      after_index: Type.Integer({ minimum: 0 }),
-    })
-  ),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   exit_reason: Type.Optional(WorkerExitReasonSchema),
 });

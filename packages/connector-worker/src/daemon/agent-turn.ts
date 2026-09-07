@@ -272,7 +272,7 @@ export async function executeAgentTurnRun(
             ...(turn.provider.input ? { input: turn.provider.input } : {}),
           },
           systemPrompt: turn.system_prompt,
-          messages: turn.messages,
+          sessionJsonl: turn.session_jsonl,
           userMessage: turn.message_text,
           // Attachment bytes the gateway already resolved out of its artifact
           // store. The guest fetches nothing: an attachment URL never reaches
@@ -371,7 +371,6 @@ export async function executeAgentTurnRun(
                   softThresholdTokens: turn.memory_flush.soft_threshold_tokens,
                   systemPrompt: turn.memory_flush.system_prompt,
                   prompt: turn.memory_flush.prompt,
-                  due: turn.memory_flush.due,
                 },
               }
             : {}),
@@ -468,25 +467,8 @@ export async function executeAgentTurnRun(
       text: result.turn.text,
       stop_reason: result.turn.stopReason,
       usage: result.turn.usage,
-      transcript: result.turn.messages,
+      session_jsonl: result.turn.sessionJsonl,
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
-      ...(result.turn.compaction
-        ? {
-            compaction: {
-              summary: result.turn.compaction.summary,
-              first_kept_index: result.turn.compaction.firstKeptIndex,
-              tokens_before: result.turn.compaction.tokensBefore,
-            },
-          }
-        : {}),
-      ...(result.turn.memoryFlush
-        ? {
-            memory_flush: {
-              outcome: result.turn.memoryFlush.outcome,
-              after_index: result.turn.memoryFlush.afterIndex,
-            },
-          }
-        : {}),
       exit_reason: 'ok',
     });
     log.info(

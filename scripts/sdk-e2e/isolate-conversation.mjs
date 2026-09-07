@@ -72,8 +72,27 @@ assert.equal(run.run_type, "agent_turn");
 assert.equal(run.input.turn.shadow, true);
 assert.equal(run.input.turn.agent_id, "isolate-smoke");
 assert.equal(run.input.result.text, marker);
-const results = run.input.result.transcript.filter(
-  (entry) => entry.role === "toolResult"
+assert.equal(typeof run.input.result.session_jsonl, "string");
+const [header, ...entries] = run.input.result.session_jsonl
+  .split("\n")
+  .filter((line) => line.trim())
+  .map((line) => JSON.parse(line));
+assert.equal(header.type, "session");
+assert.equal(header.version, 3);
+assert.ok(header.id);
+assert.equal(new Set(entries.map((entry) => entry.id)).size, entries.length);
+const messages = entries
+  .filter((entry) => entry.type === "message")
+  .map((entry) => entry.message);
+const results = messages.filter((entry) => entry.role === "toolResult");
+const calls = messages.flatMap((entry) =>
+  entry.role === "assistant"
+    ? entry.content.filter((block) => block.type === "toolCall")
+    : []
+);
+assert.deepEqual(
+  results.map((result) => result.toolCallId),
+  calls.map((call) => call.id)
 );
 assert.deepEqual(
   results.map((entry) => [entry.toolName, entry.isError]),
@@ -84,5 +103,5 @@ assert.deepEqual(
 );
 assert.ok(JSON.stringify(results[1].content).includes(marker));
 console.log(
-  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; real write/read and persisted transcript verified (shadow=true)`
+  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; real write/read and persisted native Pi session verified (shadow=true)`
 );

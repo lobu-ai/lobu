@@ -54,7 +54,9 @@ import {
   type LoadExtensionsResult,
   type ResourceLoader,
 } from "@mariozechner/pi-coding-agent";
-import type { LobuSystemPromptRenderer } from "./system-prompt.js";
+import type { BuildSystemPromptOptions } from "@mariozechner/pi-coding-agent";
+
+type LobuSystemPromptRenderer = (context?: BuildSystemPromptOptions) => string;
 
 /** Identifies our synthetic extension in pi's diagnostics and error reports. */
 const SYSTEM_PROMPT_EXTENSION_PATH = "<lobu:system-prompt>";

@@ -10,7 +10,7 @@
  * Runs in CI's format-lint job beside the other source-scanning gates.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { createConversationTools } from "@lobu/plugin-conversations";
@@ -90,6 +90,22 @@ describe("isolate lane parity with the subprocess lane", () => {
       .sort();
     expect(gateway).toEqual(conversationTools);
     expect(media).toEqual(mediaTools);
+  });
+
+  it("uses Pi's native session lifecycle and deletes the copied compaction implementation", () => {
+    const session = read(
+      "packages/connector-worker/src/agent-turn/native-session.ts"
+    );
+    expect(session).toContain("@mariozechner/pi-coding-agent");
+    expect(session).toMatch(/(?:new AgentSession|createAgentSession)\(/);
+    expect(session).toContain("SessionManager");
+    const guest = read(
+      "packages/connector-worker/src/agent-turn/guest-entry.ts"
+    );
+    expect(guest).toContain("./native-session.js");
+    expect(existsSync(join(REPO_ROOT, "packages/core/src/compaction.ts"))).toBe(
+      false
+    );
   });
 
   it("runs the memory plugin's hooks, not a reimplementation", () => {

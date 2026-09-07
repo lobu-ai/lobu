@@ -5,7 +5,7 @@
 export * from "./agent-policy";
 export * from "./tool-policy";
 export * from "./turn-control";
-export * from "./compaction";
+export * from "./memory-flush";
 // Agent store interface (unified storage abstraction)
 export type {
   AgentAccessStore,

@@ -169,19 +169,12 @@ export interface AgentTurnConversation {
   platform: string;
 }
 
-/**
- * One transcript entry, in pi's own `AgentMessage` shape. The host does not
- * interpret it; it round-trips whatever the guest returns back into the run row
- * so the next turn resumes from it.
- */
-export type AgentTurnMessage = Record<string, unknown>;
-
 /** Everything a single turn needs. */
 export interface AgentTurnInput {
   provider: AgentTurnProvider;
   systemPrompt: string;
-  /** The transcript this turn continues, oldest first. */
-  messages: AgentTurnMessage[];
+  /** Native Pi session JSONL; empty for a new conversation. */
+  sessionJsonl: string;
   /** What the human just said. Empty when the turn carries only attachments. */
   userMessage: string;
   /**
@@ -205,9 +198,9 @@ export interface AgentTurnInput {
    */
   memory?: AgentTurnMemory;
   /**
-   * pi's compaction settings and the model's context window. After answering,
-   * a turn past `contextWindow - reserveTokens` summarises its history the way
-   * pi does and reports the result. Absent → the turn never compacts.
+   * pi's compaction settings and the model's context window. Pi's own
+   * auto-compaction runs inside the session, and its `compaction` entry comes
+   * back in `sessionJsonl`. Absent → the turn never compacts.
    */
   compaction?: AgentTurnCompaction;
   /**
@@ -231,8 +224,6 @@ export interface AgentTurnMemoryFlush {
   softThresholdTokens: number;
   systemPrompt: string;
   prompt: string;
-  /** False when a flush already ran since the last compaction. */
-  due: boolean;
 }
 
 /** Whether this turn recalls and captures long-term memory, and as whom. */
@@ -291,8 +282,8 @@ export interface AgentTurnOutput {
   text: string;
   stopReason: string | null;
   usage: { input: number; output: number } | null;
-  /** The transcript after the turn, to persist and resume from. */
-  messages: AgentTurnMessage[];
+  /** Pi's native session, including message IDs, summaries and custom state. */
+  sessionJsonl: string;
   /**
    * The turn posted its answer INTO the conversation it is replying to, with
    * `send_message`/`present_event`. `text` is then a report about a message the
@@ -301,8 +292,4 @@ export interface AgentTurnOutput {
    * suppression does the rest.
    */
   repliedInBand?: boolean;
-  /** The compaction this turn performed after answering, if it did. */
-  compaction?: { summary: string; firstKeptIndex: number; tokensBefore: number };
-  /** The memory flush this turn ran before answering, if it did. */
-  memoryFlush?: { outcome: 'stored' | 'no_reply'; afterIndex: number };
 }

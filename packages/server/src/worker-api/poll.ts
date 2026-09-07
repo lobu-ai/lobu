@@ -1069,7 +1069,24 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       LIMIT 1
     `;
 
-      return rows[0] ?? null;
+      const row = rows[0];
+      if (row?.run_type === 'agent_turn') {
+        const input = row.action_input as { turn?: Record<string, unknown> } | null;
+        const turn = input?.turn;
+        if (typeof turn?.agent_id === 'string' && turn.agent_id.trim()
+          && typeof turn.conversation_id === 'string' && turn.conversation_id.trim()) {
+          // Read only after admission, while the conversation claim is held.
+          // A read failure rolls back the claim so the next poll can retry.
+          const sessionJsonl = await readSnapshotJsonl({
+            organizationId: candidate.organization_id ?? undefined,
+            agentId: turn.agent_id,
+            conversationId: turn.conversation_id,
+            client: tx,
+          });
+          row.action_input = { ...input, turn: { ...turn, session_jsonl: sessionJsonl ?? '' } };
+        }
+      }
+      return row ?? null;
     });
 
   const claimWithDiagnostics = async () => {
@@ -1213,8 +1230,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const isDeviceOwnedRun = isUserScopedWorker && row.connector_manifest_backed;
 
   // An agent turn ships its whole envelope in `action_input`: the producer
-  // already resolved the model, the prompt, the transcript and the gateway
-  // proxy, so there is nothing for the poll to look up. The provider
+  // resolved the model, prompt and proxy; the claim refreshed the native
+  // session snapshot after all earlier turns finished. The provider
   // credential is lifted OUT of the payload and onto the response's
   // `credentials`, so the worker host conceals it behind a per-run placeholder
   // the way it does a connector's OAuth token — the guest never sees either.

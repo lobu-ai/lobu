@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLobuResourceLoader } from "../runtime/pi-resources";
+import { createLobuResourceLoader } from "@lobu/plugin-toolkit/pi-resources";
 import { buildAgentSession } from "../runtime/session-runner";
 import { createLobuTools } from "../runtime/tools";
 

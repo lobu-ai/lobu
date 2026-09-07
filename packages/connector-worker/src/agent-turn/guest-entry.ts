@@ -4,10 +4,10 @@
  * portable: no `node:` import, no host module, nothing the guest prelude does
  * not provide.
  *
- * It runs one turn of pi's agent loop. The loop itself (`pi-agent-core`) has no
- * Node dependency; the provider call is pi-ai's fetch-native Anthropic or
- * OpenAI path, which reaches the network through the prelude's streaming
- * `fetch` and therefore through the host's one egress module. A tool call is
+ * It runs Pi's original AgentSession with an in-memory SessionManager. The
+ * provider call is pi-ai's fetch-native Anthropic or OpenAI path, which
+ * reaches the network through the prelude's streaming `fetch` and therefore
+ * through the host's one egress module. A tool call is
  * the same kind of request to the same host: the gateway's MCP route, over the
  * same `fetch`, under the same allowlist. A workspace tool never leaves the
  * isolate at all: `bash` is just-bash over an in-memory filesystem that lives
@@ -19,23 +19,12 @@
  * provider credential and the MCP route accepts it as the bearer.
  */
 
-import { Agent } from '@mariozechner/pi-agent-core';
-import type { AgentTool } from '@mariozechner/pi-agent-core';
-import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
-import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
+import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
-import {
-  estimateContextTokens,
-  estimatePromptTokenCost,
-  finishCompaction,
-  planCompaction,
-  type SessionMessage,
-  shouldCompact,
-  type SummaryRequest,
-  summaryRequests,
-} from '@lobu/core/compaction';
+import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
+import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 import { createWorkspace, type AgentWorkspace } from './workspace.js';
 
@@ -52,35 +41,6 @@ const TOOL_CALL_TIMEOUT_MS = 120_000;
 
 /** What of a tool's output the host sees in the event stream. */
 const TOOL_EVENT_OUTPUT_CHARS = 2_000;
-
-/**
- * The model object pi-ai reads. The gateway resolves which model a turn runs,
- * not its price list or its window, so the fields pi only uses for bookkeeping
- * are zeroed rather than guessed. `cost` carries all FOUR keys: pi divides by
- * each one to price a turn, so a missing `cacheRead`/`cacheWrite` puts NaN in
- * the transcript entry the next turn resumes from.
- */
-function buildModel(input: AgentTurnInput): Record<string, unknown> {
-  return {
-    id: input.provider.modelId,
-    name: input.provider.modelId,
-    api: input.provider.api,
-    provider: input.provider.provider,
-    baseUrl: input.provider.baseUrl,
-    reasoning: false,
-    // The gateway resolves this from pi-ai's model registry and puts it on the
-    // wire; pi reads it to decide whether an image block survives into the
-    // request (`transformMessages` downgrades every one to a placeholder when
-    // `'image'` is absent). Defaulting to text only means a turn never sends an
-    // image to a model nobody said could read one.
-    input: input.provider.input ?? ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    // Only read to decide when to compact, which this lane never does: one
-    // turn, one request, and the gateway owns the history it sends.
-    contextWindow: 200_000,
-    maxTokens: input.provider.maxTokens ?? 8192,
-  };
-}
 
 /** The MCP proxy's REST reply for a tool call. */
 interface McpToolReply {
@@ -242,29 +202,7 @@ function describeFiles(files: AgentTurnInput['files']): string {
 }
 
 /**
- * The user turn pi is prompted with.
- *
- * Built as a message rather than passed to `prompt(text, images)` because that
- * overload always emits a text block, empty text included — which is exactly
- * the attachment-only turn. The Anthropic adapter drops a blank block on its
- * way out, but the OpenAI one maps every block through, so the empty one would
- * reach the provider and be rejected. Omitting it here fixes both lanes at
- * once, and leaves the image-only user turn as just its image, which is a
- * request both providers accept.
- */
-function buildUserMessage(input: AgentTurnInput, userText: string): Record<string, unknown> {
-  const content: Array<Record<string, unknown>> = [];
-  const text = [userText, describeFiles(input.files)].filter((part) => part.trim().length > 0).join('\n\n');
-  if (text.length > 0) content.push({ type: 'text', text });
-  // pi's `ImageContent`: the base64 payload and its media type, nothing else.
-  for (const image of input.images ?? []) {
-    content.push({ type: 'image', data: image.data, mimeType: image.mimeType });
-  }
-  return { role: 'user', content, timestamp: Date.now() };
-}
-
-/**
- * Run one turn and resolve with the transcript it produced.
+ * Run one turn and resolve with its native Pi session checkpoint.
  *
  * `emit` is the host bridge: every call crosses into the worker while the
  * stream is still open, which is what makes a delta on this lane arrive at the
@@ -278,8 +216,6 @@ export async function runAgentTurn(
 ): Promise<AgentTurnOutput> {
   const credential = input.provider.apiKey;
   if (!credential) throw new Error('the agent turn reached the guest with no credential');
-  const model = buildModel(input);
-  const stream = input.provider.api === 'anthropic-messages' ? streamAnthropic : streamOpenAICompletions;
 
   // Long-term memory, if this turn has any. `@lobu/plugin-memory`'s own hooks,
   // dispatched through the real `PluginHost`, over the MCP route this turn
@@ -304,13 +240,6 @@ export async function runAgentTurn(
         })
       : null;
 
-  // The recall block is PREPENDED to what the human said, which is where the
-  // subprocess lane puts it too (`prependContexts` ahead of the user prompt).
-  // The model therefore sees the same turn on either lane, and the capture's
-  // own `<lobu-memory>` stripping keeps the block out of what gets saved.
-  const recalled = memory ? await memory.recall(input.userMessage, input.messages) : '';
-  const prompt = recalled ? `${recalled}\n\n${input.userMessage}` : input.userMessage;
-
   let toolCalls = 0;
   // `ask_user` hands the conversation back to the human: the question is posted
   // as buttons and the click returns as a NEW inbound message, which is a new
@@ -324,266 +253,185 @@ export async function runAgentTurn(
   // terminal delivery on exactly this signal; this lane reports it out so the
   // completion route can stamp the flag the renderers already act on.
   let repliedInBand = false;
-  const agent = new Agent({
-    initialState: {
-      systemPrompt: input.systemPrompt,
-      model: model as never,
-      messages: input.messages as never,
-      tools: buildTools(
-        input,
-        credential,
-        () => {
-          askedUser = true;
-        },
-        () => {
-          repliedInBand = true;
-        },
-        emit,
-        runtimeExec
-      ),
-    },
-    // pi hands the loop's own options through; the key rides here rather than
-    // in the model so it never lands in a transcript entry.
-    streamFn: ((m: unknown, context: unknown, options: Record<string, unknown> | undefined) =>
-      (stream as (a: unknown, b: unknown, c: unknown) => unknown)(m, context, {
-        ...(options ?? {}),
-        apiKey: credential,
-      })) as never,
-    beforeToolCall: async () => {
-      if (askedUser) {
-        return {
-          block: true,
-          reason: 'You have already asked the user a question; this turn is over. Stop and wait for their reply.',
-        };
-      }
-      toolCalls += 1;
-      if (toolCalls <= MAX_TOOL_CALLS_PER_TURN) return undefined;
+  let transientContext: string | undefined;
+  const tools = buildTools(
+    input,
+    credential,
+    () => { askedUser = true; },
+    () => { repliedInBand = true; },
+    emit,
+    runtimeExec
+  );
+  const session = createNativeSession(input, tools, () => transientContext);
+  session.subscribe((event) => {
+    if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
+  });
+  const agent = session.agent;
+  const nativeBeforeToolCall = agent.beforeToolCall;
+  agent.beforeToolCall = async (context) => {
+    if (askedUser) {
       return {
         block: true,
-        reason: `This turn's tool-call budget (${MAX_TOOL_CALLS_PER_TURN}) is spent; answer with what you have.`,
+        reason: 'You have already asked the user a question; this turn is over. Stop and wait for their reply.',
       };
-    },
-  });
-
-  let text = '';
-  let stopReason: string | null = null;
-  let usage: AgentTurnOutput['usage'] = null;
-  // While the pre-compaction memory flush runs, nothing it produces is the
-  // turn's answer: no deltas leave the isolate and no text is kept.
-  let flushing = false;
-  // pi does not throw a failed provider call: it ends the turn with an
-  // assistant message whose stopReason is 'error'. On this lane a failed turn
-  // must be a failed RUN, or the job completes 'successfully' with no text.
-  let failure: string | null = null;
-
-  // pi drains its steering queue between model calls. Ask the host for what
-  // arrived at exactly those points — after an assistant message, after a tool
-  // result — and queue it as the user message it is, so the model sees the
-  // follow-up on this lane where the subprocess lane's session would.
-  const steer = () => {
-    if (flushing) return;
-    for (const message of takeSteering()) {
-      agent.steer({
-        role: 'user',
-        content: [{ type: 'text', text: message.text }],
-        timestamp: Date.now(),
-      } as never);
     }
+    toolCalls += 1;
+    if (toolCalls <= MAX_TOOL_CALLS_PER_TURN) return nativeBeforeToolCall?.(context);
+    return {
+      block: true,
+      reason: `This turn's tool-call budget (${MAX_TOOL_CALLS_PER_TURN}) is spent; answer with what you have.`,
+    };
   };
 
-  agent.subscribe((event) => {
-    if (event.type === 'tool_execution_end' || (event.type === 'message_end' && (event.message as { role?: string }).role === 'assistant')) {
-      steer();
-    }
-    if (flushing) return;
-    if (event.type === 'message_update') {
-      const partial = event.assistantMessageEvent as { type?: string; delta?: string };
-      if (partial.type === 'text_delta' && typeof partial.delta === 'string') {
-        text += partial.delta;
-        emit({ type: 'text_delta', delta: partial.delta });
-      } else if (partial.type === 'thinking_delta' && typeof partial.delta === 'string') {
-        emit({ type: 'thinking_delta', delta: partial.delta });
-      }
-      return;
-    }
-    if (event.type === 'message_end') {
-      const message = event.message as unknown as {
-        role?: string;
-        stopReason?: string;
-        errorMessage?: string;
-        usage?: { input?: number; output?: number };
-      };
-      // Tool results end a message too; only the assistant's own carry the
-      // turn's outcome.
-      if (message.role !== 'assistant') return;
-      if (typeof message.stopReason === 'string') stopReason = message.stopReason;
-      if (typeof message.errorMessage === 'string' && message.errorMessage) failure = message.errorMessage;
-      if (message.usage) {
-        usage = {
-          input: (usage?.input ?? 0) + (message.usage.input ?? 0),
-          output: (usage?.output ?? 0) + (message.usage.output ?? 0),
-        };
-      }
-      emit({ type: 'message_end' });
-      return;
-    }
-    if (event.type === 'tool_execution_start') {
-      emit({ type: 'tool_call_start', toolCallId: event.toolCallId, name: event.toolName, args: event.args });
-      return;
-    }
-    if (event.type === 'tool_execution_end') {
-      const result = event.result as { content?: Array<{ type?: string; text?: string }> };
-      emit({
-        type: 'tool_call_end',
-        toolCallId: event.toolCallId,
-        name: event.toolName,
-        isError: event.isError,
-        output: clip(joinText(result?.content)),
-      });
-    }
-  });
+  try {
+    const recalled = memory ? await memory.recall(input.userMessage, agent.state.messages) : '';
+    transientContext = [recalled, describeFiles(input.files)].filter(Boolean).join('\n\n');
 
-  // `prompt` is the human's text with the memory recall block prepended, so the
-  // attachment-aware message carries the recall too — dropping either one here
-  // would silently cost a capability the other lane has.
-  const userMessage = buildUserMessage(input, prompt);
-  if ((userMessage.content as unknown[]).length === 0) {
-    throw new Error('the agent turn reached the guest with neither text nor a readable attachment');
-  }
+    let text = '';
+    let stopReason: string | null = null;
+    let usage: AgentTurnOutput['usage'] = null;
+    // While the pre-compaction memory flush runs, nothing it produces is the
+    // turn's answer: no deltas leave the isolate and no text is kept.
+    let flushing = false;
 
-  // Lobu's pre-compaction memory flush, as the subprocess lane runs it: when
-  // this prompt would land within the soft threshold of compaction and this
-  // cycle has not flushed yet, ask the model — silently, with its memory tools
-  // — to store what it is about to lose. A failed flush never fails the turn.
-  let memoryFlush: AgentTurnOutput['memoryFlush'];
-  const flush = input.memoryFlush;
-  const compaction = input.compaction;
-  if (flush?.enabled && flush.due && compaction?.enabled && memory) {
-    const projected =
-      estimateContextTokens(input.messages as SessionMessage[]).tokens +
-      estimatePromptTokenCost(prompt, input.images?.length ?? 0);
-    const threshold = compaction.contextWindow - compaction.reserveTokens - flush.softThresholdTokens;
-    if (projected >= threshold) {
-      flushing = true;
-      try {
-        await agent.prompt({
+    // pi drains its steering queue between model calls. Ask the host for what
+    // arrived at exactly those points — after an assistant message, after a tool
+    // result — and queue it as the user message it is, so the model sees the
+    // follow-up on this lane where the subprocess lane's session would.
+    const steer = () => {
+      if (flushing) return;
+      for (const message of takeSteering()) {
+        agent.steer({
           role: 'user',
-          content: [{ type: 'text', text: `${flush.systemPrompt}\n\n${flush.prompt}` }],
+          content: [{ type: 'text', text: message.text }],
           timestamp: Date.now(),
         } as never);
-        await agent.waitForIdle();
-        const messages = agent.state.messages as unknown as SessionMessage[];
-        const reply = latestAssistantText(messages);
-        memoryFlush = {
-          outcome: reply !== null && /^\W*NO_REPLY\W*$/i.test(reply.trim()) ? 'no_reply' : 'stored',
-          afterIndex: messages.length - 1,
-        };
-      } catch (error) {
-        console.warn('pre-compaction memory flush failed; continuing with the turn', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      } finally {
-        flushing = false;
       }
-    }
-  }
+    };
 
-  const mainUserIndex = agent.state.messages.length;
-  await agent.prompt(userMessage as never);
-  await agent.waitForIdle();
-
-  const stateError = (agent.state as { errorMessage?: string }).errorMessage;
-  const ended = failure ?? (typeof stateError === 'string' && stateError ? stateError : null);
-
-  // Capture BEFORE returning, and await it. `agentEnd` itself only starts the
-  // write; on the subprocess lane the worker process outlives the turn and the
-  // write lands on its own, but this isolate is disposed the moment this
-  // function resolves, so an unawaited capture would be cancelled every time
-  // and memory would silently stop accumulating for every agent on this lane.
-  // A failed turn still fires the hook — with its error, which is how the
-  // plugin knows not to save a broken exchange.
-  if (memory) {
-    await memory.capture(agent.state.messages as unknown as readonly unknown[], ended ?? undefined);
-  }
-
-  if (ended) throw new Error(ended);
-
-  // pi compacts after the agent ends, when the context has outgrown the
-  // window less the reserve. The plan and the prompts are pi's; the summary
-  // comes back through the same stream the turn answered with. A failed
-  // summary never fails the turn — the conversation simply stays uncompacted.
-  let compacted: AgentTurnOutput['compaction'];
-  if (compaction?.enabled) {
-    const messages = agent.state.messages as unknown as SessionMessage[];
-    const estimate = estimateContextTokens(messages);
-    if (shouldCompact(estimate.tokens, compaction.contextWindow, compaction)) {
-      try {
-        const plan = planCompaction(messages, compaction);
-        if (plan) {
-          const requests = summaryRequests(plan);
-          const [history, turnPrefix] = await Promise.all([
-            requests.history ? completeText(requests.history) : Promise.resolve(undefined),
-            requests.turnPrefix ? completeText(requests.turnPrefix) : Promise.resolve(undefined),
-          ]);
-          compacted = finishCompaction(plan, history, turnPrefix);
+    agent.subscribe((event) => {
+      if (event.type === 'tool_execution_end' || (event.type === 'message_end' && (event.message as { role?: string }).role === 'assistant')) {
+        steer();
+      }
+      if (flushing) return;
+      if (event.type === 'message_update') {
+        const partial = event.assistantMessageEvent as { type?: string; delta?: string };
+        if (partial.type === 'text_delta' && typeof partial.delta === 'string') {
+          text += partial.delta;
+          emit({ type: 'text_delta', delta: partial.delta });
+        } else if (partial.type === 'thinking_delta' && typeof partial.delta === 'string') {
+          emit({ type: 'thinking_delta', delta: partial.delta });
         }
-      } catch (error) {
-        console.warn('compaction failed; the conversation stays uncompacted', {
-          error: error instanceof Error ? error.message : String(error),
+        return;
+      }
+      if (event.type === 'message_end') {
+        const message = event.message as unknown as {
+          role?: string;
+          stopReason?: string;
+          errorMessage?: string;
+          usage?: { input?: number; output?: number };
+        };
+        // Tool results end a message too; only the assistant's own carry the
+        // turn's outcome.
+        if (message.role !== 'assistant') return;
+        if (typeof message.stopReason === 'string') stopReason = message.stopReason;
+        if (message.usage) {
+          usage = {
+            input: (usage?.input ?? 0) + (message.usage.input ?? 0),
+            output: (usage?.output ?? 0) + (message.usage.output ?? 0),
+          };
+        }
+        emit({ type: 'message_end' });
+        return;
+      }
+      if (event.type === 'tool_execution_start') {
+        emit({ type: 'tool_call_start', toolCallId: event.toolCallId, name: event.toolName, args: event.args });
+        return;
+      }
+      if (event.type === 'tool_execution_end') {
+        const result = event.result as { content?: Array<{ type?: string; text?: string }> };
+        emit({
+          type: 'tool_call_end',
+          toolCallId: event.toolCallId,
+          name: event.toolName,
+          isError: event.isError,
+          output: clip(joinText(result?.content)),
         });
       }
-    }
-  }
+    });
 
-  // The transcript keeps what the human said, not the prompt built around it:
-  // the recall block and the attachment listing are this turn's injections,
-  // and pi's own session stores the user's message the same way.
-  const stored = agent.state.messages[mainUserIndex] as { role?: string; content?: unknown } | undefined;
-  if (stored?.role === 'user' && input.userMessage) {
-    const images = Array.isArray(stored.content)
-      ? (stored.content as Array<{ type?: string }>).filter((block) => block.type === 'image')
-      : [];
-    stored.content = [{ type: 'text', text: input.userMessage }, ...images];
-  }
-
-  return {
-    text,
-    stopReason,
-    usage,
-    messages: agent.state.messages as unknown as AgentTurnOutput['messages'],
-    ...(repliedInBand ? { repliedInBand: true } : {}),
-    ...(compacted ? { compaction: compacted } : {}),
-    ...(memoryFlush ? { memoryFlush } : {}),
-  };
-
-  /** One non-streamed model call over the turn's own stream and credential. */
-  async function completeText(request: SummaryRequest): Promise<string> {
-    const events = (stream as unknown as (m: unknown, c: unknown, o: unknown) => AsyncIterable<unknown> & {
-      result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type?: string; text?: string }> }>;
-    })(
-      model,
-      {
-        systemPrompt: request.systemPrompt,
-        messages: [{ role: 'user', content: [{ type: 'text', text: request.prompt }], timestamp: Date.now() }],
-      },
-      { apiKey: credential, maxTokens: request.maxTokens }
-    );
-    for await (const _event of events) {
-      // Drain: the stream settles only once every event has been read.
+    if (!input.userMessage.trim() && !input.images?.length && !input.files?.length) {
+      throw new Error('the agent turn reached the guest with neither text nor a readable attachment');
     }
-    const message = await events.result();
-    if (message.stopReason === 'error') {
-      throw new Error(message.errorMessage || 'summarization failed');
+
+    const flush = input.memoryFlush;
+    const compaction = input.compaction;
+    const flushState = memoryFlushDue(session.sessionManager.getBranch());
+    if (flush?.enabled && flushState.due && compaction?.enabled && memory) {
+      const projected = (session.getContextUsage()?.tokens ?? 0) +
+        estimatePromptTokenCost([transientContext, input.userMessage].filter(Boolean).join('\n\n'), input.images?.length ?? 0);
+      const threshold = compaction.contextWindow - compaction.reserveTokens - flush.softThresholdTokens;
+      if (projected >= threshold) {
+        flushing = true;
+        const mainContext = transientContext;
+        transientContext = undefined;
+        session.setAutoCompactionEnabled(false);
+        try {
+          await promptNativeSession(session, `${flush.systemPrompt}\n\n${flush.prompt}`);
+          if (agent.state.errorMessage) throw new Error(agent.state.errorMessage);
+          const reply = latestAssistantText(agent.state.messages);
+          session.sessionManager.appendCustomEntry(MEMORY_FLUSH_STATE_CUSTOM_TYPE, {
+            compactionCount: flushState.compactionCount,
+            outcome: reply !== null && /^\W*NO_REPLY\W*$/i.test(reply.trim()) ? 'no_reply' : 'stored',
+            timestamp: Date.now(),
+          });
+        } catch (error) {
+          console.warn('pre-compaction memory flush failed; continuing with the turn', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          session.setAutoCompactionEnabled(compaction.enabled);
+          transientContext = mainContext;
+          flushing = false;
+        }
+      }
     }
-    return (message.content ?? [])
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text ?? '')
-      .join('\n');
+
+    await promptNativeSession(session, input.userMessage, input.images);
+    // A recovered native retry may have emitted an earlier error. Only the
+    // final Agent state decides whether this run failed.
+    const ended = agent.state.errorMessage;
+
+    // Capture BEFORE returning, and await it. `agentEnd` itself only starts the
+    // write; on the subprocess lane the worker process outlives the turn and the
+    // write lands on its own, but this isolate is disposed the moment this
+    // function resolves, so an unawaited capture would be cancelled every time
+    // and memory would silently stop accumulating for every agent on this lane.
+    // A failed turn still fires the hook — with its error, which is how the
+    // plugin knows not to save a broken exchange.
+    if (memory) {
+      // Compaction may remove the current user from model context. The native
+      // branch still owns the completed exchange the memory hook must capture.
+      const messages = session.sessionManager.getBranch().flatMap((entry) => entry.type === 'message' ? [entry.message] : []);
+      await memory.capture(messages, ended ?? undefined);
+    }
+
+    if (ended) throw new Error(ended);
+
+    return {
+      text,
+      stopReason,
+      usage,
+      sessionJsonl: nativeSessionJsonl(session),
+      ...(repliedInBand ? { repliedInBand: true } : {}),
+    };
+  } finally {
+    session.dispose();
   }
 }
 
 /** The text of the newest assistant message, or null when there is none. */
-function latestAssistantText(messages: readonly SessionMessage[]): string | null {
+function latestAssistantText(messages: readonly AgentMessage[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message || message.role !== 'assistant') continue;

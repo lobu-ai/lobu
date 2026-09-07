@@ -17,7 +17,6 @@ import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload,
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
-import { replayAgentSession } from '../../gateway/orchestration/agent-session';
 import { enqueueAgentTurnShadow,
   steerActiveAgentTurn,
 } from '../../gateway/orchestration/agent-turn-shadow';
@@ -235,6 +234,20 @@ async function runRow(runId: number) {
   return row;
 }
 
+/** Native session fixture: entry IDs and parent links belong to Pi, not the gateway. */
+function nativeSession(entries: Array<Record<string, unknown>> = [
+  { type: 'message', id: 'native-user', parentId: null,
+    message: { role: 'user', content: 'what is the shadow lane?', timestamp: 1 } },
+  { type: 'message', id: 'native-answer', parentId: 'native-user',
+    message: { role: 'assistant', content: [{ type: 'text', text: 'an observational copy' }], timestamp: 2 } },
+]): string {
+  const timestamp = '2026-01-01T00:00:00.000Z';
+  return [
+    { type: 'session', version: 3, id: 'native-session', timestamp, cwd: '/workspace' },
+    ...entries.map((entry) => ({ timestamp, ...entry })),
+  ].map((entry) => JSON.stringify(entry)).join('\n') + '\n';
+}
+
 describe('agent turn shadow producer', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
@@ -313,14 +326,14 @@ describe('agent turn shadow producer', () => {
         VALUES ('chat_message', 'completed', ${org.id}, now()) RETURNING id
       `;
       const timestamp = '2026-01-01T00:00:00.000Z';
-      const history = [
+      const history = nativeSession([
         { type: 'message', id: 'old-root', parentId: null, timestamp,
           message: { role: 'user', content: 'discarded-branch-history', timestamp: 1 } },
         { type: 'custom', id: 'old-flush', parentId: 'old-root', timestamp,
           customType: 'lobu.memory_flush_state', data: { compactionCount: 0 } },
         { type: 'message', id: 'new-root', parentId: null, timestamp,
           message: { role: 'user', content: 'retained-branch-history', timestamp: 2 } },
-      ].map((entry) => JSON.stringify(entry)).join('\n');
+      ]);
       await sql`
         INSERT INTO agent_transcript_snapshot
           (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
@@ -330,9 +343,7 @@ describe('agent turn shadow producer', () => {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
       });
       const [run] = await shadowRuns();
-      expect(run.action_input.turn).toMatchObject({
-        message_entry_ids: ['new-root'], memory_flush: { due: true },
-      });
+      expect(run.action_input.turn).toMatchObject({ session_jsonl: '' });
       // Exercise authoritative transcript/reply persistence in the isolated test DB.
       await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${run.id}`;
       const client = new WorkerClient({
@@ -340,6 +351,7 @@ describe('agent turn shadow producer', () => {
       });
       const job = await client.poll();
       expect(job.run_id).toBe(Number(run.id));
+      expect((job.payload as { turn: { session_jsonl: string } }).turn.session_jsonl).toBe(history);
       const result = await executeRun(client, job, {}, {
         executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }),
         timeoutMs: 20_000,
@@ -357,6 +369,8 @@ describe('agent turn shadow producer', () => {
       expect(completion.status).toBe('completed');
       expect((await runRow(Number(run.id))).status).toBe('completed');
       const [snapshot] = await sql`SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
+      expect(snapshot.snapshot_jsonl).toBe(completion.session_jsonl);
+      expect(snapshot.snapshot_jsonl.startsWith(history)).toBe(true);
       const messages = parseSessionEntries(snapshot.snapshot_jsonl).entries.map((entry) => entry.message).filter(Boolean) as any[];
       const toolResults = messages.filter((message) => message.role === 'toolResult');
       expect(toolResults.map((message) => [message.toolName, message.isError])).toEqual([
@@ -399,8 +413,7 @@ describe('agent turn shadow producer', () => {
       turn: Record<string, unknown>;
       credential: string;
     };
-    // The poll response is built straight off this, so it must satisfy the
-    // payload contract before any worker ever sees it.
+    // Enqueued turns carry an empty native session; the claim supplies history.
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn: envelope.turn })).toBe(true);
 
     expect(envelope.turn).toMatchObject({
@@ -441,7 +454,7 @@ describe('agent turn shadow producer', () => {
         'It has no network access and no package manager; use your other tools to reach data.\n' +
         'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.'
     );
-    expect(envelope.turn.messages).toEqual([]);
+    expect(envelope.turn.session_jsonl).toBe('');
     // With no tool policy every workspace tool is admitted, bash with the
     // default package-manager denylist and no allowlist.
     const tools = envelope.turn.tools as {
@@ -719,7 +732,7 @@ describe('agent turn shadow producer', () => {
     await toolless();
   });
 
-  it('replays the conversation with its tool calls and results, squared to a well-formed history', async () => {
+  it('passes native tool history and provider metadata to Pi without gateway rewriting', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const at = new Date(Date.now() - 60_000).toISOString();
@@ -741,8 +754,7 @@ describe('agent turn shadow producer', () => {
     });
     const snapshot = [
       JSON.stringify({ type: 'session', version: 3, id: 'prior', timestamp: at, cwd: '/w' }),
-      // A tool result whose call is not in the transcript: dropped, so the
-      // history opens on the human.
+      // Interrupted tool history is passed through for Pi to repair.
       entry('orphan', { role: 'toolResult', toolCallId: 'toolu_00', toolName: 'query_sdk', content: [{ type: 'text', text: 'stale' }], isError: false, timestamp: 1 }),
       entry('u1', { role: 'user', content: 'how many entities?', timestamp: 1 }),
       entry('a1', assistant([
@@ -752,8 +764,7 @@ describe('agent turn shadow producer', () => {
       entry('t1', { role: 'toolResult', toolCallId: 'toolu_01', toolName: 'query_sdk', content: [{ type: 'text', text: '3 entities' }], isError: false, timestamp: 1 }),
       entry('a2', { ...assistant([{ type: 'text', text: 'There are 3.' }]), stopReason: 'stop' }),
       entry('u2', { role: 'user', content: 'and companies?', timestamp: 1 }),
-      // The last turn died mid-call: a tool call with no result would be
-      // refused by the provider, so the history ends before it.
+      // The last turn died mid-call; the gateway must preserve this entry too.
       entry('a3', assistant([{ type: 'toolCall', id: 'toolu_02', name: 'query_sdk', arguments: {} }])),
       '',
     ].join('\n');
@@ -776,23 +787,17 @@ describe('agent turn shadow producer', () => {
     });
 
     const [run] = await shadowRuns();
-    const turn = run.action_input.turn as { messages: Array<Record<string, unknown>> };
-    expect(turn.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'toolResult', 'assistant', 'user']);
-    // The call and its result replay as pi stored them; only the thinking
-    // block, whose signature belongs to the provider that made it, is gone.
-    expect(turn.messages[1]).toMatchObject({
-      content: [{ type: 'toolCall', id: 'toolu_01', name: 'query_sdk', arguments: { code: 'entities.count()' } }],
-      stopReason: 'toolUse',
-    });
-    expect(turn.messages[2]).toMatchObject({ role: 'toolResult', toolCallId: 'toolu_01', isError: false });
-    expect(turn.messages[3]).toMatchObject({ content: [{ type: 'text', text: 'There are 3.' }] });
-    expect(turn.messages[4]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'and companies?' }] });
-    // Nothing on this branch recorded a flush, so the first cycle's is due.
-    expect((run.action_input.turn as { memory_flush: { due: boolean } }).memory_flush.due).toBe(true);
-    expect((run.action_input.turn as { message_entry_ids: string[] }).message_entry_ids).toEqual(['u1', 'a1', 't1', 'a2', 'u2']);
+    expect((run.action_input.turn as Record<string, unknown>).session_jsonl).toBe('');
+    const claimed = await (await pollFleet('fleet-native-history', { agent_turn: true })).json();
+    // Pi owns branch replay, provider conversion and interrupted tool repair.
+    // The gateway preserves the complete native session, including signatures.
+    expect(claimed.payload.turn.session_jsonl).toBe(snapshot);
+    expect(claimed.payload.turn).not.toHaveProperty('messages');
+    expect(claimed.payload.turn).not.toHaveProperty('message_entry_ids');
+    expect(claimed.payload.turn.memory_flush).not.toHaveProperty('due');
   });
 
-  it('replays the whole conversation, compaction summary included, not a window of it', async () => {
+  it('passes the whole native session with compaction and memory state at claim time', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const at = new Date(Date.now() - 60_000).toISOString();
@@ -864,32 +869,75 @@ describe('agent turn shadow producer', () => {
     });
 
     const [run] = await shadowRuns();
-    const turn = run.action_input.turn as {
-      messages: Array<{ role: string; content: Array<{ text: string }> }>;
-      message_entry_ids: string[];
-      compaction: Record<string, unknown>;
-      memory_flush: Record<string, unknown>;
-    };
-    // Summary, the two kept exchanges (u8..a9), then thirty more: 1 + 4 + 60.
-    expect(turn.messages).toHaveLength(65);
-    // Every replayed message names the entry it came from, the summary its
-    // compaction, so a compaction the guest plans by index maps back to pi's
-    // firstKeptEntryId.
-    expect(turn.message_entry_ids).toHaveLength(65);
-    expect(turn.message_entry_ids.slice(0, 3)).toEqual(['c1', 'u8', 'a8']);
-    expect(turn.message_entry_ids[64]).toBe('a39');
-    // pi's own settings against this model's window.
+    expect((run.action_input.turn as Record<string, unknown>).session_jsonl).toBe('');
+    const claimed = await (await pollFleet('fleet-native-compacted', { agent_turn: true })).json();
+    const turn = claimed.payload.turn;
+    expect(turn.session_jsonl).toBe(snapshot);
     expect(turn.compaction).toMatchObject({ enabled: true, reserve_tokens: 16384, keep_recent_tokens: 20000 });
     expect(turn.compaction.context_window).toBeGreaterThan(16384);
-    // The flush state entry after c1 says this cycle already flushed.
-    expect(turn.memory_flush).toMatchObject({ enabled: true, soft_threshold_tokens: 4000, due: false });
-    expect(turn.messages[0].role).toBe('user');
-    expect(turn.messages[0].content[0].text).toContain('The first eight exchanges were small talk.');
-    expect(turn.messages[1].content[0].text).toBe('question 8');
-    expect(turn.messages[64].content[0].text).toBe('answer 39');
-    // What the compaction replaced is not replayed.
-    expect(JSON.stringify(turn.messages)).not.toContain('"answer 3"');
-    expect(JSON.stringify(turn.messages)).not.toContain('"question 7"');
+    expect(turn.memory_flush).toMatchObject({ enabled: true, soft_threshold_tokens: 4000 });
+    expect(turn.memory_flush).not.toHaveProperty('due');
+  });
+
+  it('reads the latest native snapshot when a queued turn is claimed', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const dependencies = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurnShadow(messageFor(org.id), dependencies);
+    await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId: 'queued-second' }, dependencies);
+    const [first, second] = await shadowRuns();
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${first.id}`;
+    const firstClaim = await pollFleet('fleet-native-first', { agent_turn: true });
+    expect((await firstClaim.json()).run_id).toBe(first.id);
+    const session = nativeSession();
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: first.id, worker_id: 'fleet-native-first', status: 'completed', text: 'an observational copy', session_jsonl: session,
+    });
+    expect((await completed.json()).status).toBe('completed');
+    const secondClaim = await pollFleet('fleet-native-second', { agent_turn: true });
+    const claimed = await secondClaim.json();
+    expect(claimed.run_id).toBe(second.id);
+    expect(claimed.payload.turn.session_jsonl).toBe(session);
+    expect(claimed.payload.turn).not.toHaveProperty('messages');
+    expect(claimed.payload.turn).not.toHaveProperty('message_entry_ids');
+    expect(claimed.payload.turn.memory_flush).not.toHaveProperty('due');
+  });
+
+  it('rolls back the claim when its native snapshot cannot be read', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    const realDb = db.getDb();
+    let attemptedRead = false;
+    const unavailable = new Proxy(realDb, {
+      get(target, property) {
+        if (property === 'begin') return (fn: (tx: db.DbClient) => Promise<unknown>) =>
+          target.begin((tx) => fn(new Proxy(tx, {
+            apply(query, thisArg, args: unknown[]) {
+              const parts = args[0] as TemplateStringsArray;
+              if (Array.isArray(parts) && parts.join('').includes('FROM public.agent_transcript_snapshot')) {
+                attemptedRead = true;
+                throw new Error('synthetic snapshot read failure');
+              }
+              return Reflect.apply(query, thisArg, args);
+            },
+          })));
+        return Reflect.get(target, property);
+      },
+    });
+    const spy = vi.spyOn(db, 'getDb').mockReturnValue(unavailable);
+    try {
+      const response = await pollFleet('fleet-snapshot-unavailable', { agent_turn: true });
+      expect(response.status).toBe(500);
+      expect(attemptedRead).toBe(true);
+      expect((await runRow(run.id)).status).toBe('pending');
+    } finally {
+      spy.mockRestore();
+    }
+    const retry = await pollFleet('fleet-snapshot-retry', { agent_turn: true });
+    expect((await retry.json()).run_id).toBe(run.id);
   });
 
   it('parks a steerable follow-up on the running turn instead of making it a turn of its own', async () => {
@@ -1007,7 +1055,7 @@ describe('agent turn shadow producer', () => {
 
     const owner = workers[claims.findIndex((claim) => claim.run_id === first.id)];
     const complete = await postAsFleet('/api/workers/complete-agent-turn', {
-      run_id: first.id, worker_id: owner, status: 'completed', text: 'first finished',
+      run_id: first.id, worker_id: owner, status: 'completed', session_jsonl: nativeSession(), text: 'first finished',
     });
     expect(complete.status).toBe(200);
     expect((await (await pollFleet('fleet-claim-next', { agent_turn: true })).json()).run_id).toBe(second.id);
@@ -1107,7 +1155,7 @@ describe('agent turn shadow producer', () => {
       }
       expect((await shadowRuns()).filter((run) => run.status === 'pending')).toHaveLength(1);
       const complete = await postAsFleet('/api/workers/complete-agent-turn', {
-        run_id: claimedId, worker_id: 'fleet-insert-race', status: 'completed', text: 'finished',
+        run_id: claimedId, worker_id: 'fleet-insert-race', status: 'completed', session_jsonl: nativeSession(), text: 'finished',
       });
       expect(complete.status).toBe(200);
       expect((await (await pollFleet('fleet-after-insert', { agent_turn: true })).json()).run_id)
@@ -1438,14 +1486,11 @@ describe('agent turn completion', () => {
     delete process.env[SHADOW_ENV];
   });
 
-  it('records the transcript on the run row and is idempotent on a retry', async () => {
+  it('records the native session on the run row and is idempotent on a retry', async () => {
     const workerId = 'fleet-complete';
     const runId = await claimedShadowRun(workerId);
 
-    const transcript = [
-      { role: 'user', content: 'what is the shadow lane?' },
-      { role: 'assistant', content: [{ type: 'text', text: 'an observational copy' }] },
-    ];
+    const session_jsonl = nativeSession();
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
       worker_id: workerId,
@@ -1453,7 +1498,7 @@ describe('agent turn completion', () => {
       text: 'an observational copy',
       stop_reason: 'stop',
       usage: { input: 11, output: 7 },
-      transcript,
+      session_jsonl,
       exit_reason: 'ok',
     });
     expect(response.status).toBe(200);
@@ -1471,7 +1516,7 @@ describe('agent turn completion', () => {
       text: 'an observational copy',
       stop_reason: 'stop',
       usage: { input: 11, output: 7 },
-      transcript,
+      session_jsonl,
     });
 
     // A retry (worker reconnect, at-least-once delivery) must not re-transition.
@@ -1487,6 +1532,75 @@ describe('agent turn completion', () => {
       idempotent: true,
     });
     expect((await runRow(runId)).status).toBe('completed');
+  });
+
+  it('persists native IDs, tool pairs and summaries verbatim under the completion fence', async () => {
+    const workerId = 'fleet-native-snapshot';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+    const session = nativeSession([
+      { type: 'message', id: 'u1', parentId: null, message: { role: 'user', content: 'count' } },
+      { type: 'message', id: 'a1', parentId: 'u1', message: { role: 'assistant', content: [
+        { type: 'toolCall', id: 'call-count', name: 'query_sdk', arguments: { code: 'entities.count()' } },
+      ], stopReason: 'toolUse' } },
+      { type: 'message', id: 't1', parentId: 'a1', message: { role: 'toolResult', toolCallId: 'call-count', toolName: 'query_sdk', content: [{ type: 'text', text: '3' }], isError: false } },
+      { type: 'message', id: 'a2', parentId: 't1', message: { role: 'assistant', content: [{ type: 'text', text: 'there are 3' }], stopReason: 'stop' } },
+      { type: 'custom', id: 'flush1', parentId: 'a2', customType: 'lobu.memory_flush_state', data: { compactionCount: 0, outcome: 'stored' } },
+      { type: 'compaction', id: 'c1', parentId: 'flush1', firstKeptEntryId: 'u1', summary: 'Counted three.', tokensBefore: 900, details: { readFiles: ['a.txt'], modifiedFiles: ['b.txt'] } },
+    ]);
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: workerId, status: 'completed', text: 'there are 3', session_jsonl: session,
+    });
+    expect(await response.json()).toMatchObject({ status: 'completed' });
+    const sql = getTestDb();
+    const [snapshot] = await sql`SELECT snapshot_jsonl, byte_size FROM agent_transcript_snapshot WHERE run_id = ${runId}`;
+    expect(snapshot.snapshot_jsonl).toBe(session);
+    expect(snapshot.byte_size).toBe(Buffer.byteLength(session));
+    const late = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: workerId, status: 'completed', text: 'late overwrite', session_jsonl: nativeSession(),
+    });
+    expect(await late.json()).toMatchObject({ idempotent: true });
+    const snapshots = await sql`SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}`;
+    expect(snapshots.map((row) => row.snapshot_jsonl)).toEqual([session]);
+    expect(await threadResponses()).toHaveLength(1);
+  });
+
+  it('does not persist a stale completion after its lease changes during the request', async () => {
+    const workerId = 'fleet-lost-lease';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+    const realDb = db.getDb();
+    let leaseChanged = false;
+    const stolenLease = new Proxy(realDb, {
+      get(target, property) {
+        if (property === 'begin') return async (fn: (tx: db.DbClient) => Promise<unknown>) => {
+          if (!leaseChanged) {
+            leaseChanged = true;
+            await realDb`UPDATE runs SET claimed_by = 'fleet-new-owner' WHERE id = ${runId}`;
+          }
+          return target.begin(fn);
+        };
+        return Reflect.get(target, property);
+      },
+    });
+    const spy = vi.spyOn(db, 'getDb').mockReturnValue(stolenLease);
+    try {
+      const response = await postAsFleet('/api/workers/complete-agent-turn', {
+        run_id: runId, worker_id: workerId, status: 'completed', text: 'stale answer', session_jsonl: nativeSession(),
+      });
+      expect(await response.json()).toMatchObject({ idempotent: true });
+      expect(leaseChanged).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await runRow(runId)).status).toBe('running');
+    expect(await realDb`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${runId}`).toHaveLength(0);
+    expect(await threadResponses()).toHaveLength(0);
+    const completion = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: 'fleet-new-owner', status: 'completed', text: 'current answer', session_jsonl: nativeSession(),
+    });
+    expect(await completion.json()).toEqual({ ok: true, status: 'completed' });
+    expect(await realDb`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${runId}`).toHaveLength(1);
   });
 
   it('fails the run when the worker reports a failed turn', async () => {
@@ -1515,6 +1629,7 @@ describe('agent turn completion', () => {
       run_id: runId,
       worker_id: 'fleet-impostor',
       status: 'completed',
+      session_jsonl: nativeSession(),
       text: 'not mine to report',
     });
     // Not this worker's run: reported as already-settled rather than applied.
@@ -1522,7 +1637,7 @@ describe('agent turn completion', () => {
     expect((await runRow(runId)).status).toBe('running');
   });
 
-  it('an authoritative turn publishes the reply and appends the transcript', async () => {
+  it('an authoritative turn publishes the reply and persists its native session', async () => {
     const workerId = 'fleet-delivers';
     const runId = await claimedShadowRun(workerId);
     // Flip the run the way the cutover will: authoritative, with the reply
@@ -1539,7 +1654,7 @@ describe('agent turn completion', () => {
       worker_id: workerId,
       status: 'completed',
       text: 'the isolate lane answered',
-      transcript: [{ role: 'assistant', content: [{ type: 'text', text: 'the isolate lane answered' }] }],
+      session_jsonl: nativeSession(),
     });
     expect(response.status).toBe(200);
 
@@ -1567,207 +1682,54 @@ describe('agent turn completion', () => {
     const [snapshot] = (await sql`
       SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}
     `) as unknown as Array<{ snapshot_jsonl: string }>;
-    const entries = snapshot.snapshot_jsonl
-      .split('\n')
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line));
-    expect(entries.map((entry) => entry.message.role)).toEqual([
-      'user',
-      'assistant',
-    ]);
-    // Block-array content, the shape every other writer of this table emits
-    // and the shape `historyMessages` reads back for the next turn.
-    expect(entries.map((entry) => entry.message.content)).toEqual([
-      [{ type: 'text', text: 'what is the shadow lane?' }],
-      [{ type: 'text', text: 'the isolate lane answered' }],
-    ]);
-    // The reply is chained onto the user message, so the next turn's parent
-    // walk reaches both.
-    expect(entries[1].parentId).toBe(entries[0].id);
+    expect(snapshot.snapshot_jsonl).toBe(nativeSession());
   });
 
-  it('persists the whole turn verbatim, then the flush state and the compaction pi would have written', async () => {
-    const workerId = 'fleet-persists-tools';
+  it.each([
+    ['missing', undefined],
+    ['malformed JSON', '{invalid'],
+    ['missing header', JSON.stringify({ type: 'message', id: 'x', parentId: null, message: { role: 'user' } })],
+    ['duplicate IDs', nativeSession([
+      { type: 'message', id: 'x', parentId: null, message: { role: 'user' } },
+      { type: 'message', id: 'x', parentId: 'x', message: { role: 'assistant' } },
+    ])],
+    ['dangling parent', nativeSession([{ type: 'message', id: 'x', parentId: 'missing', message: { role: 'user' } }])],
+    ['dangling summary', nativeSession([{ type: 'compaction', id: 'x', parentId: null, firstKeptEntryId: 'missing', summary: 'lost history', tokensBefore: 1 }])],
+    ['NUL byte', nativeSession() + '\0'],
+    ['oversize', nativeSession([{ type: 'message', id: 'x', parentId: null, message: { role: 'user', content: 'x'.repeat(4 * 1024 * 1024) } }])],
+  ])('fails a %s snapshot visibly and preserves the previous session', async (_kind, session_jsonl) => {
+    const workerId = 'fleet-invalid-snapshot';
     const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
     const sql = getTestDb();
-    // The producer handed this turn two messages of history, each naming its
-    // stored entry; the guest returns them back followed by what the turn added.
-    const history = [
-      { role: 'user', content: [{ type: 'text', text: 'earlier question' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
-    ];
-    await sql`
-      UPDATE runs
-      SET action_input = jsonb_set(
-        jsonb_set(
-          jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb),
-          '{turn,messages}', ${sql.json(history)}::jsonb
-        ),
-        '{turn,message_entry_ids}', ${sql.json(['h0', 'h1'])}::jsonb
-      )
-      WHERE id = ${runId}
+    const [run] = await sql`SELECT organization_id FROM runs WHERE id = ${runId}`;
+    const [prior] = await sql`
+      INSERT INTO runs (organization_id, run_type, status, action_input)
+      VALUES (${run.organization_id}, 'chat_message', 'completed', '{}'::jsonb) RETURNING id
     `;
-    const response = await postAsFleet('/api/workers/complete-agent-turn', {
-      run_id: runId,
-      worker_id: workerId,
-      status: 'completed',
-      text: 'there are 3',
-      transcript: [
-        ...history,
-        // The flush the guest ran first, then the human's turn as the guest
-        // already cleaned it, then the tool loop and the reply.
-        { role: 'user', content: [{ type: 'text', text: 'Store durable memories now.' }] },
-        { role: 'assistant', content: [{ type: 'text', text: 'NO_REPLY' }], stopReason: 'stop' },
-        { role: 'user', content: [{ type: 'text', text: 'what is the shadow lane?' }] },
-        {
-          role: 'assistant',
-          content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk', arguments: { code: 'entities.count()' } }],
-          stopReason: 'toolUse',
-        },
-        { role: 'toolResult', toolCallId: 'toolu_9', toolName: 'query_sdk', content: [{ type: 'text', text: '3' }], isError: false },
-        { role: 'assistant', content: [{ type: 'text', text: 'there are 3' }], stopReason: 'stop' },
-      ],
-      memory_flush: { outcome: 'no_reply', after_index: 3 },
-      // Keep from the human's message (transcript index 4) onwards.
-      compaction: { summary: 'Earlier, a question was answered.', first_kept_index: 4, tokens_before: 900 },
-    });
-    expect(response.status).toBe(200);
-
-    const [snapshot] = (await sql`
-      SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}
-    `) as unknown as Array<{ snapshot_jsonl: string }>;
-    const entries = snapshot.snapshot_jsonl
-      .split('\n')
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line));
-    // The history is not written twice; every new message is, verbatim, with
-    // the flush state right after the flush's exchange and the compaction last.
-    expect(entries.map((entry) => entry.type)).toEqual([
-      'message',
-      'message',
-      'custom',
-      'message',
-      'message',
-      'message',
-      'message',
-      'compaction',
-    ]);
-    expect(entries.filter((e) => e.type === 'message').map((e) => e.message.role)).toEqual([
-      'user',
-      'assistant',
-      'user',
-      'assistant',
-      'toolResult',
-      'assistant',
-    ]);
-    expect(entries[2]).toMatchObject({
-      customType: 'lobu.memory_flush_state',
-      data: { compactionCount: 0, outcome: 'no_reply' },
-    });
-    expect(entries[3].message.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
-    expect(entries[4].message).toMatchObject({
-      content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk' }],
-      stopReason: 'toolUse',
-    });
-    // The compaction keeps from the human's message: transcript index 4 is
-    // the third new message, whose entry is the fourth line.
-    expect(entries[7]).toMatchObject({
-      type: 'compaction',
-      summary: 'Earlier, a question was answered.',
-      firstKeptEntryId: entries[3].id,
-      tokensBefore: 900,
-    });
-    // One chain, so the next turn's replay reaches every entry.
-    for (let i = 1; i < entries.length; i++) expect(entries[i].parentId).toBe(entries[i - 1].id);
-    // And that replay opens on the summary, then the kept messages.
-    const replayed = replayAgentSession(parseSessionEntries(snapshot.snapshot_jsonl).entries).replayed.map((entry) => entry.message);
-    expect(replayed.map((m) => m.role)).toEqual(['user', 'user', 'assistant', 'toolResult', 'assistant']);
-    expect(JSON.stringify(replayed[0]!.content)).toContain('Earlier, a question was answered.');
-    expect(replayed[1]!.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
-  });
-
-  it('an oversize prior transcript starts a continuation instead of hanging the client', async () => {
-    const workerId = 'fleet-delivers-oversize';
-    const runId = await claimedShadowRun(workerId);
-    const sql = getTestDb();
-    const [run] = (await sql`
-      SELECT organization_id FROM runs WHERE id = ${runId}
-    `) as unknown as Array<{ organization_id: string }>;
-
-    // A prior transcript already past MAX_SNAPSHOT_BYTES, the cap every other
-    // writer of this table honours. Appending to it would build a row well
-    // past that cap, and this insert shares the terminal transaction, so
-    // without the continuation fallback the oversize row would ride along
-    // with the run transition and the reply.
-    const bulky = `${'x'.repeat(5 * 1024 * 1024)}`;
-    const priorLine = JSON.stringify({
-      type: 'message',
-      id: 'prior-assistant',
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      message: { role: 'assistant', content: [{ type: 'text', text: bulky }] },
-    });
-    // The snapshot's `run_id` is a real foreign key, so the prior transcript
-    // needs the run that produced it.
-    const [prior] = (await sql`
-      INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
-      VALUES (${run.organization_id}, 'agent_turn', 'agent_turns', 'completed', '{}'::jsonb)
-      RETURNING id
-    `) as unknown as Array<{ id: number }>;
+    const previous = nativeSession();
     await sql`
       INSERT INTO agent_transcript_snapshot
-        (organization_id, agent_id, conversation_id, run_id,
-         snapshot_jsonl, byte_size, terminal_status)
-      VALUES (${run.organization_id}, ${AGENT_ID}, 'conv-shadow', ${prior.id},
-              ${`${priorLine}\n`}, ${Buffer.byteLength(priorLine, 'utf8') + 1}, 'completed')
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+      VALUES (${run.organization_id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${previous}, ${Buffer.byteLength(previous)}, 'completed')
     `;
-
-    await sql`
-      UPDATE runs
-      SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb)
-      WHERE id = ${runId}
-    `;
-
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
-      run_id: runId,
-      worker_id: workerId,
-      status: 'completed',
-      text: 'answered despite the long history',
+      run_id: runId, worker_id: workerId, status: 'completed', text: 'unpersisted answer', session_jsonl,
     });
     expect(response.status).toBe(200);
-    expect((await runRow(runId)).status).toBe('completed');
-
-    // The client still gets its answer — the whole point of the fallback.
-    const [reply] = (await sql`
-      SELECT action_input FROM runs
-      WHERE queue_name = 'thread_response' AND run_type = 'chat_message'
-      ORDER BY id DESC LIMIT 1
-    `) as unknown as Array<{ action_input: Record<string, unknown> }>;
-    expect(reply.action_input).toMatchObject({
-      messageId: 'msg-shadow',
-      finalText: 'answered despite the long history',
-    });
-
-    // And the stored row is a compact continuation carrying only this turn,
-    // not the oversize prefix. The prior run's row stays queryable.
-    const [snapshot] = (await sql`
-      SELECT snapshot_jsonl, byte_size FROM agent_transcript_snapshot WHERE run_id = ${runId}
-    `) as unknown as Array<{ snapshot_jsonl: string; byte_size: number }>;
-    expect(snapshot.byte_size).toBeLessThan(4 * 1024 * 1024);
-    const entries = snapshot.snapshot_jsonl
-      .split('\n')
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line));
-    expect(entries.map((entry) => entry.message.role)).toEqual([
-      'user',
-      'assistant',
-    ]);
-    // A continuation has no prior tail to chain onto.
-    expect(entries[0].parentId).toBeNull();
-    const [{ n }] = (await sql`
-      SELECT count(*)::int AS n FROM agent_transcript_snapshot WHERE run_id = ${prior.id}
-    `) as unknown as Array<{ n: number }>;
-    expect(n).toBe(1);
+    expect(await response.json()).toEqual({ ok: true, status: 'failed' });
+    const result = await runRow(runId);
+    expect(result.status).toBe('failed');
+    expect(result.error_message).toContain('snapshot');
+    expect(result.exit_reason).toBe('error_message');
+    expect(result.action_input.result).not.toHaveProperty('session_jsonl');
+    const snapshots = await sql`SELECT run_id, snapshot_jsonl FROM agent_transcript_snapshot`;
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({ run_id: prior.id, snapshot_jsonl: previous });
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ messageId: 'msg-shadow', error: result.error_message });
+    expect(replies[0]).not.toHaveProperty('finalText');
   });
 
   it('a failed authoritative turn delivers the error instead of hanging the client', async () => {
@@ -2055,9 +2017,9 @@ describe('agent turn completion', () => {
       run_id: runId,
       worker_id: workerId,
       status: 'completed',
+      session_jsonl: nativeSession(),
       text: 'I posted the summary above.',
       replied_in_band: true,
-      transcript: [],
     });
     expect(response.status).toBe(200);
 
@@ -2081,8 +2043,8 @@ describe('agent turn completion', () => {
       run_id: runId,
       worker_id: workerId,
       status: 'completed',
+      session_jsonl: nativeSession(),
       text: 'here is the answer',
-      transcript: [],
     });
 
     const rows = await threadResponses();
@@ -2126,6 +2088,7 @@ describe('agent turn completion', () => {
       run_id: runId,
       worker_id: workerId,
       status: 'completed',
+      session_jsonl: nativeSession(),
       text: 'an observational copy',
     });
     expect(response.status).toBe(200);
@@ -2159,6 +2122,7 @@ describe('agent turn completion', () => {
       run_id: runId,
       worker_id: workerId,
       status: 'completed',
+      session_jsonl: nativeSession(),
       text: 'a reply nobody would deliver',
     });
     expect(response.status).toBe(409);
@@ -2356,6 +2320,7 @@ describe('agent turn reaper', () => {
       run_id: runId,
       worker_id: workerId,
       status: 'completed',
+      session_jsonl: nativeSession(),
       text: 'made it just in time',
     });
     expect(completion.status).toBe(200);

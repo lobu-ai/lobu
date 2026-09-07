@@ -38,7 +38,8 @@ import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput } from "@lobu/conn
 import type { ExecutionHooks, ExecutorJob } from "@lobu/connector-worker/executor/interface";
 import { IsolateExecutor, type IsolateLogLevel } from "@lobu/connector-worker/executor/isolate";
 import { assertIsolateEligible } from "@lobu/connector-worker/isolate";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { SessionEntry } from "@mariozechner/pi-coding-agent";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 /** Requests the fake provider has answered. */
 interface ProviderHit {
@@ -53,6 +54,14 @@ let guestCode: string;
 let server: Server;
 let port: number;
 let hits: ProviderHit[] = [];
+let providerScript: ((body: string, res: Parameters<typeof writeAnthropicStream>[0]) => void) | undefined;
+
+afterEach(() => { providerScript = undefined; });
+
+function writeAnthropicError(res: Parameters<typeof writeAnthropicStream>[0], message: string): void {
+	res.writeHead(200, { "content-type": "text/event-stream" });
+	res.end(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`);
+}
 
 /** The gateway's own placeholder for the agent's provider key. */
 const GATEWAY_PLACEHOLDER = "lobu_secret_00000000-0000-4000-8000-000000000000";
@@ -307,6 +316,7 @@ beforeAll(async () => {
 				res.end(JSON.stringify(internalReply.body));
 				return;
 			}
+			if (providerScript) { providerScript(body, res); return; }
 			// The fake model follows its script: one tool call per round until
 			// every scripted call has its result in the transcript, then the answer.
 			const request = JSON.parse(body) as { tools?: unknown[]; messages: Array<{ role: string; content: unknown }> };
@@ -338,7 +348,7 @@ function turnJob(input: Partial<AgentTurnInput> = {}, baseUrl?: string): Executo
 				maxTokens: 64,
 			},
 			systemPrompt: "You are a test agent.",
-			messages: [],
+			sessionJsonl: "",
 			userMessage: "hi",
 			...input,
 		},
@@ -356,6 +366,19 @@ interface TurnRun {
 	events: AgentTurnEvent[];
 	logs: { level: IsolateLogLevel; line: string }[];
 	output: AgentTurnOutput;
+}
+
+function sessionEntries(output: AgentTurnOutput): SessionEntry[] {
+	return output.sessionJsonl.trim().split("\n").slice(1).map((line) => JSON.parse(line));
+}
+
+function sessionMessages(output: AgentTurnOutput) {
+	return sessionEntries(output).flatMap((entry) => entry.type === "message" ? [entry.message] : []);
+}
+
+function savedSession(entries: unknown[]): string {
+	return [{ type: "session", version: 3, id: "synthetic-session", timestamp: new Date(0).toISOString(), cwd: "/workspace" }, ...entries]
+		.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
 }
 
 async function runTurn(
@@ -401,6 +424,19 @@ async function failTurn(
 }
 
 describe("agent turn on the isolate lane", () => {
+	it("returns a native Pi session snapshot rather than reconstructing entry IDs at the gateway", async () => {
+		hits = [];
+		toolScript = [];
+		const run = await runTurn(turnJob());
+		const jsonl = (run.output as unknown as { sessionJsonl: string }).sessionJsonl;
+		expect(typeof jsonl).toBe("string");
+		const entries = jsonl.trim().split("\n").map((line) => JSON.parse(line));
+		expect(entries[0]).toMatchObject({ type: "session", version: 3 });
+		const messages = entries.filter((entry) => entry.type === "message");
+		expect(messages.map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
+		expect(messages[1].parentId).toBe(messages[0].id);
+	});
+
 	it("bundles the agent guest with no Node builtin left in it", () => {
 		expect(guestCode.length).toBeGreaterThan(1_000_000);
 		expect(() => assertIsolateEligible(guestCode)).not.toThrow();
@@ -432,20 +468,21 @@ describe("agent turn on the isolate lane", () => {
 		armFirstDeltaGate();
 		const first = await runTurn(turnJob());
 		armFirstDeltaGate();
-		expect(first.output.messages.length).toBeGreaterThanOrEqual(2);
-		expect(first.output.messages[0]).toMatchObject({ role: "user" });
-		expect(first.output.messages.at(-1)).toMatchObject({ role: "assistant" });
+		expect(sessionMessages(first.output).length).toBeGreaterThanOrEqual(2);
+		expect(sessionMessages(first.output)[0]).toMatchObject({ role: "user" });
+		expect(sessionMessages(first.output).at(-1)).toMatchObject({ role: "assistant" });
 
 		// pi prices every assistant entry off the model's four cost keys. A model
 		// missing one puts NaN there, which JSON turns to null on the way to the
 		// run row — so the entry must be finite before it is ever persisted.
-		const priced = first.output.messages.at(-1) as {
+		const priced = sessionMessages(first.output).at(-1) as {
 			usage?: { cost?: Record<string, number> };
 		};
 		expect(Object.values(priced.usage?.cost ?? {}).every(Number.isFinite)).toBe(true);
 
-		const second = await runTurn(turnJob({ messages: first.output.messages, userMessage: "and again" }));
-		expect(second.output.messages.length).toBe(first.output.messages.length + 2);
+		const second = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "and again" }));
+		expect(sessionMessages(second.output).length).toBe(sessionMessages(first.output).length + 2);
+		expect(sessionEntries(second.output).slice(0, sessionEntries(first.output).length)).toEqual(sessionEntries(first.output));
 		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as { messages: unknown[] };
 		expect(sent.messages.length).toBe(3);
 	}, 120_000);
@@ -543,9 +580,9 @@ describe("agent turn on the isolate lane", () => {
 		]);
 
 		// The transcript the next turn resumes from carries the call and its result.
-		const roles = run.output.messages.map((m) => (m as { role: string }).role);
+		const roles = sessionMessages(run.output).map((m) => (m as { role: string }).role);
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
-		expect(run.output.messages[2]).toMatchObject({ role: "toolResult", toolCallId: "toolu_01", toolName: "query_sdk", isError: false });
+		expect(sessionMessages(run.output)[2]).toMatchObject({ role: "toolResult", toolCallId: "toolu_01", toolName: "query_sdk", isError: false });
 
 		// One credential, one host: the audit line is written once per
 		// (placeholder, host), so the tool call adds no second line — the bearer
@@ -607,7 +644,7 @@ describe("agent turn on the isolate lane", () => {
 			["read", false, "hello\n"],
 			["find", false, "notes.txt"],
 		]);
-		const roles = run.output.messages.map((m) => (m as { role: string }).role);
+		const roles = sessionMessages(run.output).map((m) => (m as { role: string }).role);
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult", "assistant"]);
 	}, 120_000);
 
@@ -854,15 +891,15 @@ describe("agent turn on the isolate lane", () => {
 		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
 			messages: Array<{ content: Array<Record<string, unknown>> }>;
 		};
-		// One text block: what the user said, then what they attached. No image
-		// block and no bytes, because this lane cannot open a PDF and says so
-		// rather than pretending the attachment was not there.
+		// The resource loader adds attachment metadata to provider context only.
 		expect(sent.messages[0]?.content).toMatchObject([
 			{
 				type: "text",
-				text: "summarize this\n\nThe user attached 1 non-image file(s) that this turn cannot open:\n- report.pdf (application/pdf, 2048 bytes)",
+				text: "The user attached 1 non-image file(s) that this turn cannot open:\n- report.pdf (application/pdf, 2048 bytes)\n\n",
 			},
+			{ type: "text", text: "summarize this" },
 		]);
+		expect(sessionMessages(run.output)[0]).toMatchObject({ content: [{ type: "text", text: "summarize this" }] });
 	}, 120_000);
 
 	it("fails a turn that reached the guest with neither text nor a readable attachment", async () => {
@@ -911,7 +948,7 @@ describe("agent turn on the isolate lane", () => {
 		expect(requests[0]).not.toContain("also check companies");
 		expect(requests.some((body) => body.includes("also check companies"))).toBe(true);
 		// And it is in the transcript the next turn resumes from, as pi wrote it.
-		const steered = run.output.messages.find(
+		const steered = sessionMessages(run.output).find(
 			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
 		);
 		expect(steered).toBeDefined();
@@ -990,11 +1027,11 @@ describe("agent turn on the isolate lane", () => {
 		);
 
 		expect(run.output.text).toBe("Hello from the isolate");
-		const compaction = run.output.compaction;
+		const entries = sessionEntries(run.output);
+		const compaction = entries.find((entry) => entry.type === "compaction");
 		expect(compaction).toBeDefined();
 		expect(compaction?.tokensBefore).toBe(18);
-		expect(compaction?.firstKeptIndex).toBeGreaterThanOrEqual(0);
-		expect(compaction?.firstKeptIndex).toBeLessThan(run.output.messages.length);
+		expect(entries.some((entry) => entry.id === compaction?.firstKeptEntryId)).toBe(true);
 		// The summary came from the model, asked with pi's summarisation prompt on
 		// the same route and the same credential as the turn itself.
 		expect(compaction?.summary).toContain("Hello from the isolate");
@@ -1010,6 +1047,114 @@ describe("agent turn on the isolate lane", () => {
 		);
 	}, 120_000);
 
+	it("waits for a delayed native summary before returning the snapshot", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		let summaryFinished = false;
+		providerScript = (body, res) => {
+			if (body.includes("context summarization assistant")) {
+				setTimeout(() => {
+					summaryFinished = true;
+					void writeAnthropicStream(res, ["delayed native summary"]);
+				}, 150);
+			} else void writeAnthropicStream(res, ["main answer"]);
+		};
+		const run = await runTurn(turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		expect(summaryFinished).toBe(true);
+		expect(sessionEntries(run.output).at(-1)).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
+		expect(run.output.text).toBe("main answer");
+	}, 120_000);
+
+	it("resumes native compaction and custom entries without changing their IDs", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const first = await runTurn(turnJob({ userMessage: "original history ".repeat(100),
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		const original = sessionEntries(first.output);
+		expect(original.at(-1)?.type).toBe("compaction");
+		const custom = { type: "custom", id: "synthetic-custom", parentId: original.at(-1)!.id,
+			timestamp: new Date(0).toISOString(), customType: "synthetic.state", data: { preserved: true } };
+		const snapshot = first.output.sessionJsonl + JSON.stringify(custom) + "\n";
+		hits = [];
+		const second = await runTurn(turnJob({ sessionJsonl: snapshot, userMessage: "continue" }));
+		expect(sessionEntries(second.output).slice(0, original.length + 1)).toEqual([...original, custom]);
+		expect(hits[0]?.body).toContain("Hello from the isolate");
+		expect(hits[0]?.body).toContain("summary");
+	}, 120_000);
+
+	it("waits across Pi's delayed overflow continuation and returns the recovered answer", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const first = await runTurn(turnJob({ userMessage: "saved context ".repeat(300) }));
+		let ordinaryCalls = 0;
+		providerScript = (body, res) => {
+			if (body.includes("context summarization assistant")) {
+				void writeAnthropicStream(res, ["overflow summary"]);
+			} else if (ordinaryCalls++ === 0) {
+				writeAnthropicError(res, "prompt is too long: 300000 tokens > 200000 maximum");
+			} else void writeAnthropicStream(res, ["recovered answer"]);
+		};
+		const run = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "overflow context ".repeat(200),
+			compaction: { enabled: true, contextWindow: 200_000, reserveTokens: 256, keepRecentTokens: 32 } }));
+		expect(ordinaryCalls).toBe(2);
+		expect(run.output.text).toBe("recovered answer");
+		expect(run.output.stopReason).toBe("stop");
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(true);
+		expect(sessionMessages(run.output).at(-1)).toMatchObject({ role: "assistant", content: [{ type: "text", text: "recovered answer" }] });
+	}, 120_000);
+
+	it("lets native Pi retry a transient stream error before completing", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		let calls = 0;
+		providerScript = (_body, res) => {
+			if (calls++ === 0) writeAnthropicError(res, "503 service unavailable");
+			else void writeAnthropicStream(res, ["retry recovered"]);
+		};
+		const run = await runTurn(turnJob());
+		expect(calls).toBe(2);
+		expect(run.output.text).toBe("retry recovered");
+		expect(sessionMessages(run.output).at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	}, 120_000);
+
+	it("keeps the original native history when summarization fails", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const first = await runTurn(turnJob({ userMessage: "saved context ".repeat(100) }));
+		providerScript = (body, res) => {
+			if (body.includes("context summarization assistant")) writeAnthropicError(res, "synthetic summary rejected");
+			else void writeAnthropicStream(res, ["answer survives"]);
+		};
+		const run = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "continue",
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		expect(run.output.text).toBe("answer survives");
+		expect(sessionEntries(run.output).slice(0, sessionEntries(first.output).length)).toEqual(sessionEntries(first.output));
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(false);
+	}, 120_000);
+
+	it("lets original Pi migrate an older native session version on restore", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const entry = { type: "message", id: "synthetic-old-user", parentId: null, timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "original older session", timestamp: 0 } };
+		const run = await runTurn(turnJob({ sessionJsonl: savedSession([entry]).replace('"version":3', '"version":2') }));
+		expect(JSON.parse(run.output.sessionJsonl.split("\n")[0]!)).toMatchObject({ type: "session", version: 3 });
+		expect(sessionEntries(run.output)[0]).toEqual(entry);
+		expect(hits[0]?.body).toContain("original older session");
+	});
+
+	it("rejects malformed restored JSONL instead of silently losing history", async () => {
+		sawFirstDelta = Promise.resolve();
+		const { error } = await failTurn(turnJob({ sessionJsonl: savedSession([]) + "broken JSON\n" }), ["127.0.0.1"]);
+		expect(error.message).toMatch(/JSON|Unexpected/);
+	});
+
 	it("does not compact a turn that fits", async () => {
 		hits = [];
 		toolScript = [];
@@ -1017,7 +1162,7 @@ describe("agent turn on the isolate lane", () => {
 		const run = await runTurn(
 			turnJob({ compaction: { enabled: true, contextWindow: 200_000, reserveTokens: 16_384, keepRecentTokens: 20_000 } }),
 		);
-		expect(run.output.compaction).toBeUndefined();
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(false);
 		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
 	}, 120_000);
 
@@ -1039,7 +1184,6 @@ describe("agent turn on the isolate lane", () => {
 				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
 				memoryFlush: {
 					enabled: true,
-					due: true,
 					softThresholdTokens: 1_000,
 					systemPrompt: "Session nearing compaction. Store durable memories now.",
 					prompt: "Write any lasting notes to memory. Reply with NO_REPLY if nothing to store.",
@@ -1056,17 +1200,41 @@ describe("agent turn on the isolate lane", () => {
 		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
 			"Hello from the isolate",
 		);
-		// The flush's exchange is part of the transcript, and the report says where
-		// it ends so the server can record the cycle as flushed right after it.
-		expect(run.output.memoryFlush).toEqual({ outcome: "stored", afterIndex: 1 });
-		expect(run.output.messages).toHaveLength(4);
-		expect((run.output.messages[0] as { role: string }).role).toBe("user");
-		expect(JSON.stringify(run.output.messages[0])).toContain("Store durable memories now");
+		// Pi persists the flush cycle as a native custom entry after its exchange.
+		expect(sessionEntries(run.output).find((entry) => entry.type === "custom")).toMatchObject({
+			customType: "lobu.memory_flush_state", data: { outcome: "stored", compactionCount: 0 },
+		});
+		expect(sessionMessages(run.output)).toHaveLength(4);
+		expect((sessionMessages(run.output)[0] as { role: string }).role).toBe("user");
+		expect(JSON.stringify(sessionMessages(run.output)[0])).toContain("Store durable memories now");
 		// The human's own entry is their text, not the prompt the guest composed.
-		expect(run.output.messages[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "hi" }] });
+		expect(sessionMessages(run.output)[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "hi" }] });
+	}, 120_000);
+
+	it("captures the original exchange even when native compaction removes its user from model context", async () => {
+		hits = [];
+		toolScript = [];
+		memoryCalls = [];
+		sawFirstDelta = Promise.resolve();
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		const run = await runTurn(turnJob({
+			userMessage: "Remember this original user request",
+			memory: { mcpId: "lobu", agentId: "agent-test" },
+			tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 0 },
+		}));
+		expect(sessionEntries(run.output).at(-1)?.type).toBe("compaction");
+		const captures = memoryCalls.filter((call) => call.tool === "save_memory");
+		expect(captures).toHaveLength(1);
+		expect(captures[0]?.body.content).toBe("User: Remember this original user request\nAssistant: Hello from the isolate");
 	}, 120_000);
 
 	it("skips the flush when this compaction cycle already flushed", async () => {
+		const flushed = { type: "custom", id: "synthetic-flush", parentId: null, timestamp: new Date(0).toISOString(),
+			customType: "lobu.memory_flush_state", data: { outcome: "stored", compactionCount: 0 } };
 		hits = [];
 		toolScript = [];
 		armFirstDeltaGate();
@@ -1075,11 +1243,12 @@ describe("agent turn on the isolate lane", () => {
 				memory: { mcpId: "lobu", agentId: "agent-test" },
 				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
 				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
-				memoryFlush: { enabled: true, due: false, softThresholdTokens: 1_000, systemPrompt: "s", prompt: "p" },
+				sessionJsonl: savedSession([flushed]),
+				memoryFlush: { enabled: true, softThresholdTokens: 1_000, systemPrompt: "s", prompt: "p" },
 			}),
 		);
 		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
-		expect(run.output.memoryFlush).toBeUndefined();
+		expect(sessionEntries(run.output).filter((entry) => entry.type === "custom")).toEqual([flushed]);
 	}, 120_000);
 
 	it("recalls memory before the model runs and injects the plugin's own block", async () => {

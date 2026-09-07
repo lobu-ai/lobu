@@ -3,11 +3,11 @@
  *
  * A shadow turn reports what the isolate produced and stops there: the
  * conversation's reply still comes from the subprocess lane, so nothing is
- * delivered. What it writes is the transcript the turn produced, onto the run
- * row, which is how the two lanes are compared while the shadow runs.
+ * delivered. What it writes is the native Pi session the turn produced, onto
+ * the run row, which is how the two lanes are compared while the shadow runs.
  *
- * An authoritative turn additionally delivers: it appends the turn to the
- * conversation's transcript snapshot and publishes the `thread_response` the
+ * An authoritative turn additionally delivers: it persists the conversation's
+ * native Pi session snapshot and publishes the `thread_response` the
  * client is waiting on, both inside the same fenced terminal transition, the
  * way `device-chat.ts` does for the other non-subprocess lane. Which of the
  * two a run is, is the run's own `turn.shadow`, stamped by the producer.
@@ -21,8 +21,6 @@ import {
 	AGENT_ERRORS,
 	AgentErrorCode,
 	createLogger,
-	MEMORY_FLUSH_STATE_CUSTOM_TYPE,
-	parseSessionEntries,
 } from "@lobu/core";
 import {
 	type AgentTurnToolEvent,
@@ -30,6 +28,7 @@ import {
 	CompleteAgentTurnRequestSchema,
 } from "@lobu/core/contracts/worker/protocol";
 import { Value } from "@sinclair/typebox/value";
+import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
 import type { Context } from "hono";
 import { type DbClient, getDb } from "../db/client";
 import type { TurnReply } from "../gateway/orchestration/agent-turn-shadow";
@@ -37,10 +36,7 @@ import {
 	insertThreadResponseRow,
 	notifyThreadResponse,
 } from "../gateway/orchestration/turn-liveness";
-import {
-	MAX_SNAPSHOT_BYTES,
-	readSnapshotJsonl,
-} from "../gateway/services/transcript-snapshot";
+import { MAX_SNAPSHOT_BYTES } from "../gateway/services/transcript-snapshot";
 import type { Env } from "../index";
 import { incrementCounter } from "../gateway/metrics/prometheus";
 import { runLeaseFence } from "../runs/run-lease";
@@ -55,168 +51,57 @@ const logger = createLogger("agent-turn-worker-api");
 /** What of the turn's own text is kept on the run row for the shadow diff. */
 const MAX_OUTPUT_TAIL = 2_000;
 
-/**
- * Append this turn to the conversation's transcript snapshot, in the
- * session-jsonl shape `parseSessionEntries` reads back — the same blob the
- * producer replays for history and the subprocess lane's SessionManager reads.
- *
- * The turn is persisted whole and verbatim: every message the guest added to
- * the history it was given — the human's message, the tool calls, their
- * results, the reply, a memory flush's exchange — because the next turn
- * replays them and a provider refuses a tool call without its result. The
- * guest already stores the human's own text in its user message, not the
- * prompt it composed around it. A worker that reports no transcript (an older
- * build, or a turn that failed before producing one) still gets its text pair
- * recorded.
- *
- * Two entries beyond messages, both pi's: a `custom` entry recording a memory
- * flush ran this cycle, placed right after the flush's exchange, and a
- * `compaction` entry closing the turn when the guest compacted, whose
- * `firstKeptEntryId` is resolved from the entry ids the producer sent with
- * the history plus the ones written here.
- *
- * The row is keyed by `run_id`, and the lease fence already refuses a second
- * completion of the same run, so this insert never conflicts in practice —
- * `DO NOTHING` matches `device-chat.ts` and keeps a durable transcript
- * unoverwritable if one ever does.
- */
-async function appendTurnSnapshot(
-	tx: DbClient,
-	args: {
-		organizationId: string;
-		agentId: string;
-		conversationId: string;
-		runId: number;
-		userText: string;
-		assistantText: string;
-		/** What the guest returned: the history it was given plus this turn. */
-		transcript: Array<Record<string, unknown>>;
-		/** How many of those messages were the history it was given. */
-		priorCount: number;
-		/** The stored entry behind each of those history messages. */
-		historyEntryIds: string[];
-		compaction?: CompleteAgentTurnRequest["compaction"];
-		memoryFlush?: CompleteAgentTurnRequest["memory_flush"];
-	},
-): Promise<void> {
-	if (!args.agentId || !args.conversationId) return;
-	const previous = await readSnapshotJsonl({
-		organizationId: args.organizationId,
-		agentId: args.agentId,
-		conversationId: args.conversationId,
-		client: tx,
-	});
-	const now = new Date().toISOString();
-	const prior = parseSessionEntries(previous ?? "").entries;
-
-	const priorCount = Math.max(0, args.priorCount);
-	let messages: Array<Record<string, unknown>> = args.transcript
-		.slice(priorCount)
-		.filter((message) => typeof message.role === "string");
-	// A guest's transcript opens on a user message — the human's, or the
-	// flush prompt's. A worker that reports less than that (none at all, or an
-	// older build sending only its reply) still gets the human's message and
-	// its answer recorded, but nothing it did not say: its indices do not
-	// describe this transcript, so no flush or compaction entry is written.
-	let legacyShape = false;
-	if (messages[0]?.role !== "user") {
-		legacyShape = true;
-		const reply =
-			messages.length > 0
-				? messages
-				: args.assistantText
-					? [
-							{
-								role: "assistant",
-								content: [{ type: "text", text: args.assistantText }],
-							},
-						]
-					: [];
-		messages = [
-			...(args.userText
-				? [{ role: "user", content: [{ type: "text", text: args.userText }] }]
-				: []),
-			...reply,
-		];
-	}
-	if (messages.length === 0) return;
-	const memoryFlush = legacyShape ? undefined : args.memoryFlush;
-	const compaction = legacyShape ? undefined : args.compaction;
-
-	// One entry id per new message, fixed up front so the compaction entry can
-	// name the kept one whichever file it lands in.
-	const newIds = messages.map((_, index) => `agent-turn-${args.runId}-${index}`);
-	const allIds = [...args.historyEntryIds, ...newIds];
-	const flushAfter =
-		memoryFlush && memoryFlush.after_index >= priorCount
-			? memoryFlush.after_index - priorCount
-			: null;
-	const compactionCount = prior.filter(
-		(entry) => entry.type === "compaction",
-	).length;
-
-	const render = (base: string, tailId: string | null, continuation: boolean) => {
-		let parentId = tailId;
-		const lines: string[] = [];
-		const line = (entry: Record<string, unknown>) => {
-			lines.push(JSON.stringify({ ...entry, parentId, timestamp: now }));
-			parentId = entry.id as string;
-		};
-		messages.forEach((message, index) => {
-			line({ type: "message", id: newIds[index], message });
-			if (flushAfter === index && memoryFlush) {
-				line({
-					type: "custom",
-					id: `agent-turn-${args.runId}-memory-flush`,
-					customType: MEMORY_FLUSH_STATE_CUSTOM_TYPE,
-					data: {
-						compactionCount,
-						outcome: memoryFlush.outcome,
-						timestamp: Date.now(),
-					},
-				});
-			}
-		});
-		if (compaction) {
-			const firstKeptEntryId = allIds[compaction.first_kept_index];
-			// A continuation carries none of the history, so a summary that
-			// keeps part of it has nothing to point at; the compaction is
-			// dropped rather than written dangling.
-			const keptIsPresent =
-				firstKeptEntryId !== undefined &&
-				(!continuation || newIds.includes(firstKeptEntryId));
-			if (keptIsPresent) {
-				line({
-					type: "compaction",
-					id: `agent-turn-${args.runId}-compaction`,
-					summary: compaction.summary,
-					firstKeptEntryId,
-					tokensBefore: compaction.tokens_before,
-				});
-			}
-		}
-		return `${base}${lines.join("\n")}\n`;
-	};
-	const base = previous
-		? previous.endsWith("\n")
-			? previous
-			: `${previous}\n`
-		: "";
-	let snapshot = render(base, prior[prior.length - 1]?.id ?? null, false);
+/** Validate the transport boundary without rebuilding Pi's session state. */
+function snapshotError(snapshot: string | undefined): string | undefined {
+	if (!snapshot) return "agent turn completed without a native session snapshot";
 	if (Buffer.byteLength(snapshot, "utf8") > MAX_SNAPSHOT_BYTES) {
-		// A long-running conversation must not make the current turn fail: this
-		// insert is inside the terminal transaction, so an oversize row would
-		// roll back the completion and the reply and hang the client forever.
-		// Start a compact continuation; the prior run's row stays queryable.
-		snapshot = render("", null, true);
+		return "agent turn session snapshot exceeds the 4 MiB limit";
 	}
+	if (snapshot.includes("\0")) return "agent turn session snapshot contains a NUL byte";
+	try {
+		const [header, ...entries] = snapshot.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
+		if (!header || header.type !== "session" || header.version !== CURRENT_SESSION_VERSION
+			|| typeof header.id !== "string" || !header.id || typeof header.cwd !== "string"
+			|| typeof header.timestamp !== "string") throw new Error("invalid session header");
+		const ids = new Set<string>();
+		for (const entry of entries) {
+			if (!entry || typeof entry.id !== "string" || !entry.id || ids.has(entry.id)
+				|| typeof entry.timestamp !== "string" || typeof entry.type !== "string"
+				|| entry.type === "session"
+				|| (entry.parentId !== null && !ids.has(entry.parentId))) {
+				throw new Error("invalid entry identity or parent");
+			}
+			if (entry.type === "message" && (!entry.message || typeof entry.message.role !== "string")) {
+				throw new Error("invalid message entry");
+			}
+			if (entry.type === "compaction" && (!ids.has(entry.firstKeptEntryId)
+				|| typeof entry.summary !== "string" || !Number.isFinite(entry.tokensBefore))) {
+				throw new Error("invalid compaction entry");
+			}
+			if ((entry.type === "branch_summary" && !ids.has(entry.fromId))
+				|| (entry.type === "label" && !ids.has(entry.targetId))) {
+				throw new Error("invalid entry reference");
+			}
+			ids.add(entry.id);
+		}
+	} catch {
+		return "agent turn returned an invalid native session snapshot";
+	}
+	return undefined;
+}
+
+/** Persist Pi's complete snapshot verbatim inside the fenced terminal transaction. */
+async function persistTurnSnapshot(
+	tx: DbClient,
+	args: { organizationId: string; agentId: string; conversationId: string; runId: number; sessionJsonl: string },
+): Promise<void> {
 	await tx`
     INSERT INTO public.agent_transcript_snapshot
       (organization_id, agent_id, conversation_id, run_id,
        snapshot_jsonl, byte_size, terminal_status)
     VALUES
       (${args.organizationId}, ${args.agentId}, ${args.conversationId}, ${args.runId},
-       ${snapshot}, ${Buffer.byteLength(snapshot, "utf8")}, 'completed')
+       ${args.sessionJsonl}, ${Buffer.byteLength(args.sessionJsonl, "utf8")}, 'completed')
     ON CONFLICT (organization_id, agent_id, conversation_id, run_id)
     DO NOTHING
   `;
@@ -528,9 +413,6 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 			shadow?: unknown;
 			agent_id?: unknown;
 			conversation_id?: unknown;
-			message_text?: unknown;
-			messages?: unknown;
-			message_entry_ids?: unknown;
 		};
 		reply?: TurnReply;
 	};
@@ -547,9 +429,13 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 	}
 
 	const organizationId = run.organization_id;
-	const failed = body.status === "failed";
-	const error =
-		typeof body.error === "string" ? stripNul(body.error).trim() : "";
+	// Invalid snapshots terminalize with a visible error. Returning 400 or
+	// throwing during the insert would strand the worker's completed turn.
+	const invalidSnapshot = body.status === "completed" || body.session_jsonl !== undefined
+		? snapshotError(body.session_jsonl)
+		: undefined;
+	const failed = body.status === "failed" || invalidSnapshot !== undefined;
+	const error = invalidSnapshot ?? (typeof body.error === "string" ? stripNul(body.error).trim() : "");
 	const text = typeof body.text === "string" ? stripNul(body.text) : "";
 	// The turn's own output goes back on the row it came from, so a shadow run
 	// is diffable against the subprocess reply without a second table.
@@ -559,7 +445,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 			text,
 			stop_reason: body.stop_reason ?? null,
 			usage: body.usage ?? null,
-			transcript: body.transcript ?? [],
+			...(!invalidSnapshot && body.session_jsonl !== undefined ? { session_jsonl: body.session_jsonl } : {}),
 		},
 	};
 
@@ -573,7 +459,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
           completed_at = current_timestamp,
           error_message = ${failed ? error || "agent turn failed" : null},
           output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
-          exit_reason = ${body.exit_reason ?? (failed ? "error_message" : "ok")},
+          exit_reason = ${invalidSnapshot ? "error_message" : body.exit_reason ?? (failed ? "error_message" : "ok")},
           action_input = ${sql.json(result)}
       WHERE id = ${body.run_id}
         ${runLeaseFence(tx, body.worker_id)}
@@ -601,24 +487,12 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 		const agentId = String(envelope.turn?.agent_id ?? "");
 		const conversationId = String(envelope.turn?.conversation_id ?? "");
 		if (!failed) {
-			await appendTurnSnapshot(tx, {
+			await persistTurnSnapshot(tx, {
 				organizationId,
 				agentId,
 				conversationId,
 				runId: body.run_id,
-				userText: String(envelope.turn?.message_text ?? ""),
-				assistantText: text,
-				transcript: body.transcript ?? [],
-				priorCount: Array.isArray(envelope.turn?.messages)
-					? envelope.turn.messages.length
-					: 0,
-				historyEntryIds: Array.isArray(envelope.turn?.message_entry_ids)
-					? (envelope.turn.message_entry_ids as unknown[]).filter(
-							(id): id is string => typeof id === "string",
-						)
-					: [],
-				compaction: body.compaction,
-				memoryFlush: body.memory_flush,
+				sessionJsonl: body.session_jsonl!,
 			});
 		}
 		await insertThreadResponseRow(

@@ -40,9 +40,6 @@ import {
   isSteerableHumanMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
-  DEFAULT_COMPACTION_SETTINGS,
-  memoryFlushDue,
-  parseSessionEntries,
   resolveMemoryFlushConfig,
   renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
@@ -52,6 +49,7 @@ import {
 } from "@lobu/core";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
 import { getModel, type Model } from "@mariozechner/pi-ai";
+import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
@@ -59,8 +57,6 @@ import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import type { ModelProviderModule } from "../modules/module-system.js";
-import { replayAgentSession } from "./agent-session.js";
-import { readSnapshotJsonl } from "../services/transcript-snapshot.js";
 import {
   type AgentTurnArtifactReader,
   resolveTurnAttachments,
@@ -87,6 +83,7 @@ const LANE_APIS = new Set<string>([
 ] satisfies LaneApi[]);
 
 const TURN_MESSAGE_CHARS = 32_000;
+const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
 
 /**
  * Where an agent turn's reply is delivered. This rides `action_input` beside
@@ -278,86 +275,6 @@ function workspaceInstructions(canUpload: boolean): string {
     );
   }
   return lines.join("\n");
-}
-
-type HistoryMessage = Record<string, unknown> & { role: string };
-
-function isTextBlock(block: unknown): block is { type: "text"; text: string } {
-  return (
-    !!block &&
-    typeof block === "object" &&
-    (block as { type?: unknown }).type === "text" &&
-    typeof (block as { text?: unknown }).text === "string"
-  );
-}
-
-/** A content array with its thinking blocks dropped. */
-function trimContent(content: unknown): unknown[] {
-  if (typeof content === "string") {
-    return [{ type: "text", text: content }];
-  }
-  if (!Array.isArray(content)) return [];
-  const out: unknown[] = [];
-  for (const block of content) {
-    if (isTextBlock(block)) {
-      out.push(block);
-      continue;
-    }
-    // A thinking block carries a provider signature the next provider may not
-    // accept; the text and the tool calls are what the turn resumes from.
-    if (block && typeof block === "object" && (block as { type?: unknown }).type === "thinking") continue;
-    out.push(block);
-  }
-  return out;
-}
-
-function hasToolCall(message: HistoryMessage): boolean {
-  return (
-    Array.isArray(message.content) &&
-    message.content.some(
-      (block) => !!block && typeof block === "object" && (block as { type?: unknown }).type === "toolCall"
-    )
-  );
-}
-
-/**
- * Rebuild the conversation so far as pi messages.
- *
- * The snapshot stores pi's own entries — the same file the subprocess lane's
- * SessionManager reads — and Pi builds its current branch
- * with the compaction summary included, so the whole conversation
- * replays: nothing is windowed or truncated. The lane runs the same tool loop
- * pi ran to produce the entries, so tool calls, tool results, usage and stop
- * reason are kept, because a provider refuses a tool call without its result
- * and vice versa. Only thinking blocks go, since their provider signature is
- * not portable. The replay is then squared off so it opens on a user message
- * and never ends on a tool call still waiting for its result.
- */
-function historyMessages(replayedEntries: ReturnType<typeof replayAgentSession>["replayed"]): {
-  messages: HistoryMessage[];
-  entryIds: string[];
-} {
-  const replayed: Array<{ entryId: string; message: HistoryMessage }> = [];
-  for (const { entryId, message } of replayedEntries) {
-    const content = trimContent(message.content);
-    if (content.length === 0) continue;
-    replayed.push({ entryId, message: { ...message, content } });
-  }
-  const firstUser = replayed.findIndex(({ message }) => message.role === "user");
-  if (firstUser < 0) return { messages: [], entryIds: [] };
-  const squared = replayed.slice(firstUser);
-  while (squared.length > 0) {
-    const last = squared[squared.length - 1]!.message;
-    if (last.role === "assistant" && hasToolCall(last)) {
-      squared.pop();
-      continue;
-    }
-    break;
-  }
-  return {
-    messages: squared.map(({ message }) => message),
-    entryIds: squared.map(({ entryId }) => entryId),
-  };
 }
 
 /**
@@ -891,20 +808,6 @@ export async function enqueueAgentTurnShadow(
     const settings = await agentSettings.getSettings(data.agentId, {
       organizationId: data.organizationId,
     });
-    // The whole transcript: the snapshot writer already bounds it at
-    // MAX_SNAPSHOT_BYTES, and a shorter read would silently forget the
-    // conversation's head — which is what compaction exists to do deliberately.
-    const snapshot = await readSnapshotJsonl({
-      organizationId: data.organizationId,
-      agentId: data.agentId,
-      conversationId: data.conversationId,
-    });
-    const entries = snapshot ? parseSessionEntries(snapshot).entries : [];
-    const session = replayAgentSession(entries);
-    const history = historyMessages(session.replayed);
-    // The flush runs once per compaction cycle; the branch says whether this
-    // cycle already did, exactly as the subprocess lane reads its session.
-    const flushState = memoryFlushDue(session.branch);
     const memoryFlush = resolveMemoryFlushConfig(
       (data.agentOptions ?? {}) as Record<string, unknown>
     );
@@ -939,22 +842,21 @@ export async function enqueueAgentTurnShadow(
         // channel-participation one.
         [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin]
       ),
-      messages: history.messages,
-      message_entry_ids: history.entryIds,
+      // History is read under the conversation claim, after prior turns finish.
+      session_jsonl: "",
       // pi's own defaults, measured against this model's window. The lane
       // compacts the way the subprocess lane's SessionManager would.
       compaction: {
-        enabled: DEFAULT_COMPACTION_SETTINGS.enabled,
+        enabled: compactionDefaults.enabled,
         context_window: provider.contextWindow,
-        reserve_tokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-        keep_recent_tokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+        reserve_tokens: compactionDefaults.reserveTokens,
+        keep_recent_tokens: compactionDefaults.keepRecentTokens,
       },
       memory_flush: {
         enabled: memoryFlush.enabled,
         soft_threshold_tokens: memoryFlush.softThresholdTokens,
         system_prompt: memoryFlush.systemPrompt,
         prompt: memoryFlush.prompt,
-        due: flushState.due,
       },
       provider: {
         api: provider.api,
@@ -1016,7 +918,6 @@ export async function enqueueAgentTurnShadow(
         messageId: data.messageId,
         provider: provider.provider,
         model: provider.modelId,
-        history: turn.messages.length,
         images: attachments.images.length,
         files: attachments.files.length,
         tools: tools?.definitions.length ?? 0,
