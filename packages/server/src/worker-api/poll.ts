@@ -36,7 +36,7 @@ import {
   transcriptText,
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
-import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
+import { type DbClient, getDb, parsePgTextArray, pgTextArray } from '../db/client';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
 import { withDbRetry } from '../db/with-retry';
@@ -90,6 +90,20 @@ const DISPATCH_FAILURE_OUTCOME: RunOutcome = 'infra_error';
 const DEVICE_CHAT_HISTORY_TAIL_CHARS = 1024 * 1024;
 const DEVICE_CHAT_DISPATCH_ERROR =
   'The selected device could not start this message.';
+
+/** Both candidate selection and the locked recheck use the same conversation fence. */
+function agentTurnClaimEligible(sql: DbClient) {
+  return sql`NOT EXISTS (
+    SELECT 1 FROM runs sibling
+    WHERE sibling.run_type = 'agent_turn'
+      AND sibling.status IN ('pending', 'claimed', 'running')
+      AND sibling.organization_id = r.organization_id
+      AND sibling.action_input->'turn'->>'agent_id' = r.action_input->'turn'->>'agent_id'
+      AND sibling.action_input->'turn'->>'conversation_id' = r.action_input->'turn'->>'conversation_id'
+      AND sibling.id <> r.id
+      AND (sibling.status <> 'pending' OR sibling.id < r.id)
+  )`;
+}
 
 const DUE_FEEDS_LOCK_KEY = 71001;
 
@@ -716,7 +730,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     sql.begin(async (tx) => {
       const candidates = await tx`
       WITH next_run AS (
-        SELECT r.id, r.run_type, r.automation_id
+        SELECT r.id, r.run_type, r.automation_id, r.organization_id,
+          r.action_input->'turn'->>'agent_id' AS turn_agent_id,
+          r.action_input->'turn'->>'conversation_id' AS turn_conversation_id
         FROM runs r
         LEFT JOIN connections con ON con.id = r.connection_id
         -- Pin target platform: chrome-extension pins on non-chrome connectors mean
@@ -782,6 +798,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             OR (
               ${!isUserScopedWorker && workerRunsAgentTurns}
               AND r.run_type = 'agent_turn'
+              AND ${agentTurnClaimEligible(tx)}
             )
             -- (1b) Embedding backfills have no connector identity. They are
             -- server-side work and may only be claimed by the trusted fleet.
@@ -883,7 +900,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         FOR UPDATE OF r SKIP LOCKED
         LIMIT 1
       )
-      SELECT id, run_type, automation_id
+      SELECT id, run_type, automation_id, organization_id, turn_agent_id, turn_conversation_id
       FROM next_run
     `;
 
@@ -895,8 +912,34 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         id: unknown;
         run_type: unknown;
         automation_id: unknown;
+        organization_id: string | null;
+        turn_agent_id: string | null;
+        turn_conversation_id: string | null;
       };
       const runId = Number(candidate.id);
+      if (candidate.run_type === 'agent_turn') {
+        // Hold the conversation through commit: a lower-id insert can become
+        // visible after the recheck and otherwise claim a different locked row.
+        // This namespace is separate from the old worker's session lock.
+        const [lock] = await tx<{ acquired: boolean }>`
+          SELECT pg_try_advisory_xact_lock(hashtextextended(
+            jsonb_build_array('agent_turn_claim', ${candidate.organization_id}::text,
+              ${candidate.turn_agent_id}::text, ${candidate.turn_conversation_id}::text)::text,
+            0
+          )) AS acquired
+        `;
+        if (!lock?.acquired) return null;
+        // A lower-id insert can commit after candidate selection. Re-read in
+        // a fresh statement so a row the first snapshot could not see fences
+        // this claim. One committing after the recheck still waits: the
+        // claimed row fences it until this turn is terminal.
+        const eligible = await tx`
+          SELECT r.id FROM runs r
+          WHERE r.id = ${runId} AND r.status = 'pending'
+            AND ${agentTurnClaimEligible(tx)}
+        `;
+        if (eligible.length === 0) return null;
+      }
       if (candidate.run_type === 'automation') {
         const claimed = await claimPendingAutomationRun(tx, {
           runId,
@@ -1182,7 +1225,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     };
     const turn = envelope.turn;
     const credential = envelope.credential;
-    if (!turn || typeof credential !== 'string' || credential.length === 0) {
+    if (!turn || typeof credential !== 'string' || credential.length === 0
+      || typeof turn.agent_id !== 'string' || !turn.agent_id.trim()
+      || typeof turn.conversation_id !== 'string' || !turn.conversation_id.trim()) {
       const failure = 'agent turn run has an incomplete execution envelope';
       await failClaimedWorkerRun({
         runId: row.run_id,

@@ -15,7 +15,8 @@ import {
 } from '@lobu/core/contracts/worker/protocol';
 import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as db from '../../db/client';
 import { replayAgentSession } from '../../gateway/orchestration/agent-session';
 import { enqueueAgentTurnShadow,
   steerActiveAgentTurn,
@@ -987,6 +988,217 @@ describe('agent turn shadow producer', () => {
       SELECT count(*)::int AS n FROM agent_run_input WHERE message_id = 'msg-shadow'
     `) as unknown as Array<{ n: number }>;
     expect(journal.n).toBe(0);
+  });
+
+  it('serializes concurrent fleet claims for one conversation until completion', async () => {
+    const org = await createTestOrganization();
+    for (const messageId of ['claim-first', 'claim-second']) {
+      await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+        agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+      });
+    }
+    const [first, second] = await shadowRuns();
+    const workers = ['fleet-claim-a', 'fleet-claim-b'];
+    const responses = await Promise.all(workers.map((worker) => pollFleet(worker, { agent_turn: true })));
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    const claims = await Promise.all(responses.map((response) => response.json()));
+    expect(claims.filter((claim) => claim.run_id).map((claim) => claim.run_id)).toEqual([first.id]);
+    expect((await runRow(second.id)).status).toBe('pending');
+
+    const owner = workers[claims.findIndex((claim) => claim.run_id === first.id)];
+    const complete = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: first.id, worker_id: owner, status: 'completed', text: 'first finished',
+    });
+    expect(complete.status).toBe(200);
+    expect((await (await pollFleet('fleet-claim-next', { agent_turn: true })).json()).run_id).toBe(second.id);
+  });
+
+  it('does not skip a locked earlier turn to claim its later sibling', async () => {
+    const org = await createTestOrganization();
+    for (const messageId of ['locked-first', 'locked-second']) {
+      await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+        agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+      });
+    }
+    const [first, second] = await shadowRuns();
+    const sql = getTestDb();
+    await sql.begin(async (tx) => {
+      await tx`SELECT id FROM runs WHERE id = ${first.id} FOR UPDATE`;
+      const response = await pollFleet('fleet-locked-claim', { agent_turn: true });
+      expect(response.status).toBe(200);
+      expect((await response.json()).run_id).toBeUndefined();
+      expect((await runRow(second.id)).status).toBe('pending');
+    });
+    expect((await (await pollFleet('fleet-after-unlock', { agent_turn: true })).json()).run_id).toBe(first.id);
+  });
+
+  it.each(['before', 'after'])('serializes an earlier insert committed %s the locked recheck', async (position) => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [template] = await shadowRuns();
+    const sql = getTestDb();
+    await sql`UPDATE runs SET status = 'completed' WHERE id = ${template.id}`;
+    let releaseInsert!: () => void;
+    const insertGate = new Promise<void>((resolve) => { releaseInsert = resolve; });
+    let inserted!: (id: number) => void;
+    const earlierId = new Promise<number>((resolve) => { inserted = resolve; });
+    const earlierCommit = sql.begin(async (tx) => {
+      const [run] = await tx`
+        INSERT INTO runs (organization_id, run_type, status, approval_status, action_input)
+        SELECT organization_id, run_type, 'pending', 'auto', action_input FROM runs WHERE id = ${template.id}
+        RETURNING id
+      `;
+      inserted(run.id);
+      await insertGate;
+    });
+    const firstId = await earlierId;
+    const realDb = db.getDb();
+    let interleaved = false;
+    let competingClaim: Record<string, unknown> | undefined;
+    const barrierQuery = position === 'before'
+      ? "jsonb_build_array('agent_turn_claim'"
+      : 'SELECT r.id FROM runs r';
+    const gatedDb = new Proxy(realDb, {
+      get(target, property) {
+        if (property === 'begin') return (fn: (tx: db.DbClient) => Promise<unknown>) =>
+          target.begin((tx) => fn(new Proxy(tx, {
+            apply(query, thisArg, args: unknown[]) {
+              const result = Reflect.apply(query, thisArg, args);
+              if (!interleaved && Array.from(args[0] as TemplateStringsArray).join(' ').includes(barrierQuery)) {
+                return Promise.resolve(result).then(async (rows) => {
+                  interleaved = true;
+                  releaseInsert();
+                  await earlierCommit;
+                  if (position === 'after') {
+                    // The later candidate is still pending in other snapshots.
+                    // A row lock cannot stop a claimant of this earlier row.
+                    const response = await pollFleet('fleet-during-recheck', { agent_turn: true });
+                    expect(response.status).toBe(200);
+                    competingClaim = await response.json();
+                  }
+                  return rows;
+                });
+              }
+              return result;
+            },
+          })));
+        return Reflect.get(target, property);
+      },
+    });
+    const spy = vi.spyOn(db, 'getDb').mockReturnValue(gatedDb);
+    try {
+      const [later] = await sql`
+        INSERT INTO runs (organization_id, run_type, status, approval_status, action_input)
+        SELECT organization_id, run_type, 'pending', 'auto', action_input FROM runs WHERE id = ${template.id}
+        RETURNING id
+      `;
+      const response = await pollFleet('fleet-insert-race', { agent_turn: true });
+      expect(response.status).toBe(200);
+      expect(interleaved).toBe(true);
+      // Before recheck, the poll's second attempt picks the earlier row.
+      // After recheck, the lock prevents overlapping claims of different rows.
+      const claimedId = (await response.json()).run_id;
+      expect(claimedId).toBe(position === 'before' ? firstId : later.id);
+      if (position === 'after') {
+        expect(competingClaim).toBeDefined();
+        expect(competingClaim!.run_id).toBeUndefined();
+      }
+      expect((await shadowRuns()).filter((run) => run.status === 'pending')).toHaveLength(1);
+      const complete = await postAsFleet('/api/workers/complete-agent-turn', {
+        run_id: claimedId, worker_id: 'fleet-insert-race', status: 'completed', text: 'finished',
+      });
+      expect(complete.status).toBe(200);
+      expect((await (await pollFleet('fleet-after-insert', { agent_turn: true })).json()).run_id)
+        .toBe(position === 'before' ? later.id : firstId);
+    } finally {
+      spy.mockRestore();
+      releaseInsert();
+      await earlierCommit;
+    }
+  });
+
+  it.each(['claimed', 'running'])(
+    'keeps a crashed %s owner fenced until the reaper makes it terminal', async (status) => {
+      const org = await createTestOrganization();
+      for (const messageId of ['crashed-first', 'crashed-second']) {
+        await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+          agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+        });
+      }
+      const [first, second] = await shadowRuns();
+      const sql = getTestDb();
+      await sql`
+        UPDATE runs SET status = ${status}, claimed_by = 'fleet-crashed',
+          claimed_at = now() - interval '1 hour', last_heartbeat_at = now() - interval '1 hour'
+        WHERE id = ${first.id}
+      `;
+      expect((await (await pollFleet('fleet-before-reap', { agent_turn: true })).json()).run_id).toBeUndefined();
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 0 });
+      expect((await runRow(first.id)).status).toBe('timeout');
+      expect((await (await pollFleet('fleet-after-reap', { agent_turn: true })).json()).run_id).toBe(second.id);
+    }
+  );
+
+  it.each(['agent_id', 'conversation_id'])(
+    'fails a turn with missing %s instead of executing without its conversation fence', async (field) => {
+      const org = await createTestOrganization();
+      await enqueueAgentTurnShadow(messageFor(org.id), {
+        agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+      });
+      const [run] = await shadowRuns();
+      const sql = getTestDb();
+      await sql`
+        UPDATE runs SET action_input = jsonb_set(action_input, '{turn}', (action_input->'turn') - ${field})
+        WHERE id = ${run.id}
+      `;
+      const response = await pollFleet('fleet-invalid-scope', { agent_turn: true });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ skipped_run_id: run.id, error: 'agent turn run has an incomplete execution envelope' });
+      expect((await runRow(run.id)).status).toBe('failed');
+    }
+  );
+
+  it.each(['completed', 'failed', 'cancelled', 'timeout'])(
+    'waits for an already-running later turn to become %s', async (terminalStatus) => {
+      const org = await createTestOrganization();
+      for (const messageId of ['waiting-first', 'running-second']) {
+        await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+          agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+        });
+      }
+      const [first, second] = await shadowRuns();
+      const sql = getTestDb();
+      // Existing/out-of-order work must also fence the older pending row.
+      await sql`UPDATE runs SET status = 'running', claimed_by = 'fleet-existing-owner' WHERE id = ${second.id}`;
+      expect((await (await pollFleet('fleet-waiting', { agent_turn: true })).json()).run_id).toBeUndefined();
+      await sql`UPDATE runs SET status = ${terminalStatus}, completed_at = now() WHERE id = ${second.id}`;
+      expect((await (await pollFleet('fleet-released', { agent_turn: true })).json()).run_id).toBe(first.id);
+    }
+  );
+
+  it('claims distinct organization, agent and conversation scopes independently', async () => {
+    process.env[SHADOW_ENV] = '*';
+    const org = await createTestOrganization();
+    const otherOrg = await createTestOrganization();
+    const base = messageFor(org.id);
+    for (const message of [
+      { ...base, messageId: 'scope-base' },
+      { ...base, messageId: 'scope-org', organizationId: otherOrg.id },
+      { ...base, messageId: 'scope-agent', agentId: 'other-shadow-agent' },
+      { ...base, messageId: 'scope-conversation', conversationId: 'other-shadow-conversation' },
+    ]) {
+      await enqueueAgentTurnShadow(message, {
+        agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+      });
+    }
+    const runs = await shadowRuns();
+    expect(runs).toHaveLength(4);
+    const claims = await Promise.all(runs.map(async (_, index) =>
+      (await pollFleet(`fleet-scope-${index}`, { agent_turn: true })).json()
+    ));
+    expect(claims.map((claim) => claim.run_id).sort()).toEqual(runs.map((run) => run.id).sort());
   });
 
   it('a fleet worker that advertises the lane claims it and receives the turn plus the credential', async () => {
