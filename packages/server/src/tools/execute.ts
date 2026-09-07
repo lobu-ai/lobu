@@ -17,7 +17,6 @@ import {
   type ToolAccessLevel,
 } from '../auth/tool-access';
 import type { Env } from '../index';
-import { recordMcpConversationActivity } from '../lobu/stores/mcp-client-conversations';
 import { trackMCPToolCall } from '../sentry';
 import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
@@ -328,7 +327,6 @@ export async function executeTool(
     }
     if (toolName === 'list_organizations') {
       // Account discovery is audited even without an execution workspace.
-      // The workspace conversation projection is independent of the user ledger.
       const startTime = Date.now();
       const auditOutcome = async (outcome: {
         result?: unknown;
@@ -342,13 +340,6 @@ export async function executeTool(
           durationMs: Date.now() - startTime,
           ctx: ctx ?? authCtx,
         });
-        if (ctx) {
-          await recordMcpConversationActivity({
-            ctx,
-            toolName,
-            failed: outcome.error !== undefined || isSoftErrorResult(outcome.result),
-          });
-        }
       };
       try {
         const result = await trackMCPToolCall(toolName, args, () =>
@@ -438,11 +429,6 @@ export async function executeTool(
       durationMs: Date.now() - startTime,
       ctx: toolContext,
     });
-    await recordMcpConversationActivity({
-      ctx: toolContext,
-      toolName,
-      failed: isSoftErrorResult(result),
-    });
     return result;
   } catch (error) {
     // Stamp the correlation id onto typed errors so the response boundaries can
@@ -456,11 +442,6 @@ export async function executeTool(
       error,
       durationMs: Date.now() - startTime,
       ctx: toolContext,
-    });
-    await recordMcpConversationActivity({
-      ctx: toolContext,
-      toolName,
-      failed: true,
     });
     throw error;
   }

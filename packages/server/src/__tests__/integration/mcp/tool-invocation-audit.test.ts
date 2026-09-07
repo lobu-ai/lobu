@@ -655,11 +655,11 @@ describe('tool invocation audit coverage', () => {
     const conversations = await db<
       Array<{ conversation_id: string; last_action: string; call_count: number }>
     >`
-      SELECT conversation_id, last_action, call_count::int AS call_count
-      FROM mcp_client_conversations
-      WHERE organization_id = ${orgId}
+      SELECT activity_id AS conversation_id, last_action, call_count::int AS call_count
+      FROM user_mcp_activities
+      WHERE user_id = ${ownerId}
         AND client_identity = ${clientId}
-        AND conversation_id = ${conversationId}
+        AND activity_id = ${conversationId}
     `;
     expect(conversations).toEqual([
       {

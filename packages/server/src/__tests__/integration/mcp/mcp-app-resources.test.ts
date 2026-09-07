@@ -1363,11 +1363,10 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     const runId = Number(approval?.run_id);
     expect(runId).toBeGreaterThan(0);
     await getDb()`
-      UPDATE mcp_client_conversations
+      UPDATE user_mcp_activities
       SET title = 'Release approval E2E'
-      WHERE organization_id = ${org.id}
-        AND client_id = ${client.client_id}
-        AND conversation_id = ${hostConversationId}
+      WHERE client_id = ${client.client_id}
+        AND activity_id = ${hostConversationId}
     `;
 
     // Possessing a valid app capability does not replace the canonical human
@@ -1564,7 +1563,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
           expect.objectContaining({
             type: 'text',
             label: 'Conversation',
-            value: expect.stringContaining('Release approval E2E'),
+            value: expect.not.stringContaining('Release approval E2E'),
           }),
           expect.objectContaining({
             type: 'text',

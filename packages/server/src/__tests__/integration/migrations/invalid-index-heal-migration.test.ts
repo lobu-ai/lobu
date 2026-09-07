@@ -72,14 +72,6 @@ const HEAL_MIGRATIONS = [
 		`,
 	},
 	{
-		files: ["20260803155100_mcp_activity_scope_client_idx.sql"],
-		index: "mcp_activity_scope_client_recent",
-		seedSql: `
-      CREATE INDEX IF NOT EXISTS mcp_activity_scope_client_recent
-        ON mcp_client_conversations (conversation_id)
-		`,
-	},
-	{
 		files: ["20260803160000_events_mcp_session_activity_idx.sql"],
 		index: "events_mcp_session_activity",
 		seedSql: `

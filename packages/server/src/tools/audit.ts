@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { getDb } from '../db/client';
-import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
+import { currentMcpActivityEventMetadata, recordUserMcpActivity } from '../lobu/stores/mcp-client-conversations';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { sanitizeAuditArgs } from './audit-args';
@@ -240,16 +240,19 @@ export async function recordToolInvocationAudit(
       // A bare OAuth context can traverse/search several workspaces. Its
       // token's historical anchor is not evidence of this invocation's target.
       const organizationId = params.ctx.allowCrossOrg ? null : params.ctx.organizationId;
-      await sql`
+      await sql.begin(async (tx) => {
+        await tx`
         INSERT INTO user_tool_invocations (
           user_id, organization_id, client_id, activity_id, tool_name,
           success, duration_ms, payload_data, metadata
         ) VALUES (
           ${params.ctx.userId}, ${organizationId}, ${params.ctx.clientId ?? null},
           ${metadata.mcp_conversation_id ?? metadata.mcp_session_id}, ${params.toolName},
-          ${success}, ${params.durationMs}, ${sql.json(payload)}, ${sql.json(metadata)}
+          ${success}, ${params.durationMs}, ${tx.json(payload)}, ${tx.json(metadata)}
         )
-      `;
+        `;
+        await recordUserMcpActivity(tx, params.ctx, params.toolName, !success);
+      });
       return;
     }
     if (!params.ctx.organizationId) return;
