@@ -20,7 +20,7 @@
 import { enforceBashCommandPolicy, isDirectPackageInstallCommand } from '@lobu/core/tool-policy';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { Bash, InMemoryFs } from 'just-bash/browser';
-import type { AgentTurnBashPolicy, AgentTurnBuiltinTool } from './types.js';
+import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 
 /** Where a turn's files live; also the shell's working directory. */
 export const WORKSPACE_ROOT = '/workspace';
@@ -353,11 +353,84 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// ---------------------------------------------------------------------------
+// Remote bash: a sandbox-pinned conversation runs its commands in the remote
+// runtime, through the host. The rendering is the subprocess lane's
+// (`generic-runtime-bash`), so the model reads the same words on either lane.
+// ---------------------------------------------------------------------------
+
+/** How the host runs one command in the remote runtime sandbox. */
+export interface RemoteRuntime {
+  exec(request: RuntimeExecRequest): Promise<RuntimeExecResult>;
+}
+
+/** The agent-facing half of the honest-degradation contract for a failed package install. */
+function provisionNotice(sandbox: unknown): string | undefined {
+  if (!sandbox || typeof sandbox !== 'object') return undefined;
+  const packages = (sandbox as { packages?: unknown }).packages;
+  if (!packages || typeof packages !== 'object') return undefined;
+  const failed = ((packages as { failed?: unknown }).failed ?? []) as unknown[];
+  const names = Array.isArray(failed) ? failed.filter((f): f is string => typeof f === 'string' && f.length > 0) : [];
+  if (names.length === 0) return undefined;
+  const error = (packages as { error?: unknown }).error;
+  const why = typeof error === 'string' && error.trim() ? ` (${error.trim()})` : '';
+  return (
+    `lobu: these tools could not be installed and are NOT available in this sandbox: ${names.join(', ')}${why}. ` +
+    'Commands that need them will fail — do not try to install them yourself; ' +
+    'an admin must fix the package configuration.\n'
+  );
+}
+
+async function runRemoteBash(remote: RemoteRuntime, command: string, timeout: number | undefined): Promise<string> {
+  const result = await remote.exec({
+    command,
+    ...(timeout !== undefined && timeout > 0 ? { timeoutMs: timeout * 1000 } : {}),
+  });
+  if (result.status < 200 || result.status >= 300) {
+    const message = result.error ?? `Runtime exec failed with HTTP ${result.status}`;
+    if (result.kind === 'infrastructure') {
+      // The SANDBOX failed, not the command; say so, or the model rewrites a
+      // correct command and retries into an already failing endpoint.
+      const ran =
+        result.outcome === 'not_started'
+          ? 'your command did not run'
+          : result.outcome === 'completed'
+            ? 'your command RAN but its output could not be retrieved'
+            : 'it is unknown whether your command ran';
+      const advice =
+        result.outcome === 'not_started'
+          ? result.retryable
+            ? ' This is usually transient — the same command may succeed shortly.'
+            : ''
+          : ' Do NOT re-run it blindly; check whether it took effect first.';
+      return `lobu: sandbox runtime error — ${ran}.${advice}\n${message}\n\nCommand exited with code 126`;
+    }
+    return `${message}\n\nCommand exited with code 1`;
+  }
+  let output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const notice = provisionNotice(result.sandbox);
+  if (notice) output += `${output.length > 0 && !output.endsWith('\n') ? '\n' : ''}${notice}`;
+  const truncation = truncateTail(output);
+  let rendered = truncation.content || '(no output)';
+  if (truncation.truncated) {
+    const start = truncation.totalLines - truncation.outputLines + 1;
+    rendered += `\n\n[Showing lines ${start}-${truncation.totalLines} of ${truncation.totalLines}${truncation.truncatedBy === 'bytes' ? ` (${formatSize(MAX_BYTES)} limit)` : ''}]`;
+  }
+  // The route reports a missing exit code as the command failing with 1.
+  const exitCode = result.exitCode ?? 1;
+  if (exitCode !== 0) rendered += `\n\nCommand exited with code ${exitCode}`;
+  return rendered;
+}
+
 /**
  * Build the workspace tools the turn admits, over one fresh filesystem. The
  * shell and every file tool share it, so what `bash` writes `read` sees.
  */
-export function createWorkspace(names: readonly AgentTurnBuiltinTool[], bashPolicy?: AgentTurnBashPolicy): AgentWorkspace {
+export function createWorkspace(
+  names: readonly AgentTurnBuiltinTool[],
+  bashPolicy?: AgentTurnBashPolicy,
+  remote?: RemoteRuntime
+): AgentWorkspace {
   const fs = new InMemoryFs();
   const ready = fs.mkdir(WORKSPACE_ROOT, { recursive: true });
   const shell = new Bash({ fs, cwd: WORKSPACE_ROOT, executionLimits: BASH_LIMITS });
@@ -398,6 +471,7 @@ export function createWorkspace(names: readonly AgentTurnBuiltinTool[], bashPoli
             'DIRECT PACKAGE INSTALL BLOCKED. This workspace has no package manager and no network; use your other tools to reach data instead.'
           );
         }
+        if (remote) return text(await runRemoteBash(remote, command, timeout));
         await ready;
         const result = await shell.exec(command, {
           cwd: WORKSPACE_ROOT,

@@ -784,6 +784,43 @@ describe('agent turn shadow producer', () => {
     expect(await steerActiveAgentTurn({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
   });
 
+  it('carries a pinned sandbox as signed token claims and a remote-bash marker', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(
+      { ...messageFor(org.id), networkConfig: { allowedDomains: ['example.com'] }, nixConfig: { packages: ['ripgrep'] } } as MessagePayload,
+      {
+        agentSettings: settingsStore,
+        catalog: catalogFor(tokenEchoingModule()),
+        mcp: mcpFixture().mcp,
+        gatewayUrl: GATEWAY_URL,
+        runtime: { runtimeProviderId: 'vercel', sandboxId: 'sandbox-1' },
+      }
+    );
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as { tools?: { remote_runtime?: unknown } };
+    expect(turn.tools?.remote_runtime).toEqual({ provider_id: 'vercel' });
+    // The exec route trusts only the signed token for these — never a body.
+    const claims = verifyWorkerToken((run.action_input as { credential: string }).credential) as Record<string, unknown>;
+    expect(claims).toMatchObject({
+      runtimeProviderId: 'vercel',
+      sandboxId: 'sandbox-1',
+      allowedDomains: ['example.com'],
+      nixPackages: ['ripgrep'],
+    });
+  });
+
+  it('marks no remote bash for an unpinned conversation', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    expect((run.action_input.turn as { tools?: { remote_runtime?: unknown } }).tools?.remote_runtime).toBeUndefined();
+  });
+
   it('arms no turn marker and journals no run input', async () => {
     const org = await createTestOrganization();
     await enqueueAgentTurnShadow(messageFor(org.id), {

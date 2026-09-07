@@ -133,6 +133,11 @@ export interface AgentTurnTools {
   builtin?: AgentTurnBuiltinTool[];
   bashPolicy?: AgentTurnBashPolicy;
   /**
+   * The conversation is pinned to a remote runtime sandbox: `bash` runs there
+   * through the host, not in the in-memory workspace. Absent → local bash.
+   */
+  remoteRuntime?: { providerId: string };
+  /**
    * Gateway tools the agent's policy admits, by name. Their routing lives in
    * the plugin package, so the wire carries only the names.
    */
@@ -239,6 +244,25 @@ export interface AgentTurnMemory {
   mcpId: string;
   /** The agent the capture is attributed to. */
   agentId: string;
+}
+
+/** One command sent to the remote runtime sandbox, and what came back. */
+export interface RuntimeExecRequest {
+  command: string;
+  timeoutMs?: number;
+}
+export interface RuntimeExecResult {
+  /** HTTP status the gateway answered; 2xx means the command ran. */
+  status: number;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  error?: string;
+  /** "infrastructure" when the RUNTIME failed and the command never ran. */
+  kind?: string;
+  retryable?: boolean;
+  outcome?: string;
+  sandbox?: unknown;
 }
 
 /** A message that arrived mid-turn and is for the model now: pi's steering. */

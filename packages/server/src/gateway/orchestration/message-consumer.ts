@@ -710,6 +710,8 @@ export class MessageConsumer {
         // from here rather than from the signed URL it also stamped, so no
         // attachment URL crosses into the isolate.
         artifacts: this.agentTurnArtifacts,
+        // The same pinned sandbox the subprocess lane's token was minted with.
+        runtime: runtimeSelection,
       });
 
       queueSpan?.setStatus({ code: SpanStatusCode.OK });

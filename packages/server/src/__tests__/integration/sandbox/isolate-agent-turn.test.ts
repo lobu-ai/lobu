@@ -917,6 +917,68 @@ describe("agent turn on the isolate lane", () => {
 		expect(steered).toBeDefined();
 	}, 120_000);
 
+	it("runs bash in the remote runtime through the host when the conversation is sandbox-pinned", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_r1", name: "bash", input: { command: "uname -a" } }];
+		armFirstDeltaGate();
+		const execs: Array<{ command: string; timeoutMs?: number }> = [];
+		const run = await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash", "read"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async (request) => {
+					execs.push(request);
+					return { status: 200, stdout: "Linux sandbox 6.1\n", exitCode: 0 };
+				},
+			},
+		);
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The command went to the host, not to the in-memory shell.
+		expect(execs).toEqual([{ command: "uname -a" }]);
+		// And the model saw the sandbox's answer as the tool result.
+		const second = hits.filter((h) => h.url === "/v1/messages")[1];
+		expect(second?.body).toContain("Linux sandbox 6.1");
+		// The guest itself dialled nothing but the provider: no exec route call of its own.
+		expect(hits.some((h) => h.url.includes("/internal/runtime/exec"))).toBe(false);
+	}, 120_000);
+
+	it("tells the model when the SANDBOX failed rather than the command", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_r2", name: "bash", input: { command: "ls" } }];
+		armFirstDeltaGate();
+		await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async () => ({
+					status: 503,
+					error: "sandbox is provisioning",
+					kind: "infrastructure",
+					outcome: "not_started",
+					retryable: true,
+				}),
+			},
+		);
+		const second = hits.filter((h) => h.url === "/v1/messages")[1];
+		expect(second?.body).toContain("sandbox runtime error");
+		expect(second?.body).toContain("your command did not run");
+		expect(second?.body).toContain("Command exited with code 126");
+	}, 120_000);
+
 	it("compacts after answering when the context has outgrown the window, with pi's own prompts", async () => {
 		hits = [];
 		toolScript = [];

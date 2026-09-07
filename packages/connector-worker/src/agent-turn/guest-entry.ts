@@ -36,7 +36,7 @@ import {
   type SummaryRequest,
   summaryRequests,
 } from '@lobu/core/compaction';
-import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer } from './types.js';
+import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 import { createWorkspace, type AgentWorkspace } from './workspace.js';
 
 /**
@@ -152,7 +152,8 @@ function buildTools(
   credential: string,
   onAskUserPosted: () => void,
   onInBandReplyDelivered: () => void,
-  emit: (event: AgentTurnEvent) => void
+  emit: (event: AgentTurnEvent) => void,
+  runtimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>
 ): AgentTool[] {
   const tools = input.tools;
   if (!tools) return [];
@@ -160,8 +161,12 @@ function buildTools(
   // `upload_file` reads it, so the file the model just wrote is the file it can
   // show. Built even when no file tool was admitted but a media tool was, since
   // `bash` alone is enough to produce something worth uploading.
+  // On a sandbox-pinned conversation `bash` runs in the remote runtime through
+  // the host; the file tools stay on the in-memory workspace, as on the
+  // subprocess lane where they read the local directory beside a remote shell.
+  const remote = tools.remoteRuntime && runtimeExec ? { exec: runtimeExec } : undefined;
   const workspace: AgentWorkspace | null =
-    tools.builtin && tools.builtin.length > 0 ? createWorkspace(tools.builtin, tools.bashPolicy) : null;
+    tools.builtin && tools.builtin.length > 0 ? createWorkspace(tools.builtin, tools.bashPolicy, remote) : null;
   const gateway =
     tools.gateway && tools.gateway.length > 0 && tools.conversation
       ? createGatewayTools(tools.gateway, {
@@ -266,7 +271,8 @@ function buildUserMessage(input: AgentTurnInput, userText: string): Record<strin
 export async function runAgentTurn(
   input: AgentTurnInput,
   emit: (event: AgentTurnEvent) => void,
-  takeSteering: () => AgentTurnSteer[] = () => []
+  takeSteering: () => AgentTurnSteer[] = () => [],
+  runtimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>
 ): Promise<AgentTurnOutput> {
   const credential = input.provider.apiKey;
   if (!credential) throw new Error('the agent turn reached the guest with no credential');
@@ -330,7 +336,8 @@ export async function runAgentTurn(
         () => {
           repliedInBand = true;
         },
-        emit
+        emit,
+        runtimeExec
       ),
     },
     // pi hands the loop's own options through; the key rides here rather than

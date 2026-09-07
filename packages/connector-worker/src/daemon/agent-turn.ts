@@ -16,7 +16,14 @@ import {
 } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
 import type { HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
-import type { AgentTurnEvent, AgentTurnGatewayTool, AgentTurnMediaTool, AgentTurnSteer } from '../agent-turn/types.js';
+import type {
+  AgentTurnEvent,
+  AgentTurnGatewayTool,
+  AgentTurnMediaTool,
+  AgentTurnSteer,
+  RuntimeExecRequest,
+  RuntimeExecResult,
+} from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import type { ExecutorClient } from './client.js';
@@ -298,6 +305,7 @@ export async function executeAgentTurnRun(
                     inputSchema: tool.input_schema,
                   })),
                   ...(turn.tools.builtin ? { builtin: turn.tools.builtin } : {}),
+        ...(turn.tools.remote_runtime ? { remoteRuntime: { providerId: turn.tools.remote_runtime.provider_id } } : {}),
                   ...(turn.tools.bash_policy
                     ? {
                         bashPolicy: {
@@ -373,6 +381,35 @@ export async function executeAgentTurnRun(
       {
         signal: cancel.signal,
         takeSteering: () => steering.splice(0),
+        // Remote bash for a sandbox-pinned conversation: the SAME route and the
+        // SAME token the subprocess lane's bash uses (`generic-runtime-bash`),
+        // posted by the host so the guest keeps its deny-all egress.
+        ...(turn.tools?.remote_runtime && turn.tools.gateway_url
+          ? {
+              onRuntimeExec: async (request: RuntimeExecRequest): Promise<RuntimeExecResult> => {
+                const response = await fetch(`${turn.tools?.gateway_url.replace(/\/+$/, '')}/internal/runtime/exec`, {
+                  method: 'POST',
+                  headers: { authorization: `Bearer ${job.credentials?.accessToken ?? ''}`, 'content-type': 'application/json' },
+                  body: JSON.stringify({
+                    command: request.command,
+                    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+                  }),
+                });
+                const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+                return {
+                  status: response.status,
+                  ...(typeof payload.stdout === 'string' ? { stdout: payload.stdout } : {}),
+                  ...(typeof payload.stderr === 'string' ? { stderr: payload.stderr } : {}),
+                  ...(typeof payload.exitCode === 'number' ? { exitCode: payload.exitCode } : {}),
+                  ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
+                  ...(typeof payload.kind === 'string' ? { kind: payload.kind } : {}),
+                  ...(typeof payload.retryable === 'boolean' ? { retryable: payload.retryable } : {}),
+                  ...(typeof payload.outcome === 'string' ? { outcome: payload.outcome } : {}),
+                  ...(payload.sandbox !== undefined ? { sandbox: payload.sandbox } : {}),
+                };
+              },
+            }
+          : {}),
         onTurnEvent: (event: AgentTurnEvent) => {
           if (event.type === 'text_delta') {
             // Queued, not accumulated: the next batch carries what the server

@@ -589,6 +589,55 @@ describe("executeAgentTurnRun steering", () => {
   });
 });
 
+describe("executeAgentTurnRun remote runtime", () => {
+  test("posts a guest bash command to the gateway's exec route with the turn's own token", async () => {
+    const reported: Reported = { calls: [] };
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ stdout: "ok\n", exitCode: 0, sandbox: { packages: { failed: [] } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      let result: unknown;
+      const executor: SyncExecutor = {
+        execute: async (_code, _job, hooks) => {
+          result = await hooks?.onRuntimeExec?.({ command: "uname -a", timeoutMs: 5_000 });
+          return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+        },
+      };
+      const job = turnJob();
+      const turn = (job.payload as { turn: Record<string, unknown> }).turn;
+      turn.tools = { gateway_url: "http://gateway.test/lobu/", definitions: [], remote_runtime: { provider_id: "vercel" } };
+      await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.url).toBe("http://gateway.test/lobu/internal/runtime/exec");
+      const headers = seen[0]?.init.headers as Record<string, string>;
+      expect(headers.authorization).toBe(`Bearer ${job.credentials?.accessToken}`);
+      expect(JSON.parse(String(seen[0]?.init.body))).toEqual({ command: "uname -a", timeoutMs: 5_000 });
+      expect(result).toEqual({ status: 200, stdout: "ok\n", exitCode: 0, sandbox: { packages: { failed: [] } } });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("offers no remote exec to a turn that is not sandbox-pinned", async () => {
+    const reported: Reported = { calls: [] };
+    let offered: boolean | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        offered = typeof hooks?.onRuntimeExec === "function";
+        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+      },
+    };
+    await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, cfgWith(executor));
+    expect(offered).toBe(false);
+  });
+});
+
 describe("executeAgentTurnRun streaming", () => {
   /**
    * The guest streams; the arm has to get that text out of the worker while
