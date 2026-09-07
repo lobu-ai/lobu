@@ -56,6 +56,185 @@ export interface SessionEntry {
   customType?: string;
   content?: unknown;
   display?: boolean;
+  /** `compaction` entries: the first entry kept verbatim after the summary. */
+  firstKeptEntryId?: string;
+  /** `compaction` entries: context size the summary replaced. */
+  tokensBefore?: number;
+  /** `branch_summary` entries: the branch the summary came back from. */
+  fromId?: string;
+}
+
+/**
+ * A message the model is shown, in pi's own shape: `user`, `assistant` or
+ * `toolResult`, with whatever fields the entry carried (usage, stop reason,
+ * tool call ids) preserved so a provider sees exactly what it produced.
+ */
+export type SessionMessage = Record<string, unknown> & { role: string };
+
+/**
+ * pi's exact framing for a compaction summary when it is shown to the model
+ * (`convertToLlm` in pi-coding-agent's messages.ts). Copied verbatim so the
+ * summary reads identically whichever lane replays it.
+ */
+export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
+
+<summary>
+`;
+export const COMPACTION_SUMMARY_SUFFIX = `
+</summary>`;
+export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
+
+<summary>
+`;
+export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
+
+function userText(text: string, timestamp: string): SessionMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp: new Date(timestamp).getTime(),
+  };
+}
+
+/** pi's `bashExecutionToText`: how a `!command` record reads to the model. */
+function bashExecutionText(
+  message: NonNullable<SessionEntry["message"]>
+): string {
+  let text = `Ran \`${message.command ?? ""}\`\n`;
+  text += message.output ? `\`\`\`\n${message.output}\n\`\`\`` : "(no output)";
+  if (message.cancelled) {
+    text += "\n\n(command cancelled)";
+  } else if (
+    message.exitCode !== null &&
+    message.exitCode !== undefined &&
+    message.exitCode !== 0
+  ) {
+    text += `\n\nCommand exited with code ${message.exitCode}`;
+  }
+  if (message.truncated && message.fullOutputPath) {
+    text += `\n\n[Output truncated. Full output: ${message.fullOutputPath}]`;
+  }
+  return text;
+}
+
+/** One entry as the model sees it, or nothing for entries it never sees. */
+function entryToModelMessage(entry: SessionEntry): SessionMessage | null {
+  if (entry.type === "message" && entry.message) {
+    const message = entry.message;
+    if (message.role === "bashExecution") {
+      if (message.excludeFromContext) return null;
+      return userText(bashExecutionText(message), entry.timestamp);
+    }
+    if (
+      message.role === "user" ||
+      message.role === "assistant" ||
+      message.role === "toolResult"
+    ) {
+      return message as SessionMessage;
+    }
+    return null;
+  }
+  if (entry.type === "custom_message") {
+    const content =
+      typeof entry.content === "string"
+        ? [{ type: "text", text: entry.content }]
+        : entry.content;
+    return {
+      role: "user",
+      content,
+      timestamp: new Date(entry.timestamp).getTime(),
+    };
+  }
+  if (entry.type === "branch_summary" && entry.summary) {
+    return userText(
+      BRANCH_SUMMARY_PREFIX + entry.summary + BRANCH_SUMMARY_SUFFIX,
+      entry.timestamp
+    );
+  }
+  return null;
+}
+
+/**
+ * Replay a session's current branch as the messages the model is shown —
+ * pi's `buildSessionContext` followed by its `convertToLlm`, without a
+ * SessionManager or a filesystem.
+ *
+ * The branch is the parent chain walked back from the last entry, so entries
+ * off the current branch (pi's tree navigation) are not replayed; an entry
+ * with no reachable parent continues from its file-order predecessor. When the
+ * chain carries a `compaction` entry, the model sees the summary first, then
+ * the entries kept verbatim from `firstKeptEntryId` up to the compaction, then
+ * everything after it — exactly the context pi would rebuild from the same
+ * file, which is what lets one snapshot serve both lanes.
+ */
+export function replaySessionMessages(
+  entries: SessionEntry[]
+): SessionMessage[] {
+  const byId = new Map<string, SessionEntry>();
+  const position = new Map<SessionEntry, number>();
+  entries.forEach((entry, index) => {
+    byId.set(entry.id, entry);
+    position.set(entry, index);
+  });
+  const leaf = entries[entries.length - 1];
+  if (!leaf) return [];
+
+  // pi chains every entry to its parent, so a parent that is null or unknown
+  // only ever occurs on a file's first entry. Lobu's own writers have also
+  // emitted flat files whose entries all carry a null parent; those continue
+  // in file order, which is the only branch a flat file has.
+  const path: SessionEntry[] = [];
+  let current: SessionEntry | undefined = leaf;
+  while (current) {
+    path.unshift(current);
+    const parent: SessionEntry | undefined = current.parentId
+      ? byId.get(current.parentId)
+      : undefined;
+    if (parent) {
+      current = parent;
+      continue;
+    }
+    const index: number = position.get(current) ?? 0;
+    current = index > 0 ? entries[index - 1] : undefined;
+  }
+
+  let compactionIndex = -1;
+  for (let i = path.length - 1; i >= 0; i--) {
+    if (path[i]?.type === "compaction") {
+      compactionIndex = i;
+      break;
+    }
+  }
+
+  const messages: SessionMessage[] = [];
+  const append = (entry: SessionEntry) => {
+    const message = entryToModelMessage(entry);
+    if (message) messages.push(message);
+  };
+  if (compactionIndex < 0) {
+    for (const entry of path) append(entry);
+    return messages;
+  }
+
+  const compaction = path[compactionIndex] as SessionEntry;
+  messages.push(
+    userText(
+      COMPACTION_SUMMARY_PREFIX +
+        (compaction.summary ?? "") +
+        COMPACTION_SUMMARY_SUFFIX,
+      compaction.timestamp
+    )
+  );
+  let keeping = false;
+  for (let i = 0; i < compactionIndex; i++) {
+    const entry = path[i] as SessionEntry;
+    if (entry.id === compaction.firstKeptEntryId) keeping = true;
+    if (keeping) append(entry);
+  }
+  for (let i = compactionIndex + 1; i < path.length; i++) {
+    append(path[i] as SessionEntry);
+  }
+  return messages;
 }
 
 /**
