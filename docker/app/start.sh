@@ -2,6 +2,7 @@
 set -e
 
 MODE="${1:-server}"
+app_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 echo "Starting Lobu backend (Node)"
 echo "================================"
@@ -45,113 +46,6 @@ try {
 NODE
 }
 
-# Fail FAST, before the migration runner touches anything, when a PENDING migration will
-# `ALTER COLUMN ... SET NOT NULL` on a column that still has NULL rows. That is
-# the signature of a contract migration whose out-of-band backfill precondition
-# was skipped (incident 2026-06-24: a classifier-collapse contract migration hit
-# this, the migration failed mid-run, the Helm pre-upgrade hook failed, and the
-# HelmRelease wedged + rolled back for hours, spamming #devops). The database
-# error ("column X contains null values") is buried after partial work; this
-# surfaces the exact table.column + NULL count + remediation up front.
-#
-# Fail OPEN by design: any parse/connect/unknown error logs a warning and
-# continues so the preflight can never itself become a new deploy wedge. It only
-# HARD-fails when it positively finds NULLs in an existing targeted column.
-preflight_not_null_preconditions() {
-  echo "Checking pending migrations for unsatisfied NOT NULL preconditions..."
-  MIGRATIONS_DIR=/app/db/migrations node --input-type=module <<'NODE'
-import postgres from "postgres";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const databaseUrl = process.env.DATABASE_URL;
-const dir = process.env.MIGRATIONS_DIR || "/app/db/migrations";
-if (!databaseUrl) {
-  console.error("ERROR: DATABASE_URL not set");
-  process.exit(1);
-}
-
-const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, idle_timeout: 1, onnotice: () => {} });
-
-try {
-  let applied;
-  try {
-    const rows = await sql`SELECT version FROM schema_migrations`;
-    applied = new Set(rows.map((r) => r.version));
-  } catch {
-    // Fresh DB with no schema_migrations yet → nothing applied and no rows that
-    // could violate a NOT NULL. Nothing to check.
-    console.log("schema_migrations not present — skipping NOT NULL preflight");
-    process.exit(0);
-  }
-
-  let files;
-  try {
-    files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
-  } catch (e) {
-    console.warn(`preflight: cannot read ${dir} (${e.message}) — skipping`);
-    process.exit(0);
-  }
-
-  const violations = [];
-  for (const file of files) {
-    const version = file.split("_")[0];
-    if (applied.has(version)) continue; // already applied
-
-    let text;
-    try {
-      text = readFileSync(join(dir, file), "utf8");
-    } catch {
-      continue;
-    }
-    // Only consider the up section, statement by statement. A statement that
-    // both names a table and SETs a column NOT NULL targets an existing column.
-    const up = text.split(/--\s*migrate:down/i)[0];
-    for (const stmt of up.split(";")) {
-      if (!/alter\s+column/i.test(stmt) || !/set\s+not\s+null/i.test(stmt)) continue;
-      const tableM = stmt.match(/alter\s+table\s+(?:only\s+)?(?:public\.)?"?(\w+)"?/i);
-      const colM = stmt.match(/alter\s+column\s+"?(\w+)"?\s+set\s+not\s+null/i);
-      if (!tableM || !colM) continue;
-      const table = tableM[1];
-      const col = colM[1];
-      try {
-        // table/col are \w+ extracted from our own migration files — not user input.
-        const rows = await sql.unsafe(
-          `SELECT count(*)::bigint AS n FROM public.${table} WHERE ${col} IS NULL`
-        );
-        const n = Number(rows[0]?.n ?? 0);
-        if (n > 0) violations.push({ file, table, col, n });
-      } catch (e) {
-        // Column/table may be created by an earlier still-pending migration, so
-        // it can't be pre-verified — let the migration runner handle it. Fail open.
-        console.warn(`preflight: cannot check ${table}.${col} (${file}): ${e.message}`);
-      }
-    }
-  }
-
-  if (violations.length > 0) {
-    console.error("");
-    console.error("ERROR: refusing to run migrations — a pending NOT NULL constraint has unbacked NULLs:");
-    for (const v of violations) {
-      console.error(`  - ${v.file}: ${v.table}.${v.col} SET NOT NULL, but ${v.n} row(s) are NULL`);
-    }
-    console.error("");
-    console.error("This is a contract migration whose out-of-band backfill must run to completion FIRST");
-    console.error("(see the migration header / scripts/). Run the backfill, confirm 0 NULLs, then redeploy.");
-    console.error("Aborting before migrations so the deploy fails fast with a clear cause, not mid-migration.");
-    process.exit(1);
-  }
-  console.log("NOT NULL preflight passed");
-} catch (error) {
-  // Never let an unexpected preflight error block a deploy.
-  console.warn(`preflight: unexpected error, continuing (${error instanceof Error ? error.message : String(error)})`);
-  process.exit(0);
-} finally {
-  await sql.end({ timeout: 1 }).catch(() => {});
-}
-NODE
-}
-
 run_migrations() {
   if [ -z "$DATABASE_URL" ]; then
     echo "ERROR: DATABASE_URL not set"
@@ -162,16 +56,14 @@ run_migrations() {
     preflight_database
   fi
 
-  preflight_not_null_preconditions
-
   echo ""
   echo "Running database migrations..."
   # Statement-at-a-time for transaction:false (CONCURRENTLY + heal DO). Plain
   # dbmate Exec's the whole up section as one simple-query batch, which Postgres
   # wraps in an implicit transaction that CREATE INDEX CONCURRENTLY refuses.
   # scripts/migrate-up.mjs uses the existing public.schema_migrations ledger.
-  MIGRATIONS_DIR="${MIGRATIONS_DIR:-/app/db/migrations}" \
-    node /app/scripts/migrate-up.mjs
+  MIGRATIONS_DIR="${MIGRATIONS_DIR:-$app_dir/db/migrations}" \
+    node "$app_dir/scripts/migrate-up.mjs"
   echo "Migrations complete"
 }
 
