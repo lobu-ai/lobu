@@ -607,3 +607,138 @@ describe("whatsAppWebAdapterProgram message actions", () => {
     expect(result.confirmed).toBe(false);
   });
 });
+
+/**
+ * `collect` normalises every message in the store, and `normalizeMessage` used
+ * to rescan a whole collection per message: the chat name over every chat, the
+ * sender name over every contact, and a reaction's target over every message.
+ * That is O(messages x collection) of SYNCHRONOUS work on the page's main
+ * thread.
+ *
+ * Measured on the live prod tab (947 chats, 5323 contacts, 1872 messages): the
+ * contact scan alone projected to ~6.8s, the message scan to ~2.1s, and a real
+ * `collect` blew past a 70s in-page timer -- which could not even fire, because
+ * the main thread never yielded. The extension's 90s per-dispatch run fence
+ * then killed the run, so the feed ingested nothing, and every run was slower
+ * than the last as backfill grew the store.
+ *
+ * This asserts the shape of the cost, not a wall-clock number: with a fixed
+ * message count, growing the CONTACT collection tenfold must not multiply the
+ * comparisons the adapter performs. A linear rescan fails this; an index built
+ * once per collection passes it.
+ */
+describe("whatsAppWebAdapterProgram collect scaling", () => {
+  function installWithStore(contactCount: number) {
+    // Count property reads on each contact id: the linear scan touches every
+    // contact once per message, the index touches each exactly once.
+    let idReads = 0;
+    const contact = (index: number) => ({
+      attributes: {
+        get id() {
+          idReads += 1;
+          return { _serialized: `contact-${index}@c.us` };
+        },
+        name: `Contact ${index}`,
+      },
+    });
+    const contacts = Array.from({ length: contactCount }, (_, i) => contact(i));
+    const chatModel = {
+      attributes: {
+        id: { _serialized: `contact-${contactCount - 1}@c.us` },
+        name: "Chat 0",
+        msgs: { _models: [], msgLoadState: { noEarlierMsgs: true } },
+      },
+    };
+    // Point every message at the LAST contact. A linear scan then walks the
+    // whole collection per message -- the real prod shape, where senders are
+    // spread across 5323 contacts rather than sitting at index 0.
+    const senderIndex = contactCount - 1;
+    const messages = Array.from({ length: 25 }, (_, i) => ({
+      attributes: {
+        id: {
+          fromMe: false,
+          id: `M${i}`,
+          _serialized: `false_contact-${senderIndex}@c.us_M${i}`,
+        },
+        from: { _serialized: `contact-${senderIndex}@c.us` },
+        to: { _serialized: "me@c.us" },
+        type: "chat",
+        body: `hello ${i}`,
+        t: 1_700_000_000 + i,
+      },
+    }));
+    const modules: Record<string, unknown> = {
+      WAWebCollections: {
+        Msg: { _models: messages },
+        Chat: { _models: [chatModel] },
+        Contact: { _models: contacts },
+      },
+      // `collect` is capability-gated on the history loader, and readiness
+      // needs an authenticated self identity.
+      WAWebChatLoadMessages: { loadEarlierMsgs: async () => undefined },
+      WAWebUserPrefsMeUser: {
+        getMaybeMePnUser: () => ({ _serialized: "me@c.us" }),
+      },
+    };
+    const globals: Record<string, any> = {};
+    const page = {
+      globalThis: globals,
+      document: { querySelector: () => null, querySelectorAll: () => [] },
+      window: { require: (n: string) => modules[n] ?? null },
+      location: { origin: "https://web.whatsapp.com" },
+      setTimeout: (fn: () => void, ms?: number) =>
+        globalThis.setTimeout(fn, ms),
+      clearTimeout: (id: number) => globalThis.clearTimeout(id),
+    };
+    const run = new Function(
+      ...Object.keys(page),
+      `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
+    );
+    run(...Object.values(page));
+    return { adapter: globals.__owlettoWhatsAppAdapterV1, reads: () => idReads };
+  }
+
+  it("does not rescan a collection once per message", async () => {
+    const ready = async (adapter: any) => {
+      // Readiness requires the store signature to hold for 500ms across two
+      // probes, exactly as it does in the page.
+      await adapter.invoke({ op: "probe", adapter_version: WHATSAPP_ADAPTER_VERSION });
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 550));
+      await adapter.invoke({ op: "probe", adapter_version: WHATSAPP_ADAPTER_VERSION });
+    };
+    const small = installWithStore(50);
+    await ready(small.adapter);
+    await small.adapter.invoke({
+      op: "collect",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      max_messages: 100,
+      max_chats: 1,
+      max_loads_per_chat: 1,
+      chat_filter: "all",
+      backfill_disabled: true,
+      budget_ms: 1_000,
+    });
+    const large = installWithStore(500);
+    await ready(large.adapter);
+    await large.adapter.invoke({
+      op: "collect",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      max_messages: 100,
+      max_chats: 1,
+      max_loads_per_chat: 1,
+      chat_filter: "all",
+      backfill_disabled: true,
+      budget_ms: 1_000,
+    });
+    // The cost must scale with the COLLECTION, not with messages x collection.
+    // Indexed, 500 contacts cost ~500 id reads however many messages are
+    // normalised. Rescanning, it is 500 per message: 25 messages -> 12500, the
+    // shape that made a real collect exceed the extension's 90s run fence.
+    const messagesNormalised = 25;
+    expect(large.reads()).toBeLessThan(500 * messagesNormalised);
+    // One pass over the collection, plus a small constant.
+    expect(large.reads()).toBeLessThanOrEqual(500 * 2);
+    // And the same must hold at the smaller size, so this cannot pass by luck.
+    expect(small.reads()).toBeLessThanOrEqual(50 * 2);
+  });
+});
