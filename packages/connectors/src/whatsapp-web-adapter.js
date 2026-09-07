@@ -30,7 +30,12 @@
 
 export function whatsAppWebAdapterProgram() {
   const GLOBAL_KEY = "__owlettoWhatsAppAdapterV1";
-  const ADAPTER_VERSION = 9;
+  // Bumped whenever the program changes at all, not only its RPC surface.
+  // A WhatsApp tab outlives a deploy, so the resident adapter is replaced only
+  // when this number moves: shipping a fix under the old number leaves every
+  // already-open tab running the previous code with nothing to show for it.
+  // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
+  const ADAPTER_VERSION = 10;
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",

@@ -627,6 +627,25 @@ describe("whatsAppWebAdapterProgram message actions", () => {
  * comparisons the adapter performs. A linear rescan fails this; an index built
  * once per collection passes it.
  */
+describe("whatsAppWebAdapterProgram version", () => {
+  // The connector reuses a resident adapter whenever its version matches, so a
+  // fix shipped without bumping this number leaves every open
+  // WhatsApp tab running the old program. The two constants live in different
+  // files (one is page source, one is connector source); nothing but this test
+  // keeps them in step.
+  it("declares the same version the connector negotiates", () => {
+    // Read the file rather than `toString()`: the bundler inlines this const,
+    // so the serialised program no longer contains the identifier.
+    const source = readFileSync(
+      new URL("../whatsapp-web-adapter.js", import.meta.url),
+      "utf8"
+    );
+    const declared = source.match(/ADAPTER_VERSION = (\d+);/)?.[1];
+    expect(declared).toBeDefined();
+    expect(Number(declared)).toBe(WHATSAPP_ADAPTER_VERSION);
+  });
+});
+
 describe("whatsAppWebAdapterProgram collect scaling", () => {
   function installWithStore(contactCount: number) {
     // Count property reads on each contact id: the linear scan touches every
