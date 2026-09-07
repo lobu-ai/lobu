@@ -314,7 +314,7 @@ describe('agent turn shadow producer', () => {
     };
     expect(tools.definitions).toEqual([]);
     expect(tools.media).toEqual(['upload_file', 'generate_image', 'generate_audio']);
-    expect(tools.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
+    expect(tools.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     expect(tools.bash_policy.allow_all).toBe(false);
     expect(tools.bash_policy.allow_prefixes).toEqual([]);
     expect(tools.bash_policy.deny_prefixes).toContain('pip install ');
@@ -384,7 +384,7 @@ describe('agent turn shadow producer', () => {
     ]);
     expect(envelope.turn.tools).toMatchObject({
       gateway_url: GATEWAY_URL,
-      builtin: ['bash', 'read', 'write', 'ls', 'find'],
+      builtin: ['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find'],
       definitions: [
         {
           mcp_id: 'lobu-memory',
@@ -469,7 +469,8 @@ describe('agent turn shadow producer', () => {
     // No MCP surface wired, yet the workspace still ships: the two halves of
     // the manifest are independent.
     expect(turn.tools?.definitions).toEqual([]);
-    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'ls', 'find']);
+    // `write` is denied; `edit` is a different tool and stays.
+    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'edit', 'grep', 'ls', 'find']);
     expect(turn.tools?.bash_policy.allow_all).toBe(false);
     expect(turn.tools?.bash_policy.allow_prefixes).toEqual(['git', 'ls']);
     expect(turn.tools?.bash_policy.deny_prefixes.slice(-1)).toEqual(['rm']);
@@ -550,7 +551,7 @@ describe('agent turn shadow producer', () => {
       // The workspace tools are the policy's business, not the MCP surface's:
       // they ship regardless, with no MCP definitions beside them.
       expect(turn.tools?.definitions).toEqual([]);
-      expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
+      expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     };
 
     // No MCP surface wired.

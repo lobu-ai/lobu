@@ -414,10 +414,11 @@ export const AgentTurnPollPayloadSchema = Type.Object({
           })
         ),
         /**
-         * The guest's own workspace tools the agent's tool policy admits. They
-         * run against a per-turn in-memory filesystem inside the isolate:
-         * `bash` is just-bash, the rest are pi's file tools over the same
-         * filesystem. Absent or empty → no workspace tools.
+         * The guest's own workspace tools the agent's tool policy admits — the
+         * same seven pi builtins the subprocess lane hardens. They run against
+         * a per-turn in-memory filesystem inside the isolate: `bash` is
+         * just-bash, the rest are pi's file tools over the same filesystem.
+         * Absent or empty → no workspace tools.
          */
         builtin: Type.Optional(
           Type.Array(
@@ -425,6 +426,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
               Type.Literal("bash"),
               Type.Literal("read"),
               Type.Literal("write"),
+              Type.Literal("edit"),
+              Type.Literal("grep"),
               Type.Literal("ls"),
               Type.Literal("find"),
             ])
