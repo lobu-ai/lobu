@@ -577,9 +577,24 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
           action_input = ${sql.json(result)}
       WHERE id = ${body.run_id}
         ${runLeaseFence(tx, body.worker_id)}
-      RETURNING id
+      RETURNING id, run_metadata->'steer' AS steer
     `;
 		if (terminal.length === 0) return false;
+		// A follow-up parked after the worker's last heartbeat took its batch
+		// never reached the model. It is not lost silently: counted and named
+		// here, so the window shows up in the metrics before this lane answers
+		// conversations on its own, when the consumer must hand such a message
+		// back to the queue as a turn of its own.
+		const leftover = (terminal[0] as { steer?: unknown } | undefined)?.steer;
+		if (Array.isArray(leftover) && leftover.length > 0) {
+			for (let i = 0; i < leftover.length; i++) {
+				incrementCounter("agent_turn_steer_unconsumed_total");
+			}
+			logger.warn(
+				{ runId: body.run_id, count: leftover.length },
+				"agent turn completed with steer messages the model never saw",
+			);
+		}
 		if (isShadow) return true;
 
 		const reply = envelope.reply as TurnReply;

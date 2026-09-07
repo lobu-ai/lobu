@@ -785,6 +785,8 @@ describe('agent turn shadow producer', () => {
     ).toBe(false);
     // Nothing running in another conversation: nothing to steer.
     expect(await steerActiveAgentTurn({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
+    // An agent the operator has not selected costs the enqueue path nothing.
+    expect(await steerActiveAgentTurn({ ...followUp, agentId: 'agent-not-selected' })).toBe(false);
   });
 
   it('carries a pinned sandbox as signed token claims and a remote-bash marker', async () => {

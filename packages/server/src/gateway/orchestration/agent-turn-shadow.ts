@@ -672,7 +672,25 @@ async function resolveTurnTools(
  */
 export async function steerActiveAgentTurn(data: MessagePayload): Promise<boolean> {
   if (!data.agentId || !data.conversationId || !data.messageText?.trim()) return false;
+  // Same selection as the producer, checked BEFORE any database work: an
+  // unselected agent costs the enqueue path an env-var read, nothing more.
+  if (!shadowSelects(data.agentId)) return false;
   if (!isSteerableHumanMessage(data)) return false;
+  try {
+    return await parkSteer(data);
+  } catch (error) {
+    // Best-effort, like the producer: a failure here must never fail the
+    // message's real turn on the subprocess lane. The message simply becomes
+    // a turn of its own on this lane too.
+    logger.warn(
+      { agentId: data.agentId, conversationId: data.conversationId, error: getErrorMessage(error) },
+      "Agent turn steer could not be parked; the message becomes its own turn"
+    );
+    return false;
+  }
+}
+
+async function parkSteer(data: MessagePayload): Promise<boolean> {
   const sql = getDb();
   const parked = (await sql`
     UPDATE runs
