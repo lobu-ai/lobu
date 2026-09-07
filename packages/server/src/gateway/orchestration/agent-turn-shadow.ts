@@ -40,6 +40,7 @@ import {
   isToolAllowedByPolicy,
   type MessagePayload,
   parseSessionEntries,
+  replaySessionMessages,
   renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
   type ToolPolicy,
@@ -80,10 +81,6 @@ const LANE_APIS = new Set<string>([
   "openai-completions",
 ] satisfies LaneApi[]);
 
-/** Snapshot suffix read for history. Twelve 16 KB messages fit comfortably. */
-const HISTORY_TAIL_CHARS = 256 * 1024;
-const HISTORY_MESSAGE_LIMIT = 12;
-const HISTORY_MESSAGE_CHARS = 16_000;
 const TURN_MESSAGE_CHARS = 32_000;
 
 /**
@@ -284,16 +281,16 @@ function isTextBlock(block: unknown): block is { type: "text"; text: string } {
   );
 }
 
-/** A content array with its text capped and its thinking blocks dropped. */
+/** A content array with its thinking blocks dropped. */
 function trimContent(content: unknown): unknown[] {
   if (typeof content === "string") {
-    return [{ type: "text", text: content.slice(0, HISTORY_MESSAGE_CHARS) }];
+    return [{ type: "text", text: content }];
   }
   if (!Array.isArray(content)) return [];
   const out: unknown[] = [];
   for (const block of content) {
     if (isTextBlock(block)) {
-      out.push({ type: "text", text: block.text.slice(0, HISTORY_MESSAGE_CHARS) });
+      out.push(block);
       continue;
     }
     // A thinking block carries a provider signature the next provider may not
@@ -316,28 +313,26 @@ function hasToolCall(message: HistoryMessage): boolean {
 /**
  * Rebuild the conversation so far as pi messages.
  *
- * The snapshot stores pi's own entries, and the lane now runs the same tool
- * loop pi ran to produce them, so user, assistant and tool-result entries
- * replay as they are — text capped, thinking dropped, everything else (tool
- * calls, tool results, usage, stop reason) kept, because a provider refuses a
- * tool call without its result and vice versa. The window is then squared off
- * so it opens on a user message and never ends on a tool call still waiting
- * for its result.
+ * The snapshot stores pi's own entries — the same file the subprocess lane's
+ * SessionManager reads — and `replaySessionMessages` walks its current branch
+ * exactly as pi does, compaction summary included, so the whole conversation
+ * replays: nothing is windowed or truncated. The lane runs the same tool loop
+ * pi ran to produce the entries, so tool calls, tool results, usage and stop
+ * reason are kept, because a provider refuses a tool call without its result
+ * and vice versa. Only thinking blocks go, since their provider signature is
+ * not portable. The replay is then squared off so it opens on a user message
+ * and never ends on a tool call still waiting for its result.
  */
 function historyMessages(snapshot: string): HistoryMessage[] {
   const messages: HistoryMessage[] = [];
-  for (const entry of parseSessionEntries(snapshot).entries) {
-    if (entry.type !== "message" || !entry.message) continue;
-    const message = entry.message as unknown as HistoryMessage;
-    if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") continue;
+  for (const message of replaySessionMessages(parseSessionEntries(snapshot).entries)) {
     const content = trimContent(message.content);
     if (content.length === 0) continue;
     messages.push({ ...message, content });
   }
-  const window = messages.slice(-HISTORY_MESSAGE_LIMIT);
-  const firstUser = window.findIndex((message) => message.role === "user");
+  const firstUser = messages.findIndex((message) => message.role === "user");
   if (firstUser < 0) return [];
-  const squared = window.slice(firstUser);
+  const squared = messages.slice(firstUser);
   while (squared.length > 0) {
     const last = squared[squared.length - 1]!;
     if (last.role === "assistant" && hasToolCall(last)) {
@@ -789,11 +784,13 @@ export async function enqueueAgentTurnShadow(
     const settings = await agentSettings.getSettings(data.agentId, {
       organizationId: data.organizationId,
     });
+    // The whole transcript: the snapshot writer already bounds it at
+    // MAX_SNAPSHOT_BYTES, and a shorter read would silently forget the
+    // conversation's head — which is what compaction exists to do deliberately.
     const snapshot = await readSnapshotJsonl({
       organizationId: data.organizationId,
       agentId: data.agentId,
       conversationId: data.conversationId,
-      suffixChars: HISTORY_TAIL_CHARS,
     });
 
     const turn: TurnEnvelope = {

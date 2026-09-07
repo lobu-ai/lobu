@@ -580,7 +580,7 @@ describe('agent turn shadow producer', () => {
     await toolless();
   });
 
-  it('replays the conversation with its tool calls and results, squared to a well-formed window', async () => {
+  it('replays the conversation with its tool calls and results, squared to a well-formed history', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const at = new Date(Date.now() - 60_000).toISOString();
@@ -598,8 +598,8 @@ describe('agent turn shadow producer', () => {
     });
     const snapshot = [
       JSON.stringify({ type: 'session', version: 3, id: 'prior', timestamp: at, cwd: '/w' }),
-      // A tool result whose call fell off the window: dropped, so the window
-      // opens on the human.
+      // A tool result whose call is not in the transcript: dropped, so the
+      // history opens on the human.
       entry('orphan', { role: 'toolResult', toolCallId: 'toolu_00', toolName: 'query_sdk', content: [{ type: 'text', text: 'stale' }], isError: false, timestamp: 1 }),
       entry('u1', { role: 'user', content: 'how many entities?', timestamp: 1 }),
       entry('a1', assistant([
@@ -610,7 +610,7 @@ describe('agent turn shadow producer', () => {
       entry('a2', { ...assistant([{ type: 'text', text: 'There are 3.' }]), stopReason: 'stop' }),
       entry('u2', { role: 'user', content: 'and companies?', timestamp: 1 }),
       // The last turn died mid-call: a tool call with no result would be
-      // refused by the provider, so the window ends before it.
+      // refused by the provider, so the history ends before it.
       entry('a3', assistant([{ type: 'toolCall', id: 'toolu_02', name: 'query_sdk', arguments: {} }])),
       '',
     ].join('\n');
@@ -644,6 +644,79 @@ describe('agent turn shadow producer', () => {
     expect(turn.messages[2]).toMatchObject({ role: 'toolResult', toolCallId: 'toolu_01', isError: false });
     expect(turn.messages[3]).toMatchObject({ content: [{ type: 'text', text: 'There are 3.' }] });
     expect(turn.messages[4]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'and companies?' }] });
+  });
+
+  it('replays the whole conversation, compaction summary included, not a window of it', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const entry = (id: string, parentId: string | null, message: Record<string, unknown>) =>
+      JSON.stringify({ type: 'message', id, parentId, timestamp: at, message });
+    const reply = (text: string) => ({
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-opus-4-8',
+      stopReason: 'stop',
+      timestamp: 1,
+    });
+    // Forty turns — far past the twelve messages the lane used to keep — with a
+    // compaction in the middle, exactly as pi's SessionManager writes one.
+    const lines: string[] = [JSON.stringify({ type: 'session', version: 3, id: 'long', timestamp: at, cwd: '/w' })];
+    let parent: string | null = null;
+    for (let i = 0; i < 10; i++) {
+      lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
+      lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
+      parent = `a${i}`;
+    }
+    lines.push(
+      JSON.stringify({
+        type: 'compaction',
+        id: 'c1',
+        parentId: parent,
+        timestamp: at,
+        summary: 'The first eight exchanges were small talk.',
+        firstKeptEntryId: 'u8',
+        tokensBefore: 90000,
+      })
+    );
+    parent = 'c1';
+    for (let i = 10; i < 40; i++) {
+      lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
+      lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
+      parent = `a${i}`;
+    }
+    const snapshot = `${lines.join('\n')}\n`;
+    const [prior] = await sql<{ id: number }>`
+      INSERT INTO runs (run_type, status, organization_id, created_at, completed_at, run_at)
+      VALUES ('chat_message', 'completed', ${org.id}, ${at}, ${at}, ${at})
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status, created_at)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
+    `;
+
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as { messages: Array<{ role: string; content: Array<{ text: string }> }> };
+    // Summary, the two kept exchanges (u8..a9), then thirty more: 1 + 4 + 60.
+    expect(turn.messages).toHaveLength(65);
+    expect(turn.messages[0].role).toBe('user');
+    expect(turn.messages[0].content[0].text).toContain('The first eight exchanges were small talk.');
+    expect(turn.messages[1].content[0].text).toBe('question 8');
+    expect(turn.messages[64].content[0].text).toBe('answer 39');
+    // What the compaction replaced is not replayed.
+    expect(JSON.stringify(turn.messages)).not.toContain('"answer 3"');
+    expect(JSON.stringify(turn.messages)).not.toContain('"question 7"');
   });
 
   it('arms no turn marker and journals no run input', async () => {
@@ -1051,6 +1124,64 @@ describe('agent turn completion', () => {
     // The reply is chained onto the user message, so the next turn's parent
     // walk reaches both.
     expect(entries[1].parentId).toBe(entries[0].id);
+  });
+
+  it('persists the whole turn — tool calls and results — and not the prompt the guest composed', async () => {
+    const workerId = 'fleet-persists-tools';
+    const runId = await claimedShadowRun(workerId);
+    const sql = getTestDb();
+    // The producer handed this turn two messages of history; the guest returns
+    // them back followed by what the turn added, with the human's message as
+    // the guest composed it (memory recall prepended).
+    const history = [
+      { role: 'user', content: [{ type: 'text', text: 'earlier question' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
+    ];
+    await sql`
+      UPDATE runs
+      SET action_input = jsonb_set(
+        jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb),
+        '{turn,messages}', ${sql.json(history)}::jsonb
+      )
+      WHERE id = ${runId}
+    `;
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'there are 3',
+      transcript: [
+        ...history,
+        { role: 'user', content: [{ type: 'text', text: '<lobu-memory>recalled</lobu-memory>\n\nwhat is the shadow lane?' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk', arguments: { code: 'entities.count()' } }],
+          stopReason: 'toolUse',
+        },
+        { role: 'toolResult', toolCallId: 'toolu_9', toolName: 'query_sdk', content: [{ type: 'text', text: '3' }], isError: false },
+        { role: 'assistant', content: [{ type: 'text', text: 'there are 3' }], stopReason: 'stop' },
+      ],
+    });
+    expect(response.status).toBe(200);
+
+    const [snapshot] = (await sql`
+      SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}
+    `) as unknown as Array<{ snapshot_jsonl: string }>;
+    const entries = snapshot.snapshot_jsonl
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+    // The history is not written twice; the turn is written whole.
+    expect(entries.map((entry) => entry.message.role)).toEqual(['user', 'assistant', 'toolResult', 'assistant']);
+    // The human's entry is what they sent, not the recall-augmented prompt.
+    expect(entries[0].message.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
+    expect(entries[1].message).toMatchObject({
+      content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk' }],
+      stopReason: 'toolUse',
+    });
+    expect(entries[2].message).toMatchObject({ toolCallId: 'toolu_9', isError: false });
+    // One chain, so the next turn's replay reaches every entry.
+    for (let i = 1; i < entries.length; i++) expect(entries[i].parentId).toBe(entries[i - 1].id);
   });
 
   it('an oversize prior transcript starts a continuation instead of hanging the client', async () => {

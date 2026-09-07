@@ -50,9 +50,18 @@ const logger = createLogger("agent-turn-worker-api");
 const MAX_OUTPUT_TAIL = 2_000;
 
 /**
- * Append this turn's user message and reply to the conversation's transcript
- * snapshot, in the session-jsonl shape `parseSessionEntries` reads back — the
- * same blob the shadow producer already loads for history.
+ * Append this turn to the conversation's transcript snapshot, in the
+ * session-jsonl shape `parseSessionEntries` reads back — the same blob the
+ * producer replays for history and the subprocess lane's SessionManager reads.
+ *
+ * The turn is persisted whole: the human's message, then every message the
+ * guest's tool loop produced (tool calls, their results, the reply), verbatim,
+ * because the next turn replays them and a provider refuses a tool call
+ * without its result. The human's entry carries the text they sent — not the
+ * prompt the guest composed around it — since the memory recall and the
+ * attachment listing are this turn's injections, not part of the conversation.
+ * A worker that reports no transcript (an older build, or a turn that failed
+ * before producing one) still gets its text pair recorded.
  *
  * `content` is pi's block array, not a bare string: every other writer of this
  * table emits blocks, and the readers that flatten it (`transcriptText`,
@@ -72,6 +81,10 @@ async function appendTurnSnapshot(
 		runId: number;
 		userText: string;
 		assistantText: string;
+		/** What the guest returned: the history it was given plus this turn. */
+		transcript: Array<Record<string, unknown>>;
+		/** How many of those messages were the history it was given. */
+		priorCount: number;
 	},
 ): Promise<void> {
 	if (!args.agentId || !args.conversationId) return;
@@ -83,38 +96,48 @@ async function appendTurnSnapshot(
 	});
 	const now = new Date().toISOString();
 	const prior = parseSessionEntries(previous ?? "").entries;
-	const userId = `agent-turn-${args.runId}-user`;
-	const entry = (
-		id: string,
-		role: string,
-		text: string,
-		parentId: string | null,
-	) =>
-		JSON.stringify({
-			type: "message",
-			id,
-			parentId,
-			timestamp: now,
-			message: { role, content: [{ type: "text", text }] },
-		});
 
-	// The turn is one user message and one reply, so the chain is fixed: the
-	// reply hangs off the user message when there is one, off the prior tail
-	// when the turn carried no text.
+	// The messages this turn added, the human's own turn first. The guest's
+	// user message is replaced by the text the human sent (see above); when the
+	// worker reports no transcript, the pair of texts stands in for it.
+	const produced = args.transcript
+		.slice(Math.max(0, args.priorCount))
+		.filter(
+			(message): message is Record<string, unknown> & { role: string } =>
+				typeof message.role === "string" && message.role !== "user",
+		);
+	const messages: Array<Record<string, unknown>> = [];
+	if (args.userText) {
+		messages.push({
+			role: "user",
+			content: [{ type: "text", text: args.userText }],
+		});
+	}
+	if (produced.length > 0) {
+		messages.push(...produced);
+	} else if (args.assistantText) {
+		messages.push({
+			role: "assistant",
+			content: [{ type: "text", text: args.assistantText }],
+		});
+	}
+	if (messages.length === 0) return;
+
 	const render = (base: string, tailId: string | null) => {
-		const lines: string[] = [];
-		if (args.userText) lines.push(entry(userId, "user", args.userText, tailId));
-		if (args.assistantText) {
-			lines.push(
-				entry(
-					`agent-turn-${args.runId}-assistant`,
-					"assistant",
-					args.assistantText,
-					args.userText ? userId : tailId,
-				),
-			);
-		}
-		return lines.length > 0 ? `${base}${lines.join("\n")}\n` : null;
+		let parentId = tailId;
+		const lines = messages.map((message, index) => {
+			const id = `agent-turn-${args.runId}-${index}`;
+			const line = JSON.stringify({
+				type: "message",
+				id,
+				parentId,
+				timestamp: now,
+				message,
+			});
+			parentId = id;
+			return line;
+		});
+		return `${base}${lines.join("\n")}\n`;
 	};
 	const base = previous
 		? previous.endsWith("\n")
@@ -122,13 +145,12 @@ async function appendTurnSnapshot(
 			: `${previous}\n`
 		: "";
 	let snapshot = render(base, prior[prior.length - 1]?.id ?? null);
-	if (snapshot === null) return;
 	if (Buffer.byteLength(snapshot, "utf8") > MAX_SNAPSHOT_BYTES) {
 		// A long-running conversation must not make the current turn fail: this
 		// insert is inside the terminal transaction, so an oversize row would
 		// roll back the completion and the reply and hang the client forever.
 		// Start a compact continuation; the prior run's row stays queryable.
-		snapshot = render("", null) as string;
+		snapshot = render("", null);
 	}
 	await tx`
     INSERT INTO public.agent_transcript_snapshot
@@ -447,6 +469,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 			agent_id?: unknown;
 			conversation_id?: unknown;
 			message_text?: unknown;
+			messages?: unknown;
 		};
 		reply?: TurnReply;
 	};
@@ -509,6 +532,10 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 				runId: body.run_id,
 				userText: String(envelope.turn?.message_text ?? ""),
 				assistantText: text,
+				transcript: body.transcript ?? [],
+				priorCount: Array.isArray(envelope.turn?.messages)
+					? envelope.turn.messages.length
+					: 0,
 			});
 		}
 		await insertThreadResponseRow(
