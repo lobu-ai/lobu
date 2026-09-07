@@ -21,6 +21,7 @@ import { cleanupTestDatabase } from '../../setup/test-db';
 describe('MCP auth (wire)', () => {
   let orgSlug: string;
   let oauthToken: string;
+  let accountToken: string;
   let patToken: string;
 
   beforeAll(async () => {
@@ -36,6 +37,9 @@ describe('MCP auth (wire)', () => {
 
     orgSlug = org.slug;
     oauthToken = oauthResult.token;
+    accountToken = (await createTestAccessToken(user.id, null, oauthClient.client_id, {
+      grantedOrganizationIds: [org.id],
+    })).token;
     patToken = patResult.token;
   });
 
@@ -58,7 +62,7 @@ describe('MCP auth (wire)', () => {
 
   it('list_organizations works on the unscoped /mcp path with OAuth', async () => {
     // Org-agnostic tools must be reachable without an orgSlug.
-    const client = new TestMcpClient({ token: oauthToken });
+    const client = new TestMcpClient({ token: accountToken });
     const result = await client.listOrganizations();
     expect(JSON.stringify(result)).toContain(orgSlug);
   });

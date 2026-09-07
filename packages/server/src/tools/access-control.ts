@@ -7,6 +7,19 @@
  */
 
 import { hasRequiredMcpScope, type ToolAccessLevel } from '../auth/tool-access';
+import { ToolUserError } from '../utils/errors';
+import type { AccountToolContext, ToolContext } from './registry';
+
+/** Narrow an account-dispatch context to a workspace-bound one, or reject. */
+export function requireWorkspaceContext(ctx: AccountToolContext): ToolContext {
+  if (!ctx.organizationId) {
+    throw new ToolUserError(
+      'Select a workspace with await client.org(target), or supply the tool’s explicit workspace target.',
+      400
+    );
+  }
+  return { ...ctx, organizationId: ctx.organizationId };
+}
 
 /** The minimal slice of ToolContext/AuthContext these predicates need. */
 interface AccessControlContext {

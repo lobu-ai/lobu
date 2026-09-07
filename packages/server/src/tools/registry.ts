@@ -20,6 +20,7 @@
  */
 
 import { SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
+import { type Static, Type } from '@sinclair/typebox';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
@@ -35,7 +36,7 @@ import {
   getApproval,
   resolveApproval,
 } from './mcp_app';
-import { ListOrganizationsSchema } from './organizations';
+import { listOrganizations, ListOrganizationsSchema } from './organizations';
 import {
   InvokeEventActionResultSchema,
   InvokeEventActionSchema,
@@ -52,6 +53,7 @@ import {
 } from './sdk_run';
 import { SdkSearchResultSchema, SdkSearchSchema, sdkSearch } from './sdk_search';
 import { PublicSearchSchema, SearchSchema, search, UnifiedSearchResultSchema } from './search';
+import { withValidatedArgs } from './validate-args';
 
 // ============================================
 // Tool Definitions
@@ -178,7 +180,10 @@ export interface ToolContext {
   baseUrl?: string;
 }
 
-export interface ToolDefinition<T = any> {
+/** Account dispatch may have no execution workspace; leaf handlers remain workspace-bound. */
+export type AccountToolContext = Omit<ToolContext, 'organizationId'> & { organizationId: string | null };
+
+interface ToolDefinitionMetadata {
   name: string;
   description: string;
   inputSchema: any; // JSON Schema
@@ -210,8 +215,12 @@ export interface ToolDefinition<T = any> {
   securityScopes?: string[];
   /** MCP extension metadata, such as an Apps UI resource linkage. */
   mcpMeta?: Record<string, unknown>;
-  handler: (args: T, env: Env, ctx: ToolContext) => Promise<any>;
 }
+
+export type ToolDefinition<T = any> = ToolDefinitionMetadata & (
+  | { scope: 'account'; handler: (args: T, env: Env, ctx: AccountToolContext) => Promise<any> }
+  | { scope?: 'workspace'; handler: (args: T, env: Env, ctx: ToolContext) => Promise<any> }
+);
 
 const READ_ONLY = {
   readOnlyHint: true,
@@ -252,6 +261,11 @@ const LOBU_VIEW_MCP_META = {
   'openai/toolInvocation/invoked': 'Lobu ready',
 } as const;
 
+const SaveMemorySchema = Type.Object({
+  ...SaveContentSchema.properties,
+  org_slug: Type.Optional(Type.String({ minLength: 1, description: 'Target workspace for a bare OAuth call. Required when the connection has no workspace binding.' })),
+});
+
 /**
  * Tools advertised on MCP `tools/list` and external OpenAPI.
  *
@@ -268,6 +282,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   // ─── Memory hot path — read ───────────────────────────────────────────────
   {
     name: 'search_memory',
+    scope: 'account',
     description:
       'Search local saved workspace memory: entities, facts, decisions, preferences, observations, notes, and authorized channel transcripts. Source-backed feeds are never queried implicitly; `coverage` reports local stores searched and visible source feeds with status `not_queried`, which agents can read explicitly through query_sdk client.feeds.readMany. A query such as `memory 1234` performs an exact permission-checked content read. Pair writes with `save_memory`. The search does not change workspace content or external systems. OAuth and PAT calls append a private audit/activity record.',
     inputSchema: SearchSchema,
@@ -285,15 +300,19 @@ const AGENT_TOOLS: ToolDefinition[] = [
     name: 'save_memory',
     description:
       'Save user-shared facts, preferences, decisions, observations, and notes to workspace memory. The returned id is immediately readable with `client.knowledge.read`; the result also echoes the bounded saved payload for inline display. Semantic search indexing is asynchronous and reported as `indexing_status`. Storage is append-only — pass `supersedes_event_id` to replace an existing fact (the old event is hidden from future searches without losing history). Use a stable `idempotency_key` when a write may be retried. Optionally attach to entities via `entity_ids`. Always search first to avoid duplicates.',
-    inputSchema: SaveContentSchema,
+    inputSchema: SaveMemorySchema,
     outputSchema: SaveContentResultSchema,
     annotations: { ...WRITE_WITHOUT_CONFIRM, title: 'Save memory' },
     securityScopes: ['mcp:write'],
     mcpMeta: LOBU_VIEW_MCP_META,
-    handler: saveContent,
+    handler: withValidatedArgs('save_memory', SaveMemorySchema, (args: Static<typeof SaveMemorySchema>, env: Env, ctx: ToolContext) => {
+      const { org_slug: _target, ...content } = args;
+      return saveContent(content, env, ctx);
+    }),
   },
   {
     name: 'search_sdk',
+    scope: 'account',
     description:
       'Discover available SDK methods and runtime helpers. Search by method name, namespace (e.g. "entities", "connections", "automations"), or keyword. Returns documentation, signatures, and access requirements for each method. (Then call methods via query_sdk for reads or run_sdk for writes. Pass mode="read" to show only query_sdk-safe methods.) The search does not change workspace content or external systems. OAuth and PAT calls append a private audit/activity record.',
     inputSchema: SdkSearchSchema,
@@ -306,8 +325,9 @@ const AGENT_TOOLS: ToolDefinition[] = [
   // ─── Power tools — TS scripting + raw SQL ─────────────────────────────────
   {
     name: 'query_sdk',
+    scope: 'account',
     description:
-      'Run capability-scoped, read-only TypeScript through the Lobu SDK. Query entities, relationships, feeds, operations, metrics, and authorized connected-source data; write, administrative, and external-action methods are rejected by the sandbox. Use `run_sdk` for mutations, `search_sdk` to discover methods, and `await ctx.sleep(ms)` for bounded polling. Lobu appends a private audit/activity record for the invocation.',
+      'Run capability-scoped, read-only TypeScript through the Lobu SDK. On bare OAuth /mcp, select a workspace with await client.org(target) before workspace methods. Query entities, relationships, feeds, operations, metrics, and authorized connected-source data; write, administrative, and external-action methods are rejected by the sandbox. Use `run_sdk` for mutations, `search_sdk` to discover methods, and `await ctx.sleep(ms)` for bounded polling. Lobu appends a private audit/activity record for the invocation.',
     inputSchema: QuerySchema,
     outputSchema: SdkScriptResultSchema,
     // Private connector reads do not mutate an external/public system.
@@ -319,7 +339,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   {
     name: 'query_sql',
     description:
-      'Run a paginated, sortable, searchable read-only SQL query (member-safe). Table references auto-scope to the bound org, or pass `connection` to push read-only SQL fully into an external database connector. Source-backed feeds are queried explicitly with query_sdk client.feeds.readMany. Prefer client.metrics.query for declared measures; use client.query in query_sdk for simple one-shot SQL. Do NOT use positional parameters ($1, $2, …). Optional `org_slug` (OAuth on /mcp only) redirects to another member org. The query does not change workspace content or external systems, but Lobu appends a private audit/activity record for the invocation.',
+      'Run a paginated, sortable, searchable read-only SQL query (member-safe). Table references auto-scope to the bound org, or pass `connection` to push read-only SQL fully into an external database connector. Source-backed feeds are queried explicitly with query_sdk client.feeds.readMany. Prefer client.metrics.query for declared measures; use client.query in query_sdk for simple one-shot SQL. Do NOT use positional parameters ($1, $2, …). `org_slug` selects a granted workspace on bare OAuth /mcp and is required when the connection has no workspace binding. The query does not change workspace content or external systems, but Lobu appends a private audit/activity record for the invocation.',
     inputSchema: QuerySqlSchema,
     outputSchema: QuerySqlResultSchema,
     annotations: { ...AUDITED_READ, title: 'Query SQL' },
@@ -329,8 +349,9 @@ const AGENT_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'run_sdk',
+    scope: 'account',
     description:
-      'Execute a capability-scoped Lobu SDK script against the current workspace. The script can create, update, or delete Lobu data and invoke connector, agent, or device operations only through documented `client` methods; workspace permissions, operation policies, human approvals, and audit remain enforced. Use `query_sdk` for reads, `search_sdk` to discover methods, and `dry_run=true` to preview write, administrative, or external calls without executing them.',
+      'Execute a capability-scoped Lobu SDK script. On bare OAuth /mcp, select workspace operations with await client.org(target); account discovery and conversation titles require no target. The script can create, update, or delete Lobu data and invoke connector, agent, or device operations only through documented `client` methods; workspace permissions, operation policies, human approvals, and audit remain enforced. Use `query_sdk` for reads, `search_sdk` to discover methods, and `dry_run=true` to preview write, administrative, or external calls without executing them.',
     inputSchema: RunSchema,
     outputSchema: SdkScriptResultSchema,
     annotations: {
@@ -354,6 +375,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
 const MCP_APP_TOOLS: ToolDefinition[] = [
   {
     name: 'get_approval',
+    scope: 'account',
     description:
       'Get the server-authored review card for one approval run returned by a pending action. On an unscoped OAuth session, pass organization with the target workspace slug or id. The card reads the canonical durable approval, exposes in-card controls only when this OAuth app context can resolve it, and always includes a review link while pending. Reading does not change workspace content or external systems. OAuth and PAT calls append a private audit/activity record.',
     inputSchema: GetApprovalSchema,
@@ -366,6 +388,7 @@ const MCP_APP_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'resolve_approval',
+    scope: 'account',
     description:
       'Resolve the exact pending approval represented by this Lobu MCP App. This tool is app-only and requires the hidden, host-bound capability delivered with the review card.',
     inputSchema: ResolveApprovalSchema,
@@ -387,6 +410,7 @@ const MCP_APP_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'invoke_event_action',
+    scope: 'account',
     description:
       'Append the declared event for a JSON-template interaction using the signed-in MCP App user as the actor. The server revalidates the source event, rendered action/value, and event-kind registry.',
     inputSchema: InvokeEventActionSchema,
@@ -417,12 +441,18 @@ const INTERNAL_DISPATCH_TOOLS: ToolDefinition[] = [
   ...ADMIN_TOOLS,
   {
     name: 'list_organizations',
+    scope: 'account',
     description:
       'List organizations the authenticated user belongs to, plus any public workspaces the session can read. Managed connector providers include structured managed_auth onboarding metadata. SDK alternative: client.organizations.list via `query_sdk` / `run_sdk`.',
     inputSchema: ListOrganizationsSchema,
     annotations: { ...READ_ONLY, title: 'List organizations' },
-    handler: async () => {
-      throw new Error('Handled directly in executeTool');
+    handler: (args, env, ctx) => {
+      if (!ctx.userId) throw new Error('User context required.');
+      return listOrganizations(args, env, {
+        userId: ctx.userId,
+        currentOrganizationId: ctx.organizationId,
+        grantedOrganizationIds: ctx.grantedOrganizationIds,
+      });
     },
   },
   {
@@ -451,6 +481,7 @@ const INTERNAL_DISPATCH_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'resolve_path',
+    scope: 'account',
     description:
       'Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.',
     inputSchema: ResolvePathSchema,

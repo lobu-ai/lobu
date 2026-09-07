@@ -7,11 +7,12 @@
  * - Unauthenticated discovery requests
  */
 
-import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import { createHash } from 'node:crypto';
+import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createAuthorizationIntent } from '../../../auth/oauth/authorization-intent';
 import { hashToken } from '../../../auth/oauth/utils';
+import { parsePgTextArray } from '../../../db/client';
 import { clearInMemoryMcpSessionsForTests } from '../../../mcp-handler';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -31,11 +32,24 @@ import {
 import { del, get, mcpListTools, mcpRequest, mcpToolsCall, post } from '../../setup/test-helpers';
 
 async function verifyDeviceCode(userCode: string, cookie: string): Promise<void> {
-  const response = await get(
-    `/oauth/device/info?user_code=${encodeURIComponent(userCode)}`,
-    { cookie }
-  );
+  const response = await get(`/oauth/device/info?user_code=${encodeURIComponent(userCode)}`, {
+    cookie,
+  });
   expect(response.status).toBe(200);
+}
+
+async function createAccountAccessToken(
+  userId: string,
+  grantedOrganizationId: string,
+  clientId: string,
+  options?: Parameters<typeof createTestAccessToken>[3]
+) {
+  const credentials = await createTestAccessToken(userId, grantedOrganizationId, clientId, options);
+  await getTestDb()`
+    UPDATE oauth_tokens SET organization_id = NULL
+    WHERE token_hash = ${hashToken(credentials.token)}
+  `;
+  return { token: credentials.token };
 }
 
 describe('MCP Authentication', () => {
@@ -200,7 +214,7 @@ describe('MCP Authentication', () => {
       expect(sessionId2).toBeTruthy();
 
       // Now provide a Bearer token on the same session — should upgrade auth
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
       const authResponse = await post('/mcp', {
         body: {
           jsonrpc: '2.0',
@@ -404,12 +418,100 @@ describe('MCP Authentication', () => {
 
   describe('OAuth Access Token Authentication', () => {
     it('should accept valid OAuth access token', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const result = await mcpListTools({ token });
 
       expect(result.tools).toBeInstanceOf(Array);
       expect(result.tools.length).toBeGreaterThan(0);
+    });
+
+    it('rejects retired default-bound bare OAuth even with a client-declared agent', async () => {
+      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      for (const headers of [{}, { 'x-lobu-agent-id': agent.agentId }]) {
+        const response = await post('/mcp', {
+          token,
+          headers,
+          body: {
+            jsonrpc: '2.0',
+            id: 'legacy-default-init',
+            method: 'initialize',
+            params: {
+              protocolVersion: MCP_PROTOCOL_VERSION,
+              capabilities: {},
+              clientInfo: {
+                name: 'legacy-default-test',
+                version: '1.0',
+                agentId: agent.agentId,
+              },
+            },
+          },
+        });
+        expect(response.status).toBe(401);
+        expect(response.headers.get('mcp-session-id')).toBeNull();
+        expect((await response.json()).error_description).toContain('retired default workspace');
+      }
+    });
+
+    it('initializes and recovers account sessions without borrowing a persisted workspace', async () => {
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
+      const initialized = await post('/mcp', {
+        token,
+        body: {
+          jsonrpc: '2.0',
+          id: 'account-recovery-init',
+          method: 'initialize',
+          params: {
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: { name: 'account-recovery-test', version: '1.0' },
+          },
+        },
+      });
+      expect(initialized.status).toBe(200);
+      const sessionId = initialized.headers.get('mcp-session-id');
+      expect(sessionId).toBeTruthy();
+      const headers = { 'mcp-session-id': sessionId!, 'X-MCP-Format': 'json' };
+      await post('/mcp', {
+        token,
+        headers,
+        body: { jsonrpc: '2.0', method: 'notifications/initialized' },
+      });
+      const sql = getTestDb();
+      const [persisted] = await sql`
+        SELECT organization_id, member_role FROM mcp_sessions WHERE session_id = ${sessionId}
+      `;
+      expect(persisted).toMatchObject({
+        organization_id: null,
+        member_role: null,
+      });
+      clearInMemoryMcpSessionsForTests();
+      const body = {
+        jsonrpc: '2.0',
+        id: 'account-recovery-list',
+        method: 'tools/list',
+        params: {},
+      };
+      const recovered = await post('/mcp', { token, headers, body });
+      expect(recovered.status).toBe(200);
+      expect((await recovered.json()).result.tools.length).toBeGreaterThan(0);
+      const [afterRecovery] = await sql`
+        SELECT organization_id, member_role FROM mcp_sessions WHERE session_id = ${sessionId}
+      `;
+      expect(afterRecovery).toMatchObject({
+        organization_id: null,
+        member_role: null,
+      });
+
+      // A stale pre-cutover session row is never a source of execution scope.
+      await sql`
+        UPDATE mcp_sessions SET organization_id = ${org.id}, member_role = 'owner'
+        WHERE session_id = ${sessionId}
+      `;
+      clearInMemoryMcpSessionsForTests();
+      const stale = await post('/mcp', { token, headers, body });
+      expect(stale.status).toBe(404);
+      expect((await stale.json()).result).toBeUndefined();
     });
 
     it('rejects an OAuth token bound to a different MCP resource', async () => {
@@ -439,15 +541,21 @@ describe('MCP Authentication', () => {
     });
 
     it('enforces OAuth workspace grants on REST tools and rejects MCP audience replay', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
       const grantedRead = await post(`/api/${org.slug}/search_memory`, {
-        body: { query: 'oauth-rest-grant-probe', include_public_catalogs: false },
+        body: {
+          query: 'oauth-rest-grant-probe',
+          include_public_catalogs: false,
+        },
         token,
       });
       expect(grantedRead.status).toBe(200);
 
       const ungrantedRead = await post(`/api/${org2.slug}/search_memory`, {
-        body: { query: 'oauth-rest-ungranted-probe', include_public_catalogs: false },
+        body: {
+          query: 'oauth-rest-ungranted-probe',
+          include_public_catalogs: false,
+        },
         token,
       });
       const ungrantedWrite = await post(`/api/${org2.slug}/save_memory`, {
@@ -495,14 +603,17 @@ describe('MCP Authentication', () => {
       expect(unknownMcp.status).toBe(ungrantedMcp.status);
       expect(await unknownMcp.json()).toEqual(ungrantedMcpBody);
 
-      const { token: mcpBoundToken } = await createTestAccessToken(
+      const { token: mcpBoundToken } = await createAccountAccessToken(
         user.id,
         org.id,
         client.client_id,
         { resource: `http://localhost/mcp/${org.slug}` }
       );
       const replay = await post(`/api/${org.slug}/search_memory`, {
-        body: { query: 'oauth-rest-audience-probe', include_public_catalogs: false },
+        body: {
+          query: 'oauth-rest-audience-probe',
+          include_public_catalogs: false,
+        },
         token: mcpBoundToken,
       });
       expect(replay.status).toBe(401);
@@ -516,7 +627,7 @@ describe('MCP Authentication', () => {
         entity_type: 'brand',
         organization_id: org2.id,
       });
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
       const unavailable = 'Workspace is not available for this authorization';
 
       const deniedPaths = [
@@ -577,7 +688,7 @@ describe('MCP Authentication', () => {
       });
       expect(publicBrowse.entity).toMatchObject({ id: publicEntity.id });
 
-      const { token: grantedToken } = await createTestAccessToken(
+      const { token: grantedToken } = await createAccountAccessToken(
         user.id,
         org.id,
         client.client_id
@@ -589,17 +700,23 @@ describe('MCP Authentication', () => {
       `;
       const grantedBrowse = await mcpToolsCall<any>(
         'resolve_path',
-        { path: `/${org2.slug}/brand/private-b-resolve-path-secret`, include_bootstrap: true },
+        {
+          path: `/${org2.slug}/brand/private-b-resolve-path-secret`,
+          include_bootstrap: true,
+        },
         { token: grantedToken }
       );
-      expect(grantedBrowse.workspace).toMatchObject({ id: org2.id, slug: org2.slug });
+      expect(grantedBrowse.workspace).toMatchObject({
+        id: org2.id,
+        slug: org2.slug,
+      });
       expect(grantedBrowse.entity).toMatchObject({ name: secretEntityName });
       expect(grantedBrowse.bootstrap).not.toBeNull();
 
       const agentBound = await mcpRequest<any>(
         'tools/call',
         { name: 'resolve_path', arguments: { path: `/${org2.slug}` } },
-        { token: grantedToken, agentId: agent.agentId }
+        { token: grantedToken, orgSlug: org.slug, agentId: agent.agentId }
       );
       expect(agentBound.result?.isError).toBe(true);
       expect(agentBound.result?.content?.[0]?.text).toBe(unavailable);
@@ -689,10 +806,10 @@ describe('MCP Authentication', () => {
       expect(body.error).toBe('invalid_token');
     });
 
-    it('should set organization context from token', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+    it('searches an explicit grant without borrowing a workspace target', async () => {
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
-      // Create an entity using the token's organization
+      // Account search uses the grant set even though the token has no target.
       const response = await mcpRequest(
         'tools/call',
         {
@@ -707,7 +824,7 @@ describe('MCP Authentication', () => {
     });
 
     it('still dispatches list_organizations by name via tools/call when omitted from tools/list', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const listed = await mcpListTools({ token });
       expect(listed.tools.map((t: any) => t.name)).not.toContain('list_organizations');
@@ -792,11 +909,17 @@ describe('MCP Authentication', () => {
 
     it('requires the OAuth bearer on follow-ups and immediately applies membership and token revocation', async () => {
       const sql = getTestDb();
-      const liveOrg = await createTestOrganization({ name: 'Live OAuth Session Org' });
-      const liveUser = await createTestUser({ name: 'Live OAuth Session User' });
+      const liveOrg = await createTestOrganization({
+        name: 'Live OAuth Session Org',
+      });
+      const liveUser = await createTestUser({
+        name: 'Live OAuth Session User',
+      });
       const memberId = await addUserToOrganization(liveUser.id, liveOrg.id, 'owner');
-      const liveClient = await createTestOAuthClient({ client_name: 'Live OAuth Session Client' });
-      const { token } = await createTestAccessToken(
+      const liveClient = await createTestOAuthClient({
+        client_name: 'Live OAuth Session Client',
+      });
+      const { token } = await createAccountAccessToken(
         liveUser.id,
         liveOrg.id,
         liveClient.client_id
@@ -829,7 +952,10 @@ describe('MCP Authentication', () => {
         method: 'tools/call',
         params: {
           name: 'search_memory',
-          arguments: { query: 'live-oauth-session-probe' },
+          arguments: {
+            query: 'live-oauth-session-probe',
+            workspace: liveOrg.slug,
+          },
         },
       };
       const headerless = await post('/mcp', {
@@ -892,7 +1018,10 @@ describe('MCP Authentication', () => {
         headers: { 'mcp-session-id': sessionId! },
         token,
       });
-      expect(afterMembershipRevoke.status).toBe(403);
+      expect(afterMembershipRevoke.status).toBe(200);
+      const revokedResult = await afterMembershipRevoke.json();
+      expect(revokedResult.result?.isError).toBe(true);
+      expect(revokedResult.result?.content?.[0]?.text).toContain('Workspace is not available');
 
       await addUserToOrganization(liveUser.id, liveOrg.id, 'owner');
       await sql`
@@ -913,7 +1042,7 @@ describe('MCP Authentication', () => {
       await mcpToolsCall(
         'search_memory',
         { query: 'nonexistent-brand-12345' },
-        { token, agentId: agent.agentId }
+        { token, orgSlug: org.slug, agentId: agent.agentId }
       );
 
       const rows = await getTestDb()`
@@ -943,7 +1072,7 @@ describe('MCP Authentication', () => {
       );
       await createTestAccessToken(revoker.id, org2.id, scopedClient.client_id);
 
-      const initResponse = await post('/mcp', {
+      const initResponse = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: '__test_init__',
@@ -959,7 +1088,7 @@ describe('MCP Authentication', () => {
       const activeSessionId = initResponse.headers.get('mcp-session-id');
       expect(activeSessionId).toBeTruthy();
 
-      await post('/mcp', {
+      await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           method: 'notifications/initialized',
@@ -968,7 +1097,7 @@ describe('MCP Authentication', () => {
         token: orgToken,
       });
 
-      const preRevokeResponse = await post('/mcp', {
+      const preRevokeResponse = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: 1,
@@ -1046,7 +1175,7 @@ describe('MCP Authentication', () => {
       `;
       expect(sessionRows).toHaveLength(0);
 
-      const postRevokeResponse = await post('/mcp', {
+      const postRevokeResponse = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: 2,
@@ -1110,10 +1239,10 @@ describe('MCP Authentication', () => {
         cookie: revokerSession.cookieHeader,
       });
       expect(inventory.status).toBe(200);
-      const inventoryBody = (await inventory.json()) as { clients: { id: string }[] };
-      expect(inventoryBody.clients.map((entry) => entry.id)).toContain(
-        pendingClient.client_id
-      );
+      const inventoryBody = (await inventory.json()) as {
+        clients: { id: string }[];
+      };
+      expect(inventoryBody.clients.map((entry) => entry.id)).toContain(pendingClient.client_id);
 
       const revoked = await del(`/api/${org.slug}/clients/mcp/${pendingClient.client_id}`, {
         cookie: revokerSession.cookieHeader,
@@ -1164,12 +1293,12 @@ describe('MCP Authentication', () => {
       const sharedClient = await createTestOAuthClient({
         client_name: 'Shared Registration Client',
       });
-      const { token: bobToken } = await createTestAccessToken(
+      const { token: bobToken } = await createAccountAccessToken(
         bob.id,
         org.id,
         sharedClient.client_id
       );
-      const { token: aliceToken } = await createTestAccessToken(
+      const { token: aliceToken } = await createAccountAccessToken(
         alice.id,
         org.id,
         sharedClient.client_id
@@ -1275,7 +1404,7 @@ describe('MCP Authentication', () => {
     it('rejects initialize when an authenticated client declares an unknown agent', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
-      const response = await post('/mcp', {
+      const response = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: '__test_init__',
@@ -1301,7 +1430,7 @@ describe('MCP Authentication', () => {
     it('does not let a client-declared agent binding unlock managed-agent instructions', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
-      const response = await post('/mcp', {
+      const response = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: '__test_init__',
@@ -1519,7 +1648,7 @@ describe('MCP Authentication', () => {
         name: 'OAuth Cross-Org Target',
       });
       await addUserToOrganization(user.id, org2.id);
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const response = await post(`/mcp/${org2.slug}`, {
         body: {
@@ -1541,7 +1670,7 @@ describe('MCP Authentication', () => {
     it('rejects OAuth cross-org call when user is not a member', async () => {
       const org2 = await createTestOrganization({ name: 'OAuth Stranger Org' });
       // Deliberately not adding user to org2.
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const response = await post(`/mcp/${org2.slug}`, {
         body: {
@@ -1616,7 +1745,7 @@ describe('MCP Authentication', () => {
       });
       const singletonUser = await createTestUser({});
       await addUserToOrganization(singletonUser.id, singletonOrg.id, 'member');
-      const { token } = await createTestAccessToken(
+      const { token } = await createAccountAccessToken(
         singletonUser.id,
         singletonOrg.id,
         client.client_id,
@@ -1667,23 +1796,21 @@ describe('MCP Authentication', () => {
         token,
       });
       const initBody = await init.json();
-      expect(initBody.result?.instructions).toContain('Search and writes use the primary workspace.');
-      expect(initBody.result?.instructions).not.toContain(
-        'Unqualified search searches all granted workspaces'
-      );
+      expect(initBody.result?.instructions).not.toContain('primary workspace');
+      expect(initBody.result?.instructions).toContain('client.org(');
     });
 
     it('uses the selected workspace role for cross-org SDK mutations on unscoped OAuth only', async () => {
-      const defaultOrg = await createTestOrganization({
-        name: 'Cross-Org SDK Default',
-        slug: 'cross-org-sdk-default',
+      const otherGrantedOrg = await createTestOrganization({
+        name: 'Cross-Org SDK Other',
+        slug: 'cross-org-sdk-other',
       });
       const targetOrg = await createTestOrganization({
         name: 'Cross-Org SDK Target',
         slug: 'cross-org-sdk-target',
       });
       const crossOrgOwner = await createTestUser({});
-      await addUserToOrganization(crossOrgOwner.id, defaultOrg.id, 'member');
+      await addUserToOrganization(crossOrgOwner.id, otherGrantedOrg.id, 'member');
       await addUserToOrganization(crossOrgOwner.id, targetOrg.id, 'owner');
       const targetAgent = await createTestAgent({
         organizationId: targetOrg.id,
@@ -1699,15 +1826,15 @@ describe('MCP Authentication', () => {
         )
         RETURNING id
       `;
-      const { token } = await createTestAccessToken(
+      const { token } = await createAccountAccessToken(
         crossOrgOwner.id,
-        defaultOrg.id,
+        otherGrantedOrg.id,
         client.client_id,
         { scope: 'mcp:read mcp:write mcp:admin' }
       );
       await sql`
         UPDATE oauth_tokens
-        SET granted_organization_ids = ARRAY[${defaultOrg.id}, ${targetOrg.id}]::text[]
+        SET granted_organization_ids = ARRAY[${otherGrantedOrg.id}, ${targetOrg.id}]::text[]
         WHERE token_hash = ${hashToken(token)}
       `;
 
@@ -1762,7 +1889,13 @@ describe('MCP Authentication', () => {
       expect(updated.success).toBe(true);
 
       const [created] = await getTestDb()<
-        [{ organization_id: string; device_worker_id: string; agent_kind: string }]
+        [
+          {
+            organization_id: string;
+            device_worker_id: string;
+            agent_kind: string;
+          },
+        ]
       >`
         SELECT organization_id, device_worker_id, agent_kind
         FROM automations
@@ -1783,7 +1916,7 @@ describe('MCP Authentication', () => {
             };`,
           },
         },
-        { token, orgSlug: defaultOrg.slug }
+        { token, orgSlug: otherGrantedOrg.slug }
       );
       expect(scoped.result?.structuredContent?.success).toBe(false);
       expect(scoped.result?.structuredContent?.error?.message).toMatch(
@@ -1792,33 +1925,32 @@ describe('MCP Authentication', () => {
     });
 
     it('denies a cross-org admin mutation when the selected workspace role is only member', async () => {
-      const defaultOrg = await createTestOrganization({
-        name: 'Cross-Org Deny Default',
-        slug: 'cross-org-deny-default',
+      const otherGrantedOrg = await createTestOrganization({
+        name: 'Cross-Org Deny Other',
+        slug: 'cross-org-deny-other',
       });
       const targetOrg = await createTestOrganization({
         name: 'Cross-Org Deny Target',
         slug: 'cross-org-deny-target',
       });
       const crossOrgMember = await createTestUser({});
-      // Owner where the session defaults, plain member in the workspace the
-      // script selects: the target role must govern, so lifting the default
-      // workspace's discovery ceiling cannot become an escalation.
-      await addUserToOrganization(crossOrgMember.id, defaultOrg.id, 'owner');
+      // Owner in another grant, plain member in the selected workspace.
+      // The selected target's live role must govern the mutation.
+      await addUserToOrganization(crossOrgMember.id, otherGrantedOrg.id, 'owner');
       await addUserToOrganization(crossOrgMember.id, targetOrg.id, 'member');
       const targetAgent = await createTestAgent({
         organizationId: targetOrg.id,
         ownerUserId: crossOrgMember.id,
       });
-      const { token } = await createTestAccessToken(
+      const { token } = await createAccountAccessToken(
         crossOrgMember.id,
-        defaultOrg.id,
+        otherGrantedOrg.id,
         client.client_id,
         { scope: 'mcp:read mcp:write mcp:admin' }
       );
       await getTestDb()`
         UPDATE oauth_tokens
-        SET granted_organization_ids = ARRAY[${defaultOrg.id}, ${targetOrg.id}]::text[]
+        SET granted_organization_ids = ARRAY[${otherGrantedOrg.id}, ${targetOrg.id}]::text[]
         WHERE token_hash = ${hashToken(token)}
       `;
 
@@ -2011,7 +2143,7 @@ describe('MCP Authentication', () => {
   // by "challenges unauthenticated requests…" in the Unauthenticated block.
   describe('JSON-RPC Error Handling', () => {
     it('should handle malformed JSON-RPC requests', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const response = await post('/mcp', {
         body: {
@@ -2032,7 +2164,7 @@ describe('MCP Authentication', () => {
 
   describe('tools/list Response', () => {
     it('should return list of available tools', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id, {
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id, {
         scope: 'mcp:read mcp:write mcp:admin',
       });
 
@@ -2078,7 +2210,7 @@ describe('MCP Authentication', () => {
     });
 
     it('lists Automations through the consolidated internal admin tool', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const result = await mcpToolsCall<{ automations?: unknown[] }>(
         'manage_automations',
@@ -2089,7 +2221,7 @@ describe('MCP Authentication', () => {
     });
 
     it('should include tool descriptions', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
       const result = await mcpListTools({ token });
 
@@ -2101,7 +2233,7 @@ describe('MCP Authentication', () => {
     });
   });
 
-  describe('Device Flow Org Selection', () => {
+  describe('Device flow workspace grants and device ownership', () => {
     let deviceClient: Awaited<ReturnType<typeof createTestOAuthClient>>;
 
     beforeAll(async () => {
@@ -2110,27 +2242,36 @@ describe('MCP Authentication', () => {
       });
     });
 
-    it('should approve device code with explicit organization_id', async () => {
-      const dc = await createTestDeviceCode(deviceClient.client_id);
+    it('approves ordinary device-code login with explicit grants and no target', async () => {
+      const dc = await createTestDeviceCode(deviceClient.client_id, {
+        resource: 'http://localhost/mcp',
+      });
 
       await verifyDeviceCode(dc.userCode, sessionCookie);
       const response = await post('/oauth/device/approve', {
         body: {
           user_code: dc.userCode,
           approved: true,
-          organization_id: org.id,
+          organization_ids: [org.id],
+          workspace_access: 'selected',
         },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
 
       const body = await response.json();
       expect(response.status).toBe(200);
       expect(body.status).toBe('approved');
+      const [approved] =
+        await getTestDb()`SELECT organization_id FROM oauth_device_codes WHERE device_code = ${dc.deviceCode}`;
+      expect(approved.organization_id).toBeNull();
     });
 
-    it('should return org_selection_required without organization_id (no resource slug)', async () => {
-      const dc = await createTestDeviceCode(deviceClient.client_id);
+    it('rejects ordinary device-code login without a workspace grant selection', async () => {
+      const dc = await createTestDeviceCode(deviceClient.client_id, {
+        resource: 'http://localhost/mcp',
+      });
 
       await verifyDeviceCode(dc.userCode, sessionCookie);
       const response = await post('/oauth/device/approve', {
@@ -2140,16 +2281,13 @@ describe('MCP Authentication', () => {
         },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
 
       const body = await response.json();
       expect(response.status).toBe(400);
-      expect(body.error).toBe('org_selection_required');
-      expect(body.organizations).toBeInstanceOf(Array);
-      expect(body.organizations.length).toBeGreaterThanOrEqual(2);
-      expect(body.organizations[0]).toHaveProperty('id');
-      expect(body.organizations[0]).toHaveProperty('name');
-      expect(body.organizations[0]).toHaveProperty('slug');
+      expect(body.error).toBe('invalid_request');
+      expect(body.error_description).toContain('workspace access selection');
     });
 
     it('should use resource org slug when present (existing semantics)', async () => {
@@ -2165,6 +2303,7 @@ describe('MCP Authentication', () => {
         },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
 
       const body = await response.json();
@@ -2172,18 +2311,22 @@ describe('MCP Authentication', () => {
       expect(body.status).toBe('approved');
     });
 
-    it('should reject device approve with invalid organization_id', async () => {
-      const dc = await createTestDeviceCode(deviceClient.client_id);
+    it('rejects device-code consent for an unavailable workspace grant', async () => {
+      const dc = await createTestDeviceCode(deviceClient.client_id, {
+        resource: 'http://localhost/mcp',
+      });
 
       await verifyDeviceCode(dc.userCode, sessionCookie);
       const response = await post('/oauth/device/approve', {
         body: {
           user_code: dc.userCode,
           approved: true,
-          organization_id: 'org_nonexistent_12345',
+          organization_ids: ['org_nonexistent_12345'],
+          workspace_access: 'selected',
         },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
 
       expect(response.status).toBe(403);
@@ -2191,10 +2334,8 @@ describe('MCP Authentication', () => {
       expect(body.error).toBe('access_denied');
     });
 
-    it('forces org selection on the device flow even when the user has a personal org', async () => {
-      // A multi-org user WITH a personal org used to be silently bound to that
-      // personal org (no picker), which landed the device in the wrong
-      // workspace. Device pairing must now require an explicit pick.
+    it('requires an explicit grant selection even when a personal workspace exists', async () => {
+      // Account login must not turn personal workspace ownership into a grant.
       const sql = getTestDb();
       const pUser = await createTestUser({});
       const personalOrg = await createTestOrganization({
@@ -2213,25 +2354,26 @@ describe('MCP Authentication', () => {
       await addUserToOrganization(pUser.id, otherOrg.id);
 
       const pSession = await createTestSession(pUser.id);
-      const dc = await createTestDeviceCode(deviceClient.client_id);
+      const dc = await createTestDeviceCode(deviceClient.client_id, {
+        resource: 'http://localhost/mcp',
+      });
 
       await verifyDeviceCode(dc.userCode, pSession.cookieHeader);
       const response = await post('/oauth/device/approve', {
         body: { user_code: dc.userCode, approved: true },
         cookie: pSession.cookieHeader,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
 
       const body = await response.json();
       expect(response.status).toBe(400);
-      expect(body.error).toBe('org_selection_required');
-      const ids = (body.organizations as { id: string }[]).map((o) => o.id);
-      expect(ids).toContain(personalOrg.id);
-      expect(ids).toContain(otherOrg.id);
+      expect(body.error).toBe('invalid_request');
+      expect(body.error_description).toContain('workspace access selection');
     });
 
-    it('still approves with an explicit organization_id when the user has a personal org', async () => {
-      // The override path stays intact — an explicit pick binds the device to it.
+    it('grants the selected team workspace without making Personal the execution target', async () => {
+      // An ordinary login selects access, independently of its personal workspace.
       const sql = getTestDb();
       const pUser = await createTestUser({});
       const personalOrg = await createTestOrganization({
@@ -2249,37 +2391,50 @@ describe('MCP Authentication', () => {
       await addUserToOrganization(pUser.id, otherOrg.id);
 
       const pSession = await createTestSession(pUser.id);
-      const dc = await createTestDeviceCode(deviceClient.client_id);
+      const dc = await createTestDeviceCode(deviceClient.client_id, {
+        resource: 'http://localhost/mcp',
+      });
 
       await verifyDeviceCode(dc.userCode, pSession.cookieHeader);
       const response = await post('/oauth/device/approve', {
         body: {
           user_code: dc.userCode,
           approved: true,
-          organization_id: otherOrg.id,
+          organization_ids: [otherOrg.id],
+          workspace_access: 'selected',
         },
         cookie: pSession.cookieHeader,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
 
       const body = await response.json();
       expect(response.status).toBe(200);
       expect(body.status).toBe('approved');
+      const [approved] =
+        await getTestDb()`SELECT organization_id, granted_organization_ids FROM oauth_device_codes WHERE device_code = ${dc.deviceCode}`;
+      expect(approved.organization_id).toBeNull();
+      expect(parsePgTextArray(approved.granted_organization_ids)).toEqual([otherOrg.id]);
     });
 
-    it('attaches a polling device worker to the org its token was approved for', async () => {
-      const dc = await createTestDeviceCode(deviceClient.client_id);
+    it('keeps a verified device-worker grant bound to its personal workspace', async () => {
+      await getTestDb()`UPDATE organization SET metadata = ${JSON.stringify({ personal_org_for_user_id: user.id })} WHERE id = ${org.id}`;
+      const dc = await createTestDeviceCode(deviceClient.client_id, {
+        scope: 'mcp:read mcp:write device_worker:run',
+      });
 
-      // User approves the device on the OAuth page, picking `org`.
+      // Verified device-worker consent retains the personal data ownership rule.
       await verifyDeviceCode(dc.userCode, sessionCookie);
       const approveRes = await post('/oauth/device/approve', {
         body: {
           user_code: dc.userCode,
           approved: true,
-          organization_id: org.id,
+          organization_ids: [org.id],
+          workspace_access: 'selected',
         },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
+        env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
       });
       expect(approveRes.status).toBe(200);
 
@@ -2298,7 +2453,7 @@ describe('MCP Authentication', () => {
       };
       expect(accessToken).toBeTruthy();
 
-      // First poll registers the device worker; its home is the approved org.
+      // First poll registers the worker under its explicitly verified device home.
       const workerId = `test-mac-${Date.now()}`;
       const pollRes = await post('/api/workers/poll', {
         body: { worker_id: workerId, capabilities: {} },

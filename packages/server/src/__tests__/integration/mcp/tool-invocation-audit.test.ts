@@ -190,12 +190,8 @@ describe('tool invocation audit coverage', () => {
       userId: 'another-user',
       memberRole: 'admin',
     });
-    expect(adminPayload.request).toEqual({
-      sql: 'SELECT id FROM events',
-      sort_by: 'id',
-      limit: 1,
-      org_slug: orgSlug,
-    });
+    expect(adminPayload).not.toHaveProperty('request');
+    expect(adminPayload).not.toHaveProperty('request_bytes');
   });
 
   it('does not inline exact requests into audit list results', async () => {
@@ -219,7 +215,7 @@ describe('tool invocation audit coverage', () => {
     expect(listed!.payload_data).not.toHaveProperty('request_bytes');
     // `request_status` DOES survive a list read: it is the only signal a card
     // has that a body exists to open, and without it the UI cannot offer any
-    // route to the exact-id read that serves one (to the author or an admin).
+    // route to the exact-id read that serves one (to the author).
     expect(listed!.payload_data.request_status).toBe('complete');
   });
 
@@ -248,9 +244,7 @@ describe('tool invocation audit coverage', () => {
       // Only the four discriminating fields above are read; the rest of
       // ContentItem is irrelevant to the strip/restore index.
       items: items as unknown as ContentItem[],
-      organizationId: orgId,
       userId: ownerId,
-      memberRole: 'owner',
       restoreRequests: true,
     });
 

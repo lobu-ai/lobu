@@ -9,6 +9,7 @@ import {
   createTestOAuthClient,
   createTestOrganization,
   createTestUser,
+  createTestSession,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 import { get } from '../../setup/test-helpers';
@@ -102,7 +103,7 @@ describe('client activity scopes route', () => {
 
   it('keeps distinct ChatGPT conversations separate while combining only their reconnecting transports', async () => {
     const response = await get(
-      `/api/${organizationSlug}/clients/activity-scopes?client_ids=${chatgptClientId}`,
+      `/api/me/clients/activity-scopes?client_ids=${chatgptClientId}`,
       { token }
     );
     expect(response.status).toBe(200);
@@ -162,7 +163,7 @@ describe('client activity scopes route', () => {
 
   it('filters conversation and transport-session scopes explicitly', async () => {
     const conversations = await get(
-      `/api/${organizationSlug}/clients/activity-scopes?client_ids=${chatgptClientId}&activity_kind=conversation`,
+      `/api/me/clients/activity-scopes?client_ids=${chatgptClientId}&activity_kind=conversation`,
       { token }
     );
     const conversationBody = (await conversations.json()) as {
@@ -172,7 +173,7 @@ describe('client activity scopes route', () => {
     expect(conversationBody.scopes.every((scope) => scope.activityKind === 'conversation')).toBe(true);
 
     const sessions = await get(
-      `/api/${organizationSlug}/clients/activity-scopes?client_ids=${chatgptClientId}&activity_kind=session`,
+      `/api/me/clients/activity-scopes?client_ids=${chatgptClientId}&activity_kind=session`,
       { token }
     );
     const sessionBody = (await sessions.json()) as {
@@ -192,7 +193,7 @@ describe('client activity scopes route', () => {
         AND conversation_id = 'command-transport'
     `;
     const response = await get(
-      `/api/${organizationSlug}/clients/activity-scopes?exclude_command_clients=true&limit=1`,
+      `/api/me/clients/activity-scopes?exclude_command_clients=true&limit=1`,
       { token }
     );
     expect(response.status).toBe(200);
@@ -213,8 +214,20 @@ describe('client activity scopes route', () => {
   });
 
   it('rejects unauthenticated activity reads', async () => {
-    const response = await get(`/api/${organizationSlug}/clients/activity-scopes`);
+    const response = await get(`/api/me/clients/activity-scopes`);
     expect(response.status).toBe(401);
+  });
+
+  it('reads personal Recent from a web session without an active workspace', async () => {
+    const session = await createTestSession(userId);
+    const response = await get('/api/me/clients/activity-scopes', { cookie: session.cookieHeader });
+    expect(response.status).toBe(200);
+    expect((await response.json()).scopes.length).toBeGreaterThan(0);
+  });
+
+  it('removes the workspace-owned personal activity endpoint', async () => {
+    const response = await get(`/api/${organizationSlug}/clients/activity-scopes`, { token });
+    expect((await response.json()).scopes).toBeUndefined();
   });
 
   it('treats MCP registrations as Connected Apps rather than agent assignments', async () => {

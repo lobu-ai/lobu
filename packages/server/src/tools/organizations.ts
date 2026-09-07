@@ -4,12 +4,10 @@
  * Discovery for the orgs the authenticated user belongs to (and any public
  * workspaces the session can read). Exposed on both unscoped /mcp and
  * scoped /mcp/{slug} endpoints. The response marks the token's bound org
- * with `is_current: true` — agents use that field to know which workspace
- * memory tools target by default.
+ * with `is_current: true`; an unselected account client has no current workspace.
  *
  * Cross-org reads from inside `query_sdk` / `run_sdk` go through `client.org(slug)`;
- * scripts that need a different default org should reconnect via /mcp/{slug}
- * or a different OAuth token.
+ * scoped connections retain their explicit /mcp/{slug} binding.
  */
 
 import { type Static, Type } from '@sinclair/typebox';

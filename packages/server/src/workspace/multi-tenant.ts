@@ -505,20 +505,45 @@ export class MultiTenantProvider implements WorkspaceProvider {
         return oauthWorkspaceUnavailable();
       }
 
+      // Populate `user` for PAT/OAuth-bearer paths so REST routes that read
+      // `c.get('user')` (e.g. POST /agents owner attribution) have a value.
+      let bearerUser: { id: string; email: string; name: string; emailVerified: boolean } | null =
+        null;
+      try {
+        const userRows = await sql`
+          SELECT id, email, name, "emailVerified"
+          FROM "user"
+          WHERE id = ${authInfo.userId}
+          LIMIT 1
+        `;
+        if (userRows.length > 0) {
+          const row = userRows[0] as {
+            id: string;
+            email: string;
+            name: string;
+            emailVerified: boolean | string | number | null;
+          };
+          bearerUser = {
+            id: row.id,
+            email: row.email ?? '',
+            name: row.name ?? '',
+            emailVerified:
+              typeof row.emailVerified === 'boolean'
+                ? row.emailVerified
+                : row.emailVerified === 't' ||
+                  row.emailVerified === 'true' ||
+                  row.emailVerified === 1,
+          };
+        }
+      } catch {
+        bearerUser = null;
+      }
+
       let effectiveOrgId = requestedOrgId;
 
-      // Token's bound org is the default. PATs are intentionally org-scoped:
-      // a PAT minted for org A must never be usable against org B even if the
-      // owner has membership in both, so the URL slug must match the bound
-      // org strictly. OAuth tokens bind to whichever org the user picked at
-      // consent time but the user often has memberships in many orgs; the
-      // membership check below is the real authorization gate, so for OAuth
-      // we trust the URL slug and let membership decide. Without this, a
-      // user logged in via `lobu login` (which OAuths into one org) cannot
-      // hit cross-org admin routes like POST /api/:slug/tokens — the very
-      // call needed to bootstrap a PAT for the second org. On unscoped /mcp
-      // we still resolve the default to the bound org instead of leaving it
-      // null, matching the contract in `mcp-query-run-split.md`.
+      // Preserve explicit PAT, scoped OAuth, and device-worker bindings.
+      // Ordinary bare OAuth has no organization binding; its target is resolved
+      // from the immutable grant when a workspace operation is requested.
       if (authInfo.organizationId) {
         if (requestedOrgId && requestedOrgId !== authInfo.organizationId) {
           if (isPat) {
@@ -543,6 +568,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
             mcpIsAuthenticated: true,
             organizationId: null,
             memberRole: null,
+            user: bearerUser,
             authSource: isPat ? 'pat' : 'oauth',
           });
         }
@@ -578,40 +604,6 @@ export class MultiTenantProvider implements WorkspaceProvider {
           },
           403
         );
-      }
-
-      // Populate `user` for PAT/OAuth-bearer paths so REST routes that read
-      // `c.get('user')` (e.g. POST /agents owner attribution) have a value.
-      let bearerUser: { id: string; email: string; name: string; emailVerified: boolean } | null =
-        null;
-      try {
-        const userRows = await sql`
-          SELECT id, email, name, "emailVerified"
-          FROM "user"
-          WHERE id = ${authInfo.userId}
-          LIMIT 1
-        `;
-        if (userRows.length > 0) {
-          const row = userRows[0] as {
-            id: string;
-            email: string;
-            name: string;
-            emailVerified: boolean | string | number | null;
-          };
-          bearerUser = {
-            id: row.id,
-            email: row.email ?? '',
-            name: row.name ?? '',
-            emailVerified:
-              typeof row.emailVerified === 'boolean'
-                ? row.emailVerified
-                : row.emailVerified === 't' ||
-                  row.emailVerified === 'true' ||
-                  row.emailVerified === 1,
-          };
-        }
-      } catch {
-        bearerUser = null;
       }
 
       return setContextAndContinue({

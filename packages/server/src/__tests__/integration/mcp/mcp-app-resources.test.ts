@@ -1148,7 +1148,10 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
   });
 
   it('renders an explicitly targeted approval in the sole granted workspace', async () => {
-    const sessionId = await initSession('/mcp');
+    const token = (await createTestAccessToken(owner.id, null, client.client_id, {
+      scope: 'mcp:read mcp:write mcp:admin', grantedOrganizationIds: [org.id],
+    })).token;
+    const sessionId = await initSession('/mcp', { sessionToken: token });
     const [run] = await getDb()<{ id: number }>`
       INSERT INTO runs (organization_id, run_type, status, approval_status)
       VALUES (${org.id}, 'action', 'pending', 'pending')
@@ -1192,27 +1195,26 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
   });
 
   it('renders and resolves a target-workspace approval through one unscoped OAuth session', async () => {
-    const defaultOrg = await createTestOrganization({
-      name: 'Approval Default Org',
-      slug: 'approval-default-org',
+    const otherOrg = await createTestOrganization({
+      name: 'Approval Other Org',
+      slug: 'approval-other-org',
     });
     const targetOrg = await createTestOrganization({
       name: 'Approval Target Org',
       slug: 'approval-target-org',
     });
-    await addUserToOrganization(owner.id, defaultOrg.id, 'member');
+    await addUserToOrganization(owner.id, otherOrg.id, 'member');
     await addUserToOrganization(owner.id, targetOrg.id, 'owner');
     const crossOrgToken = (
-      await createTestAccessToken(owner.id, defaultOrg.id, client.client_id, {
+      await createTestAccessToken(owner.id, null, client.client_id, {
         scope: 'mcp:read mcp:write mcp:admin',
       })
     ).token;
     // Cross-workspace approval rendering now requires the target workspace in
-    // the token's explicit consent snapshot; a legacy NULL grant stays pinned
-    // to its anchor workspace.
+    // the token's explicit consent snapshot; no execution workspace is selected.
     await getDb()`
       UPDATE oauth_tokens
-      SET granted_organization_ids = ARRAY[${defaultOrg.id}, ${targetOrg.id}]::text[]
+      SET granted_organization_ids = ARRAY[${otherOrg.id}, ${targetOrg.id}]::text[]
       WHERE token_hash = ${hashToken(crossOrgToken)}
     `;
     const sessionId = await initSession('/mcp', { sessionToken: crossOrgToken });
@@ -1295,10 +1297,10 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
       approval_status: 'rejected',
     });
 
-    const scopedSessionId = await initSession(`/mcp/${defaultOrg.slug}`, {
+    const scopedSessionId = await initSession(`/mcp/${otherOrg.slug}`, {
       sessionToken: crossOrgToken,
     });
-    const scopedResponse = await post(`/mcp/${defaultOrg.slug}`, {
+    const scopedResponse = await post(`/mcp/${otherOrg.slug}`, {
       body: {
         jsonrpc: '2.0',
         id: 'scoped-cross-org-get-approval',

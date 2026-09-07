@@ -61,7 +61,7 @@ describe('MCP activity actor identity', () => {
     await expect(resolveMcpActivitySessionIds(getDb(), null, [clientId], 'shared-host-id')).rejects.toThrow(/not found/i);
     expect(await resolveActionOrigin(first)).toMatchObject({ label: expect.stringContaining('My conversation') });
     expect(await resolveActionOrigin(second)).toMatchObject({ label: expect.stringContaining('Other private conversation') });
-    const response = await get(`/api/${org.slug}/clients/activity-scopes`, { token });
+    const response = await get(`/api/me/clients/activity-scopes`, { token });
     expect(response.status).toBe(200);
     const body = await response.json() as { scopes: Array<{ title: string }> };
     expect(body.scopes.map(row => row.title)).toContain('My conversation');
@@ -75,7 +75,7 @@ describe('MCP activity actor identity', () => {
       WHERE user_id = ${userId} AND conversation_id = 'two-targets'`;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ organization_id: null, call_count: 2 });
-    const response = await get(`/api/${org.slug}/clients/activity-scopes`, { token });
+    const response = await get(`/api/me/clients/activity-scopes`, { token });
     const body = await response.json() as { scopes: Array<{ activityId: string; callCount: number }> };
     expect(body.scopes.find(row => row.activityId === 'two-targets')?.callCount).toBe(2);
   });

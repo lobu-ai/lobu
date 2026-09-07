@@ -41,8 +41,9 @@ import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
+import { requireWorkspaceContext } from './access-control';
 import { getContent } from './get_content';
-import type { ToolContext } from './registry';
+import type { AccountToolContext, ToolContext } from './registry';
 import { markAcceptedInternalFields, withValidatedArgs } from './validate-args';
 import { getErrorMessage } from '@lobu/core';
 import {
@@ -314,13 +315,6 @@ function withRecall<T extends UnifiedSearchResult>(
   return Object.assign(result, recall);
 }
 
-type SearchToolContext = ToolContext & {
-  /** Immutable consent snapshot. Null/absent is legacy anchor-only. */
-  grantedOrganizationIds?: readonly string[] | null;
-  /** True only for a direct tool call on an unscoped OAuth MCP connection. */
-  directSearchFederation?: boolean;
-};
-
 interface WorkspaceSearchExecution {
   workspaceSlug: string;
   recallQueryEmbedding?: number[];
@@ -358,7 +352,7 @@ async function currentWorkspaceSlug(organizationId: string): Promise<string | nu
 
 async function resolveSingleWorkspace(
   args: SearchArgs,
-  ctx: SearchToolContext
+  ctx: ToolContext
 ): Promise<{ workspaceSlug: string; scope: SearchCoverage['scope'] }> {
   const workspaceSlug = await currentWorkspaceSlug(ctx.organizationId);
   if (!workspaceSlug) throw workspaceUnavailable();
@@ -374,7 +368,7 @@ async function resolveSingleWorkspace(
 
 async function resolveFederatedTargets(
   args: SearchArgs,
-  ctx: SearchToolContext
+  ctx: AccountToolContext
 ): Promise<GrantedMemberWorkspace[]> {
   if (!ctx.userId) return [];
   const grantedOrganizationIds = ctx.grantedOrganizationIds ?? [];
@@ -520,7 +514,7 @@ function unavailableWorkspaceCoverage(workspace: GrantedMemberWorkspace): Worksp
  * write: they get the persist block, without the admin-only type-creation hop.
  */
 function guidanceAccessTier(
-  ctx: ToolContext,
+  ctx: AccountToolContext,
   memberRole: string | null = ctx.memberRole ?? null
 ): ToolAccessLevel {
   if (isInProcessSystemCall(ctx)) return 'write';
@@ -1266,16 +1260,8 @@ export const search = withValidatedArgs('search_memory', SearchSchema, searchImp
 async function searchImpl(
   args: SearchArgs,
   env: Env,
-  rawCtx: ToolContext
+  ctx: AccountToolContext
 ): Promise<UnifiedSearchResult> {
-  const ctx = rawCtx as SearchToolContext;
-  if (!ctx.organizationId) {
-    return emptyResult({
-      ...(args.title?.trim() ? { title: args.title.trim() } : {}),
-      suggestion: 'No accessible entities found in this workspace scope',
-    });
-  }
-
   // Federation is deliberately narrower than "OAuth can address another
   // org". Only a DIRECT search call on bare `/mcp` receives this bit from the
   // request boundary; scoped endpoints, PAT/session calls, agent/Automation
@@ -1286,8 +1272,9 @@ async function searchImpl(
     ctx.actingAutomationId ||
     ctx.headlessResult
   ) {
-    const target = await resolveSingleWorkspace(args, ctx);
-    return searchWorkspaceImpl(args, env, ctx, {
+    const workspaceCtx = requireWorkspaceContext(ctx);
+    const target = await resolveSingleWorkspace(args, workspaceCtx);
+    return searchWorkspaceImpl(args, env, workspaceCtx, {
       workspaceSlug: target.workspaceSlug,
       coverageScope: target.scope,
     });
@@ -1437,7 +1424,7 @@ async function filterEntitiesByReadPolicy<T extends { entity_type: string }>(
 async function searchWorkspaceImpl(
   args: SearchArgs,
   env: Env,
-  ctx: SearchToolContext,
+  ctx: ToolContext,
   execution: WorkspaceSearchExecution
 ): Promise<UnifiedSearchResult> {
   // SDK delegates (`client.knowledge.search`) skip `checkToolAccess`, so

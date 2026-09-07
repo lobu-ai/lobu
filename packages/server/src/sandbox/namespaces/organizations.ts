@@ -6,7 +6,7 @@
  * `client-sdk.ts`) handles the actual cross-org context swap.
  */
 
-import type { ToolContext } from "../../tools/registry";
+import type { AccountToolContext } from "../../tools/registry";
 import { getWorkspaceProvider } from "../../workspace";
 import type { OrgInfo } from "../../workspace/types";
 import { listLiveGrantedMemberWorkspaces } from "../../auth/oauth/workspace-grants";
@@ -29,13 +29,13 @@ export interface OrganizationsNamespace {
 	list(options?: { search?: string }): Promise<OrgSummary[]>;
 	/**
 	 * Return the session's current organization context. Reflects the URL pin
-	 * (`/mcp/{slug}`) or the user's default org for an unscoped /mcp session.
+	 * (`/mcp/{slug}`); returns null for an unselected account client.
 	 */
-	current(): Promise<OrgSummary>;
+	current(): Promise<OrgSummary | null>;
 }
 
 export function buildOrganizationsNamespace(
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 ): OrganizationsNamespace {
 	const summarize = (organization: OrgInfo): OrgSummary => ({
 		id: organization.id,
@@ -80,6 +80,7 @@ export function buildOrganizationsNamespace(
 				.map(summarize);
 		},
 		async current() {
+			if (!ctx.organizationId) return null;
 			const provider = getWorkspaceProvider();
 			const orgs = await provider.listOrganizations(undefined, ctx.userId);
 			const current = orgs.find((o) => o.id === ctx.organizationId);

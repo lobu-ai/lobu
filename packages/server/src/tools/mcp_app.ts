@@ -23,8 +23,9 @@ import {
 } from '../utils/approval-context';
 import { buildResourcePermalink } from '../utils/url-builder';
 import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
-import { getContent } from './get_content';
+import { requireWorkspaceContext } from './access-control';
 import { manageOperations } from './admin/manage_operations';
+import { getContent } from './get_content';
 import { attachMcpResultMeta } from './mcp-result-meta';
 import {
   type McpAppCapabilityBinding,
@@ -35,7 +36,7 @@ import {
   mcpAppCapabilityMatchesHost,
   readMcpAppCapability,
 } from './mcp-app-capability';
-import type { ToolContext } from './registry';
+import type { AccountToolContext, ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
 import { getOrgUrlContext } from './view-urls';
 
@@ -916,7 +917,7 @@ async function buildApprovalView(runId: number, env: Env, ctx: ToolContext): Pro
  */
 async function resolveApprovalWorkspace(
   slugOrId: string,
-  ctx: ToolContext
+  ctx: AccountToolContext
 ): Promise<ToolContext> {
   try {
     return await resolveCrossOrgToolContext(slugOrId, ctx);
@@ -931,11 +932,11 @@ async function resolveApprovalWorkspace(
 const getApprovalImpl = async (
   args: Static<typeof GetApprovalSchema>,
   env: Env,
-  ctx: ToolContext
+  ctx: AccountToolContext
 ): Promise<LobuView> => {
   const approvalCtx = args.organization
     ? await resolveApprovalWorkspace(args.organization, ctx)
-    : ctx;
+    : requireWorkspaceContext(ctx);
   return buildApprovalView(args.run_id, env, approvalCtx);
 };
 
@@ -950,7 +951,7 @@ type ResolveApprovalArgs = Static<typeof ResolveApprovalSchema>;
 const resolveApprovalImpl = async (
   args: ResolveApprovalArgs,
   env: Env,
-  ctx: ToolContext
+  ctx: AccountToolContext
 ): Promise<LobuView> => {
   const capability = readApprovalCapability(ctx.mcpAppApprovalCapability);
   // Drops `ctx.mcpAppsSupported` for the same reason issuance does — and it
@@ -970,7 +971,7 @@ const resolveApprovalImpl = async (
   // connections remain unable to cross their bound workspace.
   const approvalCtx =
     capability.organizationId === ctx.organizationId
-      ? ctx
+      ? requireWorkspaceContext(ctx)
       : await resolveApprovalWorkspace(capability.organizationId, ctx);
 
   const current = await findApprovalRow(args.run_id, env, approvalCtx);

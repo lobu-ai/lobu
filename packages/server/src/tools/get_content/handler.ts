@@ -809,9 +809,7 @@ async function getContentImpl(
     await hydrateToolInvocationRequests({
       sql,
       items: contentItems,
-      organizationId: ctx.organizationId,
       userId: ctx.userId,
-      memberRole: ctx.memberRole,
       restoreRequests: isExactIdRead,
     });
 
