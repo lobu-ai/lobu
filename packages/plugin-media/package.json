@@ -11,6 +11,12 @@
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.js"
+    },
+    "./portable": {
+      "types": "./dist/portable.d.ts",
+      "bun": "./src/portable.ts",
+      "import": "./dist/portable.js",
+      "require": "./dist/portable.js"
     }
   },
   "scripts": {
@@ -20,12 +26,10 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@lobu/core": "workspace:*",
     "@lobu/plugin-api": "workspace:*",
     "@lobu/plugin-toolkit": "workspace:*",
     "@mariozechner/pi-coding-agent": "^0.73.1",
-    "@sinclair/typebox": "^0.34.33",
-    "form-data": "^4.0.4"
+    "@sinclair/typebox": "^0.34.33"
   },
   "devDependencies": {
     "@types/node": "^20.19.9",

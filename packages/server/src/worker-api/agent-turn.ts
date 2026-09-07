@@ -17,8 +17,9 @@
  * reaper terminalizes the run and, for an authoritative turn, delivers the
  * error the completion route would have.
  */
-import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries } from "@lobu/core";
+import { AGENT_ERRORS, AgentErrorCode, createLogger, parseSessionEntries } from "@lobu/core";
 import {
+	type AgentTurnToolEvent,
 	type CompleteAgentTurnRequest,
 	CompleteAgentTurnRequestSchema,
 } from "@lobu/core/contracts/worker/protocol";
@@ -35,11 +36,15 @@ import {
 	readSnapshotJsonl,
 } from "../gateway/services/transcript-snapshot";
 import type { Env } from "../index";
+import { incrementCounter } from "../gateway/metrics/prometheus";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { buildStaleRunWhereSql } from "../scheduled/stale-run-sweeper";
+import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
+
+const logger = createLogger("agent-turn-worker-api");
 
 /** What of the turn's own text is kept on the run row for the shadow diff. */
 const MAX_OUTPUT_TAIL = 2_000;
@@ -135,6 +140,263 @@ async function appendTurnSnapshot(
     ON CONFLICT (organization_id, agent_id, conversation_id, run_id)
     DO NOTHING
   `;
+}
+
+/**
+ * The outcome of one delta batch, as the worker needs to hear it.
+ *
+ * `published` distinguishes "written into the conversation" from "correctly
+ * decided not to write" (a shadow turn, or a sequence already passed). Both
+ * retire the batch on the worker; only a THROW leaves it queued for the next
+ * beat, which is why this function returns rather than swallowing.
+ */
+type TurnDeltaOutcome = { published: boolean };
+
+/**
+ * Publish the next span of text an in-flight `agent_turn` has written, so the
+ * client watching the conversation sees the answer arrive instead of a blank
+ * screen for the length of the turn.
+ *
+ * Called from the heartbeat the turn already sends. Everything about WHERE the
+ * text goes is read from the run's own row, never from the worker's body: a
+ * worker may be compromised, and this is the same rule `/worker/response`
+ * applies when it rebuilds routing from the signed token.
+ *
+ * The row is the ordinary non-terminal `thread_response` the subprocess lane's
+ * deltas take, so every renderer — web, Slack, Telegram — already knows how to
+ * present it, and it inherits that queue's multi-replica delivery. It is
+ * emphatically not the connector `/stream` events path: a chat delta is not an
+ * event to ingest into an org's memory.
+ *
+ * The text is INCREMENTAL, because that is what those renderers do with it:
+ * `ApiResponseRenderer.handleDelta` broadcasts the span verbatim and the SPA
+ * appends it, exactly as the subprocess lane's `sendStreamDelta(delta, false)`
+ * intends. A cumulative snapshot down this same path renders as the reply
+ * repeated back to itself.
+ *
+ * What makes an increment safe under a dropped or retried beat is the pairing
+ * of the sequence fence here with the worker's ack-gated cursor: the fence
+ * refuses any sequence it has already published, so a retry is a no-op, and
+ * the worker re-sends the same sequence until it is acknowledged, so nothing
+ * is retired unwritten.
+ *
+ * Silent no-op for a shadow turn (nothing it produces is delivered) and for a
+ * turn whose sequence has already been passed — both are `published: false`,
+ * an answer rather than a failure.
+ */
+async function publishTurnDelta(
+	runId: number,
+	workerId: string,
+	delta: { text: string; sequence: number }
+): Promise<TurnDeltaOutcome> {
+	const sql = getDb();
+	const emitted = await sql.begin(async (tx) => {
+		// One statement, fenced on the lease, so a run cancelled or re-claimed
+		// between the read and the write cannot have a stale worker's text
+		// published into its conversation. The sequence is kept on the
+		// run row itself: it is per-run state with the same lifetime as the run,
+		// and an in-memory counter would be invisible to the other replicas that
+		// can serve the next heartbeat.
+		//
+		// The lease fence already pins `status = 'running'` (`runLeaseFence`), so
+		// there is no second status predicate here: one narrower fence, stated
+		// once.
+		const rows = (await tx`
+      UPDATE public.runs
+      SET run_metadata = jsonb_set(
+            COALESCE(run_metadata, '{}'::jsonb),
+            '{turn_delta_sequence}',
+            ${sql.json(delta.sequence)}::jsonb,
+            true
+          )
+      WHERE id = ${runId}
+        AND run_type = 'agent_turn'
+        AND COALESCE((run_metadata->>'turn_delta_sequence')::bigint, -1) < ${delta.sequence}
+        ${runLeaseFence(tx, workerId)}
+      RETURNING action_input, organization_id
+    `) as unknown as Array<{
+			action_input: {
+				turn?: { shadow?: boolean; conversation_id?: string };
+				reply?: TurnReply;
+			} | null;
+			organization_id: string | null;
+		}>;
+		const row = rows[0];
+		if (!row) return false;
+		const envelope = row.action_input ?? {};
+		// A shadow turn delivers nothing, by definition — it exists to be
+		// compared against the subprocess lane, not to answer anyone. Same
+		// predicate the completion route applies to the same field.
+		if (envelope.turn?.shadow === true) return false;
+		const reply = envelope.reply;
+		if (!reply) return false;
+		await insertThreadResponseRow(
+			tx,
+			{
+				messageId: reply.message_id,
+				channelId: reply.channel_id,
+				conversationId: String(envelope.turn?.conversation_id ?? ""),
+				userId: reply.user_id,
+				teamId: reply.team_id ?? "api",
+				platform: reply.platform,
+				organizationId: row.organization_id,
+				platformMetadata: reply.platform_metadata,
+				delta: delta.text,
+				// Incremental: this span CONTINUES the reply, it does not restate
+				// it. The renderers append.
+				isFullReplacement: false,
+				timestamp: Date.now(),
+			},
+			row.organization_id
+		);
+		return true;
+	});
+	// Outside the transaction, as the completion route does: the listener must
+	// not be woken for a row a rollback would take back.
+	if (emitted) await notifyThreadResponse();
+	return { published: emitted };
+}
+
+/**
+ * Publish the tool calls an in-flight `agent_turn` has finished, as the SAME
+ * `tool_use` custom event the subprocess lane emits per `tool_execution_end`.
+ *
+ * One shape for both lanes: the SPA, the promptfoo provider and the menubar
+ * already subscribe to `tool_use`, so this lane's tools become visible without
+ * a second event name or a second consumer.
+ *
+ * Routing is read from the run's own row, exactly as the delta path does, and
+ * a shadow turn publishes nothing. There is no sequence fence here and none is
+ * needed: a trace is idempotent per `toolCallId` from the client's point of
+ * view, and unlike the reply it is never reconstructed by appending.
+ */
+async function publishTurnToolEvents(
+	runId: number,
+	workerId: string,
+	events: readonly AgentTurnToolEvent[]
+): Promise<void> {
+	if (events.length === 0) return;
+	const sql = getDb();
+	const emitted = await sql.begin(async (tx) => {
+		const rows = (await tx`
+      SELECT action_input, organization_id
+      FROM public.runs
+      WHERE id = ${runId}
+        AND run_type = 'agent_turn'
+        ${runLeaseFence(tx, workerId)}
+      LIMIT 1
+    `) as unknown as Array<{
+			action_input: {
+				turn?: { shadow?: boolean; conversation_id?: string };
+				reply?: TurnReply;
+			} | null;
+			organization_id: string | null;
+		}>;
+		const row = rows[0];
+		if (!row) return false;
+		const envelope = row.action_input ?? {};
+		if (envelope.turn?.shadow === true) return false;
+		const reply = envelope.reply;
+		if (!reply) return false;
+		for (const event of events) {
+			await insertThreadResponseRow(
+				tx,
+				{
+					messageId: reply.message_id,
+					channelId: reply.channel_id,
+					conversationId: String(envelope.turn?.conversation_id ?? ""),
+					userId: reply.user_id,
+					teamId: reply.team_id ?? "api",
+					platform: reply.platform,
+					organizationId: row.organization_id,
+					platformMetadata: reply.platform_metadata,
+					customEvent: {
+						name: "tool_use",
+						data: {
+							toolCallId: event.tool_call_id,
+							name: event.name,
+							isError: event.is_error,
+							result_summary: event.is_error
+								? { error: event.output }
+								: undefined,
+						},
+					},
+					timestamp: Date.now(),
+				},
+				row.organization_id
+			);
+		}
+		return true;
+	});
+	if (emitted) await notifyThreadResponse();
+}
+
+/**
+ * Publish an in-flight turn's tool traces, absorbing any failure.
+ *
+ * Same contract as the delta path and for the same reason: a view of the turn
+ * must never fail the heartbeat that keeps the turn alive. Counted rather than
+ * silenced, so a broken trace path is visible.
+ */
+export async function publishTurnToolEventsBestEffort(
+	runId: number,
+	workerId: string,
+	events: readonly AgentTurnToolEvent[]
+): Promise<void> {
+	try {
+		await publishTurnToolEvents(runId, workerId, events);
+	} catch (err) {
+		incrementCounter("lobu_turn_tool_event_publish_failed_total");
+		logger.debug(
+			{ runId, err: errorMessage(err) },
+			"Failed to publish agent turn tool traces"
+		);
+	}
+}
+
+/**
+ * How often a failing delta publish is allowed to say so in the log, per pod.
+ *
+ * A turn beats every few seconds, so an unconditional warn on a persistently
+ * broken path is thousands of identical lines. Silence is the wrong fix for
+ * that — a 100%-failing delta path would be indistinguishable from a working
+ * one — so the counter below is unconditional and the PROSE is rate-limited.
+ */
+const DELTA_FAILURE_LOG_INTERVAL_MS = 60_000;
+let lastDeltaFailureLogAt = 0;
+
+/**
+ * Publish an in-flight turn's delta, absorbing any failure into the answer.
+ *
+ * The heartbeat's own job is to prove the turn is alive; a delta is a
+ * best-effort passenger on it. Letting a failed publish fail the heartbeat
+ * would let a cosmetic path get a live turn reaped by the stale sweep — so the
+ * failure is caught here.
+ *
+ * It is not, however, hidden. The caller gets `undefined` — no ack — and the
+ * worker keeps the text queued and re-sends it under the same sequence, and
+ * `lobu_turn_delta_publish_failed_total` counts every occurrence so a broken
+ * delta path is visible in the same place every other gateway failure is.
+ */
+export async function publishTurnDeltaBestEffort(
+	runId: number,
+	workerId: string,
+	delta: { text: string; sequence: number }
+): Promise<TurnDeltaOutcome | undefined> {
+	try {
+		return await publishTurnDelta(runId, workerId, delta);
+	} catch (err) {
+		incrementCounter("lobu_turn_delta_publish_failed_total");
+		const now = Date.now();
+		if (now - lastDeltaFailureLogAt >= DELTA_FAILURE_LOG_INTERVAL_MS) {
+			lastDeltaFailureLogAt = now;
+			logger.warn(
+				{ runId, sequence: delta.sequence, err: errorMessage(err) },
+				"Failed to publish an agent turn delta; the worker will retry the batch"
+			);
+		}
+		return undefined;
+	}
 }
 
 export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
@@ -262,7 +524,20 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 				platformMetadata: reply.platform_metadata,
 				...(failed
 					? { error: error || "agent turn failed" }
-					: { finalText: text }),
+					: {
+							finalText: text,
+							// The turn already posted its answer into this
+							// conversation with `send_message`/`present_event`, so
+							// `finalText` is a report about a message the user has
+							// read and delivering it too is the double-post. The
+							// renderers' existing suppression acts on this flag
+							// (`chat-response-bridge`); it is set only on the
+							// completion row, never on an error row, because an
+							// error is not a duplicate of the reply.
+							...(body.replied_in_band === true
+								? { repliedInBand: true }
+								: {}),
+						}),
 				processedMessageIds: [reply.message_id],
 				timestamp: Date.now(),
 			},

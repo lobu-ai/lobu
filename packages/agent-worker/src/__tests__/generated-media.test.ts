@@ -9,12 +9,27 @@ function extractText(result: {
   return result.content[0]?.text || "";
 }
 
-function bodyToString(body: BodyInit | null | undefined): string {
-  if (!body) return "";
-  if (typeof body === "string") return body;
-  if (Buffer.isBuffer(body)) return body.toString("utf8");
-  if (body instanceof Uint8Array) return Buffer.from(body).toString("utf8");
-  return "";
+/**
+ * The upload body is a `FormData`, so the runtime — not the plugin — owns the
+ * boundary and the `Content-Type`. Assert the PARTS rather than a serialised
+ * string: it is what the gateway route actually reads
+ * (`formData.get("file")`), and it is the same shape on both lanes.
+ */
+function uploadParts(body: BodyInit | null | undefined): {
+  file: File;
+  filename: string;
+  comment: string;
+} {
+  if (!(body instanceof FormData)) {
+    throw new Error(`expected a FormData upload body, got ${typeof body}`);
+  }
+  const file = body.get("file");
+  if (!(file instanceof File)) throw new Error("the file part is not a file");
+  return {
+    file,
+    filename: String(body.get("filename")),
+    comment: String(body.get("comment")),
+  };
 }
 
 describe("generated media upload flow", () => {
@@ -44,16 +59,23 @@ describe("generated media upload flow", () => {
 
         if (url.endsWith("/internal/files/upload")) {
           const headers = new Headers(init?.headers);
-          const body = bodyToString(init?.body);
+          const parts = uploadParts(init?.body);
 
           expect(init?.method).toBe("POST");
           expect(headers.get("Authorization")).toBe("Bearer worker-token");
           expect(headers.get("X-Channel-Id")).toBe("channel-1");
           expect(headers.get("X-Conversation-Id")).toBe("conversation-1");
           expect(headers.get("X-Voice-Message")).toBeNull();
-          expect(headers.get("Content-Type")).toContain("multipart/form-data");
-          expect(body).toContain("generated_image.png");
-          expect(body).toContain("Generated content");
+          // The runtime derives the multipart Content-Type and its boundary
+          // from the FormData body, so the plugin must NOT set one itself: a
+          // hand-written header would carry the wrong boundary.
+          expect(headers.get("Content-Type")).toBeNull();
+          expect(parts.file.name).toBe("generated_image.png");
+          expect(parts.file.type).toBe("image/png");
+          // The provider's bytes, straight through — no temp file in between.
+          expect(await parts.file.text()).toBe("png-bytes");
+          expect(parts.filename).toBe("generated_image.png");
+          expect(parts.comment).toBe("Generated content");
 
           return Response.json({ success: true, fileId: "file-1" });
         }
@@ -103,16 +125,19 @@ describe("generated media upload flow", () => {
 
         if (url.endsWith("/internal/files/upload")) {
           const headers = new Headers(init?.headers);
-          const body = bodyToString(init?.body);
+          const parts = uploadParts(init?.body);
 
           expect(init?.method).toBe("POST");
           expect(headers.get("Authorization")).toBe("Bearer worker-token");
           expect(headers.get("X-Channel-Id")).toBe("channel-1");
           expect(headers.get("X-Conversation-Id")).toBe("conversation-1");
           expect(headers.get("X-Voice-Message")).toBe("true");
-          expect(headers.get("Content-Type")).toContain("multipart/form-data");
-          expect(body).toContain("voice_response.ogg");
-          expect(body).toContain("Generated content");
+          expect(headers.get("Content-Type")).toBeNull();
+          expect(parts.file.name).toBe("voice_response.ogg");
+          expect(parts.file.type).toBe("audio/ogg");
+          expect(await parts.file.text()).toBe("ogg-bytes");
+          expect(parts.filename).toBe("voice_response.ogg");
+          expect(parts.comment).toBe("Generated content");
 
           return Response.json({ success: true, fileId: "file-2" });
         }

@@ -828,6 +828,15 @@ jobs:
         if: steps.dist-cache.outputs.cache-hit != 'true'
         run: |
           cd packages/core && bun run build && cd ../..
+          # connector-worker's build bundles the agent guest, whose sources
+          # import the plugin packages (types at tsc time, code at bundle
+          # time), so those dists must exist first, in dependency order.
+          cd packages/plugin-api && bun run build && cd ../..
+          cd packages/plugin-host && bun run build && cd ../..
+          cd packages/plugin-toolkit && bun run build && cd ../..
+          cd packages/plugin-memory && bun run build && cd ../..
+          cd packages/plugin-conversations && bun run build && cd ../..
+          cd packages/plugin-media && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
@@ -944,6 +953,15 @@ jobs:
         if: steps.dist-cache.outputs.cache-hit != 'true'
         run: |
           cd packages/core && bun run build && cd ../..
+          # connector-worker's build bundles the agent guest, whose sources
+          # import the plugin packages (types at tsc time, code at bundle
+          # time), so those dists must exist first, in dependency order.
+          cd packages/plugin-api && bun run build && cd ../..
+          cd packages/plugin-host && bun run build && cd ../..
+          cd packages/plugin-toolkit && bun run build && cd ../..
+          cd packages/plugin-memory && bun run build && cd ../..
+          cd packages/plugin-conversations && bun run build && cd ../..
+          cd packages/plugin-media && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..

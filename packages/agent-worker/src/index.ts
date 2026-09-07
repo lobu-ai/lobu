@@ -9,8 +9,14 @@ import {
 
 const logger = createLogger("worker");
 
+import { setToolLogger } from "@lobu/plugin-toolkit";
 import { GatewayClient } from "./gateway/sse-client";
 import { startWorkerHttpServer, stopWorkerHttpServer } from "./server";
+
+// The gateway tools default to a console logger so the same code can run
+// inside the connector isolate, whose bundle cannot contain winston. This lane
+// is Node, so give them core's real logger back before any tool runs.
+setToolLogger(createLogger("plugin-toolkit"));
 
 /**
  * Main entry point for gateway-based persistent worker

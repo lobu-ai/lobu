@@ -23,8 +23,11 @@ import { Agent } from '@mariozechner/pi-agent-core';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
 import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
+import { createGatewayTools } from './gateway-tools.js';
+import { createTurnMediaTools } from './media-tools.js';
+import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool } from './types.js';
-import { createWorkspaceTools } from './workspace.js';
+import { createWorkspace, type AgentWorkspace } from './workspace.js';
 
 /**
  * A turn's tool-call budget. pi would otherwise loop for as long as the model
@@ -55,7 +58,12 @@ function buildModel(input: AgentTurnInput): Record<string, unknown> {
     provider: input.provider.provider,
     baseUrl: input.provider.baseUrl,
     reasoning: false,
-    input: ['text'],
+    // The gateway resolves this from pi-ai's model registry and puts it on the
+    // wire; pi reads it to decide whether an image block survives into the
+    // request (`transformMessages` downgrades every one to a placeholder when
+    // `'image'` is absent). Defaulting to text only means a turn never sends an
+    // image to a model nobody said could read one.
+    input: input.provider.input ?? ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     // Only read to decide when to compact, which this lane never does: one
     // turn, one request, and the gateway owns the history it sends.
@@ -89,7 +97,8 @@ async function callMcpTool(
   gatewayUrl: string,
   credential: string,
   tool: AgentTurnTool,
-  args: unknown
+  args: unknown,
+  timeoutMs = TOOL_CALL_TIMEOUT_MS
 ): Promise<string> {
   const url = `${gatewayUrl}/mcp/${encodeURIComponent(tool.mcpId)}/tools/${encodeURIComponent(tool.name)}`;
   let response: Response;
@@ -98,7 +107,7 @@ async function callMcpTool(
       method: 'POST',
       headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(args ?? {}),
-      signal: AbortSignal.timeout(TOOL_CALL_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     if (error instanceof Error && error.name === 'TimeoutError') {
@@ -121,11 +130,51 @@ async function callMcpTool(
   return text || `${tool.name} completed.`;
 }
 
-/** pi's tool objects for the turn's manifest: the gateway's MCP tools, then the workspace's own. */
-function buildTools(input: AgentTurnInput, credential: string): AgentTool[] {
+/**
+ * pi's tool objects for the turn's manifest: the gateway's MCP tools, then its
+ * conversation tools, then the workspace's own.
+ *
+ * `onAskUserPosted` is threaded through because `ask_user` ends the turn — see
+ * `createGatewayTools`.
+ */
+function buildTools(
+  input: AgentTurnInput,
+  credential: string,
+  onAskUserPosted: () => void,
+  onInBandReplyDelivered: () => void,
+  emit: (event: AgentTurnEvent) => void
+): AgentTool[] {
   const tools = input.tools;
   if (!tools) return [];
-  const workspace = tools.builtin ? createWorkspaceTools(tools.builtin, tools.bashPolicy) : [];
+  // ONE workspace for the whole turn: the file tools act on it and
+  // `upload_file` reads it, so the file the model just wrote is the file it can
+  // show. Built even when no file tool was admitted but a media tool was, since
+  // `bash` alone is enough to produce something worth uploading.
+  const workspace: AgentWorkspace | null =
+    tools.builtin && tools.builtin.length > 0 ? createWorkspace(tools.builtin, tools.bashPolicy) : null;
+  const gateway =
+    tools.gateway && tools.gateway.length > 0 && tools.conversation
+      ? createGatewayTools(tools.gateway, {
+          gatewayUrl: tools.gatewayUrl,
+          credential,
+          conversation: tools.conversation,
+          onAskUserPosted,
+          onInBandReplyDelivered,
+        })
+      : [];
+  const media =
+    tools.media && tools.media.length > 0 && tools.conversation
+      ? createTurnMediaTools(tools.media, {
+          gatewayUrl: tools.gatewayUrl,
+          credential,
+          conversation: tools.conversation,
+          workspace,
+          // The subprocess lane turns this into a `file-uploaded` custom event.
+          // This lane has one channel out of the isolate — the event stream —
+          // so it rides that, and the host decides what to do with it.
+          onFileUploaded: (data) => emit({ type: 'file_uploaded', data }),
+        })
+      : [];
   const mcp: AgentTool[] = tools.definitions.map((tool) => ({
     name: tool.name,
     label: `${tool.mcpId}/${tool.name}`,
@@ -137,11 +186,64 @@ function buildTools(input: AgentTurnInput, credential: string): AgentTool[] {
       details: {},
     }),
   }));
-  return [...mcp, ...workspace];
+  return [...mcp, ...gateway, ...media, ...(workspace?.tools ?? [])];
 }
+
+/**
+ * Where a plugin hook's own diagnostics go.
+ *
+ * The prelude routes `console` to the host `log` capability, which redacts the
+ * line and charges it to the run's log budget — the same channel every other
+ * guest line takes. `PluginLogger` takes a message plus optional structured
+ * data, so the data rides as a second argument rather than being folded into
+ * the message.
+ */
+const guestLogger = {
+  debug: (message: string, data?: Record<string, unknown>) => console.debug(message, data ?? {}),
+  info: (message: string, data?: Record<string, unknown>) => console.info(message, data ?? {}),
+  warn: (message: string, data?: Record<string, unknown>) => console.warn(message, data ?? {}),
+  error: (message: string, data?: Record<string, unknown>) => console.error(message, data ?? {}),
+};
 
 function clip(text: string): string {
   return text.length > TOOL_EVENT_OUTPUT_CHARS ? `${text.slice(0, TOOL_EVENT_OUTPUT_CHARS)}…` : text;
+}
+
+/**
+ * One line per non-image attachment, appended to the user turn.
+ *
+ * The subprocess lane names the user's uploads in the prompt and leaves the
+ * bytes on the worker's disk for `cat`; this lane has no disk, so it names them
+ * the same way and says plainly that it cannot open them. Silently dropping
+ * them would let the model answer a question about a file it was never told
+ * existed.
+ */
+function describeFiles(files: AgentTurnInput['files']): string {
+  if (!files || files.length === 0) return '';
+  const listing = files.map((file) => `- ${file.name} (${file.mimeType})`).join('\n');
+  return `The user attached ${files.length} non-image file(s) that this turn cannot open:\n${listing}`;
+}
+
+/**
+ * The user turn pi is prompted with.
+ *
+ * Built as a message rather than passed to `prompt(text, images)` because that
+ * overload always emits a text block, empty text included — which is exactly
+ * the attachment-only turn. The Anthropic adapter drops a blank block on its
+ * way out, but the OpenAI one maps every block through, so the empty one would
+ * reach the provider and be rejected. Omitting it here fixes both lanes at
+ * once, and leaves the image-only user turn as just its image, which is a
+ * request both providers accept.
+ */
+function buildUserMessage(input: AgentTurnInput, userText: string): Record<string, unknown> {
+  const content: Array<Record<string, unknown>> = [];
+  const text = [userText, describeFiles(input.files)].filter((part) => part.trim().length > 0).join('\n\n');
+  if (text.length > 0) content.push({ type: 'text', text });
+  // pi's `ImageContent`: the base64 payload and its media type, nothing else.
+  for (const image of input.images ?? []) {
+    content.push({ type: 'image', data: image.data, mimeType: image.mimeType });
+  }
+  return { role: 'user', content, timestamp: Date.now() };
 }
 
 /**
@@ -160,13 +262,65 @@ export async function runAgentTurn(
   const model = buildModel(input);
   const stream = input.provider.api === 'anthropic-messages' ? streamAnthropic : streamOpenAICompletions;
 
+  // Long-term memory, if this turn has any. `@lobu/plugin-memory`'s own hooks,
+  // dispatched through the real `PluginHost`, over the MCP route this turn
+  // already calls.
+  const memory: TurnMemory | null =
+    input.memory && input.tools
+      ? createTurnMemoryHooks({
+          gatewayUrl: input.tools.gatewayUrl,
+          credential,
+          agentId: input.memory.agentId,
+          conversationId: input.tools.conversation?.conversationId ?? '',
+          mcpId: input.memory.mcpId,
+          callTool: (mcpId, toolName, args, options) =>
+            callMcpTool(
+              (input.tools as { gatewayUrl: string }).gatewayUrl,
+              credential,
+              { mcpId, name: toolName, description: '', inputSchema: {} },
+              args,
+              options?.timeoutMs
+            ),
+          logger: guestLogger,
+        })
+      : null;
+
+  // The recall block is PREPENDED to what the human said, which is where the
+  // subprocess lane puts it too (`prependContexts` ahead of the user prompt).
+  // The model therefore sees the same turn on either lane, and the capture's
+  // own `<lobu-memory>` stripping keeps the block out of what gets saved.
+  const recalled = memory ? await memory.recall(input.userMessage, input.messages) : '';
+  const prompt = recalled ? `${recalled}\n\n${input.userMessage}` : input.userMessage;
+
   let toolCalls = 0;
+  // `ask_user` hands the conversation back to the human: the question is posted
+  // as buttons and the click returns as a NEW inbound message, which is a new
+  // turn. The subprocess lane stops its session at that point
+  // (`onAskUserPosted`); this lane must too, or the model keeps calling tools
+  // and answering a question nobody has read yet.
+  let askedUser = false;
+  // `send_message`/`present_event` posted into the conversation this turn is
+  // already answering, so the user has READ the answer and the terminal reply
+  // would be the same message twice. The subprocess lane suppresses the
+  // terminal delivery on exactly this signal; this lane reports it out so the
+  // completion route can stamp the flag the renderers already act on.
+  let repliedInBand = false;
   const agent = new Agent({
     initialState: {
       systemPrompt: input.systemPrompt,
       model: model as never,
       messages: input.messages as never,
-      tools: buildTools(input, credential),
+      tools: buildTools(
+        input,
+        credential,
+        () => {
+          askedUser = true;
+        },
+        () => {
+          repliedInBand = true;
+        },
+        emit
+      ),
     },
     // pi hands the loop's own options through; the key rides here rather than
     // in the model so it never lands in a transcript entry.
@@ -176,6 +330,12 @@ export async function runAgentTurn(
         apiKey: credential,
       })) as never,
     beforeToolCall: async () => {
+      if (askedUser) {
+        return {
+          block: true,
+          reason: 'You have already asked the user a question; this turn is over. Stop and wait for their reply.',
+        };
+      }
       toolCalls += 1;
       if (toolCalls <= MAX_TOOL_CALLS_PER_TURN) return undefined;
       return {
@@ -241,11 +401,30 @@ export async function runAgentTurn(
     }
   });
 
-  await agent.prompt(input.userMessage);
+  // `prompt` is the human's text with the memory recall block prepended, so the
+  // attachment-aware message carries the recall too — dropping either one here
+  // would silently cost a capability the other lane has.
+  const userMessage = buildUserMessage(input, prompt);
+  if ((userMessage.content as unknown[]).length === 0) {
+    throw new Error('the agent turn reached the guest with neither text nor a readable attachment');
+  }
+  await agent.prompt(userMessage as never);
   await agent.waitForIdle();
 
   const stateError = (agent.state as { errorMessage?: string }).errorMessage;
   const ended = failure ?? (typeof stateError === 'string' && stateError ? stateError : null);
+
+  // Capture BEFORE returning, and await it. `agentEnd` itself only starts the
+  // write; on the subprocess lane the worker process outlives the turn and the
+  // write lands on its own, but this isolate is disposed the moment this
+  // function resolves, so an unawaited capture would be cancelled every time
+  // and memory would silently stop accumulating for every agent on this lane.
+  // A failed turn still fires the hook — with its error, which is how the
+  // plugin knows not to save a broken exchange.
+  if (memory) {
+    await memory.capture(agent.state.messages as unknown as readonly unknown[], ended ?? undefined);
+  }
+
   if (ended) throw new Error(ended);
 
   return {
@@ -253,5 +432,6 @@ export async function runAgentTurn(
     stopReason,
     usage,
     messages: agent.state.messages as unknown as AgentTurnOutput['messages'],
+    ...(repliedInBand ? { repliedInBand: true } : {}),
   };
 }

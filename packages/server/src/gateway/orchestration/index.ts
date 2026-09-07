@@ -62,7 +62,8 @@ export class Orchestrator {
     policyStore?: PolicyStore,
     guardrailRegistry?: GuardrailRegistry,
     agentSettingsStore?: AgentSettingsStore,
-    agentTurnMcp?: AgentTurnShadowDeps["mcp"]
+    agentTurnMcp?: AgentTurnShadowDeps["mcp"],
+    agentTurnArtifacts?: AgentTurnShadowDeps["artifacts"]
   ): Promise<void> {
     this.deploymentManager.setSecretStore(secretStore);
     // Lets a connection contribute an authenticated CLI to the agent sandbox
@@ -95,6 +96,9 @@ export class Orchestrator {
     // The isolate-lane shadow reads the agent's MCP servers and tools through
     // the same services the worker gateway hands the subprocess lane.
     this.queueConsumer.setAgentTurnMcp(agentTurnMcp);
+    // And a turn's attachments out of the same artifact store the gateway
+    // published them into on the way in.
+    this.queueConsumer.setAgentTurnArtifacts(agentTurnArtifacts);
 
     const providerModules = getModelProviderModules();
     this.deploymentManager.setProviderModules(providerModules);

@@ -53,14 +53,17 @@
  * boundary because an async rejection also surfaces as an unhandled rejection
  * in the host process.
  *
- * `FormData` carries text fields only and serialises itself to a multipart
- * body; the Stainless clients pi's LLM providers are built on test
- * `body instanceof FormData` unguarded on every request, so the guest
- * cannot reach a provider without it.
+ * `FormData` carries text fields and `Blob` file parts, and serialises itself
+ * to a multipart body. It exists at all because the Stainless clients pi's LLM
+ * providers are built on test `body instanceof FormData` unguarded on every
+ * request, so the guest cannot reach a provider without it; it carries file
+ * parts because `@lobu/plugin-media`'s upload driver is one implementation for
+ * both lanes and posts a named `Blob` to the gateway's file-upload route.
+ * `Blob` itself is the minimum that part needs — bytes, a media type, and the
+ * readers the upload path calls — with no `slice`/`stream`.
  *
  * Deliberately absent (no isolate-eligible connector or SDK root path uses
- * them): `Request`, `structuredClone`, `Blob`. Add one only with a real
- * caller that needs it.
+ * them): `Request`, `File`. Add one only with a real caller that needs it.
  *
  * Written as sloppy-mode ES2020 with no template literals so the string can
  * live in this module verbatim. `String.raw` keeps the regex escapes intact.
@@ -93,6 +96,7 @@ export const PRELUDE_GLOBALS = [
   'AbortController',
   'AbortSignal',
   'Headers',
+  'Blob',
   'FormData',
   'Response',
   'fetch',
@@ -1057,19 +1061,96 @@ var exports = module.exports;
   // FormData
   // ---------------------------------------------------------------------------
 
-  // Text fields only. Blob and File are not on this lane, so every part is a
-  // string; a non-primitive value is refused rather than stringified into
-  // "[object Object]". Present because the Stainless clients pi's providers use
-  // evaluate "body instanceof FormData" UNGUARDED on every request they send
+  // Text fields, plus the one binary part shape the lane actually sends.
+  //
+  // Present at all because the Stainless clients pi's providers use evaluate
+  // "body instanceof FormData" UNGUARDED on every request they send
   // (@anthropic-ai/sdk client.mjs, openai client.mjs), so a guest without the
   // constructor cannot reach any LLM at all.
+  //
+  // File parts exist because @lobu/plugin-media's upload driver is ONE
+  // implementation for both lanes: it hands the gateway's file-upload route a
+  // named Blob, and that route reads formData.get("file") and rejects anything
+  // that is not a file. Carrying it here is what lets the isolate lane run the
+  // plugin's own upload_file/generate_image/generate_audio rather than a
+  // second, isolate-only copy that hand-rolls a multipart body.
+  //
+  // Anything that is neither a primitive nor a Blob is still refused rather
+  // than stringified into "[object Object]".
 
   function formDataValue(value) {
+    if (value instanceof Blob) return value;
     if (value !== null && typeof value === 'object') {
-      throw new TypeError('FormData on the isolate lane holds text fields only; Blob and File parts are not available');
+      throw new TypeError('FormData on the isolate lane holds text fields and Blob parts only');
     }
     return String(value);
   }
+
+  // ---------------------------------------------------------------------------
+  // Blob
+  // ---------------------------------------------------------------------------
+
+  // The minimum a multipart file part needs: bytes, a media type, and the
+  // readers the upload path uses. Parts are concatenated at construction, so a
+  // Blob owns exactly one buffer and nothing streams; the upload driver already
+  // caps the bytes it passes in (LOBU_MAX_UPLOAD_BYTES), so this never holds
+  // more than that cap.
+  //
+  // Not implemented: slice(), stream(), and the endings/lastModified options.
+  // No caller on this lane reaches for them, and the header comment's rule is
+  // to add web surface only for a caller that needs it.
+
+  function blobBytes(parts) {
+    if (parts === undefined) return new Uint8Array(0);
+    if (!Array.isArray(parts) && typeof parts !== 'object') {
+      throw new TypeError('Blob constructor: the first argument must be iterable');
+    }
+    var chunks = [];
+    var total = 0;
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      var bytes;
+      if (part instanceof Blob) {
+        bytes = part._bytes;
+      } else if (part instanceof Uint8Array || part instanceof ArrayBuffer || ArrayBuffer.isView(part)) {
+        bytes = toBytes(part, 'Blob');
+      } else {
+        bytes = utf8Encode(String(part));
+      }
+      chunks.push(bytes);
+      total += bytes.length;
+    }
+    var out = new Uint8Array(total);
+    var at = 0;
+    for (var j = 0; j < chunks.length; j++) {
+      out.set(chunks[j], at);
+      at += chunks[j].length;
+    }
+    return out;
+  }
+
+  function Blob(parts, options) {
+    if (!(this instanceof Blob)) throw new TypeError("Class constructor Blob cannot be invoked without 'new'");
+    this._bytes = blobBytes(parts);
+    var type = options && options.type !== undefined ? String(options.type) : '';
+    // A media type with a raw CR/LF would break out of the part header it is
+    // written into; the web platform lowercases and drops invalid types.
+    this._type = /[\r\n]/.test(type) ? '' : type.toLowerCase();
+  }
+  Object.defineProperty(Blob.prototype, 'size', { get: function () { return this._bytes.length; }, enumerable: true });
+  Object.defineProperty(Blob.prototype, 'type', { get: function () { return this._type; }, enumerable: true });
+  Blob.prototype.arrayBuffer = function () {
+    var b = this._bytes;
+    return Promise.resolve(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+  };
+  Blob.prototype.bytes = function () {
+    return Promise.resolve(new Uint8Array(this._bytes));
+  };
+  Blob.prototype.text = function () {
+    return Promise.resolve(utf8Decode(this._bytes));
+  };
+  Object.defineProperty(Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
+  global.Blob = Blob;
 
   // WHATWG "escape a form field name": normalise the line breaks, then
   // percent-encode the three characters that would break the header line.
@@ -1081,17 +1162,28 @@ var exports = module.exports;
       .replace(/\n/g, '%0A');
   }
 
+  // A Blob part defaults to the web platform's "blob" filename; a string part
+  // never carries one.
+  function formDataFilename(value, filename) {
+    if (!(value instanceof Blob)) return null;
+    return filename === undefined ? 'blob' : escapeFormName(filename);
+  }
+
   function FormData(form) {
     if (!(this instanceof FormData)) throw new TypeError("Class constructor FormData cannot be invoked without 'new'");
     if (form !== undefined && form !== null) throw new TypeError('FormData constructor: no HTMLFormElement on the isolate lane');
     this._entries = [];
   }
-  FormData.prototype.append = function (name, value) {
-    this._entries.push([String(name), formDataValue(value)]);
+  // The third argument is the part's filename, and it is what turns a Blob
+  // part into a FILE part on the wire. Ignored for a string value, exactly as
+  // the web platform ignores it.
+  FormData.prototype.append = function (name, value, filename) {
+    this._entries.push([String(name), formDataValue(value), formDataFilename(value, filename)]);
   };
-  FormData.prototype.set = function (name, value) {
+  FormData.prototype.set = function (name, value, filename) {
     var key = String(name);
     var v = formDataValue(value);
+    var fn = formDataFilename(value, filename);
     var replaced = false;
     var kept = [];
     for (var i = 0; i < this._entries.length; i++) {
@@ -1099,10 +1191,10 @@ var exports = module.exports;
         kept.push(this._entries[i]);
       } else if (!replaced) {
         replaced = true;
-        kept.push([key, v]);
+        kept.push([key, v, fn]);
       }
     }
-    if (!replaced) kept.push([key, v]);
+    if (!replaced) kept.push([key, v, fn]);
     this._entries = kept;
   };
   FormData.prototype.get = function (name) {
@@ -1146,16 +1238,42 @@ var exports = module.exports;
 
   // Serialise to a multipart/form-data body. The boundary is random per body so
   // a field value can never close the envelope early.
+  //
+  // Assembled as a byte list rather than a string: a file part's bytes are
+  // arbitrary binary, and building the body as text would round-trip them
+  // through UTF-8 and corrupt every byte that is not valid UTF-8. Text runs
+  // are still encoded as text; only the part bodies are spliced in raw.
   function encodeFormData(form) {
     var boundary = '----LobuFormBoundary' + crypto.randomUUID().replace(/-/g, '');
-    var text = '';
-    for (var i = 0; i < form._entries.length; i++) {
-      text += '--' + boundary + '\r\n';
-      text += 'Content-Disposition: form-data; name="' + escapeFormName(form._entries[i][0]) + '"\r\n\r\n';
-      text += form._entries[i][1] + '\r\n';
+    var chunks = [];
+    var total = 0;
+    function push(bytes) {
+      chunks.push(bytes);
+      total += bytes.length;
     }
-    text += '--' + boundary + '--\r\n';
-    return { bytes: utf8Encode(text), contentType: 'multipart/form-data; boundary=' + boundary };
+    for (var i = 0; i < form._entries.length; i++) {
+      var name = escapeFormName(form._entries[i][0]);
+      var value = form._entries[i][1];
+      var filename = form._entries[i][2];
+      var header = '--' + boundary + '\r\nContent-Disposition: form-data; name="' + name + '"';
+      if (value instanceof Blob) {
+        header += '; filename="' + filename + '"\r\n';
+        header += 'Content-Type: ' + (value.type || 'application/octet-stream') + '\r\n\r\n';
+        push(utf8Encode(header));
+        push(value._bytes);
+        push(utf8Encode('\r\n'));
+      } else {
+        push(utf8Encode(header + '\r\n\r\n' + value + '\r\n'));
+      }
+    }
+    push(utf8Encode('--' + boundary + '--\r\n'));
+    var body = new Uint8Array(total);
+    var at = 0;
+    for (var j = 0; j < chunks.length; j++) {
+      body.set(chunks[j], at);
+      at += chunks[j].length;
+    }
+    return { bytes: body, contentType: 'multipart/form-data; boundary=' + boundary };
   }
 
   // ---------------------------------------------------------------------------

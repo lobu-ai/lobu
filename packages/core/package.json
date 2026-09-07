@@ -212,6 +212,12 @@
       "bun": "./src/contracts/tools/search-memory.ts",
       "import": "./dist/contracts/tools/search-memory.js",
       "require": "./dist/contracts/tools/search-memory.js"
+    },
+    "./agent-tooling": {
+      "types": "./dist/agent-tooling.d.ts",
+      "bun": "./src/agent-tooling.ts",
+      "import": "./dist/agent-tooling.js",
+      "require": "./dist/agent-tooling.js"
     }
   },
   "scripts": {

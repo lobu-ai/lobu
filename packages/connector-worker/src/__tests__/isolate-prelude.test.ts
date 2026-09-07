@@ -674,8 +674,9 @@ describe('guest FormData', () => {
     form.append('t', true);
     expect(form.getAll('n')).toEqual(['42']);
     expect(form.getAll('t')).toEqual(['true']);
+    // A Blob is carried; anything else that is not a primitive is not.
     expect(() => form.append('f', { name: 'x' })).toThrow(
-      'FormData on the isolate lane holds text fields only; Blob and File parts are not available'
+      'FormData on the isolate lane holds text fields and Blob parts only'
     );
     expect(form.has('f')).toBe(false);
   });
@@ -716,6 +717,78 @@ describe('guest FormData', () => {
       (o) => (o.request.headers.find((h: string[]) => h[0] === 'content-type')?.[1] as string)
     );
     expect(boundaries[0]).not.toBe(boundaries[1]);
+  });
+
+  /**
+   * The file-part surface `@lobu/plugin-media`'s upload driver needs. It posts
+   * a named Blob to the gateway's `/internal/files/upload` route, which reads
+   * `formData.get("file")` and rejects anything that is not a file — so the
+   * part has to carry a `filename` and a `Content-Type`, and its bytes have to
+   * survive verbatim.
+   */
+  it('carries a Blob part with its own bytes, type and size', async () => {
+    const { guest } = instantiateFetchGuest();
+    const blob = new guest.Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: 'image/PNG' });
+    expect(blob.size).toBe(4);
+    // The web platform lowercases the media type.
+    expect(blob.type).toBe('image/png');
+    expect(Object.prototype.toString.call(blob)).toBe('[object Blob]');
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+    expect(Array.from(await blob.bytes())).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    // Parts concatenate, strings encode as UTF-8, and a Blob part is spliced in.
+    const joined = new guest.Blob(['a', new Uint8Array([0xc3, 0xa9]), blob]);
+    expect(joined.size).toBe(7);
+    expect(joined.type).toBe('');
+    expect(await new guest.Blob(['héllo']).text()).toBe('héllo');
+    expect(new guest.Blob().size).toBe(0);
+    // A media type that could break out of the part header is dropped.
+    expect(new guest.Blob([], { type: 'text/plain\r\nX-Evil: 1' }).type).toBe('');
+  });
+
+  it('sends a file part whose arbitrary bytes survive the multipart body verbatim', async () => {
+    const { guest, opened } = instantiateFetchGuest();
+    // Every byte 0..255: anything that round-tripped this body through UTF-8
+    // would corrupt most of them.
+    const raw = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) raw[i] = i;
+    const form = new guest.FormData();
+    form.append('file', new guest.Blob([raw], { type: 'application/octet-stream' }), 'report.bin');
+    form.append('filename', 'report.bin');
+    await guest.fetch('https://gateway.test/internal/files/upload', { method: 'POST', body: form });
+
+    const contentType = opened[0].request.headers.find((h: string[]) => h[0] === 'content-type')?.[1] as string;
+    const boundary = /boundary=(----LobuFormBoundary[0-9a-f]{32})$/.exec(contentType)?.[1] as string;
+    const body = Buffer.from(opened[0].body as Uint8Array);
+
+    const header = Buffer.from(
+      `--${boundary}\r\n` +
+        'Content-Disposition: form-data; name="file"; filename="report.bin"\r\n' +
+        'Content-Type: application/octet-stream\r\n\r\n',
+      'utf8'
+    );
+    const trailer = Buffer.from(
+      `\r\n--${boundary}\r\n` +
+        'Content-Disposition: form-data; name="filename"\r\n\r\n' +
+        'report.bin\r\n' +
+        `--${boundary}--\r\n`,
+      'utf8'
+    );
+    expect(body.subarray(0, header.length)).toEqual(header);
+    // The payload is byte-for-byte what went in, not a UTF-8 round trip.
+    expect(body.subarray(header.length, header.length + 256)).toEqual(Buffer.from(raw));
+    expect(body.subarray(header.length + 256)).toEqual(trailer);
+    expect(body.length).toBe(header.length + 256 + trailer.length);
+  });
+
+  it('defaults a nameless Blob part to "blob" and octet-stream, and escapes a filename', async () => {
+    const { guest, opened } = instantiateFetchGuest();
+    const form = new guest.FormData();
+    form.append('a', new guest.Blob([new Uint8Array([1])]));
+    form.append('b', new guest.Blob([new Uint8Array([2])]), 'a"b\r\nc.txt');
+    await guest.fetch('https://gateway.test/internal/files/upload', { method: 'POST', body: form });
+    const text = Buffer.from(opened[0].body as Uint8Array).toString('latin1');
+    expect(text).toContain('name="a"; filename="blob"\r\nContent-Type: application/octet-stream\r\n');
+    expect(text).toContain('name="b"; filename="a%22b%0D%0Ac.txt"');
   });
 
   it('does not overwrite a content-type the caller already set', async () => {

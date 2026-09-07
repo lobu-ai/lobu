@@ -1,5 +1,5 @@
-import { sanitizeSuggestionPrompts } from "@lobu/core";
-import { defineLobuPlugin } from "@lobu/plugin-api";
+import { sanitizeSuggestionPrompts } from "@lobu/core/agent-tooling";
+import { defineLobuPlugin, type LobuPlugin } from "@lobu/plugin-api";
 import {
   defineGatewayTool,
   gatewayFetch,
@@ -362,7 +362,9 @@ export async function deleteMessage(
   });
 }
 
-export function createConversationTools(params: ConversationPluginParams) {
+export function createConversationTools(
+  params: ConversationPluginParams
+): ToolDefinition[] {
   const gateway: GatewayParams = params;
   const tools = [
     defineGatewayTool({
@@ -491,7 +493,9 @@ export function createConversationTools(params: ConversationPluginParams) {
   return tools;
 }
 
-export function createConversationPlugin(params: ConversationPluginParams) {
+export function createConversationPlugin(
+  params: ConversationPluginParams
+): LobuPlugin<ToolDefinition> {
   return defineLobuPlugin<ToolDefinition>({
     manifest: {
       name: "lobu-conversations",
