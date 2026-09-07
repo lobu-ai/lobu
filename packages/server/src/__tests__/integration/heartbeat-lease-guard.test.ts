@@ -165,6 +165,42 @@ describe('heartbeat lease guard', () => {
     expect(result().status).toBe(409);
   });
 
+  it('hands parked steer messages to an agent turn once, in order, and to no other lane', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const turn = await insertRun(org.id, 'running', CLAIMANT, 'agent_turn');
+    const other = await insertRun(org.id, 'running', CLAIMANT, 'automation');
+    const parked = [
+      { message_id: 'm-2', text: 'also check companies' },
+      { message_id: 'm-3', text: 'and people' },
+    ];
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ steer: parked })} WHERE id IN (${turn}, ${other})`;
+
+    const first = mockWorkerCtx({ run_id: turn, worker_id: CLAIMANT });
+    await heartbeat(first.ctx);
+    expect(first.result().status).toBe(200);
+    expect(first.result().body).toEqual({ continue: true, steer: parked });
+    // Taken: the next beat carries nothing, and the rest of run_metadata is untouched.
+    const second = mockWorkerCtx({ run_id: turn, worker_id: CLAIMANT });
+    await heartbeat(second.ctx);
+    expect(second.result().body).toEqual({ continue: true });
+    expect((await readRun(turn)).run_metadata).toEqual({});
+
+    // Another lane's run keeps whatever is under that key; the beat ignores it.
+    const otherBeat = mockWorkerCtx({ run_id: other, worker_id: CLAIMANT });
+    await heartbeat(otherBeat.ctx);
+    expect(otherBeat.result().body).toEqual({ continue: true });
+    expect((await readRun(other)).run_metadata).toEqual({ steer: parked });
+
+    // A worker that does not own the turn takes nothing.
+    const turn2 = await insertRun(org.id, 'running', CLAIMANT, 'agent_turn');
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ steer: parked })} WHERE id = ${turn2}`;
+    const stranger = mockWorkerCtx({ run_id: turn2, worker_id: OTHER });
+    await heartbeat(stranger.ctx);
+    expect(stranger.result().status).toBe(409);
+    expect((await readRun(turn2)).run_metadata).toEqual({ steer: parked });
+  });
+
   it('keeps answering continue:true while the run is healthy', async () => {
     const org = await createTestOrganization();
     const runId = await insertRun(org.id, 'running', CLAIMANT);
