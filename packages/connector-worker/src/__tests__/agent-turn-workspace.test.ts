@@ -129,75 +129,15 @@ describe("createWorkspace tools", () => {
 });
 
 describe("edit and grep — pi's two remaining builtins, inside the isolate", () => {
-  test("edit replaces each unique block once against the original and reports pi's message", async () => {
+  test("edit uses the shared file parameters and refuses paths outside the workspace", async () => {
     const t = toolMap(createWorkspace(["write", "edit", "read"]).tools);
-    await run(t.write, { file_path: "a.ts", content: "const a = 1;\nconst b = 2;\nconst c = 3;\n" });
-    expect(
-      await run(t.edit, {
-        path: "a.ts",
-        edits: [
-          { oldText: "const a = 1;", newText: "const a = 10;" },
-          { oldText: "const c = 3;", newText: "const c = 30;" },
-        ],
-      })
-    ).toBe("Successfully replaced 2 block(s) in a.ts.");
-    expect(await run(t.read, { file_path: "a.ts" })).toBe("const a = 10;\nconst b = 2;\nconst c = 30;\n");
-    // pi's older single-replacement shape, and a JSON-string edits array.
-    expect(await run(t.edit, { path: "a.ts", oldText: "const b = 2;", newText: "const b = 20;" })).toBe(
-      "Successfully replaced 1 block(s) in a.ts."
+    await run(t.write, { file_path: "a.txt", content: "one two\n" });
+    expect(await run(t.edit, { file_path: "a.txt", old_string: "two", new_string: "three" })).toBe(
+      "Successfully replaced 1 block(s) in a.txt."
     );
-    expect(
-      await run(t.edit, { path: "a.ts", edits: JSON.stringify([{ oldText: "const b = 20;", newText: "const b = 2;" }]) })
-    ).toBe("Successfully replaced 1 block(s) in a.ts.");
-  });
-
-  test("edit refuses what pi refuses, in pi's words", async () => {
-    const t = toolMap(createWorkspace(["write", "edit"]).tools);
-    await run(t.write, { file_path: "b.txt", content: "one two\none three\n" });
-    await expect(run(t.edit, { path: "b.txt", edits: [{ oldText: "four", newText: "x" }] })).rejects.toThrow(
-      "Could not find the exact text in b.txt."
-    );
-    await expect(run(t.edit, { path: "b.txt", edits: [{ oldText: "one", newText: "x" }] })).rejects.toThrow(
-      "Found 2 occurrences of the text in b.txt. The text must be unique."
-    );
-    await expect(run(t.edit, { path: "b.txt", edits: [{ oldText: "", newText: "x" }] })).rejects.toThrow(
-      "oldText must not be empty in b.txt."
-    );
-    await expect(run(t.edit, { path: "b.txt", edits: [{ oldText: "two", newText: "two" }] })).rejects.toThrow(
-      "No changes made to b.txt."
-    );
-    await expect(
-      run(t.edit, {
-        path: "b.txt",
-        edits: [
-          { oldText: "one two", newText: "a" },
-          { oldText: "two\none", newText: "b" },
-        ],
-      })
-    ).rejects.toThrow("overlap in b.txt");
-    await expect(run(t.edit, { path: "missing.txt", edits: [{ oldText: "a", newText: "b" }] })).rejects.toThrow(
-      "Could not edit file: missing.txt."
-    );
-    await expect(run(t.edit, { path: "b.txt", edits: [] })).rejects.toThrow("edits must contain at least one replacement");
-    await expect(run(t.edit, { path: "../escape.txt", edits: [{ oldText: "a", newText: "b" }] })).rejects.toThrow(
-      "Path is outside the workspace"
-    );
-  });
-
-  test("edit keeps the file's line endings and BOM, and matches across pi's fuzzy normalisation", async () => {
-    const ws = createWorkspace(["write", "edit", "read"]);
-    const t = toolMap(ws.tools);
-    await run(t.write, { file_path: "crlf.txt", content: "﻿first\r\nsecond\r\n" });
-    await run(t.edit, { path: "crlf.txt", edits: [{ oldText: "second", newText: "2nd" }] });
-    // `read` decodes the BOM away, as pi's does; the bytes on disk keep it: 3 (BOM) + 12.
-    expect(await run(t.read, { file_path: "crlf.txt" })).toBe("first\r\n2nd\r\n");
-    const bytes = await ws.fs.readFileBuffer(ws.resolve("crlf.txt"));
-    expect(Array.from(bytes.slice(0, 3))).toEqual([0xef, 0xbb, 0xbf]);
-    expect(bytes.length).toBe(15);
-    // Curly quotes in the file, straight quotes from the model: pi matches them.
-    await run(t.write, { file_path: "q.txt", content: "say “hello”\n" });
-    await run(t.edit, { path: "q.txt", edits: [{ oldText: 'say "hello"', newText: 'say "bye"' }] });
-    expect(await run(t.read, { file_path: "q.txt" })).toBe('say "bye"\n');
+    expect(await run(t.read, { file_path: "a.txt" })).toBe("one three\n");
+    await expect(run(t.edit, { file_path: "../escape.txt", old_string: "a", new_string: "b" })).rejects.toThrow("Path is outside the workspace");
+    await expect(run(t.edit, { file_path: "missing.txt", old_string: "a", new_string: "b" })).rejects.toThrow("Could not edit file: missing.txt");
   });
 
   test("grep searches the workspace tree with pi's output shape, filters, context and limits", async () => {

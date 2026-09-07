@@ -4,8 +4,8 @@
  * The guest is Lobu's own code, not organization-supplied source, so it is
  * bundled once per worker process and reused for every turn. It goes through
  * the SAME `ISOLATE_LANE_BUILD_OPTIONS` a connector does — one set of esbuild
- * options, one eligibility rule — plus three alias rules that drop the provider
- * SDKs this lane never selects.
+ * options, one eligibility rule — plus import-scoped adapters for Pi's file
+ * tools and the provider SDKs this lane never selects.
  *
  * Why the aliases are exactly these three: `@google/genai` resolves to its Node
  * build and drags google-auth-library, gaxios, ws, node-fetch, agent-base,
@@ -24,6 +24,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ISOLATE_LANE_BUILD_OPTIONS } from '../compile/index.js';
+import { piFileToolsBundle } from './pi-file-tools-bundle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -64,6 +65,7 @@ export async function buildAgentGuest(): Promise<string> {
     sourcemap: false,
     logLevel: 'silent',
     plugins: [
+      piFileToolsBundle(),
       {
         name: 'agent-guest-alias',
         setup(pluginBuild) {

@@ -1,22 +1,22 @@
 /**
- * The turn's workspace tools: `bash`, `read`, `write`, `ls` and `find` over a
- * filesystem that exists for this turn only.
+ * The turn's workspace tools over a filesystem that exists for this turn only.
  *
  * GUEST code, bundled with the agent entry, so it must stay portable: no
  * `node:` import, no host module, no root `@lobu/core` import (that root drags
  * the Node logger and tracing SDKs). The shell is just-bash's browser build —
  * the same shell the subprocess lane ran its `bash` tool on, minus the real
- * binaries and the network it could reach there. The file tools implement pi's
- * `read`/`write`/`ls`/`find` contracts (schemas, limits and the notices the
- * model has been reading) directly over just-bash's `IFileSystem`: pi's own
- * factories pull the terminal UI, syntax highlighting and an image codec into
- * any bundle that imports them, none of which loads in an isolate.
+ * binaries and the network it could reach there. Write and edit use Pi's own
+ * factories with filesystem operations; the bundler excludes their unused
+ * terminal renderer dependencies. Read, grep, ls and find still use local
+ * implementations over just-bash's filesystem.
  *
  * The filesystem is in-memory and empty at the start of every turn. Nothing
  * written here outlives the turn, and nothing here can reach the network: the
  * shell is built without `fetch`, so `curl` and `wget` do not exist in it.
  */
 
+import { withLobuFileParameters } from '@lobu/core/agent-tooling';
+import { createEditTool, createWriteTool } from '@mariozechner/pi-coding-agent';
 import { enforceBashCommandPolicy, isDirectPackageInstallCommand } from '@lobu/core/tool-policy';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { Bash, InMemoryFs } from 'just-bash/browser';
@@ -198,148 +198,12 @@ export interface AgentWorkspace {
 }
 
 // ---------------------------------------------------------------------------
-// edit: pi's `edit-diff` matching, ported. The messages are pi's verbatim so a
-// model that learned them on one lane reads the same thing on the other.
+// grep: pi's tool over the in-memory tree, no ripgrep needed.
 // ---------------------------------------------------------------------------
-
-interface EditBlock {
-  oldText: string;
-  newText: string;
-}
-
-function detectLineEnding(content: string): '\n' | '\r\n' {
-  const crlf = content.indexOf('\r\n');
-  const lf = content.indexOf('\n');
-  if (lf === -1 || crlf === -1) return '\n';
-  return crlf < lf ? '\r\n' : '\n';
-}
 
 function normalizeToLF(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
-
-function restoreLineEndings(text: string, ending: '\n' | '\r\n'): string {
-  return ending === '\r\n' ? text.replace(/\n/g, '\r\n') : text;
-}
-
-function normalizeForFuzzyMatch(text: string): string {
-  return text
-    .normalize('NFKC')
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .join('\n')
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[“”„‟]/g, '"')
-    .replace(/[‐‑‒–—―−]/g, '-')
-    .replace(/[  -   　]/g, ' ');
-}
-
-function fuzzyFindText(
-  content: string,
-  oldText: string
-): { found: boolean; index: number; matchLength: number; usedFuzzyMatch: boolean } {
-  const exact = content.indexOf(oldText);
-  if (exact !== -1) return { found: true, index: exact, matchLength: oldText.length, usedFuzzyMatch: false };
-  const fuzzyContent = normalizeForFuzzyMatch(content);
-  const fuzzyOld = normalizeForFuzzyMatch(oldText);
-  const index = fuzzyContent.indexOf(fuzzyOld);
-  if (index === -1) return { found: false, index: -1, matchLength: 0, usedFuzzyMatch: false };
-  return { found: true, index, matchLength: fuzzyOld.length, usedFuzzyMatch: true };
-}
-
-function stripBom(content: string): { bom: string; text: string } {
-  return content.startsWith('﻿') ? { bom: '﻿', text: content.slice(1) } : { bom: '', text: content };
-}
-
-function countOccurrences(content: string, oldText: string): number {
-  return normalizeForFuzzyMatch(content).split(normalizeForFuzzyMatch(oldText)).length - 1;
-}
-
-/** pi's `applyEditsToNormalizedContent`: every edit against the original, no overlaps, something must change. */
-function applyEdits(normalizedContent: string, edits: readonly EditBlock[], path: string): string {
-  const normalized = edits.map((edit) => ({ oldText: normalizeToLF(edit.oldText), newText: normalizeToLF(edit.newText) }));
-  const total = normalized.length;
-  normalized.forEach((edit, i) => {
-    if (edit.oldText.length === 0) {
-      throw new Error(total === 1 ? `oldText must not be empty in ${path}.` : `edits[${i}].oldText must not be empty in ${path}.`);
-    }
-  });
-  const usedFuzzy = normalized.some((edit) => fuzzyFindText(normalizedContent, edit.oldText).usedFuzzyMatch);
-  const base = usedFuzzy ? normalizeForFuzzyMatch(normalizedContent) : normalizedContent;
-  const matched: Array<{ editIndex: number; matchIndex: number; matchLength: number; newText: string }> = [];
-  normalized.forEach((edit, i) => {
-    const match = fuzzyFindText(base, edit.oldText);
-    if (!match.found) {
-      throw new Error(
-        total === 1
-          ? `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`
-          : `Could not find edits[${i}] in ${path}. The oldText must match exactly including all whitespace and newlines.`
-      );
-    }
-    const occurrences = countOccurrences(base, edit.oldText);
-    if (occurrences > 1) {
-      throw new Error(
-        total === 1
-          ? `Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`
-          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`
-      );
-    }
-    matched.push({ editIndex: i, matchIndex: match.index, matchLength: match.matchLength, newText: edit.newText });
-  });
-  matched.sort((a, b) => a.matchIndex - b.matchIndex);
-  for (let i = 1; i < matched.length; i++) {
-    const previous = matched[i - 1] as (typeof matched)[number];
-    const current = matched[i] as (typeof matched)[number];
-    if (previous.matchIndex + previous.matchLength > current.matchIndex) {
-      throw new Error(
-        `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. Merge them into one edit or target disjoint regions.`
-      );
-    }
-  }
-  let next = base;
-  for (let i = matched.length - 1; i >= 0; i--) {
-    const edit = matched[i] as (typeof matched)[number];
-    next = next.substring(0, edit.matchIndex) + edit.newText + next.substring(edit.matchIndex + edit.matchLength);
-  }
-  if (next === base) {
-    throw new Error(
-      total === 1
-        ? `No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`
-        : `No changes made to ${path}. The replacements produced identical content.`
-    );
-  }
-  return next;
-}
-
-/** The edits a model sent, in either of the shapes pi accepts. */
-function readEdits(args: unknown): EditBlock[] {
-  const record = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
-  let edits: unknown = record.edits;
-  // Some models send the array as a JSON string.
-  if (typeof edits === 'string') {
-    try {
-      edits = JSON.parse(edits);
-    } catch {
-      // Falls through to the shape check below.
-    }
-  }
-  const list: EditBlock[] = Array.isArray(edits)
-    ? edits.filter(
-        (edit): edit is EditBlock =>
-          !!edit && typeof edit === 'object' && typeof (edit as EditBlock).oldText === 'string' && typeof (edit as EditBlock).newText === 'string'
-      )
-    : [];
-  // pi's older single-replacement shape.
-  if (typeof record.oldText === 'string' && typeof record.newText === 'string') {
-    list.push({ oldText: record.oldText, newText: record.newText });
-  }
-  if (list.length === 0) throw new Error('Edit tool input is invalid. edits must contain at least one replacement.');
-  return list;
-}
-
-// ---------------------------------------------------------------------------
-// grep: pi's tool over the in-memory tree, no ripgrep needed.
-// ---------------------------------------------------------------------------
 
 const GREP_LIMIT = 100;
 const GREP_MAX_LINE_LENGTH = 500;
@@ -445,9 +309,21 @@ export function createWorkspace(
     }
     return absolute;
   };
-  // `resolve` guarantees a path under the workspace root, so the last slash is
-  // always at a positive index.
-  const dirname = (path: string): string => path.slice(0, path.lastIndexOf('/'));
+  // Pi owns mutation ordering, matching, cancellation, and result formatting.
+  // Only filesystem access changes: every operation stays in this turn's tree.
+  const writeFile = async (path: string, content: string): Promise<void> => {
+    await ready;
+    await fs.writeFile(resolve(path), content);
+  };
+  const write = withLobuFileParameters(createWriteTool(WORKSPACE_ROOT, { operations: {
+    writeFile,
+    mkdir: async (path) => { await ready; await fs.mkdir(resolve(path), { recursive: true }); },
+  } }), 'write');
+  const edit = withLobuFileParameters(createEditTool(WORKSPACE_ROOT, { operations: {
+    writeFile,
+    readFile: async (path) => { await ready; return Buffer.from(await fs.readFileBuffer(resolve(path))); },
+    access: async (path) => { await ready; await fs.stat(resolve(path)); },
+  } }), 'edit');
 
   const tools: Record<AgentTurnBuiltinTool, AgentTool> = {
     bash: {
@@ -536,75 +412,8 @@ export function createWorkspace(
         return text(output);
       },
     },
-    write: {
-      name: 'write',
-      label: 'write',
-      description: "Write content to a file in the workspace. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
-      parameters: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Path to the file to write (relative to the workspace, or absolute)' },
-          content: { type: 'string', description: 'Content to write to the file' },
-        },
-        required: ['file_path', 'content'],
-      } as never,
-      execute: async (_id, args) => {
-        const path = requireString(args, 'file_path');
-        const content = args && typeof args === 'object' ? (args as Record<string, unknown>).content : undefined;
-        if (typeof content !== 'string') throw new Error('Missing required parameter: content');
-        await ready;
-        const absolute = resolve(path);
-        await fs.mkdir(dirname(absolute), { recursive: true });
-        await fs.writeFile(absolute, content);
-        return text(`Successfully wrote ${byteLength(content)} bytes to ${path}`);
-      },
-    },
-    edit: {
-      name: 'edit',
-      label: 'edit',
-      description:
-        'Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Path to the file to edit (relative to the workspace, or absolute)' },
-          edits: {
-            type: 'array',
-            description:
-              'One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.',
-            items: {
-              type: 'object',
-              properties: {
-                oldText: {
-                  type: 'string',
-                  description:
-                    'Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.',
-                },
-                newText: { type: 'string', description: 'Replacement text for this targeted edit.' },
-              },
-              required: ['oldText', 'newText'],
-            },
-          },
-        },
-        required: ['path', 'edits'],
-      } as never,
-      execute: async (_id, args) => {
-        const path = requireString(args, 'path');
-        const edits = readEdits(args);
-        await ready;
-        const absolute = resolve(path);
-        if (!(await fs.exists(absolute))) throw new Error(`Could not edit file: ${path}. Error code: ENOENT.`);
-        if ((await fs.stat(absolute)).isDirectory) throw new Error(`Could not edit file: ${path}. Error code: EISDIR.`);
-        // Decoded WITH the BOM: the default decoder drops it, and pi keeps it.
-        const { bom, text: content } = stripBom(
-          new TextDecoder('utf-8', { ignoreBOM: true }).decode(await fs.readFileBuffer(absolute))
-        );
-        const ending = detectLineEnding(content);
-        const next = applyEdits(normalizeToLF(content), edits, path);
-        await fs.writeFile(absolute, bom + restoreLineEndings(next, ending));
-        return text(`Successfully replaced ${edits.length} block(s) in ${path}.`);
-      },
-    },
+    write,
+    edit,
     grep: {
       name: 'grep',
       label: 'grep',

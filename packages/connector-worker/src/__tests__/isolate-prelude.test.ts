@@ -112,6 +112,13 @@ function instantiateGuest(): any {
   return guest;
 }
 
+it('Buffer UTF-8 decoding preserves a BOM, while TextDecoder consumes it by default', () => {
+  const guest = instantiateGuest();
+  const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61]);
+  expect(guest.Buffer.from(bytes).toString('utf8')).toBe('\ufeffa');
+  expect(new guest.TextDecoder().decode(bytes)).toBe('a');
+});
+
 /**
  * Enumerated as OPERATIONS, not as one connector: a database driver on this
  * lane answers its authentication challenge entirely through `crypto.subtle`,

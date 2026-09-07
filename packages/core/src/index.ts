@@ -175,3 +175,5 @@ export type {
   QueuedMessage,
 } from "./worker/wire";
 export { parseBangBashCommand } from "./worker/wire";
+
+export { withLobuFileParameters } from "./agent-tooling";

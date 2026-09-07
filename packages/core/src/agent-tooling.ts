@@ -14,6 +14,8 @@
  * compile error to say so — `assertIsolateEligible` catches it at run time.
  */
 
+import { Type } from "@sinclair/typebox";
+
 export {
   CUSTOM_TOOL_METADATA,
   type CustomToolMetadata,
@@ -37,4 +39,74 @@ export interface ToolLogger {
   warn: (message: unknown, ...args: unknown[]) => void;
   info: (message: unknown, ...args: unknown[]) => void;
   debug: (message: unknown, ...args: unknown[]) => void;
+}
+
+const fileToolSchemas = {
+  read: Type.Object({
+    file_path: Type.String({ description: "Path to the file" }),
+    offset: Type.Optional(
+      Type.Number({ description: "Start reading at this byte offset" })
+    ),
+    limit: Type.Optional(Type.Number({ description: "Maximum bytes to read" })),
+  }),
+  write: Type.Object({
+    file_path: Type.String({ description: "Path to the file" }),
+    content: Type.String({ description: "Content to write" }),
+  }),
+  edit: Type.Object({
+    file_path: Type.String({ description: "Path to the file" }),
+    old_string: Type.String({ description: "Text to replace" }),
+    new_string: Type.String({ description: "Replacement text" }),
+  }),
+};
+
+/** The same model-facing file parameters on the Node and isolate runtimes. */
+export function withLobuFileParameters<
+  T extends {
+    parameters: unknown;
+    description: string;
+    execute: (...args: any[]) => any;
+  },
+>(tool: T, kind: keyof typeof fileToolSchemas): T {
+  return {
+    ...tool,
+    parameters: fileToolSchemas[kind],
+    ...(kind === "edit"
+      ? {
+          description:
+            "Edit a file by replacing old_string with new_string. The text to replace must match a unique region of the file. Use an empty new_string to delete text.",
+        }
+      : {}),
+    execute: (id, rawParams, signal, onUpdate) => {
+      const params =
+        rawParams && typeof rawParams === "object" ? rawParams : {};
+      const required =
+        kind === "edit"
+          ? ["file_path", "old_string", "new_string"]
+          : kind === "write"
+            ? ["file_path", "content"]
+            : ["file_path"];
+      for (const key of required) {
+        // Empty replacement/content is meaningful: deleting text or clearing a file.
+        if (
+          typeof params[key] !== "string" ||
+          (key === "file_path" && !params[key].trim())
+        ) {
+          throw new Error(`Missing required parameter: ${key}`);
+        }
+      }
+      const { file_path, old_string, new_string, ...rest } = params;
+      // The agent loop runs Pi's own prepareArguments (spread in above) first;
+      // on this snake_case input it is a no-op, so the translation to Pi's
+      // current edits[] contract happens here, not through its retired aliases.
+      const normalized =
+        kind === "edit"
+          ? {
+              path: file_path,
+              edits: [{ oldText: old_string, newText: new_string }],
+            }
+          : { ...rest, path: file_path };
+      return tool.execute(id, normalized, signal, onUpdate);
+    },
+  };
 }

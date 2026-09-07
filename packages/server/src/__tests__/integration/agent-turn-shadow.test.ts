@@ -5,6 +5,10 @@
  * seam that makes the isolate turn lane REACHABLE — the executor suite proves
  * the turn runs, this proves a real message reaches it and comes back.
  */
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { executeRun, WorkerClient } from '@lobu/connector-worker/daemon';
+import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
 import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
@@ -239,6 +243,115 @@ describe('agent turn shadow producer', () => {
   afterEach(() => {
     delete process.env[SHADOW_ENV];
   });
+
+  it('executes write/edit over worker HTTP and persists the real isolate transcript', async () => {
+    const calls = [
+      { name: 'write', input: { file_path: 'a.txt', content: '\ufeffbefore\r\n' } },
+      { name: 'edit', input: { file_path: 'a.txt', old_string: 'before', new_string: 'after' } },
+      { name: 'edit', input: { file_path: 'a.txt', old_string: 'absent', new_string: 'must not appear' } },
+      { name: 'read', input: { file_path: 'a.txt' } },
+      { name: 'bash', input: { command: 'base64 a.txt' } },
+    ];
+    const providerRequests: Array<{ tools: Array<{ name: string; input_schema: unknown }> }> = [];
+    const workerRequests: Array<{ path: string; body: Record<string, any> }> = [];
+    const serverErrors: string[] = [];
+    // Only the external model is scripted. Worker requests cross real HTTP,
+    // then the real Hono routes, lease checks, and Postgres writes.
+    const server = createServer(async (req, res) => {
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/anthropic/')) {
+          const step = providerRequests.length;
+          providerRequests.push(body);
+          if (step > calls.length) throw new Error('unexpected extra provider request');
+          const call = calls[step];
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+          send('message_start', { type: 'message_start', message: {
+            id: `msg_${step}`, type: 'message', role: 'assistant', model: 'claude-test',
+            content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 5, output_tokens: 0 },
+          } });
+          send('content_block_start', { type: 'content_block_start', index: 0, content_block: call
+            ? { type: 'tool_use', id: `tool_${step}`, name: call.name, input: {} }
+            : { type: 'text', text: '' } });
+          send('content_block_delta', { type: 'content_block_delta', index: 0, delta: call
+            ? { type: 'input_json_delta', partial_json: JSON.stringify(call.input) }
+            : { type: 'text_delta', text: 'File edited; failed edit preserved its contents.' } });
+          send('content_block_stop', { type: 'content_block_stop', index: 0 });
+          send('message_delta', { type: 'message_delta', delta: {
+            stop_reason: call ? 'tool_use' : 'end_turn', stop_sequence: null,
+          }, usage: { output_tokens: 3 } });
+          send('message_stop', { type: 'message_stop' });
+          res.end();
+          return;
+        }
+        workerRequests.push({ path, body });
+        const response = await post(path, {
+          body,
+          headers: { authorization: req.headers.authorization ?? '' },
+          env: { WORKER_API_TOKEN: 'test-file-tools-fleet' },
+        });
+        res.writeHead(response.status, { 'content-type': 'application/json' });
+        res.end(await response.text());
+      } catch (error) {
+        serverErrors.push(String(error));
+        res.writeHead(500).end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const org = await createTestOrganization();
+      await enqueueAgentTurnShadow(messageFor(org.id), {
+        agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
+      });
+      const [run] = await shadowRuns();
+      const sql = getTestDb();
+      // Exercise authoritative transcript/reply persistence in the isolated test DB.
+      await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${run.id}`;
+      const client = new WorkerClient({
+        apiUrl: origin, workerId: 'fleet-file-tools', authToken: 'test-file-tools-fleet', capabilities: { agent_turn: true },
+      });
+      const job = await client.poll();
+      expect(job.run_id).toBe(Number(run.id));
+      const result = await executeRun(client, job, {}, {
+        executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }),
+        timeoutMs: 20_000,
+      });
+      expect(serverErrors).toEqual([]);
+      expect(result.error).toBeUndefined();
+      expect(providerRequests).toHaveLength(6);
+      expect(providerRequests[0].tools.find((tool) => tool.name === 'edit')?.input_schema).toMatchObject({
+        required: ['file_path', 'old_string', 'new_string'],
+      });
+      expect(workerRequests.map((request) => request.path)).toContain('/api/workers/heartbeat');
+      const completion = workerRequests.find((request) => request.path === '/api/workers/complete-agent-turn')!.body;
+      expect(completion.status).toBe('completed');
+      expect((await runRow(Number(run.id))).status).toBe('completed');
+      const [snapshot] = await sql`SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
+      const messages = parseSessionEntries(snapshot.snapshot_jsonl).entries.map((entry) => entry.message).filter(Boolean) as any[];
+      const toolResults = messages.filter((message) => message.role === 'toolResult');
+      expect(toolResults.map((message) => [message.toolName, message.isError])).toEqual([
+        ['write', false], ['edit', false], ['edit', true], ['read', false], ['bash', false],
+      ]);
+      expect(toolResults[1].details).toMatchObject({ firstChangedLine: 1 });
+      expect(toolResults[2].content[0].text).toContain('Could not find the exact text in a.txt');
+      expect(toolResults[3].content).toEqual([{ type: 'text', text: 'after\r\n' }]);
+      expect(toolResults[4].content).toEqual([{ type: 'text', text: `${Buffer.from('\ufeffafter\r\n').toString('base64')}\n` }]);
+      const [reply] = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'finalText' = ${completion.text}`;
+      expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });
+      // A lost completion response must not append the same transcript twice.
+      await client.completeAgentTurn(completion as never);
+      const snapshots = await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
+      expect(snapshots).toHaveLength(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 30_000);
 
   it('produces a claimable, schema-valid envelope with the credential lifted off the turn', async () => {
     const org = await createTestOrganization();

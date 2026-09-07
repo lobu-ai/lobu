@@ -1836,7 +1836,8 @@ var exports = module.exports;
       }
       return hex;
     }
-    var decoded = utf8Decode(slice);
+    // Buffer preserves a BOM as text; Response/TextDecoder strip it by default.
+    var decoded = hostSync('textDecode', 'utf-8', slice, false, true);
     if (typeof decoded === 'string') return decoded;
     var s = '';
     for (var k = 0; k < slice.length; k++) s += String.fromCharCode(slice[k]);

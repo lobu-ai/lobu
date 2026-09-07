@@ -46,6 +46,10 @@ const config: KnipConfig = {
         "@xenova/transformers",
         "jimp",
         "sharp",
+        // Resolved by path at guest-bundle build time (agent-turn/
+        // pi-file-tools-bundle.ts) to stand in for `node:path` inside Pi's
+        // file tools; never statically imported in src/.
+        "pathe",
       ],
     },
     "packages/connector-sdk": {
