@@ -75,7 +75,7 @@ export function piSessionBundle(): Plugin {
         else if (args.importer === join(pi, 'core/agent-session.js') && ['core/tools/index.js', 'core/tools/bash.js'].some((path) => target === join(pi, path))) alias = 'tools';
         else if (['fs', 'fs/promises', 'os'].includes(builtin)) alias = builtin;
         else if (builtin === 'path') return { path: require.resolve('pathe') };
-        else if (args.path === 'yaml') return { path: join(dirname(require.resolve('yaml/package.json')), 'browser/index.js') };
+        else if (args.path === 'yaml') return { path: join(dirname(createRequire(args.importer).resolve('yaml/package.json')), 'browser/index.js') };
         else if (args.path === 'proper-lockfile') alias = 'lock';
         else if (args.path === '@mariozechner/pi-tui') alias = 'tui';
         else if (args.importer === join(pi, 'core/extensions/loader.js')) {

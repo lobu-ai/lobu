@@ -267,7 +267,7 @@ describe('resolveTurnAttachments', () => {
       message_text: '',
       message_images: result.images,
       system_prompt: '',
-      messages: [],
+      session_jsonl: '',
       provider: { api: 'anthropic-messages', provider: 'anthropic', model_id: 'm', base_url: 'http://x' },
       allowed_hosts: [],
       reply: { channel_id: 'ch', message_id: 'm' },
