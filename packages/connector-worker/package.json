@@ -1,6 +1,6 @@
 {
   "name": "@lobu/connector-worker",
-  "version": "19.1.0",
+  "version": "19.2.0",
   "description": "Self-hosted worker for Lobu memory — connectors and embedding generation",
   "type": "module",
   "bin": {

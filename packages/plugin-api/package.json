@@ -1,6 +1,6 @@
 {
   "name": "@lobu/plugin-api",
-  "version": "19.1.0",
+  "version": "19.2.0",
   "description": "Native first-party plugin contract for Lobu runtimes",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
