@@ -35,6 +35,9 @@ const config: KnipConfig = {
         // (agent-turn/bundle.ts) so it can be compiled for the isolate, which
         // is exactly the import knip cannot see.
         "src/agent-turn/guest-entry.ts",
+        // Build step run from the package `build` script after tsc; it writes
+        // the prebuilt guest bundle the published package ships.
+        "src/agent-turn/build-guest-bundle.ts",
         "src/**/*.test.ts",
       ],
       ignoreDependencies: [

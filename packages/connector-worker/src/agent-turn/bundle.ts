@@ -20,6 +20,7 @@
 
 import { build } from 'esbuild';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ISOLATE_LANE_BUILD_OPTIONS } from '../compile/index.js';
@@ -40,9 +41,20 @@ function guestEntryPath(): string {
   return existsSync(compiled) ? compiled : join(HERE, 'guest-entry.ts');
 }
 
+/**
+ * The bundle `build-guest-bundle.ts` writes next to this file at build time.
+ *
+ * The published package ships this file and nothing else the guest needs: its
+ * plugin dependencies are workspace packages that never reach the registry, so
+ * bundling them at build time is what makes an installed copy self-contained.
+ * In a source checkout (tsx, bun test) there is no such file and the guest is
+ * bundled from the sources on first use.
+ */
+const PREBUILT_GUEST_BUNDLE = join(HERE, 'guest.bundle.js');
+
 let cached: Promise<string> | null = null;
 
-async function buildAgentGuest(): Promise<string> {
+export async function buildAgentGuest(): Promise<string> {
   const result = await build({
     ...ISOLATE_LANE_BUILD_OPTIONS,
     entryPoints: [guestEntryPath()],
@@ -97,7 +109,7 @@ async function buildAgentGuest(): Promise<string> {
  * second of the turn's own budget.
  */
 export function agentGuestBundle(): Promise<string> {
-  cached ??= buildAgentGuest().catch((error) => {
+  cached ??= (existsSync(PREBUILT_GUEST_BUNDLE) ? readFile(PREBUILT_GUEST_BUNDLE, 'utf8') : buildAgentGuest()).catch((error) => {
     // A failed build must not poison every later turn with the same rejection.
     cached = null;
     throw error;
