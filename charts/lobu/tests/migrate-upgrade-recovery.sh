@@ -46,6 +46,8 @@ printf 'pending-check\n' >>"$PENDING_LOG"
 exit "${PENDING_EXIT_CODE:-0}"
 PENDING
 chmod +x "$test_dir/pending-check"
+export MIGRATION_PENDING_CHECK="$test_dir/pending-check"
+export PENDING_LOG="$pending_log"
 
 set +e
 COMMAND_LOG="$command_log" \
@@ -157,25 +159,36 @@ if [ -s "$command_log" ]; then
   exit 1
 fi
 
-# Fail closed: a check that cannot answer must still quiesce.
-: >"$command_log"
-: >"$migration_log"
-COMMAND_LOG="$command_log" \
-MIGRATION_LOG="$migration_log" \
-PENDING_LOG="$pending_log" \
-KUBECTL_BIN="$test_dir/kubectl" \
-NAMESPACE=lobu \
-APP_DEPLOYMENT=lobu-app \
-APP_SELECTOR='app.kubernetes.io/instance=lobu,app.kubernetes.io/component=api' \
-WORKER_DEPLOYMENT=lobu-worker \
-WORKER_SELECTOR='app.kubernetes.io/instance=lobu,app.kubernetes.io/component=worker' \
-MIGRATION_PENDING_CHECK="$test_dir/pending-check" \
-PENDING_EXIT_CODE=7 \
-  sh "$orchestrator" "$test_dir/migrate"
+# An inconclusive check must leave the healthy deployments alone.
+for pending_code in 1 7 127 137 missing; do
+  : >"$command_log"
+  : >"$migration_log"
+  check_command="$test_dir/pending-check"
+  if [ "$pending_code" = missing ]; then
+    check_command=''
+    pending_code=1
+  fi
+  set +e
+  COMMAND_LOG="$command_log" \
+  MIGRATION_LOG="$migration_log" \
+  PENDING_LOG="$pending_log" \
+  KUBECTL_BIN="$test_dir/kubectl" \
+  NAMESPACE=lobu \
+  APP_DEPLOYMENT=lobu-app \
+  APP_SELECTOR='app.kubernetes.io/instance=lobu,app.kubernetes.io/component=api' \
+  WORKER_DEPLOYMENT=lobu-worker \
+  WORKER_SELECTOR='app.kubernetes.io/instance=lobu,app.kubernetes.io/component=worker' \
+  MIGRATION_PENDING_CHECK="$check_command" \
+  PENDING_EXIT_CODE="$pending_code" \
+    sh "$orchestrator" "$test_dir/migrate"
+  check_status=$?
+  set -e
 
-grep -Fxq 'scale deployment lobu-app --replicas=0' "$command_log"
-grep -Fxq 'scale deployment lobu-worker --replicas=0' "$command_log"
-grep -Fxq 'migrate' "$migration_log"
+  if [ "$check_status" -eq 0 ] || [ -s "$command_log" ] || [ -s "$migration_log" ]; then
+    echo "failed pending check ($pending_code) unexpectedly proceeded with deployment" >&2
+    exit 1
+  fi
+done
 
 # A real pending migration still gets the full quiesce.
 : >"$command_log"

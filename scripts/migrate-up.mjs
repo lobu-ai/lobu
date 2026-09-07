@@ -12,18 +12,19 @@
  *   MIGRATIONS_DIR=/app/db/migrations node scripts/migrate-up.mjs
  *   DATABASE_URL=... node scripts/migrate-up.mjs --check-pending
  *
- * --check-pending applies nothing. It reports whether any migration file is
- * missing from the ledger and encodes the answer in the exit status, so the
- * chart's pre-upgrade hook can skip its scale-to-zero quiesce on the common
- * deploy that ships no schema change:
+ * --check-pending applies nothing. It validates declared prerequisites
+ * (db/migrations/preconditions/, see docs/MIGRATIONS.md) and reports whether
+ * any migration file is missing from the ledger, encoding the answer in the
+ * exit status so the chart's pre-upgrade hook can skip its scale-to-zero
+ * quiesce on the common deploy that ships no schema change:
  *   0 - at least one migration is pending (the caller must quiesce)
  *   3 - the ledger is complete, nothing is pending (safe to skip the quiesce)
  *   4 - migrations are pending, but every one of them carries the author's
  *       `-- lobu:no-quiesce` declaration, so the old replicas can keep
  *       serving across the migration
- *   1 - the answer could not be determined (the caller must quiesce)
- * Only the definitive 3 and 4 unlock the fast path; every other status,
- * including a crash, leaves the caller quiescing.
+ *   1 - validation failed or the answer is unknown (abort before quiescing)
+ * Only 0 permits quiescing; 3 and 4 allow migration without stopping replicas.
+ * Any other status, including a crash, must abort the deployment.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,15 +46,6 @@ const CHECK_PENDING_COMPATIBLE_EXIT = 4;
  * only the author can make the call.
  */
 const NO_QUIESCE_MARKER = /^--[ \t]*lobu:no-quiesce\b/m;
-
-/** Unreadable counts as unmarked, so anything unexpected still quiesces. */
-function isMarkedNoQuiesce(dir, file) {
-  try {
-    return NO_QUIESCE_MARKER.test(readFileSync(join(dir, file), "utf-8"));
-  } catch {
-    return false;
-  }
-}
 
 const checkPendingOnly = process.argv.slice(2).includes("--check-pending");
 const migrationsDir =
@@ -91,13 +83,59 @@ function parseTransactionOption(markerLine) {
 function loadMigrationUp(dir, file) {
   const content = readFileSync(join(dir, file), "utf-8");
   const upMarker = content.match(/^--\s*migrate:up(.*)$/m);
-  const transaction = parseTransactionOption(upMarker?.[0] ?? "-- migrate:up");
-  const sql = content
-    .split(/^--\s*migrate:down.*$/m)[0]
+  if (!upMarker) throw new Error(`${file}: missing -- migrate:up directive`);
+  const transaction = parseTransactionOption(upMarker[0]);
+  const up = content.split(/^--\s*migrate:down.*$/m)[0];
+  const sql = up
     .replace(/^--\s*migrate:up.*$/m, "")
     .replace(/^SET transaction_timeout = 0;\s*$/gm, "")
     .trim();
-  return { sql, transaction };
+  return { sql, transaction, noQuiesce: NO_QUIESCE_MARKER.test(up) };
+}
+
+function loadPendingMigrations(applied) {
+  const dir = join(migrationsDir, "preconditions");
+  let checks = [];
+  try {
+    checks = readdirSync(dir);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  for (const file of checks) {
+    if (!migrationFiles.includes(file)) {
+      throw new Error(`Precondition ${file} has no matching migration`);
+    }
+  }
+  return migrationFiles
+    .filter((file) => !applied.has(file.split("_")[0]))
+    .map((file) => ({
+      file,
+      ...loadMigrationUp(migrationsDir, file),
+      precondition: checks.includes(file)
+        ? readFileSync(join(dir, file), "utf8")
+        : "",
+    }));
+}
+
+async function validatePreconditions(sqlClient, pending) {
+  const checks = pending.filter((migration) => migration.precondition);
+  if (checks.length === 0) return;
+  // Author-written assertions describe external prerequisites, not effects of
+  // the migration itself. Postgres enforces read-only access before quiescence.
+  await sqlClient.begin("read only", async (tx) => {
+    await tx.unsafe("SET LOCAL statement_timeout = '10s'");
+    for (const migration of checks) {
+      try {
+        await tx.unsafe(migration.precondition);
+        console.log(`Precondition passed: ${migration.file}`);
+      } catch (error) {
+        throw new Error(
+          `Precondition failed: ${migration.file}: ${error.message}`,
+          { cause: error }
+        );
+      }
+    }
+  });
 }
 
 /** Dollar-quote / string-literal aware statement splitter (see migration-loader.ts). */
@@ -229,9 +267,8 @@ if (checkPendingOnly) {
       `SELECT version FROM public.schema_migrations`
     );
     const applied = new Set(appliedRows.map((r) => r.version));
-    pending = migrationFiles.filter(
-      (file) => !applied.has(file.split("_")[0] ?? "")
-    );
+    pending = loadPendingMigrations(applied);
+    await validatePreconditions(sql, pending);
   } catch (error) {
     console.error(
       `ERROR: could not determine pending migrations: ${
@@ -246,20 +283,20 @@ if (checkPendingOnly) {
     console.log("No pending migrations");
     process.exit(CHECK_PENDING_NONE_EXIT);
   }
-  console.log(`Pending migrations (${pending.length}): ${pending.join(", ")}`);
+  console.log(
+    `Pending migrations (${pending.length}): ${pending.map((migration) => migration.file).join(", ")}`
+  );
 
   // Quiescing costs a full scale-to-zero, which the ingress answers with 503.
   // A migration the running code can already serve against does not need it.
-  const unmarked = pending.filter(
-    (file) => !isMarkedNoQuiesce(migrationsDir, file)
-  );
+  const unmarked = pending.filter((migration) => !migration.noQuiesce);
   if (unmarked.length === 0) {
     console.log(
       "Every pending migration is marked -- lobu:no-quiesce; the quiesce can be skipped."
     );
     process.exit(CHECK_PENDING_COMPATIBLE_EXIT);
   }
-  for (const file of unmarked) {
+  for (const { file } of unmarked) {
     console.log(`  ${file}: not marked -- lobu:no-quiesce`);
   }
   process.exit(0);
@@ -281,11 +318,12 @@ try {
     `SELECT version FROM public.schema_migrations`
   );
   const applied = new Set(appliedRows.map((r) => r.version));
+  const pending = loadPendingMigrations(applied);
+  await validatePreconditions(sql, pending);
 
-  for (const file of migrationFiles) {
+  for (const up of pending) {
+    const { file } = up;
     const version = file.split("_")[0] ?? "";
-    if (applied.has(version)) continue;
-    const up = loadMigrationUp(migrationsDir, file);
     if (!up.sql) continue;
 
     console.log(`Applying: ${file}`);

@@ -1634,6 +1634,13 @@ jobs:
           cp -r "$tmp/node_modules/postgres" node_modules/postgres
           node scripts/migrate-up.mjs
 
+      - name: Production migration entrypoint and upgrade prerequisites
+        env:
+          MIGRATION_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/lobu_ci?sslmode=disable
+        # Real PostgreSQL and start.sh, with only kubectl replaced by a recorder.
+        # Includes the historical schema plus legacy NULL actors missed by an empty DB.
+        run: node --test scripts/__tests__/migration-entrypoint.node-test.mjs
+
       - name: Verify migrations are listed in the schema_migrations table
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/lobu_ci?sslmode=disable
