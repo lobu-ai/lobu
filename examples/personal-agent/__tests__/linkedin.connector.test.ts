@@ -1847,7 +1847,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     expect(cfg.rowSelector).toContain("replaceableComment_urn:li:comment");
     expect(cfg.expandRows.rowSelector).toContain('[componentkey^="expanded"]');
-    expect(cfg.expandRows.identity).toEqual(cfg.fields.post_identity);
+    expect(cfg.expandRows.identity).toMatchObject(cfg.fields.post_identity);
     expect(cfg.expandRows.expected.textRegex).toContain("comments?");
     expect(cfg.expandRows.expected.selector).toContain(
       cfg.fields.comment_count_text.selector
@@ -2039,6 +2039,66 @@ describe("LinkedInConnector home_feed", () => {
       }
     }
   };
+
+  test.each([
+    ["CgoIjsejvOXquuse", "activity", "1111111111111111111"],
+    ["EgoIqtXqtLDAsMJc", "ugcPost", "3333333333333333333"],
+    // Current ids exceed 2^62, so the ZigZag varint fills all ten bytes.
+    ["CgsIgICIqvf8v8fMAQ", "activity", "7370000000000000000"],
+  ])("reads encoded %s post identities from comment tools", async (encoded, namespace, postId) => {
+    const res = await syncHomeFeedDom(`
+      <div componentkey="expandedfixture_tokenFeedType_MAIN_FEED_RELEVANCE">
+        <button aria-label="Open control menu for post by Fixture Author"></button>
+        <p>Fixture Author • 1st A current feed card with a durable encoded identity</p>
+        <div id="replaceableComment_urn:li:comment:(urn:li:${namespace}:${postId},2222222222222222222)">
+          <p>Fixture Commenter • A native comment that stays linked to its parent</p>
+        </div>
+        <div id="${encoded}-replaceableCommentToolsfixture_tokenFeedType_MAIN_FEED_RELEVANCE"></div>
+      </div>`);
+    expect(res.events).toMatchObject([
+      {
+        origin_id: `li_home_${namespace}_${postId}`,
+        source_url: `https://www.linkedin.com/feed/update/urn:li:${namespace}:${postId}`,
+      },
+      {
+        origin_id: "li_comment_2222222222222222222",
+        origin_parent_id: `li_home_${namespace}_${postId}`,
+      },
+    ]);
+    expect(res.metadata.comment_threads_complete).toBe(true);
+  });
+
+  test.each([
+    "%%%",
+    "GgIIAg",
+    "CgoIjsejvOXquus",
+    "CgIIAw",
+    "CgoIjsejvOXquuseAA",
+  ])("rejects malformed or unsupported encoded post identity %s", async (encoded) => {
+    await expect(
+      syncHomeFeedDom(`
+        <div componentkey="expandedfixture_tokenFeedType_MAIN_FEED_RELEVANCE">
+          <p>Fixture Author • 1st A post whose identity must not be guessed</p>
+          <div id="${encoded}-replaceableCommentToolsfixture_token"></div>
+        </div>`)
+    ).rejects.toThrow("invalid encoded post identity");
+  });
+
+  test("rejects duplicate encoded identities despite different recycled card keys", async () => {
+    await expect(
+      syncHomeFeedDom(
+        ["first", "second"]
+          .map(
+            (token) => `
+      <div componentkey="expanded${token}FeedType_MAIN_FEED_RELEVANCE">
+        <p>Fixture Author • 1st A duplicated card cannot own expansion evidence</p>
+        <div id="CgoIjsejvOXquuse-replaceableCommentTools${token}"></div>
+      </div>`
+          )
+          .join("")
+      )
+    ).rejects.toThrow("home feed produced no post rows");
+  });
 
   test("expands a 4-comment thread from 3 rendered comments and emits all durable comments", async () => {
     const activityId = "8111111111111111111";
@@ -3174,7 +3234,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.11.10");
+    expect(c.definition.version).toBe("3.11.11");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
