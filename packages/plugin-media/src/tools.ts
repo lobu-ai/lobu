@@ -1,4 +1,4 @@
-import { defineLobuPlugin } from "@lobu/plugin-api";
+import { defineLobuPlugin, type LobuPlugin } from "@lobu/plugin-api";
 import {
   defineGatewayTool,
   toolLogger,
@@ -106,7 +106,9 @@ export function createMediaTools(params: MediaPluginParams): ToolDefinition[] {
   ];
 }
 
-export function createMediaPlugin(params: MediaPluginParams) {
+export function createMediaPlugin(
+  params: MediaPluginParams
+): LobuPlugin<ToolDefinition> {
   return defineLobuPlugin<ToolDefinition>({
     manifest: {
       name: "lobu-media",

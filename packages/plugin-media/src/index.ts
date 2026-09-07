@@ -1,3 +1,4 @@
+import type { LobuPlugin } from "@lobu/plugin-api";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { createNodeFilePort } from "./file-port-node";
 import {
@@ -58,6 +59,8 @@ export function createMediaTools(params: MediaPluginParams): ToolDefinition[] {
   return createMediaToolsWithPort(withNodePort(params));
 }
 
-export function createMediaPlugin(params: MediaPluginParams) {
+export function createMediaPlugin(
+  params: MediaPluginParams
+): LobuPlugin<ToolDefinition> {
   return createMediaPluginWithPort(withNodePort(params));
 }
