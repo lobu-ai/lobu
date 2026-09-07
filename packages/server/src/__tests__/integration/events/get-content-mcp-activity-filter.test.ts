@@ -175,10 +175,10 @@ describe('getContent > exact MCP activity filter on sibling SQL paths', () => {
 
     await sql`
       INSERT INTO mcp_client_conversations (
-        organization_id, client_identity, conversation_id,
+        organization_id, user_id, client_identity, conversation_id,
         transport_session_ids, client_id, last_action, call_count
       ) VALUES (
-        ${org.id}, ${clientId}, ${CONVERSATION_ID},
+        ${org.id}, ${user.id}, ${clientId}, ${CONVERSATION_ID},
         ${sql.json(['transport-old', 'transport-new'])}, ${clientId}, 'read_knowledge', 1
       )
     `;

@@ -13,14 +13,14 @@ interface ActivityTransportRow {
  */
 export async function resolveMcpActivitySessionIds(
 	sql: DbClient,
-	organizationId: string,
+	userId: string | null,
 	clientIds: string[],
 	activityId: string,
 ): Promise<string[]> {
 	const rows = await sql<ActivityTransportRow>`
     SELECT transport_session_ids
     FROM public.mcp_client_conversations
-    WHERE organization_id = ${organizationId}
+    WHERE user_id = ${userId}
       AND client_id = ANY(${pgTextArray(clientIds)}::text[])
       AND conversation_id = ${activityId}
   `;

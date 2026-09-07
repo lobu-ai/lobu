@@ -645,8 +645,9 @@ async function approvalOrigin(row: ApprovalContentItem, ctx: ToolContext): Promi
     automation_id: number | null;
     initiator_ref: Record<string, unknown> | null;
     original_client_id: string | null;
+    created_by_user_id: string | null;
   }>`
-    SELECT r.automation_id, r.initiator_ref, original.client_id AS original_client_id
+    SELECT r.automation_id, r.initiator_ref, r.created_by_user_id, original.client_id AS original_client_id
     FROM runs r
     LEFT JOIN LATERAL (
       SELECT e.client_id
@@ -675,6 +676,7 @@ async function approvalOrigin(row: ApprovalContentItem, ctx: ToolContext): Promi
   if (!automationId && !conversationId) return { kind: 'direct', label: 'Direct request' };
   return resolveInteractionActionOrigin({
     organizationId: ctx.organizationId,
+    userId: runs[0]?.created_by_user_id ?? null,
     automationId,
     conversationId,
     // get_content's `platform` column carries the event's connector_key, never a
