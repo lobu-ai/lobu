@@ -1,4 +1,13 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "bun:test";
 import {
@@ -63,6 +72,7 @@ const REQUIRED_IMAGE_JOBS = [
   "build-embeddings-service",
   "build-app",
   "app-image-smoke",
+  "promote-images",
 ];
 
 /** Run the helper the way the workflows do — over stdin, as a subprocess. */
@@ -372,6 +382,179 @@ describe("image builds refuse an off-main manual dispatch", () => {
     expect(dispatch).toContain('-f image_run_id="$GITHUB_RUN_ID"');
     // `skip` was the only accepted value, so the input was dead surface.
     expect(dispatch).not.toContain("bump");
+  });
+});
+
+describe("deployment images are published only after the candidate passes", () => {
+  const file = "build-images.yml";
+
+  it("builds only candidate tags and exposes immutable digests", () => {
+    const workflow = parse(file) as Workflow & { env: Record<string, string> };
+    expect(workflow.env.CANDIDATE_TAG).toBe(
+      "candidate-${{ github.run_id }}-${{ github.run_attempt }}"
+    );
+    for (const id of [
+      "build-app",
+      "build-worker",
+      "build-embeddings-service",
+    ]) {
+      const build = steps(file, id).find((step) =>
+        step.uses?.startsWith("docker/build-push-action@")
+      );
+      const metadata = steps(file, id).find((step) =>
+        step.uses?.startsWith("docker/metadata-action@")
+      );
+      expect(metadata?.with?.tags).toBe(
+        "type=raw,value=${{ env.CANDIDATE_TAG }}\n"
+      );
+      expect(build?.with?.tags).toBe("${{ steps.meta.outputs.tags }}");
+      expect(
+        (job(file, id) as Job & { outputs: Record<string, string> }).outputs
+          .digest
+      ).toBe("${{ steps.build.outputs.digest }}");
+    }
+  });
+
+  it("smokes the app digest and requires success before promotion", () => {
+    expect(shell(file, "app-image-smoke")).toContain(
+      "${REGISTRY}/${IMAGE_NAME_APP}@${{ needs.build-app.outputs.digest }}"
+    );
+    expect(job(file, "promote-images").needs).toEqual([
+      "generate-tag",
+      "build-app",
+      "build-worker",
+      "build-embeddings-service",
+      "app-image-smoke",
+    ]);
+    expect(job(file, "promote-images").if).not.toMatch(/always\(|!cancelled\(/);
+    expect(
+      steps(file, "promote-images").find(
+        (step) => step.name === "Publish tested digests, app last for Flux"
+      )
+    ).toMatchObject({
+      run: "bash scripts/promote-images.sh",
+      env: {
+        APP_IMAGE:
+          "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}@${{ needs.build-app.outputs.digest }}",
+        WORKER_IMAGE:
+          "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_WORKER }}@${{ needs.build-worker.outputs.digest }}",
+        EMBEDDINGS_IMAGE:
+          "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMBEDDINGS }}@${{ needs.build-embeddings-service.outputs.digest }}",
+      },
+    });
+    expect(job(file, "trigger-package-publish").needs).toContain(
+      "promote-images"
+    );
+    expect(job(file, "notify-failure").needs).toContain("promote-images");
+  });
+});
+
+describe("image promotion command", () => {
+  const images = {
+    WORKER_IMAGE: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
+    EMBEDDINGS_IMAGE: `registry.example.test/embeddings@sha256:${"b".repeat(64)}`,
+    APP_IMAGE: `registry.example.test/app@sha256:${"c".repeat(64)}`,
+  };
+  const deployTag = "20990101-000000-000001";
+
+  function promote(overrides: Record<string, string> = {}) {
+    const temp = mkdtempSync(join(tmpdir(), "image-promotion-"));
+    const log = join(temp, "docker.jsonl");
+    writeFileSync(log, "");
+    writeFileSync(
+      join(temp, "docker"),
+      `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const args = process.argv.slice(2);
+appendFileSync(process.env.DOCKER_LOG, JSON.stringify(args) + "\\n");
+if (args.includes(process.env.FAIL_IMAGE)) process.exit(23);
+`,
+      { mode: 0o755 }
+    );
+    try {
+      const result = spawnSync("bash", ["scripts/promote-images.sh"], {
+        cwd: root,
+        env: {
+          ...process.env,
+          ...images,
+          DEPLOY_TAG: deployTag,
+          SEMVER: "",
+          IS_STABLE: "false",
+          FAIL_IMAGE: "",
+          ...overrides,
+          PATH: `${temp}:${process.env.PATH}`,
+          DOCKER_LOG: log,
+        },
+        encoding: "utf8",
+      });
+      return {
+        code: result.status,
+        stderr: result.stderr,
+        calls: readFileSync(log, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as string[]),
+      };
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  }
+
+  it.each([
+    { SEMVER: "", IS_STABLE: "false", tags: [deployTag] },
+    {
+      SEMVER: "1.2.3-rc.1",
+      IS_STABLE: "false",
+      tags: [deployTag, "1.2.3-rc.1"],
+    },
+    {
+      SEMVER: "1.2.3",
+      IS_STABLE: "true",
+      tags: [deployTag, "1.2.3", "latest"],
+    },
+    {
+      SEMVER: "1.2.3-rc.1+build.7",
+      IS_STABLE: "false",
+      tags: [deployTag, "1.2.3-rc.1-build.7"],
+    },
+  ])("copies exact digests and promotes app last: %j", ({ tags, ...env }) => {
+    const result = promote(env);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.calls).toEqual(
+      Object.values(images).map((image) => [
+        "buildx",
+        "imagetools",
+        "create",
+        "--prefer-index=false",
+        ...tags.flatMap((tag) => ["--tag", `${image.split("@")[0]}:${tag}`]),
+        image,
+      ])
+    );
+  });
+
+  it.each([
+    images.WORKER_IMAGE,
+    images.EMBEDDINGS_IMAGE,
+  ])("never publishes the watched app tag after sibling promotion fails: %s", (FAIL_IMAGE) => {
+    const result = promote({ FAIL_IMAGE });
+    expect(result.code).toBe(23);
+    expect(result.calls.some((args) => args.includes(images.APP_IMAGE))).toBe(
+      false
+    );
+  });
+
+  it.each([
+    { APP_IMAGE: "registry.example.test/app:candidate-123-1" },
+    { WORKER_IMAGE: "" },
+    { EMBEDDINGS_IMAGE: "registry.example.test/embeddings@sha256:" },
+    { DEPLOY_TAG: "latest" },
+    { IS_STABLE: "unknown" },
+    { IS_STABLE: "true", SEMVER: "" },
+    { SEMVER: "1.2.3 invalid" },
+  ])("rejects invalid inputs before any publication: %j", (env) => {
+    const result = promote(env);
+    expect(result.code).not.toBe(0);
+    expect(result.calls).toEqual([]);
   });
 });
 

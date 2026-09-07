@@ -5,12 +5,12 @@ The published packages ship as a synchronized release: `@lobu/core`, `@lobu/cli`
 ## Flow
 
 1. Merge feature PRs into `main` with conventional commit messages.
-2. The push to `main` starts `build-images.yml`. When it finishes, `release-please.yml` runs on its `workflow_run` and attests the producer before touching anything: the run must be a completed-success push to the current `main` tip, all six required image jobs must be completed-success, and there must be an exact successful `ci.yml` run for the same commit.
+2. The push to `main` starts `build-images.yml`. When it finishes, `release-please.yml` runs on its `workflow_run` and attests the producer before touching anything: the run must be a completed-success push to the current `main` tip, all seven required image jobs must be completed-success, and there must be an exact successful `ci.yml` run for the same commit.
 3. Against that attested commit, release-please opens a `chore(main): release lobu <version>` PR with bumped `package.json`s and a generated `CHANGELOG.md`. It runs with `skip-github-release: true`, so it never creates the tag or the release itself.
 4. Merging the release PR repeats steps 2–3 for the new commit. The workflow then asks whether the attested commit's manifest version already has a stable `lobu-v<version>` GitHub release; if it does not, it creates the tag and release bound to that exact attested SHA. The question is deliberately about the release list rather than about whether the attested commit is the one that bumped the manifest — keyed on a parent diff, the release could only be cut while the bump commit was still `main`'s tip, so anything merging behind the release PR stranded it permanently. Publishing the release starts `build-images.yml` again, now on a `release` event. One consequence of asking the release list rather than the parent commit: if the bump commit's own image build does not get to cut the release, the tag binds to a later `main` tip instead, and release-please computes the following changelog from that tag — so commits that landed in the gap do not appear in the next `CHANGELOG.md`. That is deliberate; a release that ships with a short changelog is strictly better than a release that never ships at all.
-5. Once that run's `app-image-smoke` boots the tagged app image, its `trigger-package-publish` job dispatches `publish-packages.yml` from `main` with the release tag and its own run id. Automated npm publication is therefore downstream of a green image smoke — a red or still-queued image build leaves the version unpublished rather than shipping an unverified tree.
+5. That release run pushes candidate image tags outside Flux's policy, boots the app candidate by immutable digest in `app-image-smoke`, then runs `promote-images` to publish the deployment and release tags from the tested digests. Only after promotion succeeds does `trigger-package-publish` dispatch `publish-packages.yml` from `main` with the release tag and its own run id. Automated npm publication is therefore downstream of a green image smoke and successful promotion — a red or still-queued image build leaves the version unpublished rather than shipping an unverified tree.
 
-Every gate in that chain is one subcommand of `scripts/release-provenance.mjs`, covered by `scripts/__tests__/release-publish-order.test.ts`. Change the policy there, not in the workflow YAML.
+Every provenance decision in that chain is one subcommand of `scripts/release-provenance.mjs`, covered by `scripts/__tests__/release-publish-order.test.ts`. Change the attestation policy there, not in the workflow YAML.
 
 To force a specific version, land a commit on `main` whose body contains `Release-As: 7.2.0`; release-please then opens or updates the release PR for that version.
 
@@ -49,7 +49,7 @@ BREAKING CHANGE: RuntimeProviderCredentialResolver now returns
 
 **Publish step fails after release PR merge** — re-running `release-please.yml` does NOT re-publish: the release already exists, so no new release event fires and nothing dispatches the publish. Recover from the artifact side instead:
 
-- **`build-images` failed or was evicted** — re-run that run (`gh run rerun <id>`). A green `app-image-smoke` re-fires `trigger-package-publish` on its own.
+- **`build-images` failed or was evicted** — re-run that run (`gh run rerun <id>`). A successful `app-image-smoke` and `promote-images` re-fire `trigger-package-publish` on their own.
 - **`build-images` is green but `publish-packages` failed** — re-dispatch it from `main`, naming the release tag and the exact producing run. Both inputs are required and there is no fallback that guesses either one:
   ```bash
   gh workflow run publish-packages.yml --ref main \

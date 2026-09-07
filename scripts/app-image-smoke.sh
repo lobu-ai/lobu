@@ -20,9 +20,8 @@
 # `docker run`s the self-check rather than trusting the build). This is the same
 # move for the APP image, which is the one users and the browser talk to.
 #
-# It runs AFTER `build-app` has pushed, deliberately: a failure here must not
-# block the push or Flux's rollout, but it does fail the workflow — so main goes
-# red and a release cannot be cut on a broken image.
+# Runs against the candidate digest after `build-app`. Only a passing smoke
+# allows promote-images to publish the deployment tags Flux watches.
 #
 # Keyless: needs only a Postgres with pgvector. No provider key, no secrets.
 #
