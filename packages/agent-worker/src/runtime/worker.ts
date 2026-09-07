@@ -5,7 +5,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { createLogger, type WorkerTransport } from "@lobu/core";
+import {
+  createLogger,
+  type WorkerTransport,
+  estimatePromptTokenCost,
+  MEMORY_FLUSH_STATE_CUSTOM_TYPE,
+  type ResolvedMemoryFlushConfig,
+} from "@lobu/core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import type { SettingsManager } from "@mariozechner/pi-coding-agent";
 import * as Sentry from "@sentry/node";
@@ -36,10 +42,7 @@ import { checkSandboxLeak } from "./sandbox-leak";
 import {
   type buildAgentSession,
   countCompactionsOnCurrentBranch,
-  estimatePromptTokenCost,
   getLatestAssistantText,
-  MEMORY_FLUSH_STATE_CUSTOM_TYPE,
-  type ResolvedMemoryFlushConfig,
   readLastFlushedCompactionCount,
   runAISession as runAISessionImpl,
 } from "./session-runner";
@@ -49,10 +52,8 @@ import { type TerminalStatus, writeSnapshot } from "./transcript-snapshot";
 // barrel.
 export {
   buildRunContextBlock,
-  estimatePromptTokenCost,
   LOBU_DEFAULT_IDENTITY,
   resolveAgentIdentity,
-  resolveMemoryFlushConfig,
 } from "./session-runner";
 
 const logger = createLogger("worker");

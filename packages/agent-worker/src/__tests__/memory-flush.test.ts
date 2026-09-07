@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  estimatePromptTokenCost,
-  resolveMemoryFlushConfig,
-} from "../runtime/worker";
+import { estimatePromptTokenCost, resolveMemoryFlushConfig } from "@lobu/core";
 
 describe("memory flush config", () => {
   test("uses defaults when config missing", () => {

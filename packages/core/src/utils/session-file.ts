@@ -32,6 +32,8 @@ export interface SessionEntry {
   id: string;
   parentId: string | null;
   timestamp: string;
+  /** `custom` entries: the recorder's own payload. */
+  data?: unknown;
   message?: {
     role: string;
     content?: unknown;
@@ -64,29 +66,21 @@ export interface SessionEntry {
   fromId?: string;
 }
 
-/**
- * A message the model is shown, in pi's own shape: `user`, `assistant` or
- * `toolResult`, with whatever fields the entry carried (usage, stop reason,
- * tool call ids) preserved so a provider sees exactly what it produced.
- */
-export type SessionMessage = Record<string, unknown> & { role: string };
+import {
+  BRANCH_SUMMARY_PREFIX,
+  BRANCH_SUMMARY_SUFFIX,
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
+  type SessionMessage,
+} from "./session-summary";
 
-/**
- * pi's exact framing for a compaction summary when it is shown to the model
- * (`convertToLlm` in pi-coding-agent's messages.ts). Copied verbatim so the
- * summary reads identically whichever lane replays it.
- */
-export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
-
-<summary>
-`;
-export const COMPACTION_SUMMARY_SUFFIX = `
-</summary>`;
-export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
-
-<summary>
-`;
-export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
+export {
+  BRANCH_SUMMARY_PREFIX,
+  BRANCH_SUMMARY_SUFFIX,
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
+  type SessionMessage,
+};
 
 function userText(text: string, timestamp: string): SessionMessage {
   return {
@@ -155,21 +149,22 @@ function entryToModelMessage(entry: SessionEntry): SessionMessage | null {
 }
 
 /**
- * Replay a session's current branch as the messages the model is shown —
- * pi's `buildSessionContext` followed by its `convertToLlm`, without a
- * SessionManager or a filesystem.
+ * The session's current branch: the parent chain walked back from the last
+ * entry, oldest first, so entries off the branch (pi's tree navigation) are
+ * left out. pi chains every entry to its parent, so a parent that is null or
+ * unknown only ever occurs on a file's first entry; Lobu's own writers have
+ * also emitted flat files whose entries all carry a null parent, and those
+ * continue in file order, which is the only branch a flat file has.
  *
- * The branch is the parent chain walked back from the last entry, so entries
- * off the current branch (pi's tree navigation) are not replayed; an entry
- * with no reachable parent continues from its file-order predecessor. When the
- * chain carries a `compaction` entry, the model sees the summary first, then
- * the entries kept verbatim from `firstKeptEntryId` up to the compaction, then
- * everything after it — exactly the context pi would rebuild from the same
- * file, which is what lets one snapshot serve both lanes.
+ * `replaySessionMessages` turns the branch into the messages the model is
+ * shown — pi's `buildSessionContext` followed by its `convertToLlm`, without
+ * a SessionManager or a filesystem. When the branch carries a `compaction`
+ * entry, the model sees the summary first, then the entries kept verbatim
+ * from `firstKeptEntryId` up to the compaction, then everything after it —
+ * exactly the context pi would rebuild from the same file, which is what lets
+ * one snapshot serve both lanes.
  */
-export function replaySessionMessages(
-  entries: SessionEntry[]
-): SessionMessage[] {
+export function sessionBranch(entries: SessionEntry[]): SessionEntry[] {
   const byId = new Map<string, SessionEntry>();
   const position = new Map<SessionEntry, number>();
   entries.forEach((entry, index) => {
@@ -179,10 +174,6 @@ export function replaySessionMessages(
   const leaf = entries[entries.length - 1];
   if (!leaf) return [];
 
-  // pi chains every entry to its parent, so a parent that is null or unknown
-  // only ever occurs on a file's first entry. Lobu's own writers have also
-  // emitted flat files whose entries all carry a null parent; those continue
-  // in file order, which is the only branch a flat file has.
   const path: SessionEntry[] = [];
   let current: SessionEntry | undefined = leaf;
   while (current) {
@@ -197,6 +188,25 @@ export function replaySessionMessages(
     const index: number = position.get(current) ?? 0;
     current = index > 0 ? entries[index - 1] : undefined;
   }
+  return path;
+}
+
+/** A replayed message with the entry it came from. */
+export interface ReplayedMessage {
+  entryId: string;
+  message: SessionMessage;
+}
+
+/**
+ * `replaySessionMessages`, keeping each message's source entry id — so a
+ * compaction planned over the messages by index can be written back as pi's
+ * `firstKeptEntryId`. The compaction summary itself maps to its entry.
+ */
+export function replaySessionEntries(
+  entries: SessionEntry[]
+): ReplayedMessage[] {
+  const path = sessionBranch(entries);
+  if (path.length === 0) return [];
 
   let compactionIndex = -1;
   for (let i = path.length - 1; i >= 0; i--) {
@@ -206,10 +216,10 @@ export function replaySessionMessages(
     }
   }
 
-  const messages: SessionMessage[] = [];
+  const messages: ReplayedMessage[] = [];
   const append = (entry: SessionEntry) => {
     const message = entryToModelMessage(entry);
-    if (message) messages.push(message);
+    if (message) messages.push({ entryId: entry.id, message });
   };
   if (compactionIndex < 0) {
     for (const entry of path) append(entry);
@@ -217,14 +227,15 @@ export function replaySessionMessages(
   }
 
   const compaction = path[compactionIndex] as SessionEntry;
-  messages.push(
-    userText(
+  messages.push({
+    entryId: compaction.id,
+    message: userText(
       COMPACTION_SUMMARY_PREFIX +
         (compaction.summary ?? "") +
         COMPACTION_SUMMARY_SUFFIX,
       compaction.timestamp
-    )
-  );
+    ),
+  });
   let keeping = false;
   for (let i = 0; i < compactionIndex; i++) {
     const entry = path[i] as SessionEntry;
@@ -235,6 +246,12 @@ export function replaySessionMessages(
     append(path[i] as SessionEntry);
   }
   return messages;
+}
+
+export function replaySessionMessages(
+  entries: SessionEntry[]
+): SessionMessage[] {
+  return replaySessionEntries(entries).map((replayed) => replayed.message);
 }
 
 /**

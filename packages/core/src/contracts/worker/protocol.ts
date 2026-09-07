@@ -495,6 +495,39 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       })
     ),
     /**
+     * The stored entry each `messages[i]` replays, in the same order. A
+     * compaction the guest plans by message index is written back as pi's
+     * `firstKeptEntryId` through this list. Absent → the turn cannot compact.
+     */
+    message_entry_ids: Type.Optional(Type.Array(Type.String())),
+    /**
+     * pi's compaction settings for this turn plus the model's context window,
+     * which is what the trigger is measured against. Absent → no compaction.
+     */
+    compaction: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        context_window: Type.Integer({ minimum: 1 }),
+        reserve_tokens: Type.Integer({ minimum: 0 }),
+        keep_recent_tokens: Type.Integer({ minimum: 0 }),
+      })
+    ),
+    /**
+     * Lobu's pre-compaction memory flush: a silent prompt asking the model to
+     * store what it would lose, run once per compaction cycle when the next
+     * prompt would land within `soft_threshold_tokens` of compaction. `due` is
+     * false when this cycle already flushed. Absent → no flush.
+     */
+    memory_flush: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        soft_threshold_tokens: Type.Integer({ minimum: 0 }),
+        system_prompt: Type.String(),
+        prompt: Type.String(),
+        due: Type.Boolean(),
+      })
+    ),
+    /**
      * Hosts the turn may reach. An agent turn is deny-all by default, unlike a
      * connector's open one, so this is normally just the gateway.
      */
@@ -794,6 +827,30 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * (`chat-response-bridge`) already acts on it.
    */
   replied_in_band: Type.Optional(Type.Boolean()),
+  /**
+   * The turn compacted the conversation after answering: pi's summary and the
+   * index into `transcript` of the first message kept verbatim. The completion
+   * route writes it as a `compaction` entry, so the next turn — on either lane
+   * — resumes from the summary.
+   */
+  compaction: Type.Optional(
+    Type.Object({
+      summary: Type.String(),
+      first_kept_index: Type.Integer({ minimum: 0 }),
+      tokens_before: Type.Integer({ minimum: 0 }),
+    })
+  ),
+  /**
+   * The turn ran the pre-compaction memory flush before answering; its
+   * exchange sits in `transcript` up to `after_index`. Recorded as the
+   * `lobu.memory_flush_state` entry the subprocess lane writes.
+   */
+  memory_flush: Type.Optional(
+    Type.Object({
+      outcome: Type.Union([Type.Literal("stored"), Type.Literal("no_reply")]),
+      after_index: Type.Integer({ minimum: 0 }),
+    })
+  ),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   exit_reason: Type.Optional(WorkerExitReasonSchema),
 });
