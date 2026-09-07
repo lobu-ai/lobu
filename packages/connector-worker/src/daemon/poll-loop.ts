@@ -49,6 +49,8 @@ export class WorkerPollLoop {
   private running = false;
   private admittingJobs = true;
   private activeJobs = 0;
+  private capacityVersion = 0;
+  private wakePoll?: (capacityReleased?: boolean) => void;
 
   constructor(options: WorkerPollLoopOptions) {
     this.client = options.client;
@@ -78,9 +80,14 @@ export class WorkerPollLoop {
     while (this.running) {
       if (this.activeJobs === 0) await this.beforeIdlePoll?.();
       let nextDelayMs: number | undefined;
+      // A job may finish while the HTTP poll is in flight, before its wait
+      // exists. Keep that completion observable when deciding whether to wait.
+      let capacityVersion: number | undefined = this.capacityVersion;
       try {
         nextDelayMs = await this.pollAndExecute();
       } catch (err) {
+        // Server errors retain their retry backoff even if a slot opens.
+        capacityVersion = undefined;
         if (
           this.failClosedOnPollAuthError &&
           err instanceof WorkerHttpError &&
@@ -95,7 +102,7 @@ export class WorkerPollLoop {
         const delayMs = nextDelayMs === undefined || this.maxIdleDelayMs === undefined
           ? requestedDelayMs
           : Math.min(requestedDelayMs, this.maxIdleDelayMs);
-        await this.sleep(delayMs);
+        await this.waitForNextPoll(delayMs, capacityVersion);
       }
     }
     log.info('[daemon] Stopped');
@@ -105,6 +112,7 @@ export class WorkerPollLoop {
     log.info('[daemon] Stopping...');
     this.running = false;
     this.admittingJobs = false;
+    this.wakePoll?.();
   }
 
   async waitForActiveJobs(timeoutMs = 30000, pollMs = 500): Promise<boolean> {
@@ -156,7 +164,30 @@ export class WorkerPollLoop {
       })
       .finally(() => {
         this.activeJobs--;
+        this.capacityVersion++;
+        this.wakePoll?.(true);
       });
+    // Fill remaining slots while the queue has work, then wait for capacity
+    // or the normal heartbeat instead of delaying every successful claim.
+    return this.activeJobs < this.maxConcurrentJobs ? 0 : undefined;
+  }
+
+  private waitForNextPoll(ms: number, capacityVersion: number | undefined): Promise<void> {
+    if (
+      !this.running ||
+      (capacityVersion !== undefined && capacityVersion !== this.capacityVersion)
+    ) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      const wake = (capacityReleased = false) => {
+        if (capacityReleased && capacityVersion === undefined) return;
+        clearTimeout(timer);
+        this.wakePoll = undefined;
+        resolve();
+      };
+      const timer = setTimeout(wake, ms);
+      this.wakePoll = wake;
+    });
   }
 
   private sleep(ms: number): Promise<void> {
