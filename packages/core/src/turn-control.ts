@@ -8,9 +8,10 @@
  * one answer whichever lane is running it, which is the whole point of putting
  * the predicates here rather than beside either dispatcher.
  *
- * Everything here is pure and depends only on the wire payload, so the isolate
- * both lanes import it from the `@lobu/core` barrel
- * without dragging the logger and its Node transports into the bundle.
+ * Everything here is pure and depends only on the wire payload. Both lanes
+ * import it from the `@lobu/core` barrel; an isolate guest that ever needs it
+ * must reach it another way, since the barrel drags the logger and its Node
+ * transports into a bundle.
  */
 import type { MessagePayload } from "./worker/wire";
 

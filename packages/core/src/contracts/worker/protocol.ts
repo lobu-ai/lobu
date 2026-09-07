@@ -854,6 +854,13 @@ export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
 export const TurnToolEventSchema = Type.Object({
   tool_call_id: Type.String({ maxLength: 256 }),
   name: Type.String({ maxLength: 256 }),
+  /**
+   * The call's arguments, as the model sent them. The subprocess lane's
+   * `tool_use` event carries them as `input` and the SPA renders them as the
+   * tool row's args, so this lane carries them too. Absent when the start of
+   * the call was not observed.
+   */
+  input: Type.Optional(Type.Unknown()),
   is_error: Type.Boolean(),
   output: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
 });

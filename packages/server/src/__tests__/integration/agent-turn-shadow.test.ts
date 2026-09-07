@@ -1375,6 +1375,7 @@ describe('agent turn completion', () => {
         {
           tool_call_id: 'call-1',
           name: 'search_memory',
+          input: { query: 'pricing' },
           is_error: false,
           output: '3 results',
         },
@@ -1391,7 +1392,8 @@ describe('agent turn completion', () => {
       conversationId: 'conv-shadow',
       customEvent: {
         name: 'tool_use',
-        data: { toolCallId: 'call-1', name: 'search_memory', isError: false },
+        // `input` is what the SPA renders as the tool row's args, as on the subprocess lane.
+        data: { toolCallId: 'call-1', name: 'search_memory', input: { query: 'pricing' }, isError: false },
       },
     });
   });

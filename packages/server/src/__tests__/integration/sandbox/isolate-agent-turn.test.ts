@@ -855,7 +855,7 @@ describe("agent turn on the isolate lane", () => {
 		expect(sent.messages[0]?.content).toMatchObject([
 			{
 				type: "text",
-				text: "summarize this\n\nThe user attached 1 non-image file(s) that this turn cannot open:\n- report.pdf (application/pdf)",
+				text: "summarize this\n\nThe user attached 1 non-image file(s) that this turn cannot open:\n- report.pdf (application/pdf, 2048 bytes)",
 			},
 		]);
 	}, 120_000);

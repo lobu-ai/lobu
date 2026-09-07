@@ -315,6 +315,8 @@ async function publishTurnToolEvents(
 						data: {
 							toolCallId: event.tool_call_id,
 							name: event.name,
+							// `buildToolUseEventPayload`'s shape: the SPA reads the args here.
+							input: event.input ?? null,
 							isError: event.is_error,
 							result_summary: event.is_error
 								? { error: event.output }

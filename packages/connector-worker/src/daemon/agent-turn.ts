@@ -109,6 +109,8 @@ export async function executeAgentTurnRun(
   let sending = false;
   // Tool traces waiting for the next beat, oldest first.
   let toolEvents: AgentTurnToolEvent[] = [];
+  /** Arguments of the calls still running, by call id, for the trace their end produces. */
+  const toolArgs = new Map<string, unknown>();
 
   /**
    * Send the next batch, if there is one and none is already in flight.
@@ -348,6 +350,9 @@ export async function executeAgentTurnRun(
           }
           if (event.type === 'tool_call_start') {
             toolCalls += 1;
+            // Remembered until the call ends: the trace carries the arguments
+            // the model sent, as the subprocess lane's `tool_use` event does.
+            toolArgs.set(event.toolCallId, event.args);
             return;
           }
           if (event.type === 'tool_call_end') {
@@ -360,9 +365,12 @@ export async function executeAgentTurnRun(
             // Bounded, and the newest are the ones kept: a tool trace is a view
             // of the turn, not its answer, and a turn that spends its budget on
             // tool calls must not grow an unbounded queue in the worker.
+            const input = toolArgs.get(event.toolCallId);
+            toolArgs.delete(event.toolCallId);
             toolEvents.push({
               tool_call_id: event.toolCallId,
               name: event.name,
+              ...(input !== undefined ? { input } : {}),
               is_error: event.isError,
               output: event.output,
             });

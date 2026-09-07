@@ -220,7 +220,9 @@ function clip(text: string): string {
  */
 function describeFiles(files: AgentTurnInput['files']): string {
   if (!files || files.length === 0) return '';
-  const listing = files.map((file) => `- ${file.name} (${file.mimeType})`).join('\n');
+  const listing = files
+    .map((file) => `- ${file.name} (${file.mimeType}${file.size !== undefined ? `, ${file.size} bytes` : ''})`)
+    .join('\n');
   return `The user attached ${files.length} non-image file(s) that this turn cannot open:\n${listing}`;
 }
 
