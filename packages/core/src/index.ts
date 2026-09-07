@@ -149,13 +149,6 @@ export {
   type ParsedMessage,
   type ParsedMessageType,
   parseSessionEntries,
-  type ReplayedMessage,
-  replaySessionEntries,
-  replaySessionMessages,
-  sessionBranch,
-  type SessionMessage,
-  COMPACTION_SUMMARY_PREFIX,
-  COMPACTION_SUMMARY_SUFFIX,
   type SessionEntry,
   titleFromSessionJsonl,
 } from "./utils/session-file";

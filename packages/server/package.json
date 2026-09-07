@@ -38,6 +38,7 @@
 		"@lobu/connectors": "workspace:*",
 		"@lobu/connector-worker": "workspace:*",
 		"@mariozechner/pi-ai": "^0.73.1",
+		"@mariozechner/pi-coding-agent": "^0.73.1",
 		"@modelcontextprotocol/sdk": "^1.27.1",
 		"@polyglot-sql/sdk": "^0.1.13",
 		"@react-email/components": "^1.0.12",

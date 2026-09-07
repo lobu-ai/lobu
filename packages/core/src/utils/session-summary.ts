@@ -1,7 +1,6 @@
 /**
  * The model-facing message shape and pi's summary framing, with no imports:
- * this file is what the isolate guest's compaction shares with the server's
- * session replay, and the guest bundle must stay free of Node.
+ * used by the isolate guest's compaction, whose bundle must stay free of Node.
  */
 
 /**
@@ -22,8 +21,3 @@ export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this p
 `;
 export const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
-export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
-
-<summary>
-`;
-export const BRANCH_SUMMARY_SUFFIX = `</summary>`;

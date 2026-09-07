@@ -13,9 +13,10 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, replaySessionMessages, type MessagePayload, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { replayAgentSession } from '../../gateway/orchestration/agent-session';
 import { enqueueAgentTurnShadow,
   steerActiveAgentTurn,
 } from '../../gateway/orchestration/agent-turn-shadow';
@@ -252,7 +253,7 @@ describe('agent turn shadow producer', () => {
       { name: 'read', input: { file_path: 'a.txt' } },
       { name: 'bash', input: { command: 'base64 a.txt' } },
     ];
-    const providerRequests: Array<{ tools: Array<{ name: string; input_schema: unknown }> }> = [];
+    const providerRequests: Array<{ tools: Array<{ name: string; input_schema: unknown }>; messages: unknown[] }> = [];
     const workerRequests: Array<{ path: string; body: Record<string, any> }> = [];
     const serverErrors: string[] = [];
     // Only the external model is scripted. Worker requests cross real HTTP,
@@ -305,11 +306,32 @@ describe('agent turn shadow producer', () => {
     try {
       const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       const org = await createTestOrganization();
+      const sql = getTestDb();
+      const [prior] = await sql<{ id: number }>`
+        INSERT INTO runs (run_type, status, organization_id, run_at)
+        VALUES ('chat_message', 'completed', ${org.id}, now()) RETURNING id
+      `;
+      const timestamp = '2026-01-01T00:00:00.000Z';
+      const history = [
+        { type: 'message', id: 'old-root', parentId: null, timestamp,
+          message: { role: 'user', content: 'discarded-branch-history', timestamp: 1 } },
+        { type: 'custom', id: 'old-flush', parentId: 'old-root', timestamp,
+          customType: 'lobu.memory_flush_state', data: { compactionCount: 0 } },
+        { type: 'message', id: 'new-root', parentId: null, timestamp,
+          message: { role: 'user', content: 'retained-branch-history', timestamp: 2 } },
+      ].map((entry) => JSON.stringify(entry)).join('\n');
+      await sql`
+        INSERT INTO agent_transcript_snapshot
+          (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+        VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${history}, ${Buffer.byteLength(history)}, 'completed')
+      `;
       await enqueueAgentTurnShadow(messageFor(org.id), {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
       });
       const [run] = await shadowRuns();
-      const sql = getTestDb();
+      expect(run.action_input.turn).toMatchObject({
+        message_entry_ids: ['new-root'], memory_flush: { due: true },
+      });
       // Exercise authoritative transcript/reply persistence in the isolated test DB.
       await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${run.id}`;
       const client = new WorkerClient({
@@ -324,6 +346,8 @@ describe('agent turn shadow producer', () => {
       expect(serverErrors).toEqual([]);
       expect(result.error).toBeUndefined();
       expect(providerRequests).toHaveLength(6);
+      expect(JSON.stringify(providerRequests[0].messages)).toContain('retained-branch-history');
+      expect(JSON.stringify(providerRequests[0].messages)).not.toContain('discarded-branch-history');
       expect(providerRequests[0].tools.find((tool) => tool.name === 'edit')?.input_schema).toMatchObject({
         required: ['file_path', 'old_string', 'new_string'],
       });
@@ -698,8 +722,12 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const at = new Date(Date.now() - 60_000).toISOString();
-    const entry = (id: string, message: Record<string, unknown>) =>
-      JSON.stringify({ type: 'message', id, parentId: null, timestamp: at, message });
+    let parentId: string | null = null;
+    const entry = (id: string, message: Record<string, unknown>) => {
+      const line = JSON.stringify({ type: 'message', id, parentId, timestamp: at, message });
+      parentId = id;
+      return line;
+    };
     const assistant = (content: unknown[]) => ({
       role: 'assistant',
       content,
@@ -1440,7 +1468,7 @@ describe('agent turn completion', () => {
     // One chain, so the next turn's replay reaches every entry.
     for (let i = 1; i < entries.length; i++) expect(entries[i].parentId).toBe(entries[i - 1].id);
     // And that replay opens on the summary, then the kept messages.
-    const replayed = replaySessionMessages(parseSessionEntries(snapshot.snapshot_jsonl).entries);
+    const replayed = replayAgentSession(parseSessionEntries(snapshot.snapshot_jsonl).entries).replayed.map((entry) => entry.message);
     expect(replayed.map((m) => m.role)).toEqual(['user', 'user', 'assistant', 'toolResult', 'assistant']);
     expect(JSON.stringify(replayed[0]!.content)).toContain('Earlier, a question was answered.');
     expect(replayed[1]!.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);

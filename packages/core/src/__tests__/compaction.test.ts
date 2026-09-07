@@ -1,7 +1,7 @@
 /**
  * Tests for compaction.ts — pi's compaction over messages.
  *
- * The fixtures are the shapes `replaySessionMessages` produces: pi's own
+ * The fixtures are the shapes Pi produces: pi's own
  * user/assistant/toolResult messages, with a previous compaction already
  * folded into a framed user message at index 0.
  */
@@ -22,7 +22,7 @@ import {
   COMPACTION_SUMMARY_PREFIX,
   COMPACTION_SUMMARY_SUFFIX,
   type SessionMessage,
-} from "../utils/session-file";
+} from "../utils/session-summary";
 
 const user = (text: string): SessionMessage => ({
   role: "user",

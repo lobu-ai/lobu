@@ -43,10 +43,7 @@ import {
   DEFAULT_COMPACTION_SETTINGS,
   memoryFlushDue,
   parseSessionEntries,
-  replaySessionEntries,
   resolveMemoryFlushConfig,
-  type SessionEntry,
-  sessionBranch,
   renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
   type ToolPolicy,
@@ -62,6 +59,7 @@ import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import type { ModelProviderModule } from "../modules/module-system.js";
+import { replayAgentSession } from "./agent-session.js";
 import { readSnapshotJsonl } from "../services/transcript-snapshot.js";
 import {
   type AgentTurnArtifactReader,
@@ -326,8 +324,8 @@ function hasToolCall(message: HistoryMessage): boolean {
  * Rebuild the conversation so far as pi messages.
  *
  * The snapshot stores pi's own entries — the same file the subprocess lane's
- * SessionManager reads — and `replaySessionMessages` walks its current branch
- * exactly as pi does, compaction summary included, so the whole conversation
+ * SessionManager reads — and Pi builds its current branch
+ * with the compaction summary included, so the whole conversation
  * replays: nothing is windowed or truncated. The lane runs the same tool loop
  * pi ran to produce the entries, so tool calls, tool results, usage and stop
  * reason are kept, because a provider refuses a tool call without its result
@@ -335,12 +333,12 @@ function hasToolCall(message: HistoryMessage): boolean {
  * not portable. The replay is then squared off so it opens on a user message
  * and never ends on a tool call still waiting for its result.
  */
-function historyMessages(entries: SessionEntry[]): {
+function historyMessages(replayedEntries: ReturnType<typeof replayAgentSession>["replayed"]): {
   messages: HistoryMessage[];
   entryIds: string[];
 } {
   const replayed: Array<{ entryId: string; message: HistoryMessage }> = [];
-  for (const { entryId, message } of replaySessionEntries(entries)) {
+  for (const { entryId, message } of replayedEntries) {
     const content = trimContent(message.content);
     if (content.length === 0) continue;
     replayed.push({ entryId, message: { ...message, content } });
@@ -902,10 +900,11 @@ export async function enqueueAgentTurnShadow(
       conversationId: data.conversationId,
     });
     const entries = snapshot ? parseSessionEntries(snapshot).entries : [];
-    const history = historyMessages(entries);
+    const session = replayAgentSession(entries);
+    const history = historyMessages(session.replayed);
     // The flush runs once per compaction cycle; the branch says whether this
     // cycle already did, exactly as the subprocess lane reads its session.
-    const flushState = memoryFlushDue(sessionBranch(entries));
+    const flushState = memoryFlushDue(session.branch);
     const memoryFlush = resolveMemoryFlushConfig(
       (data.agentOptions ?? {}) as Record<string, unknown>
     );

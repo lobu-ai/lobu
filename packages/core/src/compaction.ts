@@ -3,7 +3,7 @@
  *
  * A port of pi-coding-agent's `core/compaction` for a runtime that has the
  * messages but no SessionManager: the isolate guest sees the conversation as
- * `replaySessionMessages` rebuilt it, decides here whether it has outgrown the
+ * Pi rebuilt it, decides here whether it has outgrown the
  * model's window, plans what to summarise and what to keep, and asks the model
  * for the summary through the same stream it answers with. The prompts, the
  * token estimates, the cut-point rules and the summary framing are pi's, kept
