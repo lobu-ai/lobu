@@ -96,6 +96,7 @@
     "@lobu/plugin-media": "workspace:*",
     "@lobu/plugin-memory": "workspace:*",
     "@lobu/plugin-toolkit": "workspace:*",
+    "@mariozechner/pi-coding-agent": "^0.73.1",
     "@types/node": "^20.10.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
