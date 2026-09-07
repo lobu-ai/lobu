@@ -1024,11 +1024,10 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  * body that has no such field; absent means "keep going", so the flag only ever
  * has to be sent to stop something.
  *
- * `continue: false` means stop: the run left `running` under this worker's
- * lease, because a human cancelled it or the lease was lost. The worker
- * finishes through its normal completion path rather than abandoning the run,
- * so the terminal row and the client's reply are still written by the lane
- * that owns them.
+ * `continue: false` means stop: a human cancelled the run while this worker
+ * still owned it, so the worker ends the turn instead of finishing an answer
+ * nobody will read. A lost lease is not a signal here — it is the 409 the
+ * heartbeat has always answered.
  *
  * `turn_delta_ack` is the honest answer to "did that batch land". The worker
  * does not retire the text it sent until the sequence comes back acknowledged,
@@ -1043,9 +1042,7 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
 export const HeartbeatResponseSchema = Type.Object({
   continue: Type.Optional(Type.Boolean()),
   /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
-  stop_reason: Type.Optional(
-    Type.Union([Type.Literal("cancelled"), Type.Literal("lease_lost")])
-  ),
+  stop_reason: Type.Optional(Type.Literal("cancelled")),
   turn_delta_ack: Type.Optional(
     Type.Object({
       sequence: Type.Integer({ minimum: 0 }),
