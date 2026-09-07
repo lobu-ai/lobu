@@ -139,12 +139,11 @@ const GATEWAY_TOOLS = [
 
 /**
  * The workspace tools the guest can run, in the order the model is offered
- * them. `grep` and `edit` are absent on purpose: pi's `grep` spawns ripgrep as
- * a child process, which an isolate cannot do, and neither tool is needed to
- * reach the workspace — just-bash's own `rg`, `grep` and `sed` run inside
- * `bash`. Adding either means writing an in-isolate implementation first.
+ * them: the seven pi builtins the subprocess lane hardens, each implemented
+ * inside the isolate over the turn's in-memory filesystem (`grep` searches it
+ * directly rather than spawning ripgrep, which an isolate cannot do).
  */
-const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "ls", "find"];
+const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "edit", "grep", "ls", "find"];
 
 /**
  * The media tools the isolate lane carries — `@lobu/plugin-media`'s own.

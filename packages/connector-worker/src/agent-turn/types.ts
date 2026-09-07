@@ -72,7 +72,7 @@ export interface AgentTurnTool {
 }
 
 /** The guest's own workspace tools, by name. */
-export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'ls' | 'find';
+export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'edit' | 'grep' | 'ls' | 'find';
 
 /**
  * A gateway tool the turn may call — `ask_user`, `send_message`,
