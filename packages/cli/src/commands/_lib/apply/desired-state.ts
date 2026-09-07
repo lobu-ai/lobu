@@ -142,8 +142,8 @@ export interface DesiredAutomation {
   reactionsGuidance?: string;
   /** UUID of a device worker to pin this automation's runs to (see `device_workers.id`). */
   deviceWorkerId?: string;
-  /** Model alias/id passed to the device's local CLI (`--model`) on device runs. */
-  model?: string;
+  /** Execution model override; omitted preserves remote, null clears it. */
+  model?: string | null;
   /** Minimum seconds between two firings of this automation (0 = no cooldown). */
   minCooldownSeconds?: number;
   /** Free-form tags for filtering. */

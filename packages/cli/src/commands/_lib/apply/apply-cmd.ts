@@ -60,7 +60,11 @@ import {
   renderPostApplyPunchList,
   renderProgress,
 } from "./render.js";
-import { declaredConnectorKeys, referencedConnectorKeys } from "./shared.js";
+import {
+  automationExecutionConfig,
+  declaredConnectorKeys,
+  referencedConnectorKeys,
+} from "./shared.js";
 
 interface ApplyOptions {
   cwd?: string;
@@ -955,7 +959,10 @@ export async function executePlan(
           min_cooldown_seconds: w.minCooldownSeconds,
           tags: w.tags,
           agent_kind: w.agentKind,
-          execution_config: w.model ? { model: w.model } : undefined,
+          execution_config:
+            w.model !== undefined
+              ? automationExecutionConfig(w.model)
+              : undefined,
           outputs: w.outputs,
           classifiers: w.classifiers,
         });
@@ -1018,16 +1025,12 @@ export async function executePlan(
             ...(scalarForUpdate.includes("agent_kind")
               ? { agent_kind: w.agentKind ?? null }
               : {}),
-            ...(scalarForUpdate.includes("execution_config") && w.model
+            ...(scalarForUpdate.includes("execution_config")
               ? {
-                  // The server assigns execution_config wholesale, so preserve
-                  // remote keys (timeout_seconds, permission_mode, …) and
-                  // override only the model — otherwise a model drift would
-                  // silently drop config set outside this project.
-                  execution_config: {
-                    ...(remote?.execution_config ?? {}),
-                    model: w.model,
-                  },
+                  execution_config: automationExecutionConfig(
+                    w.model,
+                    remote?.execution_config
+                  ),
                 }
               : {}),
           });

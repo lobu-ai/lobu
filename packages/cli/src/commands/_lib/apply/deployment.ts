@@ -22,6 +22,7 @@ import {
   effectiveRelationshipTypeAfterApply,
   projectDesiredAutomation,
 } from "./diff.js";
+import { automationExecutionConfig } from "./shared.js";
 
 export function mintApplyId(): string {
   return `apl_${randomUUID()}`;
@@ -286,12 +287,10 @@ export function buildAttributionAndOwned(
       min_cooldown_seconds: p.minCooldownSeconds,
       tags: p.tags,
       agent_kind: p.agentKind,
-      // The three-way baseline must record the execution_config the apply just
-      // wrote (including the merged remote keys), or a later model edit is
+      // The three-way baseline must record the effective execution_config after
+      // apply (including preserved remote keys), or a later model edit is
       // misclassified as "remote moved" blocking drift instead of an update.
-      execution_config: p.model
-        ? { ...(r?.execution_config ?? {}), model: p.model }
-        : (r?.execution_config ?? null),
+      execution_config: automationExecutionConfig(d.model, r?.execution_config),
       outputs: p.outputs,
       classifiers: p.classifiers,
     };
