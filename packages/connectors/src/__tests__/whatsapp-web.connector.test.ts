@@ -636,8 +636,8 @@ describe("sync over the generic chrome bridge", () => {
   /**
    * WhatsApp's `require()` BLOCKS rather than throwing while its module graph is
    * still registering, so a readiness probe can hang with the adapter never
-   * naming a state. Measured in prod (chrome action runs 1365803-1365817): nine
-   * probes answered in 3-7s, then one ran 95.2s and was killed. Bounded by the
+   * naming a state. Measured in prod: nine consecutive probes answered in
+   * 3-7s, then one ran 95.2s and was killed. Bounded by the
    * extension's CDP evaluate timeout the page reports a plain timeout, which
    * carries none of the adapter's hydration vocabulary.
    */
