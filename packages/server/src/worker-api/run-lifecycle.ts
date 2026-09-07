@@ -19,6 +19,8 @@ import type {
 	PollAuthSignalRequest,
 	StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
+import { HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
+import { Value } from "@sinclair/typebox/value";
 import type { Context } from "hono";
 import {
 	activateAutomationSignal,
@@ -219,17 +221,28 @@ async function reactivateProfileCascade(
  */
 export async function heartbeat(c: Context<{ Bindings: Env }>) {
 	try {
-		const {
-			run_id,
-			worker_id,
-			progress,
-			agent_session,
-			turn_delta,
-			turn_tool_events,
-		} = await c.req.json<HeartbeatRequest>();
+		const raw: unknown = await c.req.json();
+		const body = raw as HeartbeatRequest;
+		const { run_id, worker_id, progress, agent_session } = body;
 
 		const denied = await authorizeRunForWorker(c, run_id, worker_id);
 		if (denied) return denied;
+
+		// The streamed fields are bounded by the schema (`TURN_DELTA_MAX_CHARS`,
+		// `TURN_TOOL_OUTPUT_MAX_CHARS`) and the bound only holds if it is checked
+		// here: a span that fails it is dropped unpublished and unacknowledged, so
+		// the worker cannot push an unbounded delta into `thread_response`, and
+		// the beat itself still counts — liveness is not the streamed text's
+		// problem.
+		const wellFormed = Value.Check(HeartbeatRequestSchema, raw);
+		if (!wellFormed && (body.turn_delta || body.turn_tool_events)) {
+			logger.warn(
+				{ runId: run_id, workerId: worker_id },
+				"heartbeat carried a malformed or oversize turn payload; dropped",
+			);
+		}
+		const turn_delta = wellFormed ? body.turn_delta : undefined;
+		const turn_tool_events = wellFormed ? body.turn_tool_events : undefined;
 
 		// An agent turn rides its streamed reply on the heartbeat it already
 		// sends, so the client sees the answer arrive rather than a blank screen

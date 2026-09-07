@@ -552,6 +552,9 @@ describe('agent turn shadow producer', () => {
       const turn = rows[produced - 1].action_input.turn as { tools?: { definitions: unknown[]; builtin?: string[] } };
       // The workspace tools are the policy's business, not the MCP surface's:
       // they ship regardless, with no MCP definitions beside them.
+      // No tools means no gateway URL for the memory hooks either, so the
+      // envelope promises no memory it cannot deliver.
+      expect((turn as { memory?: unknown }).memory).toBeUndefined();
       expect(turn.tools?.definitions).toEqual([]);
       expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
     };
@@ -1193,6 +1196,34 @@ describe('agent turn completion', () => {
     `) as unknown as Array<{ action_input: Record<string, unknown> }>;
     return rows.map((row) => row.action_input);
   }
+
+  it('drops an oversize or malformed span unpublished and unacknowledged, and keeps the beat', async () => {
+    const workerId = 'fleet-oversize-span';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+    // One past TURN_DELTA_MAX_CHARS (24_000): the schema bound, now enforced.
+    const oversize = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'x'.repeat(24_001), sequence: 1 },
+    });
+    expect(oversize.status).toBe(200);
+    expect(await oversize.json()).toEqual({ continue: true });
+    const malformed = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [{ tool_call_id: 'c', name: 'x', is_error: 'yes', output: 'o' }],
+    });
+    expect(malformed.status).toBe(200);
+    expect(await threadResponses()).toHaveLength(0);
+    // A well-formed span still streams.
+    const fine = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'ok', sequence: 1 },
+    });
+    expect(await fine.json()).toMatchObject({ turn_delta_ack: { sequence: 1, published: true } });
+  });
 
   it('streams an in-flight turn to the client on the heartbeat it already sends', async () => {
     const workerId = 'fleet-streams';

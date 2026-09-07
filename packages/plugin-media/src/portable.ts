@@ -19,20 +19,12 @@ export {
   fetchAudioProviderSuggestions,
   normalizeAudioProviderSuggestions,
 } from "./audio-provider-suggestions";
-export {
-  contentTypeForName,
-  maxUploadBytes,
-  uploadPortedFile,
-  type MediaFilePort,
-  type MediaFileResolution,
-  type UploadedFileNotification,
+export type {
+  MediaFilePort,
+  MediaFileResolution,
+  UploadedFileNotification,
 } from "./file-port";
 export { generateAudio, generateImage } from "./generation";
-export {
-  uploadGeneratedFile,
-  uploadMultipart,
-  type MultipartFile,
-} from "./multipart";
 export {
   createMediaPlugin,
   createMediaTools,

@@ -796,6 +796,12 @@ export async function enqueueAgentTurnShadow(
       suffixChars: HISTORY_TAIL_CHARS,
     });
 
+    if (hasMemoryServer && !tools) {
+      logger.info(
+        { agentId: data.agentId },
+        "Agent turn shadow: the agent has the memory server but the turn carries no tools, so it runs without memory"
+      );
+    }
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
       conversation_id: data.conversationId,
@@ -833,7 +839,10 @@ export async function enqueueAgentTurnShadow(
       // not tools and carry no schema: the guest runs
       // `@lobu/plugin-memory`'s own two hooks over the MCP route the turn
       // already uses.
-      ...(hasMemoryServer
+      // The hooks reach the MCP route through `tools.gateway_url`, so a turn
+      // that carries no tools cannot recall or capture; say so here rather
+      // than promise a hook the guest would drop.
+      ...(hasMemoryServer && tools
         ? { memory: { mcp_id: MEMORY_MCP_ID, agent_id: data.agentId } }
         : {}),
       // DENY-ALL. A connector's allowlist defaults open; an agent turn's does
