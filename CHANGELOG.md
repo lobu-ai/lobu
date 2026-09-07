@@ -1,5 +1,28 @@
 # Changelog
 
+## [19.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v19.1.0...lobu-v19.2.0) (2026-09-07)
+
+
+### Features
+
+* **agent-turn:** deliver the isolate lane's reply and transcript ([#3386](https://github.com/lobu-ai/lobu/issues/3386)) ([e35ae6b](https://github.com/lobu-ai/lobu/commit/e35ae6b4af43ea7c6c9ff599915a47a6ee5d2907))
+* **agent-turn:** run the workspace tools inside the isolate ([#3384](https://github.com/lobu-ai/lobu/issues/3384)) ([bfa28f3](https://github.com/lobu-ai/lobu/commit/bfa28f396a455320209e8929777bdab1be314ce3))
+
+
+### Bug Fixes
+
+* **agent-turn:** deliver the timeout when a fleet worker dies mid-turn ([#3390](https://github.com/lobu-ai/lobu/issues/3390)) ([54485ec](https://github.com/lobu-ai/lobu/commit/54485ec85fb475b82300f8e33397cea0a3c4f2fb))
+* **auth:** block deleting a user's personal organization ([#3398](https://github.com/lobu-ai/lobu/issues/3398)) ([667d000](https://github.com/lobu-ai/lobu/commit/667d000d21e831154be3b3c634a83925e6954e0c))
+* **cli:** pin Better Auth for published installs ([#3401](https://github.com/lobu-ai/lobu/issues/3401)) ([9d5253e](https://github.com/lobu-ai/lobu/commit/9d5253e733be933053b32b1901dc2715f74f2ee6))
+* **connectors:** classify an abandoned readiness dispatch as transient ([#3394](https://github.com/lobu-ai/lobu/issues/3394)) ([1b17cfa](https://github.com/lobu-ai/lobu/commit/1b17cfae7775fd6e99a4e3bac572129115be448d))
+* **connectors:** index WhatsApp collections instead of rescanning per message ([#3397](https://github.com/lobu-ai/lobu/issues/3397)) ([46bb6eb](https://github.com/lobu-ai/lobu/commit/46bb6eb96015a4518ecdcae8cfd014dfe97757bb))
+* **connectors:** let a cold WhatsApp tab finish hydrating ([#3387](https://github.com/lobu-ai/lobu/issues/3387)) ([624091f](https://github.com/lobu-ai/lobu/commit/624091fb1fc19b9d9d6576a45dc8c68240c98504))
+* **linkedin:** decode home-feed post identities ([#3404](https://github.com/lobu-ai/lobu/issues/3404)) ([bab5a55](https://github.com/lobu-ai/lobu/commit/bab5a55800a4d791fac1f08b20d940468faf28b9))
+* **linkedin:** isolate live feeds from filesystem takeout code ([#3393](https://github.com/lobu-ai/lobu/issues/3393)) ([c733d2e](https://github.com/lobu-ai/lobu/commit/c733d2e0e8e65b44c700078a4b503af83cbd653d))
+* **sdk:** report enforced access tiers and normalize connector arguments ([#3391](https://github.com/lobu-ai/lobu/issues/3391)) ([8f7c405](https://github.com/lobu-ai/lobu/commit/8f7c405d136c47a2a39f8bbcb2ce64bbe04693b3))
+* **settings:** don't offer delete on a personal workspace ([#3400](https://github.com/lobu-ai/lobu/issues/3400)) ([1ca2399](https://github.com/lobu-ai/lobu/commit/1ca23998ea1637c1bcd1cb579bda4c7248cde5bc))
+* **worker:** wake polling when command capacity is released ([#3409](https://github.com/lobu-ai/lobu/issues/3409)) ([68cbb2c](https://github.com/lobu-ai/lobu/commit/68cbb2cf1f857d0c0e8faa31d5c4aec8148d3794))
+
 ## [19.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v19.0.0...lobu-v19.1.0) (2026-09-06)
 
 

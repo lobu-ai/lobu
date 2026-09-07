@@ -1,6 +1,6 @@
 {
   "name": "@lobu/embeddings",
-  "version": "19.1.0",
+  "version": "19.2.0",
   "license": "BUSL-1.1",
   "type": "module",
   "description": "Embeddings HTTP service for Lobu memory",
