@@ -20,9 +20,11 @@ case "$*" in
     if [ "${FAIL_DEPLOYMENT_LOOKUP:-0}" -eq 1 ]; then
       exit 19
     fi
-    printf '2'
+    printf '%s' "${FAKE_APP_REPLICAS-2}"
     ;;
-  "get deployment lobu-worker --ignore-not-found --output jsonpath={.spec.replicas}") printf '3' ;;
+  "get deployment lobu-worker --ignore-not-found --output jsonpath={.spec.replicas}") printf '%s' "${FAKE_WORKER_REPLICAS-3}" ;;
+  'scale deployment lobu-app --replicas=2') exit "${RESTORE_SCALE_EXIT_CODE:-0}" ;;
+  'rollout status deployment lobu-app --timeout 300s') exit "${READINESS_EXIT_CODE:-0}" ;;
   get\ pods*)
     if [ "${FAIL_POD_LOOKUP:-0}" -eq 1 ]; then
       exit 17
@@ -68,6 +70,76 @@ grep -Fxq 'scale deployment lobu-app --replicas=0' "$command_log"
 grep -Fxq 'scale deployment lobu-worker --replicas=0' "$command_log"
 grep -Fxq 'scale deployment lobu-app --replicas=2' "$command_log"
 grep -Fxq 'scale deployment lobu-worker --replicas=3' "$command_log"
+if ! grep -Fxq 'rollout status deployment lobu-app --timeout 300s' "$command_log" \
+  || ! grep -Fxq 'rollout status deployment lobu-worker --timeout 300s' "$command_log"; then
+  echo 'migration failure returned without verifying restored deployment readiness' >&2
+  exit 1
+fi
+
+# Both scale requests must precede either readiness wait, including when a
+# restore request or readiness wait fails. Preserve the migration's exit code.
+cat >"$test_dir/expected-recovery" <<'EXPECTED'
+scale deployment lobu-app --replicas=2
+scale deployment lobu-worker --replicas=3
+rollout status deployment lobu-app --timeout 300s
+rollout status deployment lobu-worker --timeout 300s
+EXPECTED
+for restore_failure in none scale readiness; do
+  : >"$command_log"
+  scale_code=0
+  readiness_code=0
+  [ "$restore_failure" != scale ] || scale_code=23
+  [ "$restore_failure" != readiness ] || readiness_code=24
+  recovery_status=0
+  COMMAND_LOG="$command_log" MIGRATION_LOG="$migration_log" \
+  KUBECTL_BIN="$test_dir/kubectl" NAMESPACE=lobu \
+  APP_DEPLOYMENT=lobu-app APP_SELECTOR=component=api \
+  WORKER_DEPLOYMENT=lobu-worker WORKER_SELECTOR=component=worker \
+  MIGRATION_EXIT_CODE=42 RESTORE_SCALE_EXIT_CODE="$scale_code" \
+  READINESS_EXIT_CODE="$readiness_code" \
+    sh "$orchestrator" "$test_dir/migrate" >"$test_dir/recovery-output" 2>&1 || recovery_status=$?
+  test "$recovery_status" -eq 42
+  tail -n 4 "$command_log" >"$test_dir/actual-recovery"
+  diff -u "$test_dir/expected-recovery" "$test_dir/actual-recovery"
+  if [ "$restore_failure" = none ]; then
+    grep -Fxq 'old deployments restored to readiness' "$test_dir/recovery-output"
+  else
+    grep -q '^ERROR:.*could not be restored to readiness' "$test_dir/recovery-output"
+    if grep -Fxq 'old deployments restored to readiness' "$test_dir/recovery-output"; then
+      echo 'failed recovery unexpectedly reported readiness' >&2
+      exit 1
+    fi
+  fi
+done
+
+# An absent or intentionally stopped deployment has no readiness to wait for.
+# Worker-disabled chart upgrades still recover any existing worker deployment.
+for worker_replicas in absent 0; do
+  : >"$command_log"
+  fake_replicas=$worker_replicas
+  [ "$worker_replicas" != absent ] || fake_replicas=''
+  recovery_status=0
+  COMMAND_LOG="$command_log" MIGRATION_LOG="$migration_log" \
+  KUBECTL_BIN="$test_dir/kubectl" NAMESPACE=lobu \
+  APP_DEPLOYMENT=lobu-app APP_SELECTOR=component=api \
+  WORKER_DEPLOYMENT=lobu-worker WORKER_SELECTOR=component=worker \
+  MIGRATION_EXIT_CODE=42 FAKE_WORKER_REPLICAS="$fake_replicas" \
+    sh "$orchestrator" "$test_dir/migrate" >"$test_dir/recovery-output" 2>&1 || recovery_status=$?
+  test "$recovery_status" -eq 42
+  grep -q '^rollout status deployment lobu-app' "$command_log"
+  if grep -q '^rollout status deployment lobu-worker' "$command_log"; then
+    echo 'absent or stopped worker unexpectedly waited for readiness' >&2
+    exit 1
+  fi
+  if [ "$worker_replicas" = absent ]; then
+    if grep -q '^scale deployment lobu-worker' "$command_log"; then
+      echo 'absent worker unexpectedly received a scale request' >&2
+      exit 1
+    fi
+  else
+    test "$(grep -c '^scale deployment lobu-worker --replicas=0$' "$command_log")" -eq 2
+  fi
+done
 
 : >"$command_log"
 COMMAND_LOG="$command_log" \
@@ -85,6 +157,10 @@ grep -Fxq 'scale deployment lobu-app --replicas=0' "$command_log"
 grep -Fxq 'scale deployment lobu-worker --replicas=0' "$command_log"
 if grep -Eq -- '--replicas=[23]$' "$command_log"; then
   echo 'successful migration unexpectedly restored old replicas' >&2
+  exit 1
+fi
+if grep -q '^rollout status' "$command_log"; then
+  echo 'successful migration unexpectedly waited for old deployment readiness' >&2
   exit 1
 fi
 

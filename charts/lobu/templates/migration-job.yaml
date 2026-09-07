@@ -10,9 +10,11 @@ metadata:
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: 1
+  # Retrying the same failed migration can repeat a scale-to-zero outage.
+  backoffLimit: 0
   {{- if .Release.IsUpgrade }}
-  activeDeadlineSeconds: {{ add (mul (int .Values.migrations.quiesceBeforeUpgrade.timeoutSeconds) 2) 600 }}
+  # Budget both quiescence waits and both recovery waits, plus migration time.
+  activeDeadlineSeconds: {{ add (mul (int .Values.migrations.quiesceBeforeUpgrade.timeoutSeconds) 4) 600 }}
   {{- end }}
   template:
     metadata:

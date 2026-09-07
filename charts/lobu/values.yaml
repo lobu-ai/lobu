@@ -383,8 +383,10 @@ migrations:
   # replica counts, scales both deployments to zero, and waits for their pods
   # to terminate before migrating. A check that fails or cannot answer aborts
   # the upgrade before anything is scaled. A failed migration restores those
-  # counts; after success Helm applies the new release's configured replica
-  # counts.
+  # counts and waits for both deployments to be ready; after success Helm
+  # applies the new release's configured replica counts. The migration Job
+  # makes one attempt. Keep the release controller's upgrade retries at zero
+  # too, so another Job cannot repeat the same failure automatically.
   quiesceBeforeUpgrade:
     image: bitnami/kubectl@sha256:9e369df7ab3386b736d162348f167bcc02cb4ba3f5203e9151be854437d6e0af
     pullPolicy: IfNotPresent

@@ -26,7 +26,7 @@ rules:
     resourceNames:
       - {{ include "lobu.fullname" . }}-app
       - {{ include "lobu.fullname" . }}-worker
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments/scale"]
     resourceNames:
