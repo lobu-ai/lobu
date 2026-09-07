@@ -868,6 +868,8 @@ describe("agent turn on the isolate lane", () => {
 		expect(error.message).toContain("neither text nor a readable attachment");
 		// It never reached the provider, so no invalid request was ever made.
 		expect(hits.length).toBe(0);
+	}, 120_000);
+
 	// ---------------------------------------------------------------------
 	// lobu-memory: the plugin's two hooks, on this lane
 	// ---------------------------------------------------------------------

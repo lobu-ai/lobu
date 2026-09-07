@@ -253,6 +253,31 @@ describe("executeAgentTurnRun", () => {
   });
 
   test("hands the guest the turn's attachments, and the model's own modalities, in the guest's shape", async () => {
+    const reported: Reported = { calls: [] };
+    let seen: ExecutorJob | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, job) => {
+        seen = job;
+        return {
+          mode: "agent_turn",
+          turn: { text: "", stopReason: "stop", usage: null, messages: [] },
+        };
+      },
+    };
+    const job = turnJob();
+    const turn = (job.payload as { turn: Record<string, unknown> }).turn;
+    turn.message_images = [{ mime_type: "image/png", data: "aGVsbG8=" }];
+    turn.message_files = [{ name: "report.pdf", mime_type: "application/pdf", size: 2048 }];
+    (turn.provider as Record<string, unknown>).input = ["text", "image"];
+
+    await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
+
+    if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
+    expect(seen.turn.images).toEqual([{ mimeType: "image/png", data: "aGVsbG8=" }]);
+    expect(seen.turn.files).toEqual([{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }]);
+    expect(seen.turn.provider.input).toEqual(["text", "image"]);
+  });
+
   /**
    * The media tools and the memory hooks cross the same wire the gateway tools
    * do: names only for the tools, and two ids for the hooks. What is pinned
@@ -292,9 +317,6 @@ describe("executeAgentTurnRun", () => {
     expect(seen.turn.images).toEqual([{ mimeType: "image/png", data: "aGVsbG8=" }]);
     expect(seen.turn.files).toEqual([{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }]);
     expect(seen.turn.provider.input).toEqual(["text", "image"]);
-  });
-
-  test("leaves attachments and modalities off the job when the envelope carries none", async () => {
     expect(seen.turn.tools).toEqual({
       gatewayUrl: "https://gateway.test.invalid/lobu",
       definitions: [],
