@@ -49,18 +49,8 @@ export function canonicalizeGrantedOrganizationIds(
 	return unique;
 }
 
-/**
- * Decode a DB text[] and fail closed for pre-migration rows.  A legacy row is
- * entitled only to its existing anchor, never to every current membership.
- */
-export function normalizeStoredGrantedOrganizationIds(
-	value: unknown,
-	organizationId: string | null,
-): string[] {
-	// NULL means the row predates explicit grants. It fails closed to the one
-	// existing anchor. An explicit empty array is different: never resurrect
-	// its anchor (writers must revoke such a token instead of retaining it).
-	if (value == null) return organizationId ? [organizationId] : [];
+/** Decode the immutable stored grant; missing snapshots grant no workspaces. */
+export function normalizeStoredGrantedOrganizationIds(value: unknown): string[] {
 	let parsed: string[] = [];
 	if (Array.isArray(value)) {
 		parsed = value.filter((item): item is string => typeof item === "string");

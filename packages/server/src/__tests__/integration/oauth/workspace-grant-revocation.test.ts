@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { OAuthClientsStore } from "../../../auth/oauth/clients";
 import { OAuthProvider } from "../../../auth/oauth/provider";
@@ -108,6 +109,71 @@ describe("connected-app workspace grant revocation", () => {
       WHERE session_id = 'workspace-scoped-primary-session'
     `;
 		expect(sessionsAfterPrimary).toHaveLength(0);
+	});
+
+	it("revokes codes that lose their last workspace while preserving account-only grants", async () => {
+		const sql = getTestDb();
+		const removed = await createTestOrganization({ name: "Removed Grant" });
+		const retained = await createTestOrganization({ name: "Retained Grant" });
+		const user = await createTestUser({ name: "Account Grant User" });
+		const provider = new OAuthProvider(sql, "http://localhost", true);
+		const client = await provider.clientsStore.registerClient({
+			client_name: "Account Code Revocation",
+			redirect_uris: ["http://localhost/callback"],
+			grant_types: ["authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+			token_endpoint_auth_method: "none",
+		});
+		const verifier = "synthetic-code-verifier-for-workspace-revocation";
+		const challenge = createHash("sha256").update(verifier).digest("base64url");
+		const authorizationCodes: string[] = [];
+		const deviceCodes: string[] = [];
+		for (const grants of [[removed.id], [removed.id, retained.id], []]) {
+			const scope = grants.length ? "mcp:read" : "profile:read";
+			const resource = grants.length ? "http://localhost/mcp" : undefined;
+			authorizationCodes.push(await provider.createAuthorizationCode({
+				client_id: client.client_id, redirect_uri: "http://localhost/callback",
+				response_type: "code", code_challenge: challenge, code_challenge_method: "S256",
+				scope, resource,
+			}, user.id, null, grants));
+			const device = await provider.createDeviceAuthorization(client.client_id, scope, resource ?? null);
+			if ("error" in device) throw new Error(device.error);
+			expect(await provider.claimDeviceCodeForUser(device.user_code, user.id)).toBeTruthy();
+			expect(await provider.approveDeviceCode(device.user_code, user.id, null, scope, grants)).toBe(true);
+			deviceCodes.push(device.device_code);
+		}
+
+		expect(await provider.clientsStore.revokeClientForOrganization(client.client_id, removed.id, user.id)).toBe(true);
+		const afterFirst = await sql`
+      SELECT code, granted_organization_ids FROM oauth_authorization_codes
+      WHERE client_id = ${client.client_id} ORDER BY scope ASC
+    `;
+		expect(afterFirst.map((row) => row.code)).toEqual([authorizationCodes[1], authorizationCodes[2]]);
+		expect(parsePgTextArray(afterFirst[0]?.granted_organization_ids as string)).toEqual([retained.id]);
+		const devicesAfterFirst = await sql`
+      SELECT device_code, granted_organization_ids FROM oauth_device_codes
+      WHERE client_id = ${client.client_id} ORDER BY scope ASC
+    `;
+		expect(devicesAfterFirst.map((row) => row.device_code)).toEqual([deviceCodes[1], deviceCodes[2]]);
+		expect(parsePgTextArray(devicesAfterFirst[0]?.granted_organization_ids as string)).toEqual([retained.id]);
+		expect(await provider.exchangeAuthorizationCode({
+			grant_type: "authorization_code", client_id: client.client_id,
+			code: authorizationCodes[0], code_verifier: verifier, redirect_uri: "http://localhost/callback",
+			resource: "http://localhost/mcp",
+		})).toMatchObject({ error: "invalid_grant" });
+		expect(await provider.exchangeDeviceCode({
+			grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: client.client_id,
+			device_code: deviceCodes[0], resource: "http://localhost/mcp",
+		})).toMatchObject({ error: "invalid_grant" });
+
+		expect(await provider.clientsStore.revokeClientForOrganization(client.client_id, retained.id, user.id)).toBe(true);
+		const afterLast = await sql`
+      SELECT code FROM oauth_authorization_codes WHERE client_id = ${client.client_id}
+    `;
+		expect(afterLast.map((row) => row.code)).toEqual([authorizationCodes[2]]);
+		const devicesAfterLast = await sql`
+      SELECT device_code FROM oauth_device_codes WHERE client_id = ${client.client_id}
+    `;
+		expect(devicesAfterLast.map((row) => row.device_code)).toEqual([deviceCodes[2]]);
 	});
 
 	it("serializes refresh rotation with workspace revoke so children cannot retain the removed grant", async () => {
