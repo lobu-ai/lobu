@@ -314,9 +314,12 @@ const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling/i;
  * throwing while its module graph registers, so the evaluation is abandoned by
  * its CDP timeout and the adapter never gets to name a state -- the bridge
  * REJECTS the dispatch instead of returning an adapter-shaped error, so this
- * message carries no connector prefix to classify on. It still means "try
- * again": unclassified it counts toward the consecutive-failure budget and
- * walks a recoverable feed toward a hard pause.
+ * message carries no connector prefix to classify on.
+ *
+ * Only the readiness phase may treat it as transient. A `collect` that times
+ * out is a real failure, and the server's dependency_unavailable branch skips
+ * `consecutive_failures` -- classifying it here would let a permanently broken
+ * collect retry forever without ever walking the feed toward its hard pause.
  */
 const BARE_EVALUATE_TIMEOUT_PATTERN = /\btimed out\b/i;
 const DEPENDENCY_UNAVAILABLE_PREFIX =
@@ -327,12 +330,16 @@ const DEPENDENCY_UNAVAILABLE_PREFIX =
  * corruption, unsupported operations, and collection errors remain ordinary
  * connector failures and still count toward source health.
  */
-function classifyWhatsAppReadinessFailure(error: unknown): string | null {
+function classifyWhatsAppReadinessFailure(
+  error: unknown,
+  { allowBareTimeout = false }: { allowBareTimeout?: boolean } = {}
+): string | null {
   if (!(error instanceof Error)) return null;
   // A dispatch the bridge abandoned never reaches the adapter, so it has no
   // connector prefix to match. Classify it before the prefix gate below, or a
-  // hydration stall that timed out is booked as a hard failure.
-  if (BARE_EVALUATE_TIMEOUT_PATTERN.test(error.message)) {
+  // hydration stall that timed out is booked as a hard failure. Readiness only:
+  // see BARE_EVALUATE_TIMEOUT_PATTERN for why collect must not opt in.
+  if (allowBareTimeout && BARE_EVALUATE_TIMEOUT_PATTERN.test(error.message)) {
     return `${DEPENDENCY_UNAVAILABLE_PREFIX} ${error.message}`;
   }
   // MAIN-world adapter failures may cross the extension/worker boundary without
@@ -370,7 +377,9 @@ async function readyWhatsAppTab(
     }
     await new Promise((resolve) => setTimeout(resolve, READY_POLL_INTERVAL_MS));
   } while (Date.now() < deadline);
-  const transient = classifyWhatsAppReadinessFailure(lastError);
+  const transient = classifyWhatsAppReadinessFailure(lastError, {
+    allowBareTimeout: true,
+  });
   if (transient) throw new Error(transient);
   throw (
     lastError ??

@@ -563,15 +563,42 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   /**
-   * WhatsApp's `require()` BLOCKS rather than throwing while its module graph is
-   * still registering, so a readiness probe can hang with the adapter never
-   * naming a state. Measured in prod (chrome action runs 1365803-1365817): nine
-   * probes answered in 3-7s, then one ran 95.2s and was killed. Bounded by the
-   * extension's CDP evaluate timeout the page now reports a plain timeout --
-   * which carries none of the adapter's hydration vocabulary, so unclassified it
-   * counts as a HARD failure and walks a recoverable feed toward its hard pause.
-   * The media path already treats `timed out` as retryable; readiness must too.
+   * A collect that times out is a REAL failure, not hydration. The server's
+   * dependency_unavailable branch deliberately skips consecutive_failures, so
+   * misclassifying this phase would let a permanently broken collect retry
+   * forever without ever walking the feed toward its hard pause -- the exact
+   * blindness that let this outage run for four days.
    */
+  it("keeps a collect-phase timeout a hard failure", async () => {
+    let probed = false;
+    const dispatch = mock(async (action: string, input: Record<string, unknown>) => {
+      if (action === "navigate") return { tab_id: 42, current_url: input.url };
+      if (action !== "evaluate") return {};
+      const expression = String(input.expression ?? "");
+      if (expression.includes("a.version ===")) return { value: true };
+      const match = expression.match(/a\.invoke\((\{[\s\S]*\})\);/);
+      if (!match?.[1]) return { value: undefined };
+      const request = JSON.parse(match[1]) as { op: string };
+      // Readiness succeeds; the collect dispatch is the one that hangs.
+      if (request.op === "probe") {
+        probed = true;
+        return {
+          value: {
+            ok: true,
+            status: { ready: true, state: "ready" },
+            capabilities: { collect: true },
+          },
+        };
+      }
+      throw new Error("evaluation timed out");
+    });
+    const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
+    await expect(
+      messagesFeed().sync(syncCtx(null, dispatcher))
+    ).rejects.toThrow(/^(?!\[lobu:dependency_unavailable)/);
+    expect(probed).toBe(true);
+  });
+
   /**
    * The production boundary, which the sibling test above does not reach: the
    * extension does not RETURN an adapter-shaped error when CDP abandons an
@@ -606,6 +633,14 @@ describe("sync over the generic chrome bridge", () => {
     }
   });
 
+  /**
+   * WhatsApp's `require()` BLOCKS rather than throwing while its module graph is
+   * still registering, so a readiness probe can hang with the adapter never
+   * naming a state. Measured in prod (chrome action runs 1365803-1365817): nine
+   * probes answered in 3-7s, then one ran 95.2s and was killed. Bounded by the
+   * extension's CDP evaluate timeout the page reports a plain timeout, which
+   * carries none of the adapter's hydration vocabulary.
+   */
   it("treats a probe that never answered as transient, not a real failure", async () => {
     const realNow = Date.now;
     let calls = 0;
