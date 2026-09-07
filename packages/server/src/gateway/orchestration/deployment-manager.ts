@@ -1472,7 +1472,7 @@ export class DeploymentManager {
         };
       }
 
-      // CREDENTIAL_ENV_VAR_NAME and AGENT_DEFAULT_PROVIDER are now
+      // The default provider and per-provider credential placeholders are
       // delivered dynamically via the session context endpoint instead of
       // static process environment.
     }
