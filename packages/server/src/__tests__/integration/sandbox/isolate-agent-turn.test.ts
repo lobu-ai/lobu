@@ -35,7 +35,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { agentGuestBundle } from "@lobu/connector-worker/agent-turn";
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput } from "@lobu/connector-worker/agent-turn";
-import type { ExecutorJob } from "@lobu/connector-worker/executor/interface";
+import type { ExecutionHooks, ExecutorJob } from "@lobu/connector-worker/executor/interface";
 import { IsolateExecutor, type IsolateLogLevel } from "@lobu/connector-worker/executor/isolate";
 import { assertIsolateEligible } from "@lobu/connector-worker/isolate";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -358,7 +358,11 @@ interface TurnRun {
 	output: AgentTurnOutput;
 }
 
-async function runTurn(job: ExecutorJob, allowedDomains: readonly string[] = ["127.0.0.1"]): Promise<TurnRun> {
+async function runTurn(
+	job: ExecutorJob,
+	allowedDomains: readonly string[] = ["127.0.0.1"],
+	extraHooks: Partial<ExecutionHooks> = {},
+): Promise<TurnRun> {
 	const events: AgentTurnEvent[] = [];
 	const logs: { level: IsolateLogLevel; line: string }[] = [];
 	const executor = new IsolateExecutor({
@@ -367,6 +371,7 @@ async function runTurn(job: ExecutorJob, allowedDomains: readonly string[] = ["1
 		logSink: (level, line) => logs.push({ level, line }),
 	});
 	const result = await executor.execute(guestCode, job, {
+		...extraHooks,
 		onTurnEvent: (event) => {
 			events.push(event);
 			if (event.type === "text_delta") markFirstDelta();
@@ -887,6 +892,195 @@ describe("agent turn on the isolate lane", () => {
 			...overrides,
 		});
 	}
+
+	it("steers: a follow-up the host parked reaches pi between model calls, as the user's own message", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s1", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		const run = await runTurn(toolJob(), ["127.0.0.1"], {
+			// The first ask — after the tool result — finds the follow-up; later asks find nothing.
+			takeSteering: () => (asked++ === 0 ? [{ messageId: "m-2", text: "also check companies" }] : []),
+		});
+		expect(asked).toBeGreaterThan(0);
+		// The model saw the follow-up as a user message in a later request, after
+		// the tool result it was drained behind.
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+		expect(requests.length).toBeGreaterThanOrEqual(2);
+		expect(requests[0]).not.toContain("also check companies");
+		expect(requests.some((body) => body.includes("also check companies"))).toBe(true);
+		// And it is in the transcript the next turn resumes from, as pi wrote it.
+		const steered = run.output.messages.find(
+			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
+		);
+		expect(steered).toBeDefined();
+	}, 120_000);
+
+	it("runs bash in the remote runtime through the host when the conversation is sandbox-pinned", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_r1", name: "bash", input: { command: "uname -a" } }];
+		armFirstDeltaGate();
+		const execs: Array<{ command: string; timeoutMs?: number }> = [];
+		const run = await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash", "read"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async (request) => {
+					execs.push(request);
+					return { status: 200, stdout: "Linux sandbox 6.1\n", exitCode: 0 };
+				},
+			},
+		);
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The command went to the host, not to the in-memory shell.
+		expect(execs).toEqual([{ command: "uname -a" }]);
+		// And the model saw the sandbox's answer as the tool result.
+		const second = hits.filter((h) => h.url === "/v1/messages")[1];
+		expect(second?.body).toContain("Linux sandbox 6.1");
+		// The guest itself dialled nothing but the provider: no exec route call of its own.
+		expect(hits.some((h) => h.url.includes("/internal/runtime/exec"))).toBe(false);
+	}, 120_000);
+
+	it("tells the model when the SANDBOX failed rather than the command", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_r2", name: "bash", input: { command: "ls" } }];
+		armFirstDeltaGate();
+		await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async () => ({
+					status: 503,
+					error: "sandbox is provisioning",
+					kind: "infrastructure",
+					outcome: "not_started",
+					retryable: true,
+				}),
+			},
+		);
+		const second = hits.filter((h) => h.url === "/v1/messages")[1];
+		expect(second?.body).toContain("sandbox runtime error");
+		expect(second?.body).toContain("your command did not run");
+		expect(second?.body).toContain("Command exited with code 126");
+	}, 120_000);
+
+	it("compacts after answering when the context has outgrown the window, with pi's own prompts", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The fake model reports 11 in + 7 out = 18 tokens; a 20-token window with a
+		// 5-token reserve is therefore over the line the moment the turn ends.
+		const run = await runTurn(
+			turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const compaction = run.output.compaction;
+		expect(compaction).toBeDefined();
+		expect(compaction?.tokensBefore).toBe(18);
+		expect(compaction?.firstKeptIndex).toBeGreaterThanOrEqual(0);
+		expect(compaction?.firstKeptIndex).toBeLessThan(run.output.messages.length);
+		// The summary came from the model, asked with pi's summarisation prompt on
+		// the same route and the same credential as the turn itself.
+		expect(compaction?.summary).toContain("Hello from the isolate");
+		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
+		expect(providerCalls.length).toBeGreaterThanOrEqual(2);
+		const summarization = providerCalls.find((h) => h.body.includes("context summarization assistant"));
+		expect(summarization).toBeDefined();
+		expect(summarization?.body).toContain("<conversation>");
+		expect(summarization?.body).toContain("Do NOT continue the conversation");
+		// The turn's own answer was streamed; the summary was not.
+		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+	}, 120_000);
+
+	it("does not compact a turn that fits", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({ compaction: { enabled: true, contextWindow: 200_000, reserveTokens: 16_384, keepRecentTokens: 20_000 } }),
+		);
+		expect(run.output.compaction).toBeUndefined();
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+	}, 120_000);
+
+	it("runs the memory flush silently before a prompt that would land near compaction", async () => {
+		hits = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		toolScript = [];
+		// No first-delta gate here: the flush's reply is deliberately never
+		// streamed to the host, so a fake stream waiting on a delta would hang.
+		const run = await runTurn(
+			turnJob({
+				memory: { mcpId: "lobu", agentId: "agent-test" },
+				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+				// Any prompt is "near compaction" against a zero threshold.
+				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
+				memoryFlush: {
+					enabled: true,
+					due: true,
+					softThresholdTokens: 1_000,
+					systemPrompt: "Session nearing compaction. Store durable memories now.",
+					prompt: "Write any lasting notes to memory. Reply with NO_REPLY if nothing to store.",
+				},
+			}),
+		);
+
+		// Two model rounds: the flush, then the human's turn. Only the second is
+		// the answer, and only the second streamed.
+		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
+		expect(providerCalls).toHaveLength(2);
+		expect(providerCalls[0]?.body).toContain("Store durable memories now");
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+		// The flush's exchange is part of the transcript, and the report says where
+		// it ends so the server can record the cycle as flushed right after it.
+		expect(run.output.memoryFlush).toEqual({ outcome: "stored", afterIndex: 1 });
+		expect(run.output.messages).toHaveLength(4);
+		expect((run.output.messages[0] as { role: string }).role).toBe("user");
+		expect(JSON.stringify(run.output.messages[0])).toContain("Store durable memories now");
+		// The human's own entry is their text, not the prompt the guest composed.
+		expect(run.output.messages[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "hi" }] });
+	}, 120_000);
+
+	it("skips the flush when this compaction cycle already flushed", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				memory: { mcpId: "lobu", agentId: "agent-test" },
+				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
+				memoryFlush: { enabled: true, due: false, softThresholdTokens: 1_000, systemPrompt: "s", prompt: "p" },
+			}),
+		);
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+		expect(run.output.memoryFlush).toBeUndefined();
+	}, 120_000);
 
 	it("recalls memory before the model runs and injects the plugin's own block", async () => {
 		hits = [];

@@ -9,15 +9,12 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import {
-  AGENT_ERRORS,
-  AgentErrorCode,
-  type MessagePayload,
-  verifyWorkerToken,
-} from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, replaySessionMessages, type MessagePayload, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { enqueueAgentTurnShadow } from '../../gateway/orchestration/agent-turn-shadow';
+import { enqueueAgentTurnShadow,
+  steerActiveAgentTurn,
+} from '../../gateway/orchestration/agent-turn-shadow';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
@@ -317,7 +314,7 @@ describe('agent turn shadow producer', () => {
     };
     expect(tools.definitions).toEqual([]);
     expect(tools.media).toEqual(['upload_file', 'generate_image', 'generate_audio']);
-    expect(tools.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
+    expect(tools.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     expect(tools.bash_policy.allow_all).toBe(false);
     expect(tools.bash_policy.allow_prefixes).toEqual([]);
     expect(tools.bash_policy.deny_prefixes).toContain('pip install ');
@@ -387,7 +384,7 @@ describe('agent turn shadow producer', () => {
     ]);
     expect(envelope.turn.tools).toMatchObject({
       gateway_url: GATEWAY_URL,
-      builtin: ['bash', 'read', 'write', 'ls', 'find'],
+      builtin: ['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find'],
       definitions: [
         {
           mcp_id: 'lobu-memory',
@@ -472,7 +469,8 @@ describe('agent turn shadow producer', () => {
     // No MCP surface wired, yet the workspace still ships: the two halves of
     // the manifest are independent.
     expect(turn.tools?.definitions).toEqual([]);
-    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'ls', 'find']);
+    // `write` is denied; `edit` is a different tool and stays.
+    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'edit', 'grep', 'ls', 'find']);
     expect(turn.tools?.bash_policy.allow_all).toBe(false);
     expect(turn.tools?.bash_policy.allow_prefixes).toEqual(['git', 'ls']);
     expect(turn.tools?.bash_policy.deny_prefixes.slice(-1)).toEqual(['rm']);
@@ -553,7 +551,7 @@ describe('agent turn shadow producer', () => {
       // The workspace tools are the policy's business, not the MCP surface's:
       // they ship regardless, with no MCP definitions beside them.
       expect(turn.tools?.definitions).toEqual([]);
-      expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
+      expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     };
 
     // No MCP surface wired.
@@ -580,7 +578,7 @@ describe('agent turn shadow producer', () => {
     await toolless();
   });
 
-  it('replays the conversation with its tool calls and results, squared to a well-formed window', async () => {
+  it('replays the conversation with its tool calls and results, squared to a well-formed history', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const at = new Date(Date.now() - 60_000).toISOString();
@@ -598,8 +596,8 @@ describe('agent turn shadow producer', () => {
     });
     const snapshot = [
       JSON.stringify({ type: 'session', version: 3, id: 'prior', timestamp: at, cwd: '/w' }),
-      // A tool result whose call fell off the window: dropped, so the window
-      // opens on the human.
+      // A tool result whose call is not in the transcript: dropped, so the
+      // history opens on the human.
       entry('orphan', { role: 'toolResult', toolCallId: 'toolu_00', toolName: 'query_sdk', content: [{ type: 'text', text: 'stale' }], isError: false, timestamp: 1 }),
       entry('u1', { role: 'user', content: 'how many entities?', timestamp: 1 }),
       entry('a1', assistant([
@@ -610,7 +608,7 @@ describe('agent turn shadow producer', () => {
       entry('a2', { ...assistant([{ type: 'text', text: 'There are 3.' }]), stopReason: 'stop' }),
       entry('u2', { role: 'user', content: 'and companies?', timestamp: 1 }),
       // The last turn died mid-call: a tool call with no result would be
-      // refused by the provider, so the window ends before it.
+      // refused by the provider, so the history ends before it.
       entry('a3', assistant([{ type: 'toolCall', id: 'toolu_02', name: 'query_sdk', arguments: {} }])),
       '',
     ].join('\n');
@@ -644,6 +642,183 @@ describe('agent turn shadow producer', () => {
     expect(turn.messages[2]).toMatchObject({ role: 'toolResult', toolCallId: 'toolu_01', isError: false });
     expect(turn.messages[3]).toMatchObject({ content: [{ type: 'text', text: 'There are 3.' }] });
     expect(turn.messages[4]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'and companies?' }] });
+    // Nothing on this branch recorded a flush, so the first cycle's is due.
+    expect((run.action_input.turn as { memory_flush: { due: boolean } }).memory_flush.due).toBe(true);
+    expect((run.action_input.turn as { message_entry_ids: string[] }).message_entry_ids).toEqual(['u1', 'a1', 't1', 'a2', 'u2']);
+  });
+
+  it('replays the whole conversation, compaction summary included, not a window of it', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const entry = (id: string, parentId: string | null, message: Record<string, unknown>) =>
+      JSON.stringify({ type: 'message', id, parentId, timestamp: at, message });
+    const reply = (text: string) => ({
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-opus-4-8',
+      stopReason: 'stop',
+      timestamp: 1,
+    });
+    // Forty turns — far past the twelve messages the lane used to keep — with a
+    // compaction in the middle, exactly as pi's SessionManager writes one.
+    const lines: string[] = [JSON.stringify({ type: 'session', version: 3, id: 'long', timestamp: at, cwd: '/w' })];
+    let parent: string | null = null;
+    for (let i = 0; i < 10; i++) {
+      lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
+      lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
+      parent = `a${i}`;
+    }
+    lines.push(
+      JSON.stringify({
+        type: 'compaction',
+        id: 'c1',
+        parentId: parent,
+        timestamp: at,
+        summary: 'The first eight exchanges were small talk.',
+        firstKeptEntryId: 'u8',
+        tokensBefore: 90000,
+      })
+    );
+    // This cycle already flushed: the subprocess lane's own state entry.
+    lines.push(
+      JSON.stringify({
+        type: 'custom',
+        id: 'flush1',
+        parentId: 'c1',
+        timestamp: at,
+        customType: 'lobu.memory_flush_state',
+        data: { compactionCount: 1, outcome: 'stored', timestamp: 1 },
+      })
+    );
+    parent = 'flush1';
+    for (let i = 10; i < 40; i++) {
+      lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
+      lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
+      parent = `a${i}`;
+    }
+    const snapshot = `${lines.join('\n')}\n`;
+    const [prior] = await sql<{ id: number }>`
+      INSERT INTO runs (run_type, status, organization_id, created_at, completed_at, run_at)
+      VALUES ('chat_message', 'completed', ${org.id}, ${at}, ${at}, ${at})
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status, created_at)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
+    `;
+
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as {
+      messages: Array<{ role: string; content: Array<{ text: string }> }>;
+      message_entry_ids: string[];
+      compaction: Record<string, unknown>;
+      memory_flush: Record<string, unknown>;
+    };
+    // Summary, the two kept exchanges (u8..a9), then thirty more: 1 + 4 + 60.
+    expect(turn.messages).toHaveLength(65);
+    // Every replayed message names the entry it came from, the summary its
+    // compaction, so a compaction the guest plans by index maps back to pi's
+    // firstKeptEntryId.
+    expect(turn.message_entry_ids).toHaveLength(65);
+    expect(turn.message_entry_ids.slice(0, 3)).toEqual(['c1', 'u8', 'a8']);
+    expect(turn.message_entry_ids[64]).toBe('a39');
+    // pi's own settings against this model's window.
+    expect(turn.compaction).toMatchObject({ enabled: true, reserve_tokens: 16384, keep_recent_tokens: 20000 });
+    expect(turn.compaction.context_window).toBeGreaterThan(16384);
+    // The flush state entry after c1 says this cycle already flushed.
+    expect(turn.memory_flush).toMatchObject({ enabled: true, soft_threshold_tokens: 4000, due: false });
+    expect(turn.messages[0].role).toBe('user');
+    expect(turn.messages[0].content[0].text).toContain('The first eight exchanges were small talk.');
+    expect(turn.messages[1].content[0].text).toBe('question 8');
+    expect(turn.messages[64].content[0].text).toBe('answer 39');
+    // What the compaction replaced is not replayed.
+    expect(JSON.stringify(turn.messages)).not.toContain('"answer 3"');
+    expect(JSON.stringify(turn.messages)).not.toContain('"question 7"');
+  });
+
+  it('parks a steerable follow-up on the running turn instead of making it a turn of its own', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+    const claimed = await pollFleet('fleet-steer', { agent_turn: true });
+    const { run_id: runId } = (await claimed.json()) as { run_id: number };
+
+    // The same human, in the same conversation, while the turn runs: parked.
+    const followUp = { ...messageFor(org.id), messageId: 'msg-2', messageText: 'also check companies' };
+    expect(await steerActiveAgentTurn(followUp)).toBe(true);
+    // Another follow-up queues behind it, in order.
+    expect(await steerActiveAgentTurn({ ...followUp, messageId: 'msg-3', messageText: 'and people' })).toBe(true);
+    const [row] = (await sql`SELECT run_metadata FROM runs WHERE id = ${runId}`) as unknown as Array<{
+      run_metadata: { steer?: unknown };
+    }>;
+    expect(row.run_metadata.steer).toEqual([
+      { message_id: 'msg-2', text: 'also check companies' },
+      { message_id: 'msg-3', text: 'and people' },
+    ]);
+    // No second run was produced for either.
+    expect(await shadowRuns()).toHaveLength(1);
+
+    // Someone else in the conversation, or an automation's message, is not a
+    // steer — the predicate both lanes share says so.
+    expect(await steerActiveAgentTurn({ ...followUp, userId: 'user-other' })).toBe(false);
+    expect(
+      await steerActiveAgentTurn({ ...followUp, platformMetadata: { source: 'automation-run' } } as typeof followUp)
+    ).toBe(false);
+    // Nothing running in another conversation: nothing to steer.
+    expect(await steerActiveAgentTurn({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
+  });
+
+  it('carries a pinned sandbox as signed token claims and a remote-bash marker', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(
+      { ...messageFor(org.id), networkConfig: { allowedDomains: ['example.com'] }, nixConfig: { packages: ['ripgrep'] } } as MessagePayload,
+      {
+        agentSettings: settingsStore,
+        catalog: catalogFor(tokenEchoingModule()),
+        mcp: mcpFixture().mcp,
+        gatewayUrl: GATEWAY_URL,
+        runtime: { runtimeProviderId: 'vercel', sandboxId: 'sandbox-1' },
+      }
+    );
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as { tools?: { remote_runtime?: unknown } };
+    expect(turn.tools?.remote_runtime).toEqual({ provider_id: 'vercel' });
+    // The exec route trusts only the signed token for these — never a body.
+    const claims = verifyWorkerToken((run.action_input as { credential: string }).credential) as Record<string, unknown>;
+    expect(claims).toMatchObject({
+      runtimeProviderId: 'vercel',
+      sandboxId: 'sandbox-1',
+      allowedDomains: ['example.com'],
+      nixPackages: ['ripgrep'],
+    });
+  });
+
+  it('marks no remote bash for an unpinned conversation', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    expect((run.action_input.turn as { tools?: { remote_runtime?: unknown } }).tools?.remote_runtime).toBeUndefined();
   });
 
   it('arms no turn marker and journals no run input', async () => {
@@ -1051,6 +1226,106 @@ describe('agent turn completion', () => {
     // The reply is chained onto the user message, so the next turn's parent
     // walk reaches both.
     expect(entries[1].parentId).toBe(entries[0].id);
+  });
+
+  it('persists the whole turn verbatim, then the flush state and the compaction pi would have written', async () => {
+    const workerId = 'fleet-persists-tools';
+    const runId = await claimedShadowRun(workerId);
+    const sql = getTestDb();
+    // The producer handed this turn two messages of history, each naming its
+    // stored entry; the guest returns them back followed by what the turn added.
+    const history = [
+      { role: 'user', content: [{ type: 'text', text: 'earlier question' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
+    ];
+    await sql`
+      UPDATE runs
+      SET action_input = jsonb_set(
+        jsonb_set(
+          jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb),
+          '{turn,messages}', ${sql.json(history)}::jsonb
+        ),
+        '{turn,message_entry_ids}', ${sql.json(['h0', 'h1'])}::jsonb
+      )
+      WHERE id = ${runId}
+    `;
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'there are 3',
+      transcript: [
+        ...history,
+        // The flush the guest ran first, then the human's turn as the guest
+        // already cleaned it, then the tool loop and the reply.
+        { role: 'user', content: [{ type: 'text', text: 'Store durable memories now.' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'NO_REPLY' }], stopReason: 'stop' },
+        { role: 'user', content: [{ type: 'text', text: 'what is the shadow lane?' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk', arguments: { code: 'entities.count()' } }],
+          stopReason: 'toolUse',
+        },
+        { role: 'toolResult', toolCallId: 'toolu_9', toolName: 'query_sdk', content: [{ type: 'text', text: '3' }], isError: false },
+        { role: 'assistant', content: [{ type: 'text', text: 'there are 3' }], stopReason: 'stop' },
+      ],
+      memory_flush: { outcome: 'no_reply', after_index: 3 },
+      // Keep from the human's message (transcript index 4) onwards.
+      compaction: { summary: 'Earlier, a question was answered.', first_kept_index: 4, tokens_before: 900 },
+    });
+    expect(response.status).toBe(200);
+
+    const [snapshot] = (await sql`
+      SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}
+    `) as unknown as Array<{ snapshot_jsonl: string }>;
+    const entries = snapshot.snapshot_jsonl
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+    // The history is not written twice; every new message is, verbatim, with
+    // the flush state right after the flush's exchange and the compaction last.
+    expect(entries.map((entry) => entry.type)).toEqual([
+      'message',
+      'message',
+      'custom',
+      'message',
+      'message',
+      'message',
+      'message',
+      'compaction',
+    ]);
+    expect(entries.filter((e) => e.type === 'message').map((e) => e.message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+      'toolResult',
+      'assistant',
+    ]);
+    expect(entries[2]).toMatchObject({
+      customType: 'lobu.memory_flush_state',
+      data: { compactionCount: 0, outcome: 'no_reply' },
+    });
+    expect(entries[3].message.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
+    expect(entries[4].message).toMatchObject({
+      content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk' }],
+      stopReason: 'toolUse',
+    });
+    // The compaction keeps from the human's message: transcript index 4 is
+    // the third new message, whose entry is the fourth line.
+    expect(entries[7]).toMatchObject({
+      type: 'compaction',
+      summary: 'Earlier, a question was answered.',
+      firstKeptEntryId: entries[3].id,
+      tokensBefore: 900,
+    });
+    // One chain, so the next turn's replay reaches every entry.
+    for (let i = 1; i < entries.length; i++) expect(entries[i].parentId).toBe(entries[i - 1].id);
+    // And that replay opens on the summary, then the kept messages.
+    const replayed = replaySessionMessages(parseSessionEntries(snapshot.snapshot_jsonl).entries);
+    expect(replayed.map((m) => m.role)).toEqual(['user', 'user', 'assistant', 'toolResult', 'assistant']);
+    expect(JSON.stringify(replayed[0]!.content)).toContain('Earlier, a question was answered.');
+    expect(replayed[1]!.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
   });
 
   it('an oversize prior transcript starts a continuation instead of hanging the client', async () => {

@@ -1161,6 +1161,12 @@ jobs:
         # guard that stops catching regressions fails here instead of going quiet.
         run: bun test scripts/__tests__/check-exposed-surface-naming.test.ts --timeout 30000
 
+      - name: Isolate lane parity gate
+        # The isolate agent lane must offer every tool the subprocess lane does,
+        # read from the lists both lanes are built from. A tool added to one
+        # lane fails here until it reaches the other.
+        run: bun test scripts/__tests__/isolate-lane-parity.test.ts --timeout 30000
+
       - name: Gateway LLM client gate
         # packages/server speaks to model providers through ONE client
         # (gateway/inference/gateway-completion.ts). A new per-feature

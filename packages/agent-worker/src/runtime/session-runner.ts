@@ -15,6 +15,8 @@ import {
   getOptionalEnv,
   isToolAllowedByPolicy,
   type ToolsConfig,
+  MEMORY_FLUSH_STATE_CUSTOM_TYPE,
+  resolveMemoryFlushConfig,
 } from "@lobu/core";
 import type { PluginRuntimeContext } from "@lobu/plugin-api";
 import type { GatewayParams } from "@lobu/plugin-toolkit";
@@ -217,89 +219,12 @@ export async function buildAgentSession({
 // Shared types
 // ---------------------------------------------------------------------------
 
-export interface ResolvedMemoryFlushConfig {
-  enabled: boolean;
-  softThresholdTokens: number;
-  systemPrompt: string;
-  prompt: string;
-}
-
 // ---------------------------------------------------------------------------
 // Memory-flush / compaction utilities
 // (also used by LobuAgentWorker.maybeRunPreCompactionMemoryFlush in worker.ts)
+// The config, the prompt-cost estimate and the state entry type live in
+// @lobu/core (`compaction`), shared with the isolate lane.
 // ---------------------------------------------------------------------------
-
-export const MEMORY_FLUSH_STATE_CUSTOM_TYPE = "lobu.memory_flush_state";
-const APPROX_IMAGE_TOKENS = 1200;
-
-const DEFAULT_MEMORY_FLUSH_CONFIG: ResolvedMemoryFlushConfig = {
-  enabled: true,
-  softThresholdTokens: 4000,
-  systemPrompt: "Session nearing compaction. Store durable memories now.",
-  prompt:
-    "Write any lasting notes to memory using available memory tools. Reply with NO_REPLY if nothing to store.",
-};
-
-function readStringOrFallback(value: unknown, fallback: string): string {
-  if (typeof value !== "string") {
-    return fallback;
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return fallback;
-  }
-  return trimmed;
-}
-
-function readNonNegativeNumberOrFallback(
-  value: unknown,
-  fallback: number
-): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    return fallback;
-  }
-  return value;
-}
-
-export function resolveMemoryFlushConfig(
-  rawOptions: Record<string, unknown>
-): ResolvedMemoryFlushConfig {
-  const compaction = isRecord(rawOptions.compaction)
-    ? rawOptions.compaction
-    : undefined;
-  const memoryFlush =
-    compaction && isRecord(compaction.memoryFlush)
-      ? compaction.memoryFlush
-      : undefined;
-
-  return {
-    enabled:
-      typeof memoryFlush?.enabled === "boolean"
-        ? memoryFlush.enabled
-        : DEFAULT_MEMORY_FLUSH_CONFIG.enabled,
-    softThresholdTokens: readNonNegativeNumberOrFallback(
-      memoryFlush?.softThresholdTokens,
-      DEFAULT_MEMORY_FLUSH_CONFIG.softThresholdTokens
-    ),
-    systemPrompt: readStringOrFallback(
-      memoryFlush?.systemPrompt,
-      DEFAULT_MEMORY_FLUSH_CONFIG.systemPrompt
-    ),
-    prompt: readStringOrFallback(
-      memoryFlush?.prompt,
-      DEFAULT_MEMORY_FLUSH_CONFIG.prompt
-    ),
-  };
-}
-
-export function estimatePromptTokenCost(
-  promptText: string,
-  imageCount: number
-): number {
-  const textTokens = Math.ceil(promptText.length / 4);
-  const imageTokens = Math.max(0, imageCount) * APPROX_IMAGE_TOKENS;
-  return textTokens + imageTokens;
-}
 
 export function countCompactionsOnCurrentBranch(
   sessionManager: Awaited<ReturnType<typeof openOrCreateSessionManager>>

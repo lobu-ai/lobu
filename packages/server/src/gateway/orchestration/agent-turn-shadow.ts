@@ -37,9 +37,16 @@ import {
   createLogger,
   generateWorkerToken,
   getErrorMessage,
+  isSteerableHumanMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
+  DEFAULT_COMPACTION_SETTINGS,
+  memoryFlushDue,
   parseSessionEntries,
+  replaySessionEntries,
+  resolveMemoryFlushConfig,
+  type SessionEntry,
+  sessionBranch,
   renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
   type ToolPolicy,
@@ -49,6 +56,7 @@ import {
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { getDb } from "../../db/client.js";
+import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
@@ -80,10 +88,6 @@ const LANE_APIS = new Set<string>([
   "openai-completions",
 ] satisfies LaneApi[]);
 
-/** Snapshot suffix read for history. Twelve 16 KB messages fit comfortably. */
-const HISTORY_TAIL_CHARS = 256 * 1024;
-const HISTORY_MESSAGE_LIMIT = 12;
-const HISTORY_MESSAGE_CHARS = 16_000;
 const TURN_MESSAGE_CHARS = 32_000;
 
 /**
@@ -136,12 +140,11 @@ const GATEWAY_TOOLS = [
 
 /**
  * The workspace tools the guest can run, in the order the model is offered
- * them. `grep` and `edit` are absent on purpose: pi's `grep` spawns ripgrep as
- * a child process, which an isolate cannot do, and neither tool is needed to
- * reach the workspace — just-bash's own `rg`, `grep` and `sed` run inside
- * `bash`. Adding either means writing an in-isolate implementation first.
+ * them: the seven pi builtins the subprocess lane hardens, each implemented
+ * inside the isolate over the turn's in-memory filesystem (`grep` searches it
+ * directly rather than spawning ripgrep, which an isolate cannot do).
  */
-const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "ls", "find"];
+const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "edit", "grep", "ls", "find"];
 
 /**
  * The media tools the isolate lane carries — `@lobu/plugin-media`'s own.
@@ -194,6 +197,12 @@ export interface AgentTurnShadowDeps {
    * owns the lookup, and a test can vary it.
    */
   artifacts?: AgentTurnArtifactReader;
+  /**
+   * The conversation's pinned runtime sandbox, resolved by the consumer for
+   * the subprocess lane's token. Present → the turn's token carries the same
+   * signed runtime claims and its `bash` runs in that sandbox.
+   */
+  runtime?: AgentRuntimeSelection;
 }
 
 function shadowSelects(agentId: string): boolean {
@@ -284,16 +293,16 @@ function isTextBlock(block: unknown): block is { type: "text"; text: string } {
   );
 }
 
-/** A content array with its text capped and its thinking blocks dropped. */
+/** A content array with its thinking blocks dropped. */
 function trimContent(content: unknown): unknown[] {
   if (typeof content === "string") {
-    return [{ type: "text", text: content.slice(0, HISTORY_MESSAGE_CHARS) }];
+    return [{ type: "text", text: content }];
   }
   if (!Array.isArray(content)) return [];
   const out: unknown[] = [];
   for (const block of content) {
     if (isTextBlock(block)) {
-      out.push({ type: "text", text: block.text.slice(0, HISTORY_MESSAGE_CHARS) });
+      out.push(block);
       continue;
     }
     // A thinking block carries a provider signature the next provider may not
@@ -316,37 +325,41 @@ function hasToolCall(message: HistoryMessage): boolean {
 /**
  * Rebuild the conversation so far as pi messages.
  *
- * The snapshot stores pi's own entries, and the lane now runs the same tool
- * loop pi ran to produce them, so user, assistant and tool-result entries
- * replay as they are — text capped, thinking dropped, everything else (tool
- * calls, tool results, usage, stop reason) kept, because a provider refuses a
- * tool call without its result and vice versa. The window is then squared off
- * so it opens on a user message and never ends on a tool call still waiting
- * for its result.
+ * The snapshot stores pi's own entries — the same file the subprocess lane's
+ * SessionManager reads — and `replaySessionMessages` walks its current branch
+ * exactly as pi does, compaction summary included, so the whole conversation
+ * replays: nothing is windowed or truncated. The lane runs the same tool loop
+ * pi ran to produce the entries, so tool calls, tool results, usage and stop
+ * reason are kept, because a provider refuses a tool call without its result
+ * and vice versa. Only thinking blocks go, since their provider signature is
+ * not portable. The replay is then squared off so it opens on a user message
+ * and never ends on a tool call still waiting for its result.
  */
-function historyMessages(snapshot: string): HistoryMessage[] {
-  const messages: HistoryMessage[] = [];
-  for (const entry of parseSessionEntries(snapshot).entries) {
-    if (entry.type !== "message" || !entry.message) continue;
-    const message = entry.message as unknown as HistoryMessage;
-    if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") continue;
+function historyMessages(entries: SessionEntry[]): {
+  messages: HistoryMessage[];
+  entryIds: string[];
+} {
+  const replayed: Array<{ entryId: string; message: HistoryMessage }> = [];
+  for (const { entryId, message } of replaySessionEntries(entries)) {
     const content = trimContent(message.content);
     if (content.length === 0) continue;
-    messages.push({ ...message, content });
+    replayed.push({ entryId, message: { ...message, content } });
   }
-  const window = messages.slice(-HISTORY_MESSAGE_LIMIT);
-  const firstUser = window.findIndex((message) => message.role === "user");
-  if (firstUser < 0) return [];
-  const squared = window.slice(firstUser);
+  const firstUser = replayed.findIndex(({ message }) => message.role === "user");
+  if (firstUser < 0) return { messages: [], entryIds: [] };
+  const squared = replayed.slice(firstUser);
   while (squared.length > 0) {
-    const last = squared[squared.length - 1]!;
+    const last = squared[squared.length - 1]!.message;
     if (last.role === "assistant" && hasToolCall(last)) {
       squared.pop();
       continue;
     }
     break;
   }
-  return squared;
+  return {
+    messages: squared.map(({ message }) => message),
+    entryIds: squared.map(({ entryId }) => entryId),
+  };
 }
 
 /**
@@ -384,6 +397,8 @@ interface ShadowProvider {
   host: string;
   /** pi-ai's `Model.input` for this model — which modalities it accepts. */
   input: ("text" | "image")[];
+  /** pi-ai's `Model.contextWindow`, or the subprocess lane's default for a model the registry does not carry. */
+  contextWindow: number;
 }
 
 /**
@@ -412,6 +427,21 @@ function modelInputModalities(
 }
 
 /**
+ * The subprocess lane's fallback when a model is not in pi-ai's registry
+ * (`model-resolver.ts`): the compaction trigger needs SOME window, and this is
+ * the one the other lane has been measuring against.
+ */
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+function modelContextWindow(registryProvider: string, modelId: string): number {
+  const model = getModel(registryProvider as never, modelId as never) as
+    | Model<never>
+    | undefined;
+  const window = model?.contextWindow;
+  return typeof window === "number" && window > 0 ? window : DEFAULT_CONTEXT_WINDOW;
+}
+
+/**
  * Mint the turn's one credential: a worker token scoped to this agent, user,
  * organization and conversation, exactly as the subprocess lane's per-run
  * token is (`buildRunJobToken`) minus the runtime-sandbox claims the isolate
@@ -420,7 +450,7 @@ function modelInputModalities(
  * `deploymentName` names this lane so a token can never be mistaken for a
  * subprocess deployment's.
  */
-function mintTurnToken(data: MessagePayload): string {
+function mintTurnToken(data: MessagePayload, runtime?: AgentRuntimeSelection): string {
   return generateWorkerToken(
     data.userId,
     data.conversationId,
@@ -433,6 +463,13 @@ function mintTurnToken(data: MessagePayload): string {
         organizationId: data.organizationId,
         platform: data.platform,
         platformMetadata: data.platformMetadata,
+        // The remote runtime reads all of these off the SIGNED token, never a
+        // body: which sandbox, and the egress and package sets the org set.
+        runtimeProviderId: runtime?.runtimeProviderId,
+        sandboxId: runtime?.sandboxId,
+        allowedDomains: data.networkConfig?.allowedDomains,
+        deniedDomains: data.networkConfig?.deniedDomains,
+        nixPackages: data.nixConfig?.packages,
       }),
       messageId: data.messageId,
     }
@@ -531,6 +568,7 @@ async function resolveShadowProvider(
     credential,
     host,
     input: modelInputModalities(protocol.registryAlias, modelId),
+    contextWindow: modelContextWindow(protocol.registryAlias, modelId),
   };
 }
 
@@ -620,6 +658,51 @@ async function resolveTurnTools(
 }
 
 /**
+ * A message that arrives while this conversation's turn is still running is
+ * for the model NOW, not for a turn of its own — pi's steering, which the
+ * subprocess lane does through `agent.steer()` on its live session. This lane
+ * parks it on the running run; the worker's next heartbeat carries it in and
+ * the guest hands it to the same pi API. The predicate is the one both lanes
+ * share: automation messages, session resets, `!`-bash and attachments never
+ * steer, and the message must come from the user whose turn it is.
+ *
+ * Returns true when the message was parked, in which case it must not become
+ * a turn of its own. The lookup runs over the in-flight rows only (the status
+ * index), then matches the conversation on the envelope.
+ */
+export async function steerActiveAgentTurn(data: MessagePayload): Promise<boolean> {
+  if (!data.agentId || !data.conversationId || !data.messageText?.trim()) return false;
+  if (!isSteerableHumanMessage(data)) return false;
+  const sql = getDb();
+  const parked = (await sql`
+    UPDATE runs
+    SET run_metadata = jsonb_set(
+      COALESCE(run_metadata, '{}'::jsonb),
+      '{steer}',
+      COALESCE(run_metadata->'steer', '[]'::jsonb) || ${sql.json([{ message_id: data.messageId, text: data.messageText }])}::jsonb,
+      true
+    )
+    WHERE id = (
+      SELECT id FROM runs
+      WHERE organization_id = ${data.organizationId}
+        AND run_type = 'agent_turn'
+        AND status IN ('pending', 'claimed', 'running')
+        AND action_input->'turn'->>'conversation_id' = ${data.conversationId}
+        AND action_input->'reply'->>'user_id' = ${data.userId}
+      ORDER BY id DESC
+      LIMIT 1
+    )
+    RETURNING id
+  `) as unknown as Array<{ id: number }>;
+  if (parked.length === 0) return false;
+  logger.info(
+    { agentId: data.agentId, conversationId: data.conversationId, messageId: data.messageId, runId: parked[0]?.id },
+    "Message steered into the running agent turn on the isolate lane"
+  );
+  return true;
+}
+
+/**
  * Produce the shadow `agent_turn` run for this message, when one is selected
  * and resolvable. Never throws: the caller has already delivered the real turn.
  */
@@ -698,7 +781,7 @@ export async function enqueueAgentTurnShadow(
       return;
     }
 
-    const workerToken = mintTurnToken(data);
+    const workerToken = mintTurnToken(data, deps.runtime);
     const provider = await resolveShadowProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
@@ -760,6 +843,9 @@ export async function enqueueAgentTurnShadow(
         // the model silently loses the 90% of calls that go through it.
         definitions: tools?.definitions ?? [],
         ...(builtin.length > 0 ? { builtin } : {}),
+        ...(builtin.includes("bash") && deps.runtime?.runtimeProviderId
+          ? { remote_runtime: { provider_id: deps.runtime.runtimeProviderId } }
+          : {}),
         ...(builtin.includes("bash")
           ? {
               bash_policy: {
@@ -789,12 +875,22 @@ export async function enqueueAgentTurnShadow(
     const settings = await agentSettings.getSettings(data.agentId, {
       organizationId: data.organizationId,
     });
+    // The whole transcript: the snapshot writer already bounds it at
+    // MAX_SNAPSHOT_BYTES, and a shorter read would silently forget the
+    // conversation's head — which is what compaction exists to do deliberately.
     const snapshot = await readSnapshotJsonl({
       organizationId: data.organizationId,
       agentId: data.agentId,
       conversationId: data.conversationId,
-      suffixChars: HISTORY_TAIL_CHARS,
     });
+    const entries = snapshot ? parseSessionEntries(snapshot).entries : [];
+    const history = historyMessages(entries);
+    // The flush runs once per compaction cycle; the branch says whether this
+    // cycle already did, exactly as the subprocess lane reads its session.
+    const flushState = memoryFlushDue(sessionBranch(entries));
+    const memoryFlush = resolveMemoryFlushConfig(
+      (data.agentOptions ?? {}) as Record<string, unknown>
+    );
 
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
@@ -820,7 +916,23 @@ export async function enqueueAgentTurnShadow(
         // channel-participation one.
         [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin]
       ),
-      messages: snapshot ? historyMessages(snapshot) : [],
+      messages: history.messages,
+      message_entry_ids: history.entryIds,
+      // pi's own defaults, measured against this model's window. The lane
+      // compacts the way the subprocess lane's SessionManager would.
+      compaction: {
+        enabled: DEFAULT_COMPACTION_SETTINGS.enabled,
+        context_window: provider.contextWindow,
+        reserve_tokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+        keep_recent_tokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+      },
+      memory_flush: {
+        enabled: memoryFlush.enabled,
+        soft_threshold_tokens: memoryFlush.softThresholdTokens,
+        system_prompt: memoryFlush.systemPrompt,
+        prompt: memoryFlush.prompt,
+        due: flushState.due,
+      },
       provider: {
         api: provider.api,
         provider: provider.provider,

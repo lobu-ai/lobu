@@ -13,11 +13,8 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
-import {
-  LobuAgentWorker,
-  estimatePromptTokenCost,
-  resolveMemoryFlushConfig,
-} from "../runtime/worker";
+import { estimatePromptTokenCost, resolveMemoryFlushConfig } from "@lobu/core";
+import { LobuAgentWorker } from "../runtime/worker";
 import { mockWorkerConfig } from "./setup";
 
 // ---------------------------------------------------------------------------

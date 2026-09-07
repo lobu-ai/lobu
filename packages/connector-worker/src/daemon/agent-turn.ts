@@ -15,7 +15,15 @@ import {
   TURN_DELTA_MAX_CHARS,
 } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
-import type { AgentTurnEvent, AgentTurnGatewayTool, AgentTurnMediaTool } from '../agent-turn/types.js';
+import type { HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
+import type {
+  AgentTurnEvent,
+  AgentTurnGatewayTool,
+  AgentTurnMediaTool,
+  AgentTurnSteer,
+  RuntimeExecRequest,
+  RuntimeExecResult,
+} from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import type { ExecutorClient } from './client.js';
@@ -155,6 +163,7 @@ export async function executeAgentTurnRun(
       // keeps the text queued for the next beat.
       if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
       if (ack?.continue === false) stopTurn(ack.stop_reason);
+      queueSteering(ack?.steer);
     } catch (err) {
       // The batch stays in flight and is re-sent under the same sequence. The
       // traces are not: they are a view of the turn, not its answer, and
@@ -208,6 +217,7 @@ export async function executeAgentTurnRun(
       .heartbeat(runId, { items_collected_so_far: deltaSequence })
       .then((ack) => {
         if (ack?.continue === false) stopTurn(ack.stop_reason);
+        queueSteering(ack?.steer);
       })
       .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
   }, cfg.heartbeatIntervalMs);
@@ -216,6 +226,14 @@ export async function executeAgentTurnRun(
   // down through the executor's abort hook so the model stops mid-turn, and
   // the run — already `cancelled` on the server — is left as the server wrote
   // it, since a completion would be fenced out anyway.
+  // Messages the gateway parked on this run mid-turn, in arrival order, until
+  // the guest asks for them (`takeSteering`) and hands them to pi.
+  const steering: AgentTurnSteer[] = [];
+  const queueSteering = (batch: HeartbeatResponse['steer']) => {
+    for (const message of batch ?? []) {
+      steering.push({ messageId: message.message_id, text: message.text });
+    }
+  };
   const cancel = new AbortController();
   const stopTurn = (reason: string | undefined) => {
     if (cancel.signal.aborted) return;
@@ -287,6 +305,7 @@ export async function executeAgentTurnRun(
                     inputSchema: tool.input_schema,
                   })),
                   ...(turn.tools.builtin ? { builtin: turn.tools.builtin } : {}),
+        ...(turn.tools.remote_runtime ? { remoteRuntime: { providerId: turn.tools.remote_runtime.provider_id } } : {}),
                   ...(turn.tools.bash_policy
                     ? {
                         bashPolicy: {
@@ -330,6 +349,29 @@ export async function executeAgentTurnRun(
           ...(turn.memory
             ? { memory: { mcpId: turn.memory.mcp_id, agentId: turn.memory.agent_id } }
             : {}),
+          // pi's compaction settings and the flush that precedes it: the guest
+          // decides and acts, the server records what it reports.
+          ...(turn.compaction
+            ? {
+                compaction: {
+                  enabled: turn.compaction.enabled,
+                  contextWindow: turn.compaction.context_window,
+                  reserveTokens: turn.compaction.reserve_tokens,
+                  keepRecentTokens: turn.compaction.keep_recent_tokens,
+                },
+              }
+            : {}),
+          ...(turn.memory_flush
+            ? {
+                memoryFlush: {
+                  enabled: turn.memory_flush.enabled,
+                  softThresholdTokens: turn.memory_flush.soft_threshold_tokens,
+                  systemPrompt: turn.memory_flush.system_prompt,
+                  prompt: turn.memory_flush.prompt,
+                  due: turn.memory_flush.due,
+                },
+              }
+            : {}),
         },
         config: {},
         credentials: job.credentials,
@@ -338,6 +380,36 @@ export async function executeAgentTurnRun(
       },
       {
         signal: cancel.signal,
+        takeSteering: () => steering.splice(0),
+        // Remote bash for a sandbox-pinned conversation: the SAME route and the
+        // SAME token the subprocess lane's bash uses (`generic-runtime-bash`),
+        // posted by the host so the guest keeps its deny-all egress.
+        ...(turn.tools?.remote_runtime && turn.tools.gateway_url
+          ? {
+              onRuntimeExec: async (request: RuntimeExecRequest): Promise<RuntimeExecResult> => {
+                const response = await fetch(`${turn.tools?.gateway_url.replace(/\/+$/, '')}/internal/runtime/exec`, {
+                  method: 'POST',
+                  headers: { authorization: `Bearer ${job.credentials?.accessToken ?? ''}`, 'content-type': 'application/json' },
+                  body: JSON.stringify({
+                    command: request.command,
+                    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+                  }),
+                });
+                const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+                return {
+                  status: response.status,
+                  ...(typeof payload.stdout === 'string' ? { stdout: payload.stdout } : {}),
+                  ...(typeof payload.stderr === 'string' ? { stderr: payload.stderr } : {}),
+                  ...(typeof payload.exitCode === 'number' ? { exitCode: payload.exitCode } : {}),
+                  ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
+                  ...(typeof payload.kind === 'string' ? { kind: payload.kind } : {}),
+                  ...(typeof payload.retryable === 'boolean' ? { retryable: payload.retryable } : {}),
+                  ...(typeof payload.outcome === 'string' ? { outcome: payload.outcome } : {}),
+                  ...(payload.sandbox !== undefined ? { sandbox: payload.sandbox } : {}),
+                };
+              },
+            }
+          : {}),
         onTurnEvent: (event: AgentTurnEvent) => {
           if (event.type === 'text_delta') {
             // Queued, not accumulated: the next batch carries what the server
@@ -389,6 +461,23 @@ export async function executeAgentTurnRun(
       usage: result.turn.usage,
       transcript: result.turn.messages,
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
+      ...(result.turn.compaction
+        ? {
+            compaction: {
+              summary: result.turn.compaction.summary,
+              first_kept_index: result.turn.compaction.firstKeptIndex,
+              tokens_before: result.turn.compaction.tokensBefore,
+            },
+          }
+        : {}),
+      ...(result.turn.memoryFlush
+        ? {
+            memory_flush: {
+              outcome: result.turn.memoryFlush.outcome,
+              after_index: result.turn.memoryFlush.afterIndex,
+            },
+          }
+        : {}),
       exit_reason: 'ok',
     });
     log.info(

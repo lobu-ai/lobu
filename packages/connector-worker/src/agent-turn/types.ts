@@ -72,7 +72,7 @@ export interface AgentTurnTool {
 }
 
 /** The guest's own workspace tools, by name. */
-export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'ls' | 'find';
+export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'edit' | 'grep' | 'ls' | 'find';
 
 /**
  * A gateway tool the turn may call — `ask_user`, `send_message`,
@@ -132,6 +132,11 @@ export interface AgentTurnTools {
    */
   builtin?: AgentTurnBuiltinTool[];
   bashPolicy?: AgentTurnBashPolicy;
+  /**
+   * The conversation is pinned to a remote runtime sandbox: `bash` runs there
+   * through the host, not in the in-memory workspace. Absent → local bash.
+   */
+  remoteRuntime?: { providerId: string };
   /**
    * Gateway tools the agent's policy admits, by name. Their routing lives in
    * the plugin package, so the wire carries only the names.
@@ -199,6 +204,35 @@ export interface AgentTurnInput {
    * credential and no extra host is involved.
    */
   memory?: AgentTurnMemory;
+  /**
+   * pi's compaction settings and the model's context window. After answering,
+   * a turn past `contextWindow - reserveTokens` summarises its history the way
+   * pi does and reports the result. Absent → the turn never compacts.
+   */
+  compaction?: AgentTurnCompaction;
+  /**
+   * Lobu's pre-compaction memory flush. When the next prompt would land within
+   * `softThresholdTokens` of compaction and this cycle has not flushed yet, the
+   * turn first runs the flush prompt silently so the model stores what it is
+   * about to lose. Absent → no flush.
+   */
+  memoryFlush?: AgentTurnMemoryFlush;
+}
+
+export interface AgentTurnCompaction {
+  enabled: boolean;
+  contextWindow: number;
+  reserveTokens: number;
+  keepRecentTokens: number;
+}
+
+export interface AgentTurnMemoryFlush {
+  enabled: boolean;
+  softThresholdTokens: number;
+  systemPrompt: string;
+  prompt: string;
+  /** False when a flush already ran since the last compaction. */
+  due: boolean;
 }
 
 /** Whether this turn recalls and captures long-term memory, and as whom. */
@@ -210,6 +244,31 @@ export interface AgentTurnMemory {
   mcpId: string;
   /** The agent the capture is attributed to. */
   agentId: string;
+}
+
+/** One command sent to the remote runtime sandbox, and what came back. */
+export interface RuntimeExecRequest {
+  command: string;
+  timeoutMs?: number;
+}
+export interface RuntimeExecResult {
+  /** HTTP status the gateway answered; 2xx means the command ran. */
+  status: number;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  error?: string;
+  /** "infrastructure" when the RUNTIME failed and the command never ran. */
+  kind?: string;
+  retryable?: boolean;
+  outcome?: string;
+  sandbox?: unknown;
+}
+
+/** A message that arrived mid-turn and is for the model now: pi's steering. */
+export interface AgentTurnSteer {
+  messageId: string;
+  text: string;
 }
 
 /** What the guest streams out while the turn runs. */
@@ -242,4 +301,8 @@ export interface AgentTurnOutput {
    * suppression does the rest.
    */
   repliedInBand?: boolean;
+  /** The compaction this turn performed after answering, if it did. */
+  compaction?: { summary: string; firstKeptIndex: number; tokensBefore: number };
+  /** The memory flush this turn ran before answering, if it did. */
+  memoryFlush?: { outcome: 'stored' | 'no_reply'; afterIndex: number };
 }

@@ -322,7 +322,38 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			return c.json({ error: 'Run is not in progress' }, 409);
 		}
 
-		return c.json<HeartbeatResponse>({ continue: true, ...ackBody });
+		// Messages that arrived for this conversation mid-turn and were parked on
+		// the run by the producer: hand them over once, in arrival order. Only an
+		// agent turn ever has any, and the fence keeps a stale worker from taking
+		// a message meant for the worker that now owns the run.
+		const [taken] = (await sql`
+      WITH parked AS (
+        SELECT id, run_metadata->'steer' AS steer FROM runs
+        WHERE id = ${run_id}
+          AND run_type = 'agent_turn'
+          AND jsonb_typeof(run_metadata->'steer') = 'array'
+          ${runLeaseFence(sql, worker_id)}
+        FOR UPDATE
+      )
+      UPDATE runs SET run_metadata = runs.run_metadata - 'steer'
+      FROM parked WHERE runs.id = parked.id
+      RETURNING parked.steer
+    `) as unknown as Array<{ steer: unknown } | undefined>;
+		const steer = Array.isArray(taken?.steer)
+			? (taken.steer as unknown[]).filter(
+					(m): m is { message_id: string; text: string } =>
+						!!m &&
+						typeof m === 'object' &&
+						typeof (m as { message_id?: unknown }).message_id === 'string' &&
+						typeof (m as { text?: unknown }).text === 'string',
+				)
+			: [];
+
+		return c.json<HeartbeatResponse>({
+			continue: true,
+			...ackBody,
+			...(steer.length > 0 ? { steer } : {}),
+		});
 	} catch (err: unknown) {
 		return c.json({ error: errorMessage(err) }, 500);
 	}

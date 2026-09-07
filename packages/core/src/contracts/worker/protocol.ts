@@ -414,10 +414,11 @@ export const AgentTurnPollPayloadSchema = Type.Object({
           })
         ),
         /**
-         * The guest's own workspace tools the agent's tool policy admits. They
-         * run against a per-turn in-memory filesystem inside the isolate:
-         * `bash` is just-bash, the rest are pi's file tools over the same
-         * filesystem. Absent or empty → no workspace tools.
+         * The guest's own workspace tools the agent's tool policy admits — the
+         * same seven pi builtins the subprocess lane hardens. They run against
+         * a per-turn in-memory filesystem inside the isolate: `bash` is
+         * just-bash, the rest are pi's file tools over the same filesystem.
+         * Absent or empty → no workspace tools.
          */
         builtin: Type.Optional(
           Type.Array(
@@ -425,10 +426,22 @@ export const AgentTurnPollPayloadSchema = Type.Object({
               Type.Literal("bash"),
               Type.Literal("read"),
               Type.Literal("write"),
+              Type.Literal("edit"),
+              Type.Literal("grep"),
               Type.Literal("ls"),
               Type.Literal("find"),
             ])
           )
+        ),
+        /**
+         * Present when the conversation is pinned to a remote runtime sandbox.
+         * `bash` then runs there — the host posts each command to the gateway's
+         * `/internal/runtime/exec` with the turn's own token, whose signed claims
+         * name the provider — instead of in the in-memory workspace. The file
+         * tools stay on the workspace, as they do on the subprocess lane.
+         */
+        remote_runtime: Type.Optional(
+          Type.Object({ provider_id: Type.String({ minLength: 1 }) })
         ),
         /** The agent's bash prefix policy, enforced before a command runs. */
         bash_policy: Type.Optional(
@@ -492,6 +505,39 @@ export const AgentTurnPollPayloadSchema = Type.Object({
         mcp_id: Type.String({ minLength: 1 }),
         /** The agent a captured observation is attributed to. */
         agent_id: Type.String({ minLength: 1 }),
+      })
+    ),
+    /**
+     * The stored entry each `messages[i]` replays, in the same order. A
+     * compaction the guest plans by message index is written back as pi's
+     * `firstKeptEntryId` through this list. Absent → the turn cannot compact.
+     */
+    message_entry_ids: Type.Optional(Type.Array(Type.String())),
+    /**
+     * pi's compaction settings for this turn plus the model's context window,
+     * which is what the trigger is measured against. Absent → no compaction.
+     */
+    compaction: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        context_window: Type.Integer({ minimum: 1 }),
+        reserve_tokens: Type.Integer({ minimum: 0 }),
+        keep_recent_tokens: Type.Integer({ minimum: 0 }),
+      })
+    ),
+    /**
+     * Lobu's pre-compaction memory flush: a silent prompt asking the model to
+     * store what it would lose, run once per compaction cycle when the next
+     * prompt would land within `soft_threshold_tokens` of compaction. `due` is
+     * false when this cycle already flushed. Absent → no flush.
+     */
+    memory_flush: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        soft_threshold_tokens: Type.Integer({ minimum: 0 }),
+        system_prompt: Type.String(),
+        prompt: Type.String(),
+        due: Type.Boolean(),
       })
     ),
     /**
@@ -794,6 +840,30 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * (`chat-response-bridge`) already acts on it.
    */
   replied_in_band: Type.Optional(Type.Boolean()),
+  /**
+   * The turn compacted the conversation after answering: pi's summary and the
+   * index into `transcript` of the first message kept verbatim. The completion
+   * route writes it as a `compaction` entry, so the next turn — on either lane
+   * — resumes from the summary.
+   */
+  compaction: Type.Optional(
+    Type.Object({
+      summary: Type.String(),
+      first_kept_index: Type.Integer({ minimum: 0 }),
+      tokens_before: Type.Integer({ minimum: 0 }),
+    })
+  ),
+  /**
+   * The turn ran the pre-compaction memory flush before answering; its
+   * exchange sits in `transcript` up to `after_index`. Recorded as the
+   * `lobu.memory_flush_state` entry the subprocess lane writes.
+   */
+  memory_flush: Type.Optional(
+    Type.Object({
+      outcome: Type.Union([Type.Literal("stored"), Type.Literal("no_reply")]),
+      after_index: Type.Integer({ minimum: 0 }),
+    })
+  ),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   exit_reason: Type.Optional(WorkerExitReasonSchema),
 });
@@ -1029,6 +1099,12 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  * nobody will read. A lost lease is not a signal here — it is the 409 the
  * heartbeat has always answered.
  *
+ * `steer` carries the messages that arrived for this conversation while the
+ * turn was running and are meant for the model now rather than for the next
+ * turn — pi's steering. The gateway parks them on the run and hands them over
+ * on the next beat, in arrival order; absent on every beat that has none,
+ * which is nearly all of them.
+ *
  * `turn_delta_ack` is the honest answer to "did that batch land". The worker
  * does not retire the text it sent until the sequence comes back acknowledged,
  * so a publish that failed, was fenced out by a lost lease, or never reached
@@ -1043,6 +1119,14 @@ export const HeartbeatResponseSchema = Type.Object({
   continue: Type.Optional(Type.Boolean()),
   /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
   stop_reason: Type.Optional(Type.Literal("cancelled")),
+  steer: Type.Optional(
+    Type.Array(
+      Type.Object({
+        message_id: Type.String(),
+        text: Type.String(),
+      })
+    )
+  ),
   turn_delta_ack: Type.Optional(
     Type.Object({
       sequence: Type.Integer({ minimum: 0 }),

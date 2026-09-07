@@ -45,6 +45,12 @@
       "import": "./dist/tool-policy.js",
       "require": "./dist/tool-policy.js"
     },
+    "./compaction": {
+      "types": "./dist/compaction.d.ts",
+      "bun": "./src/compaction.ts",
+      "import": "./dist/compaction.js",
+      "require": "./dist/compaction.js"
+    },
     "./errors": {
       "types": "./dist/errors.d.ts",
       "bun": "./src/errors.ts",

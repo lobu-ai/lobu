@@ -37,6 +37,7 @@ import { recordAgentRunInput } from "./agent-run-input.js";
 import {
   type AgentTurnShadowDeps,
   enqueueAgentTurnShadow,
+  steerActiveAgentTurn,
 } from "./agent-turn-shadow.js";
 import {
   buildCanonicalConversationKey,
@@ -695,7 +696,11 @@ export class MessageConsumer {
       // `enqueueAgentTurnShadow` never throws, and for an agent the operator
       // has not selected it returns on an env-var read before touching the
       // database — the unselected path costs the enqueue nothing.
-      await enqueueAgentTurnShadow(data, {
+      // A follow-up that lands while this conversation's isolate turn is still
+      // running steers that turn instead of becoming one of its own — the
+      // same rule the subprocess lane applies to its live session.
+      const steered = await steerActiveAgentTurn(data);
+      if (!steered) await enqueueAgentTurnShadow(data, {
         agentSettings: this.agentSettingsStore,
         catalog: this.deploymentManager.getProviderCatalogService?.(),
         mcp: this.agentTurnMcp,
@@ -705,6 +710,8 @@ export class MessageConsumer {
         // from here rather than from the signed URL it also stamped, so no
         // attachment URL crosses into the isolate.
         artifacts: this.agentTurnArtifacts,
+        // The same pinned sandbox the subprocess lane's token was minted with.
+        runtime: runtimeSelection,
       });
 
       queueSpan?.setStatus({ code: SpanStatusCode.OK });

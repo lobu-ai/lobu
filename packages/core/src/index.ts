@@ -5,6 +5,7 @@
 export * from "./agent-policy";
 export * from "./tool-policy";
 export * from "./turn-control";
+export * from "./compaction";
 // Agent store interface (unified storage abstraction)
 export type {
   AgentAccessStore,
@@ -148,6 +149,13 @@ export {
   type ParsedMessage,
   type ParsedMessageType,
   parseSessionEntries,
+  type ReplayedMessage,
+  replaySessionEntries,
+  replaySessionMessages,
+  sessionBranch,
+  type SessionMessage,
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
   type SessionEntry,
   titleFromSessionJsonl,
 } from "./utils/session-file";
