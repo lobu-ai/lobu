@@ -181,9 +181,10 @@ describe("fixed-action REST route registrations", () => {
 	});
 
 	it("routes every fixed-action REST wrapper through restToolAction", () => {
-		// The generic passthrough POST is the one caller-selected tool/action route.
+		// Generic dispatch and the actor-only read route do not pin an action.
 		const bareProxyCalls = indexSrc.match(/restToolProxy\(/g) ?? [];
-		expect(bareProxyCalls).toHaveLength(1);
+		expect(bareProxyCalls).toHaveLength(2);
+		expect(indexSrc.match(/restToolProxy\(c, "read_knowledge"\)/g)).toHaveLength(1);
 
 		expect(indexSrc.match(/restToolAction\(/g)).toHaveLength(3);
 	});

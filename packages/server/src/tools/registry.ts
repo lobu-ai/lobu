@@ -20,7 +20,7 @@
  */
 
 import { SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
-import { Type } from '@sinclair/typebox';
+import { type Static, Type } from '@sinclair/typebox';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
@@ -53,6 +53,7 @@ import {
 } from './sdk_run';
 import { SdkSearchResultSchema, SdkSearchSchema, sdkSearch } from './sdk_search';
 import { PublicSearchSchema, SearchSchema, search, UnifiedSearchResultSchema } from './search';
+import { withValidatedArgs } from './validate-args';
 
 // ============================================
 // Tool Definitions
@@ -260,6 +261,11 @@ const LOBU_VIEW_MCP_META = {
   'openai/toolInvocation/invoked': 'Lobu ready',
 } as const;
 
+const SaveMemorySchema = Type.Object({
+  ...SaveContentSchema.properties,
+  org_slug: Type.Optional(Type.String({ minLength: 1, description: 'Target workspace for a bare OAuth call. Required when the connection has no workspace binding.' })),
+});
+
 /**
  * Tools advertised on MCP `tools/list` and external OpenAPI.
  *
@@ -294,18 +300,15 @@ const AGENT_TOOLS: ToolDefinition[] = [
     name: 'save_memory',
     description:
       'Save user-shared facts, preferences, decisions, observations, and notes to workspace memory. The returned id is immediately readable with `client.knowledge.read`; the result also echoes the bounded saved payload for inline display. Semantic search indexing is asynchronous and reported as `indexing_status`. Storage is append-only — pass `supersedes_event_id` to replace an existing fact (the old event is hidden from future searches without losing history). Use a stable `idempotency_key` when a write may be retried. Optionally attach to entities via `entity_ids`. Always search first to avoid duplicates.',
-    inputSchema: Type.Object({
-      ...SaveContentSchema.properties,
-      org_slug: Type.Optional(Type.String({ minLength: 1, description: 'Target workspace for a bare OAuth call. Required when the connection has no workspace binding.' })),
-    }),
+    inputSchema: SaveMemorySchema,
     outputSchema: SaveContentResultSchema,
     annotations: { ...WRITE_WITHOUT_CONFIRM, title: 'Save memory' },
     securityScopes: ['mcp:write'],
     mcpMeta: LOBU_VIEW_MCP_META,
-    handler: (args, env, ctx) => {
+    handler: withValidatedArgs('save_memory', SaveMemorySchema, (args: Static<typeof SaveMemorySchema>, env: Env, ctx: ToolContext) => {
       const { org_slug: _target, ...content } = args;
       return saveContent(content, env, ctx);
-    },
+    }),
   },
   {
     name: 'search_sdk',
@@ -342,10 +345,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
     annotations: { ...AUDITED_READ, title: 'Query SQL' },
     authorizationReadOnly: true,
     securityScopes: ['mcp:read'],
-    handler: (args, env, ctx) => {
-      const { org_slug: _target, ...query } = args;
-      return querySql(query, env, ctx);
-    },
+    handler: querySql,
   },
   {
     name: 'run_sdk',

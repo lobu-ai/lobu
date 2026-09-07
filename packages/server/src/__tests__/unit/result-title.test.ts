@@ -31,17 +31,14 @@ describe('tool result titles', () => {
     expect(result.title).toBe('Invalid query');
   });
 
-  it('search_memory preserves the caller title on empty results', async () => {
-    const result = await search(
+  it('search_memory requires a workspace even when a result title is supplied', async () => {
+    await expect(search(
       {
         title: '  Missing company  ',
         entity_id: 2_147_483_647,
       },
       {},
       ctx
-    );
-
-    expect(result.discovery_status).toBe('not_found');
-    expect(result.title).toBe('Missing company');
+    )).rejects.toThrow('Select a workspace');
   });
 });
