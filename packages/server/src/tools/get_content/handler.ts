@@ -356,7 +356,7 @@ async function getContentImpl(
   const mcpSessionIds = hasMcpActivityId
     ? await resolveMcpActivitySessionIds(
         sql,
-        ctx.organizationId,
+        ctx.userId,
         args.client_ids as string[],
         args.mcp_activity_id as string
       )

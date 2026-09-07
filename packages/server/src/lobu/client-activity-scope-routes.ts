@@ -52,7 +52,7 @@ function displayAction(value: string): string {
 routes.get("/", mcpAuth, async (c) => {
 	const auth = requireOrgUser(c);
 	if (!auth) return c.json({ error: "Organization user required" }, 401);
-	const { organizationId, userId } = auth;
+	const { userId } = auth;
 	const rawLimit = Number.parseInt(c.req.query("limit") ?? "20", 10);
 	const limit = Math.min(
 		Math.max(Number.isNaN(rawLimit) ? 20 : rawLimit, 1),
@@ -88,7 +88,6 @@ routes.get("/", mcpAuth, async (c) => {
       JOIN public.events e ON e.id = target.event_id
       WHERE target.user_id = ${userId}
         AND target.read_at IS NULL
-        AND e.organization_id = ${organizationId}
         AND e.client_id IS NOT NULL
         AND COALESCE(
           e.metadata->>'mcp_conversation_id',
@@ -107,7 +106,7 @@ routes.get("/", mcpAuth, async (c) => {
     LEFT JOIN unread_notifications notification_count
       ON notification_count.client_id = mc.client_id
       AND notification_count.activity_id = mc.conversation_id
-    WHERE mc.organization_id = ${organizationId}
+    WHERE mc.user_id = ${userId}
       ${
 				clientIds.length > 0
 					? sql`AND mc.client_id = ANY(${pgTextArray(clientIds)}::text[])`

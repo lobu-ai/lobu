@@ -106,6 +106,10 @@ describe('MCP activity notification attribution', () => {
       })
     ).token;
 
+    // Each reader owns a separate activity even when the host reuses an ID.
+    await recordMcpConversationActivity({
+      ctx: conversationContext(otherOwnerId), toolName: 'manage_operations', failed: false,
+    });
     await recordMcpConversationActivity({
       ctx: conversationContext(ownerId),
       toolName: 'manage_operations',
