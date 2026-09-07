@@ -590,7 +590,7 @@ describe("executeAgentTurnRun steering", () => {
 });
 
 describe("executeAgentTurnRun remote runtime", () => {
-  test("posts a guest bash command to the gateway's exec route with the turn's own token", async () => {
+  test.each(["", "/", "///"])("posts a guest bash command with the turn token (gateway suffix %j)", async (suffix) => {
     const reported: Reported = { calls: [] };
     const seen: Array<{ url: string; init: RequestInit }> = [];
     const realFetch = globalThis.fetch;
@@ -611,7 +611,7 @@ describe("executeAgentTurnRun remote runtime", () => {
       };
       const job = turnJob();
       const turn = (job.payload as { turn: Record<string, unknown> }).turn;
-      turn.tools = { gateway_url: "http://gateway.test/lobu/", definitions: [], remote_runtime: { provider_id: "vercel" } };
+      turn.tools = { gateway_url: `http://gateway.test/lobu${suffix}`, definitions: [], remote_runtime: { provider_id: "vercel" } };
       await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
       expect(seen).toHaveLength(1);
       expect(seen[0]?.url).toBe("http://gateway.test/lobu/internal/runtime/exec");

@@ -26,7 +26,7 @@ import type {
 } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
-import type { ExecutorClient } from './client.js';
+import { type ExecutorClient, trimTrailingSlashes } from './client.js';
 import { log } from './log.js';
 
 /**
@@ -91,6 +91,7 @@ export async function executeAgentTurnRun(
     return fail('agent turn run received a non-turn payload envelope');
   }
   const turn = payload.turn;
+  const runtimeGatewayUrl = turn.tools?.remote_runtime ? turn.tools.gateway_url : undefined;
   if (!job.credentials?.accessToken) {
     return fail('agent turn run arrived without its provider credential');
   }
@@ -386,10 +387,10 @@ export async function executeAgentTurnRun(
         // Remote bash for a sandbox-pinned conversation: the SAME route and the
         // SAME token the subprocess lane's bash uses (`generic-runtime-bash`),
         // posted by the host so the guest keeps its deny-all egress.
-        ...(turn.tools?.remote_runtime && turn.tools.gateway_url
+        ...(runtimeGatewayUrl
           ? {
               onRuntimeExec: async (request: RuntimeExecRequest): Promise<RuntimeExecResult> => {
-                const response = await fetch(`${turn.tools?.gateway_url.replace(/\/+$/, '')}/internal/runtime/exec`, {
+                const response = await fetch(`${trimTrailingSlashes(runtimeGatewayUrl)}/internal/runtime/exec`, {
                   method: 'POST',
                   headers: { authorization: `Bearer ${job.credentials?.accessToken ?? ''}`, 'content-type': 'application/json' },
                   body: JSON.stringify({

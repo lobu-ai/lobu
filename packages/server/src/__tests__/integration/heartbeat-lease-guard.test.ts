@@ -32,6 +32,8 @@
 import type { Context } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../index';
+import type postgres from 'postgres';
+import { getDb } from '../../db/client';
 import { heartbeat } from '../../worker-api/run-lifecycle';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
@@ -212,6 +214,24 @@ describe('heartbeat lease guard', () => {
     expect(result().body).toEqual({ continue: true });
     const run = await readRun(runId);
     expect(run.last_heartbeat_at).not.toBeNull();
+  });
+
+  it('uses one database statement for a healthy non-agent heartbeat', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'running', CLAIMANT);
+    const sql = getDb() as unknown as postgres.Sql;
+    const debug = sql.options.debug;
+    const statements: string[] = [];
+    sql.options.debug = (_connection, query) => { statements.push(query); };
+    try {
+      const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+      await heartbeat(ctx);
+      expect(result().body).toEqual({ continue: true });
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toContain('UPDATE runs');
+    } finally {
+      sql.options.debug = debug;
+    }
   });
 
   it('does NOT let a non-claimant pin its agent session onto a running run', async () => {

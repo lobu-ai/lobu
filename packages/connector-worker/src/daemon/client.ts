@@ -5,7 +5,7 @@
  * Updated for V1 integration platform: runs-based job model.
  */
 
-function trimTrailingSlashes(value: string): string {
+export function trimTrailingSlashes(value: string): string {
   let end = value.length;
   while (end > 0 && value.charCodeAt(end - 1) === 47) end--;
   return end === value.length ? value : value.slice(0, end);
@@ -320,7 +320,7 @@ export class WorkerClient implements ExecutorClient {
     this.authToken = authToken;
   }
 
-  private async post<B = unknown>(path: string, body: B): Promise<Response> {
+  private async post<B = unknown>(path: string, body: B, signal?: AbortSignal): Promise<Response> {
     const response = await fetch(`${this.apiUrl}${path}`, {
       method: 'POST',
       headers: {
@@ -328,6 +328,7 @@ export class WorkerClient implements ExecutorClient {
         ...this.authHeaders(),
       },
       body: JSON.stringify(body),
+      signal,
     });
     if (!response.ok) {
       const responseText = await response.text();
@@ -337,8 +338,8 @@ export class WorkerClient implements ExecutorClient {
     return response;
   }
 
-  private async requestJson<T, B = unknown>(path: string, body: B): Promise<T> {
-    const response = await this.post(path, body);
+  private async requestJson<T, B = unknown>(path: string, body: B, signal?: AbortSignal): Promise<T> {
+    const response = await this.post(path, body, signal);
     return response.json() as Promise<T>;
   }
 
@@ -406,6 +407,8 @@ export class WorkerClient implements ExecutorClient {
     /** Tool calls the turn finished since the last beat. */
     turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>
   ): Promise<HeartbeatResponse> {
+    // A stalled response must release the turn's serialized delta beat before
+    // the next 30s liveness interval. The deadline covers the response body too.
     return this.requestJson<HeartbeatResponse>('/api/workers/heartbeat', {
       run_id: runId,
       worker_id: this.workerId,
@@ -415,7 +418,7 @@ export class WorkerClient implements ExecutorClient {
       ...(turnToolEvents && turnToolEvents.length > 0
         ? { turn_tool_events: turnToolEvents }
         : {}),
-    });
+    }, AbortSignal.timeout(15_000));
   }
 
   async writeAutomationTranscript(

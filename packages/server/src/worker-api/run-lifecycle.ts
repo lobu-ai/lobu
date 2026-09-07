@@ -303,13 +303,13 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// the UPDATE itself; the 409 below is the same body and status
 		// `authorizeRunForWorker` returns for the same condition, so it is not a
 		// new outcome for the worker to handle.
-		const updated = await sql`
+		const updated = await sql<{ id: number; run_type: string }>`
       UPDATE runs
       SET last_heartbeat_at = current_timestamp,
           items_collected = COALESCE(${progress?.items_collected_so_far ?? null}, items_collected)${agentSessionCheckpoint}
       WHERE id = ${run_id}
         ${runLeaseFence(sql, worker_id)}
-      RETURNING id
+      RETURNING id, run_type
     `;
 		if (updated.length === 0) {
 			// The fence requires `status = 'running'`, so a cancelled run fails it
@@ -333,6 +333,10 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 				});
 			}
 			return c.json({ error: 'Run is not in progress' }, 409);
+		}
+
+		if (updated[0].run_type !== 'agent_turn') {
+			return c.json<HeartbeatResponse>({ continue: true, ...ackBody });
 		}
 
 		// Messages that arrived for this conversation mid-turn and were parked on
