@@ -572,6 +572,40 @@ describe("sync over the generic chrome bridge", () => {
    * counts as a HARD failure and walks a recoverable feed toward its hard pause.
    * The media path already treats `timed out` as retryable; readiness must too.
    */
+  /**
+   * The production boundary, which the sibling test above does not reach: the
+   * extension does not RETURN an adapter-shaped error when CDP abandons an
+   * evaluation, it REJECTS the dispatch with a bare timeout. That message
+   * never carries the connector's own "WhatsApp Web " prefix, so classifying
+   * on the prefix first drops it before the transient pattern is ever tried
+   * and a hydration stall is still booked as a hard feed failure.
+   */
+  it("treats a bare dispatch timeout as transient, not a real failure", async () => {
+    const realNow = Date.now;
+    let calls = 0;
+    const dispatch = mock(async (action: string, input: Record<string, unknown>) => {
+      if (action === "navigate") return { tab_id: 42, current_url: input.url };
+      if (action !== "evaluate") return {};
+      const expression = String(input.expression ?? "");
+      if (expression.includes("a.version ===")) return { value: true };
+      calls += 1;
+      if (calls === 1) Date.now = () => realNow() + 10 * 60_000;
+      // Exactly what the Chrome bridge rejects with: no adapter state, no
+      // connector prefix.
+      throw new Error("evaluation timed out");
+    });
+    const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
+    try {
+      await expect(
+        messagesFeed().sync(syncCtx(null, dispatcher))
+      ).rejects.toThrow(
+        /^\[lobu:dependency_unavailable:browser_source_hydrating\]/
+      );
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   it("treats a probe that never answered as transient, not a real failure", async () => {
     const realNow = Date.now;
     let calls = 0;

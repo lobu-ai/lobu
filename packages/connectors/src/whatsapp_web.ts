@@ -306,14 +306,19 @@ async function invokeAdapter<T extends object>(
 const LOGGED_OUT_PATTERN = /logged_out|qr_code_visible/;
 /**
  * `hydrating`/`stores_settling` are the adapter's own words for "the page is
- * still coming up". `timed out` covers the case where the page never answered
- * at all: WhatsApp's `require()` blocks rather than throwing while its module
- * graph registers, so the evaluation is abandoned by its CDP timeout and the
- * adapter never gets to name a state. Both mean "try again", not "this feed is
- * broken" -- unclassified, they count toward the consecutive-failure budget and
- * walk a recoverable feed toward a hard pause.
+ * still coming up", so they arrive prefixed as a WhatsAppAdapterError.
  */
-const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling|timed out/i;
+const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling/i;
+/**
+ * The page never answered at all. WhatsApp's `require()` blocks rather than
+ * throwing while its module graph registers, so the evaluation is abandoned by
+ * its CDP timeout and the adapter never gets to name a state -- the bridge
+ * REJECTS the dispatch instead of returning an adapter-shaped error, so this
+ * message carries no connector prefix to classify on. It still means "try
+ * again": unclassified it counts toward the consecutive-failure budget and
+ * walks a recoverable feed toward a hard pause.
+ */
+const BARE_EVALUATE_TIMEOUT_PATTERN = /\btimed out\b/i;
 const DEPENDENCY_UNAVAILABLE_PREFIX =
   "[lobu:dependency_unavailable:browser_source_hydrating]";
 
@@ -324,6 +329,12 @@ const DEPENDENCY_UNAVAILABLE_PREFIX =
  */
 function classifyWhatsAppReadinessFailure(error: unknown): string | null {
   if (!(error instanceof Error)) return null;
+  // A dispatch the bridge abandoned never reaches the adapter, so it has no
+  // connector prefix to match. Classify it before the prefix gate below, or a
+  // hydration stall that timed out is booked as a hard failure.
+  if (BARE_EVALUATE_TIMEOUT_PATTERN.test(error.message)) {
+    return `${DEPENDENCY_UNAVAILABLE_PREFIX} ${error.message}`;
+  }
   // MAIN-world adapter failures may cross the extension/worker boundary without
   // preserving their prototype, so classify on the connector-owned message.
   if (!error.message.startsWith("WhatsApp Web ")) return null;
