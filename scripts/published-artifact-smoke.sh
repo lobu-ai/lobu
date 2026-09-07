@@ -150,6 +150,7 @@ fi
 pass "installed, bin present"
 
 RESOLVED="$("$LOBU_BIN" --version 2>&1 | tr -d '[:space:]')"
+printf '%s\n' "$RESOLVED" > "$WORK/version.txt"
 if [ -n "$RESOLVED" ]; then pass "lobu --version -> $RESOLVED"; else fail "lobu --version produced nothing"; fi
 
 # Run from a directory that is deliberately outside the npm install tree. A
@@ -343,6 +344,15 @@ if grep -qE "tool\(s\)" "$MCP_OUT"; then
   pass "lobu call --list (admin tool surface)"
 else
   fail "lobu call --list exposed no tools"; tail -15 "$MCP_OUT" >&2
+fi
+
+# The CLI quickstart above exercises an agent worker. Device command execution
+# has a separate process/credential/queue path, driven here by a real MCP client
+# against the SAME installed npm artifact and its installed sibling packages.
+if node "$REPO_ROOT/scripts/daemon-mcp-smoke.mjs" "$LOBU_BIN" "$WORK/daemon-mcp-logs"; then
+  pass "daemon MCP command lifecycle"
+else
+  fail "daemon MCP command lifecycle"
 fi
 
 echo ""

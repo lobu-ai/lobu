@@ -197,5 +197,6 @@ jobs:
   verify-published-artifact:
     needs: publish-packages
     uses: ./.github/workflows/published-artifact-smoke.yml
+    secrets: inherit
     with:
       version: ${{ needs.publish-packages.outputs.published-version }}

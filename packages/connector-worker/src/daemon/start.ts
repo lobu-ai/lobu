@@ -204,9 +204,9 @@ export async function startDaemonCommand(
       `[cli] device mode: platform=${platform} capabilities=${capabilities.join(',') || '(none)'}`
     );
     if (opts.activeOrg) {
-      const connectorsUrl = `${opts.apiUrl.replace(/\/+$/, '')}/${opts.activeOrg}/connectors`;
+      const deviceUrl = `${opts.apiUrl.replace(/\/+$/, '')}/${encodeURIComponent(opts.activeOrg)}/connectors/device/${encodeURIComponent(workerId)}`;
       log.info(
-        `[cli] Manage action permissions (Approval vs Auto) at: ${connectorsUrl}`
+        `[cli] Manage action permissions (Approval vs Auto) at: ${deviceUrl}`
       );
     }
   }
