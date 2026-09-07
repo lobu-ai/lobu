@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { requireAuth } from "../auth/middleware";
+import { mcpAuth } from "../auth/middleware";
 import { getDb, pgTextArray } from "../db/client";
 import type { Env } from "../index";
+import { requireOrgUser } from "../utils/require-org-user";
 
 /**
  * Recent materialized MCP activity identities for connected OAuth apps.
@@ -16,7 +17,7 @@ const LOBU_COMMAND_CLIENT_SOFTWARE_ID = "lobu-cli";
 
 interface ActivityScopeRow {
 	activity_kind: "conversation" | "session";
-	activity_id: string;
+	conversation_id: string;
 	client_id: string;
 	client_name: string | null;
 	title: string | null;
@@ -48,9 +49,10 @@ function displayAction(value: string): string {
 		.join(" ");
 }
 
-routes.get("/", requireAuth, async (c) => {
-	const userId = c.var.session!.userId;
-	c.header("Cache-Control", "private, no-store");
+routes.get("/", mcpAuth, async (c) => {
+	const auth = requireOrgUser(c);
+	if (!auth) return c.json({ error: "Organization user required" }, 401);
+	const { organizationId, userId } = auth;
 	const rawLimit = Number.parseInt(c.req.query("limit") ?? "20", 10);
 	const limit = Math.min(
 		Math.max(Number.isNaN(rawLimit) ? 20 : rawLimit, 1),
@@ -86,6 +88,7 @@ routes.get("/", requireAuth, async (c) => {
       JOIN public.events e ON e.id = target.event_id
       WHERE target.user_id = ${userId}
         AND target.read_at IS NULL
+        AND e.organization_id = ${organizationId}
         AND e.client_id IS NOT NULL
         AND COALESCE(
           e.metadata->>'mcp_conversation_id',
@@ -93,19 +96,18 @@ routes.get("/", requireAuth, async (c) => {
         ) IS NOT NULL
       GROUP BY e.client_id, activity_id
     )
-    SELECT mc.activity_kind, mc.activity_id, mc.client_id, oc.client_name,
+    SELECT mc.activity_kind, mc.conversation_id, mc.client_id, oc.client_name,
       mc.title, mc.last_action, mc.first_activity_at, mc.last_activity_at,
       mc.call_count, mc.failed_count,
       jsonb_path_query_array(mc.tools, '$[0 to 7]') AS tools,
       COALESCE(notification_count.unread_notification_count, 0)::integer
         AS unread_notification_count
-    FROM public.user_mcp_activities mc
-    LEFT JOIN public.oauth_clients oc ON oc.id = mc.client_id
+    FROM public.mcp_client_conversations mc
+    JOIN public.oauth_clients oc ON oc.id = mc.client_id
     LEFT JOIN unread_notifications notification_count
       ON notification_count.client_id = mc.client_id
-      AND notification_count.activity_id = mc.activity_id
-    WHERE mc.user_id = ${userId}
-      AND mc.client_id IS NOT NULL
+      AND notification_count.activity_id = mc.conversation_id
+    WHERE mc.organization_id = ${organizationId}
       ${
 				clientIds.length > 0
 					? sql`AND mc.client_id = ANY(${pgTextArray(clientIds)}::text[])`
@@ -125,7 +127,7 @@ routes.get("/", requireAuth, async (c) => {
 
 	return c.json({
 		scopes: rows.map((row) => ({
-			activityId: row.activity_id,
+			activityId: row.conversation_id,
 			activityKind: row.activity_kind,
 			clientId: row.client_id,
 			clientName: row.client_name,

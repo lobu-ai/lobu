@@ -174,14 +174,13 @@ describe('getContent > exact MCP activity filter on sibling SQL paths', () => {
     }
 
     await sql`
-      INSERT INTO mcp_activity_event_scopes (
-        organization_id, client_identity, activity_id,
-        transport_session_ids
+      INSERT INTO mcp_client_conversations (
+        organization_id, client_identity, conversation_id,
+        transport_session_ids, client_id, last_action, call_count
       ) VALUES (
         ${org.id}, ${clientId}, ${CONVERSATION_ID},
-        ${sql.json(['transport-old', 'transport-new'])}
-      ) ON CONFLICT (organization_id, client_identity, activity_id)
-      DO UPDATE SET transport_session_ids = EXCLUDED.transport_session_ids
+        ${sql.json(['transport-old', 'transport-new'])}, ${clientId}, 'read_knowledge', 1
+      )
     `;
 
     ctx = {

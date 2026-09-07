@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
-import { recordToolInvocationAudit } from '../../../tools/audit';
 import {
   currentMcpActivityAttribution,
+  recordMcpConversationActivity,
 } from '../../../lobu/stores/mcp-client-conversations';
 import {
   createNotificationForUsers,
@@ -20,7 +20,6 @@ import {
   addUserToOrganization,
   createTestAgent,
   createTestAccessToken,
-  createTestSession,
   createTestConnection,
   createTestConnectorDefinition,
   createTestOAuthClient,
@@ -36,8 +35,7 @@ describe('MCP activity notification attribution', () => {
   let ownerId: string;
   let otherOwnerId: string;
   let ownerToken: string;
-  let ownerCookie: string;
-  let otherOwnerCookie: string;
+  let otherOwnerToken: string;
   let clientId: string;
 
   const conversationId = 'host-conversation';
@@ -61,10 +59,10 @@ describe('MCP activity notification attribution', () => {
     } as ToolContext;
   }
 
-  async function activityFor(cookie: string) {
+  async function activityFor(token: string) {
     const response = await get(
-      `/api/me/clients/activity-scopes?client_ids=${clientId}`,
-      { cookie }
+      `/api/${organizationSlug}/clients/activity-scopes?client_ids=${clientId}`,
+      { token }
     );
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -102,21 +100,24 @@ describe('MCP activity notification attribution', () => {
         scope: 'mcp:read mcp:write mcp:admin',
       })
     ).token;
-    ownerCookie = (await createTestSession(ownerId)).cookieHeader;
-    otherOwnerCookie = (await createTestSession(otherOwnerId)).cookieHeader;
+    otherOwnerToken = (
+      await createTestAccessToken(otherOwnerId, organizationId, clientId, {
+        scope: 'mcp:read mcp:write mcp:admin',
+      })
+    ).token;
 
-    await recordToolInvocationAudit({
+    await recordMcpConversationActivity({
       ctx: conversationContext(ownerId),
       toolName: 'manage_operations',
-      args: {}, result: { success: true }, durationMs: 1,
+      failed: false,
     });
-    await recordToolInvocationAudit({
+    await recordMcpConversationActivity({
       ctx: conversationContext(ownerId, {
         mcpConversationId: 'other-chatgpt-conversation',
         mcpSessionId: 'other-chatgpt-transport',
       }),
       toolName: 'manage_operations',
-      args: {}, result: { success: true }, durationMs: 1,
+      failed: false,
     });
   });
 
@@ -157,8 +158,8 @@ describe('MCP activity notification attribution', () => {
       title: 'Unattributed notification',
     });
 
-    expect((await activityFor(ownerCookie)).unreadNotificationCount).toBe(2);
-    expect(await activityFor(otherOwnerCookie)).toBeUndefined();
+    expect((await activityFor(ownerToken)).unreadNotificationCount).toBe(2);
+    expect((await activityFor(otherOwnerToken)).unreadNotificationCount).toBe(1);
 
     const notifications = await getDb()<Array<{ id: number; title: string }>>`
       SELECT id, title
@@ -174,16 +175,16 @@ describe('MCP activity notification attribution', () => {
     );
 
     expect(await markAsRead(organizationId, ownerId, sharedId)).toBe(true);
-    expect((await activityFor(ownerCookie)).unreadNotificationCount).toBe(1);
-    expect(await activityFor(otherOwnerCookie)).toBeUndefined();
+    expect((await activityFor(ownerToken)).unreadNotificationCount).toBe(1);
+    expect((await activityFor(otherOwnerToken)).unreadNotificationCount).toBe(1);
 
     expect(await deleteNotification(organizationId, ownerId, ownerOnlyId)).toBe(true);
-    expect((await activityFor(ownerCookie)).unreadNotificationCount).toBe(0);
-    expect(await activityFor(otherOwnerCookie)).toBeUndefined();
+    expect((await activityFor(ownerToken)).unreadNotificationCount).toBe(0);
+    expect((await activityFor(otherOwnerToken)).unreadNotificationCount).toBe(1);
 
     expect(await deleteNotification(organizationId, ownerId, sharedId)).toBe(true);
     expect(await markAllAsRead(organizationId, otherOwnerId)).toBe(1);
-    expect(await activityFor(otherOwnerCookie)).toBeUndefined();
+    expect((await activityFor(otherOwnerToken)).unreadNotificationCount).toBe(0);
   });
 
   it('stores provenance on the event and keeps notification targets recipient-only', async () => {
@@ -267,7 +268,7 @@ describe('MCP activity notification attribution', () => {
   });
 
   it('does not guess legacy notification provenance from a linked proposal', async () => {
-    const unreadBefore = (await activityFor(ownerCookie)).unreadNotificationCount;
+    const unreadBefore = (await activityFor(ownerToken)).unreadNotificationCount;
     const sql = getDb();
     const [proposal] = await sql<Array<{ id: number }>>`
       INSERT INTO events (
@@ -298,7 +299,7 @@ describe('MCP activity notification attribution', () => {
       VALUES (${notification.id}, ${ownerId})
     `;
 
-    expect((await activityFor(ownerCookie)).unreadNotificationCount).toBe(unreadBefore);
+    expect((await activityFor(ownerToken)).unreadNotificationCount).toBe(unreadBefore);
     const filtered = await get(
       `/api/${organizationSlug}/notifications?client_ids=${clientId}&mcp_activity_id=${conversationId}`,
       { token: ownerToken }

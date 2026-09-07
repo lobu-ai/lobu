@@ -17,6 +17,7 @@ import {
   type ToolAccessLevel,
 } from '../auth/tool-access';
 import type { Env } from '../index';
+import { recordMcpConversationActivity } from '../lobu/stores/mcp-client-conversations';
 import { trackMCPToolCall } from '../sentry';
 import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
@@ -326,19 +327,30 @@ export async function executeTool(
       throw new Error('User context required.');
     }
     if (toolName === 'list_organizations') {
-      // Account discovery is audited even without an execution workspace.
+      // This early return sits BEFORE the shared audit seam below, so it must
+      // audit its own invocation AND materialize the same conversation
+      // projection — a client whose only call is this one still belongs in the
+      // client-conversation listing. The event needs an owning org: use the
+      // bound org when there is one; a session with no bound org has no ledger
+      // to write into, and toToolContext would throw on it anyway.
       const startTime = Date.now();
-      const auditOutcome = async (outcome: {
+      const auditIfOrgBound = async (outcome: {
         result?: unknown;
         error?: unknown;
       }) => {
-        const ctx = authCtx.organizationId ? toToolContext(authCtx) : null;
+        if (!authCtx.organizationId) return;
+        const ctx = toToolContext(authCtx);
         await recordToolInvocationAudit({
           toolName,
           args,
           ...outcome,
           durationMs: Date.now() - startTime,
-          ctx: ctx ?? authCtx,
+          ctx,
+        });
+        await recordMcpConversationActivity({
+          ctx,
+          toolName,
+          failed: outcome.error !== undefined || isSoftErrorResult(outcome.result),
         });
       };
       try {
@@ -354,10 +366,10 @@ export async function executeTool(
                 : authCtx.grantedOrganizationIds,
           })
         );
-        await auditOutcome({ result });
+        await auditIfOrgBound({ result });
         return result;
       } catch (error) {
-        await auditOutcome({ error });
+        await auditIfOrgBound({ error });
         throw error;
       }
     }
@@ -429,6 +441,11 @@ export async function executeTool(
       durationMs: Date.now() - startTime,
       ctx: toolContext,
     });
+    await recordMcpConversationActivity({
+      ctx: toolContext,
+      toolName,
+      failed: isSoftErrorResult(result),
+    });
     return result;
   } catch (error) {
     // Stamp the correlation id onto typed errors so the response boundaries can
@@ -442,6 +459,11 @@ export async function executeTool(
       error,
       durationMs: Date.now() - startTime,
       ctx: toolContext,
+    });
+    await recordMcpConversationActivity({
+      ctx: toolContext,
+      toolName,
+      failed: true,
     });
     throw error;
   }

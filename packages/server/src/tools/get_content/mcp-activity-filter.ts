@@ -19,10 +19,10 @@ export async function resolveMcpActivitySessionIds(
 ): Promise<string[]> {
 	const rows = await sql<ActivityTransportRow>`
     SELECT transport_session_ids
-    FROM public.mcp_activity_event_scopes
+    FROM public.mcp_client_conversations
     WHERE organization_id = ${organizationId}
-      AND client_identity = ANY(${pgTextArray(clientIds)}::text[])
-      AND activity_id = ${activityId}
+      AND client_id = ANY(${pgTextArray(clientIds)}::text[])
+      AND conversation_id = ${activityId}
   `;
 	if (rows.length === 0) {
 		throw new ToolUserError("MCP activity not found.", 404);

@@ -372,7 +372,7 @@ const productActivityDb = defineConnection({
             UNION ALL
 
             SELECT
-              concat_ws(':', 'mcp', m.user_id, m.client_identity, m.activity_id),
+              concat_ws(':', 'mcp', m.organization_id, m.client_identity, m.conversation_id),
               m.last_activity_at,
               'MCP activity'::text,
               concat_ws(
@@ -380,11 +380,13 @@ const productActivityDb = defineConnection({
                 coalesce(m.client_software_id, 'Unknown client'),
                 coalesce(nullif(u.name, ''), 'Unknown user'),
                 u.email,
+                o.name,
                 CASE WHEN m.last_action IS NOT NULL THEN 'last action: ' || m.last_action END,
                 m.call_count || ' total calls',
                 m.failed_count || ' failed'
               )
-            FROM user_mcp_activities m
+            FROM mcp_client_conversations m
+            JOIN organization o ON o.id = m.organization_id
             LEFT JOIN "user" u ON u.id = m.user_id
             WHERE m.call_count > 0
               AND m.last_activity_at > now() - interval '24 hours'

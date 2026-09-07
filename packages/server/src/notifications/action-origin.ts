@@ -41,12 +41,32 @@ async function automationOrigin(
 	};
 }
 
-async function mcpConversationOrigin(clientIdentity: string): Promise<ActionOrigin> {
-  const [client] = await getDb()<{ client_name: string | null }>`
-    SELECT client_name FROM oauth_clients WHERE id = ${clientIdentity}
-  `;
-  // This label appears on workspace-visible cards; private account titles do not.
-  return { kind: "conversation", label: `${client?.client_name?.trim() || "MCP"} conversation` };
+async function mcpConversationOrigin(
+	organizationId: string,
+	activity: { clientIdentity: string; activityId: string },
+): Promise<ActionOrigin> {
+	const rows = await getDb()<{
+		title: string | null;
+		client_name: string | null;
+	}>`
+		SELECT mc.title, oc.client_name
+		FROM mcp_client_conversations mc
+		LEFT JOIN oauth_clients oc ON oc.id = mc.client_id
+		WHERE mc.organization_id = ${organizationId}
+		  AND mc.client_identity = ${activity.clientIdentity}
+		  AND mc.conversation_id = ${activity.activityId}
+		LIMIT 1
+	`;
+	const title = rows[0]?.title?.trim();
+	const client = rows[0]?.client_name?.trim();
+	return {
+		kind: "conversation",
+		label: title
+			? client
+				? `${client} — ${title}`
+				: title
+			: `${client ?? "MCP"} conversation`,
+	};
 }
 
 async function resolveConversationActionOrigin(params: {
@@ -60,7 +80,10 @@ async function resolveConversationActionOrigin(params: {
 	const sourcePlatform = params.platform?.trim().toLowerCase() || null;
 	const storedPlatform = sourcePlatform === "api" ? "web" : sourcePlatform;
 	if (storedPlatform === "mcp" && params.conversationId && params.clientIdentity) {
-		return mcpConversationOrigin(params.clientIdentity);
+		return mcpConversationOrigin(params.organizationId, {
+			clientIdentity: params.clientIdentity,
+			activityId: params.conversationId,
+		});
 	}
 	if (storedPlatform && params.conversationId) {
 		const rows = await getDb()<{
@@ -136,7 +159,7 @@ export async function resolveActionOrigin(
 		}
 		const mcpActivity = currentMcpActivityAttribution(ctx);
 		if (mcpActivity) {
-			return await mcpConversationOrigin(mcpActivity.clientIdentity);
+			return await mcpConversationOrigin(ctx.organizationId, mcpActivity);
 		}
 		if (ctx.sourceContext?.conversationId) {
 			return await resolveConversationActionOrigin({

@@ -581,10 +581,10 @@ function buildEmptySearchSuggestion(
     );
   }
 
-  // The literal comes from the shared constant so the SQL and the filter we
-  // hand the agent cannot drift from the value workspace audit events use.
+  // The literals come from the shared constant so the SQL and the filter we
+  // hand the agent cannot drift from the value audit events are written with.
   lines.push(
-    `2. **Check workspace audit records:** workspace-scoped audit events are written to \`events\` with no body text and no embedding, so semantic recall cannot rank them and only their titles are searchable. Read them explicitly with \`query_sql\` (e.g. \`SELECT id, title, semantic_type, occurred_at FROM events WHERE semantic_type = '${AUDIT_SEMANTIC_TYPE}' ORDER BY occurred_at DESC LIMIT 50\`) or with \`client.knowledge.read({ semantic_type: '${AUDIT_SEMANTIC_TYPE}' })\` through \`query_sdk\`.`
+    `2. **Check activity and audit records:** tool invocations and other operational events are written to \`events\` with no body text and no embedding, so semantic recall cannot rank them and only their titles are searchable. Read them explicitly with \`query_sql\` (e.g. \`SELECT id, title, semantic_type, occurred_at FROM events WHERE semantic_type = '${AUDIT_SEMANTIC_TYPE}' ORDER BY occurred_at DESC LIMIT 50\`) or with \`client.knowledge.read({ semantic_type: '${AUDIT_SEMANTIC_TYPE}' })\` through \`query_sdk\`.`
   );
 
   const filterRelaxations: string[] = [];
