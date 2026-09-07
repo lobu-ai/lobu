@@ -22,7 +22,7 @@ permissions:
   actions: read
 
 env:
-  REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app app-image-smoke
+  REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app app-image-smoke promote-images
 
 jobs:
   attest-publish:
@@ -93,9 +93,9 @@ jobs:
           # names, so that run is still in_progress while this gate reads it --
           # asserting "completed" here strands the release off npm, which is
           # the defect this workflow exists to prevent. The per-job attestation
-          # below is stronger evidence anyway: it proves all six required image
+          # below is stronger evidence anyway: it proves all seven required image
           # jobs are completed-success, which an unfinished producer cannot
-          # fake, and none of the six is the job doing the dispatching.
+          # fake, and none of the seven is the job doing the dispatching.
 
           # Piped, never --argjson: filter=all returns the jobs of every rerun
           # attempt, so this payload grows without bound and dies with "jq:

@@ -49,6 +49,9 @@ env:
   IMAGE_NAME_APP: lobu-ai/lobu-app
   IMAGE_NAME_WORKER: lobu-ai/lobu-worker
   IMAGE_NAME_EMBEDDINGS: lobu-ai/lobu-embeddings
+  # Excluded by Flux's timestamp-only ImagePolicy. Only promote-images may
+  # publish deployment, semver, or latest tags after the candidate passes.
+  CANDIDATE_TAG: candidate-${{ github.run_id }}-${{ github.run_attempt }}
   # Prod runs Hetzner cpx41 (x86_64 only — see project_hetzner_prod_cost
   # memory), so main-branch pushes build amd64 only. This dropped the
   # build-app step from ~25min to ~8min AND fixed the disk-full failure
@@ -134,13 +137,14 @@ jobs:
         run: node scripts/derive-image-tags.mjs
 
   # Connector-runtime parity smoke gate (main/deploy side). RUNS the built worker
-  # artifact's self-check before any image is pushed, so the packaging/parity
-  # drift that broke prod (worker image missing `COPY packages/core` → dangling
-  # transitive `@lobu/core` → every feed sync crashed, all CI green) can't ship.
-  # `build-worker` depends on this, and `build-app` depends on `build-worker`, so
-  # a failing smoke blocks BOTH worker and app pushes — critical because the chart
-  # applies one shared tag to app + worker and Flux's ImageUpdateAutomation would
-  # otherwise roll the app to a tag whose worker is broken.
+  # artifact's self-check before any deployable tag is published, so the
+  # packaging/parity drift that broke prod (worker image missing `COPY
+  # packages/core` → dangling transitive `@lobu/core` → every feed sync
+  # crashed, all CI green) can't ship.
+  # `build-worker` depends on this, and `build-app` depends on `build-worker`.
+  # Promotion waits for all three candidate builds and the app-image smoke
+  # before publishing the shared tag Flux deploys to app, worker, and
+  # embeddings.
   #
   # amd64-only (no QEMU/arm64): a smoke gate, not a release. Reuses the same GHA
   # buildx cache scope as `build-worker` so this doesn't double the build cost.
@@ -190,19 +194,9 @@ jobs:
   build-app:
     runs-on: ubuntu-24.04
     if: needs.generate-tag.outputs.should_publish == 'true'
-    # Push the app image LAST. Flux's ImageUpdateAutomation only watches
-    # the app image policy, but the chart applies one shared tag to app,
-    # worker, AND embeddings. If app pushed before worker or embeddings,
-    # Flux would roll the release to a tag whose sibling images don't yet
-    # exist (or never will, if a sibling build failed for an unrelated
-    # reason — disk pressure, registry hiccup, an unrelated Dockerfile
-    # regression). Earlier in this PR I tried parallelizing build-app for
-    # a ~7min critical-path win, but pi flagged the real (low-probability
-    # but not zero) failure window: a failed sibling build still lets
-    # build-app push the watched tag, and Flux rolls a half-existent
-    # tag. Reverted to the safe gate. The arm64-drop alone still cuts
-    # ~15-20min off the critical path, which is the bigger lever anyway.
     needs: [generate-tag, build-worker, build-embeddings-service]
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -235,11 +229,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}
           tags: |
-            type=raw,value=${{ needs.generate-tag.outputs.tag }}
-            type=raw,value=${{ needs.generate-tag.outputs.semver }},enable=${{ needs.generate-tag.outputs.semver != '' }}
-            type=raw,value=latest,enable=${{ needs.generate-tag.outputs.is_stable == 'true' }}
+            type=raw,value=${{ env.CANDIDATE_TAG }}
 
-      - name: Build and push App image
+      - name: Build and push App candidate
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -267,19 +260,8 @@ jobs:
             https://api.github.com/user/packages/container/lobu-app/visibility \
             -d '{"visibility":"public"}' || true
 
-  # App-image smoke. Deliberately runs AFTER build-app has pushed, not before.
-  #
-  # `connector-parity-smoke` gates the push because a broken worker must never
-  # reach the registry. This one is the opposite shape on purpose: it needs the
-  # pushed tag to exist so it can smoke the EXACT artifact Flux will roll out,
-  # rather than a rebuild that could differ. So it cannot block the rollout —
-  # but it does fail the workflow, which reddens main and is what stops a
-  # release being cut on a broken image.
-  #
-  # Nothing else runs the app image. build-images only builds it, and CI's
-  # suites run from source. That gap shipped #2231 (no `lobu` on PATH in the
-  # image) and #2183 (app image serving 404s for its own assets) — both with
-  # every check green.
+  # Smoke the immutable candidate before any deployable app tag exists.
+  # Promotion re-tags this same digest; it never rebuilds the tested image.
   app-image-smoke:
     runs-on: ubuntu-24.04
     needs: [generate-tag, build-app]
@@ -316,11 +298,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Smoke the pushed app image
+      - name: Smoke the candidate app digest
         run: |
           chmod +x scripts/app-image-smoke.sh
           scripts/app-image-smoke.sh \
-            "${REGISTRY}/${IMAGE_NAME_APP}:${{ needs.generate-tag.outputs.tag }}"
+            "${REGISTRY}/${IMAGE_NAME_APP}@${{ needs.build-app.outputs.digest }}"
+
+  promote-images:
+    runs-on: ubuntu-24.04
+    needs: [generate-tag, build-app, build-worker, build-embeddings-service, app-image-smoke]
+    if: needs.generate-tag.outputs.should_publish == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish tested digests, app last for Flux
+        env:
+          APP_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}@${{ needs.build-app.outputs.digest }}
+          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_WORKER }}@${{ needs.build-worker.outputs.digest }}
+          EMBEDDINGS_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMBEDDINGS }}@${{ needs.build-embeddings-service.outputs.digest }}
+          DEPLOY_TAG: ${{ needs.generate-tag.outputs.tag }}
+          SEMVER: ${{ needs.generate-tag.outputs.semver }}
+          IS_STABLE: ${{ needs.generate-tag.outputs.is_stable }}
+        run: bash scripts/promote-images.sh
 
   # Package publication belongs after the exact release artifact passes its
   # runtime smoke. Dispatch from current main so the hardened workflow policy
@@ -328,7 +338,7 @@ jobs:
   # ID so the downstream gate cannot select a different producer.
   trigger-package-publish:
     runs-on: ubuntu-24.04
-    needs: [generate-tag, app-image-smoke]
+    needs: [generate-tag, promote-images]
     if: >-
       github.event_name == 'release'
       && needs.generate-tag.outputs.should_publish == 'true'
@@ -354,6 +364,8 @@ jobs:
     # build-worker`) on the parity smoke passing.
     needs: [generate-tag, connector-parity-smoke]
     if: needs.generate-tag.outputs.should_publish == 'true'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -381,11 +393,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_WORKER }}
           tags: |
-            type=raw,value=${{ needs.generate-tag.outputs.tag }}
-            type=raw,value=${{ needs.generate-tag.outputs.semver }},enable=${{ needs.generate-tag.outputs.semver != '' }}
-            type=raw,value=latest,enable=${{ needs.generate-tag.outputs.is_stable == 'true' }}
+            type=raw,value=${{ env.CANDIDATE_TAG }}
 
-      - name: Build and push Worker image
+      - name: Build and push Worker candidate
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -412,6 +423,8 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [generate-tag]
     if: needs.generate-tag.outputs.should_publish == 'true'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -439,11 +452,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMBEDDINGS }}
           tags: |
-            type=raw,value=${{ needs.generate-tag.outputs.tag }}
-            type=raw,value=${{ needs.generate-tag.outputs.semver }},enable=${{ needs.generate-tag.outputs.semver != '' }}
-            type=raw,value=latest,enable=${{ needs.generate-tag.outputs.is_stable == 'true' }}
+            type=raw,value=${{ env.CANDIDATE_TAG }}
 
-      - name: Build and push Embeddings Service image
+      - name: Build and push Embeddings Service candidate
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -464,27 +476,12 @@ jobs:
             https://api.github.com/user/packages/container/lobu-embeddings/visibility \
             -d '{"visibility":"public"}' || true
 
-  # Failure notification. The chart applies one shared tag to app + worker +
-  # embeddings, so if any of the three build/push jobs fails on main or a Lobu
-  # release, sibling tags may be incomplete. On timestamped runs the next
-  # ImageUpdateAutomation cycle can either roll a tag that does not exist for
-  # one service (half-rolled prod) or — when app fails after worker/embeddings
-  # already pushed — silently leave prod on the previous app tag while the
-  # other two move forward. Both modes were caught only by manual inspection
-  # before this notifier existed (PR #1116 build-app disk-full incident).
-  #
-  # Posts to the same Slack webhook the Flux notification-controller's
-  # `slack-devops` Provider uses (devops channel) so cluster-side and CI-side
-  # deploy failures land in one place. Webhook lives in the SLACK_DEPLOY_WEBHOOK_URL
-  # repo secret; if unset the curl is skipped, never failing the job.
-  # app-image-smoke is in `needs` too: it runs after the tag is already pushed,
-  # so when it fails Flux may already be rolling a broken image — exactly the
-  # case that must ping, not just redden the workflow. trigger-package-publish
-  # is in `needs` for the same reason: nothing else watches that dispatch, so a
-  # failed one would otherwise surface only as a version missing from npm.
+  # A failed build, smoke, promotion, or package dispatch fails the workflow.
+  # Candidate build or smoke failures never publish the app timestamp tag Flux
+  # watches.
   notify-failure:
     runs-on: ubuntu-24.04
-    needs: [generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app, app-image-smoke, trigger-package-publish]
+    needs: [generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app, app-image-smoke, promote-images, trigger-package-publish]
     if: >-
       failure()
       && needs.generate-tag.outputs.should_publish == 'true'
