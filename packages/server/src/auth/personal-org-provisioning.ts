@@ -104,6 +104,48 @@ async function lockPersonalOrgForUser(userId: string, sql: Sql): Promise<void> {
   `;
 }
 
+/**
+ * Read the `personal_org_for_user_id` marker off an `organization` row.
+ *
+ * `organization.metadata` is a `text` column holding JSON, but Better Auth
+ * hands hooks an already-parsed object, so accept both shapes. Anything that
+ * fails to parse, or carries a non-string marker, returns null: callers use
+ * this to *restrict* an action, so an unreadable row must not be treated as
+ * personal.
+ */
+export function readPersonalOrgOwnerId(metadata: unknown): string | null {
+	let parsed: Record<string, unknown> | null = null;
+	if (typeof metadata === "string") {
+		try {
+			parsed = JSON.parse(metadata) as Record<string, unknown> | null;
+		} catch {
+			return null;
+		}
+	} else if (metadata && typeof metadata === "object") {
+		parsed = metadata as Record<string, unknown>;
+	}
+	const marker = parsed?.personal_org_for_user_id;
+	return typeof marker === "string" && marker.length > 0 ? marker : null;
+}
+
+/**
+ * A user's personal org is not user-deletable.
+ *
+ * Device tokens are force-bound to it (the device-worker grant in
+ * `oauth/routes.ts`), the device-worker middleware builds `workerOrgIds` from
+ * it, and auto-wire targets it unconditionally (`device-reconcile.ts`).
+ * Deleting it strands the account rather than freeing a workspace: pairing
+ * 403s with "No personal organization is provisioned", existing workers 403 on
+ * every poll, and auto-wire silently returns []. Team orgs stay deletable.
+ */
+export function isPersonalOrgDeletionBlocked(
+	metadata: unknown,
+	actingUserId: string,
+): boolean {
+	const ownerId = readPersonalOrgOwnerId(metadata);
+	return ownerId !== null && ownerId === actingUserId;
+}
+
 export async function findExistingPersonalOrg(
 	userId: string,
 	sql: Sql,

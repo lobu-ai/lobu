@@ -44,7 +44,10 @@ import {
 	resolveLoginProviderCredentials,
 	resolveRequestOrganizationId,
 } from "./config";
-import { findExistingPersonalOrg } from "./personal-org-provisioning";
+import {
+	findExistingPersonalOrg,
+	isPersonalOrgDeletionBlocked,
+} from "./personal-org-provisioning";
 import { persistLoginSlackIdentity } from "./subject-identities";
 
 function gravatarUrl(email: string): string {
@@ -304,6 +307,24 @@ export async function createAuth(
 				allowUserToCreateOrganization: true,
 				creatorRole: "owner",
 				organizationHooks: {
+					// A personal org is not user-deletable — see
+					// `isPersonalOrgDeletionBlocked` for why. The marker is read off
+					// the org row the hook already provides, so no second query is
+					// needed. Deleting a team org you own is unaffected.
+					beforeDeleteOrganization: async ({ organization: org, user }) => {
+						if (
+							isPersonalOrgDeletionBlocked(
+								(org as { metadata?: unknown }).metadata,
+								user.id,
+							)
+						) {
+							throw new APIError("FORBIDDEN", {
+								code: "PERSONAL_ORGANIZATION_CANNOT_BE_DELETED",
+								message:
+									"Your personal workspace can't be deleted — devices and personal connections are bound to it.",
+							});
+						}
+					},
 					// If a user manually creates a private org while they have no
 					// personal-org marker yet, tag it as their personal one. Without
 					// this, `personal_org_for_user_id` only gets set by the
