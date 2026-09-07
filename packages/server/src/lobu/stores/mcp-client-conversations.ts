@@ -5,6 +5,8 @@ import type { ToolContext } from "../../tools/registry.js";
 const logger = createLogger("mcp-client-conversations");
 const MAX_TITLE_LENGTH = 200;
 
+type ActivityContext = Pick<ToolContext, 'mcpConversationId' | 'mcpSessionId' | 'clientId' | 'tokenType'>;
+
 export interface McpActivityAttribution {
 	clientIdentity: string;
 	clientId: string | null;
@@ -20,7 +22,7 @@ function boundedId(value: string | null | undefined): string | null {
 }
 
 export function currentMcpActivityAttribution(
-	ctx: ToolContext,
+	ctx: ActivityContext,
 ): McpActivityAttribution | null {
 	const hostConversationId = boundedId(ctx.mcpConversationId);
 	const transportSessionId = boundedId(ctx.mcpSessionId);
@@ -40,7 +42,7 @@ export function currentMcpActivityAttribution(
 	};
 }
 
-export function currentMcpActivityEventMetadata(ctx: ToolContext): {
+export function currentMcpActivityEventMetadata(ctx: ActivityContext): {
 	mcp_session_id: string | null;
 	mcp_conversation_id: string | null;
 } {
@@ -51,7 +53,7 @@ export function currentMcpActivityEventMetadata(ctx: ToolContext): {
 	};
 }
 
-function oauthClientId(ctx: ToolContext): string | null {
+function oauthClientId(ctx: ActivityContext): string | null {
 	return ctx.tokenType === "oauth" ? (ctx.clientId ?? null) : null;
 }
 

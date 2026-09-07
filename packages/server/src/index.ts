@@ -70,6 +70,7 @@ import { isShuttingDown } from "./lifecycle-state";
 import { agentRoutes } from "./lobu/agent-routes";
 import { clientRoutes } from "./lobu/client-routes";
 import { clientActivityScopeRoutes } from "./lobu/client-activity-scope-routes";
+import { toolInvocationRoutes } from "./lobu/tool-invocation-routes";
 import { deploymentRoutes } from "./lobu/deployment-routes";
 import { sandboxRoutes } from "./lobu/sandbox-routes";
 import {
@@ -959,6 +960,7 @@ app.delete("/api/workers/me/feeds/:id", deleteMyDeviceFeed);
 // devices. Lives under /api/me/ so the workspace resolver treats it as
 // user-scoped (no org slug in the URL).
 app.get("/api/me/devices", mcpAuth, listDeviceWorkers);
+app.route("/api/me/tool-invocations", toolInvocationRoutes);
 app.patch("/api/me/devices/:id", mcpAuth, updateDeviceWorkerOrg);
 app.delete("/api/me/devices/:id", mcpAuth, deleteDeviceWorker);
 // Mint a child device-worker token for the caller — used by the Owletto Mac

@@ -327,31 +327,28 @@ export async function executeTool(
       throw new Error('User context required.');
     }
     if (toolName === 'list_organizations') {
-      // This early return sits BEFORE the shared audit seam below, so it must
-      // audit its own invocation AND materialize the same conversation
-      // projection — a client whose only call is this one still belongs in the
-      // client-conversation listing. The event needs an owning org: use the
-      // bound org when there is one; a session with no bound org has no ledger
-      // to write into, and toToolContext would throw on it anyway.
+      // Account discovery is audited even without an execution workspace.
+      // The workspace conversation projection is independent of the user ledger.
       const startTime = Date.now();
-      const auditIfOrgBound = async (outcome: {
+      const auditOutcome = async (outcome: {
         result?: unknown;
         error?: unknown;
       }) => {
-        if (!authCtx.organizationId) return;
-        const ctx = toToolContext(authCtx);
+        const ctx = authCtx.organizationId ? toToolContext(authCtx) : null;
         await recordToolInvocationAudit({
           toolName,
           args,
           ...outcome,
           durationMs: Date.now() - startTime,
-          ctx,
+          ctx: ctx ?? authCtx,
         });
-        await recordMcpConversationActivity({
-          ctx,
-          toolName,
-          failed: outcome.error !== undefined || isSoftErrorResult(outcome.result),
-        });
+        if (ctx) {
+          await recordMcpConversationActivity({
+            ctx,
+            toolName,
+            failed: outcome.error !== undefined || isSoftErrorResult(outcome.result),
+          });
+        }
       };
       try {
         const result = await trackMCPToolCall(toolName, args, () =>
@@ -366,10 +363,10 @@ export async function executeTool(
                 : authCtx.grantedOrganizationIds,
           })
         );
-        await auditIfOrgBound({ result });
+        await auditOutcome({ result });
         return result;
       } catch (error) {
-        await auditIfOrgBound({ error });
+        await auditOutcome({ error });
         throw error;
       }
     }

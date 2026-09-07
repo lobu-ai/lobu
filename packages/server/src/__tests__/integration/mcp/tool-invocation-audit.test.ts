@@ -14,10 +14,11 @@ import {
   createTestAccessToken,
   createTestOAuthClient,
   createTestOrganization,
+  createTestSession,
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
-import { ensureMcpSession, mcpToolsCall } from '../../setup/test-helpers';
+import { ensureMcpSession, get, mcpToolsCall } from '../../setup/test-helpers';
 
 interface AuditRow {
   id: string | number;
@@ -25,14 +26,12 @@ interface AuditRow {
   metadata: Record<string, unknown>;
 }
 
-async function latestAuditRow(orgId: string, toolName: string): Promise<AuditRow | null> {
+async function latestAuditRow(userId: string, toolName: string): Promise<AuditRow | null> {
   const sql = getDb();
   const rows = await sql<AuditRow[]>`
     SELECT id, payload_data, metadata
-    FROM events
-    WHERE organization_id = ${orgId}
-      AND semantic_type = 'audit'
-      AND origin_type = 'tool_invocation'
+    FROM user_tool_invocations
+    WHERE user_id = ${userId}
       AND payload_data->>'tool_name' = ${toolName}
     ORDER BY id DESC
     LIMIT 1
@@ -40,7 +39,7 @@ async function latestAuditRow(orgId: string, toolName: string): Promise<AuditRow
   return rows[0] ?? null;
 }
 
-async function readAuditEvent(eventId: string | number, ctx: AuthContext) {
+async function readLegacyAuditEvent(eventId: string | number, ctx: AuthContext) {
   const result = (await executeTool(
     'read_knowledge',
     { content_ids: [Number(eventId)], limit: 1 },
@@ -48,6 +47,22 @@ async function readAuditEvent(eventId: string | number, ctx: AuthContext) {
     ctx
   )) as { content: Array<{ payload_data: Record<string, unknown> }> };
   return result.content[0]?.payload_data ?? {};
+}
+
+async function readAuditEvent(id: string | number, ctx: AuthContext) {
+  const { cookieHeader } = await createTestSession(ctx.userId!);
+  const response = await get(`/api/me/tool-invocations/${id}`, { cookie: cookieHeader });
+  expect(response.status).toBe(200);
+  return (await response.json()).payload;
+}
+
+async function latestLegacyAuditRow(orgId: string): Promise<AuditRow> {
+  const rows = await getDb()<AuditRow[]>`
+    SELECT id, payload_data, metadata FROM events
+    WHERE organization_id = ${orgId} AND origin_type = 'tool_invocation'
+    ORDER BY id DESC LIMIT 1
+  `;
+  return rows[0]!;
 }
 
 describe('tool invocation audit coverage', () => {
@@ -110,7 +125,7 @@ describe('tool invocation audit coverage', () => {
     );
     const sessionId = await ensureMcpSession({ token, orgSlug });
 
-    const row = await latestAuditRow(orgId, 'search_memory');
+    const row = await latestAuditRow(ownerId, 'search_memory');
     expect(row).not.toBeNull();
     expect(row!.payload_data.success).toBe(true);
     expect(row!.payload_data.args_sha256).toEqual(expect.any(String));
@@ -133,7 +148,7 @@ describe('tool invocation audit coverage', () => {
     )) as { error?: string };
     expect(result.error).toBeUndefined();
 
-    const row = await latestAuditRow(orgId, 'query_sql');
+    const row = await latestAuditRow(ownerId, 'query_sql');
     expect(row).not.toBeNull();
     expect(row!.payload_data.org_slug).toBe(orgSlug);
     expect(row!.payload_data.request_status).toBe('complete');
@@ -157,10 +172,18 @@ describe('tool invocation audit coverage', () => {
     });
   });
 
-  it('keeps the request on the event but exposes it only through the authorized event read path', async () => {
-    const row = await latestAuditRow(orgId, 'query_sql');
+  it('preserves existing request permissions on historical workspace events', async () => {
+    const row = await latestAuditRow(ownerId, 'query_sql');
     expect(row).not.toBeNull();
-    const eventId = String(row!.id);
+    const sql = getDb();
+    const [legacy] = await sql`
+      INSERT INTO events (organization_id, origin_id, semantic_type, origin_type,
+        payload_type, payload_data, created_by)
+      VALUES (${orgId}, 'historical-query-sql', 'audit', 'tool_invocation',
+        'empty', ${sql.json(row!.payload_data)}, ${ownerId})
+      RETURNING id
+    `;
+    const eventId = String(legacy.id);
 
     const sqlResult = (await executeTool(
       'query_sql',
@@ -173,7 +196,7 @@ describe('tool invocation audit coverage', () => {
     )) as { rows: Array<{ payload_data: Record<string, unknown> }> };
     expect(sqlResult.rows[0].payload_data).not.toHaveProperty('request');
 
-    const memberPayload = await readAuditEvent(eventId, {
+    const memberPayload = await readLegacyAuditEvent(eventId, {
       ...authCtxFor('session'),
       userId: 'another-user',
       memberRole: 'member',
@@ -184,7 +207,7 @@ describe('tool invocation audit coverage', () => {
     expect(memberPayload).not.toHaveProperty('request_bytes');
     expect(memberPayload.request_status).toBe('complete');
 
-    const adminPayload = await readAuditEvent(eventId, {
+    const adminPayload = await readLegacyAuditEvent(eventId, {
       ...authCtxFor('session'),
       userId: 'another-user',
       memberRole: 'admin',
@@ -198,7 +221,7 @@ describe('tool invocation audit coverage', () => {
   });
 
   it('does not inline exact requests into audit list results', async () => {
-    const row = await latestAuditRow(orgId, 'query_sql');
+    const row = await latestLegacyAuditRow(orgId);
     expect(row).not.toBeNull();
     // Guard the guard: the stored row must actually carry a request, or the
     // absence assertions below would pass on a row that never had one.
@@ -223,7 +246,7 @@ describe('tool invocation audit coverage', () => {
   });
 
   it('restores every copy when an exact read contains duplicate event ids', async () => {
-    const row = await latestAuditRow(orgId, 'query_sql');
+    const row = await latestLegacyAuditRow(orgId);
     expect(row).not.toBeNull();
     const firstPayload = structuredClone(row!.payload_data);
     const secondPayload = structuredClone(row!.payload_data);
@@ -291,7 +314,7 @@ describe('tool invocation audit coverage', () => {
       ctx: authCtxFor('pat') as never,
     });
 
-    const row = await latestAuditRow(orgId, 'query_sql');
+    const row = await latestAuditRow(ownerId, 'query_sql');
     expect(row!.payload_data.request).toEqual({
       sql: `${sql}; -- sk_live_ABCDEFGHIJKLMNOP`,
       api_key: 'sk-live-STORED-VERBATIM',
@@ -302,10 +325,10 @@ describe('tool invocation audit coverage', () => {
       {} as Env,
       authCtxFor('session')
     )) as { rows: Array<{ payload_data: Record<string, unknown> }> };
-    expect(JSON.stringify(sqlResult.rows[0].payload_data)).not.toContain(
+    expect(JSON.stringify(sqlResult.rows)).not.toContain(
       'sk_live_ABCDEFGHIJKLMNOP'
     );
-    expect(JSON.stringify(sqlResult.rows[0].payload_data)).not.toContain(
+    expect(JSON.stringify(sqlResult.rows)).not.toContain(
       'sk-live-STORED-VERBATIM'
     );
     expect(await readAuditEvent(row!.id, authCtxFor('pat'))).toMatchObject({
@@ -325,12 +348,12 @@ describe('tool invocation audit coverage', () => {
   });
 
   it('does NOT write generic audit rows for browser-session tool calls', async () => {
-    const before = await latestAuditRow(orgId, 'list_metrics');
+    const before = await latestAuditRow(ownerId, 'list_metrics');
     expect(before).toBeNull();
 
     await executeTool('list_metrics', {}, {} as Env, authCtxFor('session'));
 
-    expect(await latestAuditRow(orgId, 'list_metrics')).toBeNull();
+    expect(await latestAuditRow(ownerId, 'list_metrics')).toBeNull();
   });
 
   it('still audits query_sql for browser-session callers (detailed audit is token-type independent)', async () => {
@@ -343,9 +366,8 @@ describe('tool invocation audit coverage', () => {
 
     const sql = getDb();
     const rows = await sql`
-      SELECT id FROM events
-      WHERE organization_id = ${orgId}
-        AND semantic_type = 'audit'
+      SELECT id FROM user_tool_invocations
+      WHERE user_id = ${ownerId}
         AND payload_data->>'tool_name' = 'query_sql'
         AND payload_data->>'sql_preview_redacted' LIKE '%FROM entities%'
     `;
@@ -362,7 +384,7 @@ describe('tool invocation audit coverage', () => {
     )) as { success: boolean };
     expect(result.success).toBe(true);
 
-    const row = await latestAuditRow(orgId, 'query_sdk');
+    const row = await latestAuditRow(ownerId, 'query_sdk');
     expect(row!.payload_data.request).toEqual({ script });
     expect(await readAuditEvent(row!.id, authCtxFor('session'))).toMatchObject({
       request: { script },
@@ -379,7 +401,7 @@ describe('tool invocation audit coverage', () => {
       )
     ).rejects.toThrow();
 
-    const row = await latestAuditRow(orgId, 'manage_connections');
+    const row = await latestAuditRow(ownerId, 'manage_connections');
     expect(row).not.toBeNull();
     expect(row!.payload_data.success).toBe(false);
     expect(row!.payload_data.error).toBeTruthy();
@@ -395,7 +417,7 @@ describe('tool invocation audit coverage', () => {
   it('retains the declared action discriminator against the real tool schema', async () => {
     await executeTool('manage_connections', { action: 'list' }, {} as Env, authCtxFor('pat'));
 
-    const row = await latestAuditRow(orgId, 'manage_connections');
+    const row = await latestAuditRow(ownerId, 'manage_connections');
     expect(row).not.toBeNull();
     expect(row!.payload_data.success).toBe(true);
     // `action: 'list'` is one of the tool's own compile-time literals, so it
@@ -418,9 +440,8 @@ describe('tool invocation audit coverage', () => {
 
     const sql = getDb();
     const rows = await sql<Array<{ payload_data: Record<string, unknown> }>>`
-      SELECT payload_data FROM events
-      WHERE organization_id = ${orgId}
-        AND semantic_type = 'audit'
+      SELECT payload_data FROM user_tool_invocations
+      WHERE user_id = ${ownerId}
         AND payload_data->>'tool_name' = 'search_sdk'
       ORDER BY id DESC
       LIMIT 2
@@ -458,7 +479,7 @@ describe('tool invocation audit coverage', () => {
       } as never,
     });
 
-    const row = await latestAuditRow(orgId, 'probe_leaf_sanitization');
+    const row = await latestAuditRow(ownerId, 'probe_leaf_sanitization');
     expect(row).not.toBeNull();
     const preview = String(row!.payload_data.args_preview_redacted);
     expect(preview).not.toContain('123456');
@@ -490,7 +511,7 @@ describe('tool invocation audit coverage', () => {
         } as never,
       });
 
-      const row = await latestAuditRow(orgId, toolName);
+      const row = await latestAuditRow(ownerId, toolName);
       expect(row).not.toBeNull();
       expect(row!.payload_data.success).toBe(false);
       // Name only — handler-supplied error text never reaches the ledger.
@@ -498,7 +519,7 @@ describe('tool invocation audit coverage', () => {
     }
   );
 
-  it('bounds large requests directly on their audit event', async () => {
+  it('bounds large requests in the user-owned record', async () => {
     const script = 'x'.repeat(300 * 1024);
     await recordToolInvocationAudit({
       toolName: 'run_sdk',
@@ -507,7 +528,7 @@ describe('tool invocation audit coverage', () => {
       durationMs: 1,
       ctx: authCtxFor('pat') as never,
     });
-    const row = await latestAuditRow(orgId, 'run_sdk');
+    const row = await latestAuditRow(ownerId, 'run_sdk');
     expect(row!.payload_data).toMatchObject({
       request_status: 'too_large',
       request_bytes: expect.any(Number),
@@ -556,7 +577,7 @@ describe('tool invocation audit coverage', () => {
       } as never,
     });
 
-    const row = await latestAuditRow(orgId, 'probe_freetext_redaction');
+    const row = await latestAuditRow(ownerId, 'probe_freetext_redaction');
     expect(row).not.toBeNull();
     const preview = String(row!.payload_data.args_preview_redacted);
     expect(preview).not.toContain('my secret value');
@@ -592,9 +613,8 @@ describe('tool invocation audit coverage', () => {
 
     const db = getDb();
     const rows = await db<Array<{ payload_data: Record<string, unknown> }>>`
-      SELECT payload_data FROM events
-      WHERE organization_id = ${orgId}
-        AND semantic_type = 'audit'
+      SELECT payload_data FROM user_tool_invocations
+      WHERE user_id = ${ownerId}
         AND payload_data->>'tool_name' = 'query_sql'
         AND payload_data->>'sql_preview_redacted' LIKE '%redaction-probe%'
       ORDER BY id DESC
@@ -614,7 +634,7 @@ describe('tool invocation audit coverage', () => {
     }
   });
 
-  it('audits org-agnostic list_organizations under the bound org (early-return path)', async () => {
+  it('audits org-agnostic list_organizations for its user (early-return path)', async () => {
     const conversationId = 'list-organizations-only-session';
     await executeTool(
       'list_organizations',
@@ -627,7 +647,7 @@ describe('tool invocation audit coverage', () => {
       }
     );
 
-    const row = await latestAuditRow(orgId, 'list_organizations');
+    const row = await latestAuditRow(ownerId, 'list_organizations');
     expect(row).not.toBeNull();
     expect(row!.payload_data.success).toBe(true);
 
@@ -662,7 +682,7 @@ describe('tool invocation audit coverage', () => {
     )) as { success: boolean };
     expect(result.success).toBe(false);
 
-    const row = await latestAuditRow(orgId, 'manage_classifiers');
+    const row = await latestAuditRow(ownerId, 'manage_classifiers');
     expect(row).not.toBeNull();
     expect(row!.payload_data.success).toBe(false);
     expect(row!.payload_data.error).toMatchObject({ name: expect.any(String) });

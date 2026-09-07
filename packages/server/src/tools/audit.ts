@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { getDb } from '../db/client';
 import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
@@ -8,9 +9,9 @@ import { getTool, type ToolContext } from './registry';
 
 const MAX_PREVIEW_CHARS = 500;
 const MAX_REQUEST_BYTES = 256 * 1024;
-// These tools retain their exact request on the audit event. Other tools
+// These tools retain their exact request on the invocation audit record. Other tools
 // retain only the sanitized summary below.
-const REQUEST_EVENT_TOOLS = new Set(['run_sdk', 'query_sdk', 'query_sql']);
+const REQUEST_AUDIT_TOOLS = new Set(['run_sdk', 'query_sdk', 'query_sql']);
 const KNOWN_SECRET_SHAPE_RE =
   /\b(?:sk[-_][a-z0-9_-]{8,}|xox[baprs]-[a-z0-9-]{8,}|gh[pousr]_[a-z0-9_]{12,}|AKIA[A-Z0-9]{16}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/gi;
 // Redaction principle: consume the COMPLETE credential. Over-consumption is
@@ -38,11 +39,14 @@ interface ToolInvocationAuditParams {
   result?: unknown;
   error?: unknown;
   durationMs: number;
-  ctx: ToolContext;
+  ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' |
+    'agentId' | 'mcpSessionId' | 'mcpConversationId' | 'allowCrossOrg'> & {
+      organizationId: string | null;
+    };
 }
 
 function captureRequest(params: ToolInvocationAuditParams): Record<string, unknown> | null {
-  if (!REQUEST_EVENT_TOOLS.has(params.toolName)) return null;
+  if (!REQUEST_AUDIT_TOOLS.has(params.toolName)) return null;
 
   try {
     const serialized = JSON.stringify(params.args);
@@ -108,7 +112,7 @@ function errorPayload(
 /**
  * Error shape for GENERIC audit entries: the class name (and `code` when the
  * error carries one) only. Handler-supplied message text can echo user values
- * in shapes no pattern enumerates, so it never reaches the append-only ledger
+ * in shapes no pattern enumerates, so it never reaches the persistent audit record
  * — the caller already received the full error on the live response.
  */
 function errorNameOnly(error: unknown, fallbackName: string): Record<string, unknown> | null {
@@ -163,7 +167,8 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
       tool_name: params.toolName,
       sql_sha256: sql ? sha256(sql) : null,
       sql_preview_redacted: sql ? redactPreview(sql) : null,
-      // The event stays in the bound org, so retain the requested target.
+      // Cross-workspace calls have no reliable row-level organization, so retain
+      // the requested target.
       org_slug: typeof params.args.org_slug === 'string' ? params.args.org_slug : null,
       sort_by: typeof params.args.sort_by === 'string' ? params.args.sort_by : null,
       sort_order: params.args.sort_order === 'desc' ? 'desc' : 'asc',
@@ -180,7 +185,7 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
   // Browser-session and anonymous generic reads stay out of Activity. Power
   // tools are retained because their invocation history is the audit product.
   if (
-    !REQUEST_EVENT_TOOLS.has(params.toolName) &&
+    !REQUEST_AUDIT_TOOLS.has(params.toolName) &&
     params.ctx.tokenType !== 'oauth' &&
     params.ctx.tokenType !== 'pat'
   ) {
@@ -224,6 +229,30 @@ export async function recordToolInvocationAudit(
     const request = captureRequest(params);
     if (request) Object.assign(payload, request);
     const success = payload.success === true;
+    const metadata = {
+      category: 'audit', event_type: 'tool_invocation.completed',
+      tool_name: params.toolName, token_type: params.ctx.tokenType,
+      agent_id: params.ctx.agentId ?? null,
+      ...currentMcpActivityEventMetadata(params.ctx),
+    };
+    if (params.ctx.userId) {
+      const sql = getDb();
+      // A bare OAuth context can traverse/search several workspaces. Its
+      // token's historical anchor is not evidence of this invocation's target.
+      const organizationId = params.ctx.allowCrossOrg ? null : params.ctx.organizationId;
+      await sql`
+        INSERT INTO user_tool_invocations (
+          user_id, organization_id, client_id, activity_id, tool_name,
+          success, duration_ms, payload_data, metadata
+        ) VALUES (
+          ${params.ctx.userId}, ${organizationId}, ${params.ctx.clientId ?? null},
+          ${metadata.mcp_conversation_id ?? metadata.mcp_session_id}, ${params.toolName},
+          ${success}, ${params.durationMs}, ${sql.json(payload)}, ${sql.json(metadata)}
+        )
+      `;
+      return;
+    }
+    if (!params.ctx.organizationId) return;
     await insertEvent({
       entityIds: [],
       organizationId: params.ctx.organizationId,
@@ -233,21 +262,14 @@ export async function recordToolInvocationAudit(
       payloadData: payload,
       semanticType: AUDIT_SEMANTIC_TYPE,
       originType: 'tool_invocation',
-      metadata: {
-        category: 'audit',
-        event_type: 'tool_invocation.completed',
-        tool_name: params.toolName,
-        token_type: params.ctx.tokenType,
-        agent_id: params.ctx.agentId ?? null,
-        ...currentMcpActivityEventMetadata(params.ctx),
-      },
+      metadata,
       createdBy: params.ctx.userId ?? null,
       clientId: params.ctx.clientId ?? null,
     });
   } catch (auditError) {
     logger.warn(
       { err: auditError, toolName: params.toolName },
-      'Failed to record tool invocation audit event'
+      'Failed to record tool invocation audit'
     );
   }
 }
