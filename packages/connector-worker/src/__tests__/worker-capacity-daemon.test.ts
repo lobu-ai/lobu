@@ -2,7 +2,152 @@ import { describe, expect, test } from "bun:test";
 import { WorkerHttpError } from "../daemon/client";
 import { WorkerPollLoop } from "../daemon/poll-loop";
 
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("worker daemon capacity polling", () => {
+  for (const throws of [false, true]) {
+    test(`drains ten queued commands without interval gaps (executor throws: ${throws})`, async () => {
+      const executed: number[] = [];
+      let claimed = 0;
+      const loop = new WorkerPollLoop({
+        client: {
+          healthCheck: async () => true,
+          poll: async (capacity: number) => capacity > 0 && claimed < 10
+            ? { run_id: ++claimed, run_type: "action" }
+            : { next_poll_seconds: 1 },
+        } as never,
+        pollIntervalMs: 1000,
+        execute: async (job) => {
+          executed.push(job.run_id!);
+          if (throws) throw new Error("command failed");
+        },
+      });
+      const running = loop.start();
+      try {
+        await Bun.sleep(100);
+        expect(executed).toEqual(Array.from({ length: 10 }, (_, i) => i + 1));
+      } finally {
+        loop.stop();
+        await running;
+      }
+    });
+  }
+
+  test("fills free slots immediately without exceeding concurrency", async () => {
+    const finish = deferred();
+    const capacities: number[] = [];
+    let executions = 0;
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async (capacity: number) => {
+          capacities.push(capacity);
+          return capacity > 0
+            ? { run_id: capacities.length, run_type: "action" }
+            : { next_poll_seconds: 1 };
+        },
+      } as never,
+      maxConcurrentJobs: 3,
+      pollIntervalMs: 1000,
+      execute: async () => {
+        executions++;
+        await finish.promise;
+      },
+    });
+    const running = loop.start();
+    try {
+      await Bun.sleep(100);
+      expect(executions).toBe(3);
+      expect(capacities).toEqual([3, 2, 1]);
+    } finally {
+      loop.stop();
+      finish.resolve();
+      await running;
+      await loop.waitForActiveJobs(1000, 1);
+    }
+  });
+
+  test("does not lose a capacity wakeup while a zero-capacity poll is in flight", async () => {
+    const finish = deferred();
+    const pollingAtCapacity = deferred();
+    const idleReply = deferred<{ next_poll_seconds: number }>();
+    const capacities: number[] = [];
+    let loop: WorkerPollLoop;
+    loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async (capacity: number) => {
+          capacities.push(capacity);
+          if (capacities.length === 1) return { run_id: 1, run_type: "action" };
+          if (capacities.length === 2) {
+            pollingAtCapacity.resolve();
+            return idleReply.promise;
+          }
+          loop.stop();
+          return {};
+        },
+      } as never,
+      pollIntervalMs: 5,
+      execute: async () => finish.promise,
+    });
+    const running = loop.start();
+    try {
+      await pollingAtCapacity.promise;
+      finish.resolve();
+      await loop.waitForActiveJobs(1000, 1);
+      idleReply.resolve({ next_poll_seconds: 1 });
+      const repolled = await Promise.race([
+        running.then(() => true),
+        Bun.sleep(100).then(() => false),
+      ]);
+      expect(repolled).toBe(true);
+      expect(capacities).toEqual([1, 0, 1]);
+    } finally {
+      loop.stop();
+      finish.resolve();
+      idleReply.resolve({ next_poll_seconds: 1 });
+      await running;
+    }
+  });
+
+  test("completion cannot interrupt poll-error backoff but shutdown can", async () => {
+    const finish = deferred();
+    const pollFailed = deferred();
+    let polls = 0;
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async () => {
+          if (++polls === 1) return { run_id: 1, run_type: "action" };
+          pollFailed.resolve();
+          throw new WorkerHttpError(503, "/api/workers/poll", "retry");
+        },
+      } as never,
+      pollIntervalMs: 100,
+      execute: async () => finish.promise,
+    });
+    const running = loop.start();
+    try {
+      await pollFailed.promise;
+      finish.resolve();
+      await Bun.sleep(20);
+      expect(polls).toBe(2);
+      loop.stop();
+      expect(await Promise.race([
+        running.then(() => true),
+        Bun.sleep(20).then(() => false),
+      ])).toBe(true);
+    } finally {
+      loop.stop();
+      finish.resolve();
+      await running;
+    }
+  });
+
   test("runs credential maintenance before polls only when no job is active", async () => {
     const order: string[] = [];
     let releaseJob: (() => void) | undefined;
