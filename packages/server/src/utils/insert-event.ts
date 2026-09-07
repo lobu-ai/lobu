@@ -177,6 +177,21 @@ export interface InsertEventParams {
   clientId?: string | null;
 }
 
+type InternalInsertEventParams = Omit<InsertEventParams, 'organizationId'> & {
+  organizationId: string | null;
+};
+
+type UnboundToolInvocationAuditEventParams = Pick<
+  InsertEventParams,
+  'originId' | 'title' | 'payloadType' | 'payloadData' | 'metadata' | 'clientId'
+> & {
+  entityIds: [];
+  organizationId: null;
+  semanticType: 'audit';
+  originType: 'tool_invocation';
+  createdBy: string;
+};
+
 /**
  * How an insertEvent call settled.
  *
@@ -327,7 +342,7 @@ function normalizedTimestamp(value?: Date | string | null): string | null {
 
 async function findCurrentEventByOrigin(
   sql: DbClient,
-  params: InsertEventParams
+  params: InternalInsertEventParams
 ): Promise<
   | {
       id: number;
@@ -377,7 +392,7 @@ async function findCurrentEventByOrigin(
 
 function isSemanticallyEqual(
   existing: NonNullable<Awaited<ReturnType<typeof findCurrentEventByOrigin>>>,
-  params: InsertEventParams
+  params: InternalInsertEventParams
 ): boolean {
   return (
     (existing.title ?? null) === (params.title ?? null) &&
@@ -440,7 +455,7 @@ function isSemanticallyEqual(
 async function applyVolatileState(
   eventId: number,
   existing: { metadata: Record<string, unknown> | null; score: number | null },
-  params: InsertEventParams,
+  params: InternalInsertEventParams,
   sql: DbClient
 ): Promise<boolean> {
   const patch = volatileMetadataPatch(params.metadata);
@@ -542,7 +557,7 @@ function nullableNumber(value: number | string | null): number | null {
 async function loadEventLineage(
   sql: DbClient,
   supersedesEventId: number,
-  params: InsertEventParams
+  params: InternalInsertEventParams
 ): Promise<EventLineage> {
   const rows = await sql`
     SELECT connector_key, connection_id, feed_key, feed_id, run_id,
@@ -611,26 +626,39 @@ function isEventsClientIdForeignKeyViolation(error: unknown): boolean {
  * instead of the singleton pool — used by the identity engine to keep its
  * fact + derivation writes atomic.
  */
-export async function insertEvent(
+interface InsertEventOptions {
+  onConflictUpdate?: boolean;
+  sql?: DbClient;
+  /** Raw browser identity used only to supersede a pre-containment row. */
+  sourceOriginId?: string;
+  /** Transactional hook for durable derived work such as Automation runs. */
+  afterPersist?: (event: InsertedEvent, sql: DbClient) => Promise<void>;
+  /**
+   * Set only after connector attribution has scrubbed and rebuilt the
+   * server-owned identity-scope projection keys from durable identities.
+   */
+  trustedIdentityScopeProjections?: boolean;
+}
+
+export function insertEvent(
   params: InsertEventParams,
-  options?: {
-    onConflictUpdate?: boolean;
-    sql?: DbClient;
-    /** Raw browser identity used only to supersede a pre-containment row. */
-    sourceOriginId?: string;
-    /** Transactional hook for durable derived work such as Automation runs. */
-    afterPersist?: (event: InsertedEvent, sql: DbClient) => Promise<void>;
-    /**
-     * Set only after connector attribution has scrubbed and rebuilt the
-     * server-owned identity-scope projection keys from durable identities.
-     */
-    trustedIdentityScopeProjections?: boolean;
-  }
+  options?: InsertEventOptions
+): Promise<InsertedEvent>;
+export function insertEvent(
+  params: UnboundToolInvocationAuditEventParams,
+  options?: undefined
+): Promise<InsertedEvent>;
+export async function insertEvent(
+  params: InternalInsertEventParams,
+  options?: InsertEventOptions
 ): Promise<InsertedEvent> {
+  if (params.organizationId === null && options !== undefined) {
+    throw new Error('Unbound tool audits do not accept insert options');
+  }
   // This is the physical write funnel for event content. Connector items,
   // Automation output, and approval metadata all converge here. stripNulDeep
   // preserves Dates and other class instances.
-  params = stripNulDeep(params) as InsertEventParams;
+  params = stripNulDeep(params) as InternalInsertEventParams;
   if (!options?.trustedIdentityScopeProjections) {
     params = {
       ...params,
