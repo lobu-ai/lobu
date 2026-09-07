@@ -164,6 +164,7 @@ const config: KnipConfig = {
         "@react-email/render",
         "@scalar/hono-api-reference",
         "@sentry/node",
+        "@better-auth/core",
         "@better-auth/passkey",
         "better-auth",
         "chat",
