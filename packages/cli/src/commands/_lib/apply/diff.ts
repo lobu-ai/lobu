@@ -1607,8 +1607,8 @@ function diffAutomation(
     scalar.push("agent_kind");
   }
   if (
-    desired.model &&
-    desired.model !== (remote.execution_config?.model ?? undefined)
+    desired.model !== undefined &&
+    desired.model !== (remote.execution_config?.model ?? null)
   ) {
     scalar.push("execution_config");
   }

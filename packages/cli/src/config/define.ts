@@ -736,11 +736,10 @@ export interface Automation {
    */
   deviceWorkerId?: string;
   /**
-   * Model alias/id passed to the device's local CLI (`--model`) when this
-   * Automation runs on a device (see `agentKind`/`deviceWorkerId`). Omitted on
-   * cloud runs, which use the owning agent's model.
+   * Model override for managed or device execution. Omit to preserve a stored
+   * override; null removes it so execution uses the agent/provider defaults.
    */
-  model?: string;
+  model?: string | null;
   /**
    * A sibling `.ts` reaction script (`./reactions/foo.reaction.ts`) compiled +
    * run in a sandboxed isolate when the Automation fires, built with

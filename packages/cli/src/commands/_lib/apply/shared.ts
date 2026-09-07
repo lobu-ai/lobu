@@ -37,6 +37,18 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** A model declaration owns only the model key, preserving other execution options. */
+export function automationExecutionConfig(
+  model: string | null | undefined,
+  remote?: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (model === undefined) return remote ?? null;
+  const config = { ...remote };
+  if (model === null) delete config.model;
+  else config.model = model;
+  return Object.keys(config).length > 0 ? config : null;
+}
+
 /**
  * Keys of locally-declared connector definitions whose key is already known.
  * A `null` key (an auto-discovered `*.connector.ts` the server compiles) can't
