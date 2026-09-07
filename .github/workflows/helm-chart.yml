@@ -87,8 +87,18 @@ jobs:
           grep -q 'name: install-kubectl' /tmp/lobu-quiesced-upgrade.yaml
           grep -q 'trap restore_on_failure EXIT' /tmp/lobu-quiesced-upgrade.yaml
           grep -q 'migration failed with status' /tmp/lobu-quiesced-upgrade.yaml
+          grep -q 'backoffLimit: 0' /tmp/lobu-quiesced-upgrade.yaml
+          grep -A4 -F 'resources: ["deployments"]' /tmp/lobu-quiesced-upgrade.yaml \
+            | grep -Fq 'verbs: ["get", "list", "watch"]'
           grep -q 'name: MIGRATION_PENDING_CHECK' /tmp/lobu-quiesced-upgrade.yaml
           grep -q '"helm.sh/hook-weight": "0"' /tmp/lobu-quiesced-upgrade.yaml
+
+          helm template lobu charts/lobu --namespace lobu --is-upgrade \
+            --set migrations.enabled=true \
+            --set migrations.quiesceBeforeUpgrade.timeoutSeconds=17 \
+            >/tmp/lobu-custom-timeout-upgrade.yaml
+          # Two quiescence waits and two recovery waits retain the 600s allowance.
+          grep -q '^  activeDeadlineSeconds: 668$' /tmp/lobu-custom-timeout-upgrade.yaml
 
           helm template lobu charts/lobu --namespace lobu --is-upgrade \
             --set migrations.enabled=true \

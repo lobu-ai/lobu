@@ -35,6 +35,16 @@ restore_deployment() {
     --replicas="$replicas"
 }
 
+wait_for_restored_deployment() {
+  deployment=$1
+  replicas=$2
+  if [ "$replicas" = absent ] || [ "$replicas" -eq 0 ]; then
+    return
+  fi
+  "$kubectl_bin" --namespace "$namespace" rollout status deployment "$deployment" \
+    --timeout "$timeout"
+}
+
 restore_on_failure() {
   status=$?
   trap - EXIT INT TERM
@@ -45,8 +55,15 @@ restore_on_failure() {
     if [ -n "$worker_deployment" ]; then
       restore_deployment "$worker_deployment" "$worker_replicas" || restore_failed=1
     fi
+    # Start both services before waiting: either may depend on the other.
+    wait_for_restored_deployment "$app_deployment" "$app_replicas" || restore_failed=1
+    if [ -n "$worker_deployment" ]; then
+      wait_for_restored_deployment "$worker_deployment" "$worker_replicas" || restore_failed=1
+    fi
     if [ "$restore_failed" -ne 0 ]; then
-      echo "ERROR: migration failed and one or more deployments could not be restored" >&2
+      echo "ERROR: migration failed and one or more deployments could not be restored to readiness" >&2
+    else
+      echo "old deployments restored to readiness"
     fi
   fi
   exit "$status"
