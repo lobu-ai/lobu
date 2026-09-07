@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { ContentItem } from '@lobu/connector-sdk';
 import { REDACTED_SENTINEL } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -667,5 +668,86 @@ describe('tool invocation audit coverage', () => {
     expect(row!.payload_data.success).toBe(false);
     expect(row!.payload_data.error).toMatchObject({ name: expect.any(String) });
     expect(row!.payload_data.error).not.toHaveProperty('message');
+  });
+
+  it('records workspace discovery without choosing an organization', async () => {
+    const user = await createTestUser({ email: 'unbound-audit@example.test' });
+    await executeTool('list_organizations', {}, {} as Env, {
+      ...authCtxFor('oauth'),
+      userId: user.id,
+      organizationId: null,
+      tokenOrganizationId: null,
+      memberRole: null,
+      clientId: null,
+      grantedOrganizationIds: [],
+      mcpSessionId: 'unbound-audit-session',
+    });
+
+    const sql = getDb();
+    const [event] = await sql`
+      SELECT id, organization_id, created_by, payload_data, metadata
+      FROM events WHERE created_by = ${user.id}
+        AND origin_type = 'tool_invocation'
+    `;
+    expect(event).toBeDefined();
+    expect(event.organization_id).toBeNull();
+    expect(event.payload_data).toMatchObject({ tool_name: 'list_organizations', success: true });
+    expect(event.metadata.mcp_session_id).toBe('unbound-audit-session');
+
+    // A workspace role cannot grant access to a call that has no workspace.
+    for (const role of ['owner', 'admin', 'member'] as const) {
+      const result = await executeTool('read_knowledge', {
+        content_ids: [Number(event.id)], limit: 1,
+      }, {} as Env, { ...authCtxFor('session'), memberRole: role });
+      expect((result as { content: unknown[] }).content).toEqual([]);
+    }
+    const queried = await executeTool('query_sql', {
+      sql: `SELECT id FROM events WHERE id = ${event.id}`, limit: 1,
+    }, {} as Env, authCtxFor('session'));
+    expect((queried as { rows: unknown[] }).rows).toEqual([]);
+
+    const publicOrg = await createTestOrganization({ slug: 'unbound-audit-public', visibility: 'public' });
+    const publicRead = await executeTool('read_knowledge', {
+      content_ids: [Number(event.id)], limit: 1,
+    }, {} as Env, {
+      ...authCtxFor('session'), organizationId: publicOrg.id,
+      userId: null, memberRole: null, isAuthenticated: false,
+      tokenType: 'anonymous', scopedToOrg: true, allowCrossOrg: false,
+    });
+    expect((publicRead as { content: unknown[] }).content).toEqual([]);
+
+    // Preserve the existing FK lifecycle: deleting the account anonymizes the
+    // actor without deleting or rewriting its append-only event payload.
+    await sql`DELETE FROM "user" WHERE id = ${user.id}`;
+    const [retained] = await sql`SELECT created_by, payload_data FROM events WHERE id = ${event.id}`;
+    expect(retained.created_by).toBeNull();
+    expect(retained.payload_data).toEqual(event.payload_data);
+
+    const migration = readFileSync(new URL(
+      '../../../../../../db/migrations/20260907160000_unbound_tool_audit_events.sql', import.meta.url,
+    ), 'utf8').split('-- migrate:down')[0]!;
+    await sql.unsafe(migration);
+    const [replayed] = await sql`SELECT created_by, payload_data FROM events WHERE id = ${event.id}`;
+    expect(replayed).toEqual(retained);
+  });
+
+  it('rejects unattributed or workspace-linked events without a workspace', async () => {
+    const sql = getDb();
+    await expect(sql`
+      INSERT INTO events (semantic_type, origin_type)
+      VALUES ('audit', 'tool_invocation')
+    `).rejects.toMatchObject({ code: '23514' });
+    for (const shape of [
+      "'content', 'tool_invocation', NULL, NULL, NULL",
+      "'audit', NULL, NULL, NULL, NULL",
+      "'audit', 'tool_invocation', ARRAY[1]::bigint[], NULL, NULL",
+      "'audit', 'tool_invocation', NULL, ARRAY['other-workspace']::text[], NULL",
+      "'audit', 'tool_invocation', NULL, NULL, 1",
+    ]) {
+      await expect(sql.unsafe(`
+        INSERT INTO events (created_by, semantic_type, origin_type, entity_ids, linked_org_ids, connection_id)
+        VALUES ($1, ${shape})
+      `, [ownerId])).rejects.toMatchObject({ code: '23514' });
+    }
   });
 });

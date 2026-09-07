@@ -38,7 +38,8 @@ interface ToolInvocationAuditParams {
   result?: unknown;
   error?: unknown;
   durationMs: number;
-  ctx: ToolContext;
+  ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' | 'agentId' |
+    'mcpSessionId' | 'mcpConversationId'> & { organizationId: string | null };
 }
 
 function captureRequest(params: ToolInvocationAuditParams): Record<string, unknown> | null {
