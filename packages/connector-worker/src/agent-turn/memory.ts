@@ -63,7 +63,7 @@ export interface TurnMemoryContext {
  * including its `agentEnd` error containment, which logs a throwing hook and
  * moves on rather than failing the turn.
  */
-export function createTurnMemory(context: TurnMemoryContext): {
+function createTurnMemory(context: TurnMemoryContext): {
   host: PluginHost<ToolDefinition>;
   runtime: PluginRuntimeContext;
   settle: () => Promise<void>;

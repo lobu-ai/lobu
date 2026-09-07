@@ -9,7 +9,7 @@
  * the predicates here rather than beside either dispatcher.
  *
  * Everything here is pure and depends only on the wire payload, so the isolate
- * guest can import this module by its own subpath (`@lobu/core/turn-control`)
+ * both lanes import it from the `@lobu/core` barrel
  * without dragging the logger and its Node transports into the bundle.
  */
 import type { MessagePayload } from "./worker/wire";
