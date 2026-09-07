@@ -1,0 +1,102 @@
+name: Lobu Motion Prototype
+
+on:
+  push:
+    branches:
+      - prototype/lobu-product-motion-integration
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-submodule
+        with:
+          deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install workspace dependencies
+        run: bun install
+
+      - name: Build Owletto workspace dependencies
+        run: |
+          cd packages/core && bun run build && cd ../..
+          cd packages/connector-sdk && bun run build && cd ../..
+
+      - name: Build isolated motion entry
+        run: cd packages/owletto && bun run build:motion
+
+      - name: Capture deterministic review frames
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p motion-artifacts
+          python3 -m http.server 4173 --directory packages/owletto/dist-motion \
+            >/tmp/lobu-motion-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          for _ in {1..30}; do
+            if curl -fsS http://127.0.0.1:4173/motion.html >/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:4173/motion.html >/dev/null
+
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || true)"
+          if [[ -z "$CHROME" ]]; then
+            echo "Google Chrome is required for deterministic frame capture" >&2
+            exit 1
+          fi
+
+          capture() {
+            local name="$1"
+            local frame="$2"
+            "$CHROME" \
+              --headless=new \
+              --no-sandbox \
+              --disable-gpu \
+              --disable-dev-shm-usage \
+              --hide-scrollbars \
+              --force-device-scale-factor=1 \
+              --window-size=1920,1080 \
+              --virtual-time-budget=2000 \
+              --screenshot="$GITHUB_WORKSPACE/motion-artifacts/$name.png" \
+              "http://127.0.0.1:4173/motion.html?render=1&frame=$frame"
+          }
+
+          capture 01-intro 45
+          capture 02-connectors 150
+          capture 03-memory 300
+          capture 04-automations 450
+          capture 05-agents 550
+          capture 06-outro 585
+
+          cp -R packages/owletto/dist-motion motion-artifacts/site
+          printf '%s\n' \
+            'Lobu motion prototype review frames' \
+            '1920x1080, 30 fps, 20 seconds' \
+            'Frames: 45, 150, 300, 450, 550, 585' \
+            > motion-artifacts/README.txt
+
+      - name: Upload motion prototype
+        uses: actions/upload-artifact@v4
+        with:
+          name: lobu-motion-prototype
+          path: motion-artifacts
+          if-no-files-found: error
+          retention-days: 14
