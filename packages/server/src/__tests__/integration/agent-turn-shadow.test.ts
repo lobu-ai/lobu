@@ -9,12 +9,7 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import {
-  AGENT_ERRORS,
-  AgentErrorCode,
-  type MessagePayload,
-  verifyWorkerToken,
-} from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, replaySessionMessages, type MessagePayload, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { enqueueAgentTurnShadow } from '../../gateway/orchestration/agent-turn-shadow';
@@ -644,6 +639,9 @@ describe('agent turn shadow producer', () => {
     expect(turn.messages[2]).toMatchObject({ role: 'toolResult', toolCallId: 'toolu_01', isError: false });
     expect(turn.messages[3]).toMatchObject({ content: [{ type: 'text', text: 'There are 3.' }] });
     expect(turn.messages[4]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'and companies?' }] });
+    // Nothing on this branch recorded a flush, so the first cycle's is due.
+    expect((run.action_input.turn as { memory_flush: { due: boolean } }).memory_flush.due).toBe(true);
+    expect((run.action_input.turn as { message_entry_ids: string[] }).message_entry_ids).toEqual(['u1', 'a1', 't1', 'a2', 'u2']);
   });
 
   it('replays the whole conversation, compaction summary included, not a window of it', async () => {
@@ -681,7 +679,18 @@ describe('agent turn shadow producer', () => {
         tokensBefore: 90000,
       })
     );
-    parent = 'c1';
+    // This cycle already flushed: the subprocess lane's own state entry.
+    lines.push(
+      JSON.stringify({
+        type: 'custom',
+        id: 'flush1',
+        parentId: 'c1',
+        timestamp: at,
+        customType: 'lobu.memory_flush_state',
+        data: { compactionCount: 1, outcome: 'stored', timestamp: 1 },
+      })
+    );
+    parent = 'flush1';
     for (let i = 10; i < 40; i++) {
       lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
       lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
@@ -707,9 +716,25 @@ describe('agent turn shadow producer', () => {
     });
 
     const [run] = await shadowRuns();
-    const turn = run.action_input.turn as { messages: Array<{ role: string; content: Array<{ text: string }> }> };
+    const turn = run.action_input.turn as {
+      messages: Array<{ role: string; content: Array<{ text: string }> }>;
+      message_entry_ids: string[];
+      compaction: Record<string, unknown>;
+      memory_flush: Record<string, unknown>;
+    };
     // Summary, the two kept exchanges (u8..a9), then thirty more: 1 + 4 + 60.
     expect(turn.messages).toHaveLength(65);
+    // Every replayed message names the entry it came from, the summary its
+    // compaction, so a compaction the guest plans by index maps back to pi's
+    // firstKeptEntryId.
+    expect(turn.message_entry_ids).toHaveLength(65);
+    expect(turn.message_entry_ids.slice(0, 3)).toEqual(['c1', 'u8', 'a8']);
+    expect(turn.message_entry_ids[64]).toBe('a39');
+    // pi's own settings against this model's window.
+    expect(turn.compaction).toMatchObject({ enabled: true, reserve_tokens: 16384, keep_recent_tokens: 20000 });
+    expect(turn.compaction.context_window).toBeGreaterThan(16384);
+    // The flush state entry after c1 says this cycle already flushed.
+    expect(turn.memory_flush).toMatchObject({ enabled: true, soft_threshold_tokens: 4000, due: false });
     expect(turn.messages[0].role).toBe('user');
     expect(turn.messages[0].content[0].text).toContain('The first eight exchanges were small talk.');
     expect(turn.messages[1].content[0].text).toBe('question 8');
@@ -1126,13 +1151,12 @@ describe('agent turn completion', () => {
     expect(entries[1].parentId).toBe(entries[0].id);
   });
 
-  it('persists the whole turn — tool calls and results — and not the prompt the guest composed', async () => {
+  it('persists the whole turn verbatim, then the flush state and the compaction pi would have written', async () => {
     const workerId = 'fleet-persists-tools';
     const runId = await claimedShadowRun(workerId);
     const sql = getTestDb();
-    // The producer handed this turn two messages of history; the guest returns
-    // them back followed by what the turn added, with the human's message as
-    // the guest composed it (memory recall prepended).
+    // The producer handed this turn two messages of history, each naming its
+    // stored entry; the guest returns them back followed by what the turn added.
     const history = [
       { role: 'user', content: [{ type: 'text', text: 'earlier question' }] },
       { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
@@ -1140,8 +1164,11 @@ describe('agent turn completion', () => {
     await sql`
       UPDATE runs
       SET action_input = jsonb_set(
-        jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb),
-        '{turn,messages}', ${sql.json(history)}::jsonb
+        jsonb_set(
+          jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb),
+          '{turn,messages}', ${sql.json(history)}::jsonb
+        ),
+        '{turn,message_entry_ids}', ${sql.json(['h0', 'h1'])}::jsonb
       )
       WHERE id = ${runId}
     `;
@@ -1152,7 +1179,11 @@ describe('agent turn completion', () => {
       text: 'there are 3',
       transcript: [
         ...history,
-        { role: 'user', content: [{ type: 'text', text: '<lobu-memory>recalled</lobu-memory>\n\nwhat is the shadow lane?' }] },
+        // The flush the guest ran first, then the human's turn as the guest
+        // already cleaned it, then the tool loop and the reply.
+        { role: 'user', content: [{ type: 'text', text: 'Store durable memories now.' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'NO_REPLY' }], stopReason: 'stop' },
+        { role: 'user', content: [{ type: 'text', text: 'what is the shadow lane?' }] },
         {
           role: 'assistant',
           content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk', arguments: { code: 'entities.count()' } }],
@@ -1161,6 +1192,9 @@ describe('agent turn completion', () => {
         { role: 'toolResult', toolCallId: 'toolu_9', toolName: 'query_sdk', content: [{ type: 'text', text: '3' }], isError: false },
         { role: 'assistant', content: [{ type: 'text', text: 'there are 3' }], stopReason: 'stop' },
       ],
+      memory_flush: { outcome: 'no_reply', after_index: 3 },
+      // Keep from the human's message (transcript index 4) onwards.
+      compaction: { summary: 'Earlier, a question was answered.', first_kept_index: 4, tokens_before: 900 },
     });
     expect(response.status).toBe(200);
 
@@ -1171,17 +1205,50 @@ describe('agent turn completion', () => {
       .split('\n')
       .filter((line) => line.trim())
       .map((line) => JSON.parse(line));
-    // The history is not written twice; the turn is written whole.
-    expect(entries.map((entry) => entry.message.role)).toEqual(['user', 'assistant', 'toolResult', 'assistant']);
-    // The human's entry is what they sent, not the recall-augmented prompt.
-    expect(entries[0].message.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
-    expect(entries[1].message).toMatchObject({
+    // The history is not written twice; every new message is, verbatim, with
+    // the flush state right after the flush's exchange and the compaction last.
+    expect(entries.map((entry) => entry.type)).toEqual([
+      'message',
+      'message',
+      'custom',
+      'message',
+      'message',
+      'message',
+      'message',
+      'compaction',
+    ]);
+    expect(entries.filter((e) => e.type === 'message').map((e) => e.message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+      'toolResult',
+      'assistant',
+    ]);
+    expect(entries[2]).toMatchObject({
+      customType: 'lobu.memory_flush_state',
+      data: { compactionCount: 0, outcome: 'no_reply' },
+    });
+    expect(entries[3].message.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
+    expect(entries[4].message).toMatchObject({
       content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk' }],
       stopReason: 'toolUse',
     });
-    expect(entries[2].message).toMatchObject({ toolCallId: 'toolu_9', isError: false });
+    // The compaction keeps from the human's message: transcript index 4 is
+    // the third new message, whose entry is the fourth line.
+    expect(entries[7]).toMatchObject({
+      type: 'compaction',
+      summary: 'Earlier, a question was answered.',
+      firstKeptEntryId: entries[3].id,
+      tokensBefore: 900,
+    });
     // One chain, so the next turn's replay reaches every entry.
     for (let i = 1; i < entries.length; i++) expect(entries[i].parentId).toBe(entries[i - 1].id);
+    // And that replay opens on the summary, then the kept messages.
+    const replayed = replaySessionMessages(parseSessionEntries(snapshot.snapshot_jsonl).entries);
+    expect(replayed.map((m) => m.role)).toEqual(['user', 'user', 'assistant', 'toolResult', 'assistant']);
+    expect(JSON.stringify(replayed[0]!.content)).toContain('Earlier, a question was answered.');
+    expect(replayed[1]!.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
   });
 
   it('an oversize prior transcript starts a continuation instead of hanging the client', async () => {

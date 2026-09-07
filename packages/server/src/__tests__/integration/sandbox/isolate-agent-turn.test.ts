@@ -888,6 +888,109 @@ describe("agent turn on the isolate lane", () => {
 		});
 	}
 
+	it("compacts after answering when the context has outgrown the window, with pi's own prompts", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The fake model reports 11 in + 7 out = 18 tokens; a 20-token window with a
+		// 5-token reserve is therefore over the line the moment the turn ends.
+		const run = await runTurn(
+			turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const compaction = run.output.compaction;
+		expect(compaction).toBeDefined();
+		expect(compaction?.tokensBefore).toBe(18);
+		expect(compaction?.firstKeptIndex).toBeGreaterThanOrEqual(0);
+		expect(compaction?.firstKeptIndex).toBeLessThan(run.output.messages.length);
+		// The summary came from the model, asked with pi's summarisation prompt on
+		// the same route and the same credential as the turn itself.
+		expect(compaction?.summary).toContain("Hello from the isolate");
+		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
+		expect(providerCalls.length).toBeGreaterThanOrEqual(2);
+		const summarization = providerCalls.find((h) => h.body.includes("context summarization assistant"));
+		expect(summarization).toBeDefined();
+		expect(summarization?.body).toContain("<conversation>");
+		expect(summarization?.body).toContain("Do NOT continue the conversation");
+		// The turn's own answer was streamed; the summary was not.
+		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+	}, 120_000);
+
+	it("does not compact a turn that fits", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({ compaction: { enabled: true, contextWindow: 200_000, reserveTokens: 16_384, keepRecentTokens: 20_000 } }),
+		);
+		expect(run.output.compaction).toBeUndefined();
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+	}, 120_000);
+
+	it("runs the memory flush silently before a prompt that would land near compaction", async () => {
+		hits = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		toolScript = [];
+		// No first-delta gate here: the flush's reply is deliberately never
+		// streamed to the host, so a fake stream waiting on a delta would hang.
+		const run = await runTurn(
+			turnJob({
+				memory: { mcpId: "lobu", agentId: "agent-test" },
+				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+				// Any prompt is "near compaction" against a zero threshold.
+				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
+				memoryFlush: {
+					enabled: true,
+					due: true,
+					softThresholdTokens: 1_000,
+					systemPrompt: "Session nearing compaction. Store durable memories now.",
+					prompt: "Write any lasting notes to memory. Reply with NO_REPLY if nothing to store.",
+				},
+			}),
+		);
+
+		// Two model rounds: the flush, then the human's turn. Only the second is
+		// the answer, and only the second streamed.
+		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
+		expect(providerCalls).toHaveLength(2);
+		expect(providerCalls[0]?.body).toContain("Store durable memories now");
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+		// The flush's exchange is part of the transcript, and the report says where
+		// it ends so the server can record the cycle as flushed right after it.
+		expect(run.output.memoryFlush).toEqual({ outcome: "stored", afterIndex: 1 });
+		expect(run.output.messages).toHaveLength(4);
+		expect((run.output.messages[0] as { role: string }).role).toBe("user");
+		expect(JSON.stringify(run.output.messages[0])).toContain("Store durable memories now");
+		// The human's own entry is their text, not the prompt the guest composed.
+		expect(run.output.messages[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "hi" }] });
+	}, 120_000);
+
+	it("skips the flush when this compaction cycle already flushed", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				memory: { mcpId: "lobu", agentId: "agent-test" },
+				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
+				memoryFlush: { enabled: true, due: false, softThresholdTokens: 1_000, systemPrompt: "s", prompt: "p" },
+			}),
+		);
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+		expect(run.output.memoryFlush).toBeUndefined();
+	}, 120_000);
+
 	it("recalls memory before the model runs and injects the plugin's own block", async () => {
 		hits = [];
 		memoryCalls = [];

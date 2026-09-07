@@ -17,7 +17,13 @@
  * reaper terminalizes the run and, for an authoritative turn, delivers the
  * error the completion route would have.
  */
-import { AGENT_ERRORS, AgentErrorCode, createLogger, parseSessionEntries } from "@lobu/core";
+import {
+	AGENT_ERRORS,
+	AgentErrorCode,
+	createLogger,
+	MEMORY_FLUSH_STATE_CUSTOM_TYPE,
+	parseSessionEntries,
+} from "@lobu/core";
 import {
 	type AgentTurnToolEvent,
 	type CompleteAgentTurnRequest,
@@ -54,18 +60,20 @@ const MAX_OUTPUT_TAIL = 2_000;
  * session-jsonl shape `parseSessionEntries` reads back — the same blob the
  * producer replays for history and the subprocess lane's SessionManager reads.
  *
- * The turn is persisted whole: the human's message, then every message the
- * guest's tool loop produced (tool calls, their results, the reply), verbatim,
- * because the next turn replays them and a provider refuses a tool call
- * without its result. The human's entry carries the text they sent — not the
- * prompt the guest composed around it — since the memory recall and the
- * attachment listing are this turn's injections, not part of the conversation.
- * A worker that reports no transcript (an older build, or a turn that failed
- * before producing one) still gets its text pair recorded.
+ * The turn is persisted whole and verbatim: every message the guest added to
+ * the history it was given — the human's message, the tool calls, their
+ * results, the reply, a memory flush's exchange — because the next turn
+ * replays them and a provider refuses a tool call without its result. The
+ * guest already stores the human's own text in its user message, not the
+ * prompt it composed around it. A worker that reports no transcript (an older
+ * build, or a turn that failed before producing one) still gets its text pair
+ * recorded.
  *
- * `content` is pi's block array, not a bare string: every other writer of this
- * table emits blocks, and the readers that flatten it (`transcriptText`,
- * `trimContent`) are the only reason a bare string would survive at all.
+ * Two entries beyond messages, both pi's: a `custom` entry recording a memory
+ * flush ran this cycle, placed right after the flush's exchange, and a
+ * `compaction` entry closing the turn when the guest compacted, whose
+ * `firstKeptEntryId` is resolved from the entry ids the producer sent with
+ * the history plus the ones written here.
  *
  * The row is keyed by `run_id`, and the lease fence already refuses a second
  * completion of the same run, so this insert never conflicts in practice —
@@ -85,6 +93,10 @@ async function appendTurnSnapshot(
 		transcript: Array<Record<string, unknown>>;
 		/** How many of those messages were the history it was given. */
 		priorCount: number;
+		/** The stored entry behind each of those history messages. */
+		historyEntryIds: string[];
+		compaction?: CompleteAgentTurnRequest["compaction"];
+		memoryFlush?: CompleteAgentTurnRequest["memory_flush"];
 	},
 ): Promise<void> {
 	if (!args.agentId || !args.conversationId) return;
@@ -97,46 +109,92 @@ async function appendTurnSnapshot(
 	const now = new Date().toISOString();
 	const prior = parseSessionEntries(previous ?? "").entries;
 
-	// The messages this turn added, the human's own turn first. The guest's
-	// user message is replaced by the text the human sent (see above); when the
-	// worker reports no transcript, the pair of texts stands in for it.
-	const produced = args.transcript
-		.slice(Math.max(0, args.priorCount))
-		.filter(
-			(message): message is Record<string, unknown> & { role: string } =>
-				typeof message.role === "string" && message.role !== "user",
-		);
-	const messages: Array<Record<string, unknown>> = [];
-	if (args.userText) {
-		messages.push({
-			role: "user",
-			content: [{ type: "text", text: args.userText }],
-		});
-	}
-	if (produced.length > 0) {
-		messages.push(...produced);
-	} else if (args.assistantText) {
-		messages.push({
-			role: "assistant",
-			content: [{ type: "text", text: args.assistantText }],
-		});
+	const priorCount = Math.max(0, args.priorCount);
+	let messages: Array<Record<string, unknown>> = args.transcript
+		.slice(priorCount)
+		.filter((message) => typeof message.role === "string");
+	// A guest's transcript opens on a user message — the human's, or the
+	// flush prompt's. A worker that reports less than that (none at all, or an
+	// older build sending only its reply) still gets the human's message and
+	// its answer recorded, but nothing it did not say: its indices do not
+	// describe this transcript, so no flush or compaction entry is written.
+	let legacyShape = false;
+	if (messages[0]?.role !== "user") {
+		legacyShape = true;
+		const reply =
+			messages.length > 0
+				? messages
+				: args.assistantText
+					? [
+							{
+								role: "assistant",
+								content: [{ type: "text", text: args.assistantText }],
+							},
+						]
+					: [];
+		messages = [
+			...(args.userText
+				? [{ role: "user", content: [{ type: "text", text: args.userText }] }]
+				: []),
+			...reply,
+		];
 	}
 	if (messages.length === 0) return;
+	const memoryFlush = legacyShape ? undefined : args.memoryFlush;
+	const compaction = legacyShape ? undefined : args.compaction;
 
-	const render = (base: string, tailId: string | null) => {
+	// One entry id per new message, fixed up front so the compaction entry can
+	// name the kept one whichever file it lands in.
+	const newIds = messages.map((_, index) => `agent-turn-${args.runId}-${index}`);
+	const allIds = [...args.historyEntryIds, ...newIds];
+	const flushAfter =
+		memoryFlush && memoryFlush.after_index >= priorCount
+			? memoryFlush.after_index - priorCount
+			: null;
+	const compactionCount = prior.filter(
+		(entry) => entry.type === "compaction",
+	).length;
+
+	const render = (base: string, tailId: string | null, continuation: boolean) => {
 		let parentId = tailId;
-		const lines = messages.map((message, index) => {
-			const id = `agent-turn-${args.runId}-${index}`;
-			const line = JSON.stringify({
-				type: "message",
-				id,
-				parentId,
-				timestamp: now,
-				message,
-			});
-			parentId = id;
-			return line;
+		const lines: string[] = [];
+		const line = (entry: Record<string, unknown>) => {
+			lines.push(JSON.stringify({ ...entry, parentId, timestamp: now }));
+			parentId = entry.id as string;
+		};
+		messages.forEach((message, index) => {
+			line({ type: "message", id: newIds[index], message });
+			if (flushAfter === index && memoryFlush) {
+				line({
+					type: "custom",
+					id: `agent-turn-${args.runId}-memory-flush`,
+					customType: MEMORY_FLUSH_STATE_CUSTOM_TYPE,
+					data: {
+						compactionCount,
+						outcome: memoryFlush.outcome,
+						timestamp: Date.now(),
+					},
+				});
+			}
 		});
+		if (compaction) {
+			const firstKeptEntryId = allIds[compaction.first_kept_index];
+			// A continuation carries none of the history, so a summary that
+			// keeps part of it has nothing to point at; the compaction is
+			// dropped rather than written dangling.
+			const keptIsPresent =
+				firstKeptEntryId !== undefined &&
+				(!continuation || newIds.includes(firstKeptEntryId));
+			if (keptIsPresent) {
+				line({
+					type: "compaction",
+					id: `agent-turn-${args.runId}-compaction`,
+					summary: compaction.summary,
+					firstKeptEntryId,
+					tokensBefore: compaction.tokens_before,
+				});
+			}
+		}
 		return `${base}${lines.join("\n")}\n`;
 	};
 	const base = previous
@@ -144,13 +202,13 @@ async function appendTurnSnapshot(
 			? previous
 			: `${previous}\n`
 		: "";
-	let snapshot = render(base, prior[prior.length - 1]?.id ?? null);
+	let snapshot = render(base, prior[prior.length - 1]?.id ?? null, false);
 	if (Buffer.byteLength(snapshot, "utf8") > MAX_SNAPSHOT_BYTES) {
 		// A long-running conversation must not make the current turn fail: this
 		// insert is inside the terminal transaction, so an oversize row would
 		// roll back the completion and the reply and hang the client forever.
 		// Start a compact continuation; the prior run's row stays queryable.
-		snapshot = render("", null);
+		snapshot = render("", null, true);
 	}
 	await tx`
     INSERT INTO public.agent_transcript_snapshot
@@ -470,6 +528,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 			conversation_id?: unknown;
 			message_text?: unknown;
 			messages?: unknown;
+			message_entry_ids?: unknown;
 		};
 		reply?: TurnReply;
 	};
@@ -536,6 +595,13 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
 				priorCount: Array.isArray(envelope.turn?.messages)
 					? envelope.turn.messages.length
 					: 0,
+				historyEntryIds: Array.isArray(envelope.turn?.message_entry_ids)
+					? (envelope.turn.message_entry_ids as unknown[]).filter(
+							(id): id is string => typeof id === "string",
+						)
+					: [],
+				compaction: body.compaction,
+				memoryFlush: body.memory_flush,
 			});
 		}
 		await insertThreadResponseRow(

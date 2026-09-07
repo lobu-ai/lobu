@@ -39,8 +39,13 @@ import {
   getErrorMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
+  DEFAULT_COMPACTION_SETTINGS,
+  memoryFlushDue,
   parseSessionEntries,
-  replaySessionMessages,
+  replaySessionEntries,
+  resolveMemoryFlushConfig,
+  type SessionEntry,
+  sessionBranch,
   renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
   type ToolPolicy,
@@ -323,25 +328,31 @@ function hasToolCall(message: HistoryMessage): boolean {
  * not portable. The replay is then squared off so it opens on a user message
  * and never ends on a tool call still waiting for its result.
  */
-function historyMessages(snapshot: string): HistoryMessage[] {
-  const messages: HistoryMessage[] = [];
-  for (const message of replaySessionMessages(parseSessionEntries(snapshot).entries)) {
+function historyMessages(entries: SessionEntry[]): {
+  messages: HistoryMessage[];
+  entryIds: string[];
+} {
+  const replayed: Array<{ entryId: string; message: HistoryMessage }> = [];
+  for (const { entryId, message } of replaySessionEntries(entries)) {
     const content = trimContent(message.content);
     if (content.length === 0) continue;
-    messages.push({ ...message, content });
+    replayed.push({ entryId, message: { ...message, content } });
   }
-  const firstUser = messages.findIndex((message) => message.role === "user");
-  if (firstUser < 0) return [];
-  const squared = messages.slice(firstUser);
+  const firstUser = replayed.findIndex(({ message }) => message.role === "user");
+  if (firstUser < 0) return { messages: [], entryIds: [] };
+  const squared = replayed.slice(firstUser);
   while (squared.length > 0) {
-    const last = squared[squared.length - 1]!;
+    const last = squared[squared.length - 1]!.message;
     if (last.role === "assistant" && hasToolCall(last)) {
       squared.pop();
       continue;
     }
     break;
   }
-  return squared;
+  return {
+    messages: squared.map(({ message }) => message),
+    entryIds: squared.map(({ entryId }) => entryId),
+  };
 }
 
 /**
@@ -379,6 +390,8 @@ interface ShadowProvider {
   host: string;
   /** pi-ai's `Model.input` for this model — which modalities it accepts. */
   input: ("text" | "image")[];
+  /** pi-ai's `Model.contextWindow`, or the subprocess lane's default for a model the registry does not carry. */
+  contextWindow: number;
 }
 
 /**
@@ -404,6 +417,21 @@ function modelInputModalities(
     | Model<never>
     | undefined;
   return model?.input ? [...model.input] : ["text", "image"];
+}
+
+/**
+ * The subprocess lane's fallback when a model is not in pi-ai's registry
+ * (`model-resolver.ts`): the compaction trigger needs SOME window, and this is
+ * the one the other lane has been measuring against.
+ */
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+function modelContextWindow(registryProvider: string, modelId: string): number {
+  const model = getModel(registryProvider as never, modelId as never) as
+    | Model<never>
+    | undefined;
+  const window = model?.contextWindow;
+  return typeof window === "number" && window > 0 ? window : DEFAULT_CONTEXT_WINDOW;
 }
 
 /**
@@ -526,6 +554,7 @@ async function resolveShadowProvider(
     credential,
     host,
     input: modelInputModalities(protocol.registryAlias, modelId),
+    contextWindow: modelContextWindow(protocol.registryAlias, modelId),
   };
 }
 
@@ -792,6 +821,14 @@ export async function enqueueAgentTurnShadow(
       agentId: data.agentId,
       conversationId: data.conversationId,
     });
+    const entries = snapshot ? parseSessionEntries(snapshot).entries : [];
+    const history = historyMessages(entries);
+    // The flush runs once per compaction cycle; the branch says whether this
+    // cycle already did, exactly as the subprocess lane reads its session.
+    const flushState = memoryFlushDue(sessionBranch(entries));
+    const memoryFlush = resolveMemoryFlushConfig(
+      (data.agentOptions ?? {}) as Record<string, unknown>
+    );
 
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
@@ -817,7 +854,23 @@ export async function enqueueAgentTurnShadow(
         // channel-participation one.
         [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin]
       ),
-      messages: snapshot ? historyMessages(snapshot) : [],
+      messages: history.messages,
+      message_entry_ids: history.entryIds,
+      // pi's own defaults, measured against this model's window. The lane
+      // compacts the way the subprocess lane's SessionManager would.
+      compaction: {
+        enabled: DEFAULT_COMPACTION_SETTINGS.enabled,
+        context_window: provider.contextWindow,
+        reserve_tokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+        keep_recent_tokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+      },
+      memory_flush: {
+        enabled: memoryFlush.enabled,
+        soft_threshold_tokens: memoryFlush.softThresholdTokens,
+        system_prompt: memoryFlush.systemPrompt,
+        prompt: memoryFlush.prompt,
+        due: flushState.due,
+      },
       provider: {
         api: provider.api,
         provider: provider.provider,

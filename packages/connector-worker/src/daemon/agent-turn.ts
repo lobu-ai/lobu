@@ -330,6 +330,29 @@ export async function executeAgentTurnRun(
           ...(turn.memory
             ? { memory: { mcpId: turn.memory.mcp_id, agentId: turn.memory.agent_id } }
             : {}),
+          // pi's compaction settings and the flush that precedes it: the guest
+          // decides and acts, the server records what it reports.
+          ...(turn.compaction
+            ? {
+                compaction: {
+                  enabled: turn.compaction.enabled,
+                  contextWindow: turn.compaction.context_window,
+                  reserveTokens: turn.compaction.reserve_tokens,
+                  keepRecentTokens: turn.compaction.keep_recent_tokens,
+                },
+              }
+            : {}),
+          ...(turn.memory_flush
+            ? {
+                memoryFlush: {
+                  enabled: turn.memory_flush.enabled,
+                  softThresholdTokens: turn.memory_flush.soft_threshold_tokens,
+                  systemPrompt: turn.memory_flush.system_prompt,
+                  prompt: turn.memory_flush.prompt,
+                  due: turn.memory_flush.due,
+                },
+              }
+            : {}),
         },
         config: {},
         credentials: job.credentials,
@@ -389,6 +412,23 @@ export async function executeAgentTurnRun(
       usage: result.turn.usage,
       transcript: result.turn.messages,
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
+      ...(result.turn.compaction
+        ? {
+            compaction: {
+              summary: result.turn.compaction.summary,
+              first_kept_index: result.turn.compaction.firstKeptIndex,
+              tokens_before: result.turn.compaction.tokensBefore,
+            },
+          }
+        : {}),
+      ...(result.turn.memoryFlush
+        ? {
+            memory_flush: {
+              outcome: result.turn.memoryFlush.outcome,
+              after_index: result.turn.memoryFlush.afterIndex,
+            },
+          }
+        : {}),
       exit_reason: 'ok',
     });
     log.info(

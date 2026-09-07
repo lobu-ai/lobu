@@ -199,6 +199,35 @@ export interface AgentTurnInput {
    * credential and no extra host is involved.
    */
   memory?: AgentTurnMemory;
+  /**
+   * pi's compaction settings and the model's context window. After answering,
+   * a turn past `contextWindow - reserveTokens` summarises its history the way
+   * pi does and reports the result. Absent → the turn never compacts.
+   */
+  compaction?: AgentTurnCompaction;
+  /**
+   * Lobu's pre-compaction memory flush. When the next prompt would land within
+   * `softThresholdTokens` of compaction and this cycle has not flushed yet, the
+   * turn first runs the flush prompt silently so the model stores what it is
+   * about to lose. Absent → no flush.
+   */
+  memoryFlush?: AgentTurnMemoryFlush;
+}
+
+export interface AgentTurnCompaction {
+  enabled: boolean;
+  contextWindow: number;
+  reserveTokens: number;
+  keepRecentTokens: number;
+}
+
+export interface AgentTurnMemoryFlush {
+  enabled: boolean;
+  softThresholdTokens: number;
+  systemPrompt: string;
+  prompt: string;
+  /** False when a flush already ran since the last compaction. */
+  due: boolean;
 }
 
 /** Whether this turn recalls and captures long-term memory, and as whom. */
@@ -242,4 +271,8 @@ export interface AgentTurnOutput {
    * suppression does the rest.
    */
   repliedInBand?: boolean;
+  /** The compaction this turn performed after answering, if it did. */
+  compaction?: { summary: string; firstKeptIndex: number; tokensBefore: number };
+  /** The memory flush this turn ran before answering, if it did. */
+  memoryFlush?: { outcome: 'stored' | 'no_reply'; afterIndex: number };
 }
