@@ -13,8 +13,7 @@ import {
   CrossOrgAccessDenied,
 } from "../../../sandbox/client-sdk";
 import type { ToolContext } from "../../../tools/registry";
-import { type AuthContext, toToolContext } from "../../../tools/execute";
-import { querySqlImpl } from "../../../tools/admin/query_sql";
+import { type AuthContext, executeTool, toToolContext } from "../../../tools/execute";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -197,12 +196,9 @@ describe("ClientSDK.org() accessor", () => {
       expect(projected.directSearchFederation).toBe(false);
       expect(projected.grantedOrganizationIds).toEqual([orgA.id]);
 
-      const crossQuery = await querySqlImpl(
-        { sql: "SELECT 1", org_slug: orgB.slug },
-        testEnv,
-        projected
-      );
-      expect(crossQuery).toMatchObject({ error: expect.stringMatching(/not available/) });
+      await expect(executeTool(
+        "query_sql", { sql: "SELECT 1", org_slug: orgB.slug }, testEnv, rawAuth
+      )).rejects.toThrow(/not available/);
 
       const organizations = await buildClientSDK(projected, testEnv).organizations.list();
       expect(organizations.map((organization) => organization.id)).toContain(orgA.id);

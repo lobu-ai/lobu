@@ -5,12 +5,12 @@
  */
 
 import type { Env } from "../index";
-import { isAdminOrOwnerRole, isInProcessSystemCall, isSystemContext } from "../tools/access-control";
+import { isAdminOrOwnerRole, isInProcessSystemCall, isSystemContext, requireWorkspaceContext } from "../tools/access-control";
 import {
 	ADMIN_ONLY_QUERYABLE_TABLES,
 	SAFE_COLUMN_DEFS,
 } from "../utils/table-schema";
-import type { ToolContext } from "../tools/registry";
+import type { AccountToolContext, ToolContext } from "../tools/registry";
 import { resolveGrantedWorkspaceTarget } from "../auth/oauth/workspace-grants";
 import { raceAbort } from "../utils/race-abort";
 import { METHOD_METADATA } from "./method-metadata";
@@ -52,7 +52,10 @@ import type { AuthProfilesNamespace } from "./namespaces/auth-profiles";
 import type { CatalogNamespace } from "./namespaces/catalog";
 import type { ClassifiersNamespace } from "./namespaces/classifiers";
 import type { ConnectionsNamespace } from "./namespaces/connections";
-import type { ConversationsNamespace } from "./namespaces/conversations";
+import {
+	buildMcpConversationTitle,
+	type ConversationsNamespace,
+} from "./namespaces/conversations";
 import type { DevicesNamespace } from "./namespaces/devices";
 import type { EntitiesNamespace } from "./namespaces/entities";
 import type { EntitySchemaNamespace } from "./namespaces/entity-schema";
@@ -109,12 +112,12 @@ export class CrossOrgAccessDenied extends SdkError {
 /**
  * Resolve a workspace selected by an unscoped OAuth caller and carry its
  * membership into the handler context. The selected workspace, not the
- * session's default workspace, is authoritative for every leaf permission
+ * account client, is authoritative for every leaf permission
  * check performed with the returned context.
  */
 export async function resolveCrossOrgToolContext(
 	slugOrId: string,
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 	allowCrossOrg: boolean = ctx.allowCrossOrg,
 ): Promise<ToolContext> {
 	if (!allowCrossOrg) {
@@ -166,7 +169,7 @@ interface BuildClientSDKOptions {
 }
 
 export function buildClientSDK(
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 	env: Env,
 	opts?: BuildClientSDKOptions
 ): ClientSDK {
@@ -178,7 +181,7 @@ export function buildClientSDK(
 	// client.knowledge.save inside run_sdk has no card of its own, so it must
 	// keep the compact SDK receipt instead of echoing the saved payload into a
 	// headless result.
-	const headlessCtx: ToolContext = {
+	const headlessCtx: AccountToolContext = {
 		...ctx,
 		mcpAppsSupported: false,
 		headlessResult: true,
@@ -190,43 +193,45 @@ export function buildClientSDK(
 		? { ...headlessCtx, abortSignal: opts.abortSignal }
 		: headlessCtx;
 
-	const namespaces = {
-		agents: buildAgentsNamespace(ctx, env),
-		entities: buildEntitiesNamespace(ctx, env),
-		entitySchema: buildEntitySchemaNamespace(ctx, env),
-		catalog: buildCatalogNamespace(ctx, env),
-		connections: buildConnectionsNamespace(ctx, env),
-		conversations: buildConversationsNamespace(ctx, env),
-		feeds: buildFeedsNamespace(ctx, env),
-		authProfiles: buildAuthProfilesNamespace(ctx, env),
-		operations: buildOperationsNamespace(ctx, env),
-		automations: buildAutomationsNamespace(ctx, env),
-		classifiers: buildClassifiersNamespace(ctx, env),
-		viewTemplates: buildViewTemplatesNamespace(ctx, env),
-		knowledge: buildKnowledgeNamespace(ctx, env),
-		metrics: buildMetricsNamespace(ctx, env),
-		notifications: buildNotificationsNamespace(ctx, env),
-		devices: buildDevicesNamespace(ctx),
-		organizations: buildOrganizationsNamespace(ctx),
-		schedules: buildSchedulesNamespace(ctx, env),
-	};
-
-	if (mode === "read") {
-		for (const [ns, namespace] of Object.entries(namespaces)) {
-			// Drop methods missing a metadata entry or marked write/external.
-			// The Proxy in run-script.ts then advertises only the survivors.
-			const record = namespace as unknown as Record<string, unknown>;
-			for (const method of Object.keys(record)) {
-				if (METHOD_METADATA[`${ns}.${method}`]?.access !== "read") {
-					delete record[method];
+	function namespace<T extends object>(name: string, value: T): T {
+		if (mode === "read") {
+			for (const method of Object.keys(value)) {
+				if (METHOD_METADATA[`${name}.${method}`]?.access !== "read") {
+					delete (value as Record<string, unknown>)[method];
 				}
 			}
-			Object.freeze(namespace);
+			Object.freeze(value);
 		}
+		return value;
 	}
 
 	const sdk: ClientSDK = {
-		...namespaces,
+		get agents() { return namespace("agents", buildAgentsNamespace(requireWorkspaceContext(ctx), env)); },
+		get entities() { return namespace("entities", buildEntitiesNamespace(requireWorkspaceContext(ctx), env)); },
+		get entitySchema() { return namespace("entitySchema", buildEntitySchemaNamespace(requireWorkspaceContext(ctx), env)); },
+		get catalog() { return namespace("catalog", buildCatalogNamespace(requireWorkspaceContext(ctx), env)); },
+		get connections() { return namespace("connections", buildConnectionsNamespace(requireWorkspaceContext(ctx), env)); },
+		get feeds() { return namespace("feeds", buildFeedsNamespace(requireWorkspaceContext(ctx), env)); },
+		get authProfiles() { return namespace("authProfiles", buildAuthProfilesNamespace(requireWorkspaceContext(ctx), env)); },
+		get operations() { return namespace("operations", buildOperationsNamespace(requireWorkspaceContext(ctx), env)); },
+		get automations() { return namespace("automations", buildAutomationsNamespace(requireWorkspaceContext(ctx), env)); },
+		get classifiers() { return namespace("classifiers", buildClassifiersNamespace(requireWorkspaceContext(ctx), env)); },
+		get viewTemplates() { return namespace("viewTemplates", buildViewTemplatesNamespace(requireWorkspaceContext(ctx), env)); },
+		get knowledge() { return namespace("knowledge", buildKnowledgeNamespace(requireWorkspaceContext(ctx), env)); },
+		get metrics() { return namespace("metrics", buildMetricsNamespace(requireWorkspaceContext(ctx), env)); },
+		get notifications() { return namespace("notifications", buildNotificationsNamespace(requireWorkspaceContext(ctx), env)); },
+		get devices() { return namespace("devices", buildDevicesNamespace(requireWorkspaceContext(ctx))); },
+		get schedules() { return namespace("schedules", buildSchedulesNamespace(requireWorkspaceContext(ctx), env)); },
+		get organizations() { return namespace("organizations", buildOrganizationsNamespace(ctx)); },
+		get conversations() {
+			return namespace("conversations", {
+				setTitle: buildMcpConversationTitle(ctx),
+				get manage() { return buildConversationsNamespace(requireWorkspaceContext(ctx), env).manage; },
+				get list() { return buildConversationsNamespace(requireWorkspaceContext(ctx), env).list; },
+				get get() { return buildConversationsNamespace(requireWorkspaceContext(ctx), env).get; },
+				get send() { return buildConversationsNamespace(requireWorkspaceContext(ctx), env).send; },
+			});
+		},
 
 		async org(slugOrId) {
 			const targetCtx = await resolveCrossOrgToolContext(
@@ -242,23 +247,24 @@ export function buildClientSDK(
 		},
 
 		async query(querySql) {
+			const workspaceCtx = requireWorkspaceContext(ctx);
 			// Read-tier parity with `query_sql` / `metric_series`: members may query
 			// operational tables; auth/identity tables stay admin-only per-query.
-			const isAdmin = isAdminOrOwnerRole(ctx.memberRole);
+			const isAdmin = isAdminOrOwnerRole(workspaceCtx.memberRole);
 			const [{ getDb }, { validateAndScopeQuery }] = await Promise.all([
 				import("../db/client"),
 				import("../utils/execute-data-sources"),
 			]);
-			const scoped = validateAndScopeQuery(querySql, ctx.organizationId, {
-				userId: ctx.userId,
-				safeColumns: isSystemContext(ctx) ? undefined : SAFE_COLUMN_DEFS,
+			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
+				userId: workspaceCtx.userId,
+				safeColumns: isSystemContext(workspaceCtx) ? undefined : SAFE_COLUMN_DEFS,
 				restrictedTables:
-					isSystemContext(ctx) || isAdmin
+					isSystemContext(workspaceCtx) || isAdmin
 						? undefined
 						: ADMIN_ONLY_QUERYABLE_TABLES,
 				// Workspace-identity audit rows are owner/admin-only; ordinary
 				// members running client.query must not surface them.
-				excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdmin,
+				excludeWorkspaceAudit: !isInProcessSystemCall(workspaceCtx) && !isAdmin,
 			});
 			// Outer LIMIT caps rows at the source so a broad SELECT can't
 			// materialize an unbounded result set host-side.
@@ -269,7 +275,7 @@ export function buildClientSDK(
 					await tx.unsafe("SET LOCAL statement_timeout = '5000'");
 					return tx.unsafe(boundedSql, scoped.params as unknown[]);
 				}),
-				ctx.abortSignal
+				workspaceCtx.abortSignal
 			);
 			return rows.map((r: Record<string, unknown>) => ({ ...r }));
 		},

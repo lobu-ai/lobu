@@ -39,6 +39,11 @@ describe("sdkMethodVisible", () => {
 });
 
 describe("SDK access guidance", () => {
+	it("advertises account capabilities by scope without assigning a workspace role", () => {
+		expect(resolveSdkAccessGuidance({ access: "admin" }, null, ["mcp:admin"], true).available).toBe(true);
+		expect(resolveSdkAccessGuidance({ access: "admin" }, null, ["mcp:write"], true).progressivelyAuthorizable).toBe(true);
+		expect(resolveSdkAccessGuidance({ access: "admin" }, "member", ["mcp:admin"]).available).toBe(false);
+	});
 	it("reports each explicit permission tier", () => {
 		expect(effectiveSdkRequiredTier({ access: "read" })).toBe("read");
 		expect(effectiveSdkRequiredTier({ access: "write" })).toBe("operate");

@@ -61,7 +61,7 @@ describe('MCP activity notification attribution', () => {
 
   async function activityFor(token: string) {
     const response = await get(
-      `/api/${organizationSlug}/clients/activity-scopes?client_ids=${clientId}`,
+      `/api/me/clients/activity-scopes?client_ids=${clientId}`,
       { token }
     );
     expect(response.status).toBe(200);

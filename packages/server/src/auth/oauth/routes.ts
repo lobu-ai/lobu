@@ -150,13 +150,10 @@ async function resolveSubmittedWorkspaceGrant(params: {
   sql: ReturnType<typeof createDbClientFromEnv>;
   userId: string;
   organizationIds: unknown;
-  anchorOrganizationId: unknown;
   workspaceAccess: unknown;
   multiWorkspaceGrantsEnabled: boolean;
 }): Promise<
   | {
-      organizationId: string;
-      memberRole: string;
       grantedOrganizationIds: string[];
       liveGrantedWorkspaces: GrantedMemberWorkspace[];
     }
@@ -201,15 +198,6 @@ async function resolveSubmittedWorkspaceGrant(params: {
     };
   }
 
-  const organizationId =
-    typeof params.anchorOrganizationId === 'string' ? params.anchorOrganizationId.trim() : '';
-  if (!organizationId || !grantedOrganizationIds.includes(organizationId)) {
-    return {
-      error: createOAuthError('invalid_request', 'The primary workspace must be selected'),
-      status: 400,
-    };
-  }
-
   const workspaces = await listLiveGrantedMemberWorkspaces({
     sql: params.sql,
     userId: params.userId,
@@ -223,171 +211,15 @@ async function resolveSubmittedWorkspaceGrant(params: {
       status: 403,
     };
   }
-  const anchor = workspaces.find((workspace) => workspace.id === organizationId);
-  if (!anchor) {
-    return {
-      error: createOAuthError('access_denied', 'The workspace selection is no longer available'),
-      status: 403,
-    };
-  }
 
   return {
-    organizationId,
-    memberRole: anchor.role,
     grantedOrganizationIds,
     liveGrantedWorkspaces: workspaces,
   };
 }
 
-type OrgResolutionResult =
-  | { organizationId: string; memberRole: string | null }
-  | { error: ReturnType<typeof createOAuthError>; status: number }
-  | { orgSelectionRequired: true; organizations: { id: unknown; name: unknown; slug: unknown }[] };
-
-async function resolveOrganizationForGrant(params: {
-  sql: ReturnType<typeof createDbClientFromEnv>;
-  userId: string;
-  resourceOrgSlug: string | null;
-  explicitOrgId: string | undefined;
-  // When true, a user who belongs to more than one org and didn't pass an
-  // explicit org (or resource slug) must pick one — we do NOT silently bind to
-  // their personal org. Used by the explicitly approved device-worker flow, where a
-  // silent personal-org default landed the device in the wrong workspace.
-  forceSelectionForMultiOrg?: boolean;
-}): Promise<OrgResolutionResult> {
-  const { sql, userId, resourceOrgSlug, explicitOrgId, forceSelectionForMultiOrg } = params;
-
-  const lookupOrgAccess = async (column: 'slug' | 'id', value: string) => {
-    if (column === 'slug') {
-      return sql`
-        SELECT
-          o.id as organization_id,
-          o.visibility,
-          (
-            SELECT m.role FROM "member" m
-            WHERE m."organizationId" = o.id AND m."userId" = ${userId}
-            LIMIT 1
-          ) as member_role
-        FROM "organization" o
-        WHERE o.slug = ${value}
-        LIMIT 1
-      `;
-    }
-
-    return sql`
-      SELECT
-        o.id as organization_id,
-        o.visibility,
-        (
-          SELECT m.role FROM "member" m
-          WHERE m."organizationId" = o.id AND m."userId" = ${userId}
-          LIMIT 1
-        ) as member_role
-      FROM "organization" o
-      WHERE o.id = ${value}
-      LIMIT 1
-    `;
-  };
-
-  if (resourceOrgSlug) {
-    const org = await lookupOrgAccess('slug', resourceOrgSlug);
-    if (org.length === 0) {
-      return {
-        error: createOAuthError('invalid_request', `Organization '${resourceOrgSlug}' not found`),
-        status: 400,
-      };
-    }
-    const memberRole = (org[0].member_role as string | null) ?? null;
-    const isMember = memberRole !== null;
-    if (!isMember && org[0].visibility !== 'public') {
-      return {
-        error: createOAuthError('access_denied', 'Not a member of requested organization'),
-        status: 403,
-      };
-    }
-    return { organizationId: org[0].organization_id as string, memberRole };
-  }
-
-  if (explicitOrgId) {
-    const org = await lookupOrgAccess('id', explicitOrgId);
-    if (org.length === 0) {
-      return {
-        error: createOAuthError('access_denied', 'Not a member of the selected organization'),
-        status: 403,
-      };
-    }
-    const memberRole = (org[0].member_role as string | null) ?? null;
-    const isMember = memberRole !== null;
-    if (!isMember && org[0].visibility !== 'public') {
-      return {
-        error: createOAuthError('access_denied', 'Not a member of the selected organization'),
-        status: 403,
-      };
-    }
-    return { organizationId: org[0].organization_id as string, memberRole };
-  }
-
-  const memberships = await sql`
-    SELECT m."organizationId" as organization_id, m.role, o.name, o.slug
-    FROM "member" m
-    JOIN "organization" o ON o.id = m."organizationId"
-    WHERE m."userId" = ${userId}
-    ORDER BY m."createdAt" ASC
-  `;
-
-  if (memberships.length === 0) {
-    return {
-      error: createOAuthError('access_denied', 'No organization membership found for MCP scopes'),
-      status: 403,
-    };
-  }
-
-  // Device pairing: a multi-org user MUST choose explicitly. Skip
-  // the personal-org default below so the device can't be silently bound to the
-  // wrong workspace. Single-org users (length === 1) have no ambiguity and fall
-  // through to the normal resolution.
-  if (forceSelectionForMultiOrg && memberships.length > 1) {
-    return {
-      orgSelectionRequired: true,
-      organizations: memberships.map((m) => ({
-        id: m.organization_id,
-        name: m.name,
-        slug: m.slug,
-      })),
-    };
-  }
-
-  // If the user has a personal-org marker (`organization.metadata.personal_org_for_user_id`),
-  // bind device tokens to it without prompting. This matches what the
-  // device-worker auth middleware in `index.ts:602-607` resolves to anyway —
-  // skipping the consent picker just avoids a step the user almost always
-  // answers the same way. They can still bind to a different org by passing
-  // an explicit `organization_id` (UI path) or a `resource` slug (API path).
-  const personalOrg = await findExistingPersonalOrg(userId, sql);
-  if (personalOrg) {
-    const personalMember = memberships.find(
-      (m) => m.organization_id === personalOrg.id
-    );
-    if (personalMember) {
-      return {
-        organizationId: personalOrg.id,
-        memberRole: (personalMember.role as string | null) ?? null,
-      };
-    }
-  }
-
-  return {
-    orgSelectionRequired: true,
-    organizations: memberships.map((m) => ({
-      id: m.organization_id,
-      name: m.name,
-      slug: m.slug,
-    })),
-  };
-}
-
 type ResolvedMcpGrant = {
-  organizationId: string;
+  organizationId: string | null;
   grantedOrganizationIds: string[];
   scope: string;
 };
@@ -395,7 +227,7 @@ type ResolvedMcpGrant = {
 /**
  * Resolve the ordinary MCP grant once for both authorization-code and device
  * flows. Protocol handlers own only their request verification and completion;
- * workspace membership, primary selection, role filtering, and the immutable
+ * workspace membership, explicit resource binding, role filtering, and the immutable
  * workspace snapshot stay identical here.
  */
 async function resolveMcpGrant(params: {
@@ -407,59 +239,62 @@ async function resolveMcpGrant(params: {
   organizationIds: string[] | undefined;
   workspaceAccess: WorkspaceAccessMode | undefined;
   multiWorkspaceGrantsEnabled: boolean;
-  forceSelectionForMultiOrg: boolean;
 }): Promise<
   | { grant: ResolvedMcpGrant }
   | { error: ReturnType<typeof createOAuthError>; status: number }
-  | { orgSelectionRequired: true; organizations: { id: unknown; name: unknown; slug: unknown }[] }
 > {
   const resourceOrgSlug = getOrgSlugFromResource(params.resource);
-  const submittedGrant =
-    isBareMcpResource(params.resource) &&
-    (params.workspaceAccess !== undefined || params.organizationIds !== undefined)
-      ? await resolveSubmittedWorkspaceGrant({
-          sql: params.sql,
-          userId: params.userId,
-          organizationIds: params.organizationIds,
-          anchorOrganizationId: params.organizationId,
-          workspaceAccess: params.workspaceAccess,
-          multiWorkspaceGrantsEnabled: params.multiWorkspaceGrantsEnabled,
-        })
-      : null;
-  if (submittedGrant && 'error' in submittedGrant) return submittedGrant;
-
-  const validSubmittedGrant = submittedGrant && !('error' in submittedGrant) ? submittedGrant : null;
-  const orgResult =
-    validSubmittedGrant ??
-    (await resolveOrganizationForGrant({
+  let organizationId: string | null = null;
+  let grantedOrganizationIds: string[];
+  let grantRole: string | null;
+  if (resourceOrgSlug) {
+    const rows = await params.sql`
+      SELECT o.id, o.visibility, m.role
+      FROM organization o
+      LEFT JOIN member m
+        ON m."organizationId" = o.id AND m."userId" = ${params.userId}
+      WHERE o.slug = ${resourceOrgSlug}
+      LIMIT 1
+    `;
+    if (rows.length === 0) {
+      return {
+        error: createOAuthError('invalid_request', `Organization '${resourceOrgSlug}' not found`),
+        status: 400,
+      };
+    }
+    const workspace = rows[0];
+    grantRole = (workspace.role as string | null) ?? null;
+    if (!grantRole && workspace.visibility !== 'public') {
+      return {
+        error: createOAuthError('access_denied', 'Not a member of requested organization'),
+        status: 403,
+      };
+    }
+    organizationId = String(workspace.id);
+    grantedOrganizationIds = [organizationId];
+  } else {
+    if (!isBareMcpResource(params.resource) || params.organizationId !== undefined) {
+      return {
+        error: createOAuthError(
+          'invalid_request',
+          'Bare MCP authorization requires workspace grants without organization_id'
+        ),
+        status: 400,
+      };
+    }
+    const submittedGrant = await resolveSubmittedWorkspaceGrant({
       sql: params.sql,
       userId: params.userId,
-      resourceOrgSlug,
-      explicitOrgId: params.organizationId,
-      forceSelectionForMultiOrg: params.forceSelectionForMultiOrg,
-    }));
-  if ('error' in orgResult || 'orgSelectionRequired' in orgResult) return orgResult;
-
-  const grantedOrganizationIds = validSubmittedGrant?.grantedOrganizationIds ?? [
-    orgResult.organizationId,
-  ];
-  const liveGrantedWorkspaces =
-    validSubmittedGrant?.liveGrantedWorkspaces ??
-    (resourceOrgSlug === null
-      ? await listLiveGrantedMemberWorkspaces({
-          sql: params.sql,
-          userId: params.userId,
-          grantedOrganizationIds,
-        })
-      : []);
-  const grantRole =
-    resourceOrgSlug !== null
-      ? orgResult.memberRole
-      : liveGrantedWorkspaces.some(
-            (workspace) => workspace.role === 'owner' || workspace.role === 'admin'
-          )
-        ? 'admin'
-        : 'member';
+      organizationIds: params.organizationIds,
+      workspaceAccess: params.workspaceAccess,
+      multiWorkspaceGrantsEnabled: params.multiWorkspaceGrantsEnabled,
+    });
+    if ('error' in submittedGrant) return submittedGrant;
+    grantedOrganizationIds = submittedGrant.grantedOrganizationIds;
+    grantRole = submittedGrant.liveGrantedWorkspaces.some(
+      (workspace) => workspace.role === 'owner' || workspace.role === 'admin'
+    ) ? 'admin' : 'member';
+  }
   const filteredScope = filterScopeByRole(params.scope, grantRole);
   if (filteredScope === null) {
     return {
@@ -473,7 +308,7 @@ async function resolveMcpGrant(params: {
 
   return {
     grant: {
-      organizationId: orgResult.organizationId,
+      organizationId,
       grantedOrganizationIds,
       scope: filteredScope,
     },
@@ -775,7 +610,7 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
       const session = await resolveSession(auth, c.req.raw.headers);
       if (session?.user) {
         // User is logged in — auto-approve and redirect with code
-        const code = await provider.createAuthorizationCode(params, session.user.id, null);
+        const code = await provider.createAuthorizationCode(params, session.user.id, null, []);
         const redirectUrl = new URL(params.redirect_uri);
         redirectUrl.searchParams.set('code', code);
         if (params.state) {
@@ -828,9 +663,8 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
     isBareMcpResource(params.resource) &&
     isMultiWorkspaceGrantIssuanceEnabled(c.env)
   ) {
-    // Capability is delivered by the backend that will enforce the grant. New
-    // consent UIs fall back to the legacy singleton picker when this marker is
-    // absent, which keeps new UI safe against old or not-yet-enabled pods.
+    // This marker permits selecting multiple workspaces. Bare consent always
+    // requires an explicit grant snapshot, including singleton selections.
     consentUrl.searchParams.set('workspace_grants', '1');
   }
   consentUrl.searchParams.set('client_name', client.client_name || client.client_id);
@@ -1037,20 +871,9 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
         organizationIds: body.organization_ids,
         workspaceAccess: body.workspace_access,
         multiWorkspaceGrantsEnabled: isMultiWorkspaceGrantIssuanceEnabled(c.env),
-        forceSelectionForMultiOrg: isBareMcpResource(body.resource),
       });
       if ('error' in grantResult) {
         return c.json(grantResult.error, grantResult.status as 400);
-      }
-      if ('orgSelectionRequired' in grantResult) {
-        return c.json(
-          {
-            error: 'org_selection_required',
-            error_description: 'Please select an organization for this session',
-            organizations: grantResult.organizations,
-          },
-          400
-        );
       }
       organizationId = grantResult.grant.organizationId;
       grantedOrganizationIds = grantResult.grant.grantedOrganizationIds;
@@ -1430,8 +1253,7 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
     `) as unknown as Array<{ role: string | null }>;
     if (memberRow.length === 0) {
       // The personal-org marker exists but the user isn't a member (legacy /
-      // partially-migrated data). Mirrors resolveOrganizationForGrant's
-      // membership gate so we never bind a token to an org the user can't act
+      // partially-migrated data). Never bind a token to an org the user can't act
       // on.
       return c.json(
         createOAuthError('access_denied', 'Not a member of the personal organization'),
@@ -1451,7 +1273,6 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
         sql,
         userId: user.id,
         organizationIds: body.organization_ids,
-        anchorOrganizationId: body.organization_id,
         workspaceAccess: body.workspace_access,
         multiWorkspaceGrantsEnabled: isMultiWorkspaceGrantIssuanceEnabled(c.env),
       });
@@ -1459,7 +1280,7 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
         return c.json(submittedGrant.error, submittedGrant.status as 400);
       }
       if (
-        submittedGrant.organizationId !== personalOrg.id ||
+        (body.organization_id !== undefined && body.organization_id !== personalOrg.id) ||
         !submittedGrant.grantedOrganizationIds.includes(personalOrg.id)
       ) {
         return c.json(
@@ -1498,22 +1319,9 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
       organizationIds: body.organization_ids,
       workspaceAccess: body.workspace_access,
       multiWorkspaceGrantsEnabled: isMultiWorkspaceGrantIssuanceEnabled(c.env),
-      // Device pairing must not silently default a multi-org user's device to
-      // an unrelated workspace — require an explicit pick.
-      forceSelectionForMultiOrg: true,
     });
     if ('error' in grantResult) {
       return c.json(grantResult.error, grantResult.status as 400);
-    }
-    if ('orgSelectionRequired' in grantResult) {
-      return c.json(
-        {
-          error: 'org_selection_required',
-          error_description: 'Please select an organization for this session',
-          organizations: grantResult.organizations,
-        },
-        400
-      );
     }
     organizationId = grantResult.grant.organizationId;
     grantedOrganizationIds = grantResult.grant.grantedOrganizationIds;

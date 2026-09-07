@@ -10,6 +10,7 @@
  * import paths stay stable.
  */
 
+export { getAccountContent } from './get_content/account';
 export { getContent } from './get_content/handler';
 export {
   GetContentSchema,

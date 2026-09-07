@@ -20,12 +20,11 @@ import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { createAuthorizationIntent } from '../../../auth/oauth/authorization-intent';
+import { mcpAuth } from '../../../auth/middleware';
 import { OAuthProvider } from '../../../auth/oauth/provider';
 import { oauthRoutes } from '../../../auth/oauth/routes';
 import { hashToken } from '../../../auth/oauth/utils';
 import { parsePgTextArray } from '../../../db/client';
-import { buildClientSDK, CrossOrgAccessDenied } from '../../../sandbox/client-sdk';
-import { type AuthContext, toToolContext } from '../../../tools/execute';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -97,7 +96,6 @@ async function authorizeCodeGrant(params: {
   resource: string;
   scope: string;
   sessionCookie: string;
-  organizationId?: string;
   organizationIds?: string[];
   workspaceAccess?: 'all_current' | 'selected';
   multiWorkspaceGrantsEnabled?: boolean;
@@ -120,7 +118,6 @@ async function authorizeCodeGrant(params: {
         code_challenge_method: 'S256',
         resource: params.resource,
       }),
-      ...(params.organizationId ? { organization_id: params.organizationId } : {}),
       ...(params.organizationIds ? { organization_ids: params.organizationIds } : {}),
       ...(params.workspaceAccess ? { workspace_access: params.workspaceAccess } : {}),
       approved: true,
@@ -210,7 +207,49 @@ describe('Progressive mcp:admin consent', () => {
       sessionCookie: session.cookieHeader,
     });
     expect(elevated.scope).toBe('mcp:read mcp:write mcp:admin');
+    expect(await new OAuthProvider(getTestDb(), ORIGIN).verifyAccessToken(elevated.access_token))
+      .toMatchObject({ organizationId: org.id, grantedOrganizationIds: [org.id] });
   });
+
+  it.each(['public', 'private'] as const)(
+    'preserves scoped %s workspace access for nonmembers',
+    async (visibility) => {
+      const app = buildApp();
+      const org = await createTestOrganization({ name: 'Scoped Nonmember Workspace', visibility });
+      const user = await createTestUser({ name: 'Scoped Nonmember' });
+      const session = await createTestSession(user.id);
+      const redirectUri = `${ORIGIN}/scoped-nonmember`;
+      const registration = await call(app, 'POST', '/oauth/register', {
+        body: {
+          client_name: 'Scoped Nonmember Client', redirect_uris: [redirectUri],
+          grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'none',
+        },
+      });
+      const client = (await registration.json()) as { client_id: string };
+      const verifier = randomBytes(32).toString('base64url');
+      const challenge = createHash('sha256').update(verifier).digest('base64url');
+      const request = {
+        client_id: client.client_id, redirect_uri: redirectUri, scope: 'mcp:read',
+        code_challenge: challenge, code_challenge_method: 'S256' as const,
+        resource: `${ORIGIN}/mcp/${org.slug}`,
+      };
+      const consent = await call(app, 'POST', '/oauth/authorize/consent', {
+        body: { ...request, approved: true, authorization_intent: signAuthorizationRequest(request) },
+        headers: { Cookie: session.cookieHeader },
+      });
+      expect(consent.status).toBe(visibility === 'public' ? 200 : 403);
+      const codes = await getTestDb()`
+        SELECT organization_id, granted_organization_ids FROM oauth_authorization_codes
+        WHERE client_id = ${client.client_id}
+      `;
+      if (visibility === 'public') {
+        expect(codes[0]?.organization_id).toBe(org.id);
+        expect(parsePgTextArray(codes[0]?.granted_organization_ids as string)).toEqual([org.id]);
+      } else {
+        expect(codes).toHaveLength(0);
+      }
+    }
+  );
 
   it('never grants device-flow credential scopes on the authorization-code path', async () => {
     const app = buildApp();
@@ -489,7 +528,7 @@ describe('Progressive mcp:admin consent', () => {
     expect(await refresh.json()).toMatchObject({ error: 'invalid_scope' });
   });
 
-  it('keeps multi-workspace issuance default-off while preserving legacy singleton consent', async () => {
+  it('keeps multi-workspace issuance default-off and requires explicit singleton grants', async () => {
     const app = buildApp();
     const sql = getTestDb();
     const primary = await createTestOrganization({ name: 'Rollout Primary Org' });
@@ -517,7 +556,6 @@ describe('Progressive mcp:admin consent', () => {
       code_challenge: challenge,
       code_challenge_method: 'S256' as const,
       resource: `${ORIGIN}/mcp`,
-      organization_id: primary.id,
       organization_ids: [primary.id, secondary.id],
       workspace_access: 'selected' as const,
       authorization_intent: signAuthorizationRequest({
@@ -540,6 +578,18 @@ describe('Progressive mcp:admin consent', () => {
       error: 'invalid_request',
       error_description: 'Multiple-workspace authorization is not enabled',
     });
+
+    const obsoletePrimary = await call(app, 'POST', '/oauth/authorize/consent', {
+      body: { ...consentBody, organization_id: primary.id },
+      headers: { Cookie: session.cookieHeader },
+      env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
+    });
+    expect(obsoletePrimary.status).toBe(400);
+    const missingGrant = await call(app, 'POST', '/oauth/authorize/consent', {
+      body: { ...consentBody, organization_ids: undefined, workspace_access: undefined },
+      headers: { Cookie: session.cookieHeader },
+    });
+    expect(missingGrant.status).toBe(400);
 
     const pendingCodes = await sql`
       SELECT 1 FROM oauth_authorization_codes WHERE client_id = ${client.client_id}
@@ -578,8 +628,7 @@ describe('Progressive mcp:admin consent', () => {
     `;
     expect(disabledExchangeTokens).toHaveLength(0);
 
-    // New backends still accept the old UI's one-workspace payload while the
-    // fleet gate is off, so rollout does not strand existing OAuth clients.
+    // A singleton still needs explicit grants and has no implicit target.
     const singleton = await authorizeCodeGrant({
       app,
       clientId: client.client_id,
@@ -587,13 +636,15 @@ describe('Progressive mcp:admin consent', () => {
       resource: `${ORIGIN}/mcp`,
       scope: 'mcp:read',
       sessionCookie: session.cookieHeader,
-      organizationId: primary.id,
+      organizationIds: [primary.id],
+      workspaceAccess: 'selected',
     });
     const singletonRows = await sql`
-      SELECT granted_organization_ids
+      SELECT organization_id, granted_organization_ids
       FROM oauth_tokens
       WHERE token_hash = ${hashToken(singleton.access_token)}
     `;
+    expect(singletonRows[0]?.organization_id).toBeNull();
     expect(parsePgTextArray(singletonRows[0]?.granted_organization_ids as string | null)).toEqual([
       primary.id,
     ]);
@@ -632,7 +683,6 @@ describe('Progressive mcp:admin consent', () => {
       resource: enabledSearch.get('resource'),
       client_name: enabledSearch.get('client_name'),
       authorization_intent: enabledSearch.get('authorization_intent'),
-      organization_id: primary.id,
       organization_ids: [primary.id],
       workspace_access: 'selected',
       approved: true,
@@ -696,7 +746,6 @@ describe('Progressive mcp:admin consent', () => {
         code_challenge: challenge,
         code_challenge_method: 'S256',
         resource: `${ORIGIN}/mcp`,
-        organization_id: organization.id,
         organization_ids: [],
         workspace_access: 'selected',
         authorization_intent: signAuthorizationRequest({
@@ -758,7 +807,6 @@ describe('Progressive mcp:admin consent', () => {
       resource: `${ORIGIN}/mcp`,
       scope: 'mcp:read mcp:write mcp:admin profile:read',
       sessionCookie: session.cookieHeader,
-      organizationId: primary.id,
       organizationIds: [primary.id, admin.id],
       workspaceAccess: 'selected',
       multiWorkspaceGrantsEnabled: true,
@@ -771,7 +819,7 @@ describe('Progressive mcp:admin consent', () => {
       WHERE token_hash = ${hashToken(grant.access_token)}
       LIMIT 1
     `;
-    expect(accessRows[0]?.organization_id).toBe(primary.id);
+    expect(accessRows[0]?.organization_id).toBeNull();
     expect(parsePgTextArray(accessRows[0]?.granted_organization_ids as string | null)).toEqual([
       primary.id,
       admin.id,
@@ -789,6 +837,22 @@ describe('Progressive mcp:admin consent', () => {
     expect(info.organizations.some((organization) => organization.id === unselected.id)).toBe(
       false,
     );
+
+    const mcpApp = new Hono<{ Bindings: Env }>();
+    mcpApp.use('/mcp', mcpAuth);
+    mcpApp.get('/mcp', (c) => c.json({
+      userId: c.get('user')?.id,
+      organizationId: c.get('organizationId'),
+      memberRole: c.get('memberRole'),
+      authSource: c.get('authSource'),
+    }));
+    const account = await call(mcpApp, 'GET', '/mcp', {
+      headers: { Authorization: `Bearer ${grant.access_token}` },
+    });
+    expect(account.status).toBe(200);
+    expect(await account.json()).toEqual({
+      userId: user.id, organizationId: null, memberRole: null, authSource: 'oauth',
+    });
 
     expect(grant.refresh_token).toBeTruthy();
     const disabledRefresh = await call(app, 'POST', '/oauth/token', {
@@ -814,11 +878,12 @@ describe('Progressive mcp:admin consent', () => {
     expect(refreshed.status).toBe(200);
     const refreshedBody = (await refreshed.json()) as { access_token: string };
     const refreshedRows = await sql`
-      SELECT granted_organization_ids
+      SELECT organization_id, granted_organization_ids
       FROM oauth_tokens
       WHERE token_hash = ${hashToken(refreshedBody.access_token)}
       LIMIT 1
     `;
+    expect(refreshedRows[0]?.organization_id).toBeNull();
     expect(parsePgTextArray(refreshedRows[0]?.granted_organization_ids as string | null)).toEqual([
       primary.id,
       admin.id,
@@ -837,6 +902,84 @@ describe('Progressive mcp:admin consent', () => {
     ]);
     expect(downscopedInfo.personal_org_slug).toBeNull();
   });
+
+  it.each(['selected', 'all_current'] as const)(
+    'issues ordinary device-code %s grants without a workspace binding',
+    async (workspaceAccess) => {
+      const app = buildApp();
+      const sql = getTestDb();
+      const workspace = await createTestOrganization({ name: 'Device Login Workspace' });
+      const user = await createTestUser({ name: 'Device Login User' });
+      await addUserToOrganization(user.id, workspace.id, 'member');
+      const session = await createTestSession(user.id);
+      const registration = await call(app, 'POST', '/oauth/register', {
+        body: {
+          client_name: 'Ordinary Device Login',
+          grant_types: ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+          token_endpoint_auth_method: 'none',
+        },
+      });
+      expect(registration.status).toBe(201);
+      const client = (await registration.json()) as { client_id: string };
+      const resource = `${ORIGIN}/mcp`;
+      const authorization = await call(app, 'POST', '/oauth/device_authorization', {
+        body: { client_id: client.client_id, resource, scope: 'mcp:read mcp:admin profile:read' },
+      });
+      expect(authorization.status).toBe(200);
+      const device = (await authorization.json()) as { device_code: string; user_code: string };
+      const verified = await call(app, 'GET', `/oauth/device/info?user_code=${device.user_code}`, {
+        headers: { Cookie: session.cookieHeader },
+      });
+      expect(verified.status).toBe(200);
+      const missingGrant = await call(app, 'POST', '/oauth/device/approve', {
+        body: { user_code: device.user_code, approved: true },
+        headers: { Cookie: session.cookieHeader },
+      });
+      expect(missingGrant.status).toBe(400);
+      const approved = await call(app, 'POST', '/oauth/device/approve', {
+        body: {
+          user_code: device.user_code, approved: true,
+          organization_ids: [workspace.id], workspace_access: workspaceAccess,
+        },
+        headers: { Cookie: session.cookieHeader },
+      });
+      expect(approved.status).toBe(200);
+      const codes = await sql`
+        SELECT organization_id, granted_organization_ids FROM oauth_device_codes
+        WHERE device_code = ${device.device_code}
+      `;
+      expect(codes[0]?.organization_id).toBeNull();
+      expect(parsePgTextArray(codes[0]?.granted_organization_ids as string)).toEqual([workspace.id]);
+      const exchanged = await call(app, 'POST', '/oauth/token', {
+        body: {
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          client_id: client.client_id, device_code: device.device_code, resource,
+        },
+      });
+      expect(exchanged.status).toBe(200);
+      const tokens = (await exchanged.json()) as { access_token: string; refresh_token: string };
+      const provider = new OAuthProvider(sql, ORIGIN);
+      const auth = await provider.verifyAccessToken(tokens.access_token);
+      expect(auth).toMatchObject({
+        userId: user.id, organizationId: null, grantedOrganizationIds: [workspace.id],
+        authorizationGrantType: 'device_code', resource,
+      });
+      expect(auth?.scopes).not.toContain('mcp:admin');
+      const futureWorkspace = await createTestOrganization({ name: 'Future Device Membership' });
+      await addUserToOrganization(user.id, futureWorkspace.id, 'owner');
+      const refreshed = await call(app, 'POST', '/oauth/token', {
+        body: {
+          grant_type: 'refresh_token', client_id: client.client_id,
+          refresh_token: tokens.refresh_token, resource,
+        },
+      });
+      expect(refreshed.status).toBe(200);
+      const refreshTokens = (await refreshed.json()) as { access_token: string };
+      expect(await provider.verifyAccessToken(refreshTokens.access_token)).toMatchObject({
+        organizationId: null, grantedOrganizationIds: [workspace.id],
+      });
+    }
+  );
 
   it('rejects an unowned workspace in the snapshot without partially granting it', async () => {
     const app = buildApp();
@@ -865,7 +1008,6 @@ describe('Progressive mcp:admin consent', () => {
         code_challenge: challenge,
         code_challenge_method: 'S256',
         resource: `${ORIGIN}/mcp`,
-        organization_id: owned.id,
         organization_ids: [owned.id, foreign.id],
         workspace_access: 'selected',
         authorization_intent: signAuthorizationRequest({
@@ -885,7 +1027,7 @@ describe('Progressive mcp:admin consent', () => {
     expect(await response.json()).toMatchObject({ error: 'access_denied' });
   });
 
-  it('keeps legacy NULL grants pinned to the anchor through verification and refresh', async () => {
+  it('never reconstructs missing stored grants from an organization binding', async () => {
     const app = buildApp();
     const sql = getTestDb();
     const anchor = await createTestOrganization({ name: 'Legacy Anchor Org' });
@@ -919,35 +1061,9 @@ describe('Progressive mcp:admin consent', () => {
 
     const provider = new OAuthProvider(sql, ORIGIN);
     const verified = await provider.verifyAccessToken(accessToken);
-    expect(verified?.grantedOrganizationIds).toEqual([anchor.id]);
+    expect(verified?.grantedOrganizationIds).toEqual([]);
     const info = await provider.getUserInfo(accessToken);
-    expect(info?.organizations.map((organization) => organization.id)).toEqual([anchor.id]);
-
-    const authContext = {
-      organizationId: anchor.id,
-      tokenOrganizationId: anchor.id,
-      userId: user.id,
-      memberRole: 'owner',
-      agentId: null,
-      requestedAgentId: null,
-      isAuthenticated: true,
-      clientId: client.client_id,
-      scopes: verified?.scopes ?? [],
-      tokenType: 'oauth',
-      requestUrl: `${ORIGIN}/mcp`,
-      baseUrl: ORIGIN,
-      scopedToOrg: false,
-      allowCrossOrg: false,
-      grantedOrganizationIds: verified?.grantedOrganizationIds ?? [],
-      directSearchFederation: false,
-    } as AuthContext;
-    const toolContext = toToolContext(authContext);
-    expect(toolContext.directSearchFederation).toBe(false);
-    await expect(buildClientSDK(toolContext, TEST_ENV).org(other.slug)).rejects.toBeInstanceOf(
-      CrossOrgAccessDenied
-    );
-    const organizations = await buildClientSDK(toolContext, TEST_ENV).organizations.list();
-    expect(organizations.map((organization) => organization.id)).not.toContain(other.id);
+    expect(info?.organizations).toEqual([]);
 
     const refreshed = await call(app, 'POST', '/oauth/token', {
       body: {
@@ -964,8 +1080,6 @@ describe('Progressive mcp:admin consent', () => {
       FROM oauth_tokens
       WHERE token_hash = ${hashToken(refreshedBody.access_token)}
     `;
-    expect(parsePgTextArray(refreshedRows[0]?.granted_organization_ids as string)).toEqual([
-      anchor.id,
-    ]);
+    expect(parsePgTextArray(refreshedRows[0]?.granted_organization_ids as string)).toEqual([]);
   });
 });

@@ -89,7 +89,7 @@ export class OAuthProvider {
     params: AuthorizationParams,
     userId: string,
     organizationId: string | null,
-    grantedOrganizationIds: readonly string[] = organizationId ? [organizationId] : []
+    grantedOrganizationIds: readonly string[]
   ): Promise<string> {
     const code = generateAuthorizationCode();
     const expiresAt = calculateExpiry(AUTHORIZATION_CODE_LIFETIME_SECONDS);
@@ -191,7 +191,7 @@ export class OAuthProvider {
     }
 
     // Re-read and lock the claimed code while its tokens are inserted. A
-    // connected-app workspace revoke may delete an anchor code or narrow a
+    // connected-app workspace revoke may delete a bound code or narrow a
     // secondary grant after the initial claim; using the live row here makes
     // revoke and exchange serialize without resurrecting stale grants.
     return this.sql.begin(async (tx) => {
@@ -220,8 +220,7 @@ export class OAuthProvider {
         authCode.resource,
         'authorization_code',
         normalizeStoredGrantedOrganizationIds(
-          liveCode.granted_organization_ids,
-          liveCode.organization_id
+          liveCode.granted_organization_ids
         ),
         tx
       );
@@ -271,8 +270,7 @@ export class OAuthProvider {
     const oldRefreshToken = tokenResult[0] as StoredOAuthToken;
     if (
       normalizeStoredGrantedOrganizationIds(
-        oldRefreshToken.granted_organization_ids,
-        oldRefreshToken.organization_id
+        oldRefreshToken.granted_organization_ids
       ).length > 1 &&
       !this.multiWorkspaceGrantIssuanceEnabled
     ) {
@@ -358,8 +356,7 @@ export class OAuthProvider {
         'granted_organization_ids' | 'organization_id' | 'authorization_grant_type'
       >;
       const grantedOrganizationIds = normalizeStoredGrantedOrganizationIds(
-        liveRefreshToken.granted_organization_ids,
-        liveRefreshToken.organization_id
+        liveRefreshToken.granted_organization_ids
       );
 
       await tx`
@@ -406,7 +403,7 @@ export class OAuthProvider {
     scope: string | null,
     resource: string | null,
     authorizationGrantType: 'authorization_code' | 'device_code',
-    grantedOrganizationIds: readonly string[] = organizationId ? [organizationId] : [],
+    grantedOrganizationIds: readonly string[],
     sql: DbClient = this.sql
   ): Promise<OAuthTokenResponse | OAuthError> {
     if (grantedOrganizationIds.length > 1 && !this.multiWorkspaceGrantIssuanceEnabled) {
@@ -534,8 +531,7 @@ export class OAuthProvider {
       userId: tokenData.user_id,
       organizationId: tokenData.organization_id,
       grantedOrganizationIds: normalizeStoredGrantedOrganizationIds(
-        tokenData.granted_organization_ids,
-        tokenData.organization_id
+        tokenData.granted_organization_ids
       ),
       authorizationGrantType: tokenData.authorization_grant_type,
       clientId: tokenData.client_id,
@@ -797,8 +793,8 @@ export class OAuthProvider {
     userCode: string,
     userId: string,
     organizationId: string | null,
-    scopeOverride?: string | null,
-    grantedOrganizationIds: readonly string[] = organizationId ? [organizationId] : []
+    scopeOverride: string | null | undefined,
+    grantedOrganizationIds: readonly string[]
   ): Promise<boolean> {
     if (scopeOverride !== undefined) {
       const result = await this.sql`
@@ -956,8 +952,7 @@ export class OAuthProvider {
           deviceCode.resource,
           'device_code',
           normalizeStoredGrantedOrganizationIds(
-            deviceCode.granted_organization_ids,
-            deviceCode.organization_id
+            deviceCode.granted_organization_ids
           ),
           tx
         );

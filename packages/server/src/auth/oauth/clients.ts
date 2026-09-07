@@ -299,6 +299,21 @@ export class OAuthClientsStore {
       const affectedUserIds = affectedUsers.map((row) => String(row.user_id));
       if (affectedUserIds.length === 0) return false;
 
+      // Remove exhausted grants before narrowing so unrelated account-only
+      // codes with an existing empty snapshot remain valid.
+      const deletedAuthorizationCodes = await tx`
+        DELETE FROM oauth_authorization_codes
+        WHERE client_id = ${clientId}
+          AND (
+            organization_id = ${organizationId}
+            OR (
+              granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
+              AND cardinality(array_remove(granted_organization_ids, ${organizationId})) = 0
+            )
+          )
+          ${userId ? tx`AND user_id = ${userId}` : tx``}
+        RETURNING code
+      `;
       const narrowedAuthorizationCodes = await tx`
         UPDATE oauth_authorization_codes
         SET granted_organization_ids = array_remove(granted_organization_ids, ${organizationId})
@@ -308,27 +323,26 @@ export class OAuthClientsStore {
           ${userId ? tx`AND user_id = ${userId}` : tx``}
         RETURNING code
       `;
-      const deletedAuthorizationCodes = await tx`
-        DELETE FROM oauth_authorization_codes
-        WHERE client_id = ${clientId}
-          AND organization_id = ${organizationId}
-          ${userId ? tx`AND user_id = ${userId}` : tx``}
-        RETURNING code
-      `;
 
+      const deletedDeviceCodes = await tx`
+        DELETE FROM oauth_device_codes
+        WHERE client_id = ${clientId}
+          AND (
+            organization_id = ${organizationId}
+            OR (
+              granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
+              AND cardinality(array_remove(granted_organization_ids, ${organizationId})) = 0
+            )
+          )
+          ${userId ? tx`AND user_id = ${userId}` : tx``}
+        RETURNING device_code
+      `;
       const narrowedDeviceCodes = await tx`
         UPDATE oauth_device_codes
         SET granted_organization_ids = array_remove(granted_organization_ids, ${organizationId})
         WHERE client_id = ${clientId}
           AND organization_id IS DISTINCT FROM ${organizationId}
           AND granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
-          ${userId ? tx`AND user_id = ${userId}` : tx``}
-        RETURNING device_code
-      `;
-      const deletedDeviceCodes = await tx`
-        DELETE FROM oauth_device_codes
-        WHERE client_id = ${clientId}
-          AND organization_id = ${organizationId}
           ${userId ? tx`AND user_id = ${userId}` : tx``}
         RETURNING device_code
       `;

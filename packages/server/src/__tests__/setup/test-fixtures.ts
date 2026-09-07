@@ -530,6 +530,7 @@ export async function createTestAccessToken(
     expiresIn?: number; // seconds
     scope?: string;
     resource?: string | null;
+    grantedOrganizationIds?: string[] | null;
   },
 ): Promise<TestAccessToken> {
   const sql = getTestDb();
@@ -546,12 +547,17 @@ export async function createTestAccessToken(
     ? 'device_code'
     : null;
 
+  const grantedOrganizationIds = options?.grantedOrganizationIds === undefined
+    ? [organizationId]
+    : options.grantedOrganizationIds;
+
   await sql`
     INSERT INTO oauth_tokens (
       id, token_type, token_hash, client_id, user_id, organization_id,
-      authorization_grant_type, scope, resource, expires_at, created_at
+      granted_organization_ids, authorization_grant_type, scope, resource, expires_at, created_at
     ) VALUES (
       ${id}, 'access', ${tokenHash}, ${clientId}, ${userId}, ${organizationId},
+      ${grantedOrganizationIds === null ? null : pgTextArray(grantedOrganizationIds)}::text[],
       ${grantType}, ${scope}, ${options?.resource ?? null}, ${expiresAt}, NOW()
     )
   `;

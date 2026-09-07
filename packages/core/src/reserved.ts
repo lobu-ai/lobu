@@ -71,6 +71,7 @@ export const RESERVED_PATHS = [
   "templates",
   "help",
   "account",
+  "me",
   "admin",
   "health",
   "login",
