@@ -1,6 +1,6 @@
 {
   "name": "@lobu/plugin-host",
-  "version": "19.1.0",
+  "version": "19.2.0",
   "description": "Deterministic host for trusted first-party Lobu plugins",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
