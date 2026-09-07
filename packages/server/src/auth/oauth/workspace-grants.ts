@@ -10,15 +10,9 @@ import { findExistingPersonalOrg } from "../personal-org-provisioning";
 export const MAX_GRANTED_ORGANIZATIONS = 50;
 
 /**
- * Deployment cutover for multi-workspace OAuth issuance.
- *
- * Keep this OFF through the additive database/application rollout. Old pods do
- * not understand immutable grant arrays, so enabling while they still receive
- * traffic can turn a selected-workspace consent into legacy all-membership
- * access. Set `LOBU_OAUTH_MULTI_WORKSPACE_GRANTS=1` only after every backend pod
- * runs the grant-aware verifier/tool enforcement. Rollback must first turn the
- * flag off and revoke/re-authorize any multi-grant clients before old code can
- * receive traffic again.
+ * Controls whether ordinary bare-account OAuth consent may include more than
+ * one workspace. Both states issue an explicit grant snapshot with no default
+ * workspace; grant verification and enforcement are never gated by this flag.
  */
 export function isMultiWorkspaceGrantIssuanceEnabled(
 	env: Record<string, string | undefined>,
@@ -49,18 +43,8 @@ export function canonicalizeGrantedOrganizationIds(
 	return unique;
 }
 
-/**
- * Decode a DB text[] and fail closed for pre-migration rows.  A legacy row is
- * entitled only to its existing anchor, never to every current membership.
- */
-export function normalizeStoredGrantedOrganizationIds(
-	value: unknown,
-	organizationId: string | null,
-): string[] {
-	// NULL means the row predates explicit grants. It fails closed to the one
-	// existing anchor. An explicit empty array is different: never resurrect
-	// its anchor (writers must revoke such a token instead of retaining it).
-	if (value == null) return organizationId ? [organizationId] : [];
+/** Decode the immutable stored grant; missing snapshots grant no workspaces. */
+export function normalizeStoredGrantedOrganizationIds(value: unknown): string[] {
 	let parsed: string[] = [];
 	if (Array.isArray(value)) {
 		parsed = value.filter((item): item is string => typeof item === "string");

@@ -1,8 +1,10 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { Env } from "../index";
 import { invokeTemplateEventAction } from "../interactions/template-event-actions";
+import { resolveCrossOrgToolContext } from "../sandbox/client-sdk";
 import { ToolUserError } from "../utils/errors";
-import type { ToolContext } from "./registry";
+import { requireWorkspaceContext } from "./access-control";
+import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 import { assertTemplateActionCapability } from "../interactions/template-action-capability";
 
@@ -29,7 +31,7 @@ type InvokeEventActionArgs = Static<typeof InvokeEventActionSchema>;
 async function invokeEventActionImpl(
 	args: InvokeEventActionArgs,
 	_env: Env,
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 ): Promise<Static<typeof InvokeEventActionResultSchema>> {
 	if (!ctx.isAuthenticated || !ctx.userId) {
 		throw new ToolUserError(
@@ -37,13 +39,16 @@ async function invokeEventActionImpl(
 			401,
 		);
 	}
-	assertTemplateActionCapability(
+	const organizationId = assertTemplateActionCapability(
 		ctx.mcpAppEventActionCapability,
 		args.source_event_id,
 		ctx,
 	);
+	const target = ctx.organizationId
+		? requireWorkspaceContext(ctx)
+		: await resolveCrossOrgToolContext(organizationId, ctx);
 	const result = await invokeTemplateEventAction({
-		organizationId: ctx.organizationId,
+		organizationId: target.organizationId,
 		sourceEventId: args.source_event_id,
 		action: args.action,
 		value: args.value ?? null,

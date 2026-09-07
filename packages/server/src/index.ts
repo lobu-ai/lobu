@@ -2259,7 +2259,7 @@ app.route("/api/:orgSlug/installed", orgInstalledRoutes);
 app.route("/api/:orgSlug/agents", agentRoutes);
 app.route("/api/:orgSlug/deployments", deploymentRoutes);
 app.route("/api/:orgSlug/sandboxes", sandboxRoutes);
-app.route("/api/:orgSlug/clients/activity-scopes", clientActivityScopeRoutes);
+app.route("/api/me/clients/activity-scopes", clientActivityScopeRoutes);
 app.route("/api/:orgSlug/clients", clientRoutes);
 
 // ============================================
@@ -2601,6 +2601,10 @@ app.get("/api/:orgSlug/tools", mcpAuth, restListTools);
  * Generic tool proxy for the REST dispatch tool surface.
  * POST /api/:orgSlug/:toolName with JSON body
  */
+app.post("/api/me/read_knowledge", mcpAuth, async (c) => {
+	return restToolProxy(c, "read_knowledge");
+});
+
 app.post("/api/:orgSlug/:toolName", mcpAuth, async (c) => {
 	return restToolProxy(c);
 });

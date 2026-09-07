@@ -319,13 +319,15 @@ export function hasRequiredMcpScope(
  * Highest access tier a caller can exercise, from member role x `mcp:*`
  * scopes. `null`/sentinel scopes don't limit (session/anonymous callers are
  * gated by role + public-readability instead). Shared by MCP `tools/list` and
- * `GET /api/:orgSlug/tools` so both surfaces filter identically.
+ * `GET /api/:orgSlug/tools` so both surfaces filter identically. Account discovery
+ * has only a scope ceiling; selected workspace handlers still enforce real roles.
  */
 export function resolveMaxAccessLevel(
 	memberRole: string | null | undefined,
-	scopes: readonly string[] | null | undefined
+	scopes: readonly string[] | null | undefined,
+	accountScope = false,
 ): ToolAccessLevel {
-	const roleLevel: ToolAccessLevel = !memberRole
+	const roleLevel: ToolAccessLevel = accountScope ? "admin" : !memberRole
 		? "read"
 		: memberRole === "owner" || memberRole === "admin"
 			? "admin"
@@ -350,12 +352,13 @@ export function resolveMaxAccessLevel(
  */
 export function resolveSdkMaxAccessLevel(
 	memberRole: string | null | undefined,
-	scopes: readonly string[] | null | undefined
+	scopes: readonly string[] | null | undefined,
+	accountScope = false,
 ): ToolAccessLevel {
-	const current = resolveMaxAccessLevel(memberRole, scopes);
+	const current = resolveMaxAccessLevel(memberRole, scopes, accountScope);
 	if (
 		current === "write" &&
-		(memberRole === "owner" || memberRole === "admin") &&
+		(accountScope || memberRole === "owner" || memberRole === "admin") &&
 		hasRequiredMcpScope("write", scopes)
 	) {
 		return "admin";

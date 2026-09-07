@@ -15,7 +15,6 @@ import { resolveEntityRender } from '../../utils/default-entity-template';
 import { resolveEventKindDefinition } from '../../utils/event-kind-validation';
 import logger from '../../utils/logger';
 import { buildResourcePermalink } from '../../utils/url-builder';
-import { isAdminOrOwnerRole } from '../access-control';
 import { AUDIT_SEMANTIC_TYPE } from '../constants';
 import type { ContentRow } from './types';
 import { parseRecordArray, toNumberOrUndefined } from './types';
@@ -100,10 +99,10 @@ const AUDIT_REQUEST_KEYS = ['request', 'request_bytes'] as const;
 
 /**
  * A tool-invocation audit row retains the caller's VERBATIM request (see
- * `recordToolInvocationAudit`), which only its author or a workspace admin may
- * read. Content rows arrive with those keys still on `payload_data`, so this
- * strips them from EVERY audit item first — list/search results never inline
- * them, and an unauthorized caller or unrecognized role leaves them stripped.
+ * `recordToolInvocationAudit`), which only its author may read. Content rows
+ * arrive with those keys still on `payload_data`, so this strips them from
+ * EVERY audit item first — list/search results never inline them, and any
+ * caller other than the author leaves them stripped.
  * Explicit event-id reads put them back only on rows whose `created_by` clears
  * the gate. Authorship is the one thing the content row does not carry, so it
  * is the only thing re-read here; a failed re-read rejects rather than serving
@@ -118,13 +117,10 @@ const AUDIT_REQUEST_KEYS = ['request', 'request_bytes'] as const;
 export async function hydrateToolInvocationRequests(opts: {
   sql: DbClient;
   items: ContentItem[];
-  organizationId: string;
   userId: string | null;
-  memberRole: string | null;
   restoreRequests: boolean;
 }): Promise<void> {
-  const { sql, items, organizationId, userId, memberRole, restoreRequests } = opts;
-  const isAdmin = isAdminOrOwnerRole(memberRole);
+  const { sql, items, userId, restoreRequests } = opts;
   const stripped = new Map<
     number,
     Array<{ payload: Record<string, unknown>; fields: Record<string, unknown> }>
@@ -148,19 +144,18 @@ export async function hydrateToolInvocationRequests(opts: {
     stripped.set(id, entries);
   }
 
-  if (!restoreRequests || stripped.size === 0 || (!isAdmin && userId == null)) return;
+  if (!restoreRequests || stripped.size === 0 || userId == null) return;
 
-  const rows = await sql<{ id: number; created_by: string | null }>`
-    SELECT id, created_by
+  const rows = await sql<{ id: number }>`
+    SELECT id
     FROM events
-    WHERE organization_id = ${organizationId}
+    WHERE created_by = ${userId}
       AND id = ANY(${pgBigintArray([...stripped.keys()])}::bigint[])
       AND semantic_type = ${AUDIT_SEMANTIC_TYPE}
       AND origin_type = 'tool_invocation'
   `;
 
   for (const row of rows) {
-    if (!isAdmin && row.created_by !== userId) continue;
     const entries = stripped.get(Number(row.id));
     if (!entries) continue;
     for (const entry of entries) Object.assign(entry.payload, entry.fields);
@@ -220,7 +215,8 @@ export async function fetchClassificationExcerpts(
 export async function buildContentItems(opts: {
   sql: DbClient;
   rawContent: ContentRow[];
-  organizationId: string;
+  /** NULL only for actor-owned audit rows; never hydrate workspace references. */
+  organizationId: string | null;
   ownerSlug: string | null;
   baseUrl: string | undefined;
   excerptsMap: Map<number, string>;
@@ -259,7 +255,7 @@ export async function buildContentItems(opts: {
   const uniqueParentIds = [...new Set(parentExternalIds)];
 
   const [attributionRows, parentRows] = await Promise.all([
-    idsNeedingAttribution.length > 0
+    organizationId !== null && idsNeedingAttribution.length > 0
       ? sql`
         SELECT
           e.id,
@@ -308,7 +304,7 @@ export async function buildContentItems(opts: {
           AND e.id = ANY(${pgBigintArray(idsNeedingAttribution)}::bigint[])
       `
       : Promise.resolve([] as Array<Record<string, unknown>>),
-    uniqueParentIds.length > 0
+    organizationId !== null && uniqueParentIds.length > 0
       ? sql`
         SELECT origin_id, author_name, title, payload_text, occurred_at, source_url, score
         FROM current_event_records
@@ -446,7 +442,7 @@ export async function buildContentItems(opts: {
   // notifications keep routing metadata separate and bind their payload_data.
   await Promise.all(
     contentItems.map(async (item) => {
-      if (item.payload_template || item.payload_type !== 'empty') return;
+      if (organizationId === null || item.payload_template || item.payload_type !== 'empty') return;
       const isNotification = typeof item.metadata?.notification_type === 'string';
       const renderData = isNotification ? (item.payload_data ?? {}) : item.metadata;
       if (!isNotification && (!renderData || Object.keys(renderData).length === 0)) return;

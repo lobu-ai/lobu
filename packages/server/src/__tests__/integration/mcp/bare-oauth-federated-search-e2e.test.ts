@@ -98,7 +98,6 @@ describe('bare OAuth /mcp federated search end to end', () => {
         code_challenge: challenge,
         code_challenge_method: 'S256',
         resource,
-        organization_id: workspaceA.id,
         organization_ids: [workspaceA.id, workspaceB.id],
         workspace_access: 'selected',
         authorization_intent: createAuthorizationIntent(
@@ -148,7 +147,7 @@ describe('bare OAuth /mcp federated search end to end', () => {
         AND token_type = 'access'
       LIMIT 1
     `;
-    expect(tokenRows[0]?.organization_id).toBe(workspaceA.id);
+    expect(tokenRows[0]?.organization_id).toBeNull();
     expect(
       parsePgTextArray(tokenRows[0]?.granted_organization_ids as string | null)
     ).toEqual([workspaceA.id, workspaceB.id]);

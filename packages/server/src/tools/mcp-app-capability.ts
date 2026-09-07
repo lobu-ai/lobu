@@ -1,5 +1,5 @@
 import { decrypt, encrypt } from "@lobu/core";
-import type { ToolContext } from "./registry";
+import type { AccountToolContext, ToolContext } from "./registry";
 
 export const MCP_APP_CAPABILITY_MAX_LENGTH = 4_096;
 
@@ -80,7 +80,7 @@ export function readMcpAppCapability(
 
 export function mcpAppCapabilityMatchesHost(
 	capability: McpAppCapabilityBinding,
-	ctx: ToolContext,
+	ctx: AccountToolContext,
 ): boolean {
 	if (
 		capability.userId !== ctx.userId ||
