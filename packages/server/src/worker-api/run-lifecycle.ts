@@ -300,18 +300,20 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
     `;
 		if (updated.length === 0) {
 			// The fence requires `status = 'running'`, so a cancelled run fails it
-			// exactly like a lost lease does. The worker has to tell those apart:
-			// on a cancel it still owns the run and must finish through its normal
-			// completion path so the terminal row and the client's reply get
-			// written; on a lost lease another worker owns it and this one must
-			// touch nothing. Re-read on ownership alone to say which.
+			// exactly like a lost lease does. The agent-turn lane has to tell those
+			// apart: on a cancel it still owns the run and stops the model rather
+			// than spending the rest of the turn; on a lost lease another worker
+			// owns it and this one must touch nothing. Re-read on ownership alone
+			// to say which. Every OTHER lane keeps the 409: the automation CLI
+			// daemon and the Chrome heartbeat detect a cancel only through a
+			// non-2xx, so a 200 here would leave their runs going.
 			const [owned] = (await sql`
-        SELECT status FROM runs
+        SELECT status, run_type FROM runs
         WHERE id = ${run_id}
           ${runOwnerFence(sql, worker_id)}
         LIMIT 1
-      `) as unknown as Array<{ status: string } | undefined>;
-			if (owned?.status === 'cancelled') {
+      `) as unknown as Array<{ status: string; run_type: string } | undefined>;
+			if (owned?.status === 'cancelled' && owned.run_type === 'agent_turn') {
 				return c.json<HeartbeatResponse>({
 					continue: false,
 					stop_reason: 'cancelled',

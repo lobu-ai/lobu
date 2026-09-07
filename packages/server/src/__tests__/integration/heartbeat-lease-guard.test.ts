@@ -58,7 +58,8 @@ function mockWorkerCtx(body: unknown): {
 async function insertRun(
   organizationId: string,
   status: string,
-  claimedBy: string | null
+  claimedBy: string | null,
+  runType = 'automation'
 ): Promise<number> {
   const sql = getTestDb();
   const rows = (await sql`
@@ -66,7 +67,7 @@ async function insertRun(
       (organization_id, run_type, status, claimed_by, claimed_at,
        last_heartbeat_at, created_at)
     VALUES
-      (${organizationId}, 'automation', ${status}, ${claimedBy}, NOW(),
+      (${organizationId}, ${runType}, ${status}, ${claimedBy}, NOW(),
        NULL, NOW())
     RETURNING id
   `) as Array<{ id: number }>;
@@ -119,13 +120,12 @@ describe('heartbeat lease guard', () => {
   // The gateway cannot address a fleet worker that already holds a run, so the
   // heartbeat's response is its only way to tell a turn in flight to stop. A
   // cancelled run fails the lease fence exactly like a lost lease does (the
-  // fence requires status='running'), and the worker has to tell them apart:
-  // on a cancel it still owns the run and must finish through its normal
-  // completion path so the client still gets an answer; on a lost lease
-  // another worker owns the run and this one must not touch it.
-  it('tells the run\'s own worker to stop when a human cancelled it', async () => {
+  // fence requires status='running'), and the agent-turn arm has to tell them
+  // apart: on a cancel it still owns the run and stops the model; on a lost
+  // lease another worker owns the run and this one must not touch it.
+  it('tells an agent turn\'s own worker to stop when a human cancelled it', async () => {
     const org = await createTestOrganization();
-    const runId = await insertRun(org.id, 'cancelled', CLAIMANT);
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT, 'agent_turn');
 
     const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
     await heartbeat(ctx);
@@ -139,9 +139,23 @@ describe('heartbeat lease guard', () => {
     expect(run.last_heartbeat_at).toBeNull();
   });
 
+  // Every other lane learns about a cancel the way it always has: a non-2xx.
+  // The automation daemon aborts its CLI on a 409 and the Chrome heartbeat
+  // stops its alarm on a 4xx; a 200 here would leave both running.
+  it('keeps answering 409 to a cancelled run on every other lane', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT, 'automation');
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+    await heartbeat(ctx);
+
+    expect(result().status).toBe(409);
+    expect((await readRun(runId)).last_heartbeat_at).toBeNull();
+  });
+
   it('does NOT report cancellation to a worker that no longer owns the run', async () => {
     const org = await createTestOrganization();
-    const runId = await insertRun(org.id, 'cancelled', CLAIMANT);
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT, 'agent_turn');
 
     const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: OTHER });
     await heartbeat(ctx);

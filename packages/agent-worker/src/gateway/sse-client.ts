@@ -8,12 +8,13 @@ import {
   createLogger,
   extractTraceId,
   flushTracing,
+  isExplicitCancelMessage,
+  isSteerableHumanMessage,
   type MessagePayload,
   type QueuedMessage,
   SpanStatusCode,
 } from "@lobu/core";
 import { z } from "zod";
-import { isExplicitCancelMessage, isSteerableHumanMessage } from "@lobu/core";
 import type { WorkerConfig, WorkerExecutor } from "../core/types";
 import { invalidateSessionContextCache } from "../runtime/session-context";
 import { LobuAgentWorker } from "../runtime/worker";
@@ -1171,5 +1172,3 @@ export class GatewayClient {
     };
   }
 }
-
-export { isExplicitCancelMessage, isSteerableHumanMessage };

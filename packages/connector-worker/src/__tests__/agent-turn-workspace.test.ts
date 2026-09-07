@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { createWorkspaceTools, WORKSPACE_ROOT } from "../agent-turn/workspace.js";
+import { createWorkspace, WORKSPACE_ROOT } from "../agent-turn/workspace.js";
 
 function toolMap(tools: AgentTool[]): Record<string, AgentTool> {
   return Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -17,19 +17,19 @@ async function run(tool: AgentTool, args: Record<string, unknown>): Promise<stri
   return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
-describe("createWorkspaceTools", () => {
+describe("createWorkspace tools", () => {
   test("returns only the named tools, once each, in pi's shapes", () => {
-    const tools = createWorkspaceTools(["read", "bash", "read", "find"]);
+    const tools = createWorkspace(["read", "bash", "read", "find"]).tools;
     expect(tools.map((t) => t.name)).toEqual(["read", "bash", "find"]);
     for (const tool of tools) {
       expect(tool.label).toBe(tool.name);
       expect((tool.parameters as { type: string }).type).toBe("object");
     }
-    expect(createWorkspaceTools([])).toEqual([]);
+    expect(createWorkspace([]).tools).toEqual([]);
   });
 
   test("bash, write, read, ls and find share one filesystem rooted at the workspace", async () => {
-    const t = toolMap(createWorkspaceTools(["bash", "read", "write", "ls", "find"]));
+    const t = toolMap(createWorkspace(["bash", "read", "write", "ls", "find"]).tools);
     expect(await run(t.bash, { command: "pwd" })).toBe(`${WORKSPACE_ROOT}\n`);
     expect(await run(t.write, { file_path: "src/a.txt", content: "hello\nworld\n" })).toBe(
       "Successfully wrote 12 bytes to src/a.txt"
@@ -47,7 +47,7 @@ describe("createWorkspaceTools", () => {
   });
 
   test("reports command failure, output truncation and the missing network the way the model expects", async () => {
-    const t = toolMap(createWorkspaceTools(["bash"]));
+    const t = toolMap(createWorkspace(["bash"]).tools);
     expect(await run(t.bash, { command: "echo oops >&2; exit 3" })).toBe("oops\n\n\nCommand exited with code 3");
     expect(await run(t.bash, { command: "true" })).toBe("(no output)");
     // 3000 numbers plus the trailing newline are 3001 lines; the last 2000 stay.
@@ -62,7 +62,7 @@ describe("createWorkspaceTools", () => {
 
   test("enforces the bash policy and the package-install block before running anything", async () => {
     const t = toolMap(
-      createWorkspaceTools(["bash", "ls"], { allowAll: false, allowPrefixes: ["echo ", "ls"], denyPrefixes: ["rm "] })
+      createWorkspace(["bash", "ls"], { allowAll: false, allowPrefixes: ["echo ", "ls"], denyPrefixes: ["rm "] }).tools
     );
     expect(await run(t.bash, { command: "echo ok" })).toBe("ok\n");
     await expect(run(t.bash, { command: "rm -rf /" })).rejects.toThrow("Bash command denied by policy");
@@ -70,12 +70,12 @@ describe("createWorkspaceTools", () => {
     await expect(run(t.bash, { command: "echo hi && pip install requests" })).rejects.toThrow(
       "not allowed by policy"
     );
-    const open = toolMap(createWorkspaceTools(["bash"]));
+    const open = toolMap(createWorkspace(["bash"]).tools);
     await expect(run(open.bash, { command: "pip install requests" })).rejects.toThrow("DIRECT PACKAGE INSTALL BLOCKED");
   });
 
   test("refuses what pi's tools refuse: missing paths, directories as files, binary reads, bad offsets", async () => {
-    const t = toolMap(createWorkspaceTools(["read", "write", "ls", "bash"]));
+    const t = toolMap(createWorkspace(["read", "write", "ls", "bash"]).tools);
     await expect(run(t.read, { file_path: "nope.txt" })).rejects.toThrow("File not found");
     await expect(run(t.read, {})).rejects.toThrow("Missing required parameter: file_path");
     await run(t.write, { file_path: "d/x.txt", content: "a\nb" });
@@ -87,7 +87,7 @@ describe("createWorkspaceTools", () => {
   });
 
   test("keeps every file-tool path inside the workspace root", async () => {
-    const t = toolMap(createWorkspaceTools(["read", "write", "ls", "find"]));
+    const t = toolMap(createWorkspace(["read", "write", "ls", "find"]).tools);
     // just-bash's in-memory tree has /etc, /usr and the rest in it, and
     // `resolvePath` normalizes right past the root, so both spellings of an
     // escape have to be refused.
@@ -110,7 +110,7 @@ describe("createWorkspaceTools", () => {
     // Without the clamp, limit=0 collected no rows and `ls` answered
     // "(empty directory)" for a populated directory — a claim about the
     // workspace, not about the argument. `find` said "No files found".
-    const t = toolMap(createWorkspaceTools(["write", "ls", "find"]));
+    const t = toolMap(createWorkspace(["write", "ls", "find"]).tools);
     await run(t.write, { file_path: "a.txt", content: "x" });
     await run(t.write, { file_path: "b.txt", content: "x" });
     expect(await run(t.ls, { limit: 0 })).toBe("a.txt\nb.txt");
@@ -119,11 +119,11 @@ describe("createWorkspaceTools", () => {
     expect(await run(t.ls, { limit: 1 })).toContain("1 entries limit reached");
   });
 
-  test("each call to createWorkspaceTools starts from an empty filesystem", async () => {
-    const first = toolMap(createWorkspaceTools(["write", "ls"]));
+  test("each createWorkspace starts from an empty filesystem", async () => {
+    const first = toolMap(createWorkspace(["write", "ls"]).tools);
     await run(first.write, { file_path: "kept.txt", content: "x" });
     expect(await run(first.ls, {})).toBe("kept.txt");
-    const second = toolMap(createWorkspaceTools(["ls"]));
+    const second = toolMap(createWorkspace(["ls"]).tools);
     expect(await run(second.ls, {})).toBe("(empty directory)");
   });
 });

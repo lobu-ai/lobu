@@ -608,6 +608,11 @@ export class IsolateExecutor implements SyncExecutor {
       vault.clear();
       host?.terminate(state);
     };
+    // A caller's abort ends the run the way an uncaught guest error does:
+    // the guest is torn down and the pending result rejects with this state.
+    const onCancel = () => terminate({ name: 'RunCancelled', message: 'the run was cancelled' });
+    if (hooks?.signal?.aborted) onCancel();
+    else hooks?.signal?.addEventListener('abort', onCancel, { once: true });
 
     const queueHook = (task: () => Promise<void> | void): Promise<void> => {
       const next = processingChain.then(async () => {
@@ -1076,6 +1081,7 @@ export class IsolateExecutor implements SyncExecutor {
       }
       return outcome.result;
     } finally {
+      hooks?.signal?.removeEventListener('abort', onCancel);
       runAbort.abort();
       for (const timer of pendingSleeps) clearTimeout(timer);
       pendingSleeps.clear();

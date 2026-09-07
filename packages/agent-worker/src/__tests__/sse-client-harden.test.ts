@@ -17,11 +17,8 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { consumePendingConfigNotifications } from "../gateway/pending-config-notifications";
-import {
-  GatewayClient,
-  isExplicitCancelMessage,
-  isSteerableHumanMessage,
-} from "../gateway/sse-client";
+import { isExplicitCancelMessage, isSteerableHumanMessage } from "@lobu/core";
+import { GatewayClient } from "../gateway/sse-client";
 
 // ---------------------------------------------------------------------------
 // Helpers
