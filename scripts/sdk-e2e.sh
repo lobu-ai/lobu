@@ -50,7 +50,9 @@ if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ 
 fi
 
 MOCK_PID=""
+RUN_PID=""
 cleanup() {
+  [ -z "$RUN_PID" ] || lobu_terminate_child "$RUN_PID"
   [ -n "$MOCK_PID" ] && kill -9 "$MOCK_PID" 2>/dev/null || true
   lobu_kill_listening_port "$GW_PORT"
   lobu_kill_listening_port "$MOCK_PORT"
@@ -110,6 +112,10 @@ const digestSkill = defineSkill({ name: "digest", content: "summarize" });
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
   skills: [digestSkill],
+  providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
+});
+const isolateAgent = defineAgent({
+  id: "isolate-smoke", name: "Isolate smoke", dir: "./agents/isolate-smoke",
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // `company` exercises the declarative rendering config: event_kinds (with a
@@ -177,7 +183,7 @@ const publisher = defineAutomation({
 
 // prune:true so the gate exercises the destructive path on every run (this is
 // what catches the system-type $member halt class of bug).
-export default defineConfig({ prune: true, agents: [agent], entities: [company, contact], relationships: [worksAt], connectors: [connectorFromFile<typeof PulseConnector>("./connectors/pulse.connector.ts")], connections: [pulseConn], automations: [digest, publisher] });
+export default defineConfig({ prune: true, agents: [agent, isolateAgent], entities: [company, contact], relationships: [worksAt], connectors: [connectorFromFile<typeof PulseConnector>("./connectors/pulse.connector.ts")], connections: [pulseConn], automations: [digest, publisher] });
 TS
 
 # Local connector: deterministic, zero-dep, no network. `sync()` returns one
@@ -271,6 +277,7 @@ TS
 {
   printf '\n'
   echo "MOCK_API_KEY=mock-key-e2e"
+  echo "LOBU_ISOLATE_TURN_SHADOW_AGENTS=isolate-smoke"
   echo "WORKER_ALLOWED_DOMAINS=127.0.0.1,localhost"
   # The orchestrator wraps Linux workers in `systemd-run --user --scope` for
   # cgroup/network limits; CI runners have no user systemd session, so that
@@ -288,7 +295,13 @@ TS
   [ -n "${DATABASE_URL:-}" ] && echo "DATABASE_URL=$DATABASE_URL"
 } >> "$PROJ/.env"
 
-export LOBU_PROVIDER_REGISTRY_PATH="$HARNESS/providers.json"
+export LOBU_PROVIDER_REGISTRY_PATH="$RUN_DIR/providers.json"
+node - "$HARNESS/providers.json" "$LOBU_PROVIDER_REGISTRY_PATH" "$MOCK_PORT" <<'JS'
+const fs = require('node:fs');
+const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+config.providers[0].providers[0].upstreamBaseUrl = `http://127.0.0.1:${process.argv[4]}/v1`;
+fs.writeFileSync(process.argv[3], JSON.stringify(config));
+JS
 
 # 2c) Static CLI checks (no server needed): the typed-config validator and the
 # doctor health check. doctor must NOT false-fail the DB check on the scaffold's
@@ -313,7 +326,8 @@ fi
 echo "✓ lobu doctor reports a healthy DB (no false connect failure on embedded file://)"
 
 # 3) Boot lobu run — it auto-applies the project (the apply + prune E2E).
-( cd "$PROJ" && $LOBU run --port "$GW_PORT" > "$RUN_LOG" 2>&1 ) &
+( cd "$PROJ" && exec $LOBU run --port "$GW_PORT" > "$RUN_LOG" 2>&1 ) &
+RUN_PID=$!
 for _ in $(seq 1 80); do
   grep -qiE "Apply complete|auto-apply skipped|Apply halted" "$RUN_LOG" 2>/dev/null && break
   sleep 1
@@ -377,11 +391,15 @@ cat > "$CLIENT_DIR/package.json" <<JSON
 { "name": "sdk-e2e-consumer", "private": true, "type": "module", "dependencies": { "@lobu/client": "file:$CLIENT_TGZ" } }
 JSON
 cp "$HARNESS/client-consumer.mjs" "$CLIENT_DIR/consumer.mjs"
+cp "$HARNESS/isolate-conversation.mjs" "$CLIENT_DIR/isolate-conversation.mjs"
 ( cd "$CLIENT_DIR" && bun install >/dev/null 2>&1 ) \
   || fail "could not install the @lobu/client tarball into the consumer project"
 
 DEVTOKEN="$(curl -fsS -X POST "$GW/api/local-init" -H 'X-Lobu-Client: cli' | jget device_token)"
 [ -n "$DEVTOKEN" ] || fail "could not obtain an Agent-API token (device_token) from /api/local-init"
+
+( cd "$CLIENT_DIR" && node isolate-conversation.mjs "$GW" ) \
+  || fail "public API conversation did not complete through the isolate"
 
 CLIENT_OUT="$RUN_DIR/client-consumer.out"
 ( cd "$CLIENT_DIR" && LOBU_BASE_URL="$GW/lobu" LOBU_TOKEN="$DEVTOKEN" LOBU_AGENT_ID="echo" \

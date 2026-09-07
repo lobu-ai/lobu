@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createServer } from "node:http";
 
@@ -16,6 +17,48 @@ const REQLOG = process.env.MOCK_REQLOG || "";
 const MODE = process.env.MOCK_MODE || "";
 const QUOTA_BODY =
   "429 Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-07-10 04:32:47";
+
+function isolateToolReply(messages) {
+  const marker = JSON.stringify(
+    messages.filter((message) => message.role === "user")
+  ).match(/ISOLATE_SMOKE_[a-f0-9]{32}/)?.[0];
+  if (!marker) return null;
+  const results = messages.filter((message) => message.role === "tool");
+  let call;
+  if (results.length === 0) {
+    call = {
+      name: "write",
+      arguments: JSON.stringify({ file_path: "smoke.txt", content: marker }),
+    };
+  } else if (results.length === 1) {
+    assert.match(JSON.stringify(results[0].content), /wrote/i);
+    call = {
+      name: "read",
+      arguments: JSON.stringify({ file_path: "smoke.txt" }),
+    };
+  } else {
+    assert.equal(results.length, 2);
+    assert.ok(
+      JSON.stringify(results[1].content).includes(marker),
+      "model did not receive the written file bytes"
+    );
+  }
+  return call
+    ? {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: `smoke_${results.length}`,
+              type: "function",
+              function: call,
+            },
+          ],
+        },
+        finish: "tool_calls",
+      }
+    : { delta: { content: marker }, finish: "stop" };
+}
 const server = createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
@@ -57,6 +100,14 @@ const server = createServer((req, res) => {
         // non-JSON body → default to non-streaming
       }
       if (stream) {
+        let scripted;
+        try {
+          scripted = isolateToolReply(JSON.parse(body).messages ?? []);
+        } catch (error) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: String(error) } }));
+          return;
+        }
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -65,8 +116,8 @@ const server = createServer((req, res) => {
         const chunk = (delta, finish) =>
           `data: ${JSON.stringify({ id, object: "chat.completion.chunk", model: "mock-model", choices: [{ index: 0, delta, finish_reason: finish ?? null }] })}\n\n`;
         res.write(chunk({ role: "assistant" }));
-        res.write(chunk({ content: REPLY }));
-        res.write(chunk({}, "stop"));
+        res.write(chunk(scripted?.delta ?? { content: REPLY }));
+        res.write(chunk({}, scripted?.finish ?? "stop"));
         res.write("data: [DONE]\n\n");
         res.end();
       } else {

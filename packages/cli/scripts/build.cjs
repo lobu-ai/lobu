@@ -80,7 +80,11 @@ copyDirIfExists("../owletto/dist", "dist/owletto/dist");
 // sibling server-main.bundle.mjs (the real server graph) at runtime — so both
 // must ship together. Missing server-main.bundle.mjs
 // would make `lobu run` fail with a module-not-found after the gate passes.
-for (const bundleName of ["server.bundle.mjs", "server-main.bundle.mjs"]) {
+for (const bundleName of [
+  "server.bundle.mjs",
+  "server-main.bundle.mjs",
+  "guest.bundle.js",
+]) {
   const bundleSrc = `../server/dist/${bundleName}`;
   const bundleDest = `dist/${bundleName}`;
   if (fs.existsSync(bundleSrc)) {
@@ -88,7 +92,7 @@ for (const bundleName of ["server.bundle.mjs", "server-main.bundle.mjs"]) {
   } else {
     console.warn(
       `[cli build] server bundle missing at ${bundleSrc}; ` +
-        "`lobu run` requires both server bundles. Run " +
+        "`lobu run` requires the server and agent guest bundles. Run " +
         "`bun run --filter '@lobu/server' build:server` to bundle it."
     );
   }
