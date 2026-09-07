@@ -154,6 +154,7 @@ export async function executeAgentTurnRun(
       // either. No ack at all (an older gateway, or a publish that threw)
       // keeps the text queued for the next beat.
       if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
+      if (ack?.continue === false) stopTurn(ack.stop_reason);
     } catch (err) {
       // The batch stays in flight and is re-sent under the same sequence. The
       // traces are not: they are a view of the turn, not its answer, and
@@ -205,8 +206,22 @@ export async function executeAgentTurnRun(
     if (sending || inFlight || pending || toolEvents.length > 0) return;
     void client
       .heartbeat(runId, { items_collected_so_far: deltaSequence })
+      .then((ack) => {
+        if (ack?.continue === false) stopTurn(ack.stop_reason);
+      })
       .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
   }, cfg.heartbeatIntervalMs);
+  // The heartbeat's answer is the gateway's only way to reach a turn in
+  // flight. `continue: false` means the human cancelled: the guest is torn
+  // down through the executor's abort hook so the model stops mid-turn, and
+  // the run — already `cancelled` on the server — is left as the server wrote
+  // it, since a completion would be fenced out anyway.
+  const cancel = new AbortController();
+  const stopTurn = (reason: string | undefined) => {
+    if (cancel.signal.aborted) return;
+    log.info(`[agent-turn] run ${runId} stopping: ${reason ?? 'the gateway said stop'}`);
+    cancel.abort();
+  };
   try {
     const guestCode = await agentGuestBundle();
     // Same executor seam every other lane uses (`resolveJobExecution`): an
@@ -322,6 +337,7 @@ export async function executeAgentTurnRun(
         env,
       },
       {
+        signal: cancel.signal,
         onTurnEvent: (event: AgentTurnEvent) => {
           if (event.type === 'text_delta') {
             // Queued, not accumulated: the next batch carries what the server

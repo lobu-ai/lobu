@@ -160,6 +160,13 @@ export type ExecutorResult =
     };
 
 export interface ExecutionHooks {
+  /**
+   * Stop the run from outside: the guest is terminated and `execute` rejects
+   * with the abort as its error. An agent turn arms this when the gateway's
+   * heartbeat answers `continue: false` — the human cancelled — so the model
+   * stops mid-turn instead of spending the rest of the wall clock.
+   */
+  signal?: AbortSignal;
   /** Agent turns: the guest emitted a token or ended a message, mid-stream. */
   onTurnEvent?: (event: AgentTurnEvent) => Promise<void> | void;
   /** Sync runs: connector streamed a chunk of events (and we should persist them). */

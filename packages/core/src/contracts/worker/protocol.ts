@@ -1030,10 +1030,6 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  * so the terminal row and the client's reply are still written by the lane
  * that owns them.
  *
- * `steer` carries a message that arrived while this turn was running and is
- * meant for the model now rather than for the next turn. Absent on every beat
- * that has nothing to inject, which is nearly all of them.
- *
  * `turn_delta_ack` is the honest answer to "did that batch land". The worker
  * does not retire the text it sent until the sequence comes back acknowledged,
  * so a publish that failed, was fenced out by a lost lease, or never reached
@@ -1049,12 +1045,6 @@ export const HeartbeatResponseSchema = Type.Object({
   /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
   stop_reason: Type.Optional(
     Type.Union([Type.Literal("cancelled"), Type.Literal("lease_lost")])
-  ),
-  steer: Type.Optional(
-    Type.Object({
-      message_id: Type.String(),
-      text: Type.String(),
-    })
   ),
   turn_delta_ack: Type.Optional(
     Type.Object({

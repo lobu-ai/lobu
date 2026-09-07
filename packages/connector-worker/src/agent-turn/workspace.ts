@@ -422,11 +422,3 @@ export function createWorkspace(names: readonly AgentTurnBuiltinTool[], bashPoli
     tools: names.filter((name, index) => name in tools && names.indexOf(name) === index).map((name) => tools[name]),
   };
 }
-
-/**
- * The turn's workspace tools alone, for a caller that has no use for the
- * filesystem behind them.
- */
-export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bashPolicy?: AgentTurnBashPolicy): AgentTool[] {
-  return createWorkspace(names, bashPolicy).tools;
-}

@@ -492,6 +492,69 @@ describe("executeAgentTurnRun", () => {
   });
 });
 
+describe("executeAgentTurnRun cancellation", () => {
+  /**
+   * The gateway's heartbeat answer is its only way to reach a turn in flight.
+   * `continue: false` means a human cancelled: the arm aborts the executor's
+   * signal so the guest is torn down and the model stops mid-turn, instead of
+   * spending the rest of the wall clock on an answer nobody will read.
+   */
+  test("stops the guest when the heartbeat says the human cancelled", async () => {
+    const reported: Reported = { calls: [] };
+    const client = {
+      ...fakeClient(reported),
+      heartbeat: async () => ({ continue: false, stop_reason: "cancelled" as const }),
+    };
+    let aborted = false;
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        // The real executor terminates the guest on this signal and rejects.
+        await new Promise<void>((resolve, reject) => {
+          const signal = hooks?.signal;
+          if (!signal) return reject(new Error("the arm passed no abort signal"));
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("the run was cancelled"));
+          });
+          setTimeout(resolve, 2_000);
+        });
+        return { mode: "agent_turn", turn: { text: "never", stopReason: "stop", usage: null, messages: [] } };
+      },
+    };
+
+    const started = Date.now();
+    const outcome = await executeAgentTurnRun(client as never, turnJob(), {}, {
+      ...cfgWith(executor),
+      heartbeatIntervalMs: 5,
+    });
+    expect(aborted).toBe(true);
+    // Well inside the executor's own 2s: the cancel, not the timer, ended it.
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(outcome.itemsCollected).toBe(0);
+    // The arm reports the failure it saw; the server has already written the
+    // run as cancelled, so this completion is fenced out there.
+    expect(reported.calls[0]?.status).toBe("failed");
+  });
+
+  test("leaves a healthy turn alone", async () => {
+    const reported: Reported = { calls: [] };
+    let sawSignal: AbortSignal | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        sawSignal = hooks?.signal;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { mode: "agent_turn", turn: { text: "done", stopReason: "stop", usage: null, messages: [] } };
+      },
+    };
+    await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, {
+      ...cfgWith(executor),
+      heartbeatIntervalMs: 5,
+    });
+    expect(sawSignal?.aborted).toBe(false);
+    expect(reported.calls[0]?.status).toBe("completed");
+  });
+});
+
 describe("executeAgentTurnRun streaming", () => {
   /**
    * The guest streams; the arm has to get that text out of the worker while
