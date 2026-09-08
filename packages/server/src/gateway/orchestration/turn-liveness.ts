@@ -702,15 +702,44 @@ export async function failTurnIfPending(
 }
 
 /**
- * NOTE for the isolate lane: do NOT call this (or a variant of its DELETE) from
- * `insertAgentTurnResponse`. `hasLiveTurnForMessage` reads the turn marker as
- * "this turn is still live" and gates worker TOKEN REFRESH on it, so retiring
- * the marker at terminal delivery cuts off a guest that is still streaming and
- * the reply arrives EMPTY. A full `scripts/sdk-e2e.sh` catches that; the unit
- * suites do not. The isolate lane lets `sweepExpiredTurns` retire the marker on
- * its deadline, with the heartbeat pushing that deadline forward
- * (`extendHeartbeatedTurnMarker`) while the turn is alive.
+ * Retire the turn-liveness markers for `messageIds` inside the caller's
+ * transaction, and complete their durable inputs.
+ *
+ * For the isolate lane's TERMINAL delivery only. The marker doubles as the
+ * turn's liveness signal for worker token refresh (`hasLiveTurnForMessage`
+ * gates `/worker/token/refresh` on it), so it must NOT be retired while a
+ * guest is still streaming — doing that denies the refresh mid-turn and the
+ * client's reply arrives empty. Both callers of `insertAgentTurnResponse`
+ * transition the run to a terminal status in the SAME transaction first, so by
+ * the time this runs there is no guest left to refresh.
+ *
+ * Unlike `commitTerminalReply` this does not gate delivery on winning the
+ * race: the caller already committed its reply in this transaction, so zero
+ * deleted just means a sweep or cancel terminalized the turn first.
  */
+export async function dischargeTurnMarkers(
+  tx: DbClient,
+  deploymentName: string,
+  messageIds: readonly string[],
+  organizationId: string | null
+): Promise<number> {
+  let deleted = 0;
+  for (const messageId of messageIds) {
+    const rows = await tx<{ id: string }>`
+      DELETE FROM public.runs
+      WHERE idempotency_key = ${turnMarkerKey(deploymentName, messageId)}
+        AND status = 'pending'
+        AND queue_name = ${TURN_TIMEOUT_QUEUE}
+      RETURNING id
+    `;
+    deleted += rows.length;
+  }
+  await completeAgentRunInputs(tx, organizationId, deploymentName, [
+    ...messageIds,
+  ]);
+  return deleted;
+}
+
 export async function commitTerminalReply(
   deploymentName: string,
   messageIds: string[],

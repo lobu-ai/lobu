@@ -1,19 +1,25 @@
 /**
- * A heartbeating isolate turn must keep its turn-liveness marker alive.
+ * The turn-liveness marker's two obligations on the isolate lane.
  *
- * `MessageConsumer` arms a marker per dispatched turn with a fixed
- * `TURN_DEFAULT_DEADLINE_MS` (60s) deadline. The isolate lane's heartbeat
- * refreshes `runs.last_heartbeat_at`, which the RUN reaper reads — but the
- * marker carries its OWN `run_at`, and the subprocess lane was the only thing
- * that pushed it forward (`extendTurnDeadlines` from `/worker/response`, a
- * route the isolate lane never calls). Without an extension every turn longer
- * than 60s collected a spurious `WORKER_UNRESPONSIVE` while it was still
- * working.
+ * `MessageConsumer` arms one marker per dispatched turn — the client's only
+ * promise of a terminal event — with a fixed `TURN_DEFAULT_DEADLINE_MS` (60s)
+ * deadline, and `sweepExpiredTurns` turns a lapsed marker into a terminal
+ * WORKER_UNRESPONSIVE. Two things therefore have to happen, and the
+ * subprocess lane did both from `/worker/response`, a route this lane never
+ * calls:
  *
- * The marker is deliberately NOT discharged at terminal delivery on this lane:
- * `hasLiveTurnForMessage` gates worker token refresh on it, so retiring it
- * inside `insertAgentTurnResponse` cuts off a turn that is still streaming.
- * See the note on `dischargeTurnMarkers`.
+ *  1. WHILE the turn runs, each heartbeat pushes the deadline forward.
+ *     Without it any turn over 60s was failed mid-flight while working.
+ *  2. AT terminal delivery, the marker is retired in the reply's own
+ *     transaction. Without it heartbeats stop, the deadline lapses, and the
+ *     sweep publishes a second, contradictory error to a user who already
+ *     saw the reply.
+ *
+ * Retiring it EARLIER than terminal is a bug in the other direction:
+ * `hasLiveTurnForMessage` gates worker token refresh on this marker, so a
+ * discharge while the guest is still streaming denies its next refresh and
+ * the reply arrives empty. Both `insertAgentTurnResponse` callers set the run
+ * terminal in the same transaction first, which is what makes it safe there.
  */
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { AgentErrorCode } from "@lobu/core";
@@ -23,7 +29,10 @@ import {
   armTurnTimeout,
   sweepExpiredTurns,
 } from "../orchestration/turn-liveness.js";
-import { extendHeartbeatedTurnMarker } from "../../runs/agent-turn-inputs.js";
+import {
+  extendHeartbeatedTurnMarker,
+  insertAgentTurnResponse,
+} from "../../runs/agent-turn-inputs.js";
 import { generateDeploymentName } from "../orchestration/deployment-identity.js";
 import {
   ensureDbForGatewayTests,
@@ -131,5 +140,62 @@ describe("isolate-lane heartbeat vs the turn-liveness marker", () => {
 
     expect(await sweepExpiredTurns(AgentErrorCode.WORKER_UNRESPONSIVE)).toBe(0);
     expect(await armedMarkers()).toBe(1);
+  });
+
+  test("a REPLIED turn emits no second WORKER_UNRESPONSIVE once heartbeats stop", async () => {
+    // The turn is over, so heartbeats stop and nothing renews the marker. If
+    // terminal delivery does not retire it, its deadline lapses and the sweep
+    // publishes a SECOND, contradictory terminal error to a user who already
+    // saw the reply.
+    const conversationId = "conv-replied";
+    const messageId = "m-replied";
+    await armTurnTimeout(queue, {
+      messageId,
+      channelId: CHANNEL,
+      conversationId,
+      userId: USER,
+      platform: "api",
+      deploymentName: generateDeploymentName(identity(conversationId)),
+      organizationId: ORG,
+    });
+
+    await insertAgentTurnResponse(
+      getDb() as never,
+      {
+        id: 1,
+        organization_id: ORG,
+        action_input: {
+          turn: {
+            agent_id: AGENT,
+            conversation_id: conversationId,
+            message_id: messageId,
+          },
+          reply: {
+            message_id: messageId,
+            channel_id: CHANNEL,
+            user_id: USER,
+            team_id: "api",
+            platform: "api",
+            platform_metadata: {},
+          },
+        },
+      } as never,
+      { finalText: "the reply the user already saw" },
+    );
+
+    // Retired at delivery, not merely "not yet due".
+    expect(await armedMarkers()).toBe(0);
+
+    await getDb()`
+      UPDATE public.runs SET run_at = now() - interval '1 minute'
+      WHERE status = 'pending' AND run_type = 'internal'
+        AND queue_name = 'internal:turn_timeout'`;
+    expect(await sweepExpiredTurns(AgentErrorCode.WORKER_UNRESPONSIVE)).toBe(0);
+
+    const errors = await getDb()<{ n: number }>`
+      SELECT count(*)::int AS n FROM public.runs
+      WHERE run_type = 'chat_message'
+        AND action_input::text LIKE ${"%" + AgentErrorCode.WORKER_UNRESPONSIVE + "%"}`;
+    expect(errors[0]!.n).toBe(0);
   });
 });

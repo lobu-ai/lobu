@@ -4,7 +4,7 @@ import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
 import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
-import { extendTurnDeadlines, insertThreadResponseRow } from '../gateway/orchestration/turn-liveness';
+import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow } from '../gateway/orchestration/turn-liveness';
 import { generateDeploymentName } from '../gateway/orchestration/deployment-identity';
 
 export interface NativeTurnRun {
@@ -204,5 +204,18 @@ export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun,
     organizationId: run.organization_id, platformMetadata: reply.platform_metadata,
     processedMessageIds: [reply.message_id], ...result, timestamp: Date.now(),
   }, run.organization_id);
+  // Retire the turn-liveness marker(s) in the SAME transaction as the reply.
+  // Both callers set the run terminal before reaching here, so the turn is
+  // over and nothing is left to refresh a token. Skipping this leaves a
+  // pending marker for an answered turn: heartbeats have stopped, so its
+  // deadline lapses and `sweepExpiredTurns` publishes a SECOND, contradictory
+  // WORKER_UNRESPONSIVE to a user who already saw the reply.
+  const deployment = turnMarkerDeployment(run);
+  if (deployment) {
+    const messageIds = result.processedMessageIds?.length
+      ? result.processedMessageIds
+      : [reply.message_id];
+    await dischargeTurnMarkers(sql, deployment, messageIds, run.organization_id);
+  }
   return true;
 }
