@@ -2,6 +2,7 @@ import { Agent, type AgentTool } from '@mariozechner/pi-agent-core';
 import { registerApiProvider, streamSimple, type Api, type Model } from '@mariozechner/pi-ai';
 import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
 import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
+import { streamOpenAIResponses } from '@mariozechner/pi-ai/openai-responses';
 import { AgentSession, SessionManager, SettingsManager, convertToLlm, CURRENT_SESSION_VERSION, type ModelRegistry } from '@mariozechner/pi-coding-agent';
 import { createLobuResourceLoader } from '@lobu/plugin-toolkit/pi-resources';
 import { SESSION_PATH, withSessionSnapshot } from './pi-session-fs.js';
@@ -38,8 +39,13 @@ export function createNativeSession(
     contextWindow: input.compaction?.contextWindow ?? 200_000,
     maxTokens: input.provider.maxTokens ?? 8192,
   };
+  // One registration per wire protocol. `openai-responses` is NOT a fallback
+  // for completions: official OpenAI is promoted to Responses so reasoning
+  // models can use tools, and the two speak different request shapes.
   if (input.provider.api === 'anthropic-messages') {
     registerApiProvider({ api: 'anthropic-messages', stream: streamAnthropic, streamSimple: streamAnthropic });
+  } else if (input.provider.api === 'openai-responses') {
+    registerApiProvider({ api: 'openai-responses', stream: streamOpenAIResponses, streamSimple: streamOpenAIResponses });
   } else {
     registerApiProvider({ api: 'openai-completions', stream: streamOpenAICompletions, streamSimple: streamOpenAICompletions });
   }

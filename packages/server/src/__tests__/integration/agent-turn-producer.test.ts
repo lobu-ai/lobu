@@ -2198,6 +2198,29 @@ describe('agent turn producer', () => {
     expect(AGENT_ERRORS[AgentErrorCode.NO_MODEL_CONFIGURED].message).toBeTruthy();
   });
 
+  it('routes every fetch-native protocol, including OpenAI Responses', async () => {
+    // `provider-catalog` promotes the OFFICIAL OpenAI provider from the
+    // generic `openai` (Chat Completions) to `openai-responses`, so current
+    // reasoning models can use tools. `openai-responses` was missing from
+    // LANE_APIS, so that promotion made every official-OpenAI agent
+    // unroutable — the producer returned NO_MODEL_CONFIGURED and the agent
+    // could not run at all. pi-ai implements Responses on the same `openai`
+    // package as completions, so it is isolate-compatible for the same
+    // reason; the omission was the bug, not the promotion.
+    const org = await createTestOrganization();
+    for (const sdkCompat of ['anthropic', 'openai', 'openai-responses'] as const) {
+      expect(
+        await enqueueMessage(messageFor(org.id), {
+          agentSettings: settingsStore,
+          catalog: catalogFor(claudeModule({ sdkCompat })),
+          gatewayUrl: GATEWAY_URL,
+        })
+      ).toBeUndefined();
+    }
+    // One admitted run per protocol — none silently dropped.
+    expect(await agentTurnRuns()).toHaveLength(3);
+  });
+
   it("delivers the named misconfiguration to the client, not a deadline timeout", async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();

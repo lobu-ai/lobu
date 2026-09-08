@@ -66,9 +66,16 @@ const logger = createLogger("agent-turn-producer");
 
 
 /**
- * pi-ai's two fetch-native adapters. Every other protocol in
+ * pi-ai's fetch-native adapters. Every other protocol in
  * `SDK_COMPAT_PROTOCOLS` reaches its upstream through a Node-bound SDK, which
  * cannot be bundled for the isolate — so those agents produce no turn.
+ *
+ * `openai-responses` belongs here for the same reason `openai-completions`
+ * does: pi-ai implements both on the `openai` package with no Node bindings.
+ * It is NOT interchangeable with completions — `provider-catalog.ts` promotes
+ * the official OpenAI provider to Responses so current reasoning models can
+ * use tools, so omitting it here left every official-OpenAI agent unable to
+ * run at all.
  *
  * Typed as the envelope's own `api` union so the set and the wire contract
  * cannot drift: adding an adapter here without widening the schema is a
@@ -78,6 +85,7 @@ type LaneApi = TurnEnvelope["provider"]["api"];
 const LANE_APIS = new Set<string>([
   "anthropic-messages",
   "openai-completions",
+  "openai-responses",
 ] satisfies LaneApi[]);
 
 const TURN_MESSAGE_CHARS = 32_000;

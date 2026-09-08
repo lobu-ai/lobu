@@ -423,6 +423,11 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       api: Type.Union([
         Type.Literal("anthropic-messages"),
         Type.Literal("openai-completions"),
+        // Official OpenAI is routed through Responses, not Chat Completions,
+        // so current reasoning models can use tools — see the promotion in
+        // `provider-catalog.ts`. pi-ai implements it on the same `openai` SDK
+        // as completions, so it is isolate-compatible for the same reason.
+        Type.Literal("openai-responses"),
       ]),
       provider: Type.String({ minLength: 1 }),
       model_id: Type.String({ minLength: 1 }),

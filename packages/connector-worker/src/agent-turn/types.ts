@@ -7,7 +7,7 @@
 /** Which provider the turn talks to, and how it authenticates. */
 export interface AgentTurnProvider {
   /** pi-ai's api id. Only the two fetch-native families run on this lane. */
-  api: 'anthropic-messages' | 'openai-completions';
+  api: 'anthropic-messages' | 'openai-completions' | 'openai-responses';
   /** Provider slug pi-ai reports on the model (`anthropic`, `openai`, ...). */
   provider: string;
   modelId: string;
