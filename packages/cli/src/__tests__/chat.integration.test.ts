@@ -24,11 +24,7 @@ function createSseResponse(
   events: Array<{ event: string; data: Record<string, unknown> }>
 ): Response {
   const encoder = new TextEncoder();
-  const payload = events
-    .map(
-      ({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-    )
-    .join("");
+  const payload = encodeSseEvents(events);
 
   return new Response(
     new ReadableStream({
@@ -42,6 +38,16 @@ function createSseResponse(
       headers: { "Content-Type": "text/event-stream" },
     }
   );
+}
+
+function encodeSseEvents(
+  events: Array<{ event: string; data: Record<string, unknown> }>
+): string {
+  return events
+    .map(
+      ({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+    )
+    .join("");
 }
 
 function captureTerminal(output: { stdout: string[]; stderr: string[] }): void {
@@ -209,6 +215,96 @@ describe("chatCommand example integration", () => {
     expect(stderrText).toContain('"event":"question"');
     expect(stderrText).toContain('"event":"suggestion"');
     expect(createInterfaceMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("ignores a previous turn's backlog on a resumed direct session", async () => {
+    process.env.LOBU_API_TOKEN = "test-token";
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let createBody: Record<string, unknown> | undefined;
+    let messageBody: Record<string, unknown> | undefined;
+    let sseController: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    captureTerminal({ stdout, stderr });
+
+    globalThis.fetch = mock(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+
+        if (url.endsWith("/api/v1/agents") && init?.method === "POST") {
+          createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return Response.json({
+            agentId: "session-1",
+            token: "session-token",
+          });
+        }
+
+        if (url.endsWith("/session-1/events") && !init?.method) {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                sseController = controller;
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    encodeSseEvents([
+                      {
+                        event: "output",
+                        data: {
+                          content: "Stale previous answer.\n",
+                          messageId: "previous-message",
+                        },
+                      },
+                      {
+                        event: "complete",
+                        data: { messageId: "previous-message" },
+                      },
+                    ])
+                  )
+                );
+              },
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (url.endsWith("/session-1/messages") && init?.method === "POST") {
+          messageBody = JSON.parse(String(init.body)) as Record<
+            string,
+            unknown
+          >;
+          const messageId = messageBody.messageId;
+          if (typeof messageId !== "string") {
+            throw new Error("Expected a client-generated messageId");
+          }
+          sseController?.enqueue(
+            new TextEncoder().encode(
+              encodeSseEvents([
+                {
+                  event: "output",
+                  data: { content: "Current answer.\n", messageId },
+                },
+                { event: "complete", data: { messageId } },
+              ])
+            )
+          );
+          sseController?.close();
+          return Response.json({ success: true });
+        }
+
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    ) as unknown as typeof fetch;
+
+    await chatCommand(exampleDir, "current request", {
+      gateway: "http://gateway.test",
+    });
+
+    expect(createBody).toEqual({ agentId: "vc-tracking" });
+    expect(messageBody?.content).toBe("current request");
+    expect(typeof messageBody?.messageId).toBe("string");
+    expect(stdout.join("")).toContain("Current answer.");
+    expect(stdout.join("")).not.toContain("Stale previous answer.");
   });
 
   test("prints structured file-uploaded events in platform mode", async () => {

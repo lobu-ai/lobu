@@ -272,6 +272,66 @@ describe("chat stream idle timeout", () => {
     expect(stderr.join("")).toContain("timed out");
     expect(process.exitCode).toBe(1);
   });
+  test("a leftover turn's output does not hold this turn open", async () => {
+    process.env.LOBU_API_TOKEN = "test-token";
+    process.env.LOBU_CHAT_IDLE_TIMEOUT_MS = "200";
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    captureTerminal({ stdout, stderr });
+
+    // The agent stream is per-agent, not per-turn: a run started by an
+    // earlier `lobu chat` can still be talking on it. Those events are
+    // filtered out of the render, so they must not count as our agent
+    // being alive either — otherwise this turn hangs on someone else's.
+    const timers: ReturnType<typeof setInterval>[] = [];
+    installFetch((signal) => {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            const beat = setInterval(() => {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    sse("output", {
+                      content: "previous turn still going",
+                      messageId: "a-different-turn",
+                    })
+                  )
+                );
+              } catch {
+                clearInterval(beat);
+              }
+            }, 20);
+            timers.push(beat);
+            signal?.addEventListener("abort", () => {
+              clearInterval(beat);
+              try {
+                controller.error(
+                  new DOMException("The operation was aborted.", "AbortError")
+                );
+              } catch {
+                // already closed
+              }
+            });
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      );
+    });
+
+    await chatCommand(exampleDir, "run it", {
+      gateway: "http://gateway.test",
+      new: true,
+    });
+    for (const t of timers) clearInterval(t);
+
+    expect(stdout.join("")).not.toContain("previous turn still going");
+    expect(stderr.join("")).toContain("timed out");
+    expect(process.exitCode).toBe(1);
+  });
+
   test("slow rendering is not charged against the silence budget", async () => {
     process.env.LOBU_API_TOKEN = "test-token";
     process.env.LOBU_CHAT_IDLE_TIMEOUT_MS = "100";
