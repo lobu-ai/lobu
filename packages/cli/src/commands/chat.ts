@@ -438,21 +438,82 @@ interface StreamOptions {
   org?: string;
 }
 
+// Ten minutes of the agent saying nothing at all. Comfortably clears a chain
+// of `os.shell` calls at their 150s ceiling plus model latency, while still
+// bounding a run that died server-side without a terminal event — the case
+// the gateway's unconditional 30s heartbeat would otherwise mask forever.
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function resolveIdleTimeoutMs(): number {
+  const raw = process.env.LOBU_CHAT_IDLE_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_IDLE_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_IDLE_TIMEOUT_MS;
+}
+
 async function streamResponse(
   sseUrl: string,
   token: string,
   controller: AbortController,
   options: StreamOptions = {}
 ): Promise<void> {
-  const OVERALL_TIMEOUT_MS = 5 * 60 * 1000;
-  const IDLE_TIMEOUT_MS = 60 * 1000;
+  // How long the AGENT may go quiet, not the socket.
+  //
+  // The distinction is the whole design. The gateway heartbeats a `ping` every
+  // 30s for as long as the connection is open, whether or not a run is still
+  // alive (routes/public/agent.ts), so a deadline reset by any traffic would
+  // be held open forever by heartbeats alone if a run died without emitting a
+  // terminal event. Only substantive events postpone it.
+  //
+  // Correspondingly generous: a single `os.shell` call may legitimately run
+  // 150s with nothing to report, and an agent can chain several. A dead
+  // TRANSPORT does not need this timer at all — the socket dropping rejects
+  // `reader.read()` and surfaces immediately.
+  const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs();
 
-  const overallTimer = setTimeout(() => controller.abort(), OVERALL_TIMEOUT_MS);
-  let idleTimer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+  let idleTimedOut = false;
+  const abortIdle = () => {
+    idleTimedOut = true;
+    controller.abort();
+  };
 
-  const resetIdleTimer = () => {
+  // A budget of network silence, spent only while actually waiting on the
+  // socket and refilled only by the agent saying something.
+  //
+  // It has to be a budget rather than a deadline measured from the last event.
+  // Heartbeats mean many short waits rather than one long one, so each wait
+  // must draw down a shared allowance instead of restarting a full one — and
+  // wall-clock since the last event would charge the budget for time spent
+  // rendering output or waiting for a human at an approval prompt, aborting a
+  // perfectly healthy turn.
+  let idleBudgetMs = IDLE_TIMEOUT_MS;
+
+  /** A `ping` is the connection talking, not the agent; it refills nothing. */
+  const noteAgentActivity = (event: string) => {
+    if (event !== "ping") idleBudgetMs = IDLE_TIMEOUT_MS;
+  };
+
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearIdleTimer = () => {
+    if (idleTimer === undefined) return;
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    idleTimer = undefined;
+  };
+  const waitForStream = async <T>(operation: Promise<T>): Promise<T> => {
+    clearIdleTimer();
+    const waitStartedAt = Date.now();
+    idleTimer = setTimeout(abortIdle, idleBudgetMs);
+    try {
+      return await operation;
+    } finally {
+      clearIdleTimer();
+      // Charge only the time spent inside this wait. Everything after it —
+      // rendering to stdout, a human answering a tool-approval prompt — is
+      // this client being slow, not the agent going quiet.
+      idleBudgetMs = Math.max(0, idleBudgetMs - (Date.now() - waitStartedAt));
+    }
   };
 
   // Tracked across try/finally so we can cancel the body stream on early
@@ -461,10 +522,12 @@ async function streamResponse(
   let readerForCleanup: { cancel(reason?: unknown): Promise<void> } | undefined;
 
   try {
-    const res = await fetch(sseUrl, {
-      headers: agentApiHeaders(token, options.org),
-      signal: controller.signal,
-    });
+    const res = await waitForStream(
+      fetch(sseUrl, {
+        headers: agentApiHeaders(token, options.org),
+        signal: controller.signal,
+      })
+    );
 
     if (!res.ok || !res.body) {
       console.error(chalk.red(`\n  SSE connection failed (${res.status})\n`));
@@ -480,10 +543,17 @@ async function streamResponse(
     let sawSandboxLink = false;
 
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done, value } = await waitForStream(reader.read());
+      if (done) {
+        await writeStderr(
+          chalk.red(
+            "\n  Stream closed before the agent finished. The turn may still be running server-side.\n"
+          )
+        );
+        process.exitCode = 1;
+        return;
+      }
 
-      resetIdleTimer();
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -491,6 +561,7 @@ async function streamResponse(
       for (const line of lines) {
         if (line.startsWith("event: ")) {
           currentEvent = line.slice(7).trim();
+          noteAgentActivity(currentEvent);
         } else if (line.startsWith("data: ") && currentEvent) {
           const data = parseJSON(line.slice(6));
           if (!data) continue;
@@ -657,11 +728,26 @@ async function streamResponse(
       }
     }
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === "AbortError") return;
+    if (err instanceof Error && err.name === "AbortError") {
+      // Every terminal event (complete / error / ephemeral) aborts deliberately
+      // before returning, so an abort we did not schedule is a stalled stream.
+      // Reporting it as success would tell a wrapping script the turn finished.
+      if (!idleTimedOut) return;
+      const timeoutLabel =
+        IDLE_TIMEOUT_MS % 1000 === 0
+          ? `${IDLE_TIMEOUT_MS / 1000}s`
+          : `${IDLE_TIMEOUT_MS}ms`;
+      await writeStderr(
+        chalk.red(
+          `\n  Stream timed out: no data from the agent for ${timeoutLabel}. The turn may still be running server-side.\n`
+        )
+      );
+      process.exitCode = 1;
+      return;
+    }
     throw err;
   } finally {
-    clearTimeout(overallTimer);
-    clearTimeout(idleTimer);
+    clearIdleTimer();
     if (readerForCleanup) {
       // Cancel the body stream so the underlying connection is released
       // immediately on early return — otherwise the lock stays held until GC.
