@@ -704,7 +704,6 @@ export class SecretProxy {
         SELECT action_input->'turn'->'provider' AS provider FROM runs
         WHERE id = ${capture.runId ?? null} AND organization_id = ${capture.organizationId ?? null}
           AND run_type = 'agent_turn' AND status IN ('pending', 'running')
-          AND action_input->'turn'->>'shadow' = 'true'
           AND action_input->'turn'->>'agent_id' = ${capture.agentId ?? null}
           AND action_input->'turn'->>'conversation_id' = ${capture.conversationId}
       `;

@@ -8,7 +8,7 @@
  * a real chat message, posting an interaction card, delivering files into the
  * conversation, executing in a sandbox, generating billable media. Those are
  * the ones that would still reach the outside world during an eval replay or
- * a native shadow turn.
+ * a native agent turn.
  *
  * This guard is the one thing those routes need. It reads the signed
  * `executionMode` claim off the already-verified worker token — no DB lookup,
@@ -59,7 +59,7 @@ function boundDetails(details: Record<string, unknown>): Record<string, unknown>
 
 /**
  * Short-circuit a mutating internal route when the run captures side effects
- * (an eval replay or a native shadow turn).
+ * (an eval replay or a native agent turn).
  * Returns a Response to return immediately, or null to proceed for real.
  *
  * `action` and `details` are appended to `runs.dry_run_preview.side_effects` —
@@ -110,7 +110,7 @@ export async function captureEffect(
 }
 
 /**
- * Append one suppressed side effect to its eval or native shadow run.
+ * Append one suppressed side effect to its eval or native agent-turn run.
  *
  * One UPDATE reading and rewriting under the row lock, so concurrent handlers
  * on different replicas cannot lose each other's entry. `run_type` is guarded
@@ -168,7 +168,6 @@ async function recordCapturedSideEffect(
           (${identity.automationRunId !== undefined} AND run_type = ${AUTOMATION_EVAL_RUN_TYPE})
           OR (
             ${identity.automationRunId === undefined} AND run_type = 'agent_turn'
-            AND action_input->'turn'->>'shadow' = 'true'
             AND action_input->'turn'->>'agent_id' = ${identity.agentId ?? null}
             AND action_input->'turn'->>'conversation_id' = ${identity.conversationId ?? null}
           )

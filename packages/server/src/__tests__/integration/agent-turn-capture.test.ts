@@ -115,7 +115,12 @@ describe('native capture over HTTP and Postgres', () => {
     };
     const message = { userId: owner.id, conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
       agentId: AGENT, organizationId: org.id, platform: 'slack', messageText: 'Capture tool attempts',
-      platformMetadata: { connectionId: CONNECTION, executionMode: 'live' }, agentOptions: { model: 'capture-fixture-provider/fixture' },
+      // This suite's baseline `token` must be a CAPTURE credential, so the run
+      // asks for capture the only way that works: `platformMetadata`, which is
+      // where `buildWorkerTokenClaims` reads it from and which originates
+      // server-side. The producer no longer pins the mode — doing so made an
+      // ordinary live turn report success while performing no side effects.
+      platformMetadata: { connectionId: CONNECTION, executionMode: 'capture' }, agentOptions: { model: 'capture-fixture-provider/fixture' },
     } as MessagePayload;
     const sql = getTestDb();
     const [source] = await sql`
