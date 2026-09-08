@@ -75,7 +75,6 @@ assert.equal(
   run?.error_message ?? "isolate run did not complete"
 );
 assert.equal(run.run_type, "agent_turn");
-assert.equal(run.input.turn.shadow, true);
 assert.equal(run.input.turn.agent_id, "isolate-smoke");
 assert.equal(run.input.result.text, marker);
 assert.equal(typeof run.input.result.session_jsonl, "string");
@@ -93,7 +92,7 @@ const messages = entries
 assert.equal(
   messages.filter((entry) => entry.role === "user").length,
   1,
-  "shadow restored the managed counterpart and prompted the same message again"
+  "the turn replayed history that already contained this message, prompting it twice"
 );
 const results = messages.filter((entry) => entry.role === "toolResult");
 const calls = messages.flatMap((entry) =>
@@ -124,7 +123,7 @@ assert.ok(
 );
 assert.ok(JSON.stringify(results[2].content).includes(marker));
 console.log(
-  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; seeded skill file read, real write/read, gateway suggestion call and persisted native Pi session verified (shadow=true)`
+  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; seeded skill file read, real write/read, gateway suggestion call and persisted native Pi session verified`
 );
 
 const cancelMarker = `ISOLATE_CANCEL_${randomBytes(16).toString("hex")}`;
