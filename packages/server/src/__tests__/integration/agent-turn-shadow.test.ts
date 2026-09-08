@@ -725,7 +725,7 @@ describe('agent turn shadow producer', () => {
 
   it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
     const org = await createTestOrganization();
-    const content = 'x'.repeat(64_001);
+    const content = 'x'.repeat(64_000);
     const agentSettings = {
       getSettings: async () => ({
         identityMd: '',
@@ -737,6 +737,7 @@ describe('agent turn shadow producer', () => {
             { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
             { repo: 'owner', name: '..', enabled: true, content: 'skip' },
             { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
+            { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
             { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
           ],
         },
@@ -750,7 +751,7 @@ describe('agent turn shadow producer', () => {
 
     const [run] = await shadowRuns();
     const turn = run.action_input.turn;
-    expect(turn.skills).toEqual([{ name: 'triage', content: 'x'.repeat(64_000) }]);
+    expect(turn.skills).toEqual([{ name: 'triage', content }]);
     expect(turn.system_prompt).toContain('/workspace/.skills');
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
   });

@@ -89,7 +89,8 @@ const TURN_MESSAGE_CHARS = 32_000;
 
 /**
  * Skill bounds, restating the worker contract's own caps so an oversized
- * library is trimmed here rather than failing schema validation at the poll.
+ * library is bounded here rather than failing schema validation at the poll.
+ * A skill over the bound is dropped whole; see the producer below for why.
  * Kept as numbers because this module works in the envelope's TYPES, not its
  * runtime schema object.
  */
@@ -867,8 +868,13 @@ export async function enqueueAgentTurnShadow(
     const skills = (settings?.skillsConfig?.skills ?? [])
       .filter((skill) => skill.enabled && skill.content)
       .flatMap((skill) => {
+        // An oversized skill is DROPPED, never truncated. A skill is authored
+        // instructions, so slicing one mid-sentence would hand the model a
+        // corrupted rule that reads as complete — worse than not seeding it,
+        // and invisible at the point where the agent acts on it.
         const name = skillDirectoryName(skill.name);
-        return name ? [{ name, content: skill.content!.slice(0, TURN_SKILL_CHARS) }] : [];
+        if (!name || skill.content!.length > TURN_SKILL_CHARS) return [];
+        return [{ name, content: skill.content! }];
       })
       .slice(0, TURN_SKILLS_MAX);
 
@@ -890,9 +896,8 @@ export async function enqueueAgentTurnShadow(
       // turn's `input/` directory — the same place the subprocess lane
       // downloads them to, so an agent that reads `input/x.csv` works on both.
       ...(attachments.files.length > 0 ? { message_files: attachments.files } : {}),
-      // Enabled skills, seeded as `.skills/<name>/SKILL.md`. The same
-      // `enabled && content` selection the subprocess lane's session-context
-      // route applies, so the two lanes serve one library.
+      // Protocol-valid enabled skills, seeded in the subprocess lane's
+      // `.skills/<name>/SKILL.md` layout with their complete content.
       ...(skills.length > 0 ? { skills } : {}),
       system_prompt: composeShadowSystemPrompt(
         settings ?? {},
