@@ -23,6 +23,7 @@ import { createInteractionRoutes } from '../../gateway/routes/internal/interacti
 import { enqueueAgentTurnShadow,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-shadow';
+import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
@@ -153,9 +154,13 @@ async function admittedMessage(message: MessagePayload): Promise<MessagePayload>
   return { ...message, runId: Number(input.id) };
 }
 
-/** The producer receives an already admitted queue message in production. */
+/**
+ * The producer receives an already admitted queue message in production.
+ * Returns the producer's outcome: an `AgentErrorCode` when the agent cannot
+ * run, `undefined` when the turn was produced or nothing is owed a reply.
+ */
 async function enqueueMessage(message: MessagePayload, deps: Parameters<typeof enqueueAgentTurnShadow>[1]) {
-  await enqueueAgentTurnShadow(await admittedMessage(message), deps);
+  return await enqueueAgentTurnShadow(await admittedMessage(message), deps);
 }
 
 /**
@@ -189,6 +194,17 @@ function fakeArtifacts() {
       return fixture && metadata ? ({ metadata, bytes: fixture.bytes } as never) : null;
     },
   };
+}
+
+/** Queued `thread_response` payloads, oldest first, across the whole db. */
+async function threadResponsesGlobal(): Promise<Array<Record<string, unknown>>> {
+  const sql = getTestDb();
+  const rows = (await sql`
+    SELECT action_input FROM runs
+    WHERE queue_name = 'thread_response' AND run_type = 'chat_message'
+    ORDER BY id ASC
+  `) as unknown as Array<{ action_input: Record<string, unknown> }>;
+  return rows.map((row) => row.action_input);
 }
 
 async function shadowRuns() {
@@ -279,7 +295,7 @@ describe('agent turn shadow producer', () => {
     delete process.env[SHADOW_ENV];
   });
 
-  it('captures a real HTTP interaction made with the producer-minted shadow credential', async () => {
+  it('EXECUTES a real HTTP interaction live with the producer-minted turn credential', async () => {
     const org = await createTestOrganization();
     await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
@@ -298,19 +314,30 @@ describe('agent turn shadow producer', () => {
         body: JSON.stringify({ interactionType: 'link_button', url: 'https://example.invalid', label: 'Shadow attempt' }),
       });
       expect(response.status).toBe(200);
-      expect(postLinkButton).not.toHaveBeenCalled();
-      expect(await response.json()).toMatchObject({ captured: true });
+      // LIVE, because an ordinary turn is authoritative now. This asserted the
+      // opposite while the lane produced a discardable copy: the effect was
+      // captured and `postLinkButton` was never called. Inverting it is the
+      // point of activation — `captureEffect` answers `success: true` without
+      // performing the effect, so a turn left in capture mode would tell the
+      // user it posted while posting nothing.
+      expect(postLinkButton).toHaveBeenCalledTimes(1);
       expect(verifyWorkerToken(run.action_input.credential as string)).toMatchObject({
-        executionMode: 'capture', runId: run.id, organizationId: org.id,
+        runId: run.id, organizationId: org.id,
       });
+      // No capture claim at all: absent means live, exactly as the subprocess
+      // lane's token derivation means it.
+      expect(
+        (verifyWorkerToken(run.action_input.credential as string) as { executionMode?: string })
+          .executionMode
+      ).toBeUndefined();
       const [captured] = await getTestDb()`SELECT dry_run_preview FROM runs WHERE id = ${run.id}`;
-      expect(captured.dry_run_preview.side_effects).toMatchObject([{ action: 'interactions.create' }]);
+      expect(captured.dry_run_preview).toBeNull();
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
 
-  it.each([false, true])('executes write/edit over worker HTTP with admitted history (shadow=%s)', async (shadow) => {
+  it('executes write/edit over worker HTTP with admitted history', async () => {
     const calls = [
       { name: 'write', input: { file_path: 'a.txt', content: '\ufeffbefore\r\n' } },
       { name: 'edit', input: { file_path: 'a.txt', old_string: 'before', new_string: 'after' } },
@@ -396,20 +423,10 @@ describe('agent turn shadow producer', () => {
       });
       const [run] = await shadowRuns();
       expect(run.action_input.turn).toMatchObject({ session_jsonl: '' });
-      if (shadow) {
-        const later = await admittedMessage({ ...messageFor(org.id), messageId: 'later-managed-message' });
-        for (const [message, text] of [[source, 'managed-current-answer'], [later, 'managed-later-answer']] as const) {
-          const snapshot = nativeSession().replace('an observational copy', text);
-          await sql`
-            INSERT INTO agent_transcript_snapshot
-              (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
-            VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${message.runId}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed')
-          `;
-        }
-      } else {
-        // Exercise authoritative transcript/reply persistence in the isolated test DB.
-        await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${run.id}`;
-      }
+      // The producer enqueues an authoritative turn, so nothing has to flip
+      // `shadow` here any more, and there is no managed counterpart snapshot
+      // to exclude — the assertions below are the authoritative contract.
+      expect(run.action_input.turn.shadow).toBe(false);
       const client = new WorkerClient({
         apiUrl: origin, workerId: 'fleet-file-tools', authToken: 'test-file-tools-fleet', capabilities: { agent_turn: true },
       });
@@ -425,8 +442,6 @@ describe('agent turn shadow producer', () => {
       expect(providerRequests).toHaveLength(6);
       expect(JSON.stringify(providerRequests[0].messages)).toContain('retained-branch-history');
       expect(JSON.stringify(providerRequests[0].messages)).not.toContain('discarded-branch-history');
-      expect(JSON.stringify(providerRequests)).not.toContain('managed-current-answer');
-      expect(JSON.stringify(providerRequests)).not.toContain('managed-later-answer');
       expect(providerRequests[0].tools.find((tool) => tool.name === 'edit')?.input_schema).toMatchObject({
         required: ['file_path', 'old_string', 'new_string'],
       });
@@ -436,8 +451,7 @@ describe('agent turn shadow producer', () => {
       expect((await runRow(Number(run.id))).status).toBe('completed');
       const [snapshot] = await sql`SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
       expect(completion.session_jsonl.startsWith(history)).toBe(true);
-      if (shadow) expect(snapshot).toBeUndefined();
-      else expect(snapshot.snapshot_jsonl).toBe(completion.session_jsonl);
+      expect(snapshot.snapshot_jsonl).toBe(completion.session_jsonl);
       expect((await runRow(Number(run.id))).action_input.result?.session_jsonl).toBe(completion.session_jsonl);
       const messages = parseSessionEntries(completion.session_jsonl).entries.map((entry) => entry.message).filter(Boolean) as any[];
       const toolResults = messages.filter((message) => message.role === 'toolResult');
@@ -450,12 +464,12 @@ describe('agent turn shadow producer', () => {
       expect(toolResults[3].content).toEqual([{ type: 'text', text: '\ufeffafter\r\n' }]);
       expect(toolResults[4].content).toEqual([{ type: 'text', text: `${Buffer.from('\ufeffafter\r\n').toString('base64')}\n` }]);
       const [reply] = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'finalText' = ${completion.text}`;
-      if (shadow) expect(reply).toBeUndefined();
-      else expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });
+      // The turn is authoritative: its answer IS the conversation's reply.
+      expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });
       // A lost completion response must not append the same transcript twice.
       await client.completeAgentTurn(completion as never);
       const snapshots = await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
-      expect(snapshots).toHaveLength(shadow ? 0 : 1);
+      expect(snapshots).toHaveLength(1);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -1384,7 +1398,7 @@ describe('agent turn shadow producer', () => {
     expect((await (await pollFleet('fleet-next', { agent_turn: true })).json()).run_type).toBe('agent_turn');
   });
 
-  async function inputScenario(texts = ['same text', 'same text'], base = '', shadow = true) {
+  async function inputScenario(texts = ['same text', 'same text'], base = '') {
     const org = await createTestOrganization();
     const first = messageFor(org.id);
     const sql = getTestDb();
@@ -1397,15 +1411,12 @@ describe('agent turn shadow producer', () => {
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
     await enqueueMessage(first, deps);
     const [owner] = await shadowRuns();
-    if (!shadow) await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false') WHERE id = ${owner.id}`;
     const worker_id = 'fleet-input-receipts';
     const job = await (await pollFleet(worker_id, { agent_turn: true })).json();
     for (const [index, text] of texts.entries()) {
       await enqueueMessage({ ...first, messageId: `input-${index}`, messageText: text }, deps);
     }
     const followers = (await shadowRuns()).slice(1);
-    if (!shadow) await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false')
-      WHERE organization_id = ${org.id} AND run_type = 'agent_turn' AND status = 'pending'`;
     const entries = [
       ...(base ? base.trim().split('\n').slice(1).map((line) => JSON.parse(line)) : []),
       { type: 'message', id: 'current-user', parentId: base ? JSON.parse(base.trim().split('\n').at(-1)!).id : null,
@@ -1418,8 +1429,8 @@ describe('agent turn shadow producer', () => {
     return { sql, org, first, deps, owner, followers, job, body };
   }
 
-  it.each([true, false])('commits identical-text inputs by distinct native identities, once (shadow=%s)', async (shadow) => {
-    const { sql, owner, followers, body } = await inputScenario(undefined, '', shadow);
+  it('commits identical-text inputs by distinct native identities, once', async () => {
+    const { sql, owner, followers, body } = await inputScenario();
     const response = await postAsFleet('/api/workers/complete-agent-turn', body);
     expect(await response.json()).toEqual({ ok: true, status: 'completed' });
     const rows = await sql`SELECT status, claimed_by, claimed_at, completed_at, output_tail, outcome, exit_reason, run_metadata, action_input
@@ -1432,10 +1443,10 @@ describe('agent turn shadow producer', () => {
     }
     const retry = await postAsFleet('/api/workers/complete-agent-turn', { ...body, status: 'failed', error: 'lost response' });
     expect(await retry.json()).toEqual({ ok: true, status: 'completed', idempotent: true });
-    expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(shadow ? 0 : 1);
+    expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(1);
     const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-shadow'`;
-    expect(replies).toHaveLength(shadow ? 0 : 1);
-    if (!shadow) expect(replies[0].action_input.processedMessageIds).toEqual(['msg-shadow', 'input-0', 'input-1']);
+    expect(replies).toHaveLength(1);
+    expect(replies[0].action_input.processedMessageIds).toEqual(['msg-shadow', 'input-0', 'input-1']);
     expect(await sql`SELECT id FROM runs WHERE queue_name = 'internal:turn_timeout'`).toHaveLength(0);
     expect(await sql`SELECT message_id FROM agent_run_input`).toHaveLength(0);
   });
@@ -2168,7 +2179,55 @@ describe('agent turn shadow producer', () => {
     expect(still.status).toBe('pending');
   });
 
-  it('produces nothing when the agent is not selected, has no model, or runs an unsupported protocol', async () => {
+  it('enqueues an AUTHORITATIVE turn: no selection gate, and the reply is delivered', async () => {
+    const org = await createTestOrganization();
+    const deps = {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    };
+    // No env var is set at all. Every agent runs natively now, so the turn is
+    // produced anyway, and it owns the conversation's reply.
+    delete process.env[SHADOW_ENV];
+    await enqueueMessage(messageFor(org.id), deps);
+
+    const [run] = await shadowRuns();
+    expect(run).toBeDefined();
+    expect(run.action_input.turn.shadow).toBe(false);
+    // The completion route 409s an authoritative run with no reply envelope,
+    // so the producer must always stamp one.
+    expect(run.action_input.reply).toMatchObject({
+      message_id: expect.any(String),
+      channel_id: expect.any(String),
+      user_id: expect.any(String),
+      platform: expect.any(String),
+    });
+  });
+
+  it('THROWS when the enqueue fails unexpectedly, rather than swallowing it', async () => {
+    const org = await createTestOrganization();
+    // Two different failure shapes, two different contracts:
+    //  - A misconfiguration the producer can NAME is returned as a code, so
+    //    the caller discharges the armed marker with the real reason (see the
+    //    misconfiguration tests below).
+    //  - An UNEXPECTED failure has no user-facing explanation, so it must
+    //    propagate into the queue's retry/fail handling instead of vanishing.
+    // Here the settings store itself blows up, which is neither anticipated
+    // nor explainable to the user.
+    await expect(
+      enqueueMessage(messageFor(org.id), {
+        agentSettings: {
+          getSettings: () => {
+            throw new Error('settings store unreachable');
+          },
+        } as unknown as AgentSettingsStore,
+        catalog: catalogFor(claudeModule()),
+        gatewayUrl: GATEWAY_URL,
+      })
+    ).rejects.toThrow('settings store unreachable');
+  });
+
+  it('names the misconfiguration when the agent cannot run, instead of dropping the message', async () => {
     const org = await createTestOrganization();
     const deps = {
       agentSettings: settingsStore,
@@ -2176,41 +2235,137 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     };
 
-    process.env[SHADOW_ENV] = 'some-other-agent';
-    await enqueueMessage(messageFor(org.id), deps);
-    expect(await shadowRuns()).toHaveLength(0);
+    // Each of these used to be a silent `return`. That was right while a
+    // managed subprocess still answered the user. This lane is now the ONLY
+    // execution path AND `handleMessage` arms the turn-liveness marker before
+    // enqueueing, so a silent skip spends the whole deadline and then blames
+    // an unresponsive worker for what is really a misconfiguration. The
+    // producer must name the cause so the marker can carry its remediation.
 
-    process.env[SHADOW_ENV] = AGENT_ID;
     const noModel = messageFor(org.id);
     noModel.agentOptions = {};
-    await enqueueMessage(noModel, deps);
-    expect(await shadowRuns()).toHaveLength(0);
-
-    // A message with neither text nor a resolvable attachment: both providers
-    // reject an empty user turn, so enqueueing one would only ever produce a
-    // failed run. (An attachment-only message that DOES resolve is a real turn
-    // — see the attachment tests below.)
-    const noText = messageFor(org.id);
-    noText.messageText = '   ';
-    await enqueueMessage(noText, deps);
+    expect(await enqueueMessage(noModel, deps)).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
     expect(await shadowRuns()).toHaveLength(0);
 
     // Google speaks a protocol whose pi-ai adapter is not fetch-native, so it
-    // cannot be bundled for the isolate and must not produce a shadow.
-    await enqueueMessage(messageFor(org.id), {
-      ...deps,
-      catalog: catalogFor(claudeModule({ sdkCompat: 'google' })),
-    });
+    // cannot be bundled for the isolate. The user's fix is the model choice.
+    expect(
+      await enqueueMessage(messageFor(org.id), {
+        ...deps,
+        catalog: catalogFor(claudeModule({ sdkCompat: 'google' })),
+      })
+    ).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
     expect(await shadowRuns()).toHaveLength(0);
 
     // No public gateway URL means no URL a fleet worker could reach the proxy on.
-    await enqueueMessage(messageFor(org.id), { ...deps, gatewayUrl: undefined });
+    expect(await enqueueMessage(messageFor(org.id), { ...deps, gatewayUrl: undefined })).toBe(
+      AgentErrorCode.NO_MODEL_CONFIGURED
+    );
     expect(await shadowRuns()).toHaveLength(0);
 
-    // `*` selects every agent — the operator's blanket switch.
-    process.env[SHADOW_ENV] = '*';
-    await enqueueMessage(messageFor(org.id), deps);
-    expect(await shadowRuns()).toHaveLength(1);
+    // Whatever code the producer reports MUST carry its own prose. The four
+    // `PROVIDER_*` codes deliberately do not — they exist to relay the
+    // provider's error text — so reporting one of those from here would render
+    // an empty message with a lone CTA button. Assert the text, not just the
+    // code, because the code alone looks right while showing the user nothing.
+    expect(AGENT_ERRORS[AgentErrorCode.NO_MODEL_CONFIGURED].message).toBeTruthy();
+  });
+
+  it("delivers the named misconfiguration to the client, not a deadline timeout", async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const message = messageFor(org.id);
+    message.agentOptions = {};
+    const deploymentName = 'agent-turn-unrunnable-fixture';
+
+    // Exactly the sequence `handleMessage` runs: arm the liveness marker, then
+    // produce the turn. Arming FIRST is what makes a silent skip dangerous —
+    // the marker is a standing promise of a terminal event, and after the
+    // managed lane's deletion nothing else can discharge it.
+    const queue = {
+      createQueue: async () => {},
+      send: async (_q: string, body: unknown, opts?: { singletonKey?: string }) => {
+        await sql`
+          INSERT INTO runs (organization_id, run_type, queue_name, status, action_input, idempotency_key)
+          VALUES (${org.id}, 'chat_message', 'internal:turn_timeout', 'pending',
+                  ${sql.json(body as Record<string, unknown>)}, ${opts?.singletonKey ?? null})
+        `;
+      },
+    };
+    await armTurnTimeout(queue as never, {
+      messageId: message.messageId,
+      channelId: message.channelId,
+      conversationId: message.channelId,
+      userId: message.userId,
+      platform: message.platform,
+      platformMetadata: message.platformMetadata,
+      deploymentName,
+      organizationId: org.id,
+    });
+
+    const unrunnable = await enqueueMessage(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    expect(unrunnable).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
+    expect(await shadowRuns()).toHaveLength(0);
+
+    // The consumer discharges the marker it armed, with the producer's reason.
+    expect(await failTurnIfPending(deploymentName, message.messageId, unrunnable!)).toBe(true);
+
+    // The marker is gone, so the deadline sweep can never fire a second,
+    // wrong-cause error for this turn.
+    const [marker] = (await sql`
+      SELECT count(*)::int AS n FROM runs
+      WHERE queue_name = 'internal:turn_timeout' AND status = 'pending'
+    `) as unknown as Array<{ n: number }>;
+    expect(marker!.n).toBe(0);
+
+    // What the user actually receives: the real cause, with prose and a CTA —
+    // not WORKER_UNRESPONSIVE after 60s of silence.
+    const delivered = await threadResponsesGlobal();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      messageId: message.messageId,
+      errorCode: AgentErrorCode.NO_MODEL_CONFIGURED,
+    });
+    expect(delivered[0]!.errorCode).not.toBe(AgentErrorCode.WORKER_UNRESPONSIVE);
+    expect(String(delivered[0]!.error)).toContain('model');
+  });
+
+  it('stays silent when no turn is owed a reply at all', async () => {
+    const org = await createTestOrganization();
+    const deps = {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    };
+
+    // A message with neither text nor a resolvable attachment: both providers
+    // reject an empty user turn, so enqueueing one could only ever produce a
+    // failed run. Nothing is owed a reply, so this reports NO error code —
+    // a terminal error here would invent a failure the user did not cause.
+    const noText = messageFor(org.id);
+    noText.messageText = '   ';
+    expect(await enqueueMessage(noText, deps)).toBeUndefined();
+    expect(await shadowRuns()).toHaveLength(0);
+  });
+
+  it('produces the turn for every agent, with no selection gate', async () => {
+    const org = await createTestOrganization();
+    // There is no env var and no allow-list any more: every agent runs
+    // natively. The turn is produced and owns the conversation's reply.
+    expect(
+      await enqueueMessage(messageFor(org.id), {
+        agentSettings: settingsStore,
+        catalog: catalogFor(claudeModule()),
+        gatewayUrl: GATEWAY_URL,
+      })
+    ).toBeUndefined();
+    const runs = await shadowRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.action_input.turn.shadow).toBe(false);
   });
 
   it("carries the message's image and non-image attachments as bytes", async () => {

@@ -46,7 +46,7 @@ export class Orchestrator {
       buildModuleEnvVars,
       providerModules
     );
-    this.queueConsumer = new MessageConsumer(config, this.deploymentManager);
+    this.queueConsumer = new MessageConsumer(this.deploymentManager);
   }
 
   /**

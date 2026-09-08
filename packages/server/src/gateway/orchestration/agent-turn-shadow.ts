@@ -32,6 +32,7 @@
  */
 
 import {
+  AgentErrorCode,
   type AgentOptions,
   buildToolPolicy,
   createLogger,
@@ -68,7 +69,6 @@ import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-shadow");
 
-const SHADOW_AGENTS_ENV = "LOBU_ISOLATE_TURN_SHADOW_AGENTS";
 
 /**
  * pi-ai's two fetch-native adapters. Every other protocol in
@@ -98,6 +98,23 @@ const TURN_SKILLS_MAX = 64;
 const TURN_SKILL_CHARS = 64_000;
 const TURN_SKILL_NAME_CHARS = 128;
 const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
+
+/**
+ * Why a turn could not be produced, when the reason is a MISCONFIGURATION
+ * rather than "nothing to send".
+ *
+ * This lane is the only execution path, and `handleMessage` arms the
+ * turn-liveness marker BEFORE enqueueing, so a bare `return` here leaves the
+ * client waiting out `TURN_DEFAULT_DEADLINE_MS` for a generic
+ * `WORKER_UNRESPONSIVE`. That names the wrong cause and offers no fix. The
+ * producer therefore reports the reason and the caller — which owns the marker
+ * it armed — discharges it into a terminal error carrying that reason's own
+ * remediation CTA.
+ *
+ * `undefined` means no turn is owed a reply at all (an explicit cancel, or a
+ * message carrying neither text nor a resolvable attachment).
+ */
+export type TurnUnrunnable = AgentErrorCode;
 
 /**
  * Where an agent turn's reply is delivered. This rides `action_input` beside
@@ -212,17 +229,6 @@ export interface AgentTurnShadowDeps {
    * signed runtime claims and its `bash` runs in that sandbox.
    */
   runtime?: AgentRuntimeSelection;
-}
-
-function shadowSelects(agentId: string): boolean {
-  const raw = process.env[SHADOW_AGENTS_ENV]?.trim();
-  if (!raw) return false;
-  if (raw === "*") return true;
-  return raw
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .includes(agentId);
 }
 
 /**
@@ -444,9 +450,19 @@ function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRunti
         nixPackages: data.nixConfig?.packages,
       }),
       messageId: data.messageId,
-      executionMode: "capture",
-      // A native shadow owns its capture record, even when shadowing an eval.
-      automationRunId: undefined,
+      // No `executionMode`/`automationRunId` override here ON PURPOSE.
+      // `buildWorkerTokenClaims` above already derives both from
+      // `platformMetadata`, using the rule the subprocess lane uses: only the
+      // literal "capture" is honoured, it originates server-side from the run
+      // row and never from a caller, and an ABSENT claim means LIVE.
+      //
+      // This lane used to pin `executionMode: "capture"`, which was right while
+      // it produced a discardable copy — a shadow must never touch the outside
+      // world. It is catastrophic for an authoritative turn: `captureEffect`
+      // returns `success: true` WITHOUT performing the effect, so the agent
+      // would tell the user it sent the message and updated the record while
+      // doing neither. Overriding the claims builder is what made that
+      // possible, so the override is gone rather than re-derived here.
       runId,
     }
   );
@@ -641,7 +657,7 @@ async function resolveTurnTools(
 /** The admitted control owns its receipt; replay must not stop a later execution. */
 export async function cancelAgentTurn(data: MessagePayload): Promise<boolean> {
   if (!data.agentId || !data.organizationId || !data.conversationId || !data.userId
-    || !shadowSelects(data.agentId) || !isExplicitCancelMessage(data)) return false;
+    || !isExplicitCancelMessage(data)) return false;
   if (typeof data.runId !== "number" || !Number.isSafeInteger(data.runId) || data.runId <= 0) {
     throw new Error("Native cancellation requires the admitted message run ID");
   }
@@ -692,9 +708,11 @@ export async function cancelAgentTurn(data: MessagePayload): Promise<boolean> {
 export async function enqueueAgentTurnShadow(
   data: MessagePayload,
   deps: AgentTurnShadowDeps
-): Promise<void> {
+): Promise<TurnUnrunnable | undefined> {
   try {
-    if (!data.agentId || !shadowSelects(data.agentId) || isExplicitCancelMessage(data)) return;
+    // No turn is owed a reply: a cancel is a control message, and a payload
+    // with no agent or no org is not a turn. These stay silent `undefined`.
+    if (!data.agentId || isExplicitCancelMessage(data)) return;
     if (!data.organizationId) return;
 
     // The turn's attachments, resolved host-side out of the gateway's own
@@ -718,37 +736,42 @@ export async function enqueueAgentTurnShadow(
     ) {
       logger.info(
         { agentId: data.agentId, messageId: data.messageId },
-        "Agent turn shadow skipped: the message carries neither text nor a resolvable attachment for the turn to send"
+        "Agent turn skipped: the message carries neither text nor a resolvable attachment for the turn to send"
       );
       return;
     }
 
     const modelRef = data.agentOptions?.model?.trim();
     if (!modelRef) {
-      logger.info(
-        { agentId: data.agentId },
-        "Agent turn shadow skipped: this turn carries no resolved model, and the shadow does not re-run the worker's default resolution"
+      logger.error(
+        { agentId: data.agentId, messageId: data.messageId },
+        "Agent turn cannot run: no model is resolved for this agent"
       );
-      return;
+      return AgentErrorCode.NO_MODEL_CONFIGURED;
     }
 
     const catalog = deps.catalog;
     const agentSettings = deps.agentSettings;
     if (!catalog || !agentSettings) {
-      logger.info(
-        { agentId: data.agentId },
-        "Agent turn shadow skipped: the provider catalog or the agent settings store is not wired yet"
+      logger.error(
+        { agentId: data.agentId, messageId: data.messageId },
+        "Agent turn cannot run: the provider catalog or the agent settings store is not wired"
       );
-      return;
+      return AgentErrorCode.NO_MODEL_CONFIGURED;
     }
 
     const gatewayUrl = deps.gatewayUrl;
     if (!gatewayUrl) {
-      logger.info(
-        { agentId: data.agentId },
-        "Agent turn shadow skipped: PUBLIC_GATEWAY_URL is not configured, so there is no URL the fleet worker can reach the gateway on"
+      logger.error(
+        { agentId: data.agentId, messageId: data.messageId },
+        "Agent turn cannot run: PUBLIC_GATEWAY_URL is not configured, so there is no URL the fleet worker can reach the gateway on"
       );
-      return;
+      // Not a PROVIDER_* code: those four carry no `message` of their own
+      // because they exist to relay the provider's text, and there is no
+      // provider text here — `renderAgentError` would show the user an empty
+      // string with a lone CTA button. This code owns prose and the
+      // agent-settings CTA, which is the surface a reader can act on.
+      return AgentErrorCode.NO_MODEL_CONFIGURED;
     }
 
     const modules = await catalog.getInstalledModules(
@@ -757,11 +780,15 @@ export async function enqueueAgentTurnShadow(
     );
     const module = await catalog.findProviderForModel(modelRef, modules);
     if (!module) {
-      logger.info(
-        { agentId: data.agentId, model: modelRef },
-        "Agent turn shadow skipped: no installed provider owns this model"
+      logger.error(
+        { agentId: data.agentId, messageId: data.messageId, model: modelRef },
+        "Agent turn cannot run: no installed provider owns this model"
       );
-      return;
+      // `PROVIDER_UNKNOWN_MODEL` looks apt but renders empty: it carries no
+      // `message`, expecting the provider's own error text to fill it, and no
+      // provider answered here. The agent's configured model is unusable, so
+      // report the code that says exactly that and links to agent settings.
+      return AgentErrorCode.NO_MODEL_CONFIGURED;
     }
 
     const sql = getDb();
@@ -782,23 +809,39 @@ export async function enqueueAgentTurnShadow(
       gatewayUrl,
       workerToken,
     });
-    if (!provider) return;
+    if (!provider) {
+      // Every `resolveShadowProvider` null is a provider/model
+      // misconfiguration — an unsupported protocol, or a proxy base URL that
+      // does not resolve to exactly one gateway-origin route. It logged the
+      // specific cause; the user's fix is on the agent's model selection.
+      logger.error(
+        { agentId: data.agentId, messageId: data.messageId, model: modelRef },
+        "Agent turn cannot run: this model's provider cannot be routed on the isolate lane"
+      );
+      return AgentErrorCode.NO_MODEL_CONFIGURED;
+    }
 
     let tools: TurnTools | undefined;
     // Memory is off unless the agent actually has the server its hooks call.
     let hasMemoryServer = false;
     let mcpInstructions: string[] = [];
     const policy = turnToolPolicy(data.agentOptions);
-    const toolsConfig = data.agentOptions?.toolsConfig as ToolsConfig | undefined;
+    // `mcpExposure: "cli"` presents the agent's MCP servers as SHELL COMMANDS
+    // instead of model tools — same capability, an interface some coding models
+    // handle better than a tool manifest. This lane does not carry that surface
+    // yet, so the agent gets the default `"tools"` exposure and the setting says
+    // so out loud. Stated rather than ignored: an option that silently means
+    // something else is worse than one that reports what it did.
+    if ((data.agentOptions?.toolsConfig as ToolsConfig | undefined)?.mcpExposure === "cli") {
+      logger.info(
+        { agentId: data.agentId },
+        "Agent turn: this agent exposes MCP as shell commands, which the isolate lane does not carry; the turn runs with MCP tools exposure instead"
+      );
+    }
     if (!deps.mcp) {
       logger.info(
         { agentId: data.agentId },
-        "Agent turn shadow: the MCP surface is not wired, so the turn runs without tools"
-      );
-    } else if (toolsConfig?.mcpExposure === "cli") {
-      logger.info(
-        { agentId: data.agentId },
-        "Agent turn shadow: the agent exposes MCP as shell commands, which this lane does not carry yet, so the turn runs without tools"
+        "Agent turn: the MCP surface is not wired, so the turn runs without tools"
       );
     } else {
       const resolved = await resolveTurnTools(deps.mcp, {
@@ -962,7 +1005,10 @@ export async function enqueueAgentTurnShadow(
       // reaching: the provider is behind its proxy and the tools behind its
       // MCP route.
       allowed_hosts: [provider.host],
-      shadow: true,
+      // Authoritative. This run's reply IS the conversation's reply; there is
+      // no second lane producing one. The completion route reads the `reply`
+      // sibling below to publish it.
+      shadow: false,
     };
 
     // Where this turn's reply would be delivered, kept beside the envelope
@@ -1010,15 +1056,21 @@ export async function enqueueAgentTurnShadow(
         mediaTools: media,
         memory: hasMemoryServer,
       },
-      "Enqueued a shadow agent turn on the isolate lane"
+      "Enqueued an agent turn on the isolate lane"
     );
+    // Produced: the run owns the reply, so nothing is owed a terminal error.
+    return undefined;
   } catch (err) {
-    // A shadow is never worth a real turn. The message is already on the
-    // worker queue by the time this runs, so the only correct response to any
-    // failure here is a log line.
-    logger.warn(
+    // THROW, never swallow. While this lane produced a discardable copy, a
+    // failure here was correctly a log line: the real turn was already on the
+    // worker queue. This run IS the turn now, so swallowing would make the
+    // user's message vanish with no reply and no error — the failure mode the
+    // queue's own retry/fail path exists to handle. Log for the operator, then
+    // let it propagate.
+    logger.error(
       { agentId: data.agentId, messageId: data.messageId, err: getErrorMessage(err) },
-      "Agent turn shadow could not be produced"
+      "Agent turn could not be enqueued"
     );
+    throw err;
   }
 }
