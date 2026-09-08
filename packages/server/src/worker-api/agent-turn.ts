@@ -28,7 +28,7 @@ import {
 	CompleteAgentTurnRequestSchema,
 } from "@lobu/core/contracts/worker/protocol";
 import { Value } from "@sinclair/typebox/value";
-import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
+import { CURRENT_SESSION_VERSION, type SessionEntry, type SessionHeader } from "@mariozechner/pi-coding-agent";
 import type { Context } from "hono";
 import { type DbClient, getDb } from "../db/client";
 import type { TurnReply } from "../gateway/orchestration/agent-turn-shadow";
@@ -36,12 +36,12 @@ import {
 	insertThreadResponseRow,
 	notifyThreadResponse,
 } from "../gateway/orchestration/turn-liveness";
-import { MAX_SNAPSHOT_BYTES } from "../gateway/services/transcript-snapshot";
+import { MAX_SNAPSHOT_BYTES, transcriptText } from "../gateway/services/transcript-snapshot";
 import type { Env } from "../index";
 import { incrementCounter } from "../gateway/metrics/prometheus";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { buildStaleRunWhereSql } from "../scheduled/stale-run-sweeper";
+import { insertAgentTurnResponse, agentTurnClaimEligible, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -52,7 +52,8 @@ const logger = createLogger("agent-turn-worker-api");
 const MAX_OUTPUT_TAIL = 2_000;
 
 /** Validate the transport boundary without rebuilding Pi's session state. */
-function snapshotError(snapshot: string | undefined): string | undefined {
+type TurnSnapshot = { header: SessionHeader; entries: SessionEntry[] };
+function parseTurnSnapshot(snapshot: string | undefined): TurnSnapshot | string {
 	if (!snapshot) return "agent turn completed without a native session snapshot";
 	if (Buffer.byteLength(snapshot, "utf8") > MAX_SNAPSHOT_BYTES) {
 		return "agent turn session snapshot exceeds the 4 MiB limit";
@@ -84,10 +85,10 @@ function snapshotError(snapshot: string | undefined): string | undefined {
 			}
 			ids.add(entry.id);
 		}
+		return { header, entries };
 	} catch {
 		return "agent turn returned an invalid native session snapshot";
 	}
-	return undefined;
 }
 
 /** Persist Pi's complete snapshot verbatim inside the fenced terminal transaction. */
@@ -156,6 +157,8 @@ async function publishTurnDelta(
 ): Promise<TurnDeltaOutcome> {
 	const sql = getDb();
 	const emitted = await sql.begin(async (tx) => {
+		const owner = await lockAgentTurnRun(tx, runId);
+		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
 		// One statement, fenced on the lease, so a run cancelled or re-claimed
 		// between the read and the write cannot have a stale worker's text
 		// published into its conversation. The sequence is kept on the
@@ -243,6 +246,8 @@ async function publishTurnToolEvents(
 	if (events.length === 0) return;
 	const sql = getDb();
 	const emitted = await sql.begin(async (tx) => {
+		const owner = await lockAgentTurnRun(tx, runId);
+		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
 		const rows = (await tx`
       SELECT action_input, organization_id
       FROM public.runs
@@ -366,296 +371,159 @@ export async function publishTurnDeltaBestEffort(
 	}
 }
 
-export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
-	let rawBody: unknown;
-	try {
-		rawBody = await c.req.json();
-	} catch {
-		return c.json({ error: "Invalid or missing JSON body" }, 400);
-	}
-	if (!Value.Check(CompleteAgentTurnRequestSchema, rawBody)) {
-		return c.json({ error: "Invalid agent turn completion body" }, 400);
-	}
-	const body = rawBody as CompleteAgentTurnRequest;
-	// Fleet-only lane, so this waves the token through and the run's own
-	// claimed_by/status read below is what enforces ownership and idempotency.
-	const denied = await authorizeRunForWorker(c, body.run_id, body.worker_id);
-	if (denied) return denied;
-
-	const sql = getDb();
-	const rows = await sql<{
-		status: string;
-		claimed_by: string | null;
-		organization_id: string;
-		action_input: Record<string, unknown> | null;
-	}>`
-    SELECT status, claimed_by, organization_id, action_input
-    FROM public.runs
-    WHERE id = ${body.run_id}
-      AND run_type = 'agent_turn'
-    LIMIT 1
-  `;
-	const run = rows[0];
-	if (!run) return c.json({ error: "Agent turn run not found" }, 404);
-	if (run.claimed_by !== body.worker_id || run.status !== "running") {
-		return c.json({
-			ok: true,
-			status: run.status === "completed" ? "completed" : "failed",
-			idempotent: true,
-		});
-	}
-
-	// `turn.shadow` is the run's own statement about what its reply is FOR.
-	// A shadow records and stops; an authoritative turn also delivers. The
-	// producer stamps it, so a run cannot change its mind here.
-	const envelope = (run.action_input ?? {}) as {
-		turn?: {
-			shadow?: unknown;
-			agent_id?: unknown;
-			conversation_id?: unknown;
-		};
-		reply?: TurnReply;
-	};
-	const isShadow = envelope.turn?.shadow === true;
-	// Delivery needs somewhere to deliver TO. A producer that stamped an
-	// authoritative turn without a reply envelope would otherwise transition
-	// the run to completed and drop the answer, leaving the client waiting
-	// forever; refusing keeps the run claimable instead.
-	if (!isShadow && !envelope.reply) {
-		return c.json(
-			{ error: "Authoritative agent turn has no reply envelope" },
-			409,
-		);
-	}
-
-	const organizationId = run.organization_id;
-	// Invalid snapshots terminalize with a visible error. Returning 400 or
-	// throwing during the insert would strand the worker's completed turn.
-	const invalidSnapshot = body.status === "completed" || body.session_jsonl !== undefined
-		? snapshotError(body.session_jsonl)
-		: undefined;
-	const failed = body.status === "failed" || invalidSnapshot !== undefined;
-	const error = invalidSnapshot ?? (typeof body.error === "string" ? stripNul(body.error).trim() : "");
-	const text = typeof body.text === "string" ? stripNul(body.text) : "";
-	// The turn's own output goes back on the row it came from, so a shadow run
-	// is diffable against the subprocess reply without a second table.
-	const result = {
-		...(run.action_input ?? {}),
-		result: {
-			text,
-			stop_reason: body.stop_reason ?? null,
-			usage: body.usage ?? null,
-			...(!invalidSnapshot && body.session_jsonl !== undefined ? { session_jsonl: body.session_jsonl } : {}),
-		},
-	};
-
-	// One fenced transition. When the turn is authoritative the snapshot and
-	// the thread_response join it inside the same transaction, so a client can
-	// never observe a completed run whose answer was not persisted.
-	const transitioned = await sql.begin(async (tx) => {
-		const terminal = await tx`
-      UPDATE public.runs
-      SET status = ${failed ? "failed" : "completed"},
-          completed_at = current_timestamp,
-          error_message = ${failed ? error || "agent turn failed" : null},
-          output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
-          exit_reason = ${invalidSnapshot ? "error_message" : body.exit_reason ?? (failed ? "error_message" : "ok")},
-          action_input = ${sql.json(result)}
-      WHERE id = ${body.run_id}
-        ${runLeaseFence(tx, body.worker_id)}
-      RETURNING id, run_metadata->'steer' AS steer
-    `;
-		if (terminal.length === 0) return false;
-		// A follow-up parked after the worker's last heartbeat took its batch
-		// never reached the model. It is not lost silently: counted and named
-		// here, so the window shows up in the metrics before this lane answers
-		// conversations on its own, when the consumer must hand such a message
-		// back to the queue as a turn of its own.
-		const leftover = (terminal[0] as { steer?: unknown } | undefined)?.steer;
-		if (Array.isArray(leftover) && leftover.length > 0) {
-			for (let i = 0; i < leftover.length; i++) {
-				incrementCounter("lobu_turn_steer_unconsumed_total");
-			}
-			logger.warn(
-				{ runId: body.run_id, count: leftover.length },
-				"agent turn completed with steer messages the model never saw",
-			);
-		}
-		if (isShadow) return true;
-
-		const reply = envelope.reply as TurnReply;
-		const agentId = String(envelope.turn?.agent_id ?? "");
-		const conversationId = String(envelope.turn?.conversation_id ?? "");
-		if (!failed) {
-			await persistTurnSnapshot(tx, {
-				organizationId,
-				agentId,
-				conversationId,
-				runId: body.run_id,
-				sessionJsonl: body.session_jsonl!,
-			});
-		}
-		await insertThreadResponseRow(
-			tx,
-			{
-				messageId: reply.message_id,
-				channelId: reply.channel_id,
-				conversationId,
-				userId: reply.user_id,
-				teamId: reply.team_id ?? "api",
-				platform: reply.platform,
-				organizationId,
-				platformMetadata: reply.platform_metadata,
-				...(failed
-					? { error: error || "agent turn failed" }
-					: {
-							finalText: text,
-							// The turn already posted its answer into this
-							// conversation with `send_message`/`present_event`, so
-							// `finalText` is a report about a message the user has
-							// read and delivering it too is the double-post. The
-							// renderers' existing suppression acts on this flag
-							// (`chat-response-bridge`); it is set only on the
-							// completion row, never on an error row, because an
-							// error is not a duplicate of the reply.
-							...(body.replied_in_band === true
-								? { repliedInBand: true }
-								: {}),
-						}),
-				processedMessageIds: [reply.message_id],
-				timestamp: Date.now(),
-			},
-			organizationId,
-		);
-		return true;
-	});
-	if (!transitioned) {
-		return c.json({
-			ok: true,
-			status: failed ? "failed" : "completed",
-			idempotent: true,
-		});
-	}
-	// Outside the transaction, as device-chat does: the listener must not be
-	// woken for a row a rollback would take back.
-	if (!isShadow) await notifyThreadResponse();
-	return c.json({ ok: true, status: failed ? "failed" : "completed" });
+/** Validate native identities only; Pi owns replay and compaction. */
+function inputReceiptError(
+  run: NativeTurnRun, body: CompleteAgentTurnRequest, snapshot: TurnSnapshot,
+  offered: Awaited<ReturnType<typeof pendingAgentTurnInputs>>,
+): string | undefined {
+  const receipts = body.consumed_inputs;
+  if (!receipts) return "agent turn completed without consumed input receipts";
+  if (!receipts.length) return undefined;
+  const base = run.run_metadata?.native_session_base;
+  if (base === undefined || (base && (base.version !== CURRENT_SESSION_VERSION || base.session_id !== snapshot.header.id))) {
+    return "agent turn input receipts have no matching native session base";
+  }
+  const entries = snapshot.entries;
+  const boundary = base?.final_stored_entry_id ? entries.findIndex((entry) => entry.id === base.final_stored_entry_id) : -1;
+  if (base?.final_stored_entry_id && boundary < 0) return "agent turn lost its native session base entry";
+  // Only entries on the final native branch count. An abandoned branch may
+  // contain the same text without having processed this execution's input.
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const branch = new Set<string>();
+  let leaf = entries.at(-1);
+  while (leaf) { branch.add(leaf.id); leaf = leaf.parentId ? byId.get(leaf.parentId) : undefined; }
+  let previous = entries.findIndex((entry, index) => index > boundary && branch.has(entry.id)
+    && entry.type === 'message' && entry.message.role === 'user'
+    && transcriptText(entry.message.content) === run.action_input?.turn?.message_text);
+  if (previous < 0) return "agent turn input receipts precede its initial user entry";
+  const usedRuns = new Set<number>();
+  for (const [index, receipt] of receipts.entries()) {
+    const input = offered[index];
+    const position = entries.findIndex((entry) => entry.id === receipt.session_entry_id);
+    const entry = entries[position];
+    if (!input || receipt.run_id !== input.run_id || usedRuns.has(receipt.run_id)
+      || position <= previous || !branch.has(receipt.session_entry_id) || entry.type !== 'message'
+      || entry.message.role !== 'user' || transcriptText(entry.message.content) !== input.text
+      || (Array.isArray(entry.message.content) && entry.message.content.some((part) => part.type !== 'text'))) {
+      return "agent turn returned invalid consumed input receipts";
+    }
+    usedRuns.add(receipt.run_id);
+    previous = position;
+  }
+  return undefined;
 }
 
-/**
- * Reap stale `agent_turn` runs, delivering the failure where a client is
- * waiting on one.
- *
- * The turn lane shares the connector lanes' claim and heartbeat contract, so
- * the staleness predicate is theirs (`buildStaleRunWhereSql`): a never-claimed
- * `pending` row past the threshold, or a `claimed`/`running` row whose
- * heartbeat lapsed. What differs is what a timeout MEANS. A connector run just
- * ends; an authoritative turn has a client blocked on its reply, and the
- * completion route that would have answered it never fires for a worker that
- * died. Without this the client waits forever with no error ever surfacing.
- *
- * Shape and reason follow `sweepStaleDeviceChatRuns`: candidates are read
- * once, then each is terminalized in its own transaction by an UPDATE that
- * re-asserts the full predicate, so a worker whose heartbeat or completion
- * wins after the candidate read makes this a no-op instead of an overwrite.
- * The `thread_response` joins the same transaction, and the listener is woken
- * only after commit.
- *
- * Delivery follows the run's own envelope, exactly as the completion route
- * does: a shadow turn (`turn.shadow === true`) delivers nothing, and so does a
- * run with no `reply` address — there is nowhere to deliver to, and the row
- * still terminalizes so the lane cannot wedge.
- */
-export async function sweepStaleAgentTurnRuns(
-	thresholdSeconds: number,
-): Promise<{ reaped: number; delivered: number }> {
-	const sql = getDb();
-	const staleWhereSql = buildStaleRunWhereSql({
-		runTypes: ["agent_turn"],
-		heartbeatSemantics: "any-heartbeat",
-		heartbeatStaleInterval: `${thresholdSeconds} seconds`,
-		coarseStaleInterval: `${thresholdSeconds} seconds`,
-		includePending: true,
-	});
-	const candidates = await sql.unsafe<{
-		id: number | string;
-		status: "pending" | "claimed" | "running";
-		organization_id: string;
-		action_input: {
-			turn?: { shadow?: unknown; conversation_id?: unknown };
-			reply?: TurnReply;
-		} | null;
-	}>(
-		`SELECT id, status, organization_id, action_input
-     FROM public.runs
-     WHERE ${staleWhereSql}
-     ORDER BY id
-     LIMIT 100`,
-	);
+export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
+  let rawBody: unknown;
+  try { rawBody = await c.req.json(); }
+  catch { return c.json({ error: "Invalid or missing JSON body" }, 400); }
+  if (!Value.Check(CompleteAgentTurnRequestSchema, rawBody)) {
+    return c.json({ error: "Invalid agent turn completion body" }, 400);
+  }
+  const body = rawBody as CompleteAgentTurnRequest;
+  const denied = await authorizeRunForWorker(c, body.run_id, body.worker_id);
+  if (denied) return denied;
+  const snapshot = body.status === 'completed' || body.session_jsonl !== undefined
+    ? parseTurnSnapshot(body.session_jsonl) : undefined;
+  const text = typeof body.text === 'string' ? stripNul(body.text) : '';
+  const sql = getDb();
+  const result = await sql.begin(async (tx) => {
+    const run = await lockAgentTurnRun(tx, body.run_id, true);
+    if (!run) return { error: 'Agent turn run not found', code: 404 as const };
+    if (run.claimed_by !== body.worker_id) return { error: 'Run is not owned by this worker', code: 409 as const };
+    if (!['claimed', 'running', 'pending'].includes(run.status)) {
+      return { status: run.status === 'completed' ? 'completed' : run.status === 'cancelled' ? 'cancelled' : 'failed', idempotent: true };
+    }
+    if (run.status !== 'running' && !(run.status === 'claimed' && run.run_metadata?.cancel_requested_at)) {
+      return { error: 'Run is not in progress', code: 409 as const };
+    }
+    const envelope = run.action_input ?? {};
+    const isShadow = envelope.turn?.shadow === true;
+    if (!isShadow && !envelope.reply) return { error: 'Authoritative agent turn has no reply envelope', code: 409 as const };
+    const cancelling = !!run.run_metadata?.cancel_requested_at;
+    const offered = !cancelling && body.status === 'completed' ? await pendingAgentTurnInputs(tx, run) : [];
+    const invalid = typeof snapshot === 'string' ? snapshot
+      : !cancelling && body.status === 'completed' && snapshot ? inputReceiptError(run, body, snapshot, offered) : undefined;
+    const error = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
+    const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
+    const consumed = status === 'completed' ? body.consumed_inputs! : [];
+    await tx`UPDATE runs SET status = ${status}, completed_at = now(),
+      outcome = ${classifyRunOutcome({ status, errorMessage: error })},
+      error_message = ${status === 'completed' ? null : error || 'agent turn failed'},
+      output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
+      exit_reason = ${cancelling ? 'cancelled' : invalid ? 'error_message' : body.exit_reason ?? (status === 'completed' ? 'ok' : 'error_message')},
+      action_input = ${tx.json({ ...envelope, result: {
+        text, stop_reason: body.stop_reason ?? null, usage: body.usage ?? null,
+        ...(snapshot && typeof snapshot !== 'string' ? { session_jsonl: body.session_jsonl } : {}),
+      } })}
+      WHERE id = ${run.id}`;
+    // Offered rows are newer than the owner and ordered by ID. The conversation
+    // lock prevents another admission/cancel/claim from racing these completions.
+    for (const receipt of consumed) {
+      await tx`UPDATE runs SET status = 'completed', completed_at = now(), outcome = 'scoreable', exit_reason = 'ok',
+        output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
+        run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({
+          consumed_by_run_id: Number(run.id), session_entry_id: receipt.session_entry_id,
+        })}::jsonb WHERE id = ${receipt.run_id} AND status = 'pending'`;
+    }
+    await releaseNextAgentTurn(tx, run);
+    if (isShadow) return { status };
+    const reply = envelope.reply!;
+    const conversationId = envelope.turn!.conversation_id;
+    if (status === 'completed') await persistTurnSnapshot(tx, {
+      organizationId: run.organization_id, agentId: envelope.turn!.agent_id, conversationId,
+      runId: body.run_id, sessionJsonl: body.session_jsonl!,
+    });
+    await insertAgentTurnResponse(tx, run, {
+      ...(status === 'completed' ? { finalText: text, ...(body.replied_in_band ? { repliedInBand: true } : {}) }
+        : { error: error || 'agent turn failed' }),
+      processedMessageIds: [reply.message_id, ...offered.slice(0, consumed.length).map((input) => input.message_id)],
+    });
+    return { status, notify: true };
+  });
+  if ('error' in result) return c.json({ error: result.error }, result.code);
+  if (result.notify) await notifyThreadResponse();
+  return c.json({ ok: true, status: result.status, ...(result.idempotent ? { idempotent: true } : {}) });
+}
 
-	let reaped = 0;
-	let delivered = 0;
-	for (const candidate of candidates) {
-		const runId = Number(candidate.id);
-		const neverClaimed = candidate.status === "pending";
-		const workerError = neverClaimed
-			? "worker_claim_timeout"
-			: "worker_heartbeat_lost";
-		// The catalog owns the prose, as turn-liveness does for the subprocess
-		// lane: a run nobody claimed never started; a lapsed heartbeat is a
-		// worker that died mid-turn.
-		const code = neverClaimed
-			? AgentErrorCode.WORKER_STARTUP_FAILED
-			: AgentErrorCode.WORKER_DIED;
-		const envelope = candidate.action_input ?? {};
-		const reply =
-			envelope.turn?.shadow === true ? undefined : envelope.reply;
-		const outcome = await sql.begin(async (tx) => {
-			const rows = await tx.unsafe<{ id: number | string }>(
-				`UPDATE public.runs
-         SET status = 'timeout',
-             outcome = $2,
-             completed_at = current_timestamp,
-             error_message = $3
-         WHERE id = $1
-           AND status = $4
-           AND ${staleWhereSql}
-         RETURNING id`,
-				[
-					runId,
-					classifyRunOutcome({ status: "timeout" }),
-					workerError,
-					candidate.status,
-				],
-			);
-			if (rows.length === 0) return "won_by_worker";
-			if (!reply) return "reaped";
-			await insertThreadResponseRow(
-				tx,
-				{
-					messageId: reply.message_id,
-					channelId: reply.channel_id,
-					conversationId: String(envelope.turn?.conversation_id ?? ""),
-					userId: reply.user_id,
-					teamId: reply.team_id ?? "api",
-					platform: reply.platform,
-					organizationId: candidate.organization_id,
-					platformMetadata: reply.platform_metadata,
-					error: AGENT_ERRORS[code].message,
-					errorCode: code,
-					processedMessageIds: [reply.message_id],
-					timestamp: Date.now(),
-				},
-				candidate.organization_id,
-			);
-			return "delivered";
-		});
-		if (outcome === "won_by_worker") continue;
-		reaped += 1;
-		if (outcome === "delivered") delivered += 1;
-	}
-	// Outside the transaction, as device-chat does: the listener must not be
-	// woken for a row a rollback would take back.
-	if (delivered > 0) await notifyThreadResponse();
-	return { reaped, delivered };
+/** Reap only ready startup work or expired owners; blocked followers have no startup deadline. */
+export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number }> {
+  const sql = getDb();
+  const stale = (tx: DbClient) => tx`r.run_type = 'agent_turn' AND (
+    (r.status = 'pending' AND r.approval_status <> 'pending' AND ${agentTurnClaimEligible(tx)}
+      AND r.run_at < now() - ${thresholdSeconds} * interval '1 second')
+    OR (r.status IN ('claimed', 'running') AND CASE
+      WHEN r.run_metadata->>'cancel_requested_at' IS NOT NULL
+      THEN (r.run_metadata->>'cancel_requested_at')::timestamptz < now() - ${thresholdSeconds} * interval '1 second'
+      ELSE COALESCE(r.last_heartbeat_at, r.claimed_at, r.created_at) < now() - ${thresholdSeconds} * interval '1 second'
+    END)
+  )`;
+  const candidates = await sql<{ id: number }>`SELECT r.id FROM runs r WHERE ${stale(sql)} ORDER BY r.id LIMIT 100`;
+  let reaped = 0;
+  let delivered = 0;
+  for (const candidate of candidates) {
+    const result = await sql.begin(async (tx) => {
+      const run = await lockAgentTurnRun(tx, Number(candidate.id), true);
+      if (!run) return null;
+      const cancelled = !!run.run_metadata?.cancel_requested_at;
+      const neverClaimed = run.status === 'pending';
+      const code = neverClaimed ? AgentErrorCode.WORKER_STARTUP_FAILED : AgentErrorCode.WORKER_DIED;
+      const status = cancelled ? 'cancelled' : 'timeout';
+      const rows = await tx`UPDATE runs r SET status = ${status}, completed_at = now(),
+        outcome = ${classifyRunOutcome({ status })}, exit_reason = ${cancelled ? 'cancelled' : 'timeout'},
+        error_message = ${cancelled ? 'agent turn cancelled' : neverClaimed ? 'worker_claim_timeout' : 'worker_heartbeat_lost'}
+        WHERE r.id = ${run.id} AND ${stale(tx)} RETURNING r.id`;
+      if (!rows.length) return null;
+      await releaseNextAgentTurn(tx, run);
+      return insertAgentTurnResponse(tx, run, {
+        error: cancelled ? 'agent turn cancelled' : AGENT_ERRORS[code].message,
+        ...(!cancelled ? { errorCode: code } : {}),
+      });
+    });
+    if (result === null) continue;
+    reaped++;
+    if (result) delivered++;
+  }
+  if (delivered) await notifyThreadResponse();
+  return { reaped, delivered };
 }

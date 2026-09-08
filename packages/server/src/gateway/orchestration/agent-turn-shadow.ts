@@ -38,7 +38,6 @@ import {
   generateWorkerToken,
   getErrorMessage,
   isExplicitCancelMessage,
-  isSteerableHumanMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
   resolveMemoryFlushConfig,
@@ -52,6 +51,7 @@ import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol"
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
+import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
@@ -62,6 +62,7 @@ import {
   type AgentTurnArtifactReader,
   resolveTurnAttachments,
 } from "./agent-turn-attachments.js";
+import { notifyThreadResponse } from "./turn-liveness.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-shadow");
@@ -582,76 +583,51 @@ async function resolveTurnTools(
   };
 }
 
-/**
- * Consume a control or steer the matching active native turn. The incoming
- * chat-message run owns the cancellation receipt, so replay cannot cancel a
- * later turn. Database failures propagate to the queue instead of admitting
- * the control as model input. Worker heartbeat already stops cancelled runs.
- */
-export async function handleActiveAgentTurnMessage(data: MessagePayload): Promise<boolean> {
-  if (!data.agentId || !data.organizationId || !data.conversationId || !data.userId) return false;
-  if (!shadowSelects(data.agentId)) return false;
-  const cancelling = isExplicitCancelMessage(data);
-  if (!cancelling && (!data.messageText?.trim() || !isSteerableHumanMessage(data))) return false;
-
+/** The admitted control owns its receipt; replay must not stop a later execution. */
+export async function cancelAgentTurn(data: MessagePayload): Promise<boolean> {
+  if (!data.agentId || !data.organizationId || !data.conversationId || !data.userId
+    || !shadowSelects(data.agentId) || !isExplicitCancelMessage(data)) return false;
+  if (typeof data.runId !== "number" || !Number.isSafeInteger(data.runId) || data.runId <= 0) {
+    throw new Error("Native cancellation requires the admitted message run ID");
+  }
   const sql = getDb();
-  const target = sql`
-    SELECT id FROM runs
-    WHERE organization_id = ${data.organizationId}
-      AND run_type = 'agent_turn'
+  // Bind the control to the current target before waiting. A completed owner
+  // must not redirect this cancellation onto its successor.
+  const [target] = await sql<{ id: number }>`
+    SELECT id FROM runs WHERE organization_id = ${data.organizationId} AND run_type = 'agent_turn'
       AND status IN ('pending', 'claimed', 'running')
       AND action_input->'turn'->>'agent_id' = ${data.agentId}
       AND action_input->'turn'->>'conversation_id' = ${data.conversationId}
       AND action_input->'reply'->>'user_id' = ${data.userId}
-    ORDER BY (status = 'pending'), id
-    LIMIT 1
+      AND parent_run_id < ${data.runId}
+    ORDER BY (status = 'pending'), id LIMIT 1
   `;
-  let runId: number | undefined;
-  if (cancelling) {
-    if (typeof data.runId !== "number" || !Number.isSafeInteger(data.runId) || data.runId <= 0) {
-      throw new Error("Native cancellation requires the admitted message run ID");
+  const delivered = await sql.begin(async (tx) => {
+    await lockAgentTurnConversation(tx, data.organizationId!, data.agentId!, data.conversationId);
+    const [source] = await tx<{ run_metadata: { native_cancel_handled?: boolean } | null }>`
+      SELECT run_metadata FROM runs WHERE id = ${data.runId!} AND organization_id = ${data.organizationId!}
+        AND run_type = 'chat_message' AND queue_name = 'messages'
+        AND action_input->>'messageId' = ${data.messageId} FOR UPDATE
+    `;
+    if (!source) throw new Error("Native cancellation has no matching admitted message");
+    if (source.run_metadata?.native_cancel_handled) return false;
+    await tx`UPDATE runs SET run_metadata = jsonb_set(COALESCE(run_metadata, '{}'::jsonb),
+      '{native_cancel_handled}', 'true'::jsonb) WHERE id = ${data.runId!}`;
+    if (!target) return false;
+    const run = await lockAgentTurnRun(tx, Number(target.id), true);
+    if (!run || !['pending', 'claimed', 'running'].includes(run.status)) return false;
+    if (run.status === 'pending') {
+      await tx`UPDATE runs SET status = 'cancelled', completed_at = now(), exit_reason = 'cancelled' WHERE id = ${run.id}`;
+      await releaseNextAgentTurn(tx, run);
+      return insertAgentTurnResponse(tx, run, { error: 'agent turn cancelled' });
+    } else {
+      await tx`UPDATE runs SET run_metadata = jsonb_set(COALESCE(run_metadata, '{}'::jsonb),
+        '{cancel_requested_at}', COALESCE(run_metadata->'cancel_requested_at', to_jsonb(now()))) WHERE id = ${run.id}`;
     }
-    const source = sql`
-      id = ${data.runId} AND organization_id = ${data.organizationId}
-      AND run_type = 'chat_message' AND action_input->>'messageId' = ${data.messageId}
-    `;
-    const [result] = await sql<{ source_exists: boolean; run_id: number | null }>`
-      WITH receipt AS (
-        UPDATE runs
-        SET run_metadata = jsonb_set(COALESCE(run_metadata, '{}'::jsonb), '{native_cancel_handled}', 'true'::jsonb)
-        WHERE ${source} AND run_metadata->>'native_cancel_handled' IS DISTINCT FROM 'true'
-        RETURNING id
-      ), cancelled AS (
-        UPDATE runs SET status = 'cancelled', completed_at = now(), exit_reason = 'cancelled'
-        WHERE id = (${target}) AND status IN ('pending', 'claimed', 'running')
-          AND EXISTS (SELECT 1 FROM receipt)
-        RETURNING id
-      )
-      SELECT EXISTS (SELECT 1 FROM runs WHERE ${source}) AS source_exists,
-        (SELECT id FROM cancelled) AS run_id
-    `;
-    if (!result?.source_exists) throw new Error("Native cancellation has no matching admitted message");
-    runId = result.run_id ?? undefined;
-  } else {
-    const [parked] = await sql<{ id: number }>`
-      UPDATE runs
-      SET run_metadata = jsonb_set(
-        COALESCE(run_metadata, '{}'::jsonb), '{steer}',
-        COALESCE(run_metadata->'steer', '[]'::jsonb) || ${sql.json([{ message_id: data.messageId, text: data.messageText }])}::jsonb,
-        true
-      )
-      WHERE id = (${target}) AND status IN ('pending', 'claimed', 'running')
-      RETURNING id
-    `;
-    runId = parked?.id;
-  }
-  if (runId !== undefined) {
-    logger.info(
-      { agentId: data.agentId, conversationId: data.conversationId, messageId: data.messageId, runId },
-      cancelling ? "Explicit cancel stopped the native agent turn" : "Message steered into the active native agent turn"
-    );
-  }
-  return cancelling || runId !== undefined;
+    return false;
+  });
+  if (delivered) await notifyThreadResponse();
+  return true;
 }
 
 /**
@@ -663,7 +639,7 @@ export async function enqueueAgentTurnShadow(
   deps: AgentTurnShadowDeps
 ): Promise<void> {
   try {
-    if (!data.agentId || !shadowSelects(data.agentId)) return;
+    if (!data.agentId || !shadowSelects(data.agentId) || isExplicitCancelMessage(data)) return;
     if (!data.organizationId) return;
 
     // The turn's attachments, resolved host-side out of the gateway's own
@@ -921,22 +897,21 @@ export async function enqueueAgentTurnShadow(
       platform_metadata: data.platformMetadata,
     };
 
-    const rows = await sql<{ id: number }>`
-      INSERT INTO runs (
-        id, organization_id, run_type, status,
-        approval_status, action_input, created_at, parent_run_id
-      ) SELECT
-        ${runId}, ${data.organizationId}, 'agent_turn', 'pending',
-        'auto', ${sql.json({ turn, credential: provider.credential, reply })},
-        current_timestamp, source.id
-      FROM runs source
-      WHERE source.id = ${data.runId} AND source.organization_id = ${data.organizationId}
-        AND source.run_type = 'chat_message'
-        AND source.queue_name = 'messages'
-        AND source.action_input->>'messageId' = ${data.messageId}
-      RETURNING id
-    `;
-    if (!rows.length) throw new Error("Agent turn shadow has no matching admitted message");
+    const rows = await sql.begin(async (tx) => {
+      await lockAgentTurnConversation(tx, data.organizationId!, data.agentId!, data.conversationId);
+      const [source] = await tx`SELECT id FROM runs
+        WHERE id = ${data.runId!} AND organization_id = ${data.organizationId!}
+          AND run_type = 'chat_message' AND queue_name = 'messages'
+          AND action_input->>'messageId' = ${data.messageId} FOR UPDATE`;
+      if (!source) throw new Error("Agent turn shadow has no matching admitted message");
+      const existing = await tx<{ id: number }>`SELECT id FROM runs WHERE parent_run_id = ${data.runId!}
+        AND organization_id = ${data.organizationId!} AND run_type = 'agent_turn' LIMIT 1`;
+      if (existing.length) return existing;
+      return tx<{ id: number }>`INSERT INTO runs (
+        id, organization_id, run_type, status, approval_status, action_input, created_at, run_at, parent_run_id
+      ) VALUES (${runId}, ${data.organizationId!}, 'agent_turn', 'pending', 'auto',
+        ${tx.json({ turn, credential: provider.credential, reply })}, now(), now(), ${data.runId!}) RETURNING id`;
+    });
 
     logger.info(
       {

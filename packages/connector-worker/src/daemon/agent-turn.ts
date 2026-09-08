@@ -9,6 +9,7 @@
  */
 
 import {
+  AGENT_TURN_INPUT_MAX,
   type AgentTurnPollPayload,
   type AgentTurnToolEvent,
   type PollResponse,
@@ -74,14 +75,14 @@ export async function executeAgentTurnRun(
   if (!runId) return { itemsCollected: 0, error: 'agent turn run missing its run id' };
 
   const fail = async (error: string) => {
-    await client.completeAgentTurn({
+    const receipt = await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
       status: 'failed',
       error,
       exit_reason: 'error_message',
     });
-    return { itemsCollected: 0, error };
+    return { itemsCollected: 0, ...(receipt.status === 'completed' ? {} : { error }) };
   };
 
   // The run is already claimed, so a rejected envelope must be REPORTED, not
@@ -226,15 +227,17 @@ export async function executeAgentTurnRun(
   }, cfg.heartbeatIntervalMs);
   // The heartbeat's answer is the gateway's only way to reach a turn in
   // flight. `continue: false` means the human cancelled: the guest is torn
-  // down through the executor's abort hook so the model stops mid-turn, and
-  // the run — already `cancelled` on the server — is left as the server wrote
-  // it, since a completion would be fenced out anyway.
-  // Messages the gateway parked on this run mid-turn, in arrival order, until
-  // the guest asks for them (`takeSteering`) and hands them to pi.
+  // down through the executor's abort hook. Completion after cleanup reports
+  // that the owner stopped, allowing the gateway to release the next input.
+  // Pending turns the gateway offers as mid-turn inputs, in arrival order,
+  // until the guest asks for them (`takeSteering`) and hands them to pi.
   const steering: AgentTurnSteer[] = [];
+  const seenInputs = new Set<number>();
   const queueSteering = (batch: HeartbeatResponse['steer']) => {
     for (const message of batch ?? []) {
-      steering.push({ messageId: message.message_id, text: message.text });
+      if (seenInputs.has(message.run_id) || seenInputs.size >= AGENT_TURN_INPUT_MAX) continue;
+      seenInputs.add(message.run_id);
+      steering.push({ runId: message.run_id, messageId: message.message_id, text: message.text });
     }
   };
   const cancel = new AbortController();
@@ -460,7 +463,7 @@ export async function executeAgentTurnRun(
     // rather than as a jump at completion. Bounded so a turn cannot hang on a
     // queue the server keeps refusing.
     await drainDeltas();
-    await client.completeAgentTurn({
+    const receipt = await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
       status: 'completed',
@@ -468,9 +471,13 @@ export async function executeAgentTurnRun(
       stop_reason: result.turn.stopReason,
       usage: result.turn.usage,
       session_jsonl: result.turn.sessionJsonl,
+      consumed_inputs: result.turn.consumedInputs.map((input) => ({
+        run_id: input.runId, session_entry_id: input.sessionEntryId,
+      })),
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
       exit_reason: 'ok',
     });
+    if (receipt.status !== 'completed') return { itemsCollected: 0, error: `agent turn ${receipt.status}` };
     log.info(
       `[agent-turn] run ${runId} completed after ${deltaSequence} delta batches and ${toolCalls} tool calls`
     );

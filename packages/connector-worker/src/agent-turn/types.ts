@@ -258,6 +258,7 @@ export interface RuntimeExecResult {
 
 /** A message that arrived mid-turn and is for the model now: pi's steering. */
 export interface AgentTurnSteer {
+  runId: number;
   messageId: string;
   text: string;
 }
@@ -284,6 +285,7 @@ export interface AgentTurnOutput {
   usage: { input: number; output: number } | null;
   /** Pi's native session, including message IDs, summaries and custom state. */
   sessionJsonl: string;
+  consumedInputs: Array<{ runId: number; sessionEntryId: string }>;
   /**
    * The turn posted its answer INTO the conversation it is replying to, with
    * `send_message`/`present_event`. `text` is then a report about a message the

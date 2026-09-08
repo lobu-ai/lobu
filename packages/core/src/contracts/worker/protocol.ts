@@ -806,6 +806,9 @@ export const CompleteDeviceChatResponseSchema = Type.Object({
  * run reports it and nothing else happens; when the lane becomes authoritative
  * the same body carries the reply.
  */
+/** Per-execution input bound shared by repeatable offers and committed receipts. */
+export const AGENT_TURN_INPUT_MAX = 32;
+
 export const CompleteAgentTurnRequestSchema = Type.Object({
   run_id: Type.Integer(),
   worker_id: Type.String(),
@@ -820,6 +823,16 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
   ),
   /** Required for success; may be absent when the guest failed before session initialization. */
   session_jsonl: Type.Optional(Type.String()),
+  /** Required for success; identifies new native user entries committed with this turn. */
+  consumed_inputs: Type.Optional(
+    Type.Array(
+      Type.Object({
+        run_id: Type.Integer({ minimum: 1 }),
+        session_entry_id: Type.String({ minLength: 1 }),
+      }),
+      { maxItems: AGENT_TURN_INPUT_MAX }
+    )
+  ),
   /**
    * The turn already posted its answer INTO the conversation it is replying to,
    * through the `send_message`/`present_event` conversation tool. The user has
@@ -838,7 +851,11 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
 
 export const CompleteAgentTurnResponseSchema = Type.Object({
   ok: Type.Boolean(),
-  status: Type.Union([Type.Literal("completed"), Type.Literal("failed")]),
+  status: Type.Union([
+    Type.Literal("completed"),
+    Type.Literal("failed"),
+    Type.Literal("cancelled"),
+  ]),
   idempotent: Type.Optional(Type.Boolean()),
 });
 
@@ -1076,9 +1093,8 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  *
  * `steer` carries the messages that arrived for this conversation while the
  * turn was running and are meant for the model now rather than for the next
- * turn — pi's steering. The gateway parks them on the run and hands them over
- * on the next beat, in arrival order; absent on every beat that has none,
- * which is nearly all of them.
+ * turn — pi's steering. Pending native runs are offered repeatedly, in order.
+ * Only completion with native transcript receipts retires those inputs.
  *
  * `turn_delta_ack` is the honest answer to "did that batch land". The worker
  * does not retire the text it sent until the sequence comes back acknowledged,
@@ -1097,9 +1113,11 @@ export const HeartbeatResponseSchema = Type.Object({
   steer: Type.Optional(
     Type.Array(
       Type.Object({
+        run_id: Type.Integer({ minimum: 1 }),
         message_id: Type.String(),
         text: Type.String(),
-      })
+      }),
+      { maxItems: AGENT_TURN_INPUT_MAX }
     )
   ),
   turn_delta_ack: Type.Optional(

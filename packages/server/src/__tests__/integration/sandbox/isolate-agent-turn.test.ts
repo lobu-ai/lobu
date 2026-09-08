@@ -962,7 +962,7 @@ describe("agent turn on the isolate lane", () => {
 		let asked = 0;
 		const run = await runTurn(toolJob(), ["127.0.0.1"], {
 			// The first ask — after the tool result — finds the follow-up; later asks find nothing.
-			takeSteering: () => (asked++ === 0 ? [{ messageId: "m-2", text: "also check companies" }] : []),
+			takeSteering: () => (asked++ === 0 ? [{ runId: 2, messageId: "m-2", text: "also check companies" }] : []),
 		});
 		expect(asked).toBeGreaterThan(0);
 		// The model saw the follow-up as a user message in a later request, after
@@ -976,6 +976,12 @@ describe("agent turn on the isolate lane", () => {
 			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
 		);
 		expect(steered).toBeDefined();
+		const receipts = (run.output as { consumedInputs: Array<{ runId: number; sessionEntryId: string }>; sessionJsonl: string });
+		expect(receipts.consumedInputs).toHaveLength(1);
+		expect(receipts.consumedInputs[0].runId).toBe(2);
+		const entry = receipts.sessionJsonl.trim().split('\n').map((line) => JSON.parse(line))
+			.find((entry) => entry.id === receipts.consumedInputs[0].sessionEntryId);
+		expect(entry.message).toEqual(steered);
 	}, 120_000);
 
 	it("runs bash in the remote runtime through the host when the conversation is sandbox-pinned", async () => {
@@ -1084,10 +1090,17 @@ describe("agent turn on the isolate lane", () => {
 				}, 150);
 			} else void writeAnthropicStream(res, ["main answer"]);
 		};
-		const run = await runTurn(turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		let offered = false;
+		const run = await runTurn(turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }), ['127.0.0.1'], {
+			takeSteering: () => { if (offered) return []; offered = true; return [{ runId: 7, messageId: 'compacted-input', text: 'remember this input' }]; },
+		});
 		expect(summaryFinished).toBe(true);
 		expect(sessionEntries(run.output).at(-1)).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
-		expect(run.output.text).toBe("main answer");
+		expect(run.output.text).toBe("main answermain answer");
+		expect(run.output.consumedInputs).toHaveLength(1);
+		expect(run.output.consumedInputs[0].runId).toBe(7);
+		expect(sessionEntries(run.output).find((entry) => entry.id === run.output.consumedInputs[0].sessionEntryId))
+			.toMatchObject({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'remember this input' }] } });
 	}, 120_000);
 
 	it("resumes native compaction and custom entries without changing their IDs", async () => {

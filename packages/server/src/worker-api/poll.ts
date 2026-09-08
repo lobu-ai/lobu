@@ -36,7 +36,7 @@ import {
   transcriptText,
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
-import { type DbClient, getDb, parsePgTextArray, pgTextArray } from '../db/client';
+import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
 import { withDbRetry } from '../db/with-retry';
@@ -82,6 +82,7 @@ import {
   trustedChromeActionInput,
 } from './browser-action-context';
 import { runLeaseFence } from '../runs/run-lease';
+import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lockAgentTurnRun, nativeSessionBase, releaseNextAgentTurn } from '../runs/agent-turn-inputs';
 
 // A failure at the DISPATCH stage means the agent never ran: the run is not
 // evidence about the agent regardless of the message, so no message
@@ -90,20 +91,6 @@ const DISPATCH_FAILURE_OUTCOME: RunOutcome = 'infra_error';
 const DEVICE_CHAT_HISTORY_TAIL_CHARS = 1024 * 1024;
 const DEVICE_CHAT_DISPATCH_ERROR =
   'The selected device could not start this message.';
-
-/** Both candidate selection and the locked recheck use the same conversation fence. */
-function agentTurnClaimEligible(sql: DbClient) {
-  return sql`NOT EXISTS (
-    SELECT 1 FROM runs sibling
-    WHERE sibling.run_type = 'agent_turn'
-      AND sibling.status IN ('pending', 'claimed', 'running')
-      AND sibling.organization_id = r.organization_id
-      AND sibling.action_input->'turn'->>'agent_id' = r.action_input->'turn'->>'agent_id'
-      AND sibling.action_input->'turn'->>'conversation_id' = r.action_input->'turn'->>'conversation_id'
-      AND sibling.id <> r.id
-      AND (sibling.status <> 'pending' OR sibling.id < r.id)
-  )`;
-}
 
 const DUE_FEEDS_LOCK_KEY = 71001;
 
@@ -119,7 +106,9 @@ export async function failClaimedWorkerRun(params: {
   errorMessage: string;
 }): Promise<boolean> {
   const sql = getDb();
-  return sql.begin(async (tx) => {
+  let delivered = false;
+  const transitioned = await sql.begin(async (tx) => {
+    const nativeRun = await lockAgentTurnRun(tx, params.runId, true);
     const rows = await tx<{
       organization_id: string;
       run_type: string;
@@ -127,8 +116,8 @@ export async function failClaimedWorkerRun(params: {
       action_key: string | null;
     }>`
       UPDATE runs
-      SET status = 'failed',
-          outcome = ${DISPATCH_FAILURE_OUTCOME},
+      SET status = ${nativeRun?.run_metadata?.cancel_requested_at ? 'cancelled' : 'failed'},
+          outcome = ${nativeRun?.run_metadata?.cancel_requested_at ? null : DISPATCH_FAILURE_OUTCOME},
           completed_at = current_timestamp,
           error_message = ${params.errorMessage}
       WHERE id = ${params.runId}
@@ -137,6 +126,12 @@ export async function failClaimedWorkerRun(params: {
     `;
     if (rows.length === 0) return false;
 
+    if (nativeRun) {
+      await releaseNextAgentTurn(tx, nativeRun);
+      delivered = await insertAgentTurnResponse(tx, nativeRun, {
+        error: nativeRun.run_metadata?.cancel_requested_at ? 'agent turn cancelled' : params.errorMessage,
+      });
+    }
     const row = rows[0];
     if (row.run_type === 'action' && row.approval_status === 'approved') {
       const actionKey = row.action_key ?? 'Action';
@@ -158,6 +153,8 @@ export async function failClaimedWorkerRun(params: {
     }
     return true;
   });
+  if (delivered) await notifyThreadResponse();
+  return transitioned;
 }
 
 /** Fail a claimed device-chat dispatch and emit its visible terminal response atomically. */
@@ -922,11 +919,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         // visible after the recheck and otherwise claim a different locked row.
         // This namespace is separate from the old worker's session lock.
         const [lock] = await tx<{ acquired: boolean }>`
-          SELECT pg_try_advisory_xact_lock(hashtextextended(
-            jsonb_build_array('agent_turn_claim', ${candidate.organization_id}::text,
-              ${candidate.turn_agent_id}::text, ${candidate.turn_conversation_id}::text)::text,
-            0
-          )) AS acquired
+          SELECT pg_try_advisory_xact_lock(${agentTurnLockKey(tx, candidate.organization_id,
+            candidate.turn_agent_id, candidate.turn_conversation_id)}) AS acquired
         `;
         if (!lock?.acquired) return null;
         // A lower-id insert can commit after candidate selection. Re-read in
@@ -1100,6 +1094,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             beforeRunId: row.native_source_run_id,
             client: tx,
           });
+          await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb)
+            || ${tx.json(nativeSessionBase(sessionJsonl ?? ''))}::jsonb WHERE id = ${runId}`;
           row.action_input = { ...input, turn: { ...turn, session_jsonl: sessionJsonl ?? '' } };
         }
       }

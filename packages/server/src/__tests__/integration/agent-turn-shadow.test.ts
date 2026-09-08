@@ -9,6 +9,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { serve } from '@hono/node-server';
 import { executeRun, WorkerClient } from '@lobu/connector-worker/daemon';
+import type { SyncExecutor } from '@lobu/connector-worker/executor/interface';
 import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
 import {
   AgentTurnPollPayloadSchema,
@@ -20,10 +21,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurnShadow,
-  handleActiveAgentTurnMessage,
+  cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-shadow';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
+import { failClaimedWorkerRun } from '../../worker-api/poll';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
 import type { McpConfigService } from '../../gateway/auth/mcp/config-service';
@@ -217,7 +219,8 @@ async function pollFleet(workerId: string, capabilities: Record<string, boolean>
 
 async function postAsFleet(path: string, body: Record<string, unknown>) {
   return post(path, {
-    body,
+    body: path === '/api/workers/complete-agent-turn' && body.status === 'completed'
+      ? { consumed_inputs: [], ...body } : body,
     token: 'test-fleet-token',
     env: { WORKER_API_TOKEN: 'test-fleet-token' },
   });
@@ -458,6 +461,165 @@ describe('agent turn shadow producer', () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   }, 30_000);
+
+  it.each([
+    ['mid', true], ['mid', false], ['late', true], ['late', false], ['cancel', true], ['cancel', false],
+  ] as const)('preserves accepted input across real HTTP and isolates (%s, shadow=%s)', async (timing, shadow) => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const first = messageFor(org.id);
+    const followUp = { ...first, messageId: 'http-follow-up', messageText: 'durable-http-follow-up' };
+    const providerRequests: Array<{ messages: unknown[] }> = [];
+    const completions: Array<Record<string, any>> = [];
+    const errors: string[] = [];
+    let origin = '';
+    let followerId = 0;
+    let offered = 0;
+    let droppedBeat = false;
+    let droppedCompletion = false;
+    let guestExited = false;
+    let lateOffer = false;
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let cleanupStarted!: () => void;
+    const cleanupReady = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const enqueue = async (message: MessagePayload) => {
+      const source = await admittedMessage(message);
+      if (!await cancelAgentTurn(source)) await enqueueAgentTurnShadow(source, {
+        agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
+      });
+      const run = (await shadowRuns()).at(-1)!;
+      if (!shadow) await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false') WHERE id = ${run.id}`;
+      return Number(run.id);
+    };
+    const server = createServer(async (req, res) => {
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/anthropic/')) {
+          const step = providerRequests.length;
+          providerRequests.push(body);
+          if (step > 1) throw new Error('duplicate or unexpected provider execution');
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+          send('message_start', { type: 'message_start', message: { id: `native_${step}`, type: 'message', role: 'assistant',
+            model: 'claude-test', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 5, output_tokens: 0 } } });
+          send('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+          send('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: step ? 'Follow-up answered.' : 'Initial answer.' } });
+          if (step === 0 && timing !== 'late') {
+            followerId = await enqueue(followUp);
+            if (timing === 'cancel') {
+              await cancelAgentTurn(await admittedMessage({ ...first, messageId: 'http-cancel', messageText: '/cancel' }));
+              await new Promise<void>((resolve) => res.once('close', resolve));
+              return;
+            }
+            await providerGate;
+          }
+          send('content_block_stop', { type: 'content_block_stop', index: 0 });
+          send('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+          send('message_stop', { type: 'message_stop' });
+          res.end();
+          return;
+        }
+        const response = await post(path, { body, headers: { authorization: req.headers.authorization ?? '' },
+          env: { WORKER_API_TOKEN: 'test-input-fleet' } });
+        const payload = await response.json();
+        if (path.endsWith('/heartbeat') && payload.steer?.length) {
+          offered++;
+          if (guestExited && timing === 'late') lateOffer = true;
+          if (timing === 'mid' && !droppedBeat) { droppedBeat = true; res.destroy(); return; }
+        }
+        if (path.endsWith('/complete-agent-turn')) {
+          completions.push({ request: body, response: payload });
+          if (timing === 'mid' && !droppedCompletion) { droppedCompletion = true; res.destroy(); return; }
+        }
+        res.writeHead(response.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      } catch (error) { errors.push(String(error)); res.writeHead(500).end(); }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const ownerId = await enqueue(first);
+      const client = new WorkerClient({ apiUrl: origin, workerId: 'fleet-http-input', authToken: 'test-input-fleet', capabilities: { agent_turn: true } });
+      const heartbeat = client.heartbeat.bind(client);
+      let receivedOffers = 0;
+      client.heartbeat = async (...args) => {
+        // Keep the delta unacknowledged until late admission so the final
+        // drain deterministically makes the real HTTP request under test.
+        if (timing === 'late' && !guestExited) return { continue: true };
+        const response = await heartbeat(...args);
+        if (response.steer?.length && ++receivedOffers === 2) setTimeout(releaseProvider, 0);
+        return response;
+      };
+      const real = new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 15_000 });
+      let executions = 0;
+      const executor: SyncExecutor = { execute: async (...args) => {
+        const execution = ++executions;
+        try { return await real.execute(...args); }
+        finally {
+          if (execution === 1) {
+            if (timing === 'late') followerId = await enqueue(followUp);
+            guestExited = true;
+            if (timing === 'cancel') { cleanupStarted(); await cleanupGate; }
+          }
+        }
+      } };
+      const config = { executor, timeoutMs: 15_000, heartbeatIntervalMs: 20 };
+      const running = executeRun(client, await client.poll(), {}, config);
+      if (timing === 'cancel') {
+        await cleanupReady;
+        // The real isolate has disposed; the daemon has not reported cleanup.
+        expect((await (await pollFleet('fleet-before-cleanup', { agent_turn: true })).json()).run_id).toBeUndefined();
+        expect((await runRow(ownerId)).status).toBe('running');
+        releaseCleanup();
+      }
+      const result = await running;
+      if (timing === 'cancel') expect(result.error).toBeTruthy();
+      else expect(result.error).toBeUndefined();
+      if (timing === 'mid') {
+        expect(droppedBeat && droppedCompletion).toBe(true);
+        expect(offered).toBeGreaterThanOrEqual(3);
+        expect((await runRow(followerId)).status).toBe('completed');
+        const [row] = await sql`SELECT run_metadata, action_input FROM runs WHERE id = ${followerId}`;
+        const completion = completions[0].request;
+        expect(completion.consumed_inputs).toEqual([{ run_id: followerId, session_entry_id: row.run_metadata.session_entry_id }]);
+        expect(row.run_metadata.consumed_by_run_id).toBe(ownerId);
+        expect(row.action_input).not.toHaveProperty('result');
+        const entry = completion.session_jsonl.trim().split('\n').map((line: string) => JSON.parse(line))
+          .find((entry: { id: string }) => entry.id === row.run_metadata.session_entry_id);
+        expect(entry.message).toMatchObject({ role: 'user', content: [{ type: 'text', text: followUp.messageText }] });
+        expect(completions.at(-1)!.response).toMatchObject({ status: 'completed', idempotent: true });
+      } else {
+        expect((await runRow(followerId)).status).toBe('pending');
+        if (timing === 'late') {
+          expect(lateOffer).toBe(true);
+          expect(completions[0].request.consumed_inputs).toEqual([]);
+        }
+        const successor = await client.poll();
+        expect(successor.run_id).toBe(followerId);
+        const history = (successor.payload as { turn: { session_jsonl: string } }).turn.session_jsonl;
+        if (timing === 'late' && !shadow) expect(history).toContain('Initial answer.');
+        else expect(history).toBe('');
+        expect((await executeRun(client, successor, {}, config)).error).toBeUndefined();
+        expect(executions).toBe(2);
+      }
+      expect(providerRequests).toHaveLength(2);
+      expect(JSON.stringify(providerRequests[0].messages)).not.toContain(followUp.messageText);
+      expect(JSON.stringify(providerRequests[1].messages).split(followUp.messageText)).toHaveLength(2);
+      const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->'processedMessageIds' ? 'http-follow-up'`;
+      expect(replies).toHaveLength(shadow ? 0 : 1);
+      if (!shadow && timing === 'mid') expect(replies[0].action_input.processedMessageIds).toEqual([first.messageId, followUp.messageId]);
+      expect(errors).toEqual([]);
+    } finally {
+      releaseProvider(); releaseCleanup(); server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 25_000);
 
   it('produces a claimable, schema-valid envelope with the credential lifted off the turn', async () => {
     const org = await createTestOrganization();
@@ -1100,59 +1262,328 @@ describe('agent turn shadow producer', () => {
     expect(claimed.payload.turn).not.toHaveProperty('parent_run_id');
   });
 
-  it('parks a steerable follow-up on the running turn instead of making it a turn of its own', async () => {
+  it('repeats durable pending inputs after a lost heartbeat response', async () => {
     const org = await createTestOrganization();
-    const sql = getTestDb();
-    await enqueueMessage(messageFor(org.id), {
-      agentSettings: settingsStore,
-      catalog: catalogFor(tokenEchoingModule()),
-      mcp: mcpFixture().mcp,
-      gatewayUrl: GATEWAY_URL,
-    });
-    const claimed = await pollFleet('fleet-steer', { agent_turn: true });
-    const { run_id: runId } = (await claimed.json()) as { run_id: number };
-
-    // The same human, in the same conversation, while the turn runs: parked.
-    const followUp = { ...messageFor(org.id), messageId: 'msg-2', messageText: 'also check companies' };
-    expect(await handleActiveAgentTurnMessage(followUp)).toBe(true);
-    // Another follow-up queues behind it, in order.
-    expect(await handleActiveAgentTurnMessage({ ...followUp, messageId: 'msg-3', messageText: 'and people' })).toBe(true);
-    const [row] = (await sql`SELECT run_metadata FROM runs WHERE id = ${runId}`) as unknown as Array<{
-      run_metadata: { steer?: unknown };
-    }>;
-    expect(row.run_metadata.steer).toEqual([
-      { message_id: 'msg-2', text: 'also check companies' },
-      { message_id: 'msg-3', text: 'and people' },
-    ]);
-    // No second run was produced for either.
-    expect(await shadowRuns()).toHaveLength(1);
-
-    // Someone else in the conversation, or an automation's message, is not a
-    // steer — the predicate both lanes share says so.
-    expect(await handleActiveAgentTurnMessage({ ...followUp, userId: 'user-other' })).toBe(false);
-    expect(
-      await handleActiveAgentTurnMessage({ ...followUp, platformMetadata: { source: 'automation-run' } } as typeof followUp)
-    ).toBe(false);
-    // Nothing running in another conversation: nothing to steer.
-    expect(await handleActiveAgentTurnMessage({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
-    // An agent the operator has not selected costs the enqueue path nothing.
-    expect(await handleActiveAgentTurnMessage({ ...followUp, agentId: 'agent-not-selected' })).toBe(false);
-  });
-
-  it('scopes native steering to the selected agent in a shared conversation', async () => {
-    const org = await createTestOrganization();
-    const sql = getTestDb();
-    process.env[SHADOW_ENV] = `${AGENT_ID},other-selected-agent`;
     const first = messageFor(org.id);
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
     await enqueueMessage(first, deps);
-    await enqueueMessage({ ...first, agentId: 'other-selected-agent', messageId: 'other-agent-message' }, deps);
-    const [target, other] = await shadowRuns();
+    const { run_id } = await (await pollFleet('fleet-repeat-input', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'durable-follow-up', messageText: 'keep this input' }, deps);
+    const follower = (await shadowRuns())[1];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-repeat-input' });
+      expect(await response.json()).toMatchObject({ continue: true, steer: [
+        { run_id: follower.id, message_id: 'durable-follow-up', text: 'keep this input' },
+      ] });
+    }
+    expect((await runRow(follower.id)).status).toBe('pending');
+  });
 
-    expect(await handleActiveAgentTurnMessage({ ...first, messageId: 'target-follow-up', messageText: 'for the first agent only' })).toBe(true);
-    const rows = await sql`SELECT id, run_metadata->'steer' AS steer FROM runs WHERE id IN (${target.id}, ${other.id}) ORDER BY id`;
-    expect(rows[0].steer).toEqual([{ message_id: 'target-follow-up', text: 'for the first agent only' }]);
-    expect(rows[1].steer).toBeNull();
+  it('does not offer an input whose signed credential belongs to another run', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-input-token-scope', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'wrong-token-input' }, deps);
+    const [owner, follower] = await shadowRuns();
+    const sql = getTestDb();
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{credential}',
+      (SELECT action_input->'credential' FROM runs WHERE id = ${owner.id})) WHERE id = ${follower.id}`;
+    const response = await postAsFleet('/api/workers/heartbeat', {
+      run_id, worker_id: 'fleet-input-token-scope',
+    });
+    expect(await response.json()).toEqual({ continue: true });
+    expect((await runRow(follower.id)).status).toBe('pending');
+  });
+
+  it('deduplicates concurrent admission and replay after native completion', async () => {
+    const org = await createTestOrganization();
+    const source = await admittedMessage(messageFor(org.id));
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await Promise.all([enqueueAgentTurnShadow(source, deps), enqueueAgentTurnShadow(source, deps)]);
+    expect(await shadowRuns()).toHaveLength(1);
+    const sql = getTestDb();
+    await sql`UPDATE runs SET status = 'completed' WHERE run_type = 'agent_turn' AND organization_id = ${org.id}`;
+    await enqueueAgentTurnShadow(source, deps);
+    expect(await shadowRuns()).toHaveLength(1);
+  });
+
+  it('keeps cancellation nonterminal until its worker reports cleanup', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-stop-report', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'after-cancel' }, deps);
+    const cancel = await admittedMessage({ ...first, messageId: 'stop-request', messageText: '/cancel' });
+    await cancelAgentTurn(cancel);
+    expect((await runRow(run_id)).status).toBe('running');
+    expect((await (await pollFleet('fleet-next', { agent_turn: true })).json()).run_id).toBeUndefined();
+    const report = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id, worker_id: 'fleet-stop-report', status: 'failed', error: 'aborted',
+    });
+    expect(await report.json()).toMatchObject({ status: 'cancelled' });
+    expect((await (await pollFleet('fleet-next', { agent_turn: true })).json()).run_type).toBe('agent_turn');
+  });
+
+  async function inputScenario(texts = ['same text', 'same text'], base = '', shadow = true) {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const sql = getTestDb();
+    if (base) {
+      const prior = await admittedMessage({ ...first, messageId: 'prior-source' });
+      await sql`INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+        VALUES (${org.id}, ${AGENT_ID}, ${first.conversationId}, ${prior.runId!}, ${base}, ${Buffer.byteLength(base)}, 'completed')`;
+    }
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const [owner] = await shadowRuns();
+    if (!shadow) await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false') WHERE id = ${owner.id}`;
+    const worker_id = 'fleet-input-receipts';
+    const job = await (await pollFleet(worker_id, { agent_turn: true })).json();
+    for (const [index, text] of texts.entries()) {
+      await enqueueMessage({ ...first, messageId: `input-${index}`, messageText: text }, deps);
+    }
+    const followers = (await shadowRuns()).slice(1);
+    if (!shadow) await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false')
+      WHERE organization_id = ${org.id} AND run_type = 'agent_turn' AND status = 'pending'`;
+    const entries = [
+      ...(base ? base.trim().split('\n').slice(1).map((line) => JSON.parse(line)) : []),
+      { type: 'message', id: 'current-user', parentId: base ? JSON.parse(base.trim().split('\n').at(-1)!).id : null,
+        message: { role: 'user', content: first.messageText, timestamp: 1 } },
+      ...texts.map((text, index) => ({ type: 'message', id: `input-entry-${index}`,
+        parentId: index ? `input-entry-${index - 1}` : 'current-user', message: { role: 'user', content: text, timestamp: 2 + index } })),
+    ];
+    const body = { run_id: owner.id, worker_id, status: 'completed', text: 'all inputs answered',
+      session_jsonl: nativeSession(entries), consumed_inputs: followers.map((row, index) => ({ run_id: row.id, session_entry_id: `input-entry-${index}` })) };
+    return { sql, org, first, deps, owner, followers, job, body };
+  }
+
+  it.each([true, false])('commits identical-text inputs by distinct native identities, once (shadow=%s)', async (shadow) => {
+    const { sql, owner, followers, body } = await inputScenario(undefined, '', shadow);
+    const response = await postAsFleet('/api/workers/complete-agent-turn', body);
+    expect(await response.json()).toEqual({ ok: true, status: 'completed' });
+    const rows = await sql`SELECT status, claimed_by, claimed_at, completed_at, output_tail, outcome, exit_reason, run_metadata, action_input
+      FROM runs WHERE id IN (${followers[0].id}, ${followers[1].id}) ORDER BY id`;
+    for (const [index, row] of rows.entries()) {
+      expect(row).toMatchObject({ status: 'completed', claimed_by: null, claimed_at: null, outcome: 'scoreable', exit_reason: 'ok',
+        output_tail: body.text, run_metadata: { consumed_by_run_id: owner.id, session_entry_id: `input-entry-${index}` } });
+      expect(row.completed_at).not.toBeNull();
+      expect(row.action_input).not.toHaveProperty('result');
+    }
+    const retry = await postAsFleet('/api/workers/complete-agent-turn', { ...body, status: 'failed', error: 'lost response' });
+    expect(await retry.json()).toEqual({ ok: true, status: 'completed', idempotent: true });
+    expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(shadow ? 0 : 1);
+    const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-shadow'`;
+    expect(replies).toHaveLength(shadow ? 0 : 1);
+    if (!shadow) expect(replies[0].action_input.processedMessageIds).toEqual(['msg-shadow', 'input-0', 'input-1']);
+    expect(await sql`SELECT id FROM runs WHERE queue_name = 'internal:turn_timeout'`).toHaveLength(0);
+    expect(await sql`SELECT message_id FROM agent_run_input`).toHaveLength(0);
+  });
+
+  it.each(['missing', 'duplicate-run', 'duplicate-entry', 'wrong-run', 'wrong-entry', 'wrong-text', 'out-of-order', 'initial-entry', 'abandoned-branch'])(
+    'rejects %s receipts without completing any pending input', async (kind) => {
+      const { body, followers } = await inputScenario();
+      if (kind === 'missing') body.consumed_inputs = undefined as never;
+      if (kind === 'duplicate-run') body.consumed_inputs[1].run_id = followers[0].id;
+      if (kind === 'duplicate-entry') body.consumed_inputs[1].session_entry_id = 'input-entry-0';
+      if (kind === 'wrong-run') body.consumed_inputs[0].run_id = body.run_id;
+      if (kind === 'wrong-entry') body.consumed_inputs[0].session_entry_id = 'missing-entry';
+      if (kind === 'wrong-text') body.session_jsonl = body.session_jsonl.replace('same text', 'different text');
+      if (kind === 'out-of-order') body.consumed_inputs.reverse();
+      if (kind === 'initial-entry') body.consumed_inputs[0].session_entry_id = 'current-user';
+      if (kind === 'abandoned-branch') body.session_jsonl += JSON.stringify({ type: 'message', id: 'new-branch', parentId: 'current-user',
+        timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'assistant', content: 'different branch' } }) + '\n';
+      const response = await postAsFleet('/api/workers/complete-agent-turn', body);
+      expect(await response.json()).toMatchObject({ status: 'failed' });
+      expect((await shadowRuns()).map((run) => run.status)).toEqual(['failed', 'pending', 'pending']);
+    },
+  );
+
+  it.each(['current', 'older', 'pre-existing-entry', 'wrong-session', 'missing-boundary', 'compaction'])(
+    'checks %s native base identity before consuming follow-ups', async (kind) => {
+      const base = nativeSession().replace('what is the shadow lane?', 'same text').replace('"version":3', kind === 'older' ? '"version":2' : '"version":3');
+      const { body, job } = await inputScenario(undefined, base);
+      expect(job.payload.turn.session_jsonl).toBe(base);
+      const beat = await postAsFleet('/api/workers/heartbeat', { run_id: body.run_id, worker_id: body.worker_id });
+      expect((await beat.json()).steer?.length ?? 0).toBe(kind === 'older' ? 0 : 2);
+      if (kind === 'pre-existing-entry') body.consumed_inputs[0].session_entry_id = 'native-user';
+      if (kind === 'wrong-session') body.session_jsonl = body.session_jsonl.replace('"id":"native-session"', '"id":"different-session"');
+      if (kind === 'missing-boundary') body.session_jsonl = body.session_jsonl.replaceAll('native-answer', 'renamed-base-entry');
+      if (kind === 'compaction') body.session_jsonl += JSON.stringify({ type: 'compaction', id: 'compact-inputs', parentId: 'input-entry-1',
+        timestamp: '2026-01-01T00:00:00.000Z', firstKeptEntryId: 'input-entry-1', summary: 'Earlier input summarized', tokensBefore: 100 }) + '\n';
+      const response = await postAsFleet('/api/workers/complete-agent-turn', body);
+      expect((await response.json()).status).toBe(['current', 'compaction'].includes(kind) ? 'completed' : 'failed');
+    },
+  );
+
+  it('rolls back owner, input receipts, snapshot and delivery together', async () => {
+    const { sql, owner, body } = await inputScenario(undefined, '', false);
+    const realDb = db.getDb();
+    const broken = new Proxy(realDb, { get(target, property) {
+      if (property === 'begin') return (fn: (tx: db.DbClient) => Promise<unknown>) => target.begin((tx) => fn(new Proxy(tx, {
+        apply(query, thisArg, args: unknown[]) {
+          if (Array.from(args[0] as TemplateStringsArray).join(' ').includes("outcome = 'scoreable'")) throw new Error('synthetic input commit failure');
+          return Reflect.apply(query, thisArg, args);
+        },
+      })));
+      return Reflect.get(target, property);
+    } });
+    const spy = vi.spyOn(db, 'getDb').mockReturnValue(broken);
+    try { expect((await postAsFleet('/api/workers/complete-agent-turn', body)).status).toBe(500); }
+    finally { spy.mockRestore(); }
+    expect((await shadowRuns()).map((run) => run.status)).toEqual(['running', 'pending', 'pending']);
+    expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM runs WHERE queue_name = 'thread_response'`).toHaveLength(0);
+    expect((await (await postAsFleet('/api/workers/complete-agent-turn', body)).json()).status).toBe('completed');
+  });
+
+  it.each(['completed', 'failed', 'cancelled', 'timeout', 'malformed'])(
+    '%s releases only the next pending startup deadline', async (terminal) => {
+      const { sql, owner, followers, body, first } = await inputScenario();
+      await sql`UPDATE runs SET run_at = now() - interval '1 hour' WHERE id IN (${followers[0].id}, ${followers[1].id})`;
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
+      if (terminal === 'timeout') {
+        await sql`UPDATE runs SET last_heartbeat_at = now() - interval '1 hour' WHERE id = ${owner.id}`;
+        expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 0 });
+      } else if (terminal === 'malformed') {
+        await failClaimedWorkerRun({ runId: owner.id, workerId: body.worker_id, errorMessage: 'malformed envelope' });
+      } else {
+        if (terminal === 'cancelled') {
+          await cancelAgentTurn(await admittedMessage({ ...first, messageId: 'cancel-head', messageText: '/cancel' }));
+          expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
+        }
+        await postAsFleet('/api/workers/complete-agent-turn', { ...body, status: terminal === 'failed' ? 'failed' : 'completed', consumed_inputs: [] });
+      }
+      const ready = await sql`SELECT id, run_at > now() - interval '10 seconds' AS fresh FROM runs
+        WHERE id IN (${followers[0].id}, ${followers[1].id}) ORDER BY id`;
+      expect(ready.map((row) => row.fresh)).toEqual([true, false]);
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
+      await sql`UPDATE runs SET run_at = now() - interval '1 hour' WHERE id = ${followers[0].id}`;
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 0 });
+      expect((await (await pollFleet('fleet-released', { agent_turn: true })).json()).run_id).toBe(followers[1].id);
+    },
+  );
+
+  it('expires an unresponsive cancellation despite heartbeats and fences late reports', async () => {
+    const { sql, owner, followers, body, first } = await inputScenario();
+    await cancelAgentTurn(await admittedMessage({ ...first, messageId: 'cancel-head', messageText: '/cancel' }));
+    await sql`UPDATE runs SET run_metadata = jsonb_set(run_metadata, '{cancel_requested_at}', to_jsonb(now() - interval '1 hour')) WHERE id = ${owner.id}`;
+    const beat = await postAsFleet('/api/workers/heartbeat', { run_id: owner.id, worker_id: body.worker_id });
+    expect(await beat.json()).toMatchObject({ continue: false, stop_reason: 'cancelled' });
+    expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 0 });
+    expect((await (await pollFleet('fleet-successor', { agent_turn: true })).json()).run_id).toBe(followers[0].id);
+    const late = await postAsFleet('/api/workers/complete-agent-turn', body);
+    expect(await late.json()).toEqual({ ok: true, status: 'cancelled', idempotent: true });
+    expect((await shadowRuns()).map((run) => run.status)).toEqual(['cancelled', 'running', 'pending']);
+  });
+
+  it('delivers pending cancellation and malformed dispatch errors atomically', async () => {
+    const { sql, owner, followers, body, first } = await inputScenario(undefined, '', false);
+    await postAsFleet('/api/workers/complete-agent-turn', { ...body, consumed_inputs: [] });
+    await cancelAgentTurn(await admittedMessage({ ...first, messageId: 'cancel-pending', messageText: '/cancel' }));
+    expect((await runRow(followers[0].id)).status).toBe('cancelled');
+    const next = await (await pollFleet('fleet-malformed-response', { agent_turn: true })).json();
+    await failClaimedWorkerRun({ runId: next.run_id, workerId: 'fleet-malformed-response', errorMessage: 'incomplete envelope' });
+    const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' ORDER BY id`;
+    expect(replies.map((row) => row.action_input.processedMessageIds)).toEqual([['msg-shadow'], ['input-0'], ['input-1']]);
+    expect(replies.slice(1).map((row) => row.action_input.error)).toEqual(['agent turn cancelled', 'incomplete envelope']);
+    expect((await runRow(owner.id)).status).toBe('completed');
+  });
+
+  it('rechecks a refreshed startup deadline after the reaper candidate read', async () => {
+    const { sql, body, followers } = await inputScenario();
+    await postAsFleet('/api/workers/complete-agent-turn', { ...body, consumed_inputs: [] });
+    await sql`UPDATE runs SET run_at = now() - interval '1 hour' WHERE id = ${followers[0].id}`;
+    const realDb = db.getDb();
+    let refreshed = false;
+    const racingDb = new Proxy(realDb, { apply(query, thisArg, args: unknown[]) {
+      const result = Reflect.apply(query, thisArg, args);
+      if (!refreshed && Array.from(args[0] as TemplateStringsArray).join(' ').startsWith('SELECT r.id FROM runs r WHERE')) {
+        return Promise.resolve(result).then(async (rows) => {
+          refreshed = true;
+          await sql`UPDATE runs SET run_at = now() WHERE id = ${followers[0].id}`;
+          return rows;
+        });
+      }
+      return result;
+    } });
+    const spy = vi.spyOn(db, 'getDb').mockReturnValue(racingDb);
+    try { expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 }); }
+    finally { spy.mockRestore(); }
+    expect(refreshed).toBe(true);
+    expect((await runRow(followers[0].id)).status).toBe('pending');
+  });
+
+  it('serializes admission with an empty terminal handoff', async () => {
+    const { sql, first, deps, body } = await inputScenario([]);
+    await Promise.all([
+      postAsFleet('/api/workers/complete-agent-turn', body),
+      enqueueMessage({ ...first, messageId: 'concurrent-admission' }, deps),
+    ]);
+    const [pending] = await sql`SELECT run_at > now() - interval '10 seconds' AS fresh FROM runs WHERE run_type = 'agent_turn' AND status = 'pending'`;
+    expect(pending.fresh).toBe(true);
+    const next = await (await pollFleet('fleet-concurrent-input', { agent_turn: true })).json();
+    expect(next.payload.turn.message_id).toBe('concurrent-admission');
+  });
+
+  it('upgrades an older base alone and offers followers on the next current-version turn', async () => {
+    const { body, followers } = await inputScenario(['second', 'third'], nativeSession().replace('"version":3', '"version":2'), false);
+    body.session_jsonl = body.session_jsonl.trim().split('\n').filter((line) => !JSON.parse(line).id?.startsWith('input-entry-')).join('\n') + '\n';
+    const response = await postAsFleet('/api/workers/complete-agent-turn', { ...body, consumed_inputs: [] });
+    expect((await response.json()).status).toBe('completed');
+    const next = await (await pollFleet('fleet-current-base', { agent_turn: true })).json();
+    expect(next.payload.turn.session_jsonl).toBe(body.session_jsonl);
+    const beat = await postAsFleet('/api/workers/heartbeat', { run_id: next.run_id, worker_id: 'fleet-current-base' });
+    expect((await beat.json()).steer).toEqual([{ run_id: followers[1].id, message_id: 'input-1', text: 'third' }]);
+  });
+
+  it.each(['count', 'bytes', 'single-large'])('keeps inputs beyond the %s offer bound intact', async (kind) => {
+    const texts = kind === 'count' ? Array.from({ length: 34 }, (_, index) => `input ${index}`)
+      : kind === 'bytes' ? ['🌍'.repeat(12000), '🌍'.repeat(12000), 'intact tail'] : ['界'.repeat(24000), 'intact tail'];
+    const { body, followers, sql } = await inputScenario(texts);
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id: body.run_id, worker_id: body.worker_id });
+    const offered = (await response.json()).steer ?? [];
+    expect(offered.length).toBe(kind === 'count' ? 32 : kind === 'bytes' ? 1 : 0);
+    expect(Buffer.byteLength(JSON.stringify(offered))).toBeLessThanOrEqual(65536);
+    const rows = await sql`SELECT action_input->'turn'->>'message_text' AS text FROM runs WHERE id > ${body.run_id} AND run_type = 'agent_turn' ORDER BY id`;
+    expect(rows.map((row) => row.text)).toEqual(texts);
+    await postAsFleet('/api/workers/complete-agent-turn', { ...body, session_jsonl: nativeSession(), consumed_inputs: [] });
+    expect((await (await pollFleet('fleet-bound-next', { agent_turn: true })).json()).run_id).toBe(followers[0].id);
+  });
+
+  it.each([
+    ['organization', { organizationId: 'different-org' }],
+    ['agent', { agentId: 'other-selected-agent' }],
+    ['conversation', { conversationId: 'other-conversation' }],
+    ['user', { userId: 'other-user' }],
+    ['model', { agentOptions: { model: 'claude/different-model' } }],
+    ['tools', { agentOptions: { model: 'claude/claude-opus-4-8', disallowedTools: ['write'] } }],
+    ['routing', { channelId: 'different-channel' }],
+    ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
+    ['packages', { nixConfig: { packages: ['git'] } }],
+    ['platform metadata', { platformMetadata: { opaqueRouting: 'different' } }],
+    ['attachment', { platformMetadata: { files: [{ name: 'notes.txt', mimetype: 'text/plain' }] } }],
+    ['reset', { platformMetadata: { sessionReset: true } }],
+    ['automation', { platformMetadata: { source: 'automation-run' } }],
+  ])('keeps incompatible %s input separate and preserves FIFO barriers', async (kind, changes) => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    process.env[SHADOW_ENV] = '*';
+    if (kind === 'organization') changes = { organizationId: (await createTestOrganization()).id };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-barrier', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, ...changes, messageId: 'barrier' } as MessagePayload, deps);
+    await enqueueMessage({ ...first, messageId: 'after-barrier' }, deps);
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-barrier' });
+    const offered = (await response.json()).steer ?? [];
+    if (['organization', 'agent', 'conversation'].includes(kind)) {
+      expect(offered.map((input: { message_id: string }) => input.message_id)).toEqual(['after-barrier']);
+    } else expect(offered).toEqual([]);
+    expect((await shadowRuns()).map((run) => run.status)).toEqual(['running', 'pending', 'pending']);
   });
 
   it('cancels a native turn on explicit cancel admission instead of steering', async () => {
@@ -1163,8 +1594,8 @@ describe('agent turn shadow producer', () => {
     });
     const { run_id: runId } = await (await pollFleet('fleet-explicit-cancel', { agent_turn: true })).json();
     const cancel = await admittedMessage({ ...first, messageId: 'cancel-message', messageText: ' /CANCEL ' });
-    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
-    expect((await runRow(runId)).status).toBe('cancelled');
+    expect(await cancelAgentTurn(cancel)).toBe(true);
+    expect((await runRow(runId)).status).toBe('running');
     const response = await postAsFleet('/api/workers/heartbeat', { worker_id: 'fleet-explicit-cancel', run_id: runId });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ continue: false, stop_reason: 'cancelled' });
@@ -1178,17 +1609,27 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     for (const status of ['pending', 'claimed', 'running']) {
-      const first = { ...messageFor(org.id), messageId: `original-${status}` };
+      const first = { ...messageFor(org.id), messageId: `original-${status}`, conversationId: `cancel-${status}` };
       await enqueueMessage(first, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
       });
       const run = (await shadowRuns()).at(-1)!;
-      await sql`UPDATE runs SET status = ${status} WHERE id = ${run.id}`;
+      await sql`UPDATE runs SET status = ${status}, claimed_by = 'fleet-cancel-state' WHERE id = ${run.id}`;
       const cancel = await admittedMessage({ ...first, ...command, messageId: `cancel-${status}` });
-      expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
-      const [row] = await sql`SELECT status, completed_at, exit_reason, run_metadata->'steer' AS steer FROM runs WHERE id = ${run.id}`;
-      expect(row).toMatchObject({ status: 'cancelled', exit_reason: 'cancelled', steer: null });
-      expect(row.completed_at).not.toBeNull();
+      expect(await cancelAgentTurn(cancel)).toBe(true);
+      const [row] = await sql`SELECT status, completed_at, exit_reason, run_metadata FROM runs WHERE id = ${run.id}`;
+      if (status === 'pending') {
+        expect(row).toMatchObject({ status: 'cancelled', exit_reason: 'cancelled' });
+        expect(row.completed_at).not.toBeNull();
+      } else {
+        expect(row.status).toBe(status);
+        expect(row.completed_at).toBeNull();
+        expect(row.run_metadata.cancel_requested_at).toBeTruthy();
+        const report = await postAsFleet('/api/workers/complete-agent-turn', {
+          run_id: run.id, worker_id: 'fleet-cancel-state', status: 'failed', error: 'stopped',
+        });
+        expect(await report.json()).toMatchObject({ status: 'cancelled' });
+      }
     }
   });
 
@@ -1205,7 +1646,7 @@ describe('agent turn shadow producer', () => {
       });
     }
     const cancel = await admittedMessage({ ...first, messageId: 'scoped-cancel', messageText: '/cancel' });
-    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect(await cancelAgentTurn(cancel)).toBe(true);
     expect((await shadowRuns()).map((run) => run.status)).toEqual(['cancelled', 'pending', 'pending', 'pending', 'pending']);
   });
 
@@ -1218,15 +1659,16 @@ describe('agent turn shadow producer', () => {
     const { run_id: activeId } = await (await pollFleet('fleet-control-active', { agent_turn: true })).json();
     await enqueueMessage({ ...first, messageId: 'queued-after-active' }, deps);
     const queued = (await shadowRuns())[1];
-    expect(await handleActiveAgentTurnMessage({ ...first, messageId: 'active-follow-up', messageText: 'for the active turn' })).toBe(true);
-    const [active] = await sql`SELECT run_metadata->'steer' AS steer FROM runs WHERE id = ${activeId}`;
-    expect(active.steer).toEqual([{ message_id: 'active-follow-up', text: 'for the active turn' }]);
     const cancel = await admittedMessage({ ...first, messageId: 'replayed-cancel', messageText: '/cancel' });
-    expect(await Promise.all([handleActiveAgentTurnMessage(cancel), handleActiveAgentTurnMessage(cancel)])).toEqual([true, true]);
-    expect((await runRow(activeId)).status).toBe('cancelled');
+    expect(await Promise.all([cancelAgentTurn(cancel), cancelAgentTurn(cancel)])).toEqual([true, true]);
+    expect((await runRow(activeId)).status).toBe('running');
     expect((await runRow(queued.id)).status).toBe('pending');
+    expect((await (await pollFleet('fleet-control-next', { agent_turn: true })).json()).run_id).toBeUndefined();
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: activeId, worker_id: 'fleet-control-active', status: 'failed', error: 'cancelled',
+    });
     expect((await (await pollFleet('fleet-control-next', { agent_turn: true })).json()).run_id).toBe(queued.id);
-    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect(await cancelAgentTurn(cancel)).toBe(true);
     expect((await runRow(queued.id)).status).toBe('running');
   });
 
@@ -1234,13 +1676,29 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const first = messageFor(org.id);
     const cancel = await admittedMessage({ ...first, messageId: 'early-cancel', messageText: '/cancel' });
-    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect(await cancelAgentTurn(cancel)).toBe(true);
     expect(await shadowRuns()).toHaveLength(0);
     await enqueueMessage(first, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
     });
-    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect(await cancelAgentTurn(cancel)).toBe(true);
     expect((await shadowRuns())[0].status).toBe('pending');
+  });
+
+  it('does not let a delayed cancellation stop a turn admitted after it', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const cancel = await admittedMessage({ ...first, messageId: 'delayed-cancel', messageText: '/cancel' });
+    await enqueueMessage(first, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [later] = await shadowRuns();
+    expect((await (await pollFleet('fleet-after-delayed-cancel', { agent_turn: true })).json()).run_id).toBe(later.id);
+    expect(await cancelAgentTurn(cancel)).toBe(true);
+    const heartbeat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: later.id, worker_id: 'fleet-after-delayed-cancel',
+    });
+    expect(await heartbeat.json()).toEqual({ continue: true });
   });
 
   it('propagates database failures and refuses an unbound cancellation receipt', async () => {
@@ -1251,12 +1709,12 @@ describe('agent turn shadow producer', () => {
     });
     const cancel = await admittedMessage({ ...first, messageId: 'retryable-cancel', messageText: '/cancel' });
     const spy = vi.spyOn(db, 'getDb').mockImplementationOnce(() => { throw new Error('synthetic database failure'); });
-    try { await expect(handleActiveAgentTurnMessage(cancel)).rejects.toThrow('synthetic database failure'); }
+    try { await expect(cancelAgentTurn(cancel)).rejects.toThrow('synthetic database failure'); }
     finally { spy.mockRestore(); }
-    await expect(handleActiveAgentTurnMessage({ ...cancel, runId: 0 })).rejects.toThrow('admitted message run ID');
-    await expect(handleActiveAgentTurnMessage({ ...cancel, messageId: 'wrong-message' })).rejects.toThrow('no matching admitted message');
+    await expect(cancelAgentTurn({ ...cancel, runId: 0 })).rejects.toThrow('admitted message run ID');
+    await expect(cancelAgentTurn({ ...cancel, messageId: 'wrong-message' })).rejects.toThrow('no matching admitted message');
     expect((await shadowRuns())[0].status).toBe('pending');
-    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect(await cancelAgentTurn(cancel)).toBe(true);
     expect((await shadowRuns())[0].status).toBe('cancelled');
   });
 
@@ -1280,12 +1738,12 @@ describe('agent turn shadow producer', () => {
       await gate;
     });
     await lockReady;
-    const control = handleActiveAgentTurnMessage(cancel);
+    const control = cancelAgentTurn(cancel);
     try {
       await vi.waitFor(async () => {
         const waiting = await sql`
           SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%native_cancel_handled%'
+            AND query LIKE '%ORDER BY id FOR UPDATE%'
         `;
         expect(waiting.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 20 });
@@ -1365,9 +1823,9 @@ describe('agent turn shadow producer', () => {
       });
     }
     const [first, second] = await shadowRuns();
-    const workers = ['fleet-claim-a', 'fleet-claim-b'];
+    const workers = ['fleet-claim-a', 'fleet-claim-b', 'fleet-claim-c'];
     const responses = await Promise.all(workers.map((worker) => pollFleet(worker, { agent_turn: true })));
-    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
     const claims = await Promise.all(responses.map((response) => response.json()));
     expect(claims.filter((claim) => claim.run_id).map((claim) => claim.run_id)).toEqual([first.id]);
     expect((await runRow(second.id)).status).toBe('pending');
@@ -1425,7 +1883,7 @@ describe('agent turn shadow producer', () => {
     let interleaved = false;
     let competingClaim: Record<string, unknown> | undefined;
     const barrierQuery = position === 'before'
-      ? "jsonb_build_array('agent_turn_claim'"
+      ? "SELECT pg_try_advisory_xact_lock"
       : 'SELECT r.id FROM runs r';
     const gatedDb = new Proxy(realDb, {
       get(target, property) {
@@ -1941,7 +2399,8 @@ describe('agent turn completion', () => {
       const response = await postAsFleet('/api/workers/complete-agent-turn', {
         run_id: runId, worker_id: workerId, status: 'completed', text: 'stale answer', session_jsonl: nativeSession(),
       });
-      expect(await response.json()).toMatchObject({ idempotent: true });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toHaveProperty('error');
       expect(leaseChanged).toBe(true);
     } finally {
       spy.mockRestore();
@@ -1985,8 +2444,8 @@ describe('agent turn completion', () => {
       session_jsonl: nativeSession(),
       text: 'not mine to report',
     });
-    // Not this worker's run: reported as already-settled rather than applied.
-    expect(await response.json()).toMatchObject({ idempotent: true });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toHaveProperty('error');
     expect((await runRow(runId)).status).toBe('running');
   });
 
@@ -2601,7 +3060,7 @@ describe('agent turn reaper', () => {
     const [run] = await shadowRuns();
     await makeAuthoritative(run.id);
     const sql = getTestDb();
-    await sql`UPDATE runs SET created_at = now() - interval '1 hour' WHERE id = ${run.id}`;
+    await sql`UPDATE runs SET created_at = now() - interval '1 hour', run_at = now() - interval '1 hour' WHERE id = ${run.id}`;
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 1,

@@ -7,6 +7,7 @@
  * poll-auth-signal.
  */
 
+import { lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
 import type {
 	CompleteActionRequest,
 	CompleteAuthRequest,
@@ -303,14 +304,24 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// the UPDATE itself; the 409 below is the same body and status
 		// `authorizeRunForWorker` returns for the same condition, so it is not a
 		// new outcome for the worker to handle.
-		const updated = await sql<{ id: number; run_type: string }>`
-      UPDATE runs
-      SET last_heartbeat_at = current_timestamp,
-          items_collected = COALESCE(${progress?.items_collected_so_far ?? null}, items_collected)${agentSessionCheckpoint}
-      WHERE id = ${run_id}
-        ${runLeaseFence(sql, worker_id)}
-      RETURNING id, run_type
+		const updateHeartbeat = (tx: typeof sql, nonNative: boolean) => tx<{ id: number; run_type: string }>`
+      UPDATE runs SET last_heartbeat_at = current_timestamp,
+        items_collected = COALESCE(${progress?.items_collected_so_far ?? null}, items_collected)${agentSessionCheckpoint}
+      WHERE id = ${run_id} AND (${!nonNative} OR run_type <> 'agent_turn')
+        ${runLeaseFence(tx, worker_id)} RETURNING id, run_type
     `;
+		let updated: Array<{ id: number; run_type: string }> = await updateHeartbeat(sql, true);
+		let steer: NonNullable<HeartbeatResponse['steer']> = [];
+		let cancelRequested = false;
+		if (!updated.length) {
+			({ updated, steer, cancelRequested } = await sql.begin(async (tx) => {
+				const nativeRun = await lockAgentTurnRun(tx, run_id);
+				const updated = nativeRun ? await updateHeartbeat(tx, false) : [];
+				const owned = updated.length > 0 && nativeRun;
+				const cancelRequested = !!owned && !!nativeRun.run_metadata?.cancel_requested_at;
+				return { updated, cancelRequested, steer: owned && !cancelRequested ? await pendingAgentTurnInputs(tx, nativeRun) : [] };
+			}));
+		}
 		if (updated.length === 0) {
 			// The fence requires `status = 'running'`, so a cancelled run fails it
 			// exactly like a lost lease does. The agent-turn lane has to tell those
@@ -339,32 +350,9 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			return c.json<HeartbeatResponse>({ continue: true, ...ackBody });
 		}
 
-		// Messages that arrived for this conversation mid-turn and were parked on
-		// the run by the producer: hand them over once, in arrival order. Only an
-		// agent turn ever has any, and the fence keeps a stale worker from taking
-		// a message meant for the worker that now owns the run.
-		const [taken] = (await sql`
-      WITH parked AS (
-        SELECT id, run_metadata->'steer' AS steer FROM runs
-        WHERE id = ${run_id}
-          AND run_type = 'agent_turn'
-          AND jsonb_typeof(run_metadata->'steer') = 'array'
-          ${runLeaseFence(sql, worker_id)}
-        FOR UPDATE
-      )
-      UPDATE runs SET run_metadata = runs.run_metadata - 'steer'
-      FROM parked WHERE runs.id = parked.id
-      RETURNING parked.steer
-    `) as unknown as Array<{ steer: unknown } | undefined>;
-		const steer = Array.isArray(taken?.steer)
-			? (taken.steer as unknown[]).filter(
-					(m): m is { message_id: string; text: string } =>
-						!!m &&
-						typeof m === 'object' &&
-						typeof (m as { message_id?: unknown }).message_id === 'string' &&
-						typeof (m as { text?: unknown }).text === 'string',
-				)
-			: [];
+		if (cancelRequested) {
+			return c.json<HeartbeatResponse>({ continue: false, stop_reason: 'cancelled' });
+		}
 
 		return c.json<HeartbeatResponse>({
 			continue: true,

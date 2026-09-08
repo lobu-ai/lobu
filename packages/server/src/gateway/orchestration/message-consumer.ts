@@ -37,7 +37,7 @@ import { recordAgentRunInput } from "./agent-run-input.js";
 import {
   type AgentTurnShadowDeps,
   enqueueAgentTurnShadow,
-  handleActiveAgentTurnMessage,
+  cancelAgentTurn,
 } from "./agent-turn-shadow.js";
 import {
   buildCanonicalConversationKey,
@@ -696,9 +696,10 @@ export class MessageConsumer {
       // `enqueueAgentTurnShadow` never throws, and for an agent the operator
       // has not selected it returns on an env-var read before touching the
       // database — the unselected path costs the enqueue nothing.
-      // Consume explicit cancellation or steer the matching active native
-      // turn. A durable control failure retries through the queue catch below.
-      const handled = await handleActiveAgentTurnMessage(data);
+      // A non-cancel input is admitted as its own pending native run rather
+      // than being written onto the active owner.
+      // A durable control failure retries through the queue catch below.
+      const handled = await cancelAgentTurn(data);
       if (!handled) await enqueueAgentTurnShadow(data, {
         agentSettings: this.agentSettingsStore,
         catalog: this.deploymentManager.getProviderCatalogService?.(),

@@ -298,14 +298,15 @@ export async function runAgentTurn(
     // arrived at exactly those points — after an assistant message, after a tool
     // result — and queue it as the user message it is, so the model sees the
     // follow-up on this lane where the subprocess lane's session would.
+    const steeredMessages = new Map<AgentMessage, number>();
     const steer = () => {
       if (flushing) return;
       for (const message of takeSteering()) {
-        agent.steer({
-          role: 'user',
-          content: [{ type: 'text', text: message.text }],
-          timestamp: Date.now(),
-        } as never);
+        const nativeMessage: AgentMessage = {
+          role: 'user', content: [{ type: 'text', text: message.text }], timestamp: Date.now(),
+        };
+        steeredMessages.set(nativeMessage, message.runId);
+        agent.steer(nativeMessage);
       }
     };
 
@@ -423,6 +424,12 @@ export async function runAgentTurn(
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),
+      // Pi emits message events before persistence. Receipt identity comes from
+      // the finished native branch after retries/compaction have drained.
+      consumedInputs: session.sessionManager.getBranch().flatMap((entry) => {
+        const runId = entry.type === 'message' ? steeredMessages.get(entry.message) : undefined;
+        return runId === undefined ? [] : [{ runId, sessionEntryId: entry.id }];
+      }),
       ...(repliedInBand ? { repliedInBand: true } : {}),
     };
   } finally {
