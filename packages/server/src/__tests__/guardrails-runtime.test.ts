@@ -30,7 +30,6 @@ import { registerBuiltinGuardrails } from '../gateway/guardrails/builtins';
 import { MessageConsumer } from '../gateway/orchestration/message-consumer';
 import type {
   DeploymentManager,
-  OrchestratorConfig,
 } from '../gateway/orchestration/deployment-manager';
 import { GrantStore } from '../gateway/permissions/grant-store';
 import {
@@ -577,12 +576,7 @@ describe('MessageConsumer — wired input guardrail', () => {
       clearAllGrantSyncCaches: () => {},
     } as unknown as DeploymentManager;
 
-    const config: OrchestratorConfig = {
-      queues: { retryLimit: 1, expireInSeconds: 60 },
-      cleanup: { initialDelayMs: 1_000_000, intervalMs: 1_000_000 },
-    } as OrchestratorConfig;
-
-    const consumer = new TestableMessageConsumer(config, fakeDeployments);
+    const consumer = new TestableMessageConsumer(fakeDeployments);
     // Swap in the fake queue — `MessageConsumer` constructs a RunsQueue
     // by default which would try to connect.
     (consumer as any).queue = fakeQueue;
@@ -660,10 +654,7 @@ describe('MessageConsumer — wired input guardrail', () => {
       listDeployments: async () => [],
     } as unknown as DeploymentManager;
 
-    const consumer = new TestableMessageConsumer(
-      { queues: { retryLimit: 1, expireInSeconds: 60 } } as OrchestratorConfig,
-      fakeDeployments
-    );
+    const consumer = new TestableMessageConsumer(fakeDeployments);
     (consumer as any).queue = fakeQueue;
 
     const registry = new GuardrailRegistry();
@@ -762,10 +753,7 @@ describe('MessageConsumer — wired custom inline guardrail', () => {
       listDeployments: async () => [],
     } as unknown as DeploymentManager;
 
-    const consumer = new TestableMessageConsumer(
-      { queues: { retryLimit: 1, expireInSeconds: 60 } } as OrchestratorConfig,
-      fakeDeployments
-    );
+    const consumer = new TestableMessageConsumer(fakeDeployments);
     (consumer as any).queue = fakeQueue;
 
     // Built-ins only in the registry — the inline judge is NOT registered; it
@@ -870,10 +858,7 @@ describe('MessageConsumer — wired custom inline guardrail', () => {
       clearAllGrantSyncCaches: () => {},
     } as unknown as DeploymentManager;
 
-    const consumer = new TestableMessageConsumer(
-      { queues: { retryLimit: 1, expireInSeconds: 60 } } as OrchestratorConfig,
-      fakeDeployments
-    );
+    const consumer = new TestableMessageConsumer(fakeDeployments);
     (consumer as any).queue = fakeQueue;
     const registry = new GuardrailRegistry();
     registerBuiltinGuardrails(registry);
