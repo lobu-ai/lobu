@@ -6,6 +6,7 @@ import {
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { DbClient } from "../db/client";
 import { getDb } from "../db/client";
+import { authorizedChatLinkIds } from "../gateway/channels/chat-link-authorization";
 import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection";
 import {
   type AutomationEventRunQueued,
@@ -94,7 +95,7 @@ export async function findMatchingAutomationActivations(
   organizationId: string,
   signal: ConnectorTriggerSignal,
   db: DbClient = getDb(),
-  options?: { crossOrganization?: boolean },
+  options?: { crossOrganization?: boolean; includeAuthorizedChatLinks?: boolean },
 ): Promise<MatchingAutomationActivation[]> {
   // Coarse GIN needle: kind + connector_key. When the signal carries a
   // connection_id, match that connection's triggers OR connector-wide triggers
@@ -105,9 +106,25 @@ export async function findMatchingAutomationActivations(
     kind: "event" as const,
     connector_key: signal.connector_key,
   };
+  const channelId = signal.attributes?.channel_id;
+  // The view normalizes an empty trigger team to NULL, so normalize the signal
+  // the same way: the SQL admission below and the per-trigger re-check further
+  // down must agree on what "no workspace" means.
+  const rawTeamId = signal.attributes?.team_id;
+  const teamId = typeof rawTeamId === "string" && rawTeamId !== "" ? rawTeamId : null;
+  const chatLinkFilter = options?.includeAuthorizedChatLinks &&
+    signal.event_type === "message.created" && signal.connection_id != null &&
+    typeof channelId === "string"
+    ? db`OR w.id IN (${authorizedChatLinkIds(db, {
+        connectionOrganizationId: organizationId,
+        connection: { id: signal.connection_id },
+        channelId,
+        teamId,
+      })})`
+    : db``;
   const organizationFilter = options?.crossOrganization
     ? db``
-    : db`AND w.organization_id = ${organizationId}`;
+    : db`AND (w.organization_id = ${organizationId} ${chatLinkFilter})`;
   const connectionId = signal.connection_id;
   const triggerFilter =
     connectionId != null
@@ -146,7 +163,12 @@ export async function findMatchingAutomationActivations(
     const [trigger] = matchingAutomationTriggers(
       triggers.filter(
         (candidate): candidate is AutomationEventTrigger =>
-          candidate.kind === "event" && candidate.source !== "workspace",
+          candidate.kind === "event" && candidate.source !== "workspace" &&
+          (options?.crossOrganization || row.organization_id === organizationId || (
+            candidate.connection_id === signal.connection_id &&
+            candidate.match?.channel_id === channelId &&
+            (candidate.match?.team_id || null) === teamId
+          )),
       ),
       signal,
     );
@@ -203,7 +225,7 @@ export async function planAutomationActivationsForRuntimeConnection(
     args.connectionOrganizationId,
     signal,
     db,
-    { crossOrganization: args.crossOrganization },
+    { crossOrganization: args.crossOrganization, includeAuthorizedChatLinks: true },
   );
   return planAutomationActivations(signal, matches);
 }

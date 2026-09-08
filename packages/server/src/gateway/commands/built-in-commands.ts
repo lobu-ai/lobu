@@ -8,14 +8,18 @@ import {
   previewAgentMenu,
 } from "../../preview/slack.js";
 import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
+import type { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import {
   resolveEffectiveModelRef,
 } from "../auth/settings/model-selection.js";
 import { formatChatCommand } from "./command-spelling.js";
 
+const LINK_AUTHORITY_REVOKED_MESSAGE = "The existing chat link no longer has access to both workspaces. Retire its Automation in Lobu, then link this chat again.";
+
 interface BuiltInCommandDeps {
   agentSettingsStore: AgentSettingsStore;
+  automationSubscriptionService: AutomationSubscriptionService;
 }
 
 /**
@@ -67,8 +71,15 @@ export function registerBuiltInCommands(
         return;
       }
 
+      // Command context keeps the installation's organization for /link.
+      // Agent settings belong to the workspace selected by the chat subscription.
+      const subscription = ctx.connectionId && ctx.organizationId
+        ? await deps.automationSubscriptionService.resolveForConnection(
+            ctx.connectionId, ctx.channelId, ctx.organizationId, { teamId: ctx.teamId },
+          )
+        : null;
       const settings = await deps.agentSettingsStore.getSettings(ctx.agentId, {
-        organizationId: ctx.organizationId,
+        organizationId: subscription?.organizationId ?? ctx.organizationId,
       });
 
       const effectiveModel = resolveEffectiveModelRef(settings);
@@ -208,20 +219,14 @@ export function registerBuiltInCommands(
 						`This code can't be used in a ${result.surfaceType === "dm" ? "DM" : "channel"}. Check the agent's \`preview.${ctx.platform}.surfaces\` setting.`,
 					);
 					return;
-				case "connection_mismatch": {
-					const allowedLocation =
-						ctx.platform === "slack"
-							? "Lobu's hosted Slack workspace or a Slack workspace"
-							: "Lobu's hosted preview bot or a chat connection";
-					const currentLocation =
-						ctx.platform === "slack"
-							? "this Slack workspace"
-							: "this chat connection";
+				case "connection_mismatch":
 					await ctx.reply(
-						`That code can only be used with ${allowedLocation} connected to the same Lobu organization as the agent. Open the preview link from \`lobu run\`, or connect ${currentLocation} to the agent's organization.`,
+						"That code isn't authorized for this chat connection. Use the selected installation or hosted preview bot, or create a fresh code with access to this connection.",
 					);
 					return;
-				}
+        case "link_authority_revoked":
+          await ctx.reply(LINK_AUTHORITY_REVOKED_MESSAGE);
+          return;
         case "not_found": {
           // Not a valid code — but if we already know who this chat user is,
           // treat the arg as an agent id and re-bind directly (no fresh code
@@ -243,6 +248,10 @@ export function registerBuiltInCommands(
 							connectionId: ctx.connectionId ?? "",
 							connectionOrganizationId: ctx.organizationId,
             });
+            if (bound.status === "link_authority_revoked") {
+              await ctx.reply(LINK_AUTHORITY_REVOKED_MESSAGE);
+              return;
+            }
             if (bound.status === "bound") {
               await ctx.reply(
 								`Linked this chat to agent \`${arg}\`. Say hi — I'll reply here from now on.`,

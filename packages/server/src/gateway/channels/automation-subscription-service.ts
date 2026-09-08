@@ -14,6 +14,8 @@ import {
 	softDeleteChannelFeed,
 } from "./channel-feed.js";
 
+import { authorizedChatLinkIds, canLinkChatOrganizations } from "./chat-link-authorization.js";
+
 const logger = createLogger("automation-channel-subscriptions");
 const CHAT_LINK_TAG = "system:chat-link";
 const CHAT_LINK_PROMPT = "Respond helpfully to the incoming message.";
@@ -31,6 +33,11 @@ interface ChatAutomationSubscription {
 	connectionId?: string;
 	model?: string;
 	createdAt: number;
+}
+
+interface ChatRoutingOptions {
+	crossOrganization?: boolean;
+	teamId?: string;
 }
 
 function rowToSubscription(
@@ -157,6 +164,8 @@ async function loadChatAutomationSubscriptions(
 	sql: DbClient,
 	filters: {
 		automationOrganizationId?: string;
+		includeAuthorizedChatLinks?: boolean;
+		teamId?: string;
 		agentId?: string;
 		connectionId?: string;
 		connectionOrganizationId?: string;
@@ -169,8 +178,22 @@ async function loadChatAutomationSubscriptions(
 	const native = filters.channelId
 		? nativeChannelIdFromAny(filters.channelId)
 		: null;
+	// An admitted Automation may also carry triggers for other workspaces on
+	// this channel; return only the trigger row that matches this chat's team.
+	const linkedOrgFilter = filters.includeAuthorizedChatLinks &&
+		filters.connectionOrganizationId && filters.connectionSlug && native
+		? sql`OR (
+			s.automation_id IN (${authorizedChatLinkIds(sql, {
+				connectionOrganizationId: filters.connectionOrganizationId,
+				connection: { slug: filters.connectionSlug },
+				channelId: native,
+				teamId: filters.teamId,
+			})})
+			AND s.trigger_team_id IS NOT DISTINCT FROM ${filters.teamId || null}
+		)`
+		: sql``;
 	const automationOrgFilter = filters.automationOrganizationId
-		? sql`AND s.organization_id = ${filters.automationOrganizationId}`
+		? sql`AND (s.organization_id = ${filters.automationOrganizationId} ${linkedOrgFilter})`
 		: sql``;
 	const agentFilter = filters.agentId
 		? sql`AND s.agent_id = ${filters.agentId}`
@@ -235,11 +258,13 @@ export class AutomationSubscriptionService {
 		connectionId: string,
 		channelId: string,
 		connectionOrganizationId: string,
-		crossOrg = false,
+		options: ChatRoutingOptions = {},
 	): Promise<ChatAutomationSubscription | null> {
 		const sql = getDb();
 		const rows = await loadChatAutomationSubscriptions(sql, {
-			automationOrganizationId: crossOrg ? undefined : connectionOrganizationId,
+			automationOrganizationId: options.crossOrganization ? undefined : connectionOrganizationId,
+			includeAuthorizedChatLinks: !options.crossOrganization,
+			teamId: options.teamId,
 			connectionOrganizationId,
 			connectionSlug: runtimeConnectionIdToSlug(connectionId),
 			channelId,
@@ -250,26 +275,19 @@ export class AutomationSubscriptionService {
 
 	/**
 	 * True when any active message.created Automation covers this connection+channel
-	 * (ignoring trigger match filters like mention_only/team). Used by the chat
-	 * bridge to distinguish "filters rejected a linked channel" from "channel is
-	 * unlinked" so we do not spam the "link your agent" notice on every
-	 * non-mention in a mention_only channel.
+	 * before message filters such as mention_only. Foreign links still require
+	 * their exact optional team identity. This keeps filtered messages from
+	 * receiving an incorrect "link your agent" notice.
 	 */
 	async channelHasMessageSubscription(
 		connectionId: string,
 		channelId: string,
 		connectionOrganizationId: string,
-		crossOrg = false,
+		options: ChatRoutingOptions = {},
 	): Promise<boolean> {
-		const sql = getDb();
-		const rows = await loadChatAutomationSubscriptions(sql, {
-			automationOrganizationId: crossOrg ? undefined : connectionOrganizationId,
-			connectionOrganizationId,
-			connectionSlug: runtimeConnectionIdToSlug(connectionId),
-			channelId,
-			limit: 1,
-		});
-		return rows.length > 0;
+		return (await this.resolveForConnection(
+			connectionId, channelId, connectionOrganizationId, options,
+		)) !== null;
 	}
 
 	async healSubscriptionTeam(
@@ -378,6 +396,8 @@ export class AutomationSubscriptionService {
 		teamId: string | undefined,
 		options: {
 			configuredBy?: string;
+			/** Preserve the original author when renewing a foreign installation grant. */
+			requireAuthorizedAuthor?: boolean;
 			organizationId?: string;
 			sql?: DbClient;
 			connectionId: number;
@@ -392,7 +412,7 @@ export class AutomationSubscriptionService {
 			 */
 			createOnly?: boolean;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		if (!Number.isInteger(options.connectionId) || options.connectionId < 1) {
 			throw new Error("connectionId must be a positive integer");
 		}
@@ -409,7 +429,7 @@ export class AutomationSubscriptionService {
 			teamId,
 		});
 
-		const write = async (tx: DbClient): Promise<void> => {
+		const write = async (tx: DbClient): Promise<boolean> => {
 			// Serialize concurrent create/relink for the same org+connection+channel.
 			await tx`
 				SELECT pg_advisory_xact_lock(
@@ -418,7 +438,7 @@ export class AutomationSubscriptionService {
 				)
 			`;
 			const connectionRows = await tx`
-				SELECT 1
+				SELECT organization_id
 				FROM connections
 				WHERE id = ${options.connectionId}
 				  AND connector_key = ${platform}
@@ -431,8 +451,8 @@ export class AutomationSubscriptionService {
 				);
 			}
 
-			const existing = await tx<{ automation_id: number }>`
-				SELECT w.id AS automation_id
+			const existing = await tx<{ automation_id: number; created_by: string }>`
+				SELECT w.id AS automation_id, w.created_by
 				FROM automations w
 				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.triggers, '[]'::jsonb)) trigger
 				WHERE w.status = 'active'
@@ -452,7 +472,12 @@ export class AutomationSubscriptionService {
 				// A chat-link already covers this connection+channel. Under
 				// create-only (the connection-owner fallback), leave it untouched —
 				// this is where a racing explicit `/lobu link` is preserved.
-				if (options.createOnly) return;
+				if (options.createOnly) return true;
+				// created_by is immutable audit attribution and the durable grant
+				// principal. A different caller cannot silently replace that authority.
+				if (options.requireAuthorizedAuthor && !(await canLinkChatOrganizations(
+					tx, existing[0].created_by, organizationId, connectionRows[0].organization_id,
+				))) return false;
 				// Relink must not wipe user-added triggers (schedule, extra events)
 				// on the same Automation — only replace the chat message.created
 				// trigger for this connection+channel.
@@ -493,7 +518,7 @@ export class AutomationSubscriptionService {
 						updated_at = current_timestamp
 					WHERE id = ${existing[0].automation_id}
 				`;
-				return;
+				return true;
 			}
 
 			const createdBy = await resolveCreatedBy(
@@ -535,9 +560,10 @@ export class AutomationSubscriptionService {
 				UPDATE automations SET current_version_id = ${versionId}
 				WHERE id = ${automationId}
 			`;
+			return true;
 		};
-		if (options.sql) await write(sql);
-		else await sql.begin(write);
+		const linked = options.sql ? await write(sql) : await sql.begin(write);
+		if (!linked) return false;
 
 		await resolveChannelFeedId({
 			connectionId: String(options.connectionId),
@@ -546,6 +572,7 @@ export class AutomationSubscriptionService {
 			sql,
 		});
 		logger.info(`Created chat Automation: ${platform}/${channelId} → ${agentId}`);
+		return true;
 	}
 
 	async archiveChatAutomation(

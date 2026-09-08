@@ -14,6 +14,7 @@ import { getConfiguredPublicOrigin } from "../utils/public-origin";
 import { requireOrgUser } from "../utils/require-org-user";
 import { MANAGED_CHAT_PLATFORMS_SET } from "./managed-platforms";
 import { AutomationSubscriptionService } from "../gateway/channels/automation-subscription-service";
+import { canLinkChatOrganizations } from "../gateway/channels/chat-link-authorization";
 import { formatChatCommand } from "../gateway/commands/command-spelling";
 
 // Slack Preview lets people trying Lobu locally talk to their agent through the
@@ -63,6 +64,8 @@ interface ClaimPayload {
 	/** Unified chat connection this code may be redeemed through. Omitted only
 	 * for the hosted cross-org preview bot flow used by `lobu run`. */
 	connectionId?: number;
+	/** Freeze installation ownership so moving it invalidates outstanding codes. */
+	connectionOrganizationId?: string;
 	createdBy: string | null;
 	allowedSurfaces: SurfaceType[];
 	createdAt: number;
@@ -126,10 +129,27 @@ export function canonicalSlackChannelId(channelId: string): string {
 		: `${SLACK_PLATFORM}:${channelId}`;
 }
 
+/** The link endpoint must not widen the bearer credential's workspace grant. */
+function credentialAllowsChatLink(
+	c: Context<{ Bindings: Env }>,
+	organizationId: string,
+): boolean {
+	if (c.var.authSource === "session") return Boolean(c.var.session);
+	const token = c.var.mcpAuthInfo;
+	if (!token) return false;
+	if (c.var.authSource === "pat" && token.tokenType === "pat") {
+		return token.organizationId == null || token.organizationId === organizationId;
+	}
+	return c.var.authSource === "oauth" &&
+		(token.grantedOrganizationIds ?? []).includes(organizationId);
+}
+
 /**
  * POST /api/:orgSlug/preview/claims — called by `lobu run` (mcpAuth) to mint a
- * short-lived link code for one of the org's agents on a hosted preview platform.
- * Body: `{ agent_id, platform, surfaces?, ttl_minutes? }`.
+ * short-lived link code for a hosted preview bot or a selected installation.
+ * Cross-organization installations require both a credential grant and current
+ * admin authority in both workspaces.
+ * Body: `{ agent_id, platform, connection_id?, surfaces?, ttl_minutes? }`.
  */
 export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 	const auth = requireOrgUser(c);
@@ -154,24 +174,30 @@ export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 	const sql = getDb();
 	const requestedConnectionId = Number(body.connection_id);
 	let connectionId: number | undefined;
+	let connectionOrganizationId: string | undefined;
 	if (Number.isFinite(requestedConnectionId) && requestedConnectionId > 0) {
 		const rows = (await sql`
-			SELECT id, connector_key
+			SELECT id, connector_key, organization_id
 			FROM connections
 			WHERE id = ${requestedConnectionId}
-				AND organization_id = ${auth.organizationId}
 				AND credential_mode IS NOT NULL
 				AND status = 'active'
 				AND deleted_at IS NULL
 			LIMIT 1
-		`) as Array<{ id: number; connector_key: string }>;
+		`) as Array<{ id: number; connector_key: string; organization_id: string }>;
 		const connection = rows[0];
-		if (!connection)
-			return c.json({ error: "Active chat connection not found" }, 404);
+		if (!connection || (
+			connection.organization_id !== auth.organizationId && (
+				!credentialAllowsChatLink(c, auth.organizationId) ||
+				!credentialAllowsChatLink(c, connection.organization_id) ||
+				!(await canLinkChatOrganizations(sql, auth.userId, auth.organizationId, connection.organization_id))
+			)
+		)) return c.json({ error: "Active chat connection not found" }, 404);
 		if (connection.connector_key !== platform) {
 			return c.json({ error: "Connection platform does not match" }, 400);
 		}
 		connectionId = connection.id;
+		connectionOrganizationId = connection.organization_id;
 	} else if (!PREVIEW_PLATFORMS.has(platform)) {
 		return c.json(
 			{
@@ -207,7 +233,7 @@ export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 		const payload: ClaimPayload = {
 			organizationId: auth.organizationId,
 			agentId,
-			...(connectionId ? { connectionId } : {}),
+			...(connectionId ? { connectionId, connectionOrganizationId } : {}),
 			createdBy: auth.userId,
 			allowedSurfaces: surfaces,
 			createdAt: Date.now(),
@@ -243,6 +269,7 @@ type ConsumeClaimResult =
 	| { status: "bound"; agentId: string; organizationId: string }
 	| { status: "not_found" }
 	| { status: "connection_mismatch" }
+	| { status: "link_authority_revoked" }
 	| { status: "surface_not_allowed"; surfaceType: SurfaceType };
 
 // Create/update the tagged chat-link Automation for this concrete connection and
@@ -256,8 +283,9 @@ async function upsertBinding(
 	organizationId: string,
 	connectionId: number,
 	configuredBy?: string | null,
-): Promise<void> {
-	await new AutomationSubscriptionService().createChatAutomation(
+	requireAuthorizedAuthor = false,
+): Promise<boolean> {
+	return new AutomationSubscriptionService().createChatAutomation(
 		agentId,
 		platform,
 		channelId,
@@ -266,6 +294,7 @@ async function upsertBinding(
 			organizationId,
 			connectionId,
 			configuredBy: configuredBy ?? undefined,
+			requireAuthorizedAuthor,
 			sql: tx,
 		},
 	);
@@ -319,10 +348,11 @@ export async function consumePreviewClaim(args: {
 		let bindingConnectionId = claim.connectionId;
 		if (bindingConnectionId != null) {
 			if (!connectionId) return { status: "connection_mismatch" as const };
+			const claimedConnectionOrg = claim.connectionOrganizationId ?? claim.organizationId;
 			const matched = await tx`
 				SELECT 1 FROM connections
 				WHERE id = ${claim.connectionId}
-					AND organization_id = ${claim.organizationId}
+					AND organization_id = ${claimedConnectionOrg}
 					AND slug = ${runtimeConnectionIdToSlug(connectionId)}
 					AND connector_key = ${platform}
 					AND credential_mode IS NOT NULL
@@ -330,14 +360,17 @@ export async function consumePreviewClaim(args: {
 					AND deleted_at IS NULL
 				LIMIT 1
 			`;
-			if (matched.length === 0)
-				return { status: "connection_mismatch" as const };
+			if (matched.length === 0 ||
+				(connectionOrganizationId && connectionOrganizationId !== claimedConnectionOrg) ||
+				(claimedConnectionOrg !== claim.organizationId &&
+					!(await canLinkChatOrganizations(tx, claim.createdBy, claim.organizationId, claimedConnectionOrg)))
+			) return { status: "connection_mismatch" as const };
 		} else {
 			// A hosted claim may cross organizations only through the deliberately
 			// shared preview connection for the workspace handling the command. A normal
-			// managed/BYO installation must belong to the claimed agent's org; otherwise
-			// the Automation would be written under the agent org but inbound messages
-			// would stay scoped to the connection org and could never fire.
+			// managed/BYO installation must belong to the claimed agent's org: a hosted
+			// code has no grant for a specific foreign installation. That requires an
+			// explicitly connection-scoped code minted with authority over both orgs.
 			if (!connectionId) return { status: "connection_mismatch" as const };
 			const matched = await tx<{ id: number }>`
 				SELECT id FROM connections
@@ -366,12 +399,7 @@ export async function consumePreviewClaim(args: {
 		if (!claim.allowedSurfaces.includes(surfaceType)) {
 			return { status: "surface_not_allowed" as const, surfaceType };
 		}
-		await tx`
-			DELETE FROM oauth_states
-			WHERE id = ${codeHash(code)} AND scope = ${CLAIM_SCOPE}
-		`;
-
-		await upsertBinding(
+		const linked = await upsertBinding(
 			tx,
 			platform,
 			channelId,
@@ -380,7 +408,13 @@ export async function consumePreviewClaim(args: {
 			claim.organizationId,
 			bindingConnectionId,
 			claim.createdBy,
+			claim.connectionOrganizationId != null && claim.connectionOrganizationId !== claim.organizationId,
 		);
+		if (!linked) return { status: "link_authority_revoked" as const };
+		await tx`
+			DELETE FROM oauth_states
+			WHERE id = ${codeHash(code)} AND scope = ${CLAIM_SCOPE}
+		`;
 
 		// Redemption binds the chat and NOTHING ELSE — deliberately no
 		// chat-platform → Lobu-user identity. A claim code is paste-able and does
@@ -744,12 +778,13 @@ export async function workspaceUnlinkedNotice(
 	return [header, "", cliLine].join("\n");
 }
 
-type BindForOwnerResult = { status: "bound" } | { status: "forbidden" };
+type BindForOwnerResult = { status: "bound" } | { status: "forbidden" } | { status: "link_authority_revoked" };
 
 /**
  * Re-bind a chat to one of the caller's agents by id, without a code — only
- * works after the caller has linked at least once (so we know their Lobu user)
- * and only for agents in an org they're a member of.
+ * works with a verified chat identity and an unambiguous agent in the caller's
+ * organizations. Non-preview installations also require admin authority in
+ * both workspaces when linking across organizations.
  */
 export async function bindChatToAgentForOwner(args: {
 	platform: string;
@@ -762,25 +797,41 @@ export async function bindChatToAgentForOwner(args: {
 }): Promise<BindForOwnerResult> {
 	const { platform, teamId, channelId, agentId, lobuUserId } = args;
 	const sql = getDb();
+	// `agents` is keyed on (organization_id, id), so one agent id can name a
+	// different agent in each org the caller belongs to. Refuse rather than let
+	// an arbitrary row decide which organization the chat is bound to.
 	const owned = await sql<{ organization_id: string }>`
     SELECT a.organization_id
     FROM agents a
     JOIN "member" m ON m."organizationId" = a.organization_id
     WHERE a.id = ${agentId} AND m."userId" = ${lobuUserId}
-    LIMIT 1
+    LIMIT 2
   `;
-	if (owned.length === 0) return { status: "forbidden" };
+	if (owned.length !== 1) return { status: "forbidden" };
 	const organizationId = owned[0].organization_id;
-	const connections = await sql<{ id: number }>`
-		SELECT id FROM connections
+	const connections = await sql<{ id: number; organization_id: string; is_preview: boolean }>`
+		SELECT id, organization_id,
+			COALESCE(config->'settings'->'previewMode' = 'true'::jsonb, false) AS is_preview
+		FROM connections
 		WHERE slug = ${runtimeConnectionIdToSlug(args.connectionId)}
 			AND connector_key = ${platform}
+			AND status = 'active'
+			AND credential_mode IS NOT NULL
 			AND deleted_at IS NULL
 			${args.connectionOrganizationId ? sql`AND organization_id = ${args.connectionOrganizationId}` : sql``}
 		LIMIT 2
 	`;
 	if (connections.length !== 1) return { status: "forbidden" };
-	await sql.begin((tx) =>
+	const requiresInstallationAuthority = connections[0].organization_id !== organizationId && !connections[0].is_preview;
+	if (requiresInstallationAuthority) {
+		// Codeless identity currently comes from verified Slack workspace identity.
+		// Platforms without that identity adapter use connection-scoped codes.
+		if (!teamId) return { status: "forbidden" };
+		if (!(await canLinkChatOrganizations(sql, lobuUserId, organizationId, connections[0].organization_id))) {
+			return { status: "forbidden" };
+		}
+	}
+	const linked = await sql.begin((tx) =>
 		upsertBinding(
 			tx,
 			platform,
@@ -789,7 +840,9 @@ export async function bindChatToAgentForOwner(args: {
 			agentId,
 			organizationId,
 			connections[0].id,
+			lobuUserId,
+			requiresInstallationAuthority,
 		),
 	);
-	return { status: "bound" };
+	return { status: linked ? "bound" : "link_authority_revoked" };
 }

@@ -264,7 +264,7 @@ describe("AutomationSubscriptionService connection-scoped routing", () => {
 			"preview",
 			CHANNEL,
 			ORG_B,
-			true,
+			{ crossOrganization: true },
 		);
 		expect(binding?.agentId).toBe("agent-a");
 		expect(binding?.organizationId).toBe(ORG_A);

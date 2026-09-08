@@ -892,6 +892,7 @@ export class CoreServices {
 		this.commandRegistry = new CommandRegistry();
 		registerBuiltInCommands(this.commandRegistry, {
 			agentSettingsStore: this.agentSettingsStore,
+			automationSubscriptionService: this.getAutomationSubscriptionService(),
 		});
 		logger.debug("Command registry initialized with built-in commands");
 	}

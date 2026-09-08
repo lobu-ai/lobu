@@ -91,14 +91,15 @@ export class CommandDispatcher {
   }
 
   private async resolveAgentId(input: CommandDispatchInput): Promise<string> {
-    // Check message Automations first (Slack multi-tenant). Scope to the inbound
-    // org so an org-less read cannot match another tenant's subscription.
+    // Resolve through the concrete inbound installation so only its workspace
+    // and authorized linked workspaces can supply the command's agent.
 		const subscription =
 			input.connectionId && input.organizationId
 				? await this.automationSubscriptionService.resolveForConnection(
 						input.connectionId,
       input.channelId,
 						input.organizationId,
+						{ teamId: input.teamId },
 					)
 				: null;
     if (subscription?.agentId) {

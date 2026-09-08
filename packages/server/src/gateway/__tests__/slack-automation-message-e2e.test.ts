@@ -19,6 +19,12 @@ import {
 import { createHmac } from "node:crypto";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { Chat, type StateAdapter } from "chat";
+import { CommandRegistry } from "@lobu/core";
+import { addUserToOrganization, createTestUser, linkSlackIdentityInGraph } from "../../__tests__/setup/test-fixtures.js";
+import { bindChatToAgentForOwner } from "../../preview/slack.js";
+import { planAutomationActivationsForRuntimeConnection } from "../../automations/activation.js";
+import { registerBuiltInCommands } from "../commands/built-in-commands.js";
+import { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
 import { getDb } from "../../db/client.js";
 import { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
@@ -79,6 +85,7 @@ function slackEvent(options: {
   user?: string;
   botId?: string;
   channelType?: "channel" | "im";
+  eventType?: "message" | "app_mention";
 }) {
   return {
     token: "legacy-verification-token",
@@ -90,7 +97,7 @@ function slackEvent(options: {
     enterprise_id: ENTERPRISE_ID,
     is_enterprise_install: true,
     event: {
-      type: "message",
+      type: options.eventType ?? "message",
       team: WORKSPACE_TEAM_ID,
       team_id: WORKSPACE_TEAM_ID,
       channel: options.channel,
@@ -562,6 +569,200 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     `;
     for (const row of runStamps) {
       expect(row.action_input.platformMetadata.teamId).toBe(WORKSPACE_TEAM_ID);
+    }
+  });
+
+  test("a verified admin links another Lobu workspace and signed Slack messages queue there", async () => {
+    const sourceOrg = "org-slack-grid-e2e";
+    const targetOrg = "org-slack-linked-workspace";
+    const targetAgent = "agent-slack-linked-workspace";
+    const channel = "C_CROSS_WORKSPACE";
+    await seedAgentRow(targetAgent, { organizationId: targetOrg });
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, sourceOrg, "owner");
+    await addUserToOrganization(user.id, targetOrg, "admin");
+    await linkSlackIdentityInGraph({
+      organizationId: sourceOrg, userId: user.id,
+      teamId: WORKSPACE_TEAM_ID, slackUserId: "U_LINK_ADMIN",
+    });
+    const subscriptions = new AutomationSubscriptionService();
+    const registry = new CommandRegistry();
+    registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: subscriptions });
+    const dispatcher = new CommandDispatcher({ registry, automationSubscriptionService: subscriptions });
+    const replies: string[] = [];
+    await dispatcher.tryHandleSlashText(`/lobu link ${targetAgent}`, {
+      platform: "slack", userId: "U_LINK_ADMIN", channelId: channel,
+      teamId: WORKSPACE_TEAM_ID, isGroup: true,
+      connectionId: RUNTIME_CONNECTION_ID, organizationId: sourceOrg,
+      reply: async (text) => { replies.push(String(text)); },
+    });
+    expect(replies).toEqual([`Linked this chat to agent \`${targetAgent}\`. Say hi — I'll reply here from now on.`]);
+
+    const response = await chat.webhooks.slack(signedEventRequest(slackEvent({
+      eventId: "Ev_CROSS_WORKSPACE", channel, ts: "1787292010.000001",
+      text: "Create the follow-up task", user: "U_LINK_ADMIN",
+    })));
+    expect(response.status).toBe(200);
+    await waitFor(async () => {
+      const rows = await getDb()`SELECT action_input FROM runs WHERE run_type = 'chat_message'`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.action_input).toMatchObject({
+        agentId: targetAgent, organizationId: targetOrg,
+        messageText: "Create the follow-up task",
+        platformMetadata: { teamId: WORKSPACE_TEAM_ID, connectionId: RUNTIME_CONNECTION_ID },
+      });
+    });
+    const linked = await subscriptions.resolveForConnection(
+      RUNTIME_CONNECTION_ID, channel, sourceOrg, { teamId: WORKSPACE_TEAM_ID },
+    );
+    expect(linked?.organizationId).toBe(targetOrg);
+    const [automation] = await getDb()`SELECT created_by FROM automations WHERE organization_id = ${targetOrg}`;
+    expect(automation?.created_by).toBe(user.id);
+    const mentionResponse = await chat.webhooks.slack(signedEventRequest(slackEvent({
+      eventId: "Ev_CROSS_WORKSPACE_MENTION", channel, ts: "1787292011.000001",
+      eventType: "app_mention", text: `<@${BOT_USER_ID}> Follow up`, user: "U_LINK_ADMIN",
+    })));
+    expect(mentionResponse.status).toBe(200);
+    await waitFor(async () => {
+      const runs = await getDb()`SELECT action_input FROM runs WHERE run_type = 'chat_message'`;
+      expect(runs).toHaveLength(2);
+      for (const row of runs) expect(row.action_input.organizationId).toBe(targetOrg);
+    });
+    expect(slackPostMessage).not.toHaveBeenCalled();
+    const messages = await getDb()`SELECT organization_id, team_id FROM channel_messages WHERE channel_id = ${channel}`;
+    expect(messages).toHaveLength(2);
+    for (const message of messages) expect(message).toEqual({ organization_id: targetOrg, team_id: WORKSPACE_TEAM_ID });
+  });
+
+  test.each([
+    "no installation membership", "installation member", "agent member",
+    "missing team", "ambiguous agent",
+  ])("codeless linking rejects unauthorized or ambiguous targets: %s", async (boundary) => {
+    const targetOrg = "org-slack-untrusted-workspace";
+    await seedAgentRow("agent-slack-untrusted", { organizationId: targetOrg });
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, targetOrg, boundary === "agent member" ? "member" : "owner");
+    if (boundary !== "no installation membership") {
+      await addUserToOrganization(user.id, "org-slack-grid-e2e", boundary === "installation member" ? "member" : "owner");
+    }
+    if (boundary === "ambiguous agent") {
+      await seedAgentRow("agent-slack-untrusted", { organizationId: "org-slack-grid-e2e" });
+    }
+    const result = await bindChatToAgentForOwner({
+      platform: "slack", teamId: boundary === "missing team" ? undefined : WORKSPACE_TEAM_ID, channelId: "slack:C_UNAUTHORIZED",
+      agentId: "agent-slack-untrusted", lobuUserId: user.id,
+      connectionId: RUNTIME_CONNECTION_ID, connectionOrganizationId: "org-slack-grid-e2e",
+    });
+    expect(result).toEqual({ status: "forbidden" });
+    const rows = await getDb()`SELECT id FROM automations WHERE organization_id = ${targetOrg}`;
+    expect(rows).toHaveLength(0);
+  });
+
+  test.each([
+    "source membership revoked", "target membership revoked",
+    "source member is not admin", "target member is not admin",
+    "wrong team", "missing delivery team", "missing link team",
+    "wrong channel", "wrong connection", "wrong installation organization",
+    "inactive installation", "deleted installation", "untagged Automation",
+    "connector-wide trigger", "foreign agent",
+  ])("cross-workspace routing fails closed: %s", async (boundary) => {
+    const sourceOrg = "org-slack-grid-e2e";
+    const targetOrg = "org-slack-boundary";
+    const targetAgent = "agent-slack-boundary";
+    const channel = "C_BOUNDARY";
+    await seedAgentRow(targetAgent, { organizationId: targetOrg });
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, sourceOrg, "owner");
+    await addUserToOrganization(user.id, targetOrg, "admin");
+    await createTestAutomationSubscription({
+      organizationId: targetOrg, agentId: targetAgent, connectionId: connectionDbId,
+      channelId: channel, teamId: WORKSPACE_TEAM_ID, configuredBy: user.id,
+    });
+    const sql = getDb();
+    let deliveryTeam: string | undefined = WORKSPACE_TEAM_ID;
+    let deliveryChannel = channel;
+    let runtimeConnection = RUNTIME_CONNECTION_ID;
+    let installationOrg = sourceOrg;
+    if (boundary.endsWith("membership revoked") || boundary.endsWith("member is not admin")) {
+      const org = boundary.startsWith("source") ? sourceOrg : targetOrg;
+      if (boundary.endsWith("membership revoked")) {
+        await sql`DELETE FROM member WHERE "organizationId" = ${org} AND "userId" = ${user.id}`;
+      } else await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${org} AND "userId" = ${user.id}`;
+    } else if (boundary === "wrong team") deliveryTeam = "T_OTHER_WORKSPACE";
+    else if (boundary === "missing delivery team") deliveryTeam = undefined;
+    else if (boundary === "wrong channel") deliveryChannel = "C_OTHER_CHANNEL";
+    else if (boundary === "wrong installation organization") installationOrg = targetOrg;
+    else if (boundary === "wrong connection") {
+      runtimeConnection = "slackinst-unrelated";
+      await sql`INSERT INTO connections (organization_id, connector_key, slug, display_name, status, credential_mode, config)
+        VALUES (${sourceOrg}, 'slack', ${runtimeConnection}, 'Other install', 'active', 'managed', '{}')`;
+    } else if (boundary === "inactive installation") {
+      await sql`UPDATE connections SET status = 'error' WHERE id = ${connectionDbId}`;
+    } else if (boundary === "deleted installation") {
+      await sql`UPDATE connections SET deleted_at = now() WHERE id = ${connectionDbId}`;
+    } else if (boundary === "untagged Automation") {
+      await sql`UPDATE automations SET tags = '{}'::text[] WHERE organization_id = ${targetOrg}`;
+    } else if (boundary === "foreign agent") {
+      await sql`UPDATE automations SET managed_agent_id = 'agent-slack-grid-e2e' WHERE organization_id = ${targetOrg}`;
+    } else {
+      const [row] = await sql`SELECT triggers FROM automations WHERE organization_id = ${targetOrg}`;
+      const trigger = row.triggers[0];
+      if (boundary === "connector-wide trigger") delete trigger.connection_id;
+      else delete trigger.match.team_id;
+      await sql`UPDATE automations SET triggers = ${sql.json([trigger])} WHERE organization_id = ${targetOrg}`;
+    }
+    const plan = await planAutomationActivationsForRuntimeConnection({
+      connectionOrganizationId: installationOrg, runtimeConnectionId: runtimeConnection,
+      signal: {
+        connector_key: "slack", event_type: "message.created", delivery_id: "boundary-message",
+        resource_type: "channel", resource_ref: `slack:channel:${deliveryChannel}`,
+        attributes: { channel_id: deliveryChannel, ...(deliveryTeam ? { team_id: deliveryTeam } : {}) },
+      },
+    });
+    expect(plan.replyTargets).toHaveLength(0);
+    expect(plan.backgroundTargets).toHaveLength(0);
+    const subscriptions = new AutomationSubscriptionService();
+    expect(await subscriptions.resolveForConnection(runtimeConnection, deliveryChannel, installationOrg, { teamId: deliveryTeam })).toBeNull();
+    expect(await subscriptions.channelHasMessageSubscription(runtimeConnection, deliveryChannel, installationOrg, { teamId: deliveryTeam })).toBe(false);
+  });
+
+  test("foreign chat links only activate their exact trigger, preserving mention filters", async () => {
+    const sourceOrg = "org-slack-grid-e2e";
+    const targetOrg = "org-slack-trigger-scope";
+    const channel = "C_TRIGGER_SCOPE";
+    await seedAgentRow("agent-slack-trigger-scope", { organizationId: targetOrg });
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, sourceOrg, "owner");
+    await addUserToOrganization(user.id, targetOrg, "owner");
+    await createTestAutomationSubscription({
+      organizationId: targetOrg, agentId: "agent-slack-trigger-scope",
+      connectionId: connectionDbId, channelId: channel,
+      teamId: WORKSPACE_TEAM_ID, configuredBy: user.id,
+    });
+    const sql = getDb();
+    const [row] = await sql`SELECT triggers FROM automations WHERE organization_id = ${targetOrg}`;
+    const linkedTrigger = row.triggers[0];
+    linkedTrigger.match.mention_only = true;
+    await sql`UPDATE automations SET triggers = ${sql.json([
+      { ...linkedTrigger, connection_id: undefined, match: {}, output: "silent" },
+      { ...linkedTrigger, match: { channel_id: channel, team_id: "T_OTHER_WORKSPACE" }, output: "silent" },
+      linkedTrigger,
+    ])} WHERE organization_id = ${targetOrg}`;
+    const subscription = await new AutomationSubscriptionService().resolveForConnection(
+      RUNTIME_CONNECTION_ID, channel, sourceOrg, { teamId: WORKSPACE_TEAM_ID },
+    );
+    expect(subscription?.teamId).toBe(WORKSPACE_TEAM_ID);
+    for (const mention of [false, true]) {
+      const plan = await planAutomationActivationsForRuntimeConnection({
+        connectionOrganizationId: sourceOrg, runtimeConnectionId: RUNTIME_CONNECTION_ID,
+        signal: {
+          connector_key: "slack", event_type: "message.created", delivery_id: `mention-${mention}`,
+          resource_type: "channel", resource_ref: `slack:channel:${channel}`,
+          attributes: { channel_id: channel, team_id: WORKSPACE_TEAM_ID, mention_only: mention },
+        },
+      });
+      expect(plan.replyTargets).toHaveLength(mention ? 1 : 0);
+      expect(plan.backgroundTargets).toHaveLength(0);
     }
   });
 });
