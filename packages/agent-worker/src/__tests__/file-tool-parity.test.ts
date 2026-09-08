@@ -87,6 +87,7 @@ describe("Lobu file tools on both runtimes", () => {
     const fixtures = await lanes();
     for (const content of [
       "first\nsecond\nthird\n",
+      "\ufefffirst\r\nsecond\r\n",
       "x\n".repeat(2500),
       "€".repeat(18000),
     ]) {

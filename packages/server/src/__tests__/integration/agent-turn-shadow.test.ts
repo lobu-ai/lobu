@@ -411,7 +411,8 @@ describe('agent turn shadow producer', () => {
       ]);
       expect(toolResults[1].details).toMatchObject({ firstChangedLine: 1 });
       expect(toolResults[2].content[0].text).toContain('Could not find the exact text in a.txt');
-      expect(toolResults[3].content).toEqual([{ type: 'text', text: 'after\r\n' }]);
+      // Pi's read preserves the BOM as well as the CRLF bytes retained by edit.
+      expect(toolResults[3].content).toEqual([{ type: 'text', text: '\ufeffafter\r\n' }]);
       expect(toolResults[4].content).toEqual([{ type: 'text', text: `${Buffer.from('\ufeffafter\r\n').toString('base64')}\n` }]);
       const [reply] = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'finalText' = ${completion.text}`;
       expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });

@@ -1447,7 +1447,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if git log "$BASE_SHA"..HEAD --format=%B | grep -qF '[client-regen-not-needed]'; then
+          # Drain git log: grep -q can SIGPIPE it and fail a match under pipefail.
+          if git log "$BASE_SHA"..HEAD --format=%B | grep -F '[client-regen-not-needed]' > /dev/null; then
             echo "[client-regen-not-needed] sentinel present; generated-client check skipped for this PR."
             exit 0
           fi
@@ -1552,11 +1553,11 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git log "$BASE_SHA"..HEAD --format=%B | grep -qF '[squash-baseline]'; then
+          if git log "$BASE_SHA"..HEAD --format=%B | grep -F '[squash-baseline]' > /dev/null; then
             echo "[squash-baseline] sentinel present; immutability check is skipped for this PR."
             exit 0
           fi
-          if git log "$BASE_SHA"..HEAD --format=%B | grep -qF '[dup-version-rename]'; then
+          if git log "$BASE_SHA"..HEAD --format=%B | grep -F '[dup-version-rename]' > /dev/null; then
             echo "[dup-version-rename] sentinel present; immutability check is skipped for this PR."
             exit 0
           fi
@@ -1570,7 +1571,7 @@ jobs:
           #    does not silently no-op — the fix is genuinely applied on next
           #    run. Code review is the gate: confirm the edited migration is
           #    absent from every live schema_migrations before using this.
-          if git log "$BASE_SHA"..HEAD --format=%B | grep -qF '[migration-never-applied]'; then
+          if git log "$BASE_SHA"..HEAD --format=%B | grep -F '[migration-never-applied]' > /dev/null; then
             echo "[migration-never-applied] sentinel present; immutability check is skipped for this PR."
             exit 0
           fi
