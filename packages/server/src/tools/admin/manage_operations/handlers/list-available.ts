@@ -28,6 +28,7 @@ import {
 } from "../../../../utils/device-liveness";
 import { buildConnectionsUrl } from "../../../../utils/url-builder";
 import {
+	DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
 	describeDeviceConnectorSetupRequired,
 	findDeviceConnectorReadiness,
 	loadDeviceConnectorReadiness,
@@ -111,12 +112,15 @@ function executionTargetFromRow(
 			)}).`,
 		};
 	}
-	if (row.connector_manifest_backed && !deviceReadiness) {
+	if (
+		row.connector_manifest_backed &&
+		(row.connector_manifest_hash == null || !deviceReadiness)
+	) {
 		return {
 			...base,
 			status: "setup_required",
 			executable: false,
-			reason: "The selected connector implementation is not advertised by the assigned device. Update the device app and finish setup, then retry.",
+			reason: DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
 		};
 	}
 	if (deviceReadiness?.state === "setup_required") {

@@ -197,6 +197,23 @@ describe('manifest-backed device pin admission', () => {
     expect(result.errorMessage).toMatch(/device|manifest|setup|implementation|version/i);
   });
 
+  it.each([true, false])('rejects a manifest artifact without a hash (pinned=%s)', async (pinned) => {
+    const fixture = await seedFixture(manifest('1.0.0', 'Unverified build'));
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions SET compiled_code_hash = NULL
+      WHERE connector_key = ${KEY} AND version = ${fixture.selected.version}
+    `;
+    if (!pinned) {
+      await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${fixture.connection.id}`;
+    }
+
+    expect((await queueOperation(fixture)).status).toBe('failed');
+    expect((await readiness(fixture.connection.id, fixture.ctx)).executable).toBe(false);
+    const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${fixture.connection.id}`;
+    await expect(createSyncRun(Number(feed.id), {} as Env)).rejects.toThrow(/manifest/i);
+  });
+
   it('returns the admission failure through operations.execute without waiting for a worker', async () => {
     const fixture = await seedFixture(manifest('0.9.0'));
     const controller = new AbortController();

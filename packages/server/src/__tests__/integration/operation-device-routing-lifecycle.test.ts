@@ -609,7 +609,7 @@ describe("connection-to-device operation routing lifecycle", () => {
 		);
 		expect(manifestDemoResult).toMatchObject({
 			status: "failed",
-			error_message: expect.stringMatching(/selected connector manifest.*assigned device/i),
+			error_message: expect.stringMatching(/selected connector manifest.*eligible device/i),
 		});
 		const [manifestDemoRun] = (await sql`
 			SELECT status, claimed_by

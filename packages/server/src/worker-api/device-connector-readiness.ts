@@ -156,5 +156,5 @@ export function describeDeviceConnectorSetupRequired(
 }
 
 export const DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE =
-  'The selected connector manifest is not available on the assigned device. ' +
-  'Update or reconnect that device, then retry.';
+  'The selected connector manifest is not available on an eligible device. ' +
+  'Update or reconnect your device, then retry.';

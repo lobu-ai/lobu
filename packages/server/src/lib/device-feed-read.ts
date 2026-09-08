@@ -266,13 +266,12 @@ async function describeUnservableDevice(
       )}`
     );
   }
-  // A selected hash absent from the inventory is unavailable. Prefer the
-  // specific pin, heartbeat, and permission diagnostics below when present.
+  // This path serves only metadata-only device artifacts. Require an exact hash,
+  // while preferring the specific pin and liveness diagnostics below.
   const manifestError =
-    connectorReadiness?.state === 'device_offline' ||
-    (!connectorReadiness && p.manifestHash != null)
-      ? DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE
-      : null;
+    p.manifestHash != null && connectorReadiness?.state === 'ready'
+      ? null
+      : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
 
   if (p.deviceWorkerId) {
     // Reached THROUGH the connection, not by device id alone. The id comes off

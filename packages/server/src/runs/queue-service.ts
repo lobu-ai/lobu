@@ -327,6 +327,7 @@ async function deviceManifestAdmissionError(
     LIMIT 1
   `;
   if (!row) return null;
+  if (row.manifest_hash == null) return DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
   const target = {
     ownerUserId: row.owner_user_id,
     connectorKey,

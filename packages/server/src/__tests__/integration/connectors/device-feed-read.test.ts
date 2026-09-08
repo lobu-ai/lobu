@@ -251,6 +251,10 @@ describe('device-backed source feed read', () => {
     await setDeviceCapabilities(['local_directory']);
     const sql = getTestDb();
     await sql`UPDATE device_workers SET connector_manifests = ${sql.json(DIRECTORY_INVENTORY)} WHERE id = ${deviceWorkerId}::uuid`;
+    await sql`
+      UPDATE connector_versions SET compiled_code_hash = ${DIRECTORY_MANIFEST_HASH}
+      WHERE connector_key = ${CONNECTOR_KEY} AND version = ${CONNECTOR_VERSION}
+    `;
     await getTestDb()`UPDATE feeds SET status = 'active' WHERE id = ${feedId}`;
     await getTestDb()`DELETE FROM runs WHERE organization_id = ${orgId}`;
   });
@@ -458,7 +462,7 @@ describe('device-backed source feed read', () => {
       connectionId,
       connectorKey: CONNECTOR_KEY,
       connectorVersion: CONNECTOR_VERSION,
-      manifestHash: null,
+      manifestHash: DIRECTORY_MANIFEST_HASH,
       deviceOwnerUserId: userId,
       deviceWorkerId: foreign[0].id,
       feedStatus: 'active',
@@ -497,7 +501,17 @@ describe('device-backed source feed read', () => {
         },
       })} WHERE id = ${deviceWorkerId}::uuid
     `;
-    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*assigned device/i);
+    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*eligible device/i);
+    expect(await readRunRows()).toHaveLength(0);
+  });
+
+  it('refuses a manifest-backed read whose selected artifact has no hash', async () => {
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions SET compiled_code_hash = NULL
+      WHERE connector_key = ${CONNECTOR_KEY} AND version = ${CONNECTOR_VERSION}
+    `;
+    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*eligible device/i);
     expect(await readRunRows()).toHaveLength(0);
   });
 
@@ -1077,7 +1091,7 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
       connectionId: lifecycleConnectionId,
       connectorKey: CONNECTOR_KEY,
       connectorVersion: CONNECTOR_VERSION,
-      manifestHash: null,
+      manifestHash: DIRECTORY_MANIFEST_HASH,
       deviceOwnerUserId: lifecycleUserId,
       deviceWorkerId: lifecycleDeviceId,
       feedStatus: 'active',
@@ -1122,7 +1136,7 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
       connectionId: lifecycleConnectionId,
       connectorKey: CONNECTOR_KEY,
       connectorVersion: CONNECTOR_VERSION,
-      manifestHash: null,
+      manifestHash: DIRECTORY_MANIFEST_HASH,
       deviceOwnerUserId: lifecycleUserId,
       deviceWorkerId: lifecycleDeviceId,
       feedStatus: 'active',
