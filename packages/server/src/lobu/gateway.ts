@@ -437,15 +437,12 @@ export async function initLobuGateway(): Promise<Hono | null> {
 			workerGatewayToWire.setDeploymentActivityTracker(
 				deploymentManager,
 			);
-			workerGatewayToWire.setDispatchRecycler(
-				deploymentManager,
-			);
 			logger.info(
-				"[Lobu] Worker idle-clock tracker and claim-side recycle gate wired; readiness watchdog awaiting HTTP listener startup",
+				"[Lobu] Worker idle-clock tracker wired; readiness watchdog awaiting HTTP listener startup",
 			);
 		} else {
 			logger.warn(
-				"[Lobu] No worker gateway on this pod — the readiness watchdog, idle-clock tracker, and claim-side recycle gate are ALL inactive; workers can be reported ready before connecting, and warm workers will not be recycled when their connector lease or tooling goes stale",
+				"[Lobu] No worker gateway on this pod — the readiness watchdog and idle-clock tracker are inactive; workers can be reported ready before connecting",
 			);
 		}
 

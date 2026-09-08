@@ -14,9 +14,7 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { stream } from "hono/streaming";
 import { getDb } from "../../db/client.js";
-import { bindRequestAbortToStream } from "../../events/sse-abort-bridge.js";
 import {
   AUTOMATION_RUN_SOURCE,
   type AutomationRunSkillResolver,
@@ -42,11 +40,8 @@ import {
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import {
-  type SSEWriter,
   WorkerConnectionManager,
 } from "./connection-manager.js";
-import type { DispatchRecycler } from "./dispatch-recycle.js";
-import { WorkerJobRouter } from "./job-router.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
 
 const logger = createLogger("worker-gateway");
@@ -70,7 +65,6 @@ export interface DeploymentActivityTracker {
 export class WorkerGateway {
   private app: Hono;
   private connectionManager: WorkerConnectionManager;
-  private jobRouter: WorkerJobRouter;
   private queue: IMessageQueue;
   private mcpConfigService: McpConfigService;
   private instructionService: InstructionService;
@@ -94,7 +88,6 @@ export class WorkerGateway {
     this.queue = queue;
     this.publicGatewayUrl = publicGatewayUrl;
     this.connectionManager = new WorkerConnectionManager();
-    this.jobRouter = new WorkerJobRouter(queue, this.connectionManager);
     this.mcpConfigService = mcpConfigService;
     this.instructionService = instructionService;
     this.mcpProxy = mcpProxy;
@@ -134,22 +127,11 @@ export class WorkerGateway {
   }
 
   /**
-   * Wire the deployment manager into the job router's claim-side recycle gate
-   * (see `dispatch-recycle.ts`). Same composition-root pattern as
-   * `setDeploymentActivityTracker`: the gateway and the orchestrator are built
-   * separately, and the router runs without it (jobs deliver ungated).
-   */
-  setDispatchRecycler(recycler: DispatchRecycler): void {
-    this.jobRouter.setDispatchRecycler(recycler);
-  }
-
-  /**
    * Setup routes on Hono app
    */
   private setupRoutes() {
     // SSE endpoint for workers to receive jobs
     // Routes are mounted at /worker, so paths here should be relative
-    this.app.get("/stream", (c) => this.handleStreamConnection(c));
 
     // HTTP POST endpoint for workers to send responses
     this.app.post("/response", (c) => this.handleWorkerResponse(c));
@@ -193,179 +175,6 @@ export class WorkerGateway {
       authenticated: false,
       configured: !mcp.requiresInput,
     }));
-  }
-
-  /**
-   * Handle SSE connection from worker
-   */
-  private async handleStreamConnection(c: Context): Promise<Response> {
-    const auth = await this.authenticateWorker(c);
-    if (!auth) {
-      return c.json({ error: "Invalid token" }, 401);
-    }
-
-    const { deploymentName, userId, conversationId, agentId } =
-      auth.tokenData as any;
-    if (!conversationId) {
-      return c.json({ error: "Invalid token (missing conversationId)" }, 401);
-    }
-
-    // Extract httpPort from query params (worker HTTP server registration)
-    const httpPortParam = c.req.query("httpPort");
-    const httpPort = httpPortParam ? parseInt(httpPortParam, 10) : undefined;
-
-    // Create an SSE stream.
-    //
-    // Hono's `stream()` only fires `streamWriter.onAbort()` from
-    // `ReadableStream.cancel()` — which doesn't run on abnormal disconnects
-    // (LB idle timeout, intermediate proxy kill, worker pod hard exit). On
-    // Node + current Bun the per-request `AbortSignal` is the only reliable
-    // trigger. Without bridging it, a stale worker SSE leaks the writer
-    // closure + `while !isClosed` loop until the 10-minute stale-cleanup
-    // sweep catches up. Same retain pattern fixed for the invalidation
-    // streams in #833. Refs #782.
-    const requestSignal = c.req.raw.signal;
-
-    return stream(c, async (streamWriter) => {
-      let isClosed = false;
-
-      // If the client already aborted between handler invocation and stream
-      // body execution, bail out before registering anything.
-      if (requestSignal?.aborted) {
-        return;
-      }
-
-      // Create an SSE writer adapter
-      const sseWriter: SSEWriter = {
-        write: (data: string): boolean => {
-          try {
-            void streamWriter.write(data);
-            return true;
-          } catch {
-            return false;
-          }
-        },
-        end: () => {
-          try {
-            streamWriter.close();
-          } catch {
-            // Already closed
-          }
-        },
-        onClose: (callback: () => void) => {
-          streamWriter.onAbort(() => {
-            isClosed = true;
-            callback();
-          });
-        },
-      };
-
-      // Idempotent cleanup latch. The `onClose` subscriber must be registered
-      // BEFORE the async pauseWorker/addConnection/registerWorker block so an
-      // abort fired during that window can't leave a dead writer registered
-      // in the connection manager. `connectionAdded` flips true the instant
-      // we hand the writer to `addConnection`; the cleanup latch reads it and
-      // either removes the registration (post-add) or no-ops (pre-add). The
-      // `aborted` flag short-circuits the async setup so we don't even add a
-      // dead writer.
-      let connectionAdded = false;
-      let cleanupRan = false;
-      let aborted = false;
-      const runCleanup = () => {
-        if (cleanupRan) return;
-        cleanupRan = true;
-        aborted = true;
-        if (!connectionAdded) {
-          // Aborted before we registered; nothing to remove.
-          return;
-        }
-        const current = this.connectionManager.getConnection(deploymentName);
-        if (current && current.writer !== sseWriter) {
-          logger.debug(
-            `Ignoring stale disconnect for ${deploymentName} (replaced by newer SSE)`
-          );
-          return;
-        }
-        this.jobRouter.pauseWorker(deploymentName).catch((err) => {
-          logger.error(`Failed to pause worker ${deploymentName}:`, err);
-        });
-        this.connectionManager.removeConnection(deploymentName);
-      };
-
-      // Register the disconnect subscriber FIRST so an abort during the
-      // async setup block below routes through the same idempotent latch.
-      sseWriter.onClose(runCleanup);
-
-      // Bridge per-request AbortSignal to the stream so abnormal disconnects
-      // tear the writer down (Hono's onAbort alone doesn't fire on those).
-      const detachAbortBridge = bindRequestAbortToStream(
-        requestSignal,
-        streamWriter
-      );
-
-      // Set SSE headers
-      c.header("Content-Type", "text/event-stream");
-      c.header("Cache-Control", "no-cache");
-      c.header("Connection", "keep-alive");
-      c.header("X-Accel-Buffering", "no");
-
-      // Clean up stale state before registering new connection.
-      // When a container dies without cleanly closing its TCP socket,
-      // the old SSE connection may still appear valid. Pause the BullMQ
-      // worker first to prevent it from sending jobs to the dead connection,
-      // then remove the stale connection so any in-flight handleJob will
-      // fail and trigger a retry against the new connection.
-      await this.jobRouter.pauseWorker(deploymentName);
-
-      // If the request aborted during the await above, bail before touching
-      // the connection manager. The cleanup latch already fired via the
-      // abort bridge → onAbort → onClose path.
-      if (aborted || requestSignal?.aborted) {
-        detachAbortBridge();
-        runCleanup();
-        return;
-      }
-
-      if (this.connectionManager.isConnected(deploymentName)) {
-        logger.info(
-          `Cleaning up stale connection for ${deploymentName} before new SSE`
-        );
-        // Intentionally no expectedWriter — always evict the old connection
-        this.connectionManager.removeConnection(deploymentName);
-      }
-
-      // Register new (live) connection
-      this.connectionManager.addConnection(
-        deploymentName,
-        userId,
-        conversationId,
-        agentId || "",
-        sseWriter,
-        httpPort
-      );
-      connectionAdded = true;
-
-      // If we lost the race — abort fired between the pre-check above and
-      // here — drop the writer we just registered.
-      if (aborted || requestSignal?.aborted) {
-        detachAbortBridge();
-        runCleanup();
-        return;
-      }
-
-      // Register BullMQ worker (idempotent) and resume job processing
-      await this.jobRouter.registerWorker(deploymentName);
-      await this.jobRouter.resumeWorker(deploymentName);
-
-      // Keep the connection open until the stream is actually aborted.
-      try {
-        while (!isClosed) {
-          await streamWriter.sleep(1000);
-        }
-      } finally {
-        detachAbortBridge();
-      }
-    });
   }
 
   /**
@@ -542,11 +351,6 @@ export class WorkerGateway {
               `[WORKER-GATEWAY] Failed to refresh deployment activity for ${deploymentName}: ${err}`
             );
           });
-      }
-
-      // Acknowledge job completion if jobId provided
-      if (jobId) {
-        this.jobRouter.acknowledgeJob(jobId);
       }
 
       // Delivery receipts (worker ACKs) have no message payload — just acknowledge and return
@@ -1248,6 +1052,5 @@ export class WorkerGateway {
    */
   shutdown(): void {
     this.connectionManager.shutdown();
-    this.jobRouter.shutdown();
   }
 }
