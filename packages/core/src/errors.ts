@@ -181,12 +181,6 @@ export enum AgentErrorCode {
   /** Deployment/worker failed to START, so the request never ran. */
   WORKER_STARTUP_FAILED = "WORKER_STARTUP_FAILED",
   /**
-   * Operator required the systemd worker sandbox (LOBU_REQUIRE_WORKER_SANDBOX=1)
-   * but it's unavailable — the worker refused to run. An admin-config condition
-   * with remediation steps, not a transient user error.
-   */
-  WORKER_SANDBOX_REQUIRED = "WORKER_SANDBOX_REQUIRED",
-  /**
    * The provider aborted the turn on its own tool-call filter rather than
    * returning a usable stop reason — e.g. Gemini's
    * `finish_reason: function_call_filter: MALFORMED_FUNCTION_CALL`. A
@@ -293,14 +287,6 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
   [AgentErrorCode.WORKER_STARTUP_FAILED]: {
     message:
       "The agent couldn't start, so your request wasn't processed. Please try again in a moment.",
-    cta: "none",
-  },
-  [AgentErrorCode.WORKER_SANDBOX_REQUIRED]: {
-    message:
-      "LOBU_REQUIRE_WORKER_SANDBOX=1 but the systemd worker sandbox is unavailable on this host " +
-      "(no usable `systemd-run --user` manager). Refusing to run an un-sandboxed worker. Provide a " +
-      "user-level systemd manager, or unset LOBU_REQUIRE_WORKER_SANDBOX to allow unwrapped workers " +
-      "(the egress proxy still constrains network access).",
     cta: "none",
   },
   [AgentErrorCode.SESSION_TIMEOUT]: {

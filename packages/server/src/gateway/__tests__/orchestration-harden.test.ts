@@ -79,7 +79,6 @@ mock.module("node:child_process", () => ({
 
 import type { MessagePayload } from "@lobu/core";
 import {
-  __resetCapabilityProbesForTests,
   buildCanonicalConversationKey,
   DeploymentManager,
   generateDeploymentName,

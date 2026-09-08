@@ -55,7 +55,6 @@
     "@lobu/core": "workspace:*",
     "@lobu/embeddings": "workspace:*",
     "@mariozechner/pi-ai": "^0.73.1",
-    "@mariozechner/pi-coding-agent": "^0.73.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",

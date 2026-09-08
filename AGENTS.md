@@ -2,7 +2,7 @@
 
 ## Repo map
 - Bun workspace under `packages/*`; TS source in `src`, tests in `__tests__`.
-- `core` types/utils · `plugin-api` plugin contracts · `plugin-host` plugin composition · `server` gateway + embedded runtime · `agent-worker` agent execution · `connectors` built-in connectors · `owletto` frontend submodule.
+- `core` types/utils · `plugin-api` plugin contracts · `plugin-host` plugin composition · `server` gateway + embedded runtime · `connector-worker` connector jobs and agent turns (V8 isolates) · `connectors` built-in connectors · `owletto` frontend submodule.
 - Read the nearest package `AGENTS.md` before editing that package; grep `docs/GOTCHAS.md` when something looks inexplicable.
 
 ## Unrecoverable — never do these

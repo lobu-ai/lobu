@@ -44,7 +44,6 @@ import {
   isSecretEnvVar,
 } from "./deployment-identity.js";
 
-export { signalWorkerGroup, __resetCapabilityProbesForTests } from "./host-capabilities.js";
 export {
   acquireConversationLock,
   getMaxReservedLocks,
