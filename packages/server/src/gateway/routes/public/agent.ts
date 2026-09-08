@@ -1727,6 +1727,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         networkConfig: settingsNetwork,
         guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
+        preApprovedTools,
         ...remainingOptions
       } = agentOptions;
 
@@ -1849,6 +1850,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         networkConfig: session.networkConfig || settingsNetwork,
         guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
+        preApprovedTools,
       });
 
       rootSpan?.end();
