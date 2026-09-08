@@ -592,6 +592,20 @@ export class MessageConsumer {
       // agent's exact allow-list on the payload model NOW, before it's persisted.
       await this.enforceModelPolicyAtEnqueue(data);
 
+      // Reconcile the agent's declared egress domains and pre-approved MCP
+      // tools into the grant store. The MCP proxy answers "allow" for a tool
+      // only when `grantStore.hasGrant(agentId, '/mcp/<id>/tools/<name>')`
+      // holds, and `http-proxy` gates domains the same way — so without this,
+      // every pre-approved tool falls through to an approval prompt and a
+      // declared domain is not reachable.
+      //
+      // Runs on EVERY dispatch, cold or warm. The subprocess lane reached this
+      // twice (cold through `createWorkerDeployment`'s env build, warm through
+      // an explicit call before scale-up); both of those paths went with the
+      // lane, so one unconditional call replaces them. The sync is
+      // drift-gated internally — it writes only when the pattern set changed.
+      await this.deploymentManager.syncNetworkConfigGrants(data);
+
       // Persist before queue delivery so a worker reconnect cannot lose the input.
       await this.recordRunInput(data, deploymentName);
 

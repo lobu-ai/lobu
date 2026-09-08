@@ -252,6 +252,26 @@ describe("#1: exact-model gate enforced at ENQUEUE time (covers warm/resumed)", 
     expect(sends[0]?.data.agentOptions?.model).not.toBe("openai/gpt-4o");
   });
 
+  test("every dispatch reconciles egress + pre-approved-tool grants", async () => {
+    // The MCP proxy answers "allow" for a tool only when
+    // `grantStore.hasGrant(agentId, '/mcp/<id>/tools/<name>')` holds, and
+    // http-proxy gates declared domains the same way. The subprocess lane
+    // reached this sync twice (cold via the env build, warm via an explicit
+    // pre-scale call) and BOTH paths went with that lane — so if the isolate
+    // dispatch stops calling it, every pre-approved tool silently falls
+    // through to an approval prompt with no error anywhere.
+    const { queue, recordInput } = makeCapturingQueue();
+    const manager = makeWarmDeploymentManager(["openai/gpt-5"]);
+    const consumer = new TestMessageConsumer(manager, queue, recordInput);
+
+    await drive(consumer, "openai/gpt-5");
+
+    const sync = (manager as unknown as {
+      syncNetworkConfigGrants: { mock: { calls: unknown[][] } };
+    }).syncNetworkConfigGrants;
+    expect(sync.mock.calls.length).toBeGreaterThan(0);
+  });
+
   test("an in-list model passes through unchanged", async () => {
     const { queue, sends, recordInput } = makeCapturingQueue();
     const consumer = new TestMessageConsumer(
