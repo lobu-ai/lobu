@@ -162,6 +162,7 @@ const config: KnipConfig = {
         "@hono/zod-openapi",
         "@lobu/embeddings",
         "@mariozechner/pi-ai",
+        "@mariozechner/pi-coding-agent",
         "@modelcontextprotocol/sdk",
         "@opentelemetry/api",
         "@opentelemetry/exporter-trace-otlp-grpc",
