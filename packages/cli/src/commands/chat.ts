@@ -479,10 +479,20 @@ async function streamResponse(
     controller.abort();
   };
 
-  let lastAgentActivityAt = Date.now();
-  /** A `ping` is the connection talking, not the agent. */
+  // A budget of network silence, spent only while actually waiting on the
+  // socket and refilled only by the agent saying something.
+  //
+  // It has to be a budget rather than a deadline measured from the last event.
+  // Heartbeats mean many short waits rather than one long one, so each wait
+  // must draw down a shared allowance instead of restarting a full one — and
+  // wall-clock since the last event would charge the budget for time spent
+  // rendering output or waiting for a human at an approval prompt, aborting a
+  // perfectly healthy turn.
+  let idleBudgetMs = IDLE_TIMEOUT_MS;
+
+  /** A `ping` is the connection talking, not the agent; it refills nothing. */
   const noteAgentActivity = (event: string) => {
-    if (event !== "ping") lastAgentActivityAt = Date.now();
+    if (event !== "ping") idleBudgetMs = IDLE_TIMEOUT_MS;
   };
 
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -493,20 +503,16 @@ async function streamResponse(
   };
   const waitForStream = async <T>(operation: Promise<T>): Promise<T> => {
     clearIdleTimer();
-    // Time REMAINING since the agent last said something, so a stream carrying
-    // nothing but heartbeats still reaches the deadline.
-    const remaining = Math.max(
-      0,
-      IDLE_TIMEOUT_MS - (Date.now() - lastAgentActivityAt)
-    );
-    idleTimer = setTimeout(abortIdle, remaining);
+    const waitStartedAt = Date.now();
+    idleTimer = setTimeout(abortIdle, idleBudgetMs);
     try {
       return await operation;
     } finally {
-      // Rendering a chunk can block on stdout or on a human answering a
-      // tool-approval prompt. Neither is the agent going quiet, so the clock
-      // only runs while we are actually waiting on the network.
       clearIdleTimer();
+      // Charge only the time spent inside this wait. Everything after it —
+      // rendering to stdout, a human answering a tool-approval prompt — is
+      // this client being slow, not the agent going quiet.
+      idleBudgetMs = Math.max(0, idleBudgetMs - (Date.now() - waitStartedAt));
     }
   };
 

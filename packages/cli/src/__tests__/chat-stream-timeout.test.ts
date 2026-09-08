@@ -272,4 +272,54 @@ describe("chat stream idle timeout", () => {
     expect(stderr.join("")).toContain("timed out");
     expect(process.exitCode).toBe(1);
   });
+  test("slow rendering is not charged against the silence budget", async () => {
+    process.env.LOBU_API_TOKEN = "test-token";
+    process.env.LOBU_CHAT_IDLE_TIMEOUT_MS = "100";
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    // stdout takes 150ms to drain — longer than the whole budget.
+    captureTerminal({ stdout, stderr }, 150);
+
+    // `complete` lands 50ms after rendering finishes: well inside the budget
+    // as measured in NETWORK silence, but far outside it if the 150ms spent
+    // writing to the terminal is charged too.
+    installFetch((signal) => {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(sse("output", { content: "slow to render" }))
+            );
+            setTimeout(() => {
+              try {
+                controller.enqueue(encoder.encode(sse("complete", {})));
+              } catch {
+                // already closed
+              }
+            }, 200);
+            signal?.addEventListener("abort", () => {
+              try {
+                controller.error(
+                  new DOMException("The operation was aborted.", "AbortError")
+                );
+              } catch {
+                // already closed
+              }
+            });
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      );
+    });
+
+    await chatCommand(exampleDir, "run it", {
+      gateway: "http://gateway.test",
+      new: true,
+    });
+
+    expect(stderr.join("")).not.toContain("timed out");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
 });
