@@ -14,6 +14,8 @@ import {
 	softDeleteChannelFeed,
 } from "./channel-feed.js";
 
+import { canLinkChatOrganizations, crossOrganizationChatLinkScope } from "./chat-link-authorization.js";
+
 const logger = createLogger("automation-channel-subscriptions");
 const CHAT_LINK_TAG = "system:chat-link";
 const CHAT_LINK_PROMPT = "Respond helpfully to the incoming message.";
@@ -157,6 +159,8 @@ async function loadChatAutomationSubscriptions(
 	sql: DbClient,
 	filters: {
 		automationOrganizationId?: string;
+		includeAuthorizedChatLinks?: boolean;
+		teamId?: string;
 		agentId?: string;
 		connectionId?: string;
 		connectionOrganizationId?: string;
@@ -169,8 +173,11 @@ async function loadChatAutomationSubscriptions(
 	const native = filters.channelId
 		? nativeChannelIdFromAny(filters.channelId)
 		: null;
+	const linkedOrgFilter = filters.includeAuthorizedChatLinks && filters.connectionOrganizationId
+		? sql`OR ${crossOrganizationChatLinkScope(sql, filters.connectionOrganizationId, filters.teamId)}`
+		: sql``;
 	const automationOrgFilter = filters.automationOrganizationId
-		? sql`AND s.organization_id = ${filters.automationOrganizationId}`
+		? sql`AND (s.organization_id = ${filters.automationOrganizationId} ${linkedOrgFilter})`
 		: sql``;
 	const agentFilter = filters.agentId
 		? sql`AND s.agent_id = ${filters.agentId}`
@@ -236,10 +243,13 @@ export class AutomationSubscriptionService {
 		channelId: string,
 		connectionOrganizationId: string,
 		crossOrg = false,
+		teamId?: string,
 	): Promise<ChatAutomationSubscription | null> {
 		const sql = getDb();
 		const rows = await loadChatAutomationSubscriptions(sql, {
 			automationOrganizationId: crossOrg ? undefined : connectionOrganizationId,
+			includeAuthorizedChatLinks: !crossOrg,
+			teamId,
 			connectionOrganizationId,
 			connectionSlug: runtimeConnectionIdToSlug(connectionId),
 			channelId,
@@ -260,10 +270,13 @@ export class AutomationSubscriptionService {
 		channelId: string,
 		connectionOrganizationId: string,
 		crossOrg = false,
+		teamId?: string,
 	): Promise<boolean> {
 		const sql = getDb();
 		const rows = await loadChatAutomationSubscriptions(sql, {
 			automationOrganizationId: crossOrg ? undefined : connectionOrganizationId,
+			includeAuthorizedChatLinks: !crossOrg,
+			teamId,
 			connectionOrganizationId,
 			connectionSlug: runtimeConnectionIdToSlug(connectionId),
 			channelId,
@@ -378,6 +391,8 @@ export class AutomationSubscriptionService {
 		teamId: string | undefined,
 		options: {
 			configuredBy?: string;
+			/** Preserve the original author when renewing a foreign installation grant. */
+			requireAuthorizedAuthor?: boolean;
 			organizationId?: string;
 			sql?: DbClient;
 			connectionId: number;
@@ -392,7 +407,7 @@ export class AutomationSubscriptionService {
 			 */
 			createOnly?: boolean;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		if (!Number.isInteger(options.connectionId) || options.connectionId < 1) {
 			throw new Error("connectionId must be a positive integer");
 		}
@@ -409,7 +424,7 @@ export class AutomationSubscriptionService {
 			teamId,
 		});
 
-		const write = async (tx: DbClient): Promise<void> => {
+		const write = async (tx: DbClient): Promise<boolean> => {
 			// Serialize concurrent create/relink for the same org+connection+channel.
 			await tx`
 				SELECT pg_advisory_xact_lock(
@@ -418,7 +433,7 @@ export class AutomationSubscriptionService {
 				)
 			`;
 			const connectionRows = await tx`
-				SELECT 1
+				SELECT organization_id
 				FROM connections
 				WHERE id = ${options.connectionId}
 				  AND connector_key = ${platform}
@@ -431,8 +446,8 @@ export class AutomationSubscriptionService {
 				);
 			}
 
-			const existing = await tx<{ automation_id: number }>`
-				SELECT w.id AS automation_id
+			const existing = await tx<{ automation_id: number; created_by: string }>`
+				SELECT w.id AS automation_id, w.created_by
 				FROM automations w
 				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.triggers, '[]'::jsonb)) trigger
 				WHERE w.status = 'active'
@@ -452,7 +467,12 @@ export class AutomationSubscriptionService {
 				// A chat-link already covers this connection+channel. Under
 				// create-only (the connection-owner fallback), leave it untouched —
 				// this is where a racing explicit `/lobu link` is preserved.
-				if (options.createOnly) return;
+				if (options.createOnly) return true;
+				// created_by is immutable audit attribution and the durable grant
+				// principal. A different caller cannot silently replace that authority.
+				if (options.requireAuthorizedAuthor && !(await canLinkChatOrganizations(
+					tx, existing[0].created_by, organizationId, connectionRows[0].organization_id,
+				))) return false;
 				// Relink must not wipe user-added triggers (schedule, extra events)
 				// on the same Automation — only replace the chat message.created
 				// trigger for this connection+channel.
@@ -493,7 +513,7 @@ export class AutomationSubscriptionService {
 						updated_at = current_timestamp
 					WHERE id = ${existing[0].automation_id}
 				`;
-				return;
+				return true;
 			}
 
 			const createdBy = await resolveCreatedBy(
@@ -535,9 +555,10 @@ export class AutomationSubscriptionService {
 				UPDATE automations SET current_version_id = ${versionId}
 				WHERE id = ${automationId}
 			`;
+			return true;
 		};
-		if (options.sql) await write(sql);
-		else await sql.begin(write);
+		const linked = options.sql ? await write(sql) : await sql.begin(write);
+		if (!linked) return false;
 
 		await resolveChannelFeedId({
 			connectionId: String(options.connectionId),
@@ -546,6 +567,7 @@ export class AutomationSubscriptionService {
 			sql,
 		});
 		logger.info(`Created chat Automation: ${platform}/${channelId} → ${agentId}`);
+		return true;
 	}
 
 	async archiveChatAutomation(

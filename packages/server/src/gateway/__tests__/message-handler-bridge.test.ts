@@ -502,6 +502,7 @@ describe("registerMessageHandlers linked-channel ingress", () => {
       "slack:C0CHANNEL",
       "org-grid",
       false,
+      "T0WORKSPACE",
     );
     expect(handleMessage).toHaveBeenCalledWith(thread, message, "subscribed");
   });

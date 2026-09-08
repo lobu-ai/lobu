@@ -235,10 +235,9 @@ export async function resolveAgentId(params: {
   } = params;
 
   if (automationSubscriptionService) {
-    // Subscriptions are org-scoped (a channel can be handled independently by
-    // multiple tenants), so the read MUST be scoped to the inbound
-		// connection's org. Preview connections are the deliberate exception: they
-		// fan out across orgs, but still resolve through that concrete connection.
+    // Bind every read to the inbound installation. The subscription service
+    // admits its own workspace and authorized cross-workspace chat links;
+    // hosted preview installations retain their explicit cross-org routing.
 		const subscription =
 			connectionId && organizationId
 				? await automationSubscriptionService.resolveForConnection(
@@ -246,6 +245,7 @@ export async function resolveAgentId(params: {
           channelId,
 						organizationId,
 						crossOrg === true,
+						params.teamId,
 					)
 				: null;
     if (subscription) {

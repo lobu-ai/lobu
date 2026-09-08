@@ -79,6 +79,17 @@ function sanitizeRefLabel(name: string): string {
   return name.replace(/[[\]()\r\n]+/g, " ").replace(/\s+/g, " ").trim() || "file";
 }
 
+/**
+ * Workspace id carried on the provider envelope (Slack `team_id`/`team`).
+ * Both admission checks and the routing planner must read it the same way, or
+ * a team-scoped chat link is admitted by one and rejected by the other.
+ */
+function teamIdFromRawMessage(raw: unknown): string | undefined {
+  const envelope = raw as Record<string, unknown> | undefined;
+  const teamId = envelope?.team_id ?? envelope?.team;
+  return typeof teamId === "string" ? teamId : undefined;
+}
+
 function parseProviderFromModelRef(modelRef: string): string | null {
   const trimmed = modelRef.trim();
   if (!trimmed) return null;
@@ -524,7 +535,7 @@ export class MessageHandlerBridge {
    */
   async handleUnmatchedChannelMessage(
     thread: { id: string; channelId: string },
-    message: { author?: { isBot?: boolean | "unknown"; isMe?: boolean } },
+    message: { author?: { isBot?: boolean | "unknown"; isMe?: boolean }; raw?: unknown },
   ): Promise<void> {
     // The catch-all pattern sees bot-authored channel events too. Chat SDK
     // already suppresses this installation's own posts before dispatch, but
@@ -546,6 +557,7 @@ export class MessageHandlerBridge {
       thread.channelId,
       organizationId,
       this.connection.settings?.previewMode === true,
+      teamIdFromRawMessage(message.raw),
     );
     if (!linked) return;
 
@@ -762,10 +774,7 @@ export class MessageHandlerBridge {
     // drop the message.
     const automationSubscriptionService =
       this.services.getAutomationSubscriptionService();
-    const rawTeamId =
-      (message.raw as Record<string, unknown> | undefined)?.team_id ??
-      (message.raw as Record<string, unknown> | undefined)?.team;
-    const teamId = typeof rawTeamId === "string" ? rawTeamId : undefined;
+    const teamId = teamIdFromRawMessage(message.raw);
 
     // Preview connections fan out to Automations in OTHER orgs (a
     // `/lobu link <code>` creates one under the claim's org, not this
@@ -872,7 +881,8 @@ export class MessageHandlerBridge {
           this.connection.id,
           channelId,
           this.connection.organizationId,
-          isPreview
+          isPreview,
+          teamId
         ))
       ) {
         logger.info(

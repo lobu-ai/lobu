@@ -346,21 +346,17 @@ describe("Slack Preview claims + channel Automations", () => {
     });
   });
 
-  test("the link command explains the hosted-or-same-org boundary per platform", async () => {
+  test("the link command explains the authorized connection boundary per platform", async () => {
     const registry = new CommandRegistry();
     registerBuiltInCommands(registry, { agentSettingsStore: {} as never });
     for (const scenario of [
       {
         platform: "slack",
         connectionId: FOREIGN_SLACK_CONNECTION,
-        expectedHostedCopy: "Lobu's hosted Slack workspace",
-        expectedCurrentCopy: "this Slack workspace",
       },
       {
         platform: "telegram",
         connectionId: FOREIGN_TELEGRAM_CONNECTION,
-        expectedHostedCopy: "Lobu's hosted preview bot",
-        expectedCurrentCopy: "this chat connection",
       },
     ] as const) {
       const replies: string[] = [];
@@ -378,9 +374,8 @@ describe("Slack Preview claims + channel Automations", () => {
         },
       });
       const reply = replies.join("\n");
-      expect(reply).toContain(scenario.expectedHostedCopy);
-      expect(reply).toContain(scenario.expectedCurrentCopy);
-      expect(reply).toContain("same Lobu organization");
+      expect(reply).toContain("isn't authorized for this chat connection");
+      expect(reply).toContain("selected installation or hosted preview bot");
     }
   });
 
