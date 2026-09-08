@@ -26,19 +26,40 @@ function isolateToolReply(messages) {
   const results = messages.filter((message) => message.role === "tool");
   let call;
   if (results.length === 0) {
+    // FIRST: read the skill the gateway seeded into the workspace. Its body
+    // carries a token the file is the only source of, so a pass proves the
+    // seeded file is really on the turn's filesystem.
+    //
+    // RELATIVE on purpose. Both lanes are driven by this one mock, and their
+    // workspace roots differ: the isolate's is the in-memory `/workspace`,
+    // while the subprocess lane's is a real per-conversation directory under
+    // `WORKSPACE_DIR`. A relative path resolves against whichever root the
+    // reading lane actually has, so the same script proves the same thing on
+    // both instead of hard-coding one lane's layout.
+    call = {
+      name: "read",
+      arguments: JSON.stringify({
+        file_path: ".skills/isolate-smoke-skill/SKILL.md",
+      }),
+    };
+  } else if (results.length === 1) {
+    assert.ok(
+      JSON.stringify(results[0].content).includes("SKILL-SEED-OK"),
+      "model did not receive the seeded skill file's bytes"
+    );
     call = {
       name: "write",
       arguments: JSON.stringify({ file_path: "smoke.txt", content: marker }),
     };
-  } else if (results.length === 1) {
-    assert.match(JSON.stringify(results[0].content), /wrote/i);
+  } else if (results.length === 2) {
+    assert.match(JSON.stringify(results[1].content), /wrote/i);
     call = {
       name: "read",
       arguments: JSON.stringify({ file_path: "smoke.txt" }),
     };
-  } else if (results.length === 2) {
+  } else if (results.length === 3) {
     assert.ok(
-      JSON.stringify(results[1].content).includes(marker),
+      JSON.stringify(results[2].content).includes(marker),
       "model did not receive the written file bytes"
     );
     call = {
@@ -48,9 +69,9 @@ function isolateToolReply(messages) {
       }),
     };
   } else {
-    assert.equal(results.length, 3);
+    assert.equal(results.length, 4);
     assert.match(
-      JSON.stringify(results[2].content),
+      JSON.stringify(results[3].content),
       /Posted 1 suggested action/
     );
   }

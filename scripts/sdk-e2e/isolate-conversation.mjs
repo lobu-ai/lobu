@@ -108,14 +108,23 @@ assert.deepEqual(
 assert.deepEqual(
   results.map((entry) => [entry.toolName, entry.isError]),
   [
+    ["read", false],
     ["write", false],
     ["read", false],
     ["suggest_actions", false],
   ]
 );
-assert.ok(JSON.stringify(results[1].content).includes(marker));
+// The FIRST read is the skill the gateway seeded before the turn ran. Its token
+// exists only inside that file, so this is end-to-end proof through the
+// packaged CLI/server/worker that a seeded file reaches the isolate's
+// filesystem — not a fixture asserting its own input back.
+assert.ok(
+  JSON.stringify(results[0].content).includes("SKILL-SEED-OK"),
+  "the seeded skill file did not reach the isolate workspace"
+);
+assert.ok(JSON.stringify(results[2].content).includes(marker));
 console.log(
-  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; real write/read, gateway suggestion call and persisted native Pi session verified (shadow=true)`
+  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; seeded skill file read, real write/read, gateway suggestion call and persisted native Pi session verified (shadow=true)`
 );
 
 const cancelMarker = `ISOLATE_CANCEL_${randomBytes(16).toString("hex")}`;

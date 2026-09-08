@@ -13,6 +13,8 @@ import { AgentTurnPollPayloadSchema } from '@lobu/core/contracts/worker/protocol
 import { Value } from '@sinclair/typebox/value';
 import {
   type AgentTurnArtifactReader,
+  MAX_TURN_FILE_BYTES,
+  MAX_TURN_FILE_BYTES_TOTAL,
   MAX_TURN_IMAGE_BYTES,
   MAX_TURN_IMAGE_BYTES_TOTAL,
   MAX_TURN_IMAGES,
@@ -169,7 +171,7 @@ describe('resolveTurnAttachments', () => {
     expect(result.files).toEqual([{ name: 'not-really.png', mime_type: 'image/png', size: PNG.length }]);
   });
 
-  it('carries a non-image attachment as its name and type only — no bytes, ever', async () => {
+  it('resolves a non-image attachment from the artifact store', async () => {
     const artifacts = fakeArtifacts({ 'art-1': { contentType: 'application/pdf', bytes: PNG } });
     const result = await resolveTurnAttachments(
       { files: [{ id: 'art-1', name: 'report.pdf', mimetype: 'application/pdf', size: 2048 }] },
@@ -178,9 +180,50 @@ describe('resolveTurnAttachments', () => {
     );
 
     expect(result.images).toEqual([]);
-    expect(result.files).toEqual([{ name: 'report.pdf', mime_type: 'application/pdf', size: 2048 }]);
-    // Not even inspected: a non-image never needs its bytes on this lane.
-    expect(artifacts.asked).toEqual([]);
+    expect(result.files).toEqual([{
+      name: 'report.pdf',
+      mime_type: 'application/pdf',
+      size: 2048,
+      data: PNG.toString('base64'),
+    }]);
+    expect(artifacts.asked).toEqual(['art-1']);
+  });
+
+  it('keeps only metadata when a non-image attachment exceeds the file budget', async () => {
+    const artifacts = fakeArtifacts({
+      'art-big': {
+        contentType: 'application/pdf',
+        bytes: PNG,
+        size: MAX_TURN_FILE_BYTES + 1,
+      },
+    });
+    const result = await resolveTurnAttachments(
+      { files: [{ id: 'art-big', name: 'huge.pdf', mimetype: 'application/pdf' }] },
+      artifacts,
+      CONTEXT
+    );
+
+    expect(result.files).toEqual([{ name: 'huge.pdf', mime_type: 'application/pdf' }]);
+  });
+
+  it('stops resolving files when their total byte budget is spent', async () => {
+    const half = Math.floor(MAX_TURN_FILE_BYTES_TOTAL / 2);
+    const artifacts = fakeArtifacts({
+      a: { contentType: 'text/plain', bytes: Buffer.from('a'), size: half },
+      b: { contentType: 'text/plain', bytes: Buffer.from('b'), size: half },
+      c: { contentType: 'text/plain', bytes: Buffer.from('c'), size: half },
+    });
+    const result = await resolveTurnAttachments(
+      { files: ['a', 'b', 'c'].map((id) => ({ id, name: `${id}.txt`, mimetype: 'text/plain' })) },
+      artifacts,
+      CONTEXT
+    );
+
+    expect(result.files).toEqual([
+      { name: 'a.txt', mime_type: 'text/plain', data: Buffer.from('a').toString('base64') },
+      { name: 'b.txt', mime_type: 'text/plain', data: Buffer.from('b').toString('base64') },
+      { name: 'c.txt', mime_type: 'text/plain' },
+    ]);
   });
 
   it('skips an image this gateway does not hold, and keeps its name', async () => {
@@ -304,17 +347,22 @@ describe('resolveTurnAttachments', () => {
     expect(imageField.items.properties.data.maxLength).toBe(
       Math.ceil(MAX_TURN_IMAGE_BYTES / 3) * 4
     );
+    const fileField = AgentTurnPollPayloadSchema.properties.turn.properties.message_files;
+    expect(fileField.items.properties.data.maxLength).toBe(
+      Math.ceil(MAX_TURN_FILE_BYTES / 3) * 4
+    );
     // The total budget cannot be exceeded by the per-image cap times the count
     // without the producer's own running total refusing first, which is the
     // invariant that makes the two caps coherent rather than contradictory.
     expect(MAX_TURN_IMAGE_BYTES).toBeLessThanOrEqual(MAX_TURN_IMAGE_BYTES_TOTAL);
+    expect(MAX_TURN_FILE_BYTES).toBeLessThanOrEqual(MAX_TURN_FILE_BYTES_TOTAL);
   });
 
   /**
    * An envelope the producer actually built must satisfy the schema — the
    * bounds above are only meaningful if a real resolution passes them.
    */
-  it('produces images that satisfy the wire schema', async () => {
+  it('produces attachments that satisfy the wire schema', async () => {
     const artifacts = fakeArtifacts({
       'art-1': { contentType: 'image/png', bytes: Buffer.from('PNG!') },
     });

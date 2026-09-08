@@ -35,6 +35,7 @@ import {
   type AgentOptions,
   buildToolPolicy,
   createLogger,
+  enforceBashCommandPolicy,
   generateWorkerToken,
   getErrorMessage,
   isExplicitCancelMessage,
@@ -85,6 +86,16 @@ const LANE_APIS = new Set<string>([
 ] satisfies LaneApi[]);
 
 const TURN_MESSAGE_CHARS = 32_000;
+
+/**
+ * Skill bounds, restating the worker contract's own caps so an oversized
+ * library is trimmed here rather than failing schema validation at the poll.
+ * Kept as numbers because this module works in the envelope's TYPES, not its
+ * runtime schema object.
+ */
+const TURN_SKILLS_MAX = 64;
+const TURN_SKILL_CHARS = 64_000;
+const TURN_SKILL_NAME_CHARS = 128;
 const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
 
 /**
@@ -232,7 +243,8 @@ function composeShadowSystemPrompt(
   mcpInstructions: string[],
   workspace: boolean,
   canUpload: boolean,
-  toolNames: readonly string[]
+  toolNames: readonly string[],
+  seeded: { files: boolean; skills: boolean } = { files: false, skills: false }
 ): string {
   const sections: string[] = [];
   const identity = layers.identityMd?.trim();
@@ -246,7 +258,7 @@ function composeShadowSystemPrompt(
   // them, which is how the model learns the rule the guest enforces.
   const policyRules = renderAlwaysOnToolPolicyRulesFor(toolNames);
   if (policyRules) sections.push(policyRules);
-  if (workspace) sections.push(workspaceInstructions(canUpload));
+  if (workspace) sections.push(workspaceInstructions(canUpload, seeded));
   for (const instructions of mcpInstructions) {
     const text = instructions.trim();
     if (text) sections.push(text);
@@ -256,27 +268,69 @@ function composeShadowSystemPrompt(
 
 /**
  * What the model must know about the workspace its tools act on, and only
- * that: it is private to this turn, starts empty, and has no network.
+ * that: it is private to this turn, may contain seeded inputs, and has no
+ * network.
  *
  * The `upload_file` line is appended only when the turn actually carries that
  * tool — the workspace does not persist, so a file the user should see has to
  * be handed over during the turn that produced it, and a model told to call a
  * tool it was not given would just fail.
  */
-function workspaceInstructions(canUpload: boolean): string {
+function workspaceInstructions(
+  canUpload: boolean,
+  seeded: { files: boolean; skills: boolean }
+): string {
   const lines = [
     "## Workspace",
     "",
     "Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.",
-    "It starts empty on every turn and nothing written there persists after the turn ends.",
+    "Nothing written there persists after the turn ends.",
     "It has no network access and no package manager; use your other tools to reach data.",
   ];
+  // Named only when the turn actually seeded something: a directory the model
+  // is told about but cannot find reads as a broken tool and invites a wasted
+  // `ls` on every turn.
+  if (seeded.files) {
+    lines.push(
+      "This turn's file attachments are saved under /workspace/input; read them with your file tools."
+    );
+  }
+  if (seeded.skills) {
+    lines.push(
+      "Your skills are files under /workspace/.skills, one SKILL.md each; read the relevant one before acting on a task it covers."
+    );
+  }
   if (canUpload) {
     lines.push(
       "Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends."
     );
   }
   return lines.join("\n");
+}
+
+/** The skill directory name used by the Linux subprocess worker. */
+function skillDirectoryName(name: string): string | null {
+  const segment = name.trim().split('/').filter(Boolean).pop();
+  if (!segment || segment === '.' || segment === '..' || segment.length > TURN_SKILL_NAME_CHARS) {
+    return null;
+  }
+  return /^[a-zA-Z0-9._-]+$/.test(segment) ? segment : null;
+}
+
+/** Whether this tool manifest has a command that can open seeded files. */
+function canReadSeededFiles(
+  builtin: readonly BuiltinTool[],
+  policy: ToolPolicy,
+  remoteBash: boolean
+): boolean {
+  if (builtin.includes("read")) return true;
+  if (!builtin.includes("bash") || remoteBash) return false;
+  try {
+    enforceBashCommandPolicy("cat input/attachment", policy.bashPolicy);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -810,6 +864,13 @@ export async function enqueueAgentTurnShadow(
     const memoryFlush = resolveMemoryFlushConfig(
       (data.agentOptions ?? {}) as Record<string, unknown>
     );
+    const skills = (settings?.skillsConfig?.skills ?? [])
+      .filter((skill) => skill.enabled && skill.content)
+      .flatMap((skill) => {
+        const name = skillDirectoryName(skill.name);
+        return name ? [{ name, content: skill.content!.slice(0, TURN_SKILL_CHARS) }] : [];
+      })
+      .slice(0, TURN_SKILLS_MAX);
 
     if (hasMemoryServer && !tools) {
       logger.info(
@@ -825,9 +886,14 @@ export async function enqueueAgentTurnShadow(
       // Bytes, already read out of the artifact store. An attachment URL never
       // reaches the guest, so a turn cannot be talked into dialling one.
       ...(attachments.images.length > 0 ? { message_images: attachments.images } : {}),
-      // Names and types only, which is also all the subprocess lane sends the
-      // model for a non-image upload. This is NOT a file capability.
+      // Non-image uploads WITH their bytes, which the guest seeds into the
+      // turn's `input/` directory — the same place the subprocess lane
+      // downloads them to, so an agent that reads `input/x.csv` works on both.
       ...(attachments.files.length > 0 ? { message_files: attachments.files } : {}),
+      // Enabled skills, seeded as `.skills/<name>/SKILL.md`. The same
+      // `enabled && content` selection the subprocess lane's session-context
+      // route applies, so the two lanes serve one library.
+      ...(skills.length > 0 ? { skills } : {}),
       system_prompt: composeShadowSystemPrompt(
         settings ?? {},
         mcpInstructions,
@@ -839,7 +905,18 @@ export async function enqueueAgentTurnShadow(
         // came from: an MCP server's `search_memory` earns the thread-history
         // rule exactly as the conversation plugin's `send_message` earns the
         // channel-participation one.
-        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin]
+        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin],
+        (() => {
+          const canRead = canReadSeededFiles(
+            builtin,
+            policy,
+            Boolean(deps.runtime?.runtimeProviderId)
+          );
+          return {
+            files: canRead && attachments.files.some((file) => file.data !== undefined),
+            skills: canRead && skills.length > 0,
+          };
+        })()
       ),
       // History is read under the conversation claim, after prior turns finish.
       session_jsonl: "",

@@ -49,17 +49,34 @@ export interface AgentTurnImage {
 }
 
 /**
- * A NON-IMAGE attachment of the turn's message, by name and type only.
+ * A NON-IMAGE attachment of the turn's message.
  *
- * The subprocess lane does not send these bytes to the model either; it names
- * the files in the prompt and leaves them on the worker's disk. This lane has
- * no disk, so it carries the same names and says so. Do not read this as a
- * file capability.
+ * The subprocess lane downloads every upload to the worker's `input/` directory
+ * and tells the model to `cat` it. This lane has no disk, so the host resolves
+ * the bytes and the guest seeds them into the turn's in-memory `input/` — same
+ * path, same capability.
+ *
+ * `data` absent means the gateway could not resolve the bytes. The file is
+ * still named, because a model told nothing about an attachment will answer as
+ * though the message were bare text; it is told it cannot open that one.
  */
 export interface AgentTurnFile {
   name: string;
   mimeType: string;
   size?: number;
+  /** Base64 of the file's bytes. Absent when the host could not resolve them. */
+  data?: string;
+}
+
+/**
+ * One of the agent's enabled skills, already rendered to its `SKILL.md` body.
+ *
+ * Seeded at `.skills/<name>/SKILL.md`, the layout the subprocess lane syncs, so
+ * a skill authored for one lane reads identically on the other.
+ */
+export interface AgentTurnSkill {
+  name: string;
+  content: string;
 }
 
 /** One tool the turn may call, as the gateway's MCP proxy published it. */
@@ -183,8 +200,9 @@ export interface AgentTurnInput {
    * model whose `provider.input` does not include `'image'`.
    */
   images?: AgentTurnImage[];
-  /** The message's non-image attachments, named for the model but not sent to it. */
+  /** The message's non-image attachments, including bytes the host resolved. */
   files?: AgentTurnFile[];
+  skills?: AgentTurnSkill[];
   /** Absent → the turn runs with no tools. */
   tools?: AgentTurnTools;
   /**

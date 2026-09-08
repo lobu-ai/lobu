@@ -306,6 +306,24 @@ export const DeviceChatPollPayloadSchema = Type.Object({
  */
 const MAX_TURN_IMAGE_BASE64_CHARS = Math.ceil((5 * 1024 * 1024) / 3) * 4;
 
+/**
+ * Base64 ceiling for ONE non-image attachment, matching the producer's 5 MiB
+ * per-file cap (`MAX_TURN_FILE_BYTES` in `agent-turn-attachments.ts`).
+ *
+ * The same number as an image's, and for the same reason: the whole envelope
+ * crosses the isolate bridge as one string, so a file and an image cost the
+ * bridge identically and there is no reason to admit more of one than the other.
+ */
+const MAX_TURN_FILE_BASE64_CHARS = Math.ceil((5 * 1024 * 1024) / 3) * 4;
+
+/**
+ * Character ceiling for one skill body.
+ *
+ * A skill is authored prose, not data, and every enabled skill is seeded on
+ * EVERY turn, so the count and per-body caps together bound their total.
+ */
+const MAX_TURN_SKILL_CHARS = 64_000;
+
 export const AgentTurnPollPayloadSchema = Type.Object({
   turn: Type.Object({
     agent_id: Type.String({ minLength: 1 }),
@@ -347,13 +365,25 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       )
     ),
     /**
-     * The message's NON-IMAGE attachments, as metadata only.
+     * The message's NON-IMAGE attachments, with their bytes.
      *
-     * The subprocess lane does not send these to the model either — it writes
-     * them into the worker's `input/` directory and names them in the prompt.
-     * This lane has no such directory, so it carries the same names and types
-     * and says so in the prompt; the bytes are deliberately absent, and this
-     * field must not be read as a general file capability.
+     * The subprocess lane writes every upload into the worker's `input/`
+     * directory — its download is mimetype-blind — and tells the model to read
+     * them with `cat`. This lane has no disk, so the gateway reads the bytes out
+     * of the artifact store it already owns and seeds them into the turn's
+     * in-memory `input/` directory instead, reaching the same agent-visible
+     * result by the same path name. Bytes travel base64 for the same reason an
+     * image's do: the guest must never fetch an attachment itself, so no
+     * attachment URL, signed or not, crosses into the isolate.
+     *
+     * `data` is optional because a file the producer could not resolve is still
+     * NAMED for the model rather than silently dropped — the model must not
+     * answer about a file it was never told existed. A file without `data` is
+     * one the turn cannot open, and the prompt says so.
+     *
+     * The bound RESTATES the producer's own cap (`agent-turn-attachments.ts`)
+     * so the contract is checkable on its own. `maxLength` is the base64 length
+     * of a capped file: 4 characters per 3 bytes, padded.
      */
     message_files: Type.Optional(
       Type.Array(
@@ -361,8 +391,29 @@ export const AgentTurnPollPayloadSchema = Type.Object({
           name: Type.String({ minLength: 1, maxLength: 512 }),
           mime_type: Type.String({ minLength: 1, maxLength: 128 }),
           size: Type.Optional(Type.Integer({ minimum: 0 })),
+          /** The artifact's bytes, base64. Absent when they could not be resolved. */
+          data: Type.Optional(
+            Type.String({ minLength: 1, maxLength: MAX_TURN_FILE_BASE64_CHARS })
+          ),
         }),
         { maxItems: 32 }
+      )
+    ),
+    /**
+     * The agent's enabled skills, each already rendered to its `SKILL.md` body.
+     *
+     * The subprocess lane syncs these to `{workspace}/.skills/<name>/SKILL.md`
+     * so the agent can `cat` them; this lane seeds the same layout into the
+     * turn's filesystem. They ride the turn rather than being fetched because
+     * the guest has no egress and no disk to cache them on.
+     */
+    skills: Type.Optional(
+      Type.Array(
+        Type.Object({
+          name: Type.String({ minLength: 1, maxLength: 128 }),
+          content: Type.String({ maxLength: MAX_TURN_SKILL_CHARS }),
+        }),
+        { maxItems: 64 }
       )
     ),
     system_prompt: Type.String(),

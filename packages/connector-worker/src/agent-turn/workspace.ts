@@ -10,7 +10,10 @@
  * output truncation; the bundler excludes unused Node I/O and renderers. Grep
  * stays local because Pi's grep always starts an rg process.
  *
- * The filesystem is in-memory and empty at the start of every turn. Nothing
+ * The filesystem is in-memory and lives for one turn only. It starts empty
+ * except for what the HOST seeds into it before the model runs — this turn's
+ * non-image attachments under `input/` and the agent's enabled skills under
+ * `.skills/`, the same two places the subprocess lane puts them. Nothing
  * written here outlives the turn, and nothing here can reach the network: the
  * shell is built without `fetch`, so `curl` and `wget` do not exist in it.
  */
@@ -28,6 +31,20 @@ import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, Run
 
 /** Where a turn's files live; also the shell's working directory. */
 export const WORKSPACE_ROOT = '/workspace';
+
+/**
+ * Where the turn's own attachments are seeded, and where the subprocess lane
+ * puts them too. The name is part of the agent-visible contract: the system
+ * prompt lists each upload by this path, so both lanes name the same file.
+ */
+export const INPUT_DIR = `${WORKSPACE_ROOT}/input`;
+
+/**
+ * Where the agent's enabled skills are seeded, one `SKILL.md` per skill, the
+ * same layout the subprocess lane syncs so a skill written for one lane reads
+ * identically on the other.
+ */
+export const SKILLS_DIR = `${WORKSPACE_ROOT}/.skills`;
 
 const LS_LIMIT = 500;
 const FIND_LIMIT = 1000;
@@ -119,6 +136,19 @@ function looksBinary(bytes: Uint8Array): boolean {
 }
 
 /**
+ * One file the HOST places in the turn's filesystem before the model runs.
+ *
+ * The guest never fetches: the gateway reads an attachment out of the artifact
+ * store it already owns, and a skill straight out of agent settings, then hands
+ * the bytes over the same signed envelope as everything else. `data` is base64
+ * so arbitrary bytes survive the JSON hop intact; `text` is the convenience for
+ * content that is already a string, and exactly one of the two is given.
+ */
+export type WorkspaceSeedFile =
+  | { path: string; data: string; text?: never }
+  | { path: string; text: string; data?: never };
+
+/**
  * The turn's filesystem, and the tools that act on it.
  *
  * Returned together because more than the file tools need the FS: `upload_file`
@@ -128,11 +158,21 @@ function looksBinary(bytes: Uint8Array): boolean {
  * one that would always look empty.
  */
 export interface AgentWorkspace {
-  /** The turn's filesystem. Empty at the start of the turn, gone at the end. */
+  /** The turn's filesystem: seeded by the host, gone at the end of the turn. */
   fs: InMemoryFs;
   /** Resolved once the root directory exists; every tool awaits it first. */
   ready: Promise<unknown>;
   tools: AgentTool[];
+  /**
+   * Write host-supplied files into the turn's tree before the model runs.
+   *
+   * Containment goes through the SAME `resolve` the file tools use, so a
+   * traversing path is refused here for the reason it is refused there rather
+   * than by a second check that could drift. Throws on the first bad path and
+   * writes nothing further, because a partially seeded workspace would tell the
+   * model a file exists when its sibling silently did not.
+   */
+  seed(files: readonly WorkspaceSeedFile[]): Promise<void>;
   /**
    * Resolve a model-supplied path inside the workspace root, or throw.
    * Exported so a non-file tool that takes a path — `upload_file` — enforces
@@ -254,6 +294,21 @@ export function createWorkspace(
   const writeFile = async (path: string, content: string): Promise<void> => {
     await ready;
     await fs.writeFile(resolve(path), content);
+  };
+  // Host-placed files. Bytes go in as a Uint8Array rather than a string: a
+  // decoded-to-UTF-8 round trip would corrupt every attachment that is not
+  // text, and an attachment is exactly the case this exists for.
+  const seed = async (files: readonly WorkspaceSeedFile[]): Promise<void> => {
+    await ready;
+    for (const file of files) {
+      const absolute = resolve(file.path);
+      const parent = absolute.slice(0, absolute.lastIndexOf('/'));
+      if (parent && parent !== absolute) await fs.mkdir(parent, { recursive: true });
+      await fs.writeFile(
+        absolute,
+        file.data !== undefined ? new Uint8Array(Buffer.from(file.data, 'base64')) : file.text
+      );
+    }
   };
   const write = withLobuFileParameters(createWriteTool(WORKSPACE_ROOT, { operations: {
     writeFile,
@@ -459,6 +514,7 @@ export function createWorkspace(
     fs,
     ready,
     resolve,
+    seed,
     tools: names.filter((name, index) => name in tools && names.indexOf(name) === index).map((name) => tools[name]),
   };
 }

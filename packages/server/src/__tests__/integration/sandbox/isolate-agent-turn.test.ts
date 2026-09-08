@@ -648,6 +648,204 @@ describe("agent turn on the isolate lane", () => {
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult", "assistant"]);
 	}, 120_000);
 
+	it("seeds a non-image attachment into input/ so the agent can read its bytes", async () => {
+		hits = [];
+		const csv = "region,revenue\nemea,4200\napac,3100\n";
+		toolScript = [
+			{ id: "toolu_s1", name: "read", input: { file_path: "/workspace/input/folder\\report.csv" } },
+			{ id: "toolu_s2", name: "bash", input: { command: "wc -l < '/workspace/input/folder\\report.csv'" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				files: [
+					{
+						name: "folder\\report.csv",
+						mimeType: "text/csv",
+						size: Buffer.byteLength(csv),
+						data: Buffer.from(csv).toString("base64"),
+					},
+				],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash", "read", "ls"],
+					bashPolicy: { allowAll: false, allowPrefixes: [], denyPrefixes: ["rm "] },
+				},
+			}),
+		);
+
+		// The bytes were there before the model ran, and they are the SAME bytes.
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{
+			name: string;
+			isError: boolean;
+			output: string;
+		}>;
+		expect(ends.map((e) => [e.name, e.isError, e.output])).toEqual([
+			["read", false, csv],
+			["bash", false, "3\n"],
+		]);
+		// Nothing was fetched to get them: no attachment URL crosses into the guest.
+		expect(hits.every((h) => h.url === "/v1/messages")).toBe(true);
+		// And the model was told where to look.
+		const first = JSON.parse(hits[0]?.body ?? "{}") as { messages?: Array<{ content?: unknown }> };
+		expect(JSON.stringify(first.messages)).toContain("/workspace/input/folder\\\\report.csv");
+	}, 120_000);
+
+	it("seeds an enabled skill as .skills/<name>/SKILL.md", async () => {
+		hits = [];
+		const body = "# Triage\n\nAlways label the issue before replying.\n";
+		toolScript = [
+			{ id: "toolu_k1", name: "read", input: { file_path: "/workspace/.skills/triage/SKILL.md" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				skills: [{ name: "triage", content: body }],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["read", "ls"],
+				},
+			}),
+		);
+
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{
+			name: string;
+			isError: boolean;
+			output: string;
+		}>;
+		expect(ends.map((e) => [e.name, e.isError, e.output])).toEqual([["read", false, body]]);
+	}, 120_000);
+
+	it("names an unresolvable attachment without claiming it can be opened", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// No `data`: the gateway could not resolve the bytes.
+		await runTurn(
+			turnJob({
+				files: [{ name: "missing.pdf", mimeType: "application/pdf" }],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["read"],
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("missing.pdf");
+		expect(sent).toContain("could not be retrieved");
+		// It must NOT be advertised as a readable workspace path.
+		expect(sent).not.toContain("/workspace/input/missing.pdf");
+	}, 120_000);
+
+	it("does not offer a workspace path when the turn carries no tool that can read one", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const csv = "a,b\n1,2\n";
+		// Bytes ARE resolved, but the turn admits no `read` and no `bash`, so
+		// there is nothing that could open the file. Naming a path here would
+		// send the model after a tool it was never given.
+		await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [
+					{
+						name: "report.csv",
+						mimeType: "text/csv",
+						data: Buffer.from(csv).toString("base64"),
+					},
+				],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					bashPolicy: { allowAll: false, allowPrefixes: ["git "], denyPrefixes: [] },
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("report.csv");
+		expect(sent).toContain("cannot open");
+		expect(sent).not.toContain("/workspace/input/report.csv");
+	}, 120_000);
+
+	it("does not offer locally seeded files to a turn whose only bash runs remotely", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const csv = "a,b\n1,2\n";
+		await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [{
+					name: "report.csv",
+					mimeType: "text/csv",
+					data: Buffer.from(csv).toString("base64"),
+				}],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async () => ({ status: 200, stdout: "", exitCode: 0 }),
+			},
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("report.csv");
+		expect(sent).toContain("cannot open");
+		expect(sent).not.toContain("/workspace/input/report.csv");
+	}, 120_000);
+
+	it("does not offer a workspace path when bash is present but its policy forbids reading", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// `bash` IS admitted, so a tool-name check would call this readable. But
+		// the allowlist admits only `echo`, so no seeded file can actually be
+		// opened, and the prompt must not claim otherwise.
+		await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [
+					{
+						name: "report.csv",
+						mimeType: "text/csv",
+						data: Buffer.from("a,b\n1,2\n").toString("base64"),
+					},
+				],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					bashPolicy: { allowAll: false, allowPrefixes: ["echo "], denyPrefixes: [] },
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("report.csv");
+		expect(sent).toContain("cannot open");
+		expect(sent).not.toContain("/workspace/input/report.csv");
+	}, 120_000);
+
 	it("retains a valid UTF-8 tail inside the isolate when a bash line exceeds 50 KiB", async () => {
 		hits = [];
 		toolScript = [
@@ -900,7 +1098,7 @@ describe("agent turn on the isolate lane", () => {
 		expect(JSON.stringify(sent.messages[0]?.content)).toContain("model does not support images");
 	}, 120_000);
 
-	it("names a non-image attachment for the model without sending anything it cannot open", async () => {
+	it("names an attachment whose bytes the gateway could not resolve, without offering a path", async () => {
 		hits = [];
 		toolScript = [];
 		armFirstDeltaGate();
@@ -915,11 +1113,16 @@ describe("agent turn on the isolate lane", () => {
 		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
 			messages: Array<{ content: Array<Record<string, unknown>> }>;
 		};
-		// The resource loader adds attachment metadata to provider context only.
+		// No `data` on the wire means the gateway could not resolve the bytes, so
+		// nothing was seeded. The file is still NAMED — a model told nothing
+		// about an attachment answers as though the message were bare text — but
+		// it is not advertised at a workspace path it would fail to read.
 		expect(sent.messages[0]?.content).toMatchObject([
 			{
 				type: "text",
-				text: "The user attached 1 non-image file(s) that this turn cannot open:\n- report.pdf (application/pdf, 2048 bytes)\n\n",
+				text:
+					"The user also attached 1 file(s) whose contents could not be retrieved, "
+					+ "so this turn cannot open them:\n- report.pdf (application/pdf)\n\n",
 			},
 			{ type: "text", text: "summarize this" },
 		]);

@@ -61,6 +61,13 @@ const TURN_DELTA_DRAIN_BATCHES = 4;
  */
 const TURN_TOOL_EVENT_QUEUE_MAX = 20;
 
+/**
+ * Bridge string cap for an agent turn. Unlike a connector job, this message can
+ * carry bounded base64 attachments alongside a bounded transcript snapshot,
+ * skills, tools, and the prompt.
+ */
+const AGENT_TURN_BRIDGE_BYTES = 32 * 1024 * 1024;
+
 function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;
 }
@@ -258,6 +265,11 @@ export async function executeAgentTurnRun(
         // connector's open default would let a prompt-injected turn reach the
         // whole internet.
         allowedDomains: turn.allowed_hosts,
+        // The turn envelope is one bridge string: session journal, system
+        // prompt and base64'd attachments together. The gateway bounds each
+        // attachment payload and stored history separately; the connector
+        // default is sized for a connector payload, not for that.
+        messageBytes: AGENT_TURN_BRIDGE_BYTES,
       }));
     const result = await executor.execute(
       guestCode,
@@ -288,17 +300,24 @@ export async function executeAgentTurnRun(
                 })),
               }
             : {}),
-          // Non-image attachments, by name and type only — the same thing the
-          // subprocess lane tells the model, minus the disk it could read them
-          // from.
+          // Non-image attachments WITH their bytes, which the guest seeds into
+          // the turn's `input/` directory — the same place the subprocess lane
+          // downloads them to, so `cat input/x.csv` works on both lanes. A file
+          // whose bytes the gateway could not resolve arrives named but without
+          // `data`, and the guest tells the model it cannot open that one.
           ...(turn.message_files && turn.message_files.length > 0
             ? {
                 files: turn.message_files.map((file) => ({
                   name: file.name,
                   mimeType: file.mime_type,
                   ...(file.size !== undefined ? { size: file.size } : {}),
+                  ...(file.data !== undefined ? { data: file.data } : {}),
                 })),
               }
+            : {}),
+          // The agent's enabled skills, seeded as `.skills/<name>/SKILL.md`.
+          ...(turn.skills && turn.skills.length > 0
+            ? { skills: turn.skills.map((skill) => ({ name: skill.name, content: skill.content })) }
             : {}),
           ...(turn.tools
             ? {

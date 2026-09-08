@@ -24,9 +24,13 @@ import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
+import { enforceBashCommandPolicy } from '@lobu/core/tool-policy';
 import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
-import { createWorkspace, type AgentWorkspace } from './workspace.js';
+import {
+  createWorkspace, INPUT_DIR, SKILLS_DIR,
+  type AgentWorkspace, type WorkspaceSeedFile,
+} from './workspace.js';
 
 /**
  * A turn's tool-call budget. pi would otherwise loop for as long as the model
@@ -114,9 +118,9 @@ function buildTools(
   onInBandReplyDelivered: () => void,
   emit: (event: AgentTurnEvent) => void,
   runtimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>
-): AgentTool[] {
+): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean } {
   const tools = input.tools;
-  if (!tools) return [];
+  if (!tools) return { tools: [], workspace: null, canReadFiles: false };
   // ONE workspace for the whole turn: the file tools act on it and
   // `upload_file` reads it, so the file the model just wrote is the file it can
   // show. Built even when no file tool was admitted but a media tool was, since
@@ -161,7 +165,25 @@ function buildTools(
       details: {},
     }),
   }));
-  return [...mcp, ...gateway, ...media, ...(workspace?.tools ?? [])];
+  // `read` opens a seeded file directly. `bash` counts only when its command
+  // policy admits `cat`; a strict bash allowlist can expose the tool while
+  // still making every seeded file unreachable.
+  let bashCanRead = false;
+  if ((tools.builtin ?? []).includes('bash') && !tools.remoteRuntime) {
+    try {
+      if (tools.bashPolicy) enforceBashCommandPolicy('cat input/attachment', tools.bashPolicy);
+      bashCanRead = true;
+    } catch {
+      // The prompt must not advertise a path this turn cannot open.
+    }
+  }
+  const canReadFiles =
+    workspace !== null && ((tools.builtin ?? []).includes('read') || bashCanRead);
+  return {
+    tools: [...mcp, ...gateway, ...media, ...(workspace?.tools ?? [])],
+    workspace,
+    canReadFiles,
+  };
 }
 
 /**
@@ -185,20 +207,110 @@ function clip(text: string): string {
 }
 
 /**
+ * A file name as a single path segment.
+ *
+ * The host caps the length and the workspace `resolve` refuses a traversing
+ * path, but an attachment name is user-controlled and arrives with whatever
+ * separators the uploader had, so a `/` is flattened here rather than being
+ * allowed to create surprise subdirectories under `input/`. The isolate and
+ * subprocess workers both use POSIX paths, where a backslash is an ordinary
+ * filename character rather than a separator.
+ */
+function baseName(name: string): string {
+  const segment = name.split('/').filter(Boolean).pop() ?? 'attachment';
+  return segment === '.' || segment === '..' ? 'attachment' : segment;
+}
+
+/**
+ * A skill's directory name, or null when the name is not one.
+ *
+ * The subprocess lane's basename and character admission, with `.` and `..`
+ * refused explicitly so a skill cannot collapse onto `.skills/` itself or its
+ * parent.
+ */
+function skillDirName(name: string): string | null {
+  const segment = (name || '').trim().split('/').filter(Boolean).pop() ?? '';
+  if (segment === '.' || segment === '..') return null;
+  return /^[a-zA-Z0-9._-]+$/.test(segment) ? segment : null;
+}
+
+/**
+ * Put the turn's attachments and skills in the filesystem before the model runs.
+ *
+ * This is the whole of what the subprocess lane's `downloadInputFiles` and
+ * skills sync did, minus the network and the disk: the host already resolved
+ * every byte, so seeding is a write into the in-memory tree. Both lanes end up
+ * with the same two paths, which is what makes an agent prompt that says
+ * "read input/report.csv" true on either one.
+ */
+async function seedWorkspace(workspace: AgentWorkspace, input: AgentTurnInput): Promise<void> {
+  const seeds: WorkspaceSeedFile[] = [];
+  for (const file of input.files ?? []) {
+    if (file.data === undefined) continue;
+    seeds.push({ path: `${INPUT_DIR}/${baseName(file.name)}`, data: file.data });
+  }
+  for (const skill of input.skills ?? []) {
+    const dir = skillDirName(skill.name);
+    if (!dir) {
+      console.warn(`Skipping skill with invalid name: ${skill.name}`);
+      continue;
+    }
+    seeds.push({ path: `${SKILLS_DIR}/${dir}/SKILL.md`, text: skill.content });
+  }
+  if (seeds.length === 0) return;
+  await workspace.seed(seeds);
+}
+
+/**
  * One line per non-image attachment, appended to the user turn.
  *
- * The subprocess lane names the user's uploads in the prompt and leaves the
- * bytes on the worker's disk for `cat`; this lane has no disk, so it names them
- * the same way and says plainly that it cannot open them. Silently dropping
- * them would let the model answer a question about a file it was never told
- * existed.
+ * Named even when readable, because the model has to learn the file exists
+ * before it can decide to open it — the subprocess lane lists them in its
+ * system prompt for the same reason. A file the gateway could not resolve is
+ * listed as unopenable rather than dropped, so the model never answers about an
+ * attachment it was told nothing about.
  */
-function describeFiles(files: AgentTurnInput['files']): string {
+function describeFiles(files: AgentTurnInput['files'], canRead: boolean): string {
   if (!files || files.length === 0) return '';
-  const listing = files
-    .map((file) => `- ${file.name} (${file.mimeType}${file.size !== undefined ? `, ${file.size} bytes` : ''})`)
+  const describe = (file: NonNullable<AgentTurnInput['files']>[number]) =>
+    `- ${INPUT_DIR}/${baseName(file.name)} (${file.mimeType}${file.size !== undefined ? `, ${file.size} bytes` : ''})`;
+  // A seeded file is only READABLE if this turn actually carries a tool that
+  // opens one. Without `read` or `bash`, the bytes are on the filesystem and
+  // unreachable, so naming a path would send the model after a tool it was
+  // never given — worse than telling it plainly that it cannot open the file.
+  const readable = canRead ? files.filter((file) => file.data !== undefined) : [];
+  const unopenable = canRead
+    ? files.filter((file) => file.data === undefined)
+    : files;
+  const parts: string[] = [];
+  if (readable.length > 0) {
+    parts.push(
+      `The user attached ${readable.length} non-image file(s), saved in your workspace. `
+        + `Read them with your file tools:\n${readable.map(describe).join('\n')}`
+    );
+  }
+  if (unopenable.length > 0) {
+    parts.push(
+      `The user also attached ${unopenable.length} file(s) whose contents could not be `
+        + `retrieved, so this turn cannot open them:\n`
+        + `${unopenable.map((file) => `- ${file.name} (${file.mimeType})`).join('\n')}`
+    );
+  }
+  return parts.join('\n\n');
+}
+
+/** Where the turn's skills were seeded, so the model knows to read them. */
+function describeSkills(skills: AgentTurnInput['skills'], canRead: boolean): string {
+  if (!skills || skills.length === 0 || !canRead) return '';
+  const named = skills
+    .map((skill) => ({ dir: skillDirName(skill.name), name: skill.name }))
+    .filter((entry): entry is { dir: string; name: string } => entry.dir !== null);
+  if (named.length === 0) return '';
+  const listing = named
+    .map((entry) => `- ${SKILLS_DIR}/${entry.dir}/SKILL.md (${entry.name})`)
     .join('\n');
-  return `The user attached ${files.length} non-image file(s) that this turn cannot open:\n${listing}`;
+  return `You have ${named.length} skill(s) available as files in your workspace. `
+    + `Read the relevant one before acting on a task it covers:\n${listing}`;
 }
 
 /**
@@ -254,7 +366,7 @@ export async function runAgentTurn(
   // completion route can stamp the flag the renderers already act on.
   let repliedInBand = false;
   let transientContext: string | undefined;
-  const tools = buildTools(
+  const built = buildTools(
     input,
     credential,
     () => { askedUser = true; },
@@ -262,6 +374,7 @@ export async function runAgentTurn(
     emit,
     runtimeExec
   );
+  const tools = built.tools;
   const session = createNativeSession(input, tools, () => transientContext);
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
@@ -284,8 +397,18 @@ export async function runAgentTurn(
   };
 
   try {
+    // Seed BEFORE the model runs, so the first thing it can do is read an
+    // attachment. Awaited rather than fired: a turn that starts before its
+    // files exist would report them missing.
+    if (built.workspace && built.canReadFiles) await seedWorkspace(built.workspace, input);
     const recalled = memory ? await memory.recall(input.userMessage, agent.state.messages) : '';
-    transientContext = [recalled, describeFiles(input.files)].filter(Boolean).join('\n\n');
+    transientContext = [
+      recalled,
+      describeFiles(input.files, built.canReadFiles),
+      describeSkills(input.skills, built.canReadFiles),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
 
     let text = '';
     let stopReason: string | null = null;

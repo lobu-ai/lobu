@@ -114,8 +114,16 @@ const agent = defineAgent({
   skills: [digestSkill],
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
+// The skill body carries a token the turn has to READ off the seeded file to
+// report, so a pass proves the file reached the isolate's filesystem rather
+// than that the prompt merely mentioned a skill.
+const isolateSkill = defineSkill({
+  name: "isolate-smoke-skill",
+  content: "# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n",
+});
 const isolateAgent = defineAgent({
   id: "isolate-smoke", name: "Isolate smoke", dir: "./agents/isolate-smoke",
+  skills: [isolateSkill],
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // `company` exercises the declarative rendering config: event_kinds (with a

@@ -20,11 +20,10 @@
  *  - an id that is not a well-formed artifact id, or names no artifact this
  *    store holds, resolves to nothing. `ArtifactStore.inspect`/`read` enforce
  *    both, plus the byte bound;
- *  - `image/*` is the only content type whose BYTES travel, matching what the
- *    subprocess lane actually sends the model. Everything else travels as its
- *    name and type so the model is told it exists, which is also what the
- *    subprocess lane does — this lane simply has no `input/` directory behind
- *    the name.
+ *  - `image/*` bytes become model image blocks. Every other resolved upload is
+ *    seeded under the isolate turn's in-memory `input/` directory, matching
+ *    the subprocess lane's downloaded files. Unresolved uploads still travel
+ *    by name so the model is told they exist.
  *
  * Every rejection is a skip with a log line, never a failed turn: the
  * subprocess lane skips an unreadable or oversized image the same way, and a
@@ -62,11 +61,36 @@ export const MAX_TURN_IMAGE_BYTES_TOTAL = 10 * 1024 * 1024;
 /** How many images one turn may carry, however small they are. */
 export const MAX_TURN_IMAGES = 8;
 
-/** What the model is told about each non-image attachment. */
+/**
+ * Per-file byte bound for a NON-IMAGE attachment, seeded into the turn's
+ * `input/` directory.
+ *
+ * Same number as an image's: both are base64'd into the same envelope and
+ * cross the same isolate bridge, so admitting more of one than the other would
+ * only move which attachment blows the bridge budget.
+ */
+export const MAX_TURN_FILE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Total NON-IMAGE bytes one turn may seed, before base64.
+ *
+ * A SEPARATE budget from the image total rather than a shared pool, so a turn
+ * of spreadsheets and a turn of screenshots admit independently and one large
+ * upload cannot starve the other kind.
+ *
+ * 5 MiB, not the image total's 10 MiB, because the envelope has to fit the
+ * isolate bridge with room left for history. See `turnEnvelopeBudget` for the
+ * arithmetic that makes this number the constrained one.
+ */
+export const MAX_TURN_FILE_BYTES_TOTAL = 5 * 1024 * 1024;
+
+/** What the model is told about each non-image attachment, and its bytes. */
 export interface TurnAttachmentFile {
   name: string;
   mime_type: string;
   size?: number;
+  /** Base64 of the artifact's bytes. Absent when they could not be resolved. */
+  data?: string;
 }
 
 /** One image attachment, resolved to base64 by this module. */
@@ -122,6 +146,7 @@ export async function resolveTurnAttachments(
   const images: TurnAttachmentImage[] = [];
   const files: TurnAttachmentFile[] = [];
   let imageBytes = 0;
+  let fileBytes = 0;
 
   for (const entry of inbound) {
     const name = (typeof entry.name === "string" && entry.name ? entry.name : "attachment")
@@ -145,9 +170,74 @@ export async function resolveTurnAttachments(
     };
 
     if (!isImageMimeType(mimetype)) {
-      // Not sent to the model on either lane; named so the model knows it
-      // exists and can ask the user for the part it needs.
-      appendFile();
+      // Resolved to BYTES, then seeded into the turn's `input/` directory, so
+      // the model can read an upload here exactly as it can on the subprocess
+      // lane — whose download is mimetype-blind and whose prompt says `cat`.
+      // Every exit below still APPENDS the name: a file the turn cannot open
+      // must be named anyway, or the model answers about a file it was never
+      // told existed.
+      const skipFile = (reason: string, detail?: Record<string, unknown>) => {
+        logger.info(
+          { agentId: context.agentId, messageId: context.messageId, name, mimetype, ...detail },
+          `Agent turn attachment bytes skipped: ${reason}`
+        );
+        appendFile();
+      };
+      if (!artifacts) {
+        skipFile("the artifact store is not wired, so its bytes cannot be resolved");
+        continue;
+      }
+      if (typeof entry.id !== "string" || !entry.id) {
+        skipFile("it carries no artifact id, so there is nothing to resolve it against");
+        continue;
+      }
+      if (files.length >= fileSchema.maxItems!) {
+        appendFile();
+        continue;
+      }
+      try {
+        const metadata = await artifacts.inspect(entry.id);
+        if (!metadata) {
+          skipFile("this gateway's artifact store holds no such artifact");
+          continue;
+        }
+        if (metadata.size > MAX_TURN_FILE_BYTES) {
+          skipFile("it is larger than one turn may carry", {
+            size: metadata.size,
+            cap: MAX_TURN_FILE_BYTES,
+          });
+          continue;
+        }
+        if (metadata.size === 0) {
+          skipFile("the stored artifact is empty");
+          continue;
+        }
+        if (fileBytes + metadata.size > MAX_TURN_FILE_BYTES_TOTAL) {
+          skipFile("this turn's total file budget is spent", {
+            size: metadata.size,
+            used: fileBytes,
+            cap: MAX_TURN_FILE_BYTES_TOTAL,
+          });
+          continue;
+        }
+        const stored = await artifacts.read(entry.id, { maxBytes: MAX_TURN_FILE_BYTES });
+        if (!stored) {
+          skipFile("its bytes could not be read back");
+          continue;
+        }
+        // Charge the size the store REPORTED, which is what the total was
+        // checked against, so a store that answers short cannot leave the
+        // budget open forever. Same rule as the image path.
+        fileBytes += metadata.size;
+        files.push({
+          name,
+          mime_type: mimetype,
+          ...(size !== undefined ? { size } : {}),
+          data: stored.bytes.toString("base64"),
+        });
+      } catch (err) {
+        skipFile("reading it failed", { err: getErrorMessage(err) });
+      }
       continue;
     }
 
@@ -233,4 +323,49 @@ export async function resolveTurnAttachments(
   }
 
   return { images, files };
+}
+
+/**
+ * The isolate bridge's string cap, restated where the envelope is built.
+ *
+ * The guest receives the whole turn as ONE JSON string across the isolate
+ * bridge, and the bridge terminates the run over `messageBytes`
+ * (`AGENT_TURN_BRIDGE_BYTES` in `connector-worker/src/daemon/agent-turn.ts`).
+ * Admission budgets are counted in RAW bytes; the bridge counts the base64'd
+ * envelope, so raw admission has to leave room for the ~4/3 inflation plus the
+ * session journal and the system prompt.
+ */
+const ISOLATE_BRIDGE_BYTES = 32 * 1024 * 1024;
+
+/** Base64 grows 3 bytes into 4 characters, padded up to the quantum. */
+function base64Length(rawBytes: number): number {
+  return Math.ceil(rawBytes / 3) * 4;
+}
+
+/**
+ * Prove the admitted budgets cannot build an envelope the bridge will kill.
+ *
+ * This exists because the two ends were set independently and did NOT agree:
+ * admission allowed 10 MiB of images (~13.3 MiB base64) against a 16 MiB
+ * bridge, leaving under 3 MiB for everything else, and adding a file budget on
+ * top would have exceeded the bridge outright. Rather than trust a comment to
+ * keep that arithmetic true across later edits to either end, the numbers are
+ * checked against each other and a test calls this.
+ *
+ * `historyHeadroom` is what must survive for the session journal and system
+ * prompt once attachments are counted — the quantity a reader actually cares
+ * about, so it is returned rather than asserted against a magic number here.
+ */
+export function turnEnvelopeBudget(): {
+  attachmentsBase64: number;
+  bridge: number;
+  historyHeadroom: number;
+} {
+  const attachmentsBase64 =
+    base64Length(MAX_TURN_IMAGE_BYTES_TOTAL) + base64Length(MAX_TURN_FILE_BYTES_TOTAL);
+  return {
+    attachmentsBase64,
+    bridge: ISOLATE_BRIDGE_BYTES,
+    historyHeadroom: ISOLATE_BRIDGE_BYTES - attachmentsBase64,
+  };
 }

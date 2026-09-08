@@ -679,7 +679,7 @@ describe('agent turn shadow producer', () => {
         '- Only what you send_message reaches the channel — your normal reply text does not. Decide deliberately what and where to post; it is fine to post nothing.\n\n' +
         '## Workspace\n\n' +
         'Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.\n' +
-        'It starts empty on every turn and nothing written there persists after the turn ends.\n' +
+        'Nothing written there persists after the turn ends.\n' +
         'It has no network access and no package manager; use your other tools to reach data.\n' +
         'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.'
     );
@@ -721,6 +721,62 @@ describe('agent turn shadow producer', () => {
     expect(turn.tools.builtin).toContain('write');
     expect(turn.system_prompt).not.toContain('### Share Created Files');
     expect(turn.system_prompt).not.toContain('call upload_file before the turn ends');
+  });
+
+  it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
+    const org = await createTestOrganization();
+    const content = 'x'.repeat(64_001);
+    const agentSettings = {
+      getSettings: async () => ({
+        identityMd: '',
+        soulMd: '',
+        userMd: '',
+        skillsConfig: {
+          skills: [
+            { repo: 'owner', name: 'owner/triage', enabled: true, content },
+            { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
+            { repo: 'owner', name: '..', enabled: true, content: 'skip' },
+            { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
+            { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
+          ],
+        },
+      }),
+    } as unknown as AgentSettingsStore;
+    await enqueueMessage(messageFor(org.id), {
+      agentSettings,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn;
+    expect(turn.skills).toEqual([{ name: 'triage', content: 'x'.repeat(64_000) }]);
+    expect(turn.system_prompt).toContain('/workspace/.skills');
+    expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
+  });
+
+  it('does not advertise seeded inputs when a strict bash policy rejects cat', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.platformMetadata = {
+      files: [{ id: 'art-doc', name: 'report.pdf', mimetype: 'application/pdf' }],
+    };
+    message.agentOptions = {
+      model: 'claude/claude-opus-4-8',
+      toolsConfig: { strictMode: true, allowedTools: ['Bash(git:*)'] },
+    };
+    await enqueueMessage(message, {
+      agentSettings: settingsStore,
+      artifacts: fakeArtifacts(),
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn;
+    expect(turn.tools.builtin).toEqual(['bash']);
+    expect(turn.message_files[0].data).toBe(Buffer.from('%PDF').toString('base64'));
+    expect(turn.system_prompt).not.toContain('/workspace/input');
   });
 
   it('hands the turn its tools, its one credential being a worker token both gateway routes accept', async () => {
@@ -2156,7 +2212,7 @@ describe('agent turn shadow producer', () => {
     expect(await shadowRuns()).toHaveLength(1);
   });
 
-  it("carries the message's image attachments as bytes and the rest as names", async () => {
+  it("carries the message's image and non-image attachments as bytes", async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
     message.platformMetadata = {
@@ -2185,8 +2241,16 @@ describe('agent turn shadow producer', () => {
     expect(turn.message_images).toEqual([
       { mime_type: 'image/png', data: Buffer.from('PNG!').toString('base64') },
     ]);
+    // The non-image attachment now carries its BYTES too: the guest seeds them
+    // into the turn's `input/` directory, which is what the subprocess lane's
+    // mimetype-blind download gave the model on disk.
     expect(turn.message_files).toEqual([
-      { name: 'report.pdf', mime_type: 'application/pdf', size: 2048 },
+      {
+        name: 'report.pdf',
+        mime_type: 'application/pdf',
+        size: 2048,
+        data: Buffer.from('%PDF').toString('base64'),
+      },
     ]);
     // No attachment URL is anywhere in the envelope the guest will be handed.
     expect(JSON.stringify(turn)).not.toContain('attacker.invalid');

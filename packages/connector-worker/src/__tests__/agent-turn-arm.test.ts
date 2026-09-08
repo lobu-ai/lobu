@@ -274,14 +274,26 @@ describe("executeAgentTurnRun", () => {
     const job = turnJob();
     const turn = (job.payload as { turn: Record<string, unknown> }).turn;
     turn.message_images = [{ mime_type: "image/png", data: "aGVsbG8=" }];
-    turn.message_files = [{ name: "report.pdf", mime_type: "application/pdf", size: 2048 }];
+    turn.message_files = [{
+      name: "report.pdf",
+      mime_type: "application/pdf",
+      size: 2048,
+      data: "JVBERg==",
+    }];
+    turn.skills = [{ name: "triage", content: "# Triage" }];
     (turn.provider as Record<string, unknown>).input = ["text", "image"];
 
     await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
 
     if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
     expect(seen.turn.images).toEqual([{ mimeType: "image/png", data: "aGVsbG8=" }]);
-    expect(seen.turn.files).toEqual([{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }]);
+    expect(seen.turn.files).toEqual([{
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      size: 2048,
+      data: "JVBERg==",
+    }]);
+    expect(seen.turn.skills).toEqual([{ name: "triage", content: "# Triage" }]);
     expect(seen.turn.provider.input).toEqual(["text", "image"]);
   });
 
@@ -307,7 +319,12 @@ describe("executeAgentTurnRun", () => {
     const job = turnJob();
     const turn = (job.payload as { turn: Record<string, unknown> }).turn;
     turn.message_images = [{ mime_type: "image/png", data: "aGVsbG8=" }];
-    turn.message_files = [{ name: "report.pdf", mime_type: "application/pdf", size: 2048 }];
+    turn.message_files = [{
+      name: "report.pdf",
+      mime_type: "application/pdf",
+      size: 2048,
+      data: "JVBERg==",
+    }];
     (turn.provider as Record<string, unknown>).input = ["text", "image"];
     turn.tools = {
       gateway_url: "https://gateway.test.invalid/lobu",
@@ -322,7 +339,12 @@ describe("executeAgentTurnRun", () => {
 
     if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
     expect(seen.turn.images).toEqual([{ mimeType: "image/png", data: "aGVsbG8=" }]);
-    expect(seen.turn.files).toEqual([{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }]);
+    expect(seen.turn.files).toEqual([{
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      size: 2048,
+      data: "JVBERg==",
+    }]);
     expect(seen.turn.provider.input).toEqual(["text", "image"]);
     expect(seen.turn.tools).toEqual({
       gatewayUrl: "https://gateway.test.invalid/lobu",
