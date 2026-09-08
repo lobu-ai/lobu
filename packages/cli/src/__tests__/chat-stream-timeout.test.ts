@@ -6,7 +6,6 @@ const originalFetch = globalThis.fetch;
 const originalStdoutWrite = process.stdout.write.bind(process.stdout);
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
 const originalConsoleError = console.error;
-const originalExitCode = process.exitCode ?? 0;
 const originalToken = process.env.LOBU_API_TOKEN;
 const originalIdle = process.env.LOBU_CHAT_IDLE_TIMEOUT_MS;
 const exampleDir = join(import.meta.dir, "../../../../examples/market");
@@ -96,7 +95,7 @@ afterEach(() => {
   process.stdout.write = originalStdoutWrite;
   process.stderr.write = originalStderrWrite;
   console.error = originalConsoleError;
-  process.exitCode = originalExitCode;
+  process.exitCode = 0;
   if (originalToken === undefined) delete process.env.LOBU_API_TOKEN;
   else process.env.LOBU_API_TOKEN = originalToken;
   if (originalIdle === undefined) delete process.env.LOBU_CHAT_IDLE_TIMEOUT_MS;
@@ -126,6 +125,30 @@ describe("chat stream idle timeout", () => {
     });
 
     expect(stderr.join("")).toContain("timed out");
+    expect(stderr.join("")).toContain("for 150ms");
+    expect(process.exitCode).toBe(1);
+  });
+
+  test("a stream that closes without a terminal event exits non-zero", async () => {
+    process.env.LOBU_API_TOKEN = "test-token";
+    process.env.LOBU_CHAT_IDLE_TIMEOUT_MS = "5000";
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    captureTerminal({ stdout, stderr });
+
+    installFetch((signal) =>
+      sseResponse([sse("output", { content: "partial" })], signal, {
+        close: true,
+      })
+    );
+
+    await chatCommand(exampleDir, "run it", {
+      gateway: "http://gateway.test",
+      new: true,
+    });
+
+    expect(stderr.join("")).toContain("closed before the agent finished");
     expect(process.exitCode).toBe(1);
   });
 

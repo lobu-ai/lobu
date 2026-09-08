@@ -513,7 +513,15 @@ async function streamResponse(
 
     while (true) {
       const { done, value } = await waitForStream(reader.read());
-      if (done) break;
+      if (done) {
+        await writeStderr(
+          chalk.red(
+            "\n  Stream closed before the agent finished. The turn may still be running server-side.\n"
+          )
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
