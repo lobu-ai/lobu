@@ -41,8 +41,9 @@ const message = await session.ask(
   `Write ${marker} to smoke.txt, read the file, then report its contents.`,
   { timeoutMs: 90_000 }
 );
-// The current API reply still comes from the old worker. It cannot substitute
-// for the independently persisted isolate result asserted below.
+// The API reply is the isolate's own answer now, so this is the client-facing
+// half of the proof; the independently persisted run asserted below is the
+// server-side half.
 assert.equal(message.text, marker);
 assert.ok(message.messageId);
 
@@ -171,14 +172,16 @@ async function until(description, predicate) {
   assert.fail(`Timed out: ${description}`);
 }
 let activeRun;
-await until("native and managed runtimes are both streaming", async () => {
+// One `opened` event per streaming inference request holding the cancel
+// marker, and the isolate is the only runtime that issues one.
+await until("the isolate run is streaming", async () => {
   activeRun = (await nativeRuns()).find(
     (item) => item.input?.turn?.message_id === activeMessageId
   );
   return (
     activeRun?.status === "running" &&
     (await streamEvents()).filter((event) => event.event === "opened")
-      .length === 2
+      .length === 1
   );
 });
 await cancelSession.send("/cancel", { messageId: cancelMessageId });
@@ -199,15 +202,15 @@ await until(
   }
 );
 await until(
-  "cancellation closes both provider streams",
+  "cancellation closes the provider stream",
   async () =>
     (await streamEvents()).filter((event) => event.event === "closed")
-      .length === 2
+      .length === 1
 );
 const events = await streamEvents();
 assert.equal(
   events.filter((event) => event.event === "opened").length,
-  2,
+  1,
   "cancellation started another inference call"
 );
 assert.ok(
@@ -215,5 +218,5 @@ assert.ok(
   "fixture timeout ended inference instead of cancellation"
 );
 console.log(
-  `PASS: public API /cancel cancelled isolate run ${activeRun.id}; heartbeat stopped the real isolate and both provider streams closed without another inference call`
+  `PASS: public API /cancel cancelled isolate run ${activeRun.id}; heartbeat stopped the real isolate and the provider stream closed without another inference call`
 );

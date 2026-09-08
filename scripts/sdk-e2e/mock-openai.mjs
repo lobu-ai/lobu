@@ -30,12 +30,9 @@ function isolateToolReply(messages) {
     // carries a token the file is the only source of, so a pass proves the
     // seeded file is really on the turn's filesystem.
     //
-    // RELATIVE on purpose. Both lanes are driven by this one mock, and their
-    // workspace roots differ: the isolate's is the in-memory `/workspace`,
-    // while the subprocess lane's is a real per-conversation directory under
-    // `WORKSPACE_DIR`. A relative path resolves against whichever root the
-    // reading lane actually has, so the same script proves the same thing on
-    // both instead of hard-coding one lane's layout.
+    // RELATIVE on purpose: it resolves against whatever workspace root the
+    // turn actually has (the isolate's is the in-memory `/workspace`), so the
+    // script proves the seeded file arrived without hard-coding one layout.
     call = {
       name: "read",
       arguments: JSON.stringify({
@@ -155,8 +152,8 @@ const server = createServer((req, res) => {
           /ISOLATE_CANCEL_[a-f0-9]{32}/
         )?.[0];
         if (cancelMarker) {
-          // Keep both real runtimes in inference until the public cancel reaches
-          // them. A separate event log leaves request JSONL consumers unchanged.
+          // Hold the isolate in real inference until the public cancel reaches
+          // it. A separate event log leaves request JSONL consumers unchanged.
           const record = (event) => {
             if (REQLOG)
               appendFileSync(
