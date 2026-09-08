@@ -574,9 +574,8 @@ describe("connection-to-device operation routing lifecycle", () => {
 		expect(unpinnedCompiledDemoRun).toEqual({ status: "timeout", claimed_by: null });
 
 		// The same key becomes device-native when the selected artifact is
-		// metadata-only. With no physical pin, its runtime still queues the action
-		// for any device advertising the exact manifest rather than attempting to
-		// resolve nonexistent connector code inline.
+		// metadata-only. No device advertises this manifest, so admission fails
+		// before waiting for a device or attempting to resolve connector code inline.
 		await sql`
 			UPDATE connector_versions
 			SET compiled_code = NULL,
@@ -609,7 +608,8 @@ describe("connection-to-device operation routing lifecycle", () => {
 			{ ...ctx, abortSignal: aborted.signal },
 		);
 		expect(manifestDemoResult).toMatchObject({
-			status: "timeout",
+			status: "failed",
+			error_message: expect.stringMatching(/selected connector manifest.*assigned device/i),
 		});
 		const [manifestDemoRun] = (await sql`
 			SELECT status, claimed_by
@@ -617,7 +617,7 @@ describe("connection-to-device operation routing lifecycle", () => {
 			WHERE connection_id = ${compiledDemoConnection.id}
 			  AND action_idempotency_key = ${manifestDemoKey}
 		`) as unknown as Array<{ status: string; claimed_by: string | null }>;
-		expect(manifestDemoRun).toEqual({ status: "timeout", claimed_by: null });
+		expect(manifestDemoRun).toEqual({ status: "failed", claimed_by: null });
 
 		// Intrinsic connector runtime remains authoritative even without a pin.
 		await sql`
