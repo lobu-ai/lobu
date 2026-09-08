@@ -132,6 +132,22 @@ describe("worker-token mint parity (real mint, not generateWorkerToken)", () => 
     }
   });
 
+  test.each(["T_NATIVE", null, 42])("native team metadata overrides the channel routing key: %s", (teamId) => {
+    const args = {
+      ...baseArgs,
+      teamId: "slack:C_CHANNEL",
+      platformMetadata: { ...baseArgs.platformMetadata, teamId },
+    };
+    for (const token of [
+      buildRunJobToken({ ...args, runId: 42, messageId: "message-team" }),
+      buildDeploymentWorkerToken(args),
+    ]) {
+      expect(verifyWorkerToken(token)?.teamId).toBe(
+        typeof teamId === "string" ? teamId : undefined,
+      );
+    }
+  });
+
   test("PARITY: both mints carry the egress allow AND deny claims", () => {
     const egressArgs = {
       ...baseArgs,

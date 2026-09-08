@@ -30,8 +30,12 @@ export interface PlatformMetadata {
   senderId?: string;
   senderUsername?: string;
   senderDisplayName?: string;
-  /** Inbound: Slack workspace id (also used as `raw.team_id` shim). */
-  teamId?: string;
+  /**
+   * Inbound: Slack workspace id (also used as `raw.team_id` shim). Explicit
+   * `null` for a teamless chat so the queued JSON keeps the known absence and
+   * token minting does not fall back to the payload's routing `teamId`.
+   */
+  teamId?: string | null;
   /**
    * Inbound: a link back to the originating conversation/message on the source
    * platform (e.g. a Slack permalink). Surfaced to the agent in its per-run
