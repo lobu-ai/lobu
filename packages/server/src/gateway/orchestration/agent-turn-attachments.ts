@@ -6,8 +6,7 @@
  * `platformMetadata.files[]` with its id, name, mimetype and a signed
  * `downloadUrl`; the worker downloads each one into `<workspace>/input/`, then
  * base64s the `image/*` ones into the prompt for vision and leaves the rest for
- * `cat` (`agent-worker/src/runtime/worker.ts` `downloadInputFiles` /
- * `loadImageAttachments`).
+ * `cat` (`downloadInputFiles` / `loadImageAttachments` in the isolate guest).
  *
  * The isolate lane has no disk and must not have a fetch. So the resolution
  * happens HERE, host-side, and it is deliberately not a download:

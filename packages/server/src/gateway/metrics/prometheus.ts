@@ -287,9 +287,10 @@ export function getMetricsText(): string {
   lines.push("# TYPE nodejs_external_memory_bytes gauge");
   lines.push(`nodejs_external_memory_bytes ${memUsage.external}`);
 
-  // Resident set size: the whole process's memory. On the app pod this runs far
-  // above heapUsed because agent-worker child subprocesses' memory counts toward
-  // the pod cgroup — the gap between RSS and heap is what OOM-kills the pod.
+  // Resident set size: the whole process's memory. This runs above heapUsed
+  // because off-heap allocations — V8 isolates for agent turns, buffers, native
+  // modules — count toward the pod cgroup, and the gap between RSS and heap is
+  // what OOM-kills the pod.
   lines.push("# HELP nodejs_rss_bytes Node.js resident set size in bytes");
   lines.push("# TYPE nodejs_rss_bytes gauge");
   lines.push(`nodejs_rss_bytes ${memUsage.rss}`);

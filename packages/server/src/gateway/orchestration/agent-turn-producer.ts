@@ -385,11 +385,10 @@ interface TurnProvider {
 /**
  * Which modalities this model accepts, from pi-ai's own model registry.
  *
- * SAME source of truth the subprocess lane uses: it resolves a registry model
- * through `getModelDynamic` when there is one and otherwise builds a dynamic
- * entry that declares `["text", "image"]` (`agent-worker`'s
- * `buildDynamicOpenAIModel`). Both rules are reproduced rather than
- * re-decided, so an agent's vision support does not depend on which lane ran
+ * source of truth the retired subprocess lane used: it resolves a registry
+ * model through `getModelDynamic` when there is one and otherwise builds a
+ * dynamic entry that declares `["text", "image"]`. Both rules are carried over
+ * rather than re-decided, so an agent's vision support did not change with
  * its turn — and neither lane hardcodes a per-model guess. pi is what enforces
  * the answer: `transformMessages` replaces every image block with a
  * "model does not support images" placeholder when `"image"` is missing.
