@@ -702,17 +702,14 @@ export async function failTurnIfPending(
 }
 
 /**
- * Atomically commit a worker's TERMINAL reply (success completion or explicit
- * error) and discharge its marker(s) in ONE transaction. Two guarantees:
- *
- *  - **Atomic** — reply insert + marker delete commit together, so a crash
- *    can't leave a surviving marker that the sweep would turn into a duplicate.
- *  - **First-writer-wins** — the reply is inserted ONLY if this transaction
- *    actually deleted a pending marker. If the sweep or fast path already
- *    terminalized the turn (deleted the marker + emitted an error), a late
- *    worker reply deletes 0 markers and is dropped instead of double-signalling.
- *
- * @returns whether the reply was emitted (false = turn already terminalized).
+ * NOTE for the isolate lane: do NOT call this (or a variant of its DELETE) from
+ * `insertAgentTurnResponse`. `hasLiveTurnForMessage` reads the turn marker as
+ * "this turn is still live" and gates worker TOKEN REFRESH on it, so retiring
+ * the marker at terminal delivery cuts off a guest that is still streaming and
+ * the reply arrives EMPTY. A full `scripts/sdk-e2e.sh` catches that; the unit
+ * suites do not. The isolate lane lets `sweepExpiredTurns` retire the marker on
+ * its deadline, with the heartbeat pushing that deadline forward
+ * (`extendHeartbeatedTurnMarker`) while the turn is alive.
  */
 export async function commitTerminalReply(
   deploymentName: string,

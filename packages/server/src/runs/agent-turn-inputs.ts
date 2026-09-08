@@ -2,9 +2,10 @@ import { isDeepStrictEqual } from 'node:util';
 import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type MessagePayload } from '@lobu/core';
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
-import type { DbClient } from '../db/client';
+import { getDb, type DbClient } from '../db/client';
 import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
-import { insertThreadResponseRow } from '../gateway/orchestration/turn-liveness';
+import { extendTurnDeadlines, insertThreadResponseRow } from '../gateway/orchestration/turn-liveness';
+import { generateDeploymentName } from '../gateway/orchestration/deployment-identity';
 
 export interface NativeTurnRun {
   id: number;
@@ -137,6 +138,58 @@ export async function pendingAgentTurnInputs(sql: DbClient, owner: NativeTurnRun
   return offered;
 }
 
+/**
+ * Derive the turn-liveness marker's deployment name from a native turn's
+ * envelope. Single source for the two sites that need it — the terminal
+ * discharge and the heartbeat extension — so neither can drift from the
+ * arming site in `MessageConsumer`.
+ */
+function turnMarkerDeployment(run: NativeTurnRun): string | null {
+  const envelope = run.action_input;
+  const reply = envelope?.reply;
+  if (!reply) return null;
+  return generateDeploymentName({
+    organizationId: run.organization_id,
+    agentId: envelope?.turn?.agent_id ?? '',
+    userId: reply.user_id,
+    platform: reply.platform,
+    channelId: reply.channel_id,
+    conversationId: envelope?.turn?.conversation_id ?? '',
+  });
+}
+
+/**
+ * Push the turn marker's deadline forward for a heartbeating native turn.
+ *
+ * The isolate lane's heartbeat refreshes `runs.last_heartbeat_at`, which the
+ * run reaper reads — but the marker carries its OWN `run_at`, and without this
+ * a turn running longer than `TURN_DEFAULT_DEADLINE_MS` collects a spurious
+ * terminal error while it is still working. Never throws: a heartbeat ACK must
+ * not fail on a liveness bookkeeping error.
+ */
+export async function extendHeartbeatedTurnMarker(
+  runId: number,
+): Promise<void> {
+  try {
+    // Its OWN connection, never the caller's transaction handle: the caller
+    // fires this without awaiting, and a query issued on a tx that has since
+    // committed is a use-after-close that fails the heartbeat response.
+    //
+    // A plain read, deliberately not `lockAgentTurnRun`: this runs on every
+    // heartbeat and only needs the envelope's identity, so taking the
+    // conversation lock here would serialize heartbeats behind turn admission.
+    const sql = getDb();
+    const [run] = await sql<NativeTurnRun>`
+      SELECT id, organization_id, action_input
+      FROM runs WHERE id = ${runId} AND run_type = 'agent_turn'
+    `;
+    const deployment = run && turnMarkerDeployment(run);
+    if (deployment) await extendTurnDeadlines(deployment);
+  } catch {
+    // Deliberately silent — see the doc comment.
+  }
+}
+
 /** Terminal delivery uses the persisted routing and joins the caller's transaction. */
 export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun, result: {
   finalText?: string; error?: string; errorCode?: string; repliedInBand?: boolean; processedMessageIds?: string[];
@@ -144,8 +197,9 @@ export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun,
   const envelope = run.action_input;
   const reply = envelope?.reply;
   if (!reply) return false;
+  const conversationId = envelope?.turn?.conversation_id ?? '';
   await insertThreadResponseRow(sql, {
-    messageId: reply.message_id, channelId: reply.channel_id, conversationId: envelope?.turn?.conversation_id ?? '',
+    messageId: reply.message_id, channelId: reply.channel_id, conversationId,
     userId: reply.user_id, teamId: reply.team_id ?? 'api', platform: reply.platform,
     organizationId: run.organization_id, platformMetadata: reply.platform_metadata,
     processedMessageIds: [reply.message_id], ...result, timestamp: Date.now(),

@@ -7,7 +7,7 @@
  * poll-auth-signal.
  */
 
-import { lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
+import { extendHeartbeatedTurnMarker, lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
 import type {
 	CompleteActionRequest,
 	CompleteAuthRequest,
@@ -321,6 +321,18 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 				const cancelRequested = !!owned && !!nativeRun.run_metadata?.cancel_requested_at;
 				return { updated, cancelRequested, steer: owned && !cancelRequested ? await pendingAgentTurnInputs(tx, nativeRun) : [] };
 			}));
+		}
+		// A heartbeat is the isolate lane's liveness signal, so it must refresh the
+		// TURN marker too, not just `runs.last_heartbeat_at`. There are two
+		// independent deadlines: the run reaper reads the heartbeat column, while
+		// the marker carries its own `run_at`. Refreshing only the column let any
+		// turn longer than TURN_DEFAULT_DEADLINE_MS (60s) collect a spurious
+		// WORKER_UNRESPONSIVE mid-flight, while it was still working. The
+		// subprocess lane extended the marker from `/worker/response`, a route the
+		// isolate lane does not use. `extendTurnDeadlines` never throws and skips a
+		// provider-failed turn, so a wedged run still lapses into the backstop.
+		if (updated.some((row) => row.run_type === 'agent_turn')) {
+			void extendHeartbeatedTurnMarker(run_id);
 		}
 		if (updated.length === 0) {
 			// The fence requires `status = 'running'`, so a cancelled run fails it
