@@ -39,7 +39,6 @@ COPY packages/plugin-memory/package.json packages/plugin-memory/
 COPY packages/plugin-conversations/package.json packages/plugin-conversations/
 COPY packages/plugin-media/package.json packages/plugin-media/
 COPY packages/plugin-mcp/package.json packages/plugin-mcp/
-COPY packages/agent-worker/package.json packages/agent-worker/
 COPY packages/server/package.json packages/server/
 COPY packages/connector-sdk/package.json packages/connector-sdk/
 COPY packages/connectors/package.json packages/connectors/
@@ -93,7 +92,6 @@ COPY packages/plugin-memory/ packages/plugin-memory/
 COPY packages/plugin-conversations/ packages/plugin-conversations/
 COPY packages/plugin-media/ packages/plugin-media/
 COPY packages/plugin-mcp/ packages/plugin-mcp/
-COPY packages/agent-worker/ packages/agent-worker/
 COPY packages/connector-sdk/ packages/connector-sdk/
 COPY packages/connectors/ packages/connectors/
 COPY packages/embeddings/ packages/embeddings/
@@ -207,7 +205,6 @@ COPY --from=builder /app/packages/plugin-memory ./packages/plugin-memory
 COPY --from=builder /app/packages/plugin-conversations ./packages/plugin-conversations
 COPY --from=builder /app/packages/plugin-media ./packages/plugin-media
 COPY --from=builder /app/packages/plugin-mcp ./packages/plugin-mcp
-COPY --from=builder /app/packages/agent-worker ./packages/agent-worker
 COPY --from=builder /app/packages/connector-sdk ./packages/connector-sdk
 COPY --from=builder /app/packages/connectors ./packages/connectors
 COPY --from=builder /app/packages/embeddings ./packages/embeddings

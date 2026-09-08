@@ -27,19 +27,18 @@ const REPO_ROOT = path.resolve(
 
 const PACKAGES = [
   { dir: "packages/core", transform: transformCorePublish },
-  // @lobu/plugin-api and @lobu/plugin-host are NOT published. Their only
-  // consumer is @lobu/worker, whose publish transform inlines the entire
-  // @lobu graph into dist/index.bundle.mjs and declares no @lobu dependency
-  // at all — so nothing on npm can resolve them, and nothing needs to. They
-  // sat in this list without ever existing on the registry, which made every
-  // release report a first-publish failure (npm returns E404 when the CI
-  // granular token cannot name a package that does not exist yet) even though
-  // every package a consumer actually installs published fine.
+  // @lobu/plugin-api and @lobu/plugin-host are NOT published. Every package
+  // that depends on them at RUNTIME is `private: true` (plugin-conversations,
+  // plugin-mcp, plugin-media, plugin-memory), and @lobu/connector-worker —
+  // which is published — declares them only in devDependencies, which
+  // `rewriteWorkspaceRefs` exempts because a consumer never installs those.
+  // So nothing on npm can resolve them, and nothing needs to. They sat in
+  // this list without ever existing on the registry, which made every release
+  // report a first-publish failure (npm returns E404 when the CI granular
+  // token cannot name a package that does not exist yet) even though every
+  // package a consumer actually installs published fine.
   { dir: "packages/connector-sdk", transform: rewriteWorkspaceRefs },
   { dir: "packages/client", transform: rewriteWorkspaceRefs },
-  // Publishes the esbuild bundle rather than the tsc output — see
-  // transformWorkerPublish for why (#2186).
-  { dir: "packages/agent-worker", transform: transformWorkerPublish },
   { dir: "packages/embeddings", transform: rewriteWorkspaceRefs },
   // @lobu/pgvector-embedded is NOT published: it's `private` and ships its
   // prebuilt native binaries inside the @lobu/cli tarball (build.cjs copies it
@@ -138,11 +137,10 @@ function rewriteWorkspaceRefs(pkg) {
  *
  * Every manifest here carries dev-loop scripts (`build`, `dev`, `typecheck`,
  * `test`, `clean`) needing `src/`, `tsc` or `scripts/` — none of which ship.
- * Shipping them is not merely dead weight: `@lobu/worker`'s `start` pointed at
- * `dist/index.js`, which transformWorkerPublish excludes from `files`, so
- * `npm start` on an installed copy died with MODULE_NOT_FOUND. That is the
- * same defect class as #2186 — a published manifest naming something the
- * consumer cannot get.
+ * Shipping them is not merely dead weight: a `start` script pointing at a
+ * path excluded from `files` makes `npm start` on an installed copy die with
+ * MODULE_NOT_FOUND — the same defect class as #2186, a published manifest
+ * naming something the consumer cannot get.
  *
  * Runnability is decided by `files`, not by a name allowlist: a script whose
  * referenced paths all ship is kept (@lobu/connector-worker's
@@ -258,54 +256,6 @@ function transformCorePublish(pkg) {
   return rewriteWorkspaceRefs(pkg);
 }
 
-/**
- * @lobu/worker publishes the esbuild bundle, not the tsc output.
- *
- * Both the shipped src/ and the tsc dist/ import `private: true` plugin
- * packages, which is what put unresolvable dependencies on the registry
- * (#2186). build-worker-bundle.mjs inlines the whole @lobu workspace graph
- * into dist/index.bundle.mjs, so this repoints the published entry points at
- * it and drops what the bundle no longer needs. The in-repo manifest keeps
- * `bun`/src for local dev; the publish script restores it afterwards.
- */
-function transformWorkerPublish(pkg) {
-  const BUNDLE = "./dist/index.bundle.mjs";
-  const DECLARATION = "./dist/index.bundle.d.ts";
-
-  pkg.main = BUNDLE;
-  // Both type entries must move: Node10 resolution reads the top-level `types`,
-  // and leaving it on the unshipped dist/index.d.ts gave consumers an untyped
-  // bundle (TS7016) even though exports.types was correct.
-  pkg.types = DECLARATION;
-  pkg.bin = { "lobu-worker": BUNDLE };
-  pkg.exports = {
-    ".": {
-      types: DECLARATION,
-      import: BUNDLE,
-      default: BUNDLE,
-    },
-    "./package.json": "./package.json",
-  };
-  // Exactly the bundle plus the self-contained declaration the bundler emits.
-  // Shipping src/ or tsc's dist/**/*.d.ts drags back in files that reference
-  // @lobu packages this manifest no longer declares, failing consumer tsc.
-  pkg.files = ["dist/index.bundle.mjs", "dist/index.bundle.d.ts", "!**/*.map"];
-
-  // EVERY @lobu dependency is dropped, not just the private ones — the bundle
-  // inlines them all, so declaring them would make consumers install packages
-  // nothing imports. It also means the release does not wait on plugin-api /
-  // plugin-host ever being published.
-  for (const section of ["dependencies", "optionalDependencies"]) {
-    const deps = pkg[section];
-    if (!deps) continue;
-    for (const name of Object.keys(deps)) {
-      if (name.startsWith("@lobu/")) delete deps[name];
-    }
-  }
-
-  return rewriteWorkspaceRefs(pkg);
-}
-
 function packageNameFor(dir) {
   try {
     return (
@@ -323,11 +273,8 @@ function packageNameFor(dir) {
  *
  * The publish transform is applied first, because the transformed manifest is
  * what npm receives and therefore what a consumer has to be able to install.
- * Reading the raw on-disk manifest instead would skip @lobu/worker whenever
- * @lobu/core, plugin-api or plugin-host is unavailable — the worker still
- * declares them on disk, but `transformWorkerPublish` deletes every @lobu
- * dependency because the bundle inlines the whole graph. That is precisely the
- * bootstrap wait this change removes.
+ * Reading the raw on-disk manifest instead would make a package wait on an
+ * @lobu dependency its transform deletes — the bootstrap wait this avoids.
  *
  * Callers may omit `transform` to ask what the package declares on disk.
  */
@@ -398,7 +345,7 @@ class FirstPublishBlockedError extends Error {
  * Non-404 failures still hard-fail (real errors must stop the release). The
  * package's source dir is carried on the marker error so the bootstrap message
  * prints the real path — package dir and npm name diverge (e.g. dir
- * `agent-worker` publishes as `@lobu/worker`).
+ * a directory's published name can differ from its directory name).
  */
 function runPublish(name, dir, args, opts = {}) {
   const result = spawnSync("npm", args, {
@@ -589,7 +536,7 @@ async function main() {
         "  3. Re-run this workflow; the package now exists and CI publishes it.",
         "",
         "Until then these packages are absent from npm, so any published package",
-        "that depends on them (e.g. @lobu/agent-worker → @lobu/plugin-api) will",
+        "that depends on them will",
         "fail `npm install` for external consumers.",
       ].join("\n")
     );

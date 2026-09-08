@@ -51,12 +51,11 @@ COPY packages/plugin-media/package.json packages/plugin-media/
 # Stub workspaces not needed at build time
 RUN mkdir -p packages/cli \
                packages/server packages/lobu-cli \
-               packages/owletto packages/agent-worker packages/mcpsandbox \
+               packages/owletto packages/mcpsandbox \
     && for p in cli server \
-                owletto agent-worker mcpsandbox; do \
+                owletto mcpsandbox; do \
         echo "{\"name\":\"@lobu/$p\",\"version\":\"0.0.0\",\"private\":true}" > "packages/$p/package.json"; \
       done \
-    && echo '{"name":"@lobu/worker","version":"0.0.0","private":true}' > packages/agent-worker/package.json \
     && echo '{"name":"lobu","version":"0.0.0","private":true}' > packages/lobu-cli/package.json
 
 RUN --mount=type=cache,target=/root/.bun/install/cache bun install

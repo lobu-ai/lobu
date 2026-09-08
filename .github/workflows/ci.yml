@@ -262,23 +262,6 @@ jobs:
           bun test packages/plugin-api packages/plugin-host packages/plugin-toolkit packages/plugin-memory packages/plugin-conversations packages/plugin-media packages/plugin-mcp --coverage --timeout 30000
           mv coverage/lcov.info coverage/plugin-runtime.lcov.info
 
-      - name: worker (bun:test, full suite)
-        # The previous CI cherry-picked 8 of 18 files because pi-coding-agent
-        # was thought to fail under bun on Linux. Locally the full suite
-        # passes; if Linux turns out different we'll narrow this back down,
-        # but we own the WASM concern via run-script-runtime.test.ts under
-        # Node + isolated-vm in the integration job below.
-        #
-        # LOBU_REQUIRE_EXEC_SANDBOX turns a missing/non-functional bwrap into a
-        # test failure. Without it the exec-sandbox escape matrix `describe.skip`s
-        # itself and the job still goes green — the one place we verify the
-        # sandbox actually contains a hostile command would vanish unnoticed.
-        env:
-          LOBU_REQUIRE_EXEC_SANDBOX: "1"
-        run: |
-          bun test packages/agent-worker --coverage --timeout 30000
-          mv coverage/lcov.info coverage/agent-worker.lcov.info
-
       - name: server (bun:test units)
         # The gateway code that used to live in packages/gateway is now under
         # src/gateway/. Its bun:test suites run in the integration job below
@@ -349,7 +332,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v7
         with:
-          files: coverage/core-cli.lcov.info,coverage/scripts.lcov.info,coverage/plugin-runtime.lcov.info,coverage/agent-worker.lcov.info,coverage/server-units.lcov.info,coverage/server-units-auth.lcov.info,coverage/server-units-activity.lcov.info,coverage/server-units-compiler.lcov.info,coverage/connector-worker.lcov.info,coverage/client-promptfoo.lcov.info,coverage/connector-sdk.lcov.info,coverage/connectors.lcov.info,coverage/embeddings.lcov.info
+          files: coverage/core-cli.lcov.info,coverage/scripts.lcov.info,coverage/plugin-runtime.lcov.info,coverage/server-units.lcov.info,coverage/server-units-auth.lcov.info,coverage/server-units-activity.lcov.info,coverage/server-units-compiler.lcov.info,coverage/connector-worker.lcov.info,coverage/client-promptfoo.lcov.info,coverage/connector-sdk.lcov.info,coverage/connectors.lcov.info,coverage/embeddings.lcov.info
           flags: unit
           fail_ci_if_error: false
 

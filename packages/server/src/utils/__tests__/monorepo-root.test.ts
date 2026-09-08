@@ -18,8 +18,8 @@ function makeFakeMonorepo(): string {
     join(root, "package.json"),
     JSON.stringify({ name: "fake-root", workspaces: ["packages/*"] })
   );
-  mkdirSync(join(root, "packages/agent-worker/src"), { recursive: true });
-  writeFileSync(join(root, "packages/agent-worker/src/index.ts"), "// worker");
+  mkdirSync(join(root, "packages/server/src"), { recursive: true });
+  writeFileSync(join(root, "packages/server/src/index.ts"), "// server");
   return root;
 }
 
@@ -67,8 +67,8 @@ describe("findEnclosingMonorepoRoot", () => {
       join(root, "package.json"),
       JSON.stringify({ name: "no-workspaces" })
     );
-    mkdirSync(join(root, "packages/agent-worker/src"), { recursive: true });
-    writeFileSync(join(root, "packages/agent-worker/src/index.ts"), "// worker");
+    mkdirSync(join(root, "packages/server/src"), { recursive: true });
+    writeFileSync(join(root, "packages/server/src/index.ts"), "// server");
     expect(findEnclosingMonorepoRoot(root)).toBeNull();
   });
 
@@ -78,7 +78,7 @@ describe("findEnclosingMonorepoRoot", () => {
     // Sanity: the discovered root must actually carry the worker entry.
     expect(
       require("node:fs").existsSync(
-        join(found!, "packages/agent-worker/src/index.ts")
+        join(found!, "packages/server/src/index.ts")
       )
     ).toBe(true);
   });

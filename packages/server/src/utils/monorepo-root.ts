@@ -4,9 +4,9 @@ import path from "node:path";
 /**
  * Walk up from `startDir` looking for the Lobu monorepo workspace root: a
  * `package.json` whose `workspaces` field is set AND which has
- * `packages/agent-worker/src/index.ts` underneath it. The worker-entry check
- * keeps us from false-positiving on unrelated Bun/npm workspace roots that
- * happen to enclose the start dir.
+ * `packages/server/src/index.ts` underneath it. The server-entry check keeps
+ * us from false-positiving on unrelated Bun/npm workspace roots that happen
+ * to enclose the start dir.
  *
  * Returns the absolute path to that directory, or `null` if none is found.
  */
@@ -32,7 +32,7 @@ export function findEnclosingMonorepoRoot(startDir: string): string | null {
       }
       if (
         hasWorkspaces &&
-        existsSync(path.join(cur, "packages/agent-worker/src/index.ts"))
+        existsSync(path.join(cur, "packages/server/src/index.ts"))
       ) {
         return cur;
       }

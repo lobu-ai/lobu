@@ -83,6 +83,14 @@ const config: KnipConfig = {
       // Generated openapi-ts client (ignored above) is the only consumer.
       ignoreDependencies: ["@hey-api/client-fetch"],
     },
+    "packages/core": {
+      // `./testing` is a declared public export of @lobu/core, consumed by
+      // other packages' test setup (packages/server/src/gateway/__tests__/
+      // setup.ts) rather than by production source. Knip reached it through
+      // the root `test` script's path list, which no longer names every
+      // package, so name the entry here instead of depending on that.
+      entry: ["src/index.ts", "src/testing/index.ts"],
+    },
     "packages/embeddings": {
       // main points at dist/; the source entries are index and the standalone
       // embeddings server. openai/embedding-utils are reached transitively from

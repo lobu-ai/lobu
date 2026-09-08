@@ -54,7 +54,6 @@
     "@lobu/connector-worker": "workspace:*",
     "@lobu/core": "workspace:*",
     "@lobu/embeddings": "workspace:*",
-    "@lobu/worker": "workspace:*",
     "@mariozechner/pi-ai": "^0.73.1",
     "@mariozechner/pi-coding-agent": "^0.73.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
