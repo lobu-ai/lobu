@@ -562,7 +562,7 @@ Connectors are **not** pre-installed globally. When an org first uses a connecto
 3. Stores the metadata in `connector_definitions` scoped to that org
 4. Stores a `source_path` reference (e.g. `github.ts`) in `connector_versions` — **compiled code is NOT stored**
 
-Connectors can also be installed manually via `client.connections.installConnector(...)` from inside an `execute` script (or the equivalent admin REST endpoint), passing a `source_url` or inline `source_code`. Manual installs store compiled code in the database as before.
+Connectors can also be installed manually via `client.connections.installConnector(...)` from inside an `execute` script (or the equivalent admin REST endpoint), passing a `connector_id`, `source_url`/`source_uri`, inline `source_code`, or `mcp_url`. Manual installs store compiled code in the database as before. Agents drive the full validate → install → test → iterate loop through `manage_connections`; see `docs/connector-authoring.md` ("The MCP loop").
 
 ### How connector code runs
 
