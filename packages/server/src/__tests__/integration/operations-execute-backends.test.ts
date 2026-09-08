@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
 import { createAutomationRun } from "../../runs/queue-service";
 import { manageOperations } from "../../tools/admin/manage_operations";
+import { runSdkScript } from "../../tools/sdk_run";
 import type { ToolContext } from "../../tools/registry";
 import { createAuthProfile } from "../../utils/auth-profiles";
 import { initWorkspaceProvider } from "../../workspace";
@@ -417,6 +418,33 @@ describe("operations.execute backend lifecycle", () => {
 		expect(Date.now() - started).toBeLessThan(10_000);
 	});
 
+	it("carries one SDK invocation owner through real sandbox calls without sharing across invocations", async () => {
+		const script = `export default async (ctx, client) => {
+			return await Promise.all(['first', 'second'].map(value => client.operations.execute({
+				connection_id: ${localConnectionId}, operation_key: 'echo',
+				input: { value: 'synthetic-sdk-owner-' + value }
+			})));
+		}`;
+		for (let i = 0; i < 2; i++) {
+			await runSdkScript({ script, title: "Check notifications" }, {} as Env, ctx);
+		}
+		const sql = getTestDb();
+		const rows = await sql`
+			SELECT run_metadata FROM runs
+			WHERE organization_id = ${orgId}
+				AND action_input->>'value' IN ('synthetic-sdk-owner-first', 'synthetic-sdk-owner-second')
+			ORDER BY id
+		`;
+		expect(rows).toHaveLength(4);
+		const owners = rows.map((row) => row.run_metadata.browser_context);
+		expect(owners[0]).toEqual(owners[1]);
+		expect(owners[2]).toEqual(owners[3]);
+		expect(owners[0].flow_id).not.toBe(owners[2].flow_id);
+		expect(owners[0].title).toMatch(
+			/^Lobu · Check notifications · [a-f0-9]{12}$/,
+		);
+	});
+
 	it("replays a completed action instead of executing an idempotency key twice", async () => {
 		const execute = () =>
 			manageOperations(
@@ -473,7 +501,7 @@ describe("operations.execute backend lifecycle", () => {
 		expect(run.run_metadata).toEqual({
 			browser_context: {
 				id: `automation:${sourceRunId}`,
-				title: `Owletto · Automation ${automationId} · Run ${sourceRunId}`,
+				title: `Lobu · Automation ${automationId} · Run ${sourceRunId}`,
 				flow_id: String(sourceRunId),
 				kind: "automation",
 			},

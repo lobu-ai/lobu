@@ -53,7 +53,10 @@ import { stripNul, stripNulDeep } from "../../../../utils/strip-nul";
 import { buildResourcePermalink } from "../../../../utils/url-builder";
 import { trackAutomationReaction } from "../../../../utils/automation-reactions";
 import { dispatchChromeActionToExtension } from "../../../../worker-api/dispatch-chrome-action";
-import { deriveBrowserActionContext } from "../../../../worker-api/browser-action-context";
+import {
+	deriveBrowserActionContext,
+	deriveSdkBrowserActionContext,
+} from "../../../../worker-api/browser-action-context";
 import { resolveRunInitiator } from "../../../initiator";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
@@ -489,6 +492,9 @@ export async function handleExecute(
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
 	const browserContext = deriveBrowserActionContext(ctx);
+	const sdkBrowserContext = browserContext
+		? undefined
+		: deriveSdkBrowserActionContext(ctx);
 	const runMetadata = browserContext
 		? { browser_context: browserContext }
 		: undefined;
@@ -767,6 +773,7 @@ export async function handleExecute(
 				automationId: ctx.actingAutomationId,
 				parentRunId: ctx.actingRunId,
 				runMetadata,
+				sdkBrowserContext,
 				idempotencyKey: args.idempotency_key,
 				db: tx,
 			});
@@ -905,6 +912,7 @@ export async function handleExecute(
 		automationId: ctx.actingAutomationId,
 		parentRunId: ctx.actingRunId,
 		runMetadata,
+		sdkBrowserContext,
 		idempotencyKey: args.idempotency_key,
 		activation,
 	});

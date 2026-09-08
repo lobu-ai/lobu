@@ -558,7 +558,7 @@ credentialRoutes.get('/sse-ticket', async (c) => {
 });
 
 /**
- * Bootstrap page for the Owletto extension's side-panel iframe.
+ * Bootstrap page for the Lobu extension's side-panel iframe.
  *
  * The extension mounts the iframe at this route with the deep-link token in the
  * URL **fragment** (`#token=…&worker=…`) — fragments are never sent to a server
@@ -607,6 +607,7 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
   }
   if (!token) { location.replace("/"); return; }
   var retried = false;
+  var activeAttempt = null;
   function fail(msg) {
     // Surface a real error instead of redirecting to a token-less app, which
     // would just render signed-out and hang on a spinner — the exact failure
@@ -616,7 +617,7 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
     // re-pair) — the only path that recovers a token this page can't refresh.
     document.body.innerHTML =
       '<div style="font:14px/1.5 system-ui,sans-serif;color:#e7e5e4;padding:24px;max-width:24rem">' +
-      '<p style="margin:0 0 .5rem;font-weight:600">Could not connect to your Owletto.</p>' +
+      '<p style="margin:0 0 .5rem;font-weight:600">Could not connect to Lobu.</p>' +
       '<p style="margin:0 0 1rem;color:#a8a29e"></p>' +
       '<button id="owl-retry" style="font:inherit;padding:.4rem .9rem;border:1px solid #3f3f46;border-radius:.4rem;background:#18181b;color:inherit;cursor:pointer">Retry</button>' +
       (retried
@@ -635,16 +636,30 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
     };
   }
   function attempt() {
+    if (activeAttempt) {
+      clearTimeout(activeAttempt.timer);
+      activeAttempt.controller.abort();
+    }
+    var current = { controller: new AbortController(), timer: null };
+    activeAttempt = current;
+    current.timer = setTimeout(function () {
+      if (activeAttempt !== current) return;
+      activeAttempt = null;
+      current.controller.abort();
+      fail("Connection timed out. Check your connection and retry.");
+    }, 15000);
     document.body.textContent = "Connecting\\u2026";
     var body = new URLSearchParams();
     body.set("token", token);
     fetch("/api/extension-session", {
+      signal: current.controller.signal,
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
     })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
+        if (activeAttempt !== current) return;
         if (data && data.session_token) {
           try { sessionStorage.setItem("owletto.session_token", data.session_token); } catch (e) {}
           location.replace(next);
@@ -652,7 +667,13 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
           fail("Your session may have expired. Re-pair from the extension if this keeps happening.");
         }
       })
-      .catch(function () { fail("Network error reaching the gateway."); });
+      .catch(function () {
+        if (activeAttempt === current) fail("Network error reaching the gateway.");
+      })
+      .finally(function () {
+        clearTimeout(current.timer);
+        if (activeAttempt === current) activeAttempt = null;
+      });
   }
   attempt();
 })();
