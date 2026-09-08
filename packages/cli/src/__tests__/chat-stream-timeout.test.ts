@@ -216,4 +216,60 @@ describe("chat stream idle timeout", () => {
     expect(stderr.join("")).not.toContain("timed out");
     expect(process.exitCode ?? 0).toBe(0);
   });
+  test("heartbeat pings alone do not hold the stream open forever", async () => {
+    process.env.LOBU_API_TOKEN = "test-token";
+    process.env.LOBU_CHAT_IDLE_TIMEOUT_MS = "200";
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    captureTerminal({ stdout, stderr });
+
+    // Exactly what a run that died server-side looks like from here: the
+    // gateway keeps heartbeating the open connection (its interval is not
+    // conditioned on run state) but the agent never says anything again.
+    // A deadline reset by any traffic would wait forever.
+    const timers: ReturnType<typeof setInterval>[] = [];
+    installFetch((signal) => {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(sse("output", { content: "working" }))
+            );
+            const beat = setInterval(() => {
+              try {
+                controller.enqueue(
+                  encoder.encode(sse("ping", { timestamp: Date.now() }))
+                );
+              } catch {
+                clearInterval(beat);
+              }
+            }, 20);
+            timers.push(beat);
+            signal?.addEventListener("abort", () => {
+              clearInterval(beat);
+              try {
+                controller.error(
+                  new DOMException("The operation was aborted.", "AbortError")
+                );
+              } catch {
+                // already closed
+              }
+            });
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      );
+    });
+
+    await chatCommand(exampleDir, "run it", {
+      gateway: "http://gateway.test",
+      new: true,
+    });
+    for (const t of timers) clearInterval(t);
+
+    expect(stderr.join("")).toContain("timed out");
+    expect(process.exitCode).toBe(1);
+  });
 });

@@ -438,7 +438,11 @@ interface StreamOptions {
   org?: string;
 }
 
-const DEFAULT_IDLE_TIMEOUT_MS = 60 * 1000;
+// Ten minutes of the agent saying nothing at all. Comfortably clears a chain
+// of `os.shell` calls at their 150s ceiling plus model latency, while still
+// bounding a run that died server-side without a terminal event — the case
+// the gateway's unconditional 30s heartbeat would otherwise mask forever.
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 function resolveIdleTimeoutMs(): number {
   const raw = process.env.LOBU_CHAT_IDLE_TIMEOUT_MS?.trim();
@@ -455,16 +459,30 @@ async function streamResponse(
   controller: AbortController,
   options: StreamOptions = {}
 ): Promise<void> {
-  // Silence, not elapsed time, is what distinguishes a dead connection from a
-  // long-running turn: the gateway heartbeats a `ping` every 30s while the run
-  // is alive. A wall-clock cap would kill healthy turns — a single `os.shell`
-  // call may legitimately run 150s, and an agent can chain several of them.
+  // How long the AGENT may go quiet, not the socket.
+  //
+  // The distinction is the whole design. The gateway heartbeats a `ping` every
+  // 30s for as long as the connection is open, whether or not a run is still
+  // alive (routes/public/agent.ts), so a deadline reset by any traffic would
+  // be held open forever by heartbeats alone if a run died without emitting a
+  // terminal event. Only substantive events postpone it.
+  //
+  // Correspondingly generous: a single `os.shell` call may legitimately run
+  // 150s with nothing to report, and an agent can chain several. A dead
+  // TRANSPORT does not need this timer at all — the socket dropping rejects
+  // `reader.read()` and surfaces immediately.
   const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs();
 
   let idleTimedOut = false;
   const abortIdle = () => {
     idleTimedOut = true;
     controller.abort();
+  };
+
+  let lastAgentActivityAt = Date.now();
+  /** A `ping` is the connection talking, not the agent. */
+  const noteAgentActivity = (event: string) => {
+    if (event !== "ping") lastAgentActivityAt = Date.now();
   };
 
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -475,12 +493,19 @@ async function streamResponse(
   };
   const waitForStream = async <T>(operation: Promise<T>): Promise<T> => {
     clearIdleTimer();
-    idleTimer = setTimeout(abortIdle, IDLE_TIMEOUT_MS);
+    // Time REMAINING since the agent last said something, so a stream carrying
+    // nothing but heartbeats still reaches the deadline.
+    const remaining = Math.max(
+      0,
+      IDLE_TIMEOUT_MS - (Date.now() - lastAgentActivityAt)
+    );
+    idleTimer = setTimeout(abortIdle, remaining);
     try {
       return await operation;
     } finally {
-      // Rendering a chunk can block on stdout or human approval. Neither is
-      // network silence, so the idle clock runs only while awaiting I/O.
+      // Rendering a chunk can block on stdout or on a human answering a
+      // tool-approval prompt. Neither is the agent going quiet, so the clock
+      // only runs while we are actually waiting on the network.
       clearIdleTimer();
     }
   };
@@ -530,6 +555,7 @@ async function streamResponse(
       for (const line of lines) {
         if (line.startsWith("event: ")) {
           currentEvent = line.slice(7).trim();
+          noteAgentActivity(currentEvent);
         } else if (line.startsWith("data: ") && currentEvent) {
           const data = parseJSON(line.slice(6));
           if (!data) continue;
