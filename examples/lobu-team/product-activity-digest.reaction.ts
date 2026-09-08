@@ -31,10 +31,6 @@ interface ActivityRow {
   _id?: number | null;
 }
 
-interface PreviousDigestRow {
-  created_at: string;
-}
-
 interface LogActivity {
   errors?: number;
   warnings?: number;
@@ -300,24 +296,18 @@ export default async (
     throw new Error("Product activity digest requires a durable run id");
   }
 
-  // Sub-hour schedules share a daily analysis period. Use the last delivered
-  // digest as a durable cursor so every newly ingested row is reported once.
-  const previousRows = (await client.query(`
-    SELECT created_at
-    FROM events
-    WHERE automation_id = ${ctx.window.automation_id}
-      AND semantic_type = 'notification'
-      AND title = 'Lobu production activity digest'
-    ORDER BY created_at DESC, id DESC
-    LIMIT 1
-  `)) as PreviousDigestRow[];
-  const end = new Date();
-  const previous = previousRows[0]?.created_at
-    ? new Date(previousRows[0].created_at)
-    : new Date(end.getTime() - 20 * 60 * 1000);
-  const start = Number.isFinite(previous.getTime())
-    ? previous
-    : new Date(end.getTime() - 20 * 60 * 1000);
+  // The scheduler owns the durable arrival cursor. Read exactly the claimed
+  // half-open window so retries cannot skip activity based on a later inbox
+  // notification or include arrivals reserved for the next run.
+  const start = new Date(ctx.window.window_start);
+  const end = new Date(ctx.window.window_end);
+  if (
+    !Number.isFinite(start.getTime()) ||
+    !Number.isFinite(end.getTime()) ||
+    start >= end
+  ) {
+    throw new Error("Product activity digest requires a valid arrival window");
+  }
 
   const excludedEmail =
     ctx.extracted_data &&
@@ -333,15 +323,16 @@ export default async (
   // Read the window in bounded keyset pages ordered by (created_at, id) and
   // exclude the operator's presence rows in memory. No leading-wildcard LIKE
   // over events, and excluded rows cannot consume a fixed LIMIT budget: the
-  // cursor keeps advancing past them until the window is exhausted or the
-  // safety cap is hit, so later valid activity is never starved.
+  // cursor keeps advancing past them until the window is exhausted, so later
+  // valid activity is never starved. Hitting the safety cap fails the run
+  // instead of silently reporting a truncated digest.
   const rows: ActivityRow[] = [];
   let lastCreatedAt: string | null = null;
   let lastId = 0;
   const PAGE_SIZE = 1000;
   const MAX_ROWS = 20_000;
-  let sawPartialPage = true;
-  while (sawPartialPage && rows.length < MAX_ROWS) {
+  let pageWasFull = true;
+  while (pageWasFull && rows.length < MAX_ROWS) {
     const page = (await client.query(`
       SELECT
         c.slug AS connection_slug,
@@ -354,8 +345,8 @@ export default async (
       FROM events e
       JOIN connections c ON c.id = e.connection_id
       WHERE c.slug IN ('${PRODUCT_ACTIVITY_CONNECTION}', '${LOG_ACTIVITY_CONNECTION}')
-        AND e.created_at > '${start.toISOString()}'::timestamptz
-        AND e.created_at <= '${end.toISOString()}'::timestamptz
+        AND e.created_at >= '${start.toISOString()}'::timestamptz
+        AND e.created_at < '${end.toISOString()}'::timestamptz
         AND (
           ${
             lastCreatedAt == null
@@ -367,12 +358,17 @@ export default async (
       ORDER BY e.created_at ASC, e.id ASC
       LIMIT ${PAGE_SIZE}
     `)) as ActivityRow[];
-    sawPartialPage = page.length === PAGE_SIZE;
+    pageWasFull = page.length === PAGE_SIZE;
     for (const row of page) {
       rows.push(row);
       if (typeof row._created_at === "string") lastCreatedAt = row._created_at;
       if (typeof row._id === "number") lastId = row._id;
     }
+  }
+  if (pageWasFull) {
+    throw new Error(
+      "Product activity digest exceeded its row budget; narrow the arrival window before retrying"
+    );
   }
   const digest = collectProductActivityDigest(rows, excludedEmail);
   if (!hasProductActivity(digest)) {

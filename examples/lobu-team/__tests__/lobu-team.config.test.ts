@@ -97,15 +97,15 @@ describe("Lobu Team configuration", () => {
       {
         kind: "schedule",
         cron: "5,25,45 * * * *",
-        skip_if_unchanged: true,
+        skip_if_unchanged: false,
       },
     ]);
     expect(digest?.sources).toEqual({
-      product_activity: "@connection:lobu-product-activity-db",
-      kubernetes_logs: "@connection:lobu-production-logs",
+      reaction_window: "SELECT * FROM events WHERE FALSE",
     });
     expect(digest?.agent).toMatchObject({
       id: "product-ops",
+      providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
       tools: {
         allowed: [],
         strict: true,
