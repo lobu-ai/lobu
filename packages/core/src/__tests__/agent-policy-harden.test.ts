@@ -2,7 +2,7 @@
  * Hardened tests for agent-policy.ts.
  *
  * The existing agent-policy.test.ts covers file delivery detection.
- * This file covers: renderBaselineAgentPolicy, renderAlwaysOnToolPolicyRules,
+ * This file covers: renderBaselineAgentPolicy, renderAlwaysOnToolPolicyRulesFor,
  * getCustomToolDescription for unknown tools, detectToolIntentRules edge cases
  * (empty prompt, whitespace-only, alwaysInclude exclusion, ordering, multiple
  * rule matches), and buildUnconfiguredAgentNotice.
@@ -13,7 +13,7 @@ import {
   buildUnconfiguredAgentNotice,
   detectToolIntentRules,
   getCustomToolDescription,
-  renderAlwaysOnToolPolicyRules,
+  renderAlwaysOnToolPolicyRulesFor,
   renderBaselineAgentPolicy,
   renderDetectedToolIntentRules,
   TOOL_INTENT_RULES,
@@ -41,9 +41,17 @@ describe("renderBaselineAgentPolicy", () => {
   });
 });
 
-// ── renderAlwaysOnToolPolicyRules ─────────────────────────────────────────────
+// ── renderAlwaysOnToolPolicyRulesFor ─────────────────────────────────────────
 
-describe("renderAlwaysOnToolPolicyRules", () => {
+// Every always-on rule's tools, so these cases exercise the same rule set the
+// deleted unfiltered renderer used to emit. The narrowing itself — a rule is
+// dropped when the turn carries none of its tools — is asserted separately
+// below, because that is the whole reason only the filtered renderer survives.
+const ALL_ALWAYS_ON_TOOLS = TOOL_INTENT_RULES.filter(
+  (r) => r.alwaysInclude
+).flatMap((r) => r.tools);
+
+describe("renderAlwaysOnToolPolicyRulesFor", () => {
   test("returns a non-empty string because there are alwaysInclude rules", () => {
     const alwaysOnCount = TOOL_INTENT_RULES.filter(
       (r) => r.alwaysInclude
@@ -51,34 +59,53 @@ describe("renderAlwaysOnToolPolicyRules", () => {
     // Confirm the assumption: there are always-on rules
     expect(alwaysOnCount).toBeGreaterThan(0);
 
-    const output = renderAlwaysOnToolPolicyRules();
+    const output = renderAlwaysOnToolPolicyRulesFor(ALL_ALWAYS_ON_TOOLS);
     expect(output.length).toBeGreaterThan(0);
   });
 
   test("includes the Built-In Tool Policies heading", () => {
-    expect(renderAlwaysOnToolPolicyRules()).toContain(
+    expect(renderAlwaysOnToolPolicyRulesFor(ALL_ALWAYS_ON_TOOLS)).toContain(
       "## Built-In Tool Policies"
     );
   });
 
   test("includes ask_user rule (always-on)", () => {
-    expect(renderAlwaysOnToolPolicyRules()).toContain("ask_user");
+    expect(renderAlwaysOnToolPolicyRulesFor(["ask_user"])).toContain(
+      "ask_user"
+    );
   });
 
   test("includes upload_file rule (always-on)", () => {
-    expect(renderAlwaysOnToolPolicyRules()).toContain("upload_file");
+    expect(renderAlwaysOnToolPolicyRulesFor(["upload_file"])).toContain(
+      "upload_file"
+    );
   });
 
   test("does NOT include image-generation rule (not alwaysInclude)", () => {
-    // image-generation has no alwaysInclude flag
-    const output = renderAlwaysOnToolPolicyRules();
+    // image-generation has no alwaysInclude flag, so offering its tool is
+    // still not enough to emit it here.
+    const output = renderAlwaysOnToolPolicyRulesFor([
+      ...ALL_ALWAYS_ON_TOOLS,
+      "generate_image",
+    ]);
     expect(output).not.toContain("Image Generation");
   });
 
   test("is deterministic across calls", () => {
-    expect(renderAlwaysOnToolPolicyRules()).toBe(
-      renderAlwaysOnToolPolicyRules()
+    expect(renderAlwaysOnToolPolicyRulesFor(ALL_ALWAYS_ON_TOOLS)).toBe(
+      renderAlwaysOnToolPolicyRulesFor(ALL_ALWAYS_ON_TOOLS)
     );
+  });
+
+  test("drops a rule whose tools the turn does not carry", () => {
+    // The reason the unfiltered renderer was retired: a turn without
+    // `upload_file` must not be told to deliver files with it.
+    const output = renderAlwaysOnToolPolicyRulesFor(["ask_user"]);
+    expect(output).not.toContain("upload_file");
+  });
+
+  test("returns an empty string when the turn carries none of the tools", () => {
+    expect(renderAlwaysOnToolPolicyRulesFor([])).toBe("");
   });
 });
 
@@ -147,7 +174,7 @@ describe("detectToolIntentRules", () => {
     expect(rules).toEqual([]);
   });
 
-  test("does NOT return alwaysInclude rules (they go via renderAlwaysOnToolPolicyRules)", () => {
+  test("does NOT return alwaysInclude rules (they go via renderAlwaysOnToolPolicyRulesFor)", () => {
     // A prompt that definitely matches patterns should not include alwaysInclude rules
     const rules = detectToolIntentRules(
       "send me the file as an attachment please"

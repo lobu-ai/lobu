@@ -175,26 +175,16 @@ function renderRule(rule: ToolIntentRule): string {
   return `### ${rule.title}\nTools: ${tools}\n${body}`;
 }
 
-export function renderAlwaysOnToolPolicyRules(): string {
-  const rules = TOOL_INTENT_RULES.filter((rule) => rule.alwaysInclude).sort(
-    (a, b) => a.priority - b.priority
-  );
-  if (rules.length === 0) {
-    return "";
-  }
-  return ["## Built-In Tool Policies", ...rules.map(renderRule)].join("\n\n");
-}
-
 /**
- * The always-on tool-policy block, narrowed to the tools a lane actually
+ * The always-on tool-policy block, narrowed to the tools this turn actually
  * carries.
  *
- * `renderAlwaysOnToolPolicyRules` emits every always-on rule because the
- * subprocess lane composes essentially all of them. The isolate lane does not:
- * it has no `upload_file`, so telling its model to deliver files with a tool
- * it was never offered produces a turn that claims to have sent something it
- * could not. A rule survives only when the lane carries at least one of the
- * tools it is about — the same rules, the same prose, one renderer.
+ * A rule survives only when the turn offers at least one of the tools it is
+ * about. Emitting every always-on rule unconditionally is what the retired
+ * subprocess lane did, and it could tell a model to deliver files with a tool
+ * it was never offered — producing a turn that claims to have sent something
+ * it could not. `upload_file`, for instance, is dropped when the turn has no
+ * workspace.
  */
 export function renderAlwaysOnToolPolicyRulesFor(
   availableTools: readonly string[]
