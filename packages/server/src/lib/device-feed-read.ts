@@ -43,6 +43,7 @@ import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
 import { DEVICE_ONLINE_WINDOW_SECONDS, describeDeviceLastSeen } from '../utils/device-liveness';
 import logger from '../utils/logger';
 import {
+  DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
   describeDeviceConnectorSetupRequired,
   findDeviceConnectorReadiness,
   loadDeviceConnectorReadiness,
@@ -265,6 +266,13 @@ async function describeUnservableDevice(
       )}`
     );
   }
+  // A selected hash absent from the inventory is unavailable. Prefer the
+  // specific pin, heartbeat, and permission diagnostics below when present.
+  const manifestError =
+    connectorReadiness?.state === 'device_offline' ||
+    (!connectorReadiness && p.manifestHash != null)
+      ? DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE
+      : null;
 
   if (p.deviceWorkerId) {
     // Reached THROUGH the connection, not by device id alone. The id comes off
@@ -300,7 +308,7 @@ async function describeUnservableDevice(
     if (p.requiredCapability && !capabilities.includes(p.requiredCapability)) {
       return `${name} no longer grants '${p.requiredCapability}'`;
     }
-    return null;
+    return manifestError;
   }
 
   // Unpinned. The question is which org a device may serve WITHOUT a pin, and
@@ -359,7 +367,7 @@ async function describeUnservableDevice(
       ? `no online device is serving '${p.requiredCapability}'`
       : 'no online device can serve this connection';
   }
-  return null;
+  return manifestError;
 }
 
 /**

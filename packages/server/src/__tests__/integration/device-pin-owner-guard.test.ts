@@ -8,15 +8,9 @@
  * PER DEVICE, the same shape `idx_connections_org_connector_account_live` gives
  * OAuth accounts.
  *
- * Retiring a Mac leaves its connection pinned to the now-stale device while the
- * replacement Mac's connection holds the only fresh one. The fast path resolves
- * a connection for the (org, connector) with no ORDER BY, hands it to
- * `reconcilePin`, and the pin UPDATE targets a device the OTHER row owns — 23505,
- * the whole wire transaction aborts, and the poll retries forever.
- *
- * Observed on prod 2026-07-29: org 8dc12bdd, apple.computer_use, rows 397
- * (MacBook Pro, last seen 10d) and 447 (Mac mini, last seen 2h), ~8 errors/min
- * across two replicas.
+ * An offline device's connection retains its placement even when another
+ * device can serve the connector. Initial binding must still respect the
+ * unique device ownership constraint.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -139,7 +133,7 @@ describe('device pin owner guard', () => {
     await cleanupTestDatabase();
   });
 
-  it('does not steal a pin held by another live connection, and clears the dead one', async () => {
+  it('preserves both pins when only one device is online', async () => {
     const staleDevice = await seedWorker(userId, orgId, false);
     const freshDevice = await seedWorker(userId, orgId, true);
 
@@ -150,21 +144,19 @@ describe('device pin owner guard', () => {
     // aborts, and the error is swallowed by the catch.
     await reconcileDeviceCapabilities(userId);
 
-    // The live row keeps its device; the retired row is unpinned (claimable by
-    // any future device) rather than left pointing at a vanished one.
+    // Offline placement is retained; it must not become a fleet-wide grant.
     expect(await pinOf(current)).toBe(freshDevice);
-    expect(await pinOf(retired)).toBeNull();
+    expect(await pinOf(retired)).toBe(staleDevice);
   });
 
-  it('still repairs a stale pin to the sole fresh device when nothing else holds it', async () => {
+  it('does not move an offline pin to the sole fresh device', async () => {
     const staleDevice = await seedWorker(userId, orgId, false);
-    const freshDevice = await seedWorker(userId, orgId, true);
+    await seedWorker(userId, orgId, true);
     const only = await seedConn(orgId, userId, staleDevice);
 
     await reconcileDeviceCapabilities(userId);
 
-    // The documented repair must survive the guard.
-    expect(await pinOf(only)).toBe(freshDevice);
+    expect(await pinOf(only)).toBe(staleDevice);
   });
 
   it('leaves a pin that is already a fresh device untouched', async () => {
@@ -174,5 +166,25 @@ describe('device pin owner guard', () => {
     await reconcileDeviceCapabilities(userId);
 
     expect(await pinOf(only)).toBe(freshDevice);
+  });
+
+  it('initially binds an unpinned connection to its sole advertiser', async () => {
+    const device = await seedWorker(userId, orgId, true);
+    const connection = await seedConn(orgId, userId, null);
+
+    await reconcileDeviceCapabilities(userId);
+
+    expect(await pinOf(connection)).toBe(device);
+  });
+
+  it('leaves an unpinned connection alone when a sibling owns the sole advertiser', async () => {
+    const device = await seedWorker(userId, orgId, true);
+    const unpinned = await seedConn(orgId, userId, null);
+    const owner = await seedConn(orgId, userId, device);
+
+    await reconcileDeviceCapabilities(userId);
+
+    expect(await pinOf(unpinned)).toBeNull();
+    expect(await pinOf(owner)).toBe(device);
   });
 });

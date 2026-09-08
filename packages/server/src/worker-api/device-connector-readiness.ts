@@ -154,3 +154,7 @@ export function describeDeviceConnectorSetupRequired(
     'Open the paired device app, finish setup, then retry.'
   );
 }
+
+export const DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE =
+  'The selected connector manifest is not available on the assigned device. ' +
+  'Update or reconnect that device, then retry.';

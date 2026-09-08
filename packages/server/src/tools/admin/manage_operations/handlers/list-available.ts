@@ -111,6 +111,14 @@ function executionTargetFromRow(
 			)}).`,
 		};
 	}
+	if (row.connector_manifest_backed && !deviceReadiness) {
+		return {
+			...base,
+			status: "setup_required",
+			executable: false,
+			reason: "The selected connector implementation is not advertised by the assigned device. Update the device app and finish setup, then retry.",
+		};
+	}
 	if (deviceReadiness?.state === "setup_required") {
 		return {
 			...base,
@@ -132,7 +140,9 @@ function executionTargetFromRow(
 			...base,
 			status: "device_offline",
 			executable: false,
-			reason: "No online device is advertising the connector's selected manifest.",
+			reason: row.device_worker_id
+				? "The paired device is not advertising the connector's selected manifest. Update or reconnect that device."
+				: "No online device is advertising the connector's selected manifest.",
 		};
 	}
 	if (row.device_bound && !row.device_online) {

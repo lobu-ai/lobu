@@ -55,6 +55,23 @@ const CONNECTOR_KEY = 'local.directory';
 const CONNECTOR_VERSION = '0.3.0';
 const FEED_KEY = 'files';
 const WORKER_ID = 'wk-dir-source-read';
+const DIRECTORY_MANIFEST: DeviceConnectorManifest = {
+  key: CONNECTOR_KEY,
+  version: CONNECTOR_VERSION,
+  name: 'Local Folder',
+  required_capability: 'local_directory',
+  runtime: { platforms: ['macos'] },
+  auth_schema: { methods: [{ type: 'none' }] },
+  feeds_schema: { [FEED_KEY]: { key: FEED_KEY, operations: ['read'] } },
+};
+const DIRECTORY_MANIFEST_HASH = deviceManifestHash(DIRECTORY_MANIFEST);
+const DIRECTORY_INVENTORY = {
+  [CONNECTOR_KEY]: {
+    manifest: DIRECTORY_MANIFEST,
+    manifest_hash: DIRECTORY_MANIFEST_HASH,
+    received_at: new Date().toISOString(),
+  },
+};
 
 const DEVICE_ROWS = [
   {
@@ -200,9 +217,9 @@ describe('device-backed source feed read', () => {
               ${sql.json({ methods: [{ type: 'none' }] })}, NOW(), NOW())
     `;
     await sql`
-      INSERT INTO connector_versions (connector_key, version, compiled_code, source_path, created_at)
+      INSERT INTO connector_versions (connector_key, version, compiled_code, source_path, compiled_code_hash, created_at)
       VALUES (${CONNECTOR_KEY}, ${CONNECTOR_VERSION}, NULL,
-              ${`device-manifest://macos/${CONNECTOR_KEY}@${CONNECTOR_VERSION}`}, NOW())
+              ${`device-manifest://macos/${CONNECTOR_KEY}@${CONNECTOR_VERSION}`}, ${DIRECTORY_MANIFEST_HASH}, NOW())
     `;
     const connection = (await sql`
       INSERT INTO connections
@@ -232,7 +249,8 @@ describe('device-backed source feed read', () => {
     __setDeviceActionWaiterForTest(null);
     await setDeviceLastSeen('5 seconds');
     await setDeviceCapabilities(['local_directory']);
-    await getTestDb()`UPDATE device_workers SET connector_manifests = '{}'::jsonb WHERE id = ${deviceWorkerId}::uuid`;
+    const sql = getTestDb();
+    await sql`UPDATE device_workers SET connector_manifests = ${sql.json(DIRECTORY_INVENTORY)} WHERE id = ${deviceWorkerId}::uuid`;
     await getTestDb()`UPDATE feeds SET status = 'active' WHERE id = ${feedId}`;
     await getTestDb()`DELETE FROM runs WHERE organization_id = ${orgId}`;
   });
@@ -464,6 +482,22 @@ describe('device-backed source feed read', () => {
       /is unavailable: device "Test Mac" is offline \(last polled 30m ago\)/
     );
     // No run parked for the 60s queue budget — the server already knew.
+    expect(await readRunRows()).toHaveLength(0);
+  });
+
+  it('refuses an online device with a different manifest before queuing a source read', async () => {
+    const sql = getTestDb();
+    const otherManifest = { ...DIRECTORY_MANIFEST, name: 'Different build' };
+    await sql`
+      UPDATE device_workers SET connector_manifests = ${sql.json({
+        [CONNECTOR_KEY]: {
+          manifest: otherManifest,
+          manifest_hash: deviceManifestHash(otherManifest),
+          received_at: new Date().toISOString(),
+        },
+      })} WHERE id = ${deviceWorkerId}::uuid
+    `;
+    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*assigned device/i);
     expect(await readRunRows()).toHaveLength(0);
   });
 
@@ -748,9 +782,9 @@ describe('unpinned device source-feed reads are a personal-org lane', () => {
     personalDeviceWorkerId = device[0].id;
 
     await sql`
-      INSERT INTO connector_versions (connector_key, version, compiled_code, source_path, created_at)
+      INSERT INTO connector_versions (connector_key, version, compiled_code, source_path, compiled_code_hash, created_at)
       VALUES (${CONNECTOR_KEY}, ${CONNECTOR_VERSION}, NULL,
-              ${`device-manifest://macos/${CONNECTOR_KEY}@${CONNECTOR_VERSION}`}, NOW())
+              ${`device-manifest://macos/${CONNECTOR_KEY}@${CONNECTOR_VERSION}`}, ${DIRECTORY_MANIFEST_HASH}, NOW())
     `;
     personalFeedId = (await seedPersonalLaneConnection(personalOrgId, 'folder-personal')).feedId;
     const teamSeed = await seedPersonalLaneConnection(teamOrgId, 'folder-team');
@@ -767,7 +801,8 @@ describe('unpinned device source-feed reads are a personal-org lane', () => {
     await sql`DELETE FROM runs WHERE organization_id IN (${personalOrgId}, ${teamOrgId})`;
     await sql`
       UPDATE device_workers
-      SET last_seen_at = now(), capabilities = ${sql.json([CAPABILITY])}
+      SET last_seen_at = now(), capabilities = ${sql.json([CAPABILITY])},
+          connector_manifests = ${sql.json(DIRECTORY_INVENTORY)}
       WHERE id = ${personalDeviceWorkerId}::uuid
     `;
     await sql`
@@ -984,9 +1019,9 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
               ${sql.json({ methods: [{ type: 'none' }] })}, NOW(), NOW())
     `;
     await sql`
-      INSERT INTO connector_versions (connector_key, version, compiled_code, source_path, created_at)
+      INSERT INTO connector_versions (connector_key, version, compiled_code, source_path, compiled_code_hash, created_at)
       VALUES (${CONNECTOR_KEY}, ${CONNECTOR_VERSION}, NULL,
-              ${`device-manifest://macos/${CONNECTOR_KEY}@${CONNECTOR_VERSION}`}, NOW())
+              ${`device-manifest://macos/${CONNECTOR_KEY}@${CONNECTOR_VERSION}`}, ${DIRECTORY_MANIFEST_HASH}, NOW())
     `;
     const connection = (await sql`
       INSERT INTO connections
@@ -1019,7 +1054,8 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
     await sql`DELETE FROM runs WHERE organization_id = ${lifecycleOrgId}`;
     await sql`
       UPDATE device_workers
-      SET last_seen_at = now(), capabilities = ${sql.json([CAPABILITY])}
+      SET last_seen_at = now(), capabilities = ${sql.json([CAPABILITY])},
+          connector_manifests = ${sql.json(DIRECTORY_INVENTORY)}
       WHERE id = ${lifecycleDeviceId}::uuid
     `;
   });
