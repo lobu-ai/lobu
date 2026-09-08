@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { currentMcpActivityAttribution } from '../lobu/stores/mcp-client-conversations';
+import { currentMcpActivityAttribution, normalizeMcpConversationTitle } from '../lobu/stores/mcp-client-conversations';
 import type { ToolContext } from '../tools/registry';
 
-type BrowserActionContext = {
+export type BrowserActionContext = {
   id: string;
   title: string;
   flow_id: string;
@@ -26,7 +26,7 @@ export function runScopedBrowserActionContext(runIdValue: unknown): BrowserActio
   if (runId == null) throw new Error('Browser action context requires a positive run id.');
   return {
     id: `run:${runId}`,
-    title: `Owletto · Run ${runId}`,
+    title: `Lobu · Browser task · ${runId}`,
     flow_id: String(runId),
     kind: 'run',
   };
@@ -67,13 +67,31 @@ export function browserActionContextFromMetadata(
   };
 }
 
+function browserTitle(ctx: ToolContext, fallback: string, suffix: string): string {
+  const subject = normalizeMcpConversationTitle(ctx.sdkBrowserInvocation?.title ?? '');
+  return `Lobu · ${subject || fallback} · ${suffix}`;
+}
+
+export function deriveSdkBrowserActionContext(ctx: ToolContext): BrowserActionContext | null {
+  if (!ctx.sdkBrowserInvocation || !ctx.userId || !ctx.isAuthenticated) return null;
+  const digest = createHash('sha256')
+    .update(JSON.stringify([ctx.organizationId, ctx.userId, ctx.sdkBrowserInvocation.nonce]))
+    .digest('hex');
+  return {
+    id: `run:sdk-${digest}`,
+    flow_id: `sdk-${digest}`,
+    title: browserTitle(ctx, 'Browser task', digest.slice(0, 12)),
+    kind: 'run',
+  };
+}
+
 export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionContext | null {
   const automationId = positiveRunId(ctx.actingAutomationId);
   const actingRunId = positiveRunId(ctx.actingRunId);
   if (automationId != null && actingRunId != null) {
     return {
       id: `automation:${actingRunId}`,
-      title: `Owletto · Automation ${automationId} · Run ${actingRunId}`,
+      title: browserTitle(ctx, `Automation ${automationId}`, `Run ${actingRunId}`),
       flow_id: String(actingRunId),
       kind: 'automation',
     };
@@ -92,7 +110,7 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
     const id = `conversation:${digest}`;
     return {
       id,
-      title: `Owletto · Conversation ${digest}`,
+      title: browserTitle(ctx, 'Conversation', digest),
       flow_id: id,
       kind: 'conversation',
     };
@@ -109,7 +127,7 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
     const id = `mcp:${digest}`;
     return {
       id,
-      title: `Owletto · MCP ${digest}`,
+      title: browserTitle(ctx, 'MCP activity', digest),
       flow_id: id,
       kind: 'mcp',
     };

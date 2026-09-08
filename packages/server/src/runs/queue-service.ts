@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { BrowserActionContext } from '../worker-api/browser-action-context';
 
 import { type DbClient, parsePgTextArray, pgTextArray } from '../db/client';
 import {
@@ -1144,6 +1145,8 @@ export async function createConnectorOperationRun(params: {
   parentRunId?: number | null;
   /** Internal-only metadata persisted in the existing runs.run_metadata column. */
   runMetadata?: Record<string, unknown> | null;
+  /** Fresh-insert-only SDK ownership. Replaying an operation never adopts a new invocation. */
+  sdkBrowserContext?: BrowserActionContext | null;
   /**
    * Optional transaction handle. When passed, the run INSERT (and its
    * connector-version read) execute on the caller's transaction instead of the
@@ -1225,6 +1228,13 @@ export async function createConnectorOperationRun(params: {
     targetDeviceWorkerId = connRows[0]?.device_worker_id ?? null;
   }
 
+  const insertMetadata = params.sdkBrowserContext
+    ? {
+        ...params.runMetadata,
+        browser_context:
+          params.runMetadata?.browser_context ?? params.sdkBrowserContext,
+      }
+    : params.runMetadata;
   const inserted = await sql<{
     id: number;
     status: string;
@@ -1260,7 +1270,7 @@ export async function createConnectorOperationRun(params: {
       ${inlineOwner},
       ${params.activation?.kind ?? null},
       ${params.activation ? pgTextArray(params.activation.urls) : null}::text[],
-      ${params.runMetadata == null ? null : sql.json(params.runMetadata)},
+      ${insertMetadata == null ? null : sql.json(insertMetadata)},
       ${targetDeviceWorkerId == null ? null : sql`${targetDeviceWorkerId}::uuid`},
       current_timestamp
     )
@@ -1331,10 +1341,15 @@ export async function createConnectorOperationRun(params: {
         ? prior.run_metadata.browser_context
         : null;
     const requestedBrowserContext = params.runMetadata?.browser_context ?? null;
+    // Display titles are not identity: the same flow may re-request with a new subject.
+    const browserIdentity = (context: unknown) => {
+      const { title: _title, ...identity } = context as Record<string, unknown>;
+      return stableJson(identity);
+    };
     const compatibleBrowserContext =
       priorBrowserContext == null ||
       requestedBrowserContext == null ||
-      stableJson(priorBrowserContext) === stableJson(requestedBrowserContext);
+      browserIdentity(priorBrowserContext) === browserIdentity(requestedBrowserContext);
     const compatibleProvenance =
       (priorAutomationId == null || priorAutomationId === requestedAutomationId) &&
       (priorParentRunId == null || priorParentRunId === requestedParentRunId);
@@ -1358,7 +1373,7 @@ export async function createConnectorOperationRun(params: {
           ? sql`TRUE`
           : sql`(
               run_metadata->'browser_context' IS NULL
-              OR run_metadata->'browser_context' = ${sql.json(requestedBrowserContext)}::jsonb
+              OR ((run_metadata->'browser_context') - 'title') = (${sql.json(requestedBrowserContext)}::jsonb - 'title')
             )`;
       const hydrated = await sql`
         UPDATE runs

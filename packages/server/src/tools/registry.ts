@@ -118,6 +118,8 @@ export interface ToolContext {
   sourceContext?: ToolSourceContext | null;
   /** `x-lobu-apply-id` when this call belongs to a `lobu apply` run (REST proxy only). */
   applyId?: string | null;
+  /** Server-only seed shared by browser operations within one SDK invocation. */
+  sdkBrowserInvocation?: { nonce: string; title: string };
   /** Persistent MCP session id driving this call; null off the MCP transport. */
   mcpSessionId?: string | null;
   /** True only for an MCP session that negotiated the standard Apps UI extension. */

@@ -757,6 +757,8 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
       browser_context: browserContext,
     });
 
+    expect((await createConnectorOperationRun({ ...request, runMetadata: { browser_context: { ...browserContext, title: 'Lobu · Changed task' } } })).runId).toBe(first.runId);
+
     await expect(
       createConnectorOperationRun({
         ...request,
@@ -767,7 +769,51 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
     ).rejects.toThrow(/already bound to a different request/);
   });
 
-  it('rejects a conflicting browser-context hydration race atomically', async () => {
+  it.each([false, true])('replays a bare SDK operation without adopting its owner (legacy=%s)', async (legacy) => {
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connectionId = await insertChromeConnection(org.id);
+    const request = {
+      organizationId: org.id, connectionId, connectorKey: 'chrome',
+      operationKey: 'open_tab', operationInput: { url: 'about:blank' },
+      approvalMode: 'device' as const, idempotencyKey: 'synthetic-sdk-replay',
+    };
+    const owner = { id: 'run:sdk-first', flow_id: 'sdk-first', kind: 'run' as const, title: 'Lobu · Same task · first' };
+    const first = await createConnectorOperationRun({ ...request, sdkBrowserContext: legacy ? undefined : owner });
+    const sql = getTestDb();
+    await sql`UPDATE runs SET status = 'completed', action_output = '{"tab_id":123}'::jsonb WHERE id = ${first.runId}`;
+    const replay = await createConnectorOperationRun({
+      ...request, sdkBrowserContext: { ...owner, id: 'run:sdk-second', flow_id: 'sdk-second' },
+    });
+    expect(replay).toMatchObject({ runId: first.runId, created: false, status: 'completed', actionOutput: { tab_id: 123 } });
+    const [row] = await sql`SELECT run_metadata FROM runs WHERE id = ${first.runId}`;
+    expect(row.run_metadata?.browser_context ?? null).toEqual(legacy ? null : owner);
+    await expect(createConnectorOperationRun({ ...request, operationInput: { url: 'https://different.example' } })).rejects.toThrow(/different request/);
+    await expect(createConnectorOperationRun({ ...request, policyPrincipalKind: 'user', policyPrincipalId: 'synthetic-other-user' })).rejects.toThrow(/different request/);
+  });
+
+  it('keeps the winning invocation owner when two replicas insert the same SDK key', async () => {
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connectionId = await insertChromeConnection(org.id);
+    const request = {
+      organizationId: org.id, connectionId, connectorKey: 'chrome',
+      operationKey: 'open_tab', operationInput: {},
+      approvalMode: 'device' as const, idempotencyKey: 'synthetic-sdk-race',
+    };
+    const contexts = ['first', 'second'].map((suffix) => ({
+      id: `run:sdk-${suffix}`, flow_id: `sdk-${suffix}`, kind: 'run' as const, title: 'Lobu · Same task',
+    }));
+    const claims = await Promise.all(contexts.map((sdkBrowserContext) => createConnectorOperationRun({ ...request, sdkBrowserContext })));
+    expect(new Set(claims.map((claim) => claim.runId)).size).toBe(1);
+    const winner = claims.findIndex((claim) => claim.created);
+    expect(claims.filter((claim) => claim.created)).toHaveLength(1);
+    const sql = getTestDb();
+    const [row] = await sql`SELECT run_metadata FROM runs WHERE id = ${claims[0].runId}`;
+    expect(row.run_metadata.browser_context).toEqual(contexts[winner]);
+  });
+
+  it.each([false, true])('checks browser identity atomically during hydration (title-only=%s)', async (titleOnly) => {
     const org = await createTestOrganization();
     await insertChromeConnector(org.id);
     const connId = await insertChromeConnection(org.id);
@@ -820,7 +866,7 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
       flow_id: 'conversation:context-a',
       kind: 'conversation',
     };
-    const contextB = {
+    const contextB = titleOnly ? { ...contextA, title: 'Lobu · New task · context-a' } : {
       id: 'conversation:context-b',
       title: 'Owletto · Conversation context-b',
       flow_id: 'conversation:context-b',
@@ -839,8 +885,8 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
       }),
     ]);
 
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(titleOnly ? 2 : 1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(titleOnly ? 0 : 1);
     const [row] = await sql`
       SELECT run_metadata FROM runs
       WHERE organization_id = ${org.id}

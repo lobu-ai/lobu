@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { type Static, Type } from "@sinclair/typebox";
 import {
   isRetryable,
@@ -41,7 +42,7 @@ const SCRIPT_FIELDS = {
   title: Type.Optional(
     Type.String({
       description:
-        'Human-friendly heading for this result (e.g. "Companies missing a domain"). The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.',
+        'Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.',
       maxLength: 200,
     }),
   ),
@@ -406,9 +407,13 @@ async function runSandbox(
     sdkMode: mode,
     agentDryRun,
   });
+  const sdkContext = {
+    ...ctx,
+    sdkBrowserInvocation: { nonce: randomUUID(), title: args.title ?? "" },
+  };
   const result = await runScript({
     source: args.script,
-    sdk: (abortSignal) => buildClientSDK(ctx, env, { mode, allowCrossOrg, abortSignal }),
+    sdk: (abortSignal) => buildClientSDK(sdkContext, env, { mode, allowCrossOrg, abortSignal }),
     sdkMode: mode,
     allowCrossOrg,
     // Account scripts are scope-bounded; selected SDK clients enforce the
