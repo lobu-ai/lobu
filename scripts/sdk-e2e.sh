@@ -398,7 +398,7 @@ cp "$HARNESS/isolate-conversation.mjs" "$CLIENT_DIR/isolate-conversation.mjs"
 DEVTOKEN="$(curl -fsS -X POST "$GW/api/local-init" -H 'X-Lobu-Client: cli' | jget device_token)"
 [ -n "$DEVTOKEN" ] || fail "could not obtain an Agent-API token (device_token) from /api/local-init"
 
-( cd "$CLIENT_DIR" && node isolate-conversation.mjs "$GW" ) \
+( cd "$CLIENT_DIR" && node isolate-conversation.mjs "$GW" "$MOCK_REQLOG" "$RUN_LOG" ) \
   || fail "public API conversation did not complete through the isolate"
 
 CLIENT_OUT="$RUN_DIR/client-consumer.out"

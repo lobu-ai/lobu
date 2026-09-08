@@ -21,7 +21,7 @@
  *  - Use a run type inside `LOBU_RUN_TYPES`. `agent_turn` is deliberately
  *    outside it, so `RunsQueue` never claims or completes these rows.
  *
- * Everything here is best-effort. `enqueueAgentTurnShadow` never throws into
+ * Shadow creation is best-effort. `enqueueAgentTurnShadow` never throws into
  * the enqueue path, and the caller runs it AFTER the real message is on the
  * worker queue, so a shadow that cannot be produced costs the turn nothing.
  *
@@ -37,6 +37,7 @@ import {
   createLogger,
   generateWorkerToken,
   getErrorMessage,
+  isExplicitCancelMessage,
   isSteerableHumanMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
@@ -582,66 +583,75 @@ async function resolveTurnTools(
 }
 
 /**
- * A message that arrives while this conversation's turn is still running is
- * for the model NOW, not for a turn of its own — pi's steering, which the
- * subprocess lane does through `agent.steer()` on its live session. This lane
- * parks it on the running run; the worker's next heartbeat carries it in and
- * the guest hands it to the same pi API. The predicate is the one both lanes
- * share: automation messages, session resets, `!`-bash and attachments never
- * steer, and the message must come from the user whose turn it is.
- *
- * Returns true when the message was parked, in which case it must not become
- * a turn of its own. The lookup runs over the in-flight rows only (the status
- * index), then matches the conversation on the envelope.
+ * Consume a control or steer the matching active native turn. The incoming
+ * chat-message run owns the cancellation receipt, so replay cannot cancel a
+ * later turn. Database failures propagate to the queue instead of admitting
+ * the control as model input. Worker heartbeat already stops cancelled runs.
  */
-export async function steerActiveAgentTurn(data: MessagePayload): Promise<boolean> {
-  if (!data.agentId || !data.conversationId || !data.messageText?.trim()) return false;
-  // Same selection as the producer, checked BEFORE any database work: an
-  // unselected agent costs the enqueue path an env-var read, nothing more.
+export async function handleActiveAgentTurnMessage(data: MessagePayload): Promise<boolean> {
+  if (!data.agentId || !data.organizationId || !data.conversationId || !data.userId) return false;
   if (!shadowSelects(data.agentId)) return false;
-  if (!isSteerableHumanMessage(data)) return false;
-  try {
-    return await parkSteer(data);
-  } catch (error) {
-    // Best-effort, like the producer: a failure here must never fail the
-    // message's real turn on the subprocess lane. The message simply becomes
-    // a turn of its own on this lane too.
-    logger.warn(
-      { agentId: data.agentId, conversationId: data.conversationId, error: getErrorMessage(error) },
-      "Agent turn steer could not be parked; the message becomes its own turn"
-    );
-    return false;
-  }
-}
+  const cancelling = isExplicitCancelMessage(data);
+  if (!cancelling && (!data.messageText?.trim() || !isSteerableHumanMessage(data))) return false;
 
-async function parkSteer(data: MessagePayload): Promise<boolean> {
   const sql = getDb();
-  const parked = (await sql`
-    UPDATE runs
-    SET run_metadata = jsonb_set(
-      COALESCE(run_metadata, '{}'::jsonb),
-      '{steer}',
-      COALESCE(run_metadata->'steer', '[]'::jsonb) || ${sql.json([{ message_id: data.messageId, text: data.messageText }])}::jsonb,
-      true
-    )
-    WHERE id = (
-      SELECT id FROM runs
-      WHERE organization_id = ${data.organizationId}
-        AND run_type = 'agent_turn'
-        AND status IN ('pending', 'claimed', 'running')
-        AND action_input->'turn'->>'conversation_id' = ${data.conversationId}
-        AND action_input->'reply'->>'user_id' = ${data.userId}
-      ORDER BY id DESC
-      LIMIT 1
-    )
-    RETURNING id
-  `) as unknown as Array<{ id: number }>;
-  if (parked.length === 0) return false;
-  logger.info(
-    { agentId: data.agentId, conversationId: data.conversationId, messageId: data.messageId, runId: parked[0]?.id },
-    "Message steered into the running agent turn on the isolate lane"
-  );
-  return true;
+  const target = sql`
+    SELECT id FROM runs
+    WHERE organization_id = ${data.organizationId}
+      AND run_type = 'agent_turn'
+      AND status IN ('pending', 'claimed', 'running')
+      AND action_input->'turn'->>'agent_id' = ${data.agentId}
+      AND action_input->'turn'->>'conversation_id' = ${data.conversationId}
+      AND action_input->'reply'->>'user_id' = ${data.userId}
+    ORDER BY (status = 'pending'), id
+    LIMIT 1
+  `;
+  let runId: number | undefined;
+  if (cancelling) {
+    if (typeof data.runId !== "number" || !Number.isSafeInteger(data.runId) || data.runId <= 0) {
+      throw new Error("Native cancellation requires the admitted message run ID");
+    }
+    const source = sql`
+      id = ${data.runId} AND organization_id = ${data.organizationId}
+      AND run_type = 'chat_message' AND action_input->>'messageId' = ${data.messageId}
+    `;
+    const [result] = await sql<{ source_exists: boolean; run_id: number | null }>`
+      WITH receipt AS (
+        UPDATE runs
+        SET run_metadata = jsonb_set(COALESCE(run_metadata, '{}'::jsonb), '{native_cancel_handled}', 'true'::jsonb)
+        WHERE ${source} AND run_metadata->>'native_cancel_handled' IS DISTINCT FROM 'true'
+        RETURNING id
+      ), cancelled AS (
+        UPDATE runs SET status = 'cancelled', completed_at = now(), exit_reason = 'cancelled'
+        WHERE id = (${target}) AND status IN ('pending', 'claimed', 'running')
+          AND EXISTS (SELECT 1 FROM receipt)
+        RETURNING id
+      )
+      SELECT EXISTS (SELECT 1 FROM runs WHERE ${source}) AS source_exists,
+        (SELECT id FROM cancelled) AS run_id
+    `;
+    if (!result?.source_exists) throw new Error("Native cancellation has no matching admitted message");
+    runId = result.run_id ?? undefined;
+  } else {
+    const [parked] = await sql<{ id: number }>`
+      UPDATE runs
+      SET run_metadata = jsonb_set(
+        COALESCE(run_metadata, '{}'::jsonb), '{steer}',
+        COALESCE(run_metadata->'steer', '[]'::jsonb) || ${sql.json([{ message_id: data.messageId, text: data.messageText }])}::jsonb,
+        true
+      )
+      WHERE id = (${target}) AND status IN ('pending', 'claimed', 'running')
+      RETURNING id
+    `;
+    runId = parked?.id;
+  }
+  if (runId !== undefined) {
+    logger.info(
+      { agentId: data.agentId, conversationId: data.conversationId, messageId: data.messageId, runId },
+      cancelling ? "Explicit cancel stopped the native agent turn" : "Message steered into the active native agent turn"
+    );
+  }
+  return cancelling || runId !== undefined;
 }
 
 /**

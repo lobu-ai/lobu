@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurnShadow,
-  steerActiveAgentTurn,
+  handleActiveAgentTurnMessage,
 } from '../../gateway/orchestration/agent-turn-shadow';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
@@ -140,6 +140,15 @@ function messageFor(organizationId: string): MessagePayload {
     platformMetadata: {},
     agentOptions: { model: 'claude/claude-opus-4-8' },
   } as MessagePayload;
+}
+
+async function admittedMessage(message: MessagePayload): Promise<MessagePayload> {
+  const sql = getTestDb();
+  const [input] = await sql`
+    INSERT INTO runs (organization_id, run_type, status, action_input)
+    VALUES (${message.organizationId}, 'chat_message', 'claimed', ${sql.json(message)}) RETURNING id
+  `;
+  return { ...message, runId: Number(input.id) };
 }
 
 /**
@@ -988,9 +997,9 @@ describe('agent turn shadow producer', () => {
 
     // The same human, in the same conversation, while the turn runs: parked.
     const followUp = { ...messageFor(org.id), messageId: 'msg-2', messageText: 'also check companies' };
-    expect(await steerActiveAgentTurn(followUp)).toBe(true);
+    expect(await handleActiveAgentTurnMessage(followUp)).toBe(true);
     // Another follow-up queues behind it, in order.
-    expect(await steerActiveAgentTurn({ ...followUp, messageId: 'msg-3', messageText: 'and people' })).toBe(true);
+    expect(await handleActiveAgentTurnMessage({ ...followUp, messageId: 'msg-3', messageText: 'and people' })).toBe(true);
     const [row] = (await sql`SELECT run_metadata FROM runs WHERE id = ${runId}`) as unknown as Array<{
       run_metadata: { steer?: unknown };
     }>;
@@ -1003,14 +1012,173 @@ describe('agent turn shadow producer', () => {
 
     // Someone else in the conversation, or an automation's message, is not a
     // steer — the predicate both lanes share says so.
-    expect(await steerActiveAgentTurn({ ...followUp, userId: 'user-other' })).toBe(false);
+    expect(await handleActiveAgentTurnMessage({ ...followUp, userId: 'user-other' })).toBe(false);
     expect(
-      await steerActiveAgentTurn({ ...followUp, platformMetadata: { source: 'automation-run' } } as typeof followUp)
+      await handleActiveAgentTurnMessage({ ...followUp, platformMetadata: { source: 'automation-run' } } as typeof followUp)
     ).toBe(false);
     // Nothing running in another conversation: nothing to steer.
-    expect(await steerActiveAgentTurn({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
+    expect(await handleActiveAgentTurnMessage({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
     // An agent the operator has not selected costs the enqueue path nothing.
-    expect(await steerActiveAgentTurn({ ...followUp, agentId: 'agent-not-selected' })).toBe(false);
+    expect(await handleActiveAgentTurnMessage({ ...followUp, agentId: 'agent-not-selected' })).toBe(false);
+  });
+
+  it('scopes native steering to the selected agent in a shared conversation', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    process.env[SHADOW_ENV] = `${AGENT_ID},other-selected-agent`;
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurnShadow(first, deps);
+    await enqueueAgentTurnShadow({ ...first, agentId: 'other-selected-agent', messageId: 'other-agent-message' }, deps);
+    const [target, other] = await shadowRuns();
+
+    expect(await handleActiveAgentTurnMessage({ ...first, messageId: 'target-follow-up', messageText: 'for the first agent only' })).toBe(true);
+    const rows = await sql`SELECT id, run_metadata->'steer' AS steer FROM runs WHERE id IN (${target.id}, ${other.id}) ORDER BY id`;
+    expect(rows[0].steer).toEqual([{ message_id: 'target-follow-up', text: 'for the first agent only' }]);
+    expect(rows[1].steer).toBeNull();
+  });
+
+  it('cancels a native turn on explicit cancel admission instead of steering', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    await enqueueAgentTurnShadow(first, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const { run_id: runId } = await (await pollFleet('fleet-explicit-cancel', { agent_turn: true })).json();
+    const cancel = await admittedMessage({ ...first, messageId: 'cancel-message', messageText: ' /CANCEL ' });
+    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect((await runRow(runId)).status).toBe('cancelled');
+    const response = await postAsFleet('/api/workers/heartbeat', { worker_id: 'fleet-explicit-cancel', run_id: runId });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ continue: false, stop_reason: 'cancelled' });
+  });
+
+  it.each([
+    { name: 'text', messageText: '/cancel', platformMetadata: {} },
+    { name: 'control metadata without text', messageText: '', platformMetadata: { control: 'cancel' } },
+    { name: 'intent metadata without text', messageText: '', platformMetadata: { intent: { kind: 'cancel' } } },
+  ])('honors $name cancellation in every nonterminal native state', async (command) => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    for (const status of ['pending', 'claimed', 'running']) {
+      const first = { ...messageFor(org.id), messageId: `original-${status}` };
+      await enqueueAgentTurnShadow(first, {
+        agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+      });
+      const run = (await shadowRuns()).at(-1)!;
+      await sql`UPDATE runs SET status = ${status} WHERE id = ${run.id}`;
+      const cancel = await admittedMessage({ ...first, ...command, messageId: `cancel-${status}` });
+      expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+      const [row] = await sql`SELECT status, completed_at, exit_reason, run_metadata->'steer' AS steer FROM runs WHERE id = ${run.id}`;
+      expect(row).toMatchObject({ status: 'cancelled', exit_reason: 'cancelled', steer: null });
+      expect(row.completed_at).not.toBeNull();
+    }
+  });
+
+  it('keeps cancellation within its organization, agent, conversation and posting user', async () => {
+    const org = await createTestOrganization();
+    const otherOrg = await createTestOrganization();
+    process.env[SHADOW_ENV] = '*';
+    const first = messageFor(org.id);
+    const variants = [first, { ...first, organizationId: otherOrg.id }, { ...first, agentId: 'other-selected-agent' },
+      { ...first, conversationId: 'other-conversation' }, { ...first, userId: 'other-user' }];
+    for (const [i, message] of variants.entries()) {
+      await enqueueAgentTurnShadow({ ...message, messageId: `scope-${i}` }, {
+        agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+      });
+    }
+    const cancel = await admittedMessage({ ...first, messageId: 'scoped-cancel', messageText: '/cancel' });
+    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect((await shadowRuns()).map((run) => run.status)).toEqual(['cancelled', 'pending', 'pending', 'pending', 'pending']);
+  });
+
+  it('controls the active turn before queued work and consumes duplicate cancellation across workers', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurnShadow(first, deps);
+    const { run_id: activeId } = await (await pollFleet('fleet-control-active', { agent_turn: true })).json();
+    await enqueueAgentTurnShadow({ ...first, messageId: 'queued-after-active' }, deps);
+    const queued = (await shadowRuns())[1];
+    expect(await handleActiveAgentTurnMessage({ ...first, messageId: 'active-follow-up', messageText: 'for the active turn' })).toBe(true);
+    const [active] = await sql`SELECT run_metadata->'steer' AS steer FROM runs WHERE id = ${activeId}`;
+    expect(active.steer).toEqual([{ message_id: 'active-follow-up', text: 'for the active turn' }]);
+    const cancel = await admittedMessage({ ...first, messageId: 'replayed-cancel', messageText: '/cancel' });
+    expect(await Promise.all([handleActiveAgentTurnMessage(cancel), handleActiveAgentTurnMessage(cancel)])).toEqual([true, true]);
+    expect((await runRow(activeId)).status).toBe('cancelled');
+    expect((await runRow(queued.id)).status).toBe('pending');
+    expect((await (await pollFleet('fleet-control-next', { agent_turn: true })).json()).run_id).toBe(queued.id);
+    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect((await runRow(queued.id)).status).toBe('running');
+  });
+
+  it('consumes a no-active cancellation without cancelling a future turn on replay', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const cancel = await admittedMessage({ ...first, messageId: 'early-cancel', messageText: '/cancel' });
+    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect(await shadowRuns()).toHaveLength(0);
+    await enqueueAgentTurnShadow(first, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect((await shadowRuns())[0].status).toBe('pending');
+  });
+
+  it('propagates database failures and refuses an unbound cancellation receipt', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    await enqueueAgentTurnShadow(first, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const cancel = await admittedMessage({ ...first, messageId: 'retryable-cancel', messageText: '/cancel' });
+    const spy = vi.spyOn(db, 'getDb').mockImplementationOnce(() => { throw new Error('synthetic database failure'); });
+    try { await expect(handleActiveAgentTurnMessage(cancel)).rejects.toThrow('synthetic database failure'); }
+    finally { spy.mockRestore(); }
+    await expect(handleActiveAgentTurnMessage({ ...cancel, runId: 0 })).rejects.toThrow('admitted message run ID');
+    await expect(handleActiveAgentTurnMessage({ ...cancel, messageId: 'wrong-message' })).rejects.toThrow('no matching admitted message');
+    expect((await shadowRuns())[0].status).toBe('pending');
+    expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
+    expect((await shadowRuns())[0].status).toBe('cancelled');
+  });
+
+  it('preserves a completion committed while cancellation waits for the active row', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurnShadow(first, deps);
+    const { run_id: activeId } = await (await pollFleet('fleet-completing-control', { agent_turn: true })).json();
+    await enqueueAgentTurnShadow({ ...first, messageId: 'queued-after-completion' }, deps);
+    const queued = (await shadowRuns())[1];
+    const cancel = await admittedMessage({ ...first, messageId: 'completion-race-cancel', messageText: '/cancel' });
+    let locked!: () => void;
+    const lockReady = new Promise<void>((resolve) => { locked = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const completion = sql.begin(async (tx) => {
+      await tx`UPDATE runs SET status = 'completed', completed_at = now(), exit_reason = 'ok' WHERE id = ${activeId}`;
+      locked();
+      await gate;
+    });
+    await lockReady;
+    const control = handleActiveAgentTurnMessage(cancel);
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await sql`
+          SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%native_cancel_handled%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 20 });
+    } finally {
+      release();
+      await completion;
+      await control;
+    }
+    expect((await runRow(activeId))).toMatchObject({ status: 'completed', exit_reason: 'ok' });
+    expect((await runRow(queued.id)).status).toBe('pending');
   });
 
   it('carries a pinned sandbox as signed token claims and a remote-bash marker', async () => {

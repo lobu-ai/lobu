@@ -37,7 +37,7 @@ import { recordAgentRunInput } from "./agent-run-input.js";
 import {
   type AgentTurnShadowDeps,
   enqueueAgentTurnShadow,
-  steerActiveAgentTurn,
+  handleActiveAgentTurnMessage,
 } from "./agent-turn-shadow.js";
 import {
   buildCanonicalConversationKey,
@@ -696,11 +696,10 @@ export class MessageConsumer {
       // `enqueueAgentTurnShadow` never throws, and for an agent the operator
       // has not selected it returns on an env-var read before touching the
       // database — the unselected path costs the enqueue nothing.
-      // A follow-up that lands while this conversation's isolate turn is still
-      // running steers that turn instead of becoming one of its own — the
-      // same rule the subprocess lane applies to its live session.
-      const steered = await steerActiveAgentTurn(data);
-      if (!steered) await enqueueAgentTurnShadow(data, {
+      // Consume explicit cancellation or steer the matching active native
+      // turn. A durable control failure retries through the queue catch below.
+      const handled = await handleActiveAgentTurnMessage(data);
+      if (!handled) await enqueueAgentTurnShadow(data, {
         agentSettings: this.agentSettingsStore,
         catalog: this.deploymentManager.getProviderCatalogService?.(),
         mcp: this.agentTurnMcp,

@@ -127,6 +127,34 @@ const server = createServer((req, res) => {
         const chunk = (delta, finish) =>
           `data: ${JSON.stringify({ id, object: "chat.completion.chunk", model: "mock-model", choices: [{ index: 0, delta, finish_reason: finish ?? null }] })}\n\n`;
         res.write(chunk({ role: "assistant" }));
+        const latestUser = (JSON.parse(body).messages ?? [])
+          .filter((message) => message.role === "user")
+          .at(-1);
+        const cancelMarker = JSON.stringify(latestUser?.content ?? "").match(
+          /ISOLATE_CANCEL_[a-f0-9]{32}/
+        )?.[0];
+        if (cancelMarker) {
+          // Keep both real runtimes in inference until the public cancel reaches
+          // them. A separate event log leaves request JSONL consumers unchanged.
+          const record = (event) => {
+            if (REQLOG)
+              appendFileSync(
+                `${REQLOG}.streams`,
+                `${JSON.stringify({ marker: cancelMarker, event })}\n`
+              );
+          };
+          record("opened");
+          res.write(chunk({ content: "Cancellation fixture is streaming." }));
+          const timeout = setTimeout(() => {
+            record("timeout");
+            res.end();
+          }, 75_000);
+          res.on("close", () => {
+            clearTimeout(timeout);
+            record("closed");
+          });
+          return;
+        }
         res.write(chunk(scripted?.delta ?? { content: REPLY }));
         res.write(chunk({}, scripted?.finish ?? "stop"));
         res.write("data: [DONE]\n\n");
