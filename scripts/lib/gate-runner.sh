@@ -95,11 +95,6 @@ gate_unit() {
   fi
   bun test packages/core packages/cli --timeout 30000 || return 1
   bun test packages/plugin-api packages/plugin-host packages/plugin-toolkit packages/plugin-memory packages/plugin-conversations packages/plugin-media packages/plugin-mcp --timeout 30000 || return 1
-  if [ "$bwrap_present" -eq 1 ]; then
-    env LOBU_REQUIRE_EXEC_SANDBOX=1 bun test packages/agent-worker --timeout 30000 || return 1
-  else
-    bun test packages/agent-worker --timeout 30000 || return 1
-  fi
   bun test packages/server/src/__tests__/unit --timeout 30000 || return 1
   bun test packages/server/src/auth/__tests__/system-provider-resolution.test.ts --timeout 30000 || return 1
   bun test packages/server/src/utils/__tests__/device-pin-tombstones.test.ts packages/server/src/tools/admin/manage_operations/__tests__/activity-feed-collapse.test.ts --timeout 30000 || return 1

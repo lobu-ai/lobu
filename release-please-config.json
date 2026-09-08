@@ -23,11 +23,6 @@
         },
         {
           "type": "json",
-          "path": "packages/agent-worker/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
           "path": "packages/cli/package.json",
           "jsonpath": "$.version"
         },

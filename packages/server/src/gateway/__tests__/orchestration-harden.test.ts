@@ -103,7 +103,6 @@ const TEST_CONFIG: OrchestratorConfig = {
     expireInSeconds: 300,
   },
   worker: {
-    entryPoint: "/fake/agent-worker/src/index.ts",
     binPathEntries: ["/fake/node_modules/.bin"],
     idleCleanupMinutes: 30,
     maxDeployments: 10,

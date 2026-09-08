@@ -97,11 +97,6 @@ const config: KnipConfig = {
       // those, so they don't need explicit entries.
       entry: ["src/index.ts", "src/server.ts", "src/**/*.test.ts"],
     },
-    "packages/agent-worker": {
-      // The publish bundler is invoked from the package's `build` script, not
-      // imported, so knip can't reach it through the module graph.
-      entry: ["src/index.ts", "scripts/build-worker-bundle.mjs"],
-    },
     "packages/server": {
       entry: [
         // Bundle entry (esbuild). server-entry.ts is the Node-version gate that
@@ -148,11 +143,11 @@ const config: KnipConfig = {
         // Build helper invoked as `node scripts/build.cjs`.
         "scripts/build.cjs",
       ],
-      // The published `lobu` CLI is an umbrella: its build bundles @lobu/server
-      // and @lobu/worker, so it re-declares THEIR runtime deps in its own
+      // The published `lobu` CLI is an umbrella: its build bundles @lobu/server,
+      // so it re-declares ITS runtime deps in its own
       // package.json (npm installs them for the bundled output). knip only sees
       // cli/src, which doesn't import these directly, so it flags them — but
-      // every one is used by the bundled server/worker at runtime. Listed
+      // every one is used by the bundled server at runtime. Listed
       // explicitly so a real unused cli dep would still surface.
       ignoreDependencies: [
         "@aws-sdk/client-bedrock",
@@ -166,7 +161,6 @@ const config: KnipConfig = {
         "@hono/node-server",
         "@hono/zod-openapi",
         "@lobu/embeddings",
-        "@lobu/worker",
         "@mariozechner/pi-ai",
         "@modelcontextprotocol/sdk",
         "@opentelemetry/api",

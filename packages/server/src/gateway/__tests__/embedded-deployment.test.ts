@@ -75,7 +75,6 @@ const TEST_CONFIG: OrchestratorConfig = {
     expireInSeconds: 300,
   },
   worker: {
-    entryPoint: "/test/packages/agent-worker/src/index.ts",
     binPathEntries: ["/test/node_modules/.bin"],
     idleCleanupMinutes: 30,
     maxDeployments: 10,

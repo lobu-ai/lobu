@@ -81,10 +81,7 @@ const layers = [
       (name) => packageBuild(name)
     ),
   ],
-  [
-    "runtimes",
-    ["agent-worker", "connector-worker"].map((name) => packageBuild(name)),
-  ],
+  ["runtimes", ["connector-worker"].map((name) => packageBuild(name))],
 ];
 
 if (!skipApplications) {

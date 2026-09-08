@@ -113,8 +113,6 @@ export class Orchestrator {
       const providerModules = getModelProviderModules();
       this.deploymentManager.setProviderModules(providerModules);
 
-      await this.deploymentManager.validateWorkerImage();
-
       await this.queueConsumer.start();
 
       this.setupIdleCleanup();

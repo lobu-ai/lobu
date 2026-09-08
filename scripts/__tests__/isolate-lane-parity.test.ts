@@ -1,11 +1,11 @@
 /**
- * Parity gate between the two agent runtimes.
+ * Coherence gate for the agent-turn lane.
  *
- * The isolate lane (`connector-worker/src/agent-turn`) must offer the model
- * every tool the subprocess lane (`agent-worker`) offers, or a cutover is a
- * regression a customer notices before a test does. This reads the lists both
- * lanes are built from — not a fixture — so a tool added to one lane fails
- * here until it reaches the other.
+ * The guest's tool union, the producer's tool lists, and what the plugins
+ * actually publish must all name the same tools — a tool added to one but not
+ * the others is a capability the model is promised and never gets, or offered
+ * and never declared. This reads the lists the lane is BUILT from, not a
+ * fixture, so a drift fails here rather than in front of a customer.
  *
  * Runs in CI's format-lint job beside the other source-scanning gates.
  */
@@ -42,12 +42,8 @@ function unionLiterals(source: string, typeName: string): string[] {
     .sort();
 }
 
-describe("isolate lane parity with the subprocess lane", () => {
-  it("offers every pi builtin the subprocess lane hardens", () => {
-    const subprocess = quotedNamesAfter(
-      read("packages/agent-worker/src/runtime/session-runner.ts"),
-      "const OVERRIDABLE_BUILTIN_NAMES"
-    );
+describe("agent-turn lane coherence", () => {
+  it("declares the same pi builtins in the guest union and the producer", () => {
     const guest = unionLiterals(
       read("packages/connector-worker/src/agent-turn/types.ts"),
       "AgentTurnBuiltinTool"
@@ -56,8 +52,7 @@ describe("isolate lane parity with the subprocess lane", () => {
       read("packages/server/src/gateway/orchestration/agent-turn-producer.ts"),
       "const WORKSPACE_TOOLS"
     );
-    expect(guest).toEqual(subprocess);
-    expect(producer).toEqual(subprocess);
+    expect(producer).toEqual(guest);
   });
 
   it("names every conversation and media tool the plugins publish", () => {
