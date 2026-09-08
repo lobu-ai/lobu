@@ -1378,7 +1378,17 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       // broadcast landing during the `connected` write below would be delivered
       // live AND still be in the backlog we replay — duplicating it (and
       // possibly reordering it after later live events) for the client.
-      const backlog = sseManager.getRecentEvents(sseKey);
+      // Bounded to THIS session's lifetime. `conversationId` is deterministic
+      // (agent + user + org + thread), so `forceNew` mints a fresh session at
+      // the key the old one used — while the backlog ring, keyed on that same
+      // string, still holds the previous turn for its 2-minute TTL. Replaying
+      // the whole ring therefore answered `lobu chat --new` with the PREVIOUS
+      // turn's output, before the new message had even been dispatched.
+      //
+      // `createdAt` is the exact boundary: a resumed session keeps its
+      // original value and still gets its own events back, while a replacement
+      // session starts after everything the old one emitted.
+      const backlog = sseManager.getRecentEvents(sseKey, session.createdAt);
       sseManager.addConnection(sseKey, stream);
       connectionAdded = true;
 
