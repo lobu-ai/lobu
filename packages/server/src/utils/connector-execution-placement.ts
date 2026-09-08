@@ -145,3 +145,14 @@ export function selectedConnectorVersionArtifactSql<TFragment>(
     LIMIT 1
   `;
 }
+
+/** Hashless native artifacts defer final authorization to the capability claim lane. */
+export function hashlessManifestArtifactMayBeClaimed(
+  connectorKey: string,
+  runtime: { platforms?: unknown; execution?: unknown } | null | undefined
+): boolean {
+  if (isChromeNamespaceConnectorKey(connectorKey) || runtime?.execution === 'bridge') return false;
+  return Array.isArray(runtime?.platforms) && runtime.platforms.some(
+    (platform) => typeof platform === 'string' && platform !== 'headless' && platform !== 'chrome-extension'
+  );
+}

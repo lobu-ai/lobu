@@ -32,7 +32,10 @@ import { getDb } from '../db/client';
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../config/intervals';
 import type { Env } from '../index';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
-import { selectedConnectorVersionArtifactSql } from '../utils/connector-execution-placement';
+import {
+  hashlessManifestArtifactMayBeClaimed,
+  selectedConnectorVersionArtifactSql,
+} from '../utils/connector-execution-placement';
 import {
   DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
   describeDeviceConnectorSetupRequired,
@@ -302,7 +305,7 @@ async function resolveActiveConnectorVersion(
 
 /**
  * Reject an unavailable manifest on the exact execution pin before queuing.
- * Reuse worker-claim readiness; compiled and bundled artifacts bypass this gate.
+ * Compiled artifacts bypass this check; native hashless artifacts retain capability claims.
  */
 async function deviceManifestAdmissionError(
   sql: DbClient,
@@ -312,10 +315,18 @@ async function deviceManifestAdmissionError(
   connectorVersion: string,
   deviceWorkerId: string | null
 ): Promise<string | null> {
-  const [row] = await sql<{ owner_user_id: string | null; manifest_hash: string | null }>`
-    SELECT COALESCE(c.created_by, dw.user_id) AS owner_user_id, cv.artifact_hash AS manifest_hash
+  const [row] = await sql<{
+    owner_user_id: string | null;
+    manifest_hash: string | null;
+    runtime: Record<string, unknown> | null;
+  }>`
+    SELECT COALESCE(c.created_by, dw.user_id) AS owner_user_id, cv.artifact_hash AS manifest_hash,
+           cd.runtime
     FROM connections c
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
+    LEFT JOIN connector_definitions cd
+      ON cd.organization_id = c.organization_id AND cd.key = c.connector_key
+      AND cd.status = 'active'
     JOIN LATERAL (
       ${selectedConnectorVersionArtifactSql(sql, {
         connectorKey: sql`${connectorKey}`,
@@ -327,7 +338,10 @@ async function deviceManifestAdmissionError(
     LIMIT 1
   `;
   if (!row) return null;
-  if (row.manifest_hash == null) return DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+  if (row.manifest_hash == null) {
+    return hashlessManifestArtifactMayBeClaimed(connectorKey, row.runtime)
+      ? null : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+  }
   const target = {
     ownerUserId: row.owner_user_id,
     connectorKey,

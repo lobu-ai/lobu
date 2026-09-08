@@ -463,6 +463,7 @@ describe('device-backed source feed read', () => {
       connectorKey: CONNECTOR_KEY,
       connectorVersion: CONNECTOR_VERSION,
       manifestHash: DIRECTORY_MANIFEST_HASH,
+      connectorRuntime: { platforms: ['macos'] },
       deviceOwnerUserId: userId,
       deviceWorkerId: foreign[0].id,
       feedStatus: 'active',
@@ -505,15 +506,26 @@ describe('device-backed source feed read', () => {
     expect(await readRunRows()).toHaveLength(0);
   });
 
-  it('refuses a manifest-backed read whose selected artifact has no hash', async () => {
+  it('serves a pre-attestation hashless artifact through the legacy capability poll', async () => {
     const sql = getTestDb();
     await sql`
       UPDATE connector_versions SET compiled_code_hash = NULL
       WHERE connector_key = ${CONNECTOR_KEY} AND version = ${CONNECTOR_VERSION}
     `;
-    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*eligible device/i);
-    expect(await readRunRows()).toHaveLength(0);
-  });
+    await sql`UPDATE device_workers SET connector_manifests = '{}'::jsonb WHERE id = ${deviceWorkerId}::uuid`;
+    const reading = readSourceFeed({ scope: scope(), feedId });
+    const result = reading.then(value => ({ value }), error => ({ error }));
+    await respondAsDevice({
+      status: 'success',
+      action_output: { rows: DEVICE_ROWS, columns: DEVICE_COLUMNS },
+    });
+    expect(await result).toMatchObject({ value: { rows: DEVICE_ROWS } });
+    const runs = await readRunRows();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: 'completed', action_output: null });
+    expect(runs[0].action_input).toEqual({ scrubbed: true, feed_key: FEED_KEY });
+    expect(await countPersistence()).toEqual({ events: 0, checkpointed: 0 });
+  }, 30_000);
 
   it('keeps an offline execution pin authoritative over another device\'s setup state', async () => {
     await setDeviceLastSeen('30 minutes');
@@ -1092,6 +1104,7 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
       connectorKey: CONNECTOR_KEY,
       connectorVersion: CONNECTOR_VERSION,
       manifestHash: DIRECTORY_MANIFEST_HASH,
+      connectorRuntime: { platforms: ['macos'] },
       deviceOwnerUserId: lifecycleUserId,
       deviceWorkerId: lifecycleDeviceId,
       feedStatus: 'active',
@@ -1137,6 +1150,7 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
       connectorKey: CONNECTOR_KEY,
       connectorVersion: CONNECTOR_VERSION,
       manifestHash: DIRECTORY_MANIFEST_HASH,
+      connectorRuntime: { platforms: ['macos'] },
       deviceOwnerUserId: lifecycleUserId,
       deviceWorkerId: lifecycleDeviceId,
       feedStatus: 'active',

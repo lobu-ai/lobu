@@ -23,7 +23,7 @@ const CAPABILITY = 'test_pin_preservation';
 const MANIFEST = {
   key: CONNECTOR,
   version: '1.0.0',
-  name: 'Test Pin Sweep',
+  name: 'Test Pin Preservation',
   required_capability: CAPABILITY,
   runtime: { platforms: ['macos'] },
   feeds_schema: {},
@@ -35,7 +35,7 @@ async function seedDefinition(orgId: string) {
       organization_id, key, name, version, status, required_capability,
       runtime, feeds_schema, auth_schema, actions_schema, options_schema
     ) VALUES (
-      ${orgId}, ${CONNECTOR}, 'Test Pin Sweep', '1.0.0', 'active', ${CAPABILITY},
+      ${orgId}, ${CONNECTOR}, 'Test Pin Preservation', '1.0.0', 'active', ${CAPABILITY},
       ${sql.json({ kind: 'device' })}, ${sql.json({})}, ${sql.json({})},
       ${sql.json({})}, ${sql.json({})}
     )
@@ -78,7 +78,7 @@ async function seedConn(orgId: string, userId: string, device: string | null): P
       organization_id, connector_key, slug, display_name, status,
       auth_profile_id, created_by, visibility, device_worker_id
     ) VALUES (
-      ${orgId}, ${CONNECTOR}, ${slug}, 'Test Pin Sweep', 'active',
+      ${orgId}, ${CONNECTOR}, ${slug}, 'Test Pin Preservation', 'active',
       NULL, ${userId}, 'private', ${device}::uuid
     )
     RETURNING id

@@ -50,9 +50,9 @@ async function seedDevice(userId: string, orgId: string, advertised: DeviceConne
       user_id, worker_id, platform, capabilities, connector_manifests,
       label, organization_id, last_seen_at
     ) VALUES (
-      ${userId}, ${workerId}, 'chrome-extension', ${sql.json([CAPABILITY])},
+      ${userId}, ${workerId}, ${advertised.runtime.platforms[0]}, ${sql.json([advertised.required_capability])},
       ${sql.json({
-        [KEY]: {
+        [advertised.key]: {
           manifest: advertised,
           manifest_hash: deviceManifestHash(advertised),
           received_at: new Date().toISOString(),
@@ -73,7 +73,7 @@ async function seedFixture(advertised = manifest(), selected = manifest()) {
   `;
   await createTestConnectorDefinition({
     organization_id: org.id,
-    key: KEY,
+    key: selected.key,
     name: selected.name,
     version: selected.version,
     auth_schema: selected.auth_schema,
@@ -81,21 +81,21 @@ async function seedFixture(advertised = manifest(), selected = manifest()) {
   });
   await sql`
     UPDATE connector_definitions
-    SET required_capability = ${CAPABILITY}, runtime = ${sql.json(selected.runtime)},
+    SET required_capability = ${selected.required_capability!}, runtime = ${sql.json(selected.runtime)},
         actions_schema = ${sql.json(selected.actions_schema!)}
-    WHERE organization_id = ${org.id} AND key = ${KEY}
+    WHERE organization_id = ${org.id} AND key = ${selected.key}
   `;
   await sql`
     UPDATE connector_versions
-    SET source_path = ${`device-manifest://chrome-extension/${KEY}@${selected.version}`},
+    SET source_path = ${`device-manifest://${selected.runtime.platforms[0]}/${selected.key}@${selected.version}`},
         compiled_code = NULL, compile_config_hash = NULL, source_code = NULL,
         compiled_code_hash = ${deviceManifestHash(selected)}
-    WHERE connector_key = ${KEY} AND version = ${selected.version}
+    WHERE connector_key = ${selected.key} AND version = ${selected.version}
   `;
   const device = await seedDevice(user.id, org.id, advertised);
   const connection = await createTestConnection({
     organization_id: org.id,
-    connector_key: KEY,
+    connector_key: selected.key,
     created_by: user.id,
     visibility: 'private',
   });
@@ -110,7 +110,7 @@ function queueOperation(fixture: Fixture, idempotencyKey?: string) {
   return createConnectorOperationRun({
     organizationId: fixture.org.id,
     connectionId: fixture.connection.id,
-    connectorKey: KEY,
+    connectorKey: fixture.selected.key,
     operationKey: 'echo',
     operationInput: {},
     approvalMode: 'device',
@@ -270,6 +270,63 @@ describe('manifest-backed device pin admission', () => {
     expect(stored.target_device_worker_id).toBe(fixture.device.id);
     expect((await pollDevice(other, fixture.selected)).run_id).toBeUndefined();
     expect((await pollDevice(fixture.device, fixture.selected)).run_id).toBe(run.runId);
+  });
+
+  it('admits native capability-only actions and manual sync without a manifest hash', async () => {
+    const native = {
+      ...manifest(),
+      key: 'local.test_admission',
+      required_capability: 'local_directory',
+      runtime: { platforms: ['macos'] },
+    };
+    const fixture = await seedFixture(native, native);
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions SET compiled_code_hash = NULL
+      WHERE connector_key = ${native.key} AND version = ${native.version}
+    `;
+    await sql`UPDATE device_workers SET connector_manifests = '{}'::jsonb WHERE id = ${fixture.device.id}::uuid`;
+    expect((await readiness(fixture.connection.id, fixture.ctx)).executable).toBe(true);
+    const run = await queueOperation(fixture);
+    expect(run.status).toBe('pending');
+    const response = await post('/api/workers/poll', {
+      body: {
+        worker_id: fixture.device.workerId,
+        platform: 'macos',
+        capabilities: { local_directory: true },
+        capacity_available: 1,
+      },
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).run_id).toBe(run.runId);
+    const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${fixture.connection.id}`;
+    expect((await createSyncRun(Number(feed.id), {} as Env)).ok).toBe(true);
+  });
+
+  it('rejects a hashless artifact whose platform cannot use the legacy capability lane', async () => {
+    // `headless` and `chrome-extension` are excluded from
+    // `legacyHashlessManifestAuthorization`, so a hashless artifact confined to
+    // them is unclaimable — admitting it would park a run nothing can pick up.
+    const shell = {
+      ...manifest(),
+      key: 'local.test_headless_admission',
+      required_capability: 'local_directory',
+      runtime: { platforms: ['headless'] },
+    };
+    const fixture = await seedFixture(shell, shell);
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions SET compiled_code_hash = NULL
+      WHERE connector_key = ${shell.key} AND version = ${shell.version}
+    `;
+    await sql`UPDATE device_workers SET connector_manifests = '{}'::jsonb WHERE id = ${fixture.device.id}::uuid`;
+    expect((await readiness(fixture.connection.id, fixture.ctx)).executable).toBe(false);
+    const run = await queueOperation(fixture);
+    expect(run.status).toBe('failed');
+    const [stored] = await sql`SELECT error_message FROM runs WHERE id = ${run.runId}`;
+    expect(String(stored.error_message)).toMatch(/selected connector manifest.*eligible device/i);
+    const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${fixture.connection.id}`;
+    await expect(createSyncRun(Number(feed.id), {} as Env)).rejects.toThrow(/selected connector manifest.*eligible device/i);
   });
 
   it('rejects a manual sync whose selected artifact cannot run on its pinned device', async () => {

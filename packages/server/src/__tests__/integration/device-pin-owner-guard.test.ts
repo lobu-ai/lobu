@@ -140,8 +140,8 @@ describe('device pin owner guard', () => {
     const retired = await seedConn(orgId, userId, staleDevice); // old MacBook's row
     const current = await seedConn(orgId, userId, freshDevice); // new Mac mini's row
 
-    // Before the guard this throws 23505 inside the wire pass, the transaction
-    // aborts, and the error is swallowed by the catch.
+    // Both rows are already pinned, so the wire pass must leave both alone —
+    // it may neither repoint the retired row nor contend for the fresh device.
     await reconcileDeviceCapabilities(userId);
 
     // Offline placement is retained; it must not become a fleet-wide grant.

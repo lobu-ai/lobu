@@ -21,7 +21,10 @@ import {
 import { listOperations } from "../../../../operations/connector-operations";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { AvailableOperation, OperationDescriptor } from "../../../../operations/types";
-import { isChromeNamespaceConnectorKey } from "../../../../utils/connector-execution-placement";
+import {
+	hashlessManifestArtifactMayBeClaimed,
+	isChromeNamespaceConnectorKey,
+} from "../../../../utils/connector-execution-placement";
 import {
 	DEVICE_ONLINE_WINDOW_SECONDS,
 	describeDeviceLastSeen,
@@ -73,6 +76,7 @@ type OperationTargetRow = {
 	connector_version: string | null;
 	connector_manifest_backed: boolean;
 	connector_manifest_hash: string | null;
+	connector_runtime: Record<string, unknown> | null;
 	auth_profile_kind: string | null;
 	auth_profile_slug: string | null;
 	auth_data: Record<string, unknown> | null;
@@ -81,6 +85,9 @@ function executionTargetFromRow(
 	row: OperationTargetRow,
 	deviceReadiness?: DeviceConnectorReadiness,
 ): InternalExecutionTarget {
+	const capabilityOnly = row.connector_manifest_hash == null &&
+		hashlessManifestArtifactMayBeClaimed(row.connector_key, row.connector_runtime);
+	if (capabilityOnly) deviceReadiness = undefined;
 	const base = {
 		connection_id: Number(row.id),
 		slug: row.slug,
@@ -113,7 +120,7 @@ function executionTargetFromRow(
 		};
 	}
 	if (
-		row.connector_manifest_backed &&
+		row.connector_manifest_backed && !capabilityOnly &&
 		(row.connector_manifest_hash == null || !deviceReadiness)
 	) {
 		return {
@@ -602,6 +609,7 @@ async function loadVisibleOperationTargets(
 		        latest.version AS connector_version,
 		        COALESCE(latest.manifest_backed, false) AS connector_manifest_backed,
 		        latest.artifact_hash AS connector_manifest_hash,
+		        latest.runtime AS connector_runtime,
 		        ap.profile_kind AS auth_profile_kind,
 		        ap.slug AS auth_profile_slug,
 		        ap.auth_data AS auth_data,

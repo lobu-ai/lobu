@@ -40,6 +40,7 @@ import { getDb, pgTextArray } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { classifyRunOutcome } from '../runs/run-outcome';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
+import { hashlessManifestArtifactMayBeClaimed } from '../utils/connector-execution-placement';
 import { DEVICE_ONLINE_WINDOW_SECONDS, describeDeviceLastSeen } from '../utils/device-liveness';
 import logger from '../utils/logger';
 import {
@@ -102,6 +103,8 @@ export interface DeviceFeedReadParams {
   /** Exact connector artifact selected for this read. */
   connectorVersion: string | null;
   manifestHash: string | null;
+  /** `connector_definitions.runtime` — declares which device platforms may serve it. */
+  connectorRuntime: Record<string, unknown> | null;
   /** User whose device fleet is authorized to serve this connection. */
   deviceOwnerUserId: string | null;
   /** `connections.device_worker_id` — the execution pin, or null when unpinned. */
@@ -251,7 +254,9 @@ async function describeUnservableDevice(
       },
     ],
   });
-  const connectorReadiness = findDeviceConnectorReadiness(readinessIndex, {
+  const capabilityOnly = p.manifestHash == null &&
+    hashlessManifestArtifactMayBeClaimed(p.connectorKey, p.connectorRuntime);
+  const connectorReadiness = capabilityOnly ? undefined : findDeviceConnectorReadiness(readinessIndex, {
     ownerUserId: p.deviceOwnerUserId,
     connectorKey: p.connectorKey,
     connectorVersion: p.connectorVersion,
@@ -266,12 +271,10 @@ async function describeUnservableDevice(
       )}`
     );
   }
-  // This path serves only metadata-only device artifacts. Require an exact hash,
-  // while preferring the specific pin and liveness diagnostics below.
+  // Prefer the specific pin and liveness diagnostics below.
   const manifestError =
-    p.manifestHash != null && connectorReadiness?.state === 'ready'
-      ? null
-      : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+    capabilityOnly || (p.manifestHash != null && connectorReadiness?.state === 'ready')
+      ? null : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
 
   if (p.deviceWorkerId) {
     // Reached THROUGH the connection, not by device id alone. The id comes off
