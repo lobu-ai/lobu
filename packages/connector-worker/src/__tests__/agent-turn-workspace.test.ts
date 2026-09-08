@@ -1,8 +1,8 @@
 /**
  * The turn's workspace tools, run under Node against the same just-bash build
- * the guest bundles. What is pinned: the shell and the file tools share one
- * filesystem, the file tools keep pi's contracts (paths, limits, notices), the
- * bash policy runs before a command does, and the shell has no network.
+ * the guest bundles. Local bash and the file tools share one filesystem; a
+ * pinned remote bash does not. The file tools keep pi's contracts (paths,
+ * limits, notices), and bash policy runs before either shell executes.
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
@@ -73,6 +73,20 @@ describe("createWorkspace tools", () => {
     );
     const open = toolMap(createWorkspace(["bash"]).tools);
     await expect(run(open.bash, { command: "pip install requests" })).rejects.toThrow("DIRECT PACKAGE INSTALL BLOCKED");
+  });
+
+  test("describes a remote bash separately from the in-memory file workspace", async () => {
+    const remote = {
+      exec: async () => ({ status: 200, stdout: "remote\n", stderr: "", exitCode: 0 }),
+    };
+    const t = toolMap(createWorkspace(["bash", "read"], undefined, remote).tools);
+    expect(t.bash.description).toContain("pinned remote sandbox");
+    expect(t.bash.description).toContain("does not share the file tools' in-memory workspace");
+    expect(t.bash.description).not.toContain("workspace has no network access");
+    expect(await run(t.bash, { command: "pwd" })).toBe("remote\n");
+    await expect(run(t.bash, { command: "pip install requests" })).rejects.toThrow(
+      "Use the sandbox packages configured by an admin"
+    );
   });
 
   test("retains Pi's UTF-8 tail when one output line exceeds the byte cap", async () => {

@@ -88,8 +88,8 @@ export type ExecutorJob =
   | {
       // One turn of an agent conversation. Not connector code: `compiledCode`
       // is Lobu's own agent-session guest bundle. `credentials.accessToken` is
-      // the gateway's own credential for this turn (the signed capture worker
-      // token, never a real provider key): the host pins it onto every
+      // the gateway's own credential for this turn (a signed worker token,
+      // never a real provider key): the host pins it onto every
       // gateway request, and the guest sees only the vault's placeholder.
       mode: 'agent_turn';
       turn: AgentTurnInput;

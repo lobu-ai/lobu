@@ -109,8 +109,7 @@ export async function executeAgentTurnRun(
   //
   // Incremental, because that is what every renderer of a `thread_response`
   // delta does with it — the API renderer broadcasts the span and the SPA
-  // appends it, exactly as the subprocess lane's `sendStreamDelta(delta,
-  // false)` intends. A cumulative snapshot down the same path renders as the
+  // appends it. A cumulative snapshot down the same path renders as the
   // reply repeated back to itself.
   //
   // Nothing leaves this queue until the server names its sequence in the
@@ -301,8 +300,7 @@ export async function executeAgentTurnRun(
               }
             : {}),
           // Non-image attachments WITH their bytes, which the guest seeds into
-          // the turn's `input/` directory — the same place the subprocess lane
-          // downloads them to, so `cat input/x.csv` works on both lanes. A file
+          // the turn's `input/` directory. A file
           // whose bytes the gateway could not resolve arrives named but without
           // `data`, and the guest tells the model it cannot open that one.
           ...(turn.message_files && turn.message_files.length > 0
@@ -405,9 +403,8 @@ export async function executeAgentTurnRun(
       {
         signal: cancel.signal,
         takeSteering: () => steering.splice(0),
-        // Remote bash for a sandbox-pinned conversation: the SAME route and the
-        // SAME token the subprocess lane's bash uses (`generic-runtime-bash`),
-        // posted by the host so the guest keeps its deny-all egress.
+        // Remote bash for a sandbox-pinned conversation is posted by the host
+        // under the turn token, so the guest keeps its deny-all egress.
         ...(runtimeGatewayUrl
           ? {
               onRuntimeExec: async (request: RuntimeExecRequest): Promise<RuntimeExecResult> => {
@@ -444,17 +441,15 @@ export async function executeAgentTurnRun(
           }
           if (event.type === 'tool_call_start') {
             toolCalls += 1;
-            // Remembered until the call ends: the trace carries the arguments
-            // the model sent, as the subprocess lane's `tool_use` event does.
+            // Remembered until the call ends so the trace carries the arguments
+            // the model sent.
             toolArgs.set(event.toolCallId, event.args);
             return;
           }
           if (event.type === 'tool_call_end') {
             // The turn's tool trace, queued onto the same beat the text takes.
-            // The server turns it into the SAME `tool_use` custom event the
-            // subprocess lane emits per `tool_execution_end`, so every consumer
-            // that already reads that — the SPA, the promptfoo provider, the
-            // menubar — sees this lane's tools without learning a second shape.
+            // The server turns it into the established `tool_use` custom event,
+            // so the SPA, promptfoo provider and menubar keep one trace shape.
             //
             // Bounded, and the newest are the ones kept: a tool trace is a view
             // of the turn, not its answer, and a turn that spends its budget on

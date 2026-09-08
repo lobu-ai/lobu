@@ -18,8 +18,7 @@ export function createNativeSession(
   if (input.sessionJsonl) {
     // Pi's file reader tolerates malformed lines for crash recovery. A gateway
     // checkpoint must be intact: never silently start over with partial history.
-    // An older session version is fine: Pi migrates it in memory on load, as
-    // the subprocess lane's SessionManager does.
+    // An older session version is fine: Pi migrates it in memory on load.
     const entries = input.sessionJsonl.trim().split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
     if (entries[0]?.type !== 'session' || !Number.isInteger(entries[0].version) || entries[0].version < 1 || entries[0].version > CURRENT_SESSION_VERSION) {
       throw new Error('Invalid native Pi session snapshot');

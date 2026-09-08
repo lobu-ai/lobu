@@ -44,7 +44,9 @@ export * from "./contracts/interaction-envelope";
 // Shared credential-store primitives (CLI + embedded server share one impl)
 export * from "./credentials";
 // Errors & logging
+export * from "./classify-error";
 export * from "./errors";
+export * from "./provider-auth-hints";
 // Guardrail primitive (type + registry + parallel runner + no-op builtin)
 export * from "./guardrails";
 // Shared base for InstructionProvider implementations (server + worker)

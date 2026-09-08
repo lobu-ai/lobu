@@ -6,11 +6,9 @@
  * `workspace.ts` apply: no `node:` import, no host module, no root
  * `@lobu/core` import.
  *
- * Nothing here reimplements a tool. `createConversationTools` is the SAME
- * function the subprocess lane composes through `createRuntimePluginHost`, so
- * an agent gets one `ask_user` — one schema, one description, one request body,
- * one piece of turn-ending prose — whichever lane runs the turn. That is only
- * possible because those tools were already plain `fetch` calls to
+ * Nothing here reimplements a tool. `createConversationTools` owns each
+ * schema, description, request body and piece of turn-ending prose. The tools
+ * are plain `fetch` calls to
  * `/internal/...` under a worker bearer; making the package isolate-loadable
  * was a matter of keeping the winston-bearing `@lobu/core` root out of its
  * import graph (`@lobu/core/agent-tooling`), not of porting any tool.
@@ -30,17 +28,15 @@ import type { AgentTurnConversation, AgentTurnGatewayTool } from './types.js';
  * policy — this function only selects, it never grants: a name the plugin does
  * not define is dropped rather than invented.
  *
- * `onAskUserPosted` exists because `ask_user` ENDS the turn on the subprocess
- * lane: pi is told the user's click arrives as a new inbound message. The
- * caller uses it to stop the loop for the same reason, so a model that asks a
- * question does not then keep talking to itself.
+ * `onAskUserPosted` exists because `ask_user` ends the turn: pi is told the
+ * user's click arrives as a new inbound message. The caller stops the loop so
+ * a model that asks a question does not then keep talking to itself.
  *
  * `onInBandReplyDelivered` fires when `send_message`/`present_event` posted
  * into the conversation this turn is ALREADY answering. The user has read that
  * message, so the turn's terminal reply would be the same answer a second
- * time. The subprocess lane threads this same hook to `recordInBandReply`; on
- * this lane it travels out on the turn result, and the completion route stamps
- * `repliedInBand` so the renderers' existing suppression acts on it unchanged.
+ * time. The hook travels out on the turn result, and the completion route
+ * stamps `repliedInBand` so the renderers suppress the duplicate.
  */
 export function createGatewayTools(
   allowed: readonly AgentTurnGatewayTool[],

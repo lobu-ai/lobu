@@ -64,8 +64,8 @@ function joinText(content: McpToolReply['content']): string {
  * One tool call: `POST {gateway}/mcp/{mcpId}/tools/{name}` with the turn's
  * credential as bearer. The gateway runs the agent's guardrails and approval
  * policy before the upstream sees the call, and answers a refusal as an error
- * result — so a blocked or approval-gated call reaches the model as the same
- * text the subprocess lane showed it, and the turn goes on.
+ * result, so a blocked or approval-gated call reaches the model as text and the
+ * turn goes on.
  */
 async function callMcpTool(
   gatewayUrl: string,
@@ -126,8 +126,7 @@ function buildTools(
   // show. Built even when no file tool was admitted but a media tool was, since
   // `bash` alone is enough to produce something worth uploading.
   // On a sandbox-pinned conversation `bash` runs in the remote runtime through
-  // the host; the file tools stay on the in-memory workspace, as on the
-  // subprocess lane where they read the local directory beside a remote shell.
+  // the host; file tools stay on the in-memory workspace.
   const remote = tools.remoteRuntime && runtimeExec ? { exec: runtimeExec } : undefined;
   const workspace: AgentWorkspace | null =
     tools.builtin && tools.builtin.length > 0 ? createWorkspace(tools.builtin, tools.bashPolicy, remote) : null;
@@ -148,9 +147,8 @@ function buildTools(
           credential,
           conversation: tools.conversation,
           workspace,
-          // The subprocess lane turns this into a `file-uploaded` custom event.
-          // This lane has one channel out of the isolate — the event stream —
-          // so it rides that, and the host decides what to do with it.
+          // The isolate has one channel out — its event stream — so the upload
+          // notification rides that and the host decides what to do with it.
           onFileUploaded: (data) => emit({ type: 'file_uploaded', data }),
         })
       : [];
@@ -212,9 +210,8 @@ function clip(text: string): string {
  * The host caps the length and the workspace `resolve` refuses a traversing
  * path, but an attachment name is user-controlled and arrives with whatever
  * separators the uploader had, so a `/` is flattened here rather than being
- * allowed to create surprise subdirectories under `input/`. The isolate and
- * subprocess workers both use POSIX paths, where a backslash is an ordinary
- * filename character rather than a separator.
+ * allowed to create surprise subdirectories under `input/`. The isolate uses
+ * POSIX paths, where a backslash is an ordinary filename character.
  */
 function baseName(name: string): string {
   const segment = name.split('/').filter(Boolean).pop() ?? 'attachment';
@@ -224,9 +221,8 @@ function baseName(name: string): string {
 /**
  * A skill's directory name, or null when the name is not one.
  *
- * The subprocess lane's basename and character admission, with `.` and `..`
- * refused explicitly so a skill cannot collapse onto `.skills/` itself or its
- * parent.
+ * `.` and `..` are refused explicitly so a skill cannot collapse onto
+ * `.skills/` itself or its parent.
  */
 function skillDirName(name: string): string | null {
   const segment = (name || '').trim().split('/').filter(Boolean).pop() ?? '';
@@ -237,11 +233,8 @@ function skillDirName(name: string): string | null {
 /**
  * Put the turn's attachments and skills in the filesystem before the model runs.
  *
- * This is the whole of what the subprocess lane's `downloadInputFiles` and
- * skills sync did, minus the network and the disk: the host already resolved
- * every byte, so seeding is a write into the in-memory tree. Both lanes end up
- * with the same two paths, which is what makes an agent prompt that says
- * "read input/report.csv" true on either one.
+ * The host already resolved every byte, so seeding is only a write into the
+ * in-memory tree at the paths named in the agent prompt.
  */
 async function seedWorkspace(workspace: AgentWorkspace, input: AgentTurnInput): Promise<void> {
   const seeds: WorkspaceSeedFile[] = [];
@@ -265,8 +258,7 @@ async function seedWorkspace(workspace: AgentWorkspace, input: AgentTurnInput): 
  * One line per non-image attachment, appended to the user turn.
  *
  * Named even when readable, because the model has to learn the file exists
- * before it can decide to open it — the subprocess lane lists them in its
- * system prompt for the same reason. A file the gateway could not resolve is
+ * before it can decide to open it. A file the gateway could not resolve is
  * listed as unopenable rather than dropped, so the model never answers about an
  * attachment it was told nothing about.
  */
@@ -317,8 +309,7 @@ function describeSkills(skills: AgentTurnInput['skills'], canRead: boolean): str
  * Run one turn and resolve with its native Pi session checkpoint.
  *
  * `emit` is the host bridge: every call crosses into the worker while the
- * stream is still open, which is what makes a delta on this lane arrive at the
- * same point in the turn as a delta on the subprocess lane.
+ * stream is still open, so deltas arrive while the turn is running.
  */
 export async function runAgentTurn(
   input: AgentTurnInput,
@@ -355,14 +346,12 @@ export async function runAgentTurn(
   let toolCalls = 0;
   // `ask_user` hands the conversation back to the human: the question is posted
   // as buttons and the click returns as a NEW inbound message, which is a new
-  // turn. The subprocess lane stops its session at that point
-  // (`onAskUserPosted`); this lane must too, or the model keeps calling tools
+  // turn. Stop the session at that point, or the model keeps calling tools
   // and answering a question nobody has read yet.
   let askedUser = false;
   // `send_message`/`present_event` posted into the conversation this turn is
   // already answering, so the user has READ the answer and the terminal reply
-  // would be the same message twice. The subprocess lane suppresses the
-  // terminal delivery on exactly this signal; this lane reports it out so the
+  // would be the same message twice. Report that signal so the
   // completion route can stamp the flag the renderers already act on.
   let repliedInBand = false;
   let transientContext: string | undefined;
@@ -419,8 +408,7 @@ export async function runAgentTurn(
 
     // pi drains its steering queue between model calls. Ask the host for what
     // arrived at exactly those points — after an assistant message, after a tool
-    // result — and queue it as the user message it is, so the model sees the
-    // follow-up on this lane where the subprocess lane's session would.
+    // result — and queue it as the user message it is.
     const steeredMessages = new Map<AgentMessage, number>();
     const steer = () => {
       if (flushing) return;
@@ -527,9 +515,8 @@ export async function runAgentTurn(
     const ended = agent.state.errorMessage;
 
     // Capture BEFORE returning, and await it. `agentEnd` itself only starts the
-    // write; on the subprocess lane the worker process outlives the turn and the
-    // write lands on its own, but this isolate is disposed the moment this
-    // function resolves, so an unawaited capture would be cancelled every time
+    // write; this isolate is disposed the moment this function resolves, so an
+    // unawaited capture would be cancelled every time
     // and memory would silently stop accumulating for every agent on this lane.
     // A failed turn still fires the hook — with its error, which is how the
     // plugin knows not to save a broken exchange.

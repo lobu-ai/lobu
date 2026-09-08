@@ -8,14 +8,10 @@ import { uploadMultipart } from "./multipart";
 /**
  * How `upload_file` reaches a file, without saying what a file is.
  *
- * The two lanes hold the agent's workspace in genuinely different places: the
- * subprocess lane writes it to a real directory on the worker's disk, and the
- * isolate lane keeps it in just-bash's in-memory filesystem, which exists for
- * the length of one turn and has no disk behind it at all. Everything else
- * about the tool — the schema, the prose the model reads, the multipart body,
- * the gateway response handling, the notification — is identical, so the
- * runtime difference is isolated to this ONE injected port and nothing else
- * forks.
+ * The agent-turn isolate keeps its workspace in just-bash's in-memory
+ * filesystem, while Node consumers may use a real directory. Everything else
+ * about the tool — schema, prose, multipart body, gateway handling and
+ * notification — stays behind this one injected port.
  *
  * The port is deliberately not an `fs` shape. It answers exactly the two
  * questions the tool asks ("what is this path, if I am allowed to see it?" and
@@ -131,12 +127,8 @@ export interface UploadedFileNotification {
 }
 
 /**
- * `upload_file`, once for both lanes.
- *
- * Every message the model can receive here is the wording the subprocess lane
- * has been sending it, because the model has been reading these sentences and
- * acting on them; a lane that phrased a refusal differently would be changing
- * what the agent does under cover of a port.
+ * `upload_file` over an injected file port. Refusal wording lives here so every
+ * filesystem implementation presents the same semantics to the model.
  */
 export async function uploadPortedFile(
   gw: GatewayParams,

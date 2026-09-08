@@ -2,8 +2,8 @@
  * The media tools WITHOUT the Node filesystem.
  *
  * The package root composes `file-port-node.ts`, whose Node port owns
- * `node:fs` and `node:path` for the whole package. That is correct for the subprocess lane
- * and fatal for the isolate one: an isolate bundle that names a Node builtin
+ * `node:fs` and `node:path` for the whole package. That remains correct for
+ * Node consumers and is fatal for the isolate: a bundle that names a Node builtin
  * is rejected outright by `assertIsolateEligible`, and a bundler cannot
  * tree-shake a CommonJS `require` out of the graph just because the value is
  * unused.

@@ -93,8 +93,8 @@ export class Orchestrator {
       logger.debug("Input-stage guardrails wired into MessageConsumer");
     }
 
-    // The isolate-lane shadow reads the agent's MCP servers and tools through
-    // the same services the worker gateway hands the subprocess lane.
+    // Native turns read the agent's MCP servers and tools through the gateway's
+    // existing MCP services.
     this.queueConsumer.setAgentTurnMcp(agentTurnMcp);
     // And a turn's attachments out of the same artifact store the gateway
     // published them into on the way in.

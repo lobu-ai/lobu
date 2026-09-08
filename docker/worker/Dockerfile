@@ -80,7 +80,7 @@ COPY packages/connector-worker/ packages/connector-worker/
 # `bun run build` (tsc + guest bundle) then writes dist/agent-turn/guest.bundle.js
 # — the file the daemon loads, so the plugins are not needed at runtime.
 # connector-worker itself builds last: the runtime runs its dist under Node
-# (`bin.js` plus the fork()ed `executor/child-runner.js`), never TypeScript source.
+# (`bin.js` plus the in-process V8 isolate guest), never TypeScript source.
 RUN cd packages/core && bunx tsc \
     && cd ../plugin-api && bunx tsc \
     && cd ../plugin-host && bunx tsc \
@@ -141,8 +141,8 @@ COPY --from=builder --chown=worker:worker /app/packages/connector-worker ./packa
 # == patchright) so install revision == runtime revision by construction.
 # PLAYWRIGHT_BROWSERS_PATH pins BOTH install target and runtime lookup to an
 # absolute, HOME-independent path (default $HOME/.cache/ms-playwright differs by
-# USER and breaks the connector child forked in another cwd). /ms-playwright is
-# created + chowned to worker above; subprocess.ts forwards the var to the child.
+# USER and breaks browser connectors running under another cwd). /ms-playwright
+# is created + chowned to worker above; the connector worker reads it directly.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 USER 1001
 WORKDIR /app/packages/connector-worker

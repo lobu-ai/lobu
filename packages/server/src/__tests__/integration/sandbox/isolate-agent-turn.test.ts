@@ -121,6 +121,43 @@ async function writeAnthropicStream(res: Parameters<Parameters<typeof createServ
 	res.end();
 }
 
+function writeOpenAIResponsesStream(
+	res: Parameters<Parameters<typeof createServer>[0]>[1],
+	text: string,
+): void {
+	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+	const send = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+	const item = {
+		type: "message",
+		id: "msg_responses",
+		role: "assistant",
+		status: "completed",
+		content: [{ type: "output_text", text, annotations: [] }],
+	};
+	send({ type: "response.created", response: { id: "resp_isolate" } });
+	send({ type: "response.output_item.added", item: { ...item, status: "in_progress", content: [] } });
+	send({
+		type: "response.content_part.added",
+		part: { type: "output_text", text: "", annotations: [] },
+	});
+	send({ type: "response.output_text.delta", delta: text });
+	send({ type: "response.output_item.done", item });
+	send({
+		type: "response.completed",
+		response: {
+			id: "resp_isolate",
+			status: "completed",
+			usage: {
+				input_tokens: 5,
+				output_tokens: 3,
+				total_tokens: 8,
+				input_tokens_details: { cached_tokens: 0 },
+			},
+		},
+	});
+	res.end();
+}
+
 /** An assistant turn that calls one tool and stops for its result. */
 function writeAnthropicToolUse(
 	res: Parameters<Parameters<typeof createServer>[0]>[1],
@@ -461,6 +498,28 @@ describe("agent turn on the isolate lane", () => {
 		expect(hits[0]?.url).toBe("/v1/messages");
 		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 		expect(JSON.parse(hits[0]?.body ?? "{}")).toMatchObject({ model: "claude-test", system: expect.anything() });
+	}, 120_000);
+
+	it("admits the OpenAI Responses endpoint through the agent-turn egress gate", async () => {
+		hits = [];
+		toolScript = [];
+		providerScript = (_body, res) => writeOpenAIResponsesStream(res, "Hello from Responses");
+		const run = await runTurn(
+			turnJob({
+				provider: {
+					api: "openai-responses",
+					provider: "openai",
+					modelId: "gpt-5",
+					baseUrl: `http://127.0.0.1:${port}`,
+					maxTokens: 64,
+				},
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from Responses");
+		expect(hits).toHaveLength(1);
+		expect(hits[0]?.url).toBe("/responses");
+		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 	}, 120_000);
 
 	it("returns the transcript with the turn appended so the next turn resumes from it", async () => {

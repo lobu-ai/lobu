@@ -67,8 +67,8 @@ function lastMessage(
  * of every single reply.
  *
  * The problem is that "returns without waiting" only works on a runtime that
- * OUTLIVES the turn. The subprocess lane's worker process does; the isolate
- * lane's isolate does not — it is disposed the moment `runAgentTurn` resolves,
+ * OUTLIVES the turn. The retired worker process did; the isolate does not — it
+ * is disposed the moment `runAgentTurn` resolves,
  * which cancels the in-flight write and silently stops memory from
  * accumulating for every agent on that lane. So the promise is not dropped on
  * the floor: it is kept here, and a runtime that is about to tear itself down

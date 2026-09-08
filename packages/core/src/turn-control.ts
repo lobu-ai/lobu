@@ -2,13 +2,11 @@
  * Turn control policy: whether an inbound message steers the turn already
  * running, cancels it, or queues as a turn of its own.
  *
- * Shared by every lane that can have a turn in flight — the agent worker, which
- * holds the running child process, and the gateway producer that dispatches an
- * isolate turn to a fleet worker it cannot address directly. One message gets
- * one answer whichever lane is running it, which is the whole point of putting
- * the predicates here rather than beside either dispatcher.
+ * Shared by the gateway producer and the fleet worker that executes its
+ * isolate turn. The gateway cannot address an in-flight isolate directly, so
+ * both sides must agree whether a new message steers, cancels, or queues.
  *
- * Everything here is pure and depends only on the wire payload. Both lanes
+ * Everything here is pure and depends only on the wire payload. Both sides
  * import it from the `@lobu/core` barrel; an isolate guest that ever needs it
  * must reach it another way, since the barrel drags the logger and its Node
  * transports into a bundle.

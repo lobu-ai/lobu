@@ -99,6 +99,7 @@ describe('native capture over HTTP and Postgres', () => {
     provider.setAuthProfilesManager({ getBestProfile: async () => ({ credential: 'synthetic-provider-key' }), ensureFreshCredential: async () => 'synthetic-provider-key' } as never);
     app.route('/lobu', provider.getApp());
     app.post('/upstream/v1/messages', (c) => { upstream(c.req.path); return c.json({ content: [] }); });
+    app.post('/upstream/responses', (c) => { upstream(c.req.path); return c.json({ output: [] }); });
     server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
     if (!server.listening) await new Promise<void>((resolve) => server.once('listening', resolve));
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -296,6 +297,31 @@ describe('native capture over HTTP and Postgres', () => {
     const response = await request(path + '/v1/messages', {}, '', { 'x-api-key': token });
     expect(response.status, await response.clone().text()).toBe(200);
     expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it('admits the OpenAI Responses path during capture', async () => {
+    const sql = getTestDb();
+    const [row] = await sql`SELECT action_input->'turn'->'provider' AS provider FROM runs WHERE id = ${runId}`;
+    const path = new URL(row.provider.base_url).pathname;
+    await sql`
+      UPDATE runs
+      SET action_input = jsonb_set(action_input, '{turn,provider,api}', '"openai-responses"')
+      WHERE id = ${runId}
+    `;
+    upstream.mockClear();
+    try {
+      const denied = await request(path + '/v1/messages', {}, '', { authorization: `Bearer ${token}` });
+      expect(denied.status).toBe(403);
+      const response = await request(path + '/responses', {}, '', { authorization: `Bearer ${token}` });
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(upstream).toHaveBeenCalledWith('/upstream/responses');
+    } finally {
+      await sql`
+        UPDATE runs
+        SET action_input = jsonb_set(action_input, '{turn,provider,api}', '"anthropic-messages"')
+        WHERE id = ${runId}
+      `;
+    }
   });
 
   it('does not write a cross-org, wrong-type or wrong-conversation capture record', async () => {

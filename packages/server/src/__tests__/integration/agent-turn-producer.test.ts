@@ -685,9 +685,10 @@ describe('agent turn producer', () => {
         '- To act in a channel: read_conversation to catch up on what people said, then send_message to post. Pass a conversation handle to post to the channel, or a thread handle (returned by a previous send_message) to reply in that thread.\n' +
         '- Only what you send_message reaches the channel — your normal reply text does not. Decide deliberately what and where to post; it is fine to post nothing.\n\n' +
         '## Workspace\n\n' +
-        'Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.\n' +
-        'Nothing written there persists after the turn ends.\n' +
-        'It has no network access and no package manager; use your other tools to reach data.\n' +
+        'Your in-memory file workspace is at /workspace; file tools act there when available.\n' +
+        'Nothing written to that in-memory workspace persists after the turn ends.\n' +
+        'Your bash tool uses the same in-memory workspace when available.\n' +
+        'The in-memory environment has no network access and no package manager; use your other tools to reach data.\n' +
         'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.'
     );
     expect(envelope.turn.session_jsonl).toBe('');
@@ -1766,8 +1767,15 @@ describe('agent turn producer', () => {
       }
     );
     const [run] = await agentTurnRuns();
-    const turn = run.action_input.turn as { tools?: { remote_runtime?: unknown } };
+    const turn = run.action_input.turn as { system_prompt: string; tools?: { remote_runtime?: unknown } };
     expect(turn.tools?.remote_runtime).toEqual({ provider_id: 'vercel' });
+    expect(turn.system_prompt).toContain(
+      "Your bash tool runs in the conversation's pinned remote sandbox and does not share the in-memory file workspace."
+    );
+    expect(turn.system_prompt).toContain(
+      'Network access and installed tools in that sandbox follow its runtime configuration; direct package installation is blocked.'
+    );
+    expect(turn.system_prompt).not.toContain('The in-memory environment has no network access');
     // The exec route trusts only the signed token for these — never a body.
     const claims = verifyWorkerToken((run.action_input as { credential: string }).credential) as Record<string, unknown>;
     expect(claims).toMatchObject({
@@ -2990,6 +2998,27 @@ describe('agent turn completion', () => {
     // no message at all.
     expect(rows[0].repliedInBand).toBeUndefined();
     expect(rows[0].error).toBe('provider refused');
+  });
+
+  it('classifies a native provider failure and preserves its CTA context', async () => {
+    const workerId = 'fleet-provider-quota';
+    const runId = await claimedTurnRun(workerId);
+    const raw = '429 Weekly/Monthly Limit Exhausted';
+
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'failed',
+      error: raw,
+    });
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      error: raw,
+      errorCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
+      errorContext: { provider: 'claude', model: 'claude-opus-4-8' },
+    });
   });
 
   it('refuses an authoritative turn that carries nowhere to deliver', async () => {

@@ -13,6 +13,7 @@
 import {
 	AGENT_ERRORS,
 	AgentErrorCode,
+	classifyErrorMessage,
 	createLogger,
 } from "@lobu/core";
 import {
@@ -121,16 +122,15 @@ type TurnDeltaOutcome = { published: boolean };
  * worker may be compromised, and this is the same rule `/worker/response`
  * applies when it rebuilds routing from the signed token.
  *
- * The row is the ordinary non-terminal `thread_response` the subprocess lane's
- * deltas take, so every renderer — web, Slack, Telegram — already knows how to
- * present it, and it inherits that queue's multi-replica delivery. It is
+ * The row is an ordinary non-terminal `thread_response`, so every renderer —
+ * web, Slack, Telegram — already knows how to present it, and it inherits that
+ * queue's multi-replica delivery. It is
  * emphatically not the connector `/stream` events path: a chat delta is not an
  * event to ingest into an org's memory.
  *
  * The text is INCREMENTAL, because that is what those renderers do with it:
  * `ApiResponseRenderer.handleDelta` broadcasts the span verbatim and the SPA
- * appends it, exactly as the subprocess lane's `sendStreamDelta(delta, false)`
- * intends. A cumulative snapshot down this same path renders as the reply
+ * appends it. A cumulative snapshot down this same path renders as the reply
  * repeated back to itself.
  *
  * What makes an increment safe under a dropped or retried beat is the pairing
@@ -214,8 +214,8 @@ async function publishTurnDelta(
 }
 
 /**
- * Publish the tool calls an in-flight `agent_turn` has finished, as the SAME
- * `tool_use` custom event the subprocess lane emits per `tool_execution_end`.
+ * Publish the tool calls an in-flight `agent_turn` has finished as the
+ * established `tool_use` custom event.
  *
  * One shape for both lanes: the SPA, the promptfoo provider and the menubar
  * already subscribe to `tool_use`, so this lane's tools become visible without
@@ -431,6 +431,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       : !cancelling && body.status === 'completed' && snapshot ? inputReceiptError(run, body, snapshot, offered) : undefined;
     const error = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
     const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
+    const errorCode = status === 'failed' ? classifyErrorMessage(error) : undefined;
     const consumed = status === 'completed' ? body.consumed_inputs! : [];
     await tx`UPDATE runs SET status = ${status}, completed_at = now(),
       outcome = ${classifyRunOutcome({ status, errorMessage: error })},
@@ -460,7 +461,10 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     });
     await insertAgentTurnResponse(tx, run, {
       ...(status === 'completed' ? { finalText: text, ...(body.replied_in_band ? { repliedInBand: true } : {}) }
-        : { error: error || 'agent turn failed' }),
+        : {
+            error: error || 'agent turn failed',
+            ...(errorCode ? { errorCode, errorContext: envelope.reply!.error_context } : {}),
+          }),
       processedMessageIds: [reply.message_id, ...offered.slice(0, consumed.length).map((input) => input.message_id)],
     });
     return { status, notify: true };

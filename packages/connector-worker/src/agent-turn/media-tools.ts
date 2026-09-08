@@ -6,14 +6,10 @@
  * `gateway-tools.ts` apply: no `node:` import, no host module, no root
  * `@lobu/core` import.
  *
- * Nothing here reimplements a tool. `createMediaTools` is the SAME function the
- * subprocess lane composes, so the schemas, the descriptions, the request
- * bodies and every sentence the model reads on a refusal are identical on both
- * lanes. What this module adds is the one thing that genuinely differs: WHERE
- * the bytes of `upload_file` come from. The subprocess lane reads a directory
- * on the worker's disk; this lane has no disk, so the port below reads the
- * turn's own in-memory workspace — the very filesystem `bash` and `write` just
- * wrote to, not the host's.
+ * Nothing here reimplements a tool. `createMediaTools` owns the schemas,
+ * descriptions, request bodies and refusal text. This module supplies the
+ * isolate-specific file port: `upload_file` reads the turn's in-memory
+ * workspace, not the host filesystem.
  *
  * The upload itself is the plugin's shared multipart driver over the guest's
  * `fetch`, so it goes through the host's one egress module under the turn's one
@@ -39,8 +35,7 @@ import { WORKSPACE_ROOT, type AgentWorkspace } from './workspace.js';
  * Containment is enforced with the workspace's OWN `resolve`, the same one
  * every file tool calls: a path that escapes `/workspace` throws there and is
  * reported here as `outside-workspace`, so `upload_file` cannot reach a file
- * `read` would refuse. The size cap and the MIME type are the plugin's, applied
- * identically on both lanes.
+ * `read` would refuse. The plugin owns the size cap and MIME type.
  */
 function createWorkspaceFilePort(workspace: {
   fs: InMemoryFs;

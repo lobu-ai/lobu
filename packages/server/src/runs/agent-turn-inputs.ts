@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type MessagePayload } from '@lobu/core';
+import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload } from '@lobu/core';
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
@@ -192,7 +192,8 @@ export async function extendHeartbeatedTurnMarker(
 
 /** Terminal delivery uses the persisted routing and joins the caller's transaction. */
 export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun, result: {
-  finalText?: string; error?: string; errorCode?: string; repliedInBand?: boolean; processedMessageIds?: string[];
+  finalText?: string; error?: string; errorCode?: string; errorContext?: AgentErrorContext;
+  repliedInBand?: boolean; processedMessageIds?: string[];
 }): Promise<boolean> {
   const envelope = run.action_input;
   const reply = envelope?.reply;

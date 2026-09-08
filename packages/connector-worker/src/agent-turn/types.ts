@@ -51,10 +51,8 @@ export interface AgentTurnImage {
 /**
  * A NON-IMAGE attachment of the turn's message.
  *
- * The subprocess lane downloads every upload to the worker's `input/` directory
- * and tells the model to `cat` it. This lane has no disk, so the host resolves
- * the bytes and the guest seeds them into the turn's in-memory `input/` — same
- * path, same capability.
+ * The host resolves the bytes and the guest seeds them into the turn's
+ * in-memory `input/`, the established agent-visible attachment path.
  *
  * `data` absent means the gateway could not resolve the bytes. The file is
  * still named, because a model told nothing about an attachment will answer as
@@ -71,8 +69,7 @@ export interface AgentTurnFile {
 /**
  * One of the agent's enabled skills, already rendered to its `SKILL.md` body.
  *
- * Seeded at `.skills/<name>/SKILL.md`, the layout the subprocess lane syncs, so
- * a skill authored for one lane reads identically on the other.
+ * Seeded at `.skills/<name>/SKILL.md`, the agent-visible skill layout.
  */
 export interface AgentTurnSkill {
   name: string;
@@ -289,10 +286,8 @@ export type AgentTurnEvent =
   | { type: 'tool_call_start'; toolCallId: string; name: string; args: unknown }
   | { type: 'tool_call_end'; toolCallId: string; name: string; isError: boolean; output: string }
   /**
-   * A file `upload_file` delivered, with the gateway's own reply for it. The
-   * subprocess lane raises the same payload as its `file-uploaded` custom
-   * event; on this lane it rides the turn's one event stream, so the guest
-   * still needs no second channel out of the isolate.
+   * A file `upload_file` delivered, with the gateway's own reply for it. It
+   * rides the turn's event stream, so the guest needs no second host callback.
    */
   | { type: 'file_uploaded'; data: Record<string, unknown> };
 

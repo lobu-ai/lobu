@@ -3,9 +3,8 @@
  *
  * GUEST code, bundled with the agent entry, so it must stay portable: no
  * `node:` import, no host module, no root `@lobu/core` import (that root drags
- * the Node logger and tracing SDKs). The shell is just-bash's browser build —
- * the same shell the subprocess lane ran its `bash` tool on, minus the real
- * binaries and the network it could reach there. Write and edit use Pi's own
+ * the Node logger and tracing SDKs). The local shell is just-bash's browser
+ * build, without real binaries or network access. Write and edit use Pi's own
  * factories with filesystem operations, as do read, ls and find. Pi also owns
  * output truncation; the bundler excludes unused Node I/O and renderers. Grep
  * stays local because Pi's grep always starts an rg process.
@@ -13,7 +12,7 @@
  * The filesystem is in-memory and lives for one turn only. It starts empty
  * except for what the HOST seeds into it before the model runs — this turn's
  * non-image attachments under `input/` and the agent's enabled skills under
- * `.skills/`, the same two places the subprocess lane puts them. Nothing
+ * `.skills/`, the two established agent-visible locations. Nothing
  * written here outlives the turn, and nothing here can reach the network: the
  * shell is built without `fetch`, so `curl` and `wget` do not exist in it.
  */
@@ -33,16 +32,13 @@ import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, Run
 export const WORKSPACE_ROOT = '/workspace';
 
 /**
- * Where the turn's own attachments are seeded, and where the subprocess lane
- * puts them too. The name is part of the agent-visible contract: the system
- * prompt lists each upload by this path, so both lanes name the same file.
+ * Where the turn's own attachments are seeded. The name is part of the
+ * agent-visible contract: the system prompt lists each upload by this path.
  */
 export const INPUT_DIR = `${WORKSPACE_ROOT}/input`;
 
 /**
- * Where the agent's enabled skills are seeded, one `SKILL.md` per skill, the
- * same layout the subprocess lane syncs so a skill written for one lane reads
- * identically on the other.
+ * Where the agent's enabled skills are seeded, one `SKILL.md` per skill.
  */
 export const SKILLS_DIR = `${WORKSPACE_ROOT}/.skills`;
 
@@ -50,7 +46,7 @@ const LS_LIMIT = 500;
 const FIND_LIMIT = 1000;
 const FIND_IGNORED = /(^|\/)(node_modules|\.git)(\/|$)/;
 
-/** The same interpreter budget the subprocess lane gave its shell. */
+/** The local shell's interpreter budget. */
 const BASH_LIMITS = { maxCommandCount: 50_000, maxLoopIterations: 50_000 };
 
 const decoder = new TextDecoder();
@@ -199,8 +195,7 @@ function escapeRegExp(text: string): string {
 
 // ---------------------------------------------------------------------------
 // Remote bash: a sandbox-pinned conversation runs its commands in the remote
-// runtime, through the host. The rendering is the subprocess lane's
-// (`generic-runtime-bash`), so the model reads the same words on either lane.
+// runtime through the host, while file tools remain in memory.
 // ---------------------------------------------------------------------------
 
 /** How the host runs one command in the remote runtime sandbox. */
@@ -268,7 +263,9 @@ async function runRemoteBash(remote: RemoteRuntime, command: string, timeout: nu
 
 /**
  * Build the workspace tools the turn admits, over one fresh filesystem. The
- * shell and every file tool share it, so what `bash` writes `read` sees.
+ * local shell and every file tool share it, so what local `bash` writes `read`
+ * sees. A supplied remote runtime replaces only `bash`; file tools remain on
+ * this in-memory filesystem.
  */
 export function createWorkspace(
   names: readonly AgentTurnBuiltinTool[],
@@ -377,7 +374,9 @@ export function createWorkspace(
     bash: {
       name: 'bash',
       label: 'bash',
-      description: `Execute a bash command in the workspace (${WORKSPACE_ROOT}). Returns stdout and stderr. Output is truncated to last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). The workspace has no network access and no package manager. Optionally provide a timeout in seconds.`,
+      description: remote
+        ? `Execute a bash command in the conversation's pinned remote sandbox. The sandbox does not share the file tools' in-memory workspace. Returns stdout and stderr. Output is truncated to last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Network and installed tools follow the sandbox configuration; direct package installation is blocked. Optionally provide a timeout in seconds.`
+        : `Execute a bash command in the workspace (${WORKSPACE_ROOT}). Returns stdout and stderr. Output is truncated to last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). The workspace has no network access and no package manager. Optionally provide a timeout in seconds.`,
       parameters: {
         type: 'object',
         properties: {
@@ -392,7 +391,9 @@ export function createWorkspace(
         if (bashPolicy) enforceBashCommandPolicy(command, bashPolicy);
         if (isDirectPackageInstallCommand(command)) {
           throw new Error(
-            'DIRECT PACKAGE INSTALL BLOCKED. This workspace has no package manager and no network; use your other tools to reach data instead.'
+            remote
+              ? 'DIRECT PACKAGE INSTALL BLOCKED. Use the sandbox packages configured by an admin.'
+              : 'DIRECT PACKAGE INSTALL BLOCKED. This workspace has no package manager and no network; use your other tools to reach data instead.'
           );
         }
         if (remote) return text(await runRemoteBash(remote, command, timeout));

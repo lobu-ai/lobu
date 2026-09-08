@@ -5,17 +5,13 @@
  * GUEST code, so the same portability rules as `workspace.ts` apply: no `node:`
  * import, no host module, no root `@lobu/core` import.
  *
- * Nothing here reimplements a hook. `createMemoryPlugin` is the SAME function
- * the subprocess lane composes, so the recall query, the `<lobu-memory>` block
- * the model reads, the capture's shape and its 2,000-character bound are
- * identical on both lanes. Two things are supplied here:
+ * Nothing here reimplements a hook. `createMemoryPlugin` owns the recall query,
+ * the `<lobu-memory>` block the model reads, the capture shape and its
+ * 2,000-character bound. Two isolate-specific pieces are supplied here:
  *
- *  1. The INVOKER. The subprocess lane passes `callMcpTool` from
- *     `@lobu/plugin-mcp`, which imports the `@lobu/core` root and therefore
- *     cannot load in an isolate. This lane passes the guest's own MCP caller
- *     instead — the same `POST {gateway}/mcp/lobu/tools/{name}` under the same
- *     bearer that every other tool call on this turn takes, so there is still
- *     ONE credential and ONE host.
+ *  1. The INVOKER. The guest's MCP caller avoids importing the Node-bound
+ *     `@lobu/core` root and posts to `{gateway}/mcp/lobu/tools/{name}` under
+ *     the same bearer as every other tool call on this turn.
  *
  *  2. The SETTLE. `agentEnd` starts the `save_memory` write and returns
  *     without waiting, which is correct on a runtime that outlives the turn and
@@ -58,10 +54,9 @@ export interface TurnMemoryContext {
 }
 
 /**
- * The turn's memory plugin, composed through the real `PluginHost` so the hooks
- * are dispatched by the same code the subprocess lane dispatches them with —
- * including its `agentEnd` error containment, which logs a throwing hook and
- * moves on rather than failing the turn.
+ * The turn's memory plugin, composed through the real `PluginHost`, including
+ * its `agentEnd` error containment: a throwing hook is logged and does not fail
+ * the turn.
  */
 function createTurnMemory(context: TurnMemoryContext): {
   host: PluginHost<ToolDefinition>;
@@ -100,8 +95,8 @@ function createTurnMemory(context: TurnMemoryContext): {
     invoke
   );
 
-  // `PluginRuntimeContext` is the subprocess lane's shape and carries more than
-  // the memory hooks read (they use `logger` and `agentId`). The rest is filled
+  // `PluginRuntimeContext` carries more than the memory hooks read (they use
+  // `logger` and `agentId`). The rest is filled
   // with what this lane actually knows, and nothing is invented: a field this
   // lane has no value for stays empty rather than carrying a plausible lie.
   const runtime: PluginRuntimeContext = {
@@ -131,8 +126,7 @@ function createTurnMemory(context: TurnMemoryContext): {
 export interface TurnMemory {
   /**
    * The recall block to prepend to this turn's prompt, or `''`. Never throws:
-   * a memory server that is down must not cost the user their answer, which is
-   * the same best-effort contract the subprocess lane has.
+   * a memory server that is down must not cost the user their answer.
    */
   recall(prompt: string, messages: readonly unknown[]): Promise<string>;
   /**

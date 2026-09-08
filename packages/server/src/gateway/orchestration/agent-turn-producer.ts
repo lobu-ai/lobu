@@ -28,6 +28,7 @@
 
 import {
   AgentErrorCode,
+  type AgentErrorContext,
   type AgentOptions,
   buildToolPolicy,
   createLogger,
@@ -135,6 +136,8 @@ export interface TurnReply {
   team_id?: string;
   platform: string;
   platform_metadata?: Record<string, unknown>;
+  /** Non-secret provider/model identifiers used to target an error CTA. */
+  error_context: AgentErrorContext;
 }
 
 type TurnEnvelope = AgentTurnPollPayload["turn"];
@@ -169,8 +172,8 @@ const GATEWAY_TOOLS = [
 
 /**
  * The workspace tools the guest can run, in the order the model is offered
- * them: the seven pi builtins the subprocess lane hardens, each implemented
- * inside the isolate over the turn's in-memory filesystem (`grep` searches it
+ * them. Each is implemented inside the isolate over the turn's in-memory
+ * filesystem (`grep` searches it
  * directly rather than spawning ripgrep, which an isolate cannot do).
  */
 const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "edit", "grep", "ls", "find"];
@@ -227,9 +230,9 @@ export interface AgentTurnDeps {
    */
   artifacts?: AgentTurnArtifactReader;
   /**
-   * The conversation's pinned runtime sandbox, resolved by the consumer for
-   * the subprocess lane's token. Present → the turn's token carries the same
-   * signed runtime claims and its `bash` runs in that sandbox.
+   * The conversation's pinned runtime sandbox, resolved by the consumer.
+   * Present → the turn's token carries signed runtime claims and its `bash`
+   * runs in that sandbox.
    */
   runtime?: AgentRuntimeSelection;
 }
@@ -237,12 +240,9 @@ export interface AgentTurnDeps {
 /**
  * The system prompt for the turn.
  *
- * DELIBERATELY REDUCED: the subprocess lane's prompt also carries platform,
- * network and skills instruction blocks, none of which the isolate lane can
- * act on yet. Composing the three agent layers plus each MCP server's own
- * instructions keeps the comparison honest about what the lane can currently
- * do, and matches the worker's own section headings
- * (`composeAgentInstructions`) so the identity text itself is byte-identical.
+ * Composes the three agent layers, policy rules, workspace contract and each
+ * MCP server's own instructions. Seeded skills remain files, so the prompt
+ * names their directory only when this turn can read it.
  */
 function composeTurnSystemPrompt(
   layers: {
@@ -253,6 +253,7 @@ function composeTurnSystemPrompt(
   mcpInstructions: string[],
   workspace: boolean,
   canUpload: boolean,
+  remoteBash: boolean,
   toolNames: readonly string[],
   seeded: { files: boolean; skills: boolean } = { files: false, skills: false }
 ): string {
@@ -263,12 +264,12 @@ function composeTurnSystemPrompt(
   if (identity) sections.push(`## Agent Identity\n\n${identity}`);
   if (soul) sections.push(`## Agent Instructions\n\n${soul}`);
   if (user) sections.push(`## User Context\n\n${user}`);
-  // The same always-on tool rules the subprocess lane composes, narrowed to
-  // the tools THIS turn carries — `ask_user`'s "after calling it, stop" among
+  // Always-on tool rules are narrowed to the tools THIS turn carries —
+  // `ask_user`'s "after calling it, stop" among
   // them, which is how the model learns the rule the guest enforces.
   const policyRules = renderAlwaysOnToolPolicyRulesFor(toolNames);
   if (policyRules) sections.push(policyRules);
-  if (workspace) sections.push(workspaceInstructions(canUpload, seeded));
+  if (workspace) sections.push(workspaceInstructions(canUpload, seeded, remoteBash));
   for (const instructions of mcpInstructions) {
     const text = instructions.trim();
     if (text) sections.push(text);
@@ -278,8 +279,8 @@ function composeTurnSystemPrompt(
 
 /**
  * What the model must know about the workspace its tools act on, and only
- * that: it is private to this turn, may contain seeded inputs, and has no
- * network.
+ * that: its file tools are private to this turn, while a pinned remote bash
+ * runs outside that filesystem and follows the runtime's network policy.
  *
  * The `upload_file` line is appended only when the turn actually carries that
  * tool — the workspace does not persist, so a file the user should see has to
@@ -288,14 +289,23 @@ function composeTurnSystemPrompt(
  */
 function workspaceInstructions(
   canUpload: boolean,
-  seeded: { files: boolean; skills: boolean }
+  seeded: { files: boolean; skills: boolean },
+  remoteBash: boolean
 ): string {
   const lines = [
     "## Workspace",
     "",
-    "Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.",
-    "Nothing written there persists after the turn ends.",
-    "It has no network access and no package manager; use your other tools to reach data.",
+    "Your in-memory file workspace is at /workspace; file tools act there when available.",
+    "Nothing written to that in-memory workspace persists after the turn ends.",
+    ...(remoteBash
+      ? [
+          "Your bash tool runs in the conversation's pinned remote sandbox and does not share the in-memory file workspace.",
+          "Network access and installed tools in that sandbox follow its runtime configuration; direct package installation is blocked.",
+        ]
+      : [
+          "Your bash tool uses the same in-memory workspace when available.",
+          "The in-memory environment has no network access and no package manager; use your other tools to reach data.",
+        ]),
   ];
   // Named only when the turn actually seeded something: a directory the model
   // is told about but cannot find reads as a broken tool and invites a wasted
@@ -318,7 +328,7 @@ function workspaceInstructions(
   return lines.join("\n");
 }
 
-/** The skill directory name used by the Linux subprocess worker. */
+/** A safe final path segment for one seeded skill directory. */
 function skillDirectoryName(name: string): string | null {
   const segment = name.trim().split('/').filter(Boolean).pop();
   if (!segment || segment === '.' || segment === '..' || segment.length > TURN_SKILL_NAME_CHARS) {
@@ -372,13 +382,14 @@ function isLaneApi(api: string): api is LaneApi {
 interface TurnProvider {
   api: LaneApi;
   provider: string;
+  providerSlug: string;
   modelId: string;
   baseUrl: string;
   credential: string;
   host: string;
   /** pi-ai's `Model.input` for this model — which modalities it accepts. */
   input: ("text" | "image")[];
-  /** pi-ai's `Model.contextWindow`, or the subprocess lane's default for a model the registry does not carry. */
+  /** pi-ai's `Model.contextWindow`, or the native turn default for an unknown model. */
   contextWindow: number;
 }
 
@@ -407,9 +418,8 @@ function modelInputModalities(
 }
 
 /**
- * The subprocess lane's fallback when a model is not in pi-ai's registry
- * (`model-resolver.ts`): the compaction trigger needs SOME window, and this is
- * the one the other lane has been measuring against.
+ * Fallback when a model is not in pi-ai's registry: compaction still needs a
+ * finite context window.
  */
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
@@ -423,12 +433,9 @@ function modelContextWindow(registryProvider: string, modelId: string): number {
 
 /**
  * Mint the turn's one credential: a worker token scoped to this agent, user,
- * organization and conversation, exactly as the subprocess lane's per-run
- * token is (`buildRunJobToken`) minus the runtime-sandbox claims the isolate
- * has no use for. The secret proxy accepts it as the provider credential and
- * binds it to the agent in the URL; the MCP route authenticates it. The
- * `deploymentName` names this lane so a token can never be mistaken for a
- * subprocess deployment's.
+ * organization, conversation, run and optional runtime sandbox. The secret
+ * proxy accepts it as the provider credential and binds it to the agent in the
+ * URL; the MCP and runtime routes authenticate the same token.
  */
 function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRuntimeSelection): string {
   return generateWorkerToken(
@@ -454,7 +461,7 @@ function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRunti
       messageId: data.messageId,
       // No `executionMode`/`automationRunId` override here ON PURPOSE.
       // `buildWorkerTokenClaims` above already derives both from
-      // `platformMetadata`, using the rule the subprocess lane uses: only the
+      // `platformMetadata`, using the shared claims rule: only the
       // literal "capture" is honoured, it originates server-side from the run
       // row and never from a caller, and an ABSENT claim means LIVE.
       //
@@ -471,9 +478,8 @@ function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRunti
 }
 
 /**
- * Resolve the provider exactly the way the subprocess lane's session context
- * does: the agent's installed modules, the module that owns the requested
- * model, its agent-scoped secret-proxy URL and its credential.
+ * Resolve the provider from the agent's installed modules, the module that owns
+ * the requested model, its agent-scoped secret-proxy URL and its credential.
  *
  * Returns null (with one log line) whenever the turn cannot run here, which
  * is a normal outcome, not a failure: an agent on Google or Bedrock, a provider
@@ -523,14 +529,14 @@ async function resolveTurnProvider(
   }
   const baseUrl = routes[0];
 
-  // Every hop must carry the same signed capture credential.
+  // Every hop must carry the same signed turn credential.
   const credential = module.buildCredentialPlaceholder
     ? await module.buildCredentialPlaceholder(args.agentId, context)
     : "lobu-proxy";
   if (credential !== args.workerToken) {
     logger.info(
       { agentId: args.agentId, provider: module.providerId },
-      "Agent turn skipped: the provider does not accept the signed capture credential"
+      "Agent turn skipped: the provider does not accept the signed turn credential"
     );
     return null;
   }
@@ -562,6 +568,7 @@ async function resolveTurnProvider(
   return {
     api: protocol.api,
     provider: protocol.registryAlias,
+    providerSlug: module.providerId,
     modelId,
     baseUrl,
     credential,
@@ -572,10 +579,8 @@ async function resolveTurnProvider(
 }
 
 /**
- * The agent's tool policy, built from the same options the subprocess lane
- * reads (`agentOptions.toolsConfig`, `allowedTools`, `disallowedTools`) and
- * through the same shared builder, so one agent's patterns mean the same thing
- * whichever lane runs the turn.
+ * The agent's tool policy, built from `agentOptions.toolsConfig`,
+ * `allowedTools` and `disallowedTools` through the shared policy builder.
  */
 function turnToolPolicy(options: AgentOptions | undefined): ToolPolicy {
   return buildToolPolicy({
@@ -588,15 +593,9 @@ function turnToolPolicy(options: AgentOptions | undefined): ToolPolicy {
 /**
  * The tools this turn may call: every tool of every MCP server the agent has,
  * filtered through the agent's tool policy. Discovery is per server and
- * best-effort, as it is for the subprocess lane's session context — a server
- * that fails to list contributes nothing and one log line.
- *
- * The policy filter is applied here and NOT by the subprocess lane, which
- * registers its MCP tools through `createMcpPlugin` unfiltered and only
- * policy-filters its built-in tools. Erring strict is the safe direction for a
- * turn: it can only withhold a tool, never grant one the agent's
- * patterns deny. Aligning the two lanes is a separate change to the
- * subprocess lane, not to this producer.
+ * best-effort: a server that fails to list contributes nothing and one log
+ * line. Filtering can only withhold a tool; it never grants one the agent's
+ * patterns deny.
  */
 async function resolveTurnTools(
   mcp: NonNullable<AgentTurnDeps["mcp"]>,
@@ -865,9 +864,8 @@ export async function enqueueAgentTurn(
     // The workspace tools the policy admits. `bash` carries its prefix policy
     // with it; the file tools need none beyond being admitted.
     const builtin = WORKSPACE_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    // The gateway tools the policy admits, through the SAME builder and the
-    // same patterns that decide them on the subprocess lane — so an agent that
-    // denies `ask_user` denies it on both lanes.
+    // The gateway tools the policy admits through the same shared builder, so
+    // an agent that denies `ask_user` does not receive it.
     const gateway = GATEWAY_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
     // The media tools the policy admits, through the same builder again.
     const media = MEDIA_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
@@ -942,10 +940,9 @@ export async function enqueueAgentTurn(
       // reaches the guest, so a turn cannot be talked into dialling one.
       ...(attachments.images.length > 0 ? { message_images: attachments.images } : {}),
       // Non-image uploads WITH their bytes, which the guest seeds into the
-      // turn's `input/` directory — the same place the subprocess lane
-      // downloads them to, so an agent that reads `input/x.csv` works on both.
+      // turn's agent-visible `input/` directory.
       ...(attachments.files.length > 0 ? { message_files: attachments.files } : {}),
-      // Protocol-valid enabled skills, seeded in the subprocess lane's
+      // Protocol-valid enabled skills, seeded in the agent-visible
       // `.skills/<name>/SKILL.md` layout with their complete content.
       ...(skills.length > 0 ? { skills } : {}),
       system_prompt: composeTurnSystemPrompt(
@@ -955,6 +952,7 @@ export async function enqueueAgentTurn(
         // The guest drops `upload_file` when the turn has no workspace, so the
         // prompt must not promise it either.
         builtin.length > 0 && media.includes("upload_file"),
+        builtin.includes("bash") && Boolean(deps.runtime?.runtimeProviderId),
         // Every tool the model will actually be offered, whichever family it
         // came from: an MCP server's `search_memory` earns the thread-history
         // rule exactly as the conversation plugin's `send_message` earns the
@@ -974,8 +972,7 @@ export async function enqueueAgentTurn(
       ),
       // History is read under the conversation claim, after prior turns finish.
       session_jsonl: "",
-      // pi's own defaults, measured against this model's window. The lane
-      // compacts the way the subprocess lane's SessionManager would.
+      // Pi's own defaults, measured against this model's window.
       compaction: {
         enabled: compactionDefaults.enabled,
         context_window: provider.contextWindow,
@@ -1020,7 +1017,7 @@ export async function enqueueAgentTurn(
     // rather than inside it: the guest has no use for a channel id, and the
     // poll route lifts only `turn` and `credential` out of `action_input`, so
     // a third sibling never crosses into the isolate. The completion route
-    // reads it to publish the same thread_response the subprocess lane does.
+    // reads it to publish the terminal thread_response.
     const reply: TurnReply = {
       message_id: data.messageId,
       channel_id: data.channelId,
@@ -1028,6 +1025,10 @@ export async function enqueueAgentTurn(
       team_id: data.teamId,
       platform: data.platform,
       platform_metadata: data.platformMetadata,
+      error_context: {
+        provider: provider.providerSlug,
+        model: provider.modelId,
+      },
     };
 
     const rows = await sql.begin(async (tx) => {

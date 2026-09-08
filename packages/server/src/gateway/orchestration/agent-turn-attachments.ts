@@ -1,15 +1,10 @@
 /**
  * The agent-turn isolate lane's attachment resolver.
  *
- * The subprocess lane reads a turn's attachments off the worker's own disk:
- * the gateway publishes every inbound attachment as an artifact and stamps
+ * The gateway publishes every inbound attachment as an artifact and stamps
  * `platformMetadata.files[]` with its id, name, mimetype and a signed
- * `downloadUrl`; the worker downloads each one into `<workspace>/input/`, then
- * base64s the `image/*` ones into the prompt for vision and leaves the rest for
- * `cat` (`downloadInputFiles` / `loadImageAttachments` in the isolate guest).
- *
- * The isolate lane has no disk and must not have a fetch. So the resolution
- * happens HERE, host-side, and it is deliberately not a download:
+ * `downloadUrl`. The isolate has no disk and must not fetch that URL, so
+ * resolution happens here, host-side, and is deliberately not a download:
  *
  *  - the bytes come out of the gateway's OWN artifact store, keyed by the
  *    artifact id the gateway itself minted for THIS message. `downloadUrl` is
@@ -20,13 +15,11 @@
  *    store holds, resolves to nothing. `ArtifactStore.inspect`/`read` enforce
  *    both, plus the byte bound;
  *  - `image/*` bytes become model image blocks. Every other resolved upload is
- *    seeded under the isolate turn's in-memory `input/` directory, matching
- *    the subprocess lane's downloaded files. Unresolved uploads still travel
- *    by name so the model is told they exist.
+ *    seeded under the isolate turn's in-memory `input/` directory. Unresolved
+ *    uploads still travel by name so the model is told they exist.
  *
- * Every rejection is a skip with a log line, never a failed turn: the
- * subprocess lane skips an unreadable or oversized image the same way, and a
- * turn that still has text must not die because one upload did not resolve.
+ * Every rejection is a skip with a log line, never a failed turn: a turn that
+ * still has text must not die because one upload did not resolve.
  */
 
 import { createLogger, getErrorMessage } from "@lobu/core";
@@ -46,11 +39,9 @@ export type AgentTurnArtifactReader = Pick<ArtifactStore, "inspect" | "read">;
 /**
  * Per-image byte bound.
  *
- * The subprocess lane's own cap is 20 MB, but its images live on a worker's
- * disk while these are base64'd into a `runs.action_input` jsonb column and
- * carried through a poll response — a ~1.33x inflation on every hop. 5 MiB is
- * also the largest image Anthropic's API accepts base64, so an image over it
- * could not have reached the model on either lane anyway.
+ * These bytes are base64'd into a `runs.action_input` jsonb column and carried
+ * through a poll response, a ~1.33x inflation on every hop. 5 MiB is also the
+ * largest image Anthropic's API accepts base64.
  */
 export const MAX_TURN_IMAGE_BYTES = 5 * 1024 * 1024;
 

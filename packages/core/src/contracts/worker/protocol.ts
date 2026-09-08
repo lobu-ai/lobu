@@ -341,8 +341,7 @@ export const AgentTurnPollPayloadSchema = Type.Object({
      * the bytes the model sees are bytes Lobu already owns, and no attachment
      * URL — signed or not — ever crosses into the isolate. Bounded per image
      * and in total by the producer; an attachment over the bound is dropped
-     * with a log line rather than truncated, exactly as the subprocess lane
-     * skips an oversized image.
+     * with a log line rather than truncated.
      *
      * The bounds here RESTATE the producer's own caps
      * (`agent-turn-attachments.ts`: 8 images, 5 MiB each) so the contract is
@@ -367,12 +366,9 @@ export const AgentTurnPollPayloadSchema = Type.Object({
     /**
      * The message's NON-IMAGE attachments, with their bytes.
      *
-     * The subprocess lane writes every upload into the worker's `input/`
-     * directory — its download is mimetype-blind — and tells the model to read
-     * them with `cat`. This lane has no disk, so the gateway reads the bytes out
-     * of the artifact store it already owns and seeds them into the turn's
-     * in-memory `input/` directory instead, reaching the same agent-visible
-     * result by the same path name. Bytes travel base64 for the same reason an
+     * The gateway reads the bytes out of the artifact store it already owns and
+     * seeds them into the turn's in-memory `input/` directory. Bytes travel
+     * base64 for the same reason an
      * image's do: the guest must never fetch an attachment itself, so no
      * attachment URL, signed or not, crosses into the isolate.
      *
@@ -402,9 +398,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
     /**
      * The agent's enabled skills, each already rendered to its `SKILL.md` body.
      *
-     * The subprocess lane syncs these to `{workspace}/.skills/<name>/SKILL.md`
-     * so the agent can `cat` them; this lane seeds the same layout into the
-     * turn's filesystem. They ride the turn rather than being fetched because
+     * The guest seeds these at `{workspace}/.skills/<name>/SKILL.md` so the
+     * agent can read them. They ride the turn rather than being fetched because
      * the guest has no egress and no disk to cache them on.
      */
     skills: Type.Optional(
@@ -470,9 +465,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
           })
         ),
         /**
-         * The guest's own workspace tools the agent's tool policy admits — the
-         * same seven pi builtins the subprocess lane hardens. They run against
-         * a per-turn in-memory filesystem inside the isolate: `bash` is
+         * The workspace tools the agent's tool policy admits. They run against
+         * a per-turn in-memory filesystem inside the isolate: local `bash` is
          * just-bash, the rest are pi's file tools over the same filesystem.
          * Absent or empty → no workspace tools.
          */
@@ -493,8 +487,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
          * Present when the conversation is pinned to a remote runtime sandbox.
          * `bash` then runs there — the host posts each command to the gateway's
          * `/internal/runtime/exec` with the turn's own token, whose signed claims
-         * name the provider — instead of in the in-memory workspace. The file
-         * tools stay on the workspace, as they do on the subprocess lane.
+         * name the provider — instead of in the in-memory workspace. File tools
+         * remain in the in-memory workspace.
          */
         remote_runtime: Type.Optional(
           Type.Object({ provider_id: Type.String({ minLength: 1 }) })
@@ -891,9 +885,8 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * through the `send_message`/`present_event` conversation tool. The user has
    * read that message, so delivering `text` as well is the double-post.
    *
-   * The guest learns this from the plugin's own `onInBandReplyDelivered` hook —
-   * the same hook the subprocess lane threads into `recordInBandReply` — and it
-   * travels here so the completion route can stamp `repliedInBand` on the
+   * The guest learns this from the plugin's own `onInBandReplyDelivered` hook.
+   * It travels here so the completion route can stamp `repliedInBand` on the
    * terminal `thread_response`, where the renderers' existing suppression
    * (`chat-response-bridge`) already acts on it.
    */
@@ -951,9 +944,8 @@ export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
 /**
  * One finished tool call on an `agent_turn`, as the client should see it.
  *
- * The server renders this into the SAME `tool_use` custom event the subprocess
- * lane emits per `tool_execution_end`, so the SPA, the promptfoo provider and
- * the menubar read one shape for both lanes rather than learning a second.
+ * The server renders this into the established `tool_use` custom event, so the
+ * SPA, promptfoo provider and menubar keep one tool-trace shape.
  *
  * Best-effort like the delta it rides with, and for the same reason: a tool
  * trace is a VIEW of the turn, never the turn's answer, so a dropped one costs
@@ -963,10 +955,8 @@ export const TurnToolEventSchema = Type.Object({
   tool_call_id: Type.String({ maxLength: 256 }),
   name: Type.String({ maxLength: 256 }),
   /**
-   * The call's arguments, as the model sent them. The subprocess lane's
-   * `tool_use` event carries them as `input` and the SPA renders them as the
-   * tool row's args, so this lane carries them too. Absent when the start of
-   * the call was not observed.
+   * The call's arguments, as the model sent them. The SPA renders `input` as
+   * the tool row's args. Absent when the start of the call was not observed.
    */
   input: Type.Optional(Type.Unknown()),
   is_error: Type.Boolean(),
@@ -1010,10 +1000,9 @@ export const HeartbeatRequestSchema = Type.Object({
    *
    * `text` is INCREMENTAL, and that is a contract with the renderers, not a
    * preference: every consumer of a `thread_response` delta APPENDS it
-   * (`ApiResponseRenderer` → the SPA's `textOut += content`), exactly as the
-   * subprocess lane's `sendStreamDelta(delta, false)` intends. A cumulative
+   * (`ApiResponseRenderer` → the SPA's `textOut += content`). A cumulative
    * snapshot sent down the same path renders as the reply repeated back to
-   * itself, so this lane sends increments like the lane it replaces.
+   * itself, so the worker sends increments.
    *
    * A dropped batch cannot leave a hole, because the worker only retires text
    * the server has ACKNOWLEDGED (`turn_delta_ack`): an unacknowledged batch is

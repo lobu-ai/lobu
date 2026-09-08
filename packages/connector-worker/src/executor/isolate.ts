@@ -44,7 +44,7 @@ import { IsolateHost, IsolateHostError, type IsolateTerminalState } from '../iso
 import { assertIsolateEligible } from '../isolate/eligibility.js';
 import type { IsolatedVm } from '../isolate/ivm-types.js';
 import { isolatedVmUnavailableReason, loadIsolatedVm } from '../isolate/load.js';
-import type { AgentTurnEvent } from '../agent-turn/types.js';
+import type { AgentTurnEvent, AgentTurnInput } from '../agent-turn/types.js';
 import { buildConnectorConfig } from './connector-config.js';
 import type {
   ExecutionHooks,
@@ -409,6 +409,17 @@ interface RunNetwork {
   };
 }
 
+function agentInferencePath(api: AgentTurnInput['provider']['api']): string {
+  switch (api) {
+    case 'anthropic-messages':
+      return '/v1/messages';
+    case 'openai-completions':
+      return '/chat/completions';
+    case 'openai-responses':
+      return '/responses';
+  }
+}
+
 /**
  * The job as the guest receives it: the OAuth access token behind a placeholder
  * the vault resolves at `fetch`. The gateway resolves the token per run, so the
@@ -665,8 +676,9 @@ export class IsolateExecutor implements SyncExecutor {
         agentGateway: {
           origin: new URL(job.turn.provider.baseUrl).origin,
           credential: job.credentials.accessToken,
-          inferenceUrl: new URL(job.turn.provider.baseUrl.replace(/\/$/, '') +
-            (job.turn.provider.api === 'anthropic-messages' ? '/v1/messages' : '/chat/completions')).href,
+          inferenceUrl: new URL(
+            job.turn.provider.baseUrl.replace(/\/$/, '') + agentInferencePath(job.turn.provider.api)
+          ).href,
           toolPrefixes: job.turn.tools
             ? ['internal', 'mcp'].map((path) => `${job.turn.tools!.gatewayUrl.replace(/\/$/, '')}/${path}/`)
             : [],

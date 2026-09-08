@@ -147,14 +147,13 @@ export class ConfigError extends BaseError {
  * past fix touched one layer while the other three kept diverging, so the same
  * error rendered differently depending on which layer terminalized first.
  *
- * This catalog makes an agent error DATA, resolved once:
- *   1. `classifyError` (worker) is the ONLY classifier — message → code.
- *   2. The code rides `signalError`/`ThreadResponsePayload.errorCode` to the
- *      gateway.
- *   3. Every renderer (Slack, Telegram, browser SSE) turns the code into
+ * This catalog makes an agent error DATA:
+ *   1. The execution path classifies a message into a code.
+ *   2. The code rides `ThreadResponsePayload.errorCode` to the gateway.
+ *   3. Every renderer (Slack, Telegram, browser SSE) turns that code into
  *      text + CTA via the shared `renderAgentError`, keyed on this record.
  *
- * Adding a new failure mode = one entry here + one `classifyError` pattern.
+ * Adding a new failure mode requires one entry here plus its classifier pattern.
  * A raw error reaching a user is a signal to add an entry, not to hand-wire a
  * new branch in a renderer.
  */
@@ -299,13 +298,12 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
  * Provider says: the key is VALID, the account just cannot spend — a balance,
  * credit, or billing-limit wall rather than a windowed rate limit.
  *
- * Lives in core because two packages must agree on it and previously did not:
- * `classifyError` (agent-worker) turns the message into
- * `PROVIDER_QUOTA_EXHAUSTED`, and `providerQuotaResetNotBefore` (server) parks
+ * The native turn classifier maps this wording to
+ * `PROVIDER_QUOTA_EXHAUSTED`, while `providerQuotaResetNotBefore` parks
  * an Automation for a day on the same wording. They were maintained as separate
- * literals and drifted in both directions: the server list learned OpenAI's
- * "no credits remaining" while the worker's
- * did not, and the worker matched "insufficient quota" while the server's park
+ * literals and drifted in both directions: the parker learned OpenAI's
+ * "no credits remaining" while the classifier did not, and the classifier
+ * matched "insufficient quota" while the parker's
  * list did not. Because the server gates on the code the worker assigns, the
  * first drift silently disabled BOTH the day-park and the provider-health
  * writeback for OpenAI balance exhaustion (observed in prod 2026-08-05). This
