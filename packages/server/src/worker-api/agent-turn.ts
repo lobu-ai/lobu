@@ -24,7 +24,7 @@ import { Value } from "@sinclair/typebox/value";
 import { CURRENT_SESSION_VERSION, type SessionEntry, type SessionHeader } from "@mariozechner/pi-coding-agent";
 import type { Context } from "hono";
 import { type DbClient, getDb } from "../db/client";
-import type { TurnReply } from "../gateway/orchestration/agent-turn-shadow";
+import type { TurnReply } from "../gateway/orchestration/agent-turn-producer";
 import {
 	insertThreadResponseRow,
 	notifyThreadResponse,

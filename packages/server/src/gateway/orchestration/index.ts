@@ -22,7 +22,7 @@ import {
   type OrchestratorConfig,
 } from "./deployment-manager.js";
 import { buildModuleEnvVars } from "./deployment-utils.js";
-import type { AgentTurnShadowDeps } from "./agent-turn-shadow.js";
+import type { AgentTurnDeps } from "./agent-turn-producer.js";
 import { MessageConsumer } from "./message-consumer.js";
 
 const logger = createLogger("orchestrator");
@@ -62,8 +62,8 @@ export class Orchestrator {
     policyStore?: PolicyStore,
     guardrailRegistry?: GuardrailRegistry,
     agentSettingsStore?: AgentSettingsStore,
-    agentTurnMcp?: AgentTurnShadowDeps["mcp"],
-    agentTurnArtifacts?: AgentTurnShadowDeps["artifacts"]
+    agentTurnMcp?: AgentTurnDeps["mcp"],
+    agentTurnArtifacts?: AgentTurnDeps["artifacts"]
   ): Promise<void> {
     this.deploymentManager.setSecretStore(secretStore);
     // Lets a connection contribute an authenticated CLI to the agent sandbox

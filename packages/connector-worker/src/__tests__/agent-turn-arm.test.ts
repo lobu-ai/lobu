@@ -120,7 +120,6 @@ function turnJob(overrides: Record<string, unknown> = {}): PollResponse {
           base_url: "https://gateway.test.invalid/api/proxy/anthropic",
         },
         allowed_hosts: ["gateway.test.invalid"],
-        shadow: true,
       },
     },
     ...overrides,

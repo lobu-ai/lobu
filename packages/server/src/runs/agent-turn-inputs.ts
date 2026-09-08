@@ -3,7 +3,7 @@ import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, ty
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import type { DbClient } from '../db/client';
-import type { TurnReply } from '../gateway/orchestration/agent-turn-shadow';
+import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
 import { insertThreadResponseRow } from '../gateway/orchestration/turn-liveness';
 
 export interface NativeTurnRun {

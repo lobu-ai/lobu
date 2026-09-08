@@ -31,10 +31,10 @@ import {
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { recordAgentRunInput } from "./agent-run-input.js";
 import {
-  type AgentTurnShadowDeps,
-  enqueueAgentTurnShadow,
+  type AgentTurnDeps,
+  enqueueAgentTurn,
   cancelAgentTurn,
-} from "./agent-turn-shadow.js";
+} from "./agent-turn-producer.js";
 import {
   buildCanonicalConversationKey,
   type DeploymentManager,
@@ -127,8 +127,8 @@ export class MessageConsumer {
    * advisory lock in DeploymentManager — this Set is pod-local only.
    */
   private agentSettingsStore?: AgentSettingsStore;
-  private agentTurnMcp?: AgentTurnShadowDeps["mcp"];
-  private agentTurnArtifacts?: AgentTurnShadowDeps["artifacts"];
+  private agentTurnMcp?: AgentTurnDeps["mcp"];
+  private agentTurnArtifacts?: AgentTurnDeps["artifacts"];
   private guardrailRegistry?: GuardrailRegistry;
   private recordRunInput: typeof recordAgentRunInput;
   constructor(
@@ -149,7 +149,7 @@ export class MessageConsumer {
    * as the guardrails, for the same reason. Absent → shadow turns run with no
    * tools.
    */
-  setAgentTurnMcp(mcp?: AgentTurnShadowDeps["mcp"]): void {
+  setAgentTurnMcp(mcp?: AgentTurnDeps["mcp"]): void {
     this.agentTurnMcp = mcp;
   }
 
@@ -158,7 +158,7 @@ export class MessageConsumer {
    * out of. Same post-construction injection as the MCP surface. Absent → an
    * image attachment travels as its name only.
    */
-  setAgentTurnArtifacts(artifacts?: AgentTurnShadowDeps["artifacts"]): void {
+  setAgentTurnArtifacts(artifacts?: AgentTurnDeps["artifacts"]): void {
     this.agentTurnArtifacts = artifacts;
   }
 
@@ -605,7 +605,7 @@ export class MessageConsumer {
       // instead of becoming one. Everything else is admitted as its own
       // pending native run, including while another turn is active.
       const handled = await cancelAgentTurn(data);
-      const unrunnable = handled ? undefined : await enqueueAgentTurnShadow(data, {
+      const unrunnable = handled ? undefined : await enqueueAgentTurn(data, {
         agentSettings: this.agentSettingsStore,
         catalog: this.deploymentManager.getProviderCatalogService?.(),
         mcp: this.agentTurnMcp,

@@ -1,34 +1,29 @@
 /**
- * Shadow producer for the agent-turn isolate lane.
+ * Producer for the agent-turn isolate lane.
  *
- * A selected agent's turn is enqueued TWICE: once the ordinary way, to the
- * subprocess worker that answers the conversation, and once as an `agent_turn`
- * row the connector-worker fleet claims and runs inside an isolate. The shadow
- * copy is observational — its reply is written to its own run row by
- * `/api/workers/complete-agent-turn` and never reaches the client — so the two
- * lanes can be compared on live traffic before the isolate lane becomes
- * authoritative.
+ * A message's turn becomes one `agent_turn` row that the connector-worker
+ * fleet claims and runs inside a V8 isolate, with Pi's own session, tools and
+ * memory. This is the only execution path: nothing spawns a managed
+ * subprocess for a message any more, and the answer this run produces IS the
+ * conversation's reply, delivered by `/api/workers/complete-agent-turn`.
  *
- * Three things this producer must NOT do, each of which would corrupt the real
- * turn rather than merely observe it:
+ * Because nothing else can answer, the two ways this can fail both surface:
  *
- *  - Arm a turn-timeout marker. The marker is keyed
- *    `(deploymentName, messageId)` and discharged first-writer-wins, so a
- *    second marker for the same turn would let the shadow's outcome terminate
- *    the client's stream.
- *  - Write an `agent_run_input` journal row. Same key, same collision: a
- *    replay would resume the wrong lane.
- *  - Use a run type inside `LOBU_RUN_TYPES`. `agent_turn` is deliberately
- *    outside it, so `RunsQueue` never claims or completes these rows.
+ *  - A misconfiguration the producer can NAME (no resolved model, no provider
+ *    that owns it, no provider that routes on this lane, no public gateway
+ *    URL) is RETURNED as an `AgentErrorCode`. The caller discharges the
+ *    turn-liveness marker it armed with that reason, so the user reads the
+ *    real cause and its remediation instead of waiting out the deadline for a
+ *    generic "worker unresponsive".
+ *  - Anything unexpected THROWS, so the queue's own retry/fail handling sees
+ *    it rather than a message disappearing without a reply.
  *
- * Shadow creation is best-effort. `enqueueAgentTurnShadow` never throws into
- * the enqueue path, and the caller runs it AFTER the real message is on the
- * worker queue, so a shadow that cannot be produced costs the turn nothing.
+ * A message owed no reply at all — an explicit cancel, or one carrying
+ * neither text nor a resolvable attachment — returns `undefined` silently.
  *
- * Selection is the operator env var `LOBU_ISOLATE_TURN_SHADOW_AGENTS`
- * (comma-separated agent ids, or `*`). It is an operator switch for a
- * short-lived overlap, not a product surface, so it is deliberately not an
- * agent column.
+ * `agent_turn` is deliberately outside `LOBU_RUN_TYPES`, so `RunsQueue` never
+ * claims or completes these rows; the fleet's poll/heartbeat/complete routes
+ * own their whole lifecycle.
  */
 
 import {
@@ -67,13 +62,13 @@ import {
 import { notifyThreadResponse } from "./turn-liveness.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
-const logger = createLogger("agent-turn-shadow");
+const logger = createLogger("agent-turn-producer");
 
 
 /**
  * pi-ai's two fetch-native adapters. Every other protocol in
  * `SDK_COMPAT_PROTOCOLS` reaches its upstream through a Node-bound SDK, which
- * cannot be bundled for the isolate — so those agents simply produce no shadow.
+ * cannot be bundled for the isolate — so those agents produce no turn.
  *
  * Typed as the envelope's own `api` union so the set and the wire contract
  * cannot drift: adding an adapter here without widening the schema is a
@@ -193,10 +188,10 @@ const MEDIA_TOOLS = ["upload_file", "generate_image", "generate_audio"] as const
  */
 const MEMORY_MCP_ID = "lobu";
 
-export interface AgentTurnShadowDeps {
-  /** Reads the agent's identity/soul/user layers. Absent → no shadow. */
+export interface AgentTurnDeps {
+  /** Reads the agent's identity/soul/user layers. Absent → no turn. */
   agentSettings?: AgentSettingsStore;
-  /** Resolves the agent's provider modules. Absent → no shadow. */
+  /** Resolves the agent's provider modules. Absent → no turn. */
   catalog?: ProviderCatalogService;
   /**
    * The gateway's MCP surface: which servers this agent has, and their tools.
@@ -212,7 +207,7 @@ export interface AgentTurnShadowDeps {
    * than read here so the caller owns the lookup: the canonical accessor
    * memoizes `PUBLIC_GATEWAY_URL` for the life of the process, which a caller
    * under test cannot vary without reaching into that cache. Absent → no
-   * shadow, because there is no URL to hand the worker.
+   * turn, because there is no URL to hand the worker.
    */
   gatewayUrl?: string;
   /**
@@ -232,7 +227,7 @@ export interface AgentTurnShadowDeps {
 }
 
 /**
- * The system prompt for the shadow turn.
+ * The system prompt for the turn.
  *
  * DELIBERATELY REDUCED: the subprocess lane's prompt also carries platform,
  * network and skills instruction blocks, none of which the isolate lane can
@@ -241,7 +236,7 @@ export interface AgentTurnShadowDeps {
  * do, and matches the worker's own section headings
  * (`composeAgentInstructions`) so the identity text itself is byte-identical.
  */
-function composeShadowSystemPrompt(
+function composeTurnSystemPrompt(
   layers: {
     identityMd?: string | null;
     soulMd?: string | null;
@@ -366,7 +361,7 @@ function isLaneApi(api: string): api is LaneApi {
   return LANE_APIS.has(api);
 }
 
-interface ShadowProvider {
+interface TurnProvider {
   api: LaneApi;
   provider: string;
   modelId: string;
@@ -456,9 +451,9 @@ function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRunti
       // literal "capture" is honoured, it originates server-side from the run
       // row and never from a caller, and an ABSENT claim means LIVE.
       //
-      // This lane used to pin `executionMode: "capture"`, which was right while
-      // it produced a discardable copy — a shadow must never touch the outside
-      // world. It is catastrophic for an authoritative turn: `captureEffect`
+      // This lane used to pin `executionMode: "capture"`, which was right
+      // while it produced a discardable copy that had to touch nothing in the
+      // outside world. It is catastrophic now that the turn answers: `captureEffect`
       // returns `success: true` WITHOUT performing the effect, so the agent
       // would tell the user it sent the message and updated the record while
       // doing neither. Overriding the claims builder is what made that
@@ -473,11 +468,11 @@ function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRunti
  * does: the agent's installed modules, the module that owns the requested
  * model, its agent-scoped secret-proxy URL and its credential.
  *
- * Returns null (with one log line) whenever the turn is not shadowable, which
+ * Returns null (with one log line) whenever the turn cannot run here, which
  * is a normal outcome, not a failure: an agent on Google or Bedrock, a provider
  * with no proxy route, a credential the gateway cannot placeholder.
  */
-async function resolveShadowProvider(
+async function resolveTurnProvider(
   module: ModelProviderModule,
   args: {
     agentId: string;
@@ -487,12 +482,12 @@ async function resolveShadowProvider(
     gatewayUrl: string;
     workerToken: string;
   }
-): Promise<ShadowProvider | null> {
+): Promise<TurnProvider | null> {
   const protocol = resolveSdkCompat(module.sdkCompat);
   if (!protocol || !isLaneApi(protocol.api)) {
     logger.info(
       { agentId: args.agentId, provider: module.providerId, api: protocol?.api ?? null },
-      "Agent turn shadow skipped: the provider's protocol has no fetch-native adapter on the isolate lane"
+      "Agent turn skipped: the provider's protocol has no fetch-native adapter on the isolate lane"
     );
     return null;
   }
@@ -515,7 +510,7 @@ async function resolveShadowProvider(
   if (routes.length !== 1) {
     logger.info(
       { agentId: args.agentId, provider: module.providerId, routes: routes.length },
-      "Agent turn shadow skipped: the provider does not publish exactly one proxy base URL"
+      "Agent turn skipped: the provider does not publish exactly one proxy base URL"
     );
     return null;
   }
@@ -528,7 +523,7 @@ async function resolveShadowProvider(
   if (credential !== args.workerToken) {
     logger.info(
       { agentId: args.agentId, provider: module.providerId },
-      "Agent turn shadow skipped: the provider does not accept the signed capture credential"
+      "Agent turn skipped: the provider does not accept the signed capture credential"
     );
     return null;
   }
@@ -539,7 +534,7 @@ async function resolveShadowProvider(
     if (url.origin !== new URL(args.gatewayUrl).origin) {
       logger.info(
         { agentId: args.agentId, provider: module.providerId },
-        "Agent turn shadow skipped: the provider's proxy base URL leaves the gateway origin"
+        "Agent turn skipped: the provider's proxy base URL leaves the gateway origin"
       );
       return null;
     }
@@ -547,7 +542,7 @@ async function resolveShadowProvider(
   } catch {
     logger.warn(
       { agentId: args.agentId, provider: module.providerId },
-      "Agent turn shadow skipped: the provider's proxy base URL does not parse"
+      "Agent turn skipped: the provider's proxy base URL does not parse"
     );
     return null;
   }
@@ -592,12 +587,12 @@ function turnToolPolicy(options: AgentOptions | undefined): ToolPolicy {
  * The policy filter is applied here and NOT by the subprocess lane, which
  * registers its MCP tools through `createMcpPlugin` unfiltered and only
  * policy-filters its built-in tools. Erring strict is the safe direction for a
- * shadow turn: it can only withhold a tool, never grant one the agent's
+ * turn: it can only withhold a tool, never grant one the agent's
  * patterns deny. Aligning the two lanes is a separate change to the
  * subprocess lane, not to this producer.
  */
 async function resolveTurnTools(
-  mcp: NonNullable<AgentTurnShadowDeps["mcp"]>,
+  mcp: NonNullable<AgentTurnDeps["mcp"]>,
   args: {
     agentId: string;
     organizationId: string;
@@ -626,7 +621,7 @@ async function resolveTurnTools(
     if (outcome.status === "rejected") {
       logger.warn(
         { agentId: args.agentId, err: getErrorMessage(outcome.reason) },
-        "Agent turn shadow: an MCP server did not list its tools; the turn runs without them"
+        "Agent turn: an MCP server did not list its tools; the turn runs without them"
       );
       continue;
     }
@@ -702,12 +697,16 @@ export async function cancelAgentTurn(data: MessagePayload): Promise<boolean> {
 }
 
 /**
- * Produce the shadow `agent_turn` run for this message, when one is selected
- * and resolvable. Never throws: the caller has already delivered the real turn.
+ * Produce the `agent_turn` run for this message.
+ *
+ * Returns `undefined` when the turn was produced, or when nothing is owed a
+ * reply. Returns an `AgentErrorCode` when the agent is misconfigured and
+ * cannot run, so the caller can tell the user why. Throws on anything
+ * unexpected — see the module header.
  */
-export async function enqueueAgentTurnShadow(
+export async function enqueueAgentTurn(
   data: MessagePayload,
-  deps: AgentTurnShadowDeps
+  deps: AgentTurnDeps
 ): Promise<TurnUnrunnable | undefined> {
   try {
     // No turn is owed a reply: a cancel is a control message, and a payload
@@ -793,7 +792,7 @@ export async function enqueueAgentTurnShadow(
 
     const sql = getDb();
     if (typeof data.runId !== "number" || !Number.isSafeInteger(data.runId) || data.runId <= 0) {
-      throw new Error("Agent turn shadow requires the admitted message run ID");
+      throw new Error("Agent turn requires the admitted message run ID");
     }
     // Allocate identity without publishing a partially assembled pending job.
     const [allocated] = await sql<{ id: number }>`
@@ -801,7 +800,7 @@ export async function enqueueAgentTurnShadow(
     `;
     const runId = allocated!.id;
     const workerToken = mintTurnToken(data, runId, deps.runtime);
-    const provider = await resolveShadowProvider(module, {
+    const provider = await resolveTurnProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
       userId: data.userId,
@@ -810,7 +809,7 @@ export async function enqueueAgentTurnShadow(
       workerToken,
     });
     if (!provider) {
-      // Every `resolveShadowProvider` null is a provider/model
+      // Every `resolveTurnProvider` null is a provider/model
       // misconfiguration — an unsupported protocol, or a proxy base URL that
       // does not resolve to exactly one gateway-origin route. It logged the
       // specific cause; the user's fix is on the agent's model selection.
@@ -924,7 +923,7 @@ export async function enqueueAgentTurnShadow(
     if (hasMemoryServer && !tools) {
       logger.info(
         { agentId: data.agentId },
-        "Agent turn shadow: the agent has the memory server but the turn carries no tools, so it runs without memory"
+        "Agent turn: the agent has the memory server but the turn carries no tools, so it runs without memory"
       );
     }
     const turn: TurnEnvelope = {
@@ -942,7 +941,7 @@ export async function enqueueAgentTurnShadow(
       // Protocol-valid enabled skills, seeded in the subprocess lane's
       // `.skills/<name>/SKILL.md` layout with their complete content.
       ...(skills.length > 0 ? { skills } : {}),
-      system_prompt: composeShadowSystemPrompt(
+      system_prompt: composeTurnSystemPrompt(
         settings ?? {},
         mcpInstructions,
         builtin.length > 0,
@@ -1030,7 +1029,7 @@ export async function enqueueAgentTurnShadow(
         WHERE id = ${data.runId!} AND organization_id = ${data.organizationId!}
           AND run_type = 'chat_message' AND queue_name = 'messages'
           AND action_input->>'messageId' = ${data.messageId} FOR UPDATE`;
-      if (!source) throw new Error("Agent turn shadow has no matching admitted message");
+      if (!source) throw new Error("Agent turn has no matching admitted message");
       const existing = await tx<{ id: number }>`SELECT id FROM runs WHERE parent_run_id = ${data.runId!}
         AND organization_id = ${data.organizationId!} AND run_type = 'agent_turn' LIMIT 1`;
       if (existing.length) return existing;

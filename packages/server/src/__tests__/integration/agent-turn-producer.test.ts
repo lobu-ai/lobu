@@ -1,5 +1,5 @@
 /**
- * The shadow producer end to end: a selected agent's message produces an
+ * The agent-turn producer end to end: a message produces an
  * `agent_turn` run, only a fleet worker that advertises the lane can claim it,
  * and the turn is reported back on the lane's own completion route. This is the
  * seam that makes the isolate turn lane REACHABLE — the executor suite proves
@@ -20,9 +20,9 @@ import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
-import { enqueueAgentTurnShadow,
+import { enqueueAgentTurn,
   cancelAgentTurn,
-} from '../../gateway/orchestration/agent-turn-shadow';
+} from '../../gateway/orchestration/agent-turn-producer';
 import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
@@ -41,9 +41,8 @@ import {
 } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
 
-const SHADOW_ENV = 'LOBU_ISOLATE_TURN_SHADOW_AGENTS';
 const GATEWAY_URL = 'https://gateway.test.invalid/lobu';
-const AGENT_ID = 'shadow-agent';
+const AGENT_ID = 'turn-agent';
 
 /**
  * A provider module shaped like the real Claude one: a Lobu id that differs
@@ -123,7 +122,7 @@ function catalogFor(module: ModelProviderModule | undefined): ProviderCatalogSer
 
 const settingsStore = {
   getSettings: async () => ({
-    identityMd: 'I am the shadow agent.',
+    identityMd: 'I am the turn agent.',
     soulMd: 'Answer briefly.',
     userMd: '',
   }),
@@ -131,15 +130,15 @@ const settingsStore = {
 
 function messageFor(organizationId: string): MessagePayload {
   return {
-    userId: 'user-shadow',
-    conversationId: 'conv-shadow',
-    messageId: 'msg-shadow',
-    channelId: 'api_user-shadow',
+    userId: 'user-turn',
+    conversationId: 'conv-turn',
+    messageId: 'msg-turn',
+    channelId: 'api_user-turn',
     agentId: AGENT_ID,
     organizationId,
-    botId: 'bot-shadow',
+    botId: 'bot-turn',
     platform: 'api',
-    messageText: 'what is the shadow lane?',
+    messageText: 'what is the isolate lane?',
     platformMetadata: {},
     agentOptions: { model: 'claude/claude-opus-4-8' },
   } as MessagePayload;
@@ -159,8 +158,8 @@ async function admittedMessage(message: MessagePayload): Promise<MessagePayload>
  * Returns the producer's outcome: an `AgentErrorCode` when the agent cannot
  * run, `undefined` when the turn was produced or nothing is owed a reply.
  */
-async function enqueueMessage(message: MessagePayload, deps: Parameters<typeof enqueueAgentTurnShadow>[1]) {
-  return await enqueueAgentTurnShadow(await admittedMessage(message), deps);
+async function enqueueMessage(message: MessagePayload, deps: Parameters<typeof enqueueAgentTurn>[1]) {
+  return await enqueueAgentTurn(await admittedMessage(message), deps);
 }
 
 /**
@@ -207,7 +206,7 @@ async function threadResponsesGlobal(): Promise<Array<Record<string, unknown>>> 
   return rows.map((row) => row.action_input);
 }
 
-async function shadowRuns() {
+async function agentTurnRuns() {
   const sql = getTestDb();
   return (await sql`
     SELECT id, run_type, status, approval_status, organization_id, action_input, parent_run_id
@@ -242,8 +241,8 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
   });
 }
 
-/** Enqueue a shadow turn and claim it, as the fleet worker would. */
-async function claimedShadowRun(workerId: string): Promise<number> {
+/** Enqueue a turn and claim it, as the fleet worker would. */
+async function claimedTurnRun(workerId: string): Promise<number> {
   const org = await createTestOrganization();
   await enqueueMessage(messageFor(org.id), {
     agentSettings: settingsStore,
@@ -273,9 +272,9 @@ async function runRow(runId: number) {
 /** Native session fixture: entry IDs and parent links belong to Pi, not the gateway. */
 function nativeSession(entries: Array<Record<string, unknown>> = [
   { type: 'message', id: 'native-user', parentId: null,
-    message: { role: 'user', content: 'what is the shadow lane?', timestamp: 1 } },
+    message: { role: 'user', content: 'what is the isolate lane?', timestamp: 1 } },
   { type: 'message', id: 'native-answer', parentId: 'native-user',
-    message: { role: 'assistant', content: [{ type: 'text', text: 'an observational copy' }], timestamp: 2 } },
+    message: { role: 'assistant', content: [{ type: 'text', text: 'the isolate answer' }], timestamp: 2 } },
 ]): string {
   const timestamp = '2026-01-01T00:00:00.000Z';
   return [
@@ -284,15 +283,13 @@ function nativeSession(entries: Array<Record<string, unknown>> = [
   ].map((entry) => JSON.stringify(entry)).join('\n') + '\n';
 }
 
-describe('agent turn shadow producer', () => {
+describe('agent turn producer', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
     delete process.env.WORKER_API_TOKEN;
-    process.env[SHADOW_ENV] = AGENT_ID;
   });
 
   afterEach(() => {
-    delete process.env[SHADOW_ENV];
   });
 
   it('EXECUTES a real HTTP interaction live with the producer-minted turn credential', async () => {
@@ -302,7 +299,7 @@ describe('agent turn shadow producer', () => {
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
     const app = createInteractionRoutes({ postLinkButton } as never);
     const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
@@ -311,7 +308,7 @@ describe('agent turn shadow producer', () => {
       const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/internal/interactions/create`, {
         method: 'POST',
         headers: { authorization: `Bearer ${run.action_input.credential}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ interactionType: 'link_button', url: 'https://example.invalid', label: 'Shadow attempt' }),
+        body: JSON.stringify({ interactionType: 'link_button', url: 'https://example.invalid', label: 'Interaction attempt' }),
       });
       expect(response.status).toBe(200);
       // LIVE, because an ordinary turn is authoritative now. This asserted the
@@ -415,13 +412,13 @@ describe('agent turn shadow producer', () => {
       await sql`
         INSERT INTO agent_transcript_snapshot
           (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
-        VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${history}, ${Buffer.byteLength(history)}, 'completed')
+        VALUES (${org.id}, ${AGENT_ID}, 'conv-turn', ${prior.id}, ${history}, ${Buffer.byteLength(history)}, 'completed')
       `;
       const source = await admittedMessage(messageFor(org.id));
-      await enqueueAgentTurnShadow(source, {
+      await enqueueAgentTurn(source, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
       });
-      const [run] = await shadowRuns();
+      const [run] = await agentTurnRuns();
       expect(run.action_input.turn).toMatchObject({ session_jsonl: '' });
       // There is no shadow lane and no managed counterpart snapshot to
       // exclude: the assertions below are the whole contract.
@@ -464,7 +461,7 @@ describe('agent turn shadow producer', () => {
       expect(toolResults[4].content).toEqual([{ type: 'text', text: `${Buffer.from('\ufeffafter\r\n').toString('base64')}\n` }]);
       const [reply] = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'finalText' = ${completion.text}`;
       // The turn is authoritative: its answer IS the conversation's reply.
-      expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });
+      expect(reply.action_input).toMatchObject({ conversationId: 'conv-turn', finalText: completion.text });
       // A lost completion response must not append the same transcript twice.
       await client.completeAgentTurn(completion as never);
       const snapshots = await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
@@ -499,10 +496,10 @@ describe('agent turn shadow producer', () => {
     const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
     const enqueue = async (message: MessagePayload) => {
       const source = await admittedMessage(message);
-      if (!await cancelAgentTurn(source)) await enqueueAgentTurnShadow(source, {
+      if (!await cancelAgentTurn(source)) await enqueueAgentTurn(source, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
       });
-      const run = (await shadowRuns()).at(-1)!;
+      const run = (await agentTurnRuns()).at(-1)!;
       return Number(run.id);
     };
     const server = createServer(async (req, res) => {
@@ -640,7 +637,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const rows = await shadowRuns();
+    const rows = await agentTurnRuns();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       run_type: 'agent_turn',
@@ -658,21 +655,21 @@ describe('agent turn shadow producer', () => {
 
     expect(envelope.turn).toMatchObject({
       agent_id: AGENT_ID,
-      conversation_id: 'conv-shadow',
-      message_id: 'msg-shadow',
-      message_text: 'what is the shadow lane?',
+      conversation_id: 'conv-turn',
+      message_id: 'msg-turn',
+      message_text: 'what is the isolate lane?',
       provider: {
         api: 'anthropic-messages',
         provider: 'anthropic',
         // Lobu stores "claude/…"; the upstream only knows the bare id.
         model_id: 'claude-opus-4-8',
-        base_url: `${GATEWAY_URL}/api/proxy/anthropic/a/${AGENT_ID}/o/${org.id}/u/user-shadow`,
+        base_url: `${GATEWAY_URL}/api/proxy/anthropic/a/${AGENT_ID}/o/${org.id}/u/user-turn`,
       },
       // Deny-all: the gateway proxy and nothing else.
       allowed_hosts: ['gateway.test.invalid'],
     });
     expect(envelope.turn.system_prompt).toBe(
-      '## Agent Identity\n\nI am the shadow agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
+      '## Agent Identity\n\nI am the turn agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
         // Policy text must match the tools this envelope actually offers.
         '## Built-In Tool Policies\n\n' +
         '### Structured User Choices\nTools: `ask_user`\n' +
@@ -731,7 +728,7 @@ describe('agent turn shadow producer', () => {
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn;
     expect(turn.tools.media).toEqual(['generate_image', 'generate_audio']);
     expect(turn.tools.builtin).toContain('write');
@@ -765,7 +762,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn;
     expect(turn.skills).toEqual([{ name: 'triage', content }]);
     expect(turn.system_prompt).toContain('/workspace/.skills');
@@ -789,7 +786,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn;
     expect(turn.tools.builtin).toEqual(['bash']);
     expect(turn.message_files[0].data).toBe(Buffer.from('%PDF').toString('base64'));
@@ -800,7 +797,7 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const fixture = mcpFixture();
     const message = messageFor(org.id);
-    message.platformMetadata = { connectionId: 'conn-shadow' };
+    message.platformMetadata = { connectionId: 'conn-turn' };
     await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
@@ -808,7 +805,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const envelope = run.action_input as {
       turn: { tools?: Record<string, unknown>; system_prompt: string };
       credential: string;
@@ -821,13 +818,13 @@ describe('agent turn shadow producer', () => {
     const claims = verifyWorkerToken(envelope.credential);
     expect(claims).toMatchObject({
       agentId: AGENT_ID,
-      userId: 'user-shadow',
+      userId: 'user-turn',
       organizationId: org.id,
-      conversationId: 'conv-shadow',
-      channelId: 'api_user-shadow',
-      connectionId: 'conn-shadow',
-      messageId: 'msg-shadow',
-      deploymentName: 'agent-turn:msg-shadow',
+      conversationId: 'conv-turn',
+      channelId: 'api_user-turn',
+      connectionId: 'conn-turn',
+      messageId: 'msg-turn',
+      deploymentName: 'agent-turn:msg-turn',
     });
     expect(JSON.stringify(envelope.turn)).not.toContain(envelope.credential);
 
@@ -883,7 +880,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as {
       tools?: { definitions: Array<{ name: string }>; builtin?: string[]; bash_policy?: unknown };
       system_prompt: string;
@@ -910,7 +907,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as {
       tools?: {
         definitions: unknown[];
@@ -939,7 +936,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as {
       tools?: { gateway?: string[]; conversation?: Record<string, string> };
     };
@@ -981,7 +978,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as { tools?: { gateway?: string[] } };
     expect(turn.tools?.gateway).not.toContain('ask_user');
     expect(turn.tools?.gateway).not.toContain('send_message');
@@ -997,7 +994,7 @@ describe('agent turn shadow producer', () => {
     };
     let produced = 0;
     const toolless = async () => {
-      const rows = await shadowRuns();
+      const rows = await agentTurnRuns();
       produced += 1;
       expect(rows).toHaveLength(produced);
       const turn = rows[produced - 1].action_input.turn as { tools?: { definitions: unknown[]; builtin?: string[] } };
@@ -1023,19 +1020,19 @@ describe('agent turn shadow producer', () => {
     cli.agentOptions = { model: 'claude/claude-opus-4-8', toolsConfig: { mcpExposure: 'cli' } };
     await enqueueMessage(cli, { ...base, mcp: mcpFixture().mcp });
     produced += 1;
-    const cliRows = await shadowRuns();
+    const cliRows = await agentTurnRuns();
     expect(cliRows).toHaveLength(produced);
     const cliTurn = cliRows[produced - 1].action_input.turn as { tools?: { definitions?: Array<{ name: string }> } };
     expect(cliTurn.tools?.definitions?.map((tool) => tool.name)).toContain('query_sdk');
 
     // A separate placeholder cannot enforce the signed capture policy.
-    const before = (await shadowRuns()).length;
+    const before = (await agentTurnRuns()).length;
     await enqueueMessage(messageFor(org.id), {
       ...base,
       catalog: catalogFor(claudeModule({ buildCredentialPlaceholder: () => 'lobu_secret_11111111-2222-3333-4444-555555555555' })),
       mcp: mcpFixture().mcp,
     });
-    expect(await shadowRuns()).toHaveLength(before);
+    expect(await agentTurnRuns()).toHaveLength(before);
 
     // Discovery failed: nothing to hand the turn, but the turn itself runs.
     await enqueueMessage(messageFor(org.id), { ...base, mcp: mcpFixture({ fail: true }).mcp });
@@ -1086,7 +1083,7 @@ describe('agent turn shadow producer', () => {
     await sql`
       INSERT INTO agent_transcript_snapshot
         (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status, created_at)
-      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-turn', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
     `;
 
     await enqueueMessage(messageFor(org.id), {
@@ -1096,7 +1093,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     expect((run.action_input.turn as Record<string, unknown>).session_jsonl).toBe('');
     const claimed = await (await pollFleet('fleet-native-history', { agent_turn: true })).json();
     // Pi owns branch replay, provider conversion and interrupted tool repair.
@@ -1168,7 +1165,7 @@ describe('agent turn shadow producer', () => {
     await sql`
       INSERT INTO agent_transcript_snapshot
         (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status, created_at)
-      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-turn', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
     `;
 
     await enqueueMessage(messageFor(org.id), {
@@ -1178,7 +1175,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     expect((run.action_input.turn as Record<string, unknown>).session_jsonl).toBe('');
     const claimed = await (await pollFleet('fleet-native-compacted', { agent_turn: true })).json();
     const turn = claimed.payload.turn;
@@ -1195,15 +1192,15 @@ describe('agent turn shadow producer', () => {
     const dependencies = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
     const firstSource = await admittedMessage(messageFor(org.id));
     const secondSource = await admittedMessage({ ...messageFor(org.id), messageId: 'queued-second' });
-    await enqueueAgentTurnShadow(firstSource, dependencies);
-    await enqueueAgentTurnShadow(secondSource, dependencies);
-    const [first, second] = await shadowRuns();
+    await enqueueAgentTurn(firstSource, dependencies);
+    await enqueueAgentTurn(secondSource, dependencies);
+    const [first, second] = await agentTurnRuns();
     expect(first.id).toBeGreaterThan(secondSource.runId!);
     const firstClaim = await pollFleet('fleet-native-first', { agent_turn: true });
     expect((await firstClaim.json()).run_id).toBe(first.id);
     const session = nativeSession();
     const completed = await postAsFleet('/api/workers/complete-agent-turn', {
-      run_id: first.id, worker_id: 'fleet-native-first', status: 'completed', text: 'an observational copy', session_jsonl: session,
+      run_id: first.id, worker_id: 'fleet-native-first', status: 'completed', text: 'the isolate answer', session_jsonl: session,
     });
     expect((await completed.json()).status).toBe('completed');
     const secondClaim = await pollFleet('fleet-native-second', { agent_turn: true });
@@ -1220,7 +1217,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const realDb = db.getDb();
     let attemptedRead = false;
     const unavailable = new Proxy(realDb, {
@@ -1253,7 +1250,7 @@ describe('agent turn shadow producer', () => {
     await sql`
       INSERT INTO agent_transcript_snapshot
         (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
-      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${run.parent_run_id}, ${current}, ${Buffer.byteLength(current)}, 'completed')
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-turn', ${run.parent_run_id}, ${current}, ${Buffer.byteLength(current)}, 'completed')
     `;
     const retry = await pollFleet('fleet-snapshot-retry', { agent_turn: true });
     const claimed = await retry.json();
@@ -1271,7 +1268,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(first, deps);
     const { run_id } = await (await pollFleet('fleet-repeat-input', { agent_turn: true })).json();
     await enqueueMessage({ ...first, messageId: 'durable-follow-up', messageText: 'keep this input' }, deps);
-    const follower = (await shadowRuns())[1];
+    const follower = (await agentTurnRuns())[1];
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-repeat-input' });
       expect(await response.json()).toMatchObject({ continue: true, steer: [
@@ -1288,7 +1285,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(first, deps);
     const { run_id } = await (await pollFleet('fleet-input-token-scope', { agent_turn: true })).json();
     await enqueueMessage({ ...first, messageId: 'wrong-token-input' }, deps);
-    const [owner, follower] = await shadowRuns();
+    const [owner, follower] = await agentTurnRuns();
     const sql = getTestDb();
     await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{credential}',
       (SELECT action_input->'credential' FROM runs WHERE id = ${owner.id})) WHERE id = ${follower.id}`;
@@ -1303,12 +1300,12 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const source = await admittedMessage(messageFor(org.id));
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
-    await Promise.all([enqueueAgentTurnShadow(source, deps), enqueueAgentTurnShadow(source, deps)]);
-    expect(await shadowRuns()).toHaveLength(1);
+    await Promise.all([enqueueAgentTurn(source, deps), enqueueAgentTurn(source, deps)]);
+    expect(await agentTurnRuns()).toHaveLength(1);
     const sql = getTestDb();
     await sql`UPDATE runs SET status = 'completed' WHERE run_type = 'agent_turn' AND organization_id = ${org.id}`;
-    await enqueueAgentTurnShadow(source, deps);
-    expect(await shadowRuns()).toHaveLength(1);
+    await enqueueAgentTurn(source, deps);
+    expect(await agentTurnRuns()).toHaveLength(1);
   });
 
   it('keeps cancellation nonterminal until its worker reports cleanup', async () => {
@@ -1341,13 +1338,13 @@ describe('agent turn shadow producer', () => {
     }
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
     await enqueueMessage(first, deps);
-    const [owner] = await shadowRuns();
+    const [owner] = await agentTurnRuns();
     const worker_id = 'fleet-input-receipts';
     const job = await (await pollFleet(worker_id, { agent_turn: true })).json();
     for (const [index, text] of texts.entries()) {
       await enqueueMessage({ ...first, messageId: `input-${index}`, messageText: text }, deps);
     }
-    const followers = (await shadowRuns()).slice(1);
+    const followers = (await agentTurnRuns()).slice(1);
     const entries = [
       ...(base ? base.trim().split('\n').slice(1).map((line) => JSON.parse(line)) : []),
       { type: 'message', id: 'current-user', parentId: base ? JSON.parse(base.trim().split('\n').at(-1)!).id : null,
@@ -1375,9 +1372,9 @@ describe('agent turn shadow producer', () => {
     const retry = await postAsFleet('/api/workers/complete-agent-turn', { ...body, status: 'failed', error: 'lost response' });
     expect(await retry.json()).toEqual({ ok: true, status: 'completed', idempotent: true });
     expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(1);
-    const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-shadow'`;
+    const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'`;
     expect(replies).toHaveLength(1);
-    expect(replies[0].action_input.processedMessageIds).toEqual(['msg-shadow', 'input-0', 'input-1']);
+    expect(replies[0].action_input.processedMessageIds).toEqual(['msg-turn', 'input-0', 'input-1']);
     expect(await sql`SELECT id FROM runs WHERE queue_name = 'internal:turn_timeout'`).toHaveLength(0);
     expect(await sql`SELECT message_id FROM agent_run_input`).toHaveLength(0);
   });
@@ -1397,13 +1394,13 @@ describe('agent turn shadow producer', () => {
         timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'assistant', content: 'different branch' } }) + '\n';
       const response = await postAsFleet('/api/workers/complete-agent-turn', body);
       expect(await response.json()).toMatchObject({ status: 'failed' });
-      expect((await shadowRuns()).map((run) => run.status)).toEqual(['failed', 'pending', 'pending']);
+      expect((await agentTurnRuns()).map((run) => run.status)).toEqual(['failed', 'pending', 'pending']);
     },
   );
 
   it.each(['current', 'older', 'pre-existing-entry', 'wrong-session', 'missing-boundary', 'compaction'])(
     'checks %s native base identity before consuming follow-ups', async (kind) => {
-      const base = nativeSession().replace('what is the shadow lane?', 'same text').replace('"version":3', kind === 'older' ? '"version":2' : '"version":3');
+      const base = nativeSession().replace('what is the isolate lane?', 'same text').replace('"version":3', kind === 'older' ? '"version":2' : '"version":3');
       const { body, job } = await inputScenario(undefined, base);
       expect(job.payload.turn.session_jsonl).toBe(base);
       const beat = await postAsFleet('/api/workers/heartbeat', { run_id: body.run_id, worker_id: body.worker_id });
@@ -1433,7 +1430,7 @@ describe('agent turn shadow producer', () => {
     const spy = vi.spyOn(db, 'getDb').mockReturnValue(broken);
     try { expect((await postAsFleet('/api/workers/complete-agent-turn', body)).status).toBe(500); }
     finally { spy.mockRestore(); }
-    expect((await shadowRuns()).map((run) => run.status)).toEqual(['running', 'pending', 'pending']);
+    expect((await agentTurnRuns()).map((run) => run.status)).toEqual(['running', 'pending', 'pending']);
     expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(0);
     expect(await sql`SELECT id FROM runs WHERE queue_name = 'thread_response'`).toHaveLength(0);
     expect((await (await postAsFleet('/api/workers/complete-agent-turn', body)).json()).status).toBe('completed');
@@ -1479,7 +1476,7 @@ describe('agent turn shadow producer', () => {
     expect((await (await pollFleet('fleet-successor', { agent_turn: true })).json()).run_id).toBe(followers[0].id);
     const late = await postAsFleet('/api/workers/complete-agent-turn', body);
     expect(await late.json()).toEqual({ ok: true, status: 'cancelled', idempotent: true });
-    expect((await shadowRuns()).map((run) => run.status)).toEqual(['cancelled', 'running', 'pending']);
+    expect((await agentTurnRuns()).map((run) => run.status)).toEqual(['cancelled', 'running', 'pending']);
   });
 
   it('delivers pending cancellation and malformed dispatch errors atomically', async () => {
@@ -1490,7 +1487,7 @@ describe('agent turn shadow producer', () => {
     const next = await (await pollFleet('fleet-malformed-response', { agent_turn: true })).json();
     await failClaimedWorkerRun({ runId: next.run_id, workerId: 'fleet-malformed-response', errorMessage: 'incomplete envelope' });
     const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' ORDER BY id`;
-    expect(replies.map((row) => row.action_input.processedMessageIds)).toEqual([['msg-shadow'], ['input-0'], ['input-1']]);
+    expect(replies.map((row) => row.action_input.processedMessageIds)).toEqual([['msg-turn'], ['input-0'], ['input-1']]);
     expect(replies.slice(1).map((row) => row.action_input.error)).toEqual(['agent turn cancelled', 'incomplete envelope']);
     expect((await runRow(owner.id)).status).toBe('completed');
   });
@@ -1573,7 +1570,6 @@ describe('agent turn shadow producer', () => {
   ])('keeps incompatible %s input separate and preserves FIFO barriers', async (kind, changes) => {
     const org = await createTestOrganization();
     const first = messageFor(org.id);
-    process.env[SHADOW_ENV] = '*';
     if (kind === 'organization') changes = { organizationId: (await createTestOrganization()).id };
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
     await enqueueMessage(first, deps);
@@ -1585,7 +1581,7 @@ describe('agent turn shadow producer', () => {
     if (['organization', 'agent', 'conversation'].includes(kind)) {
       expect(offered.map((input: { message_id: string }) => input.message_id)).toEqual(['after-barrier']);
     } else expect(offered).toEqual([]);
-    expect((await shadowRuns()).map((run) => run.status)).toEqual(['running', 'pending', 'pending']);
+    expect((await agentTurnRuns()).map((run) => run.status)).toEqual(['running', 'pending', 'pending']);
   });
 
   it('cancels a native turn on explicit cancel admission instead of steering', async () => {
@@ -1615,7 +1611,7 @@ describe('agent turn shadow producer', () => {
       await enqueueMessage(first, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
       });
-      const run = (await shadowRuns()).at(-1)!;
+      const run = (await agentTurnRuns()).at(-1)!;
       await sql`UPDATE runs SET status = ${status}, claimed_by = 'fleet-cancel-state' WHERE id = ${run.id}`;
       const cancel = await admittedMessage({ ...first, ...command, messageId: `cancel-${status}` });
       expect(await cancelAgentTurn(cancel)).toBe(true);
@@ -1638,7 +1634,6 @@ describe('agent turn shadow producer', () => {
   it('keeps cancellation within its organization, agent, conversation and posting user', async () => {
     const org = await createTestOrganization();
     const otherOrg = await createTestOrganization();
-    process.env[SHADOW_ENV] = '*';
     const first = messageFor(org.id);
     const variants = [first, { ...first, organizationId: otherOrg.id }, { ...first, agentId: 'other-selected-agent' },
       { ...first, conversationId: 'other-conversation' }, { ...first, userId: 'other-user' }];
@@ -1649,7 +1644,7 @@ describe('agent turn shadow producer', () => {
     }
     const cancel = await admittedMessage({ ...first, messageId: 'scoped-cancel', messageText: '/cancel' });
     expect(await cancelAgentTurn(cancel)).toBe(true);
-    expect((await shadowRuns()).map((run) => run.status)).toEqual(['cancelled', 'pending', 'pending', 'pending', 'pending']);
+    expect((await agentTurnRuns()).map((run) => run.status)).toEqual(['cancelled', 'pending', 'pending', 'pending', 'pending']);
   });
 
   it('controls the active turn before queued work and consumes duplicate cancellation across workers', async () => {
@@ -1660,7 +1655,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(first, deps);
     const { run_id: activeId } = await (await pollFleet('fleet-control-active', { agent_turn: true })).json();
     await enqueueMessage({ ...first, messageId: 'queued-after-active' }, deps);
-    const queued = (await shadowRuns())[1];
+    const queued = (await agentTurnRuns())[1];
     const cancel = await admittedMessage({ ...first, messageId: 'replayed-cancel', messageText: '/cancel' });
     expect(await Promise.all([cancelAgentTurn(cancel), cancelAgentTurn(cancel)])).toEqual([true, true]);
     expect((await runRow(activeId)).status).toBe('running');
@@ -1679,12 +1674,12 @@ describe('agent turn shadow producer', () => {
     const first = messageFor(org.id);
     const cancel = await admittedMessage({ ...first, messageId: 'early-cancel', messageText: '/cancel' });
     expect(await cancelAgentTurn(cancel)).toBe(true);
-    expect(await shadowRuns()).toHaveLength(0);
+    expect(await agentTurnRuns()).toHaveLength(0);
     await enqueueMessage(first, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
     });
     expect(await cancelAgentTurn(cancel)).toBe(true);
-    expect((await shadowRuns())[0].status).toBe('pending');
+    expect((await agentTurnRuns())[0].status).toBe('pending');
   });
 
   it('does not let a delayed cancellation stop a turn admitted after it', async () => {
@@ -1694,7 +1689,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(first, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
     });
-    const [later] = await shadowRuns();
+    const [later] = await agentTurnRuns();
     expect((await (await pollFleet('fleet-after-delayed-cancel', { agent_turn: true })).json()).run_id).toBe(later.id);
     expect(await cancelAgentTurn(cancel)).toBe(true);
     const heartbeat = await postAsFleet('/api/workers/heartbeat', {
@@ -1715,9 +1710,9 @@ describe('agent turn shadow producer', () => {
     finally { spy.mockRestore(); }
     await expect(cancelAgentTurn({ ...cancel, runId: 0 })).rejects.toThrow('admitted message run ID');
     await expect(cancelAgentTurn({ ...cancel, messageId: 'wrong-message' })).rejects.toThrow('no matching admitted message');
-    expect((await shadowRuns())[0].status).toBe('pending');
+    expect((await agentTurnRuns())[0].status).toBe('pending');
     expect(await cancelAgentTurn(cancel)).toBe(true);
-    expect((await shadowRuns())[0].status).toBe('cancelled');
+    expect((await agentTurnRuns())[0].status).toBe('cancelled');
   });
 
   it('preserves a completion committed while cancellation waits for the active row', async () => {
@@ -1728,7 +1723,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(first, deps);
     const { run_id: activeId } = await (await pollFleet('fleet-completing-control', { agent_turn: true })).json();
     await enqueueMessage({ ...first, messageId: 'queued-after-completion' }, deps);
-    const queued = (await shadowRuns())[1];
+    const queued = (await agentTurnRuns())[1];
     const cancel = await admittedMessage({ ...first, messageId: 'completion-race-cancel', messageText: '/cancel' });
     let locked!: () => void;
     const lockReady = new Promise<void>((resolve) => { locked = resolve; });
@@ -1770,7 +1765,7 @@ describe('agent turn shadow producer', () => {
         runtime: { runtimeProviderId: 'vercel', sandboxId: 'sandbox-1' },
       }
     );
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = run.action_input.turn as { tools?: { remote_runtime?: unknown } };
     expect(turn.tools?.remote_runtime).toEqual({ provider_id: 'vercel' });
     // The exec route trusts only the signed token for these — never a body.
@@ -1791,7 +1786,7 @@ describe('agent turn shadow producer', () => {
       mcp: mcpFixture().mcp,
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     expect((run.action_input.turn as { tools?: { remote_runtime?: unknown } }).tools?.remote_runtime).toBeUndefined();
   });
 
@@ -1804,15 +1799,16 @@ describe('agent turn shadow producer', () => {
     });
 
     const sql = getTestDb();
-    // Both are keyed (deploymentName, messageId) and both are first-writer-wins,
-    // so a shadow that wrote either would let the observational lane terminate
-    // or replay the real turn.
+    // The PRODUCER writes neither. Both are keyed (deploymentName, messageId)
+    // and first-writer-wins, and `handleMessage` already armed the marker and
+    // journaled the input before calling the producer — a second write here
+    // would let one turn terminate or replay another.
     const [markers] = (await sql`
       SELECT count(*)::int AS n FROM runs WHERE queue_name = 'internal:turn_timeout'
     `) as unknown as Array<{ n: number }>;
     expect(markers.n).toBe(0);
     const [journal] = (await sql`
-      SELECT count(*)::int AS n FROM agent_run_input WHERE message_id = 'msg-shadow'
+      SELECT count(*)::int AS n FROM agent_run_input WHERE message_id = 'msg-turn'
     `) as unknown as Array<{ n: number }>;
     expect(journal.n).toBe(0);
   });
@@ -1824,7 +1820,7 @@ describe('agent turn shadow producer', () => {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
     }
-    const [first, second] = await shadowRuns();
+    const [first, second] = await agentTurnRuns();
     const workers = ['fleet-claim-a', 'fleet-claim-b', 'fleet-claim-c'];
     const responses = await Promise.all(workers.map((worker) => pollFleet(worker, { agent_turn: true })));
     expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
@@ -1847,7 +1843,7 @@ describe('agent turn shadow producer', () => {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
     }
-    const [first, second] = await shadowRuns();
+    const [first, second] = await agentTurnRuns();
     const sql = getTestDb();
     await sql.begin(async (tx) => {
       await tx`SELECT id FROM runs WHERE id = ${first.id} FOR UPDATE`;
@@ -1864,7 +1860,7 @@ describe('agent turn shadow producer', () => {
     await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
     });
-    const [template] = await shadowRuns();
+    const [template] = await agentTurnRuns();
     const sql = getTestDb();
     await sql`UPDATE runs SET status = 'completed' WHERE id = ${template.id}`;
     let releaseInsert!: () => void;
@@ -1932,7 +1928,7 @@ describe('agent turn shadow producer', () => {
         expect(competingClaim).toBeDefined();
         expect(competingClaim!.run_id).toBeUndefined();
       }
-      expect((await shadowRuns()).filter((run) => run.status === 'pending')).toHaveLength(1);
+      expect((await agentTurnRuns()).filter((run) => run.status === 'pending')).toHaveLength(1);
       const complete = await postAsFleet('/api/workers/complete-agent-turn', {
         run_id: claimedId, worker_id: 'fleet-insert-race', status: 'completed', session_jsonl: nativeSession(), text: 'finished',
       });
@@ -1954,7 +1950,7 @@ describe('agent turn shadow producer', () => {
           agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
         });
       }
-      const [first, second] = await shadowRuns();
+      const [first, second] = await agentTurnRuns();
       const sql = getTestDb();
       await sql`
         UPDATE runs SET status = ${status}, claimed_by = 'fleet-crashed',
@@ -1974,7 +1970,7 @@ describe('agent turn shadow producer', () => {
       await enqueueMessage(messageFor(org.id), {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
-      const [run] = await shadowRuns();
+      const [run] = await agentTurnRuns();
       const sql = getTestDb();
       await sql`
         UPDATE runs SET action_input = jsonb_set(action_input, '{turn}', (action_input->'turn') - ${field})
@@ -1995,7 +1991,7 @@ describe('agent turn shadow producer', () => {
           agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
         });
       }
-      const [first, second] = await shadowRuns();
+      const [first, second] = await agentTurnRuns();
       const sql = getTestDb();
       // Existing/out-of-order work must also fence the older pending row.
       await sql`UPDATE runs SET status = 'running', claimed_by = 'fleet-existing-owner' WHERE id = ${second.id}`;
@@ -2006,21 +2002,20 @@ describe('agent turn shadow producer', () => {
   );
 
   it('claims distinct organization, agent and conversation scopes independently', async () => {
-    process.env[SHADOW_ENV] = '*';
     const org = await createTestOrganization();
     const otherOrg = await createTestOrganization();
     const base = messageFor(org.id);
     for (const message of [
       { ...base, messageId: 'scope-base' },
       { ...base, messageId: 'scope-org', organizationId: otherOrg.id },
-      { ...base, messageId: 'scope-agent', agentId: 'other-shadow-agent' },
-      { ...base, messageId: 'scope-conversation', conversationId: 'other-shadow-conversation' },
+      { ...base, messageId: 'scope-agent', agentId: 'other-agent' },
+      { ...base, messageId: 'scope-conversation', conversationId: 'other-conversation' },
     ]) {
       await enqueueMessage(message, {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
     }
-    const runs = await shadowRuns();
+    const runs = await agentTurnRuns();
     expect(runs).toHaveLength(4);
     const claims = await Promise.all(runs.map(async (_, index) =>
       (await pollFleet(`fleet-scope-${index}`, { agent_turn: true })).json()
@@ -2035,7 +2030,7 @@ describe('agent turn shadow producer', () => {
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
 
     const response = await pollFleet('fleet-agent-turn', { agent_turn: true });
     expect(response.status).toBe(200);
@@ -2064,7 +2059,7 @@ describe('agent turn shadow producer', () => {
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
 
     // An older daemon advertises no `agent_turn`. If it could claim the row it
     // would fall through `executeRun`'s default arm into `executeSyncRun`.
@@ -2088,7 +2083,7 @@ describe('agent turn shadow producer', () => {
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
 
     const sql = getTestDb();
     await sql`
@@ -2122,10 +2117,9 @@ describe('agent turn shadow producer', () => {
     };
     // No env var is set at all. Every agent runs natively now, so the turn is
     // produced anyway, and it owns the conversation's reply.
-    delete process.env[SHADOW_ENV];
     await enqueueMessage(messageFor(org.id), deps);
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     expect(run).toBeDefined();
     // The completion route 409s a turn with no reply envelope, so the
     // producer must always stamp one.
@@ -2178,7 +2172,7 @@ describe('agent turn shadow producer', () => {
     const noModel = messageFor(org.id);
     noModel.agentOptions = {};
     expect(await enqueueMessage(noModel, deps)).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
-    expect(await shadowRuns()).toHaveLength(0);
+    expect(await agentTurnRuns()).toHaveLength(0);
 
     // Google speaks a protocol whose pi-ai adapter is not fetch-native, so it
     // cannot be bundled for the isolate. The user's fix is the model choice.
@@ -2188,13 +2182,13 @@ describe('agent turn shadow producer', () => {
         catalog: catalogFor(claudeModule({ sdkCompat: 'google' })),
       })
     ).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
-    expect(await shadowRuns()).toHaveLength(0);
+    expect(await agentTurnRuns()).toHaveLength(0);
 
     // No public gateway URL means no URL a fleet worker could reach the proxy on.
     expect(await enqueueMessage(messageFor(org.id), { ...deps, gatewayUrl: undefined })).toBe(
       AgentErrorCode.NO_MODEL_CONFIGURED
     );
-    expect(await shadowRuns()).toHaveLength(0);
+    expect(await agentTurnRuns()).toHaveLength(0);
 
     // Whatever code the producer reports MUST carry its own prose. The four
     // `PROVIDER_*` codes deliberately do not — they exist to relay the
@@ -2242,7 +2236,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
     expect(unrunnable).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
-    expect(await shadowRuns()).toHaveLength(0);
+    expect(await agentTurnRuns()).toHaveLength(0);
 
     // The consumer discharges the marker it armed, with the producer's reason.
     expect(await failTurnIfPending(deploymentName, message.messageId, unrunnable!)).toBe(true);
@@ -2282,7 +2276,7 @@ describe('agent turn shadow producer', () => {
     const noText = messageFor(org.id);
     noText.messageText = '   ';
     expect(await enqueueMessage(noText, deps)).toBeUndefined();
-    expect(await shadowRuns()).toHaveLength(0);
+    expect(await agentTurnRuns()).toHaveLength(0);
   });
 
   it('produces the turn for every agent, with no selection gate', async () => {
@@ -2296,7 +2290,7 @@ describe('agent turn shadow producer', () => {
         gatewayUrl: GATEWAY_URL,
       })
     ).toBeUndefined();
-    const runs = await shadowRuns();
+    const runs = await agentTurnRuns();
     expect(runs).toHaveLength(1);
     expect(runs[0]!.action_input.reply).toBeDefined();
   });
@@ -2325,7 +2319,7 @@ describe('agent turn shadow producer', () => {
       artifacts: fakeArtifacts(),
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = (run?.action_input as { turn: Record<string, unknown> }).turn;
     expect(turn.message_images).toEqual([
       { mime_type: 'image/png', data: Buffer.from('PNG!').toString('base64') },
@@ -2362,7 +2356,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
       artifacts: fakeArtifacts(),
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn: run.action_input.turn })).toBe(true);
     const response = await pollFleet('fleet-attachment-boundary', { agent_turn: true });
     expect(response.status).toBe(200);
@@ -2394,7 +2388,7 @@ describe('agent turn shadow producer', () => {
       artifacts: fakeArtifacts(),
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = (run?.action_input as { turn: Record<string, unknown> }).turn;
     expect(turn.message_text).toBe('');
     expect(turn.message_images).toHaveLength(1);
@@ -2414,8 +2408,8 @@ describe('agent turn shadow producer', () => {
     });
     // Still just the first run: the unresolvable one names the file, so it DOES
     // enqueue — what must never enqueue is a message with nothing at all.
-    expect(await shadowRuns()).toHaveLength(2);
-    const second = (await shadowRuns())[1];
+    expect(await agentTurnRuns()).toHaveLength(2);
+    const second = (await agentTurnRuns())[1];
     const secondTurn = (second?.action_input as { turn: Record<string, unknown> }).turn;
     expect(secondTurn.message_images).toBeUndefined();
     expect(secondTurn.message_files).toEqual([{ name: 'shot.png', mime_type: 'image/png' }]);
@@ -2429,7 +2423,7 @@ describe('agent turn shadow producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
 
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const turn = (run?.action_input as { turn: { provider: { input?: string[] } } }).turn;
     // Whatever pi-ai says this model accepts — asserted as a non-empty list
     // that always contains text, because the registry's per-model answer is
@@ -2443,23 +2437,21 @@ describe('agent turn completion', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
     delete process.env.WORKER_API_TOKEN;
-    process.env[SHADOW_ENV] = AGENT_ID;
   });
 
   afterEach(() => {
-    delete process.env[SHADOW_ENV];
   });
 
   it('records the native session on the run row and is idempotent on a retry', async () => {
     const workerId = 'fleet-complete';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     const session_jsonl = nativeSession();
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
       worker_id: workerId,
       status: 'completed',
-      text: 'an observational copy',
+      text: 'the isolate answer',
       stop_reason: 'stop',
       usage: { input: 11, output: 7 },
       session_jsonl,
@@ -2471,13 +2463,13 @@ describe('agent turn completion', () => {
     const row = await runRow(runId);
     expect(row.status).toBe('completed');
     expect(row.exit_reason).toBe('ok');
-    expect(row.output_tail).toBe('an observational copy');
+    expect(row.output_tail).toBe('the isolate answer');
     expect(row.error_message).toBe(null);
-    // The turn envelope survives alongside the result, so the shadow stays
-    // diffable against what the subprocess lane answered.
+    // The turn envelope survives alongside the result, so a completed run
+    // still shows what it was asked to do, not only what it answered.
     expect(row.action_input.turn).toBeDefined();
     expect(row.action_input.result).toEqual({
-      text: 'an observational copy',
+      text: 'the isolate answer',
       stop_reason: 'stop',
       usage: { input: 11, output: 7 },
       session_jsonl,
@@ -2500,7 +2492,7 @@ describe('agent turn completion', () => {
 
   it('persists native IDs, tool pairs and summaries verbatim under the completion fence', async () => {
     const workerId = 'fleet-native-snapshot';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     const session = nativeSession([
       { type: 'message', id: 'u1', parentId: null, message: { role: 'user', content: 'count' } },
       { type: 'message', id: 'a1', parentId: 'u1', message: { role: 'assistant', content: [
@@ -2530,7 +2522,7 @@ describe('agent turn completion', () => {
 
   it('does not persist a stale completion after its lease changes during the request', async () => {
     const workerId = 'fleet-lost-lease';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     const realDb = db.getDb();
     let leaseChanged = false;
     const stolenLease = new Proxy(realDb, {
@@ -2568,7 +2560,7 @@ describe('agent turn completion', () => {
 
   it('fails the run when the worker reports a failed turn', async () => {
     const workerId = 'fleet-fail';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
@@ -2586,7 +2578,7 @@ describe('agent turn completion', () => {
   });
 
   it('refuses a worker that did not claim the run', async () => {
-    const runId = await claimedShadowRun('fleet-claimant');
+    const runId = await claimedTurnRun('fleet-claimant');
 
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
@@ -2602,16 +2594,8 @@ describe('agent turn completion', () => {
 
   it('an authoritative turn publishes the reply and persists its native session', async () => {
     const workerId = 'fleet-delivers';
-    const runId = await claimedShadowRun(workerId);
-    // Flip the run the way the cutover will: authoritative, with the reply
-    // envelope the producer stamps beside the guest's turn.
+    const runId = await claimedTurnRun(workerId);
     const sql = getTestDb();
-    await sql`
-      UPDATE runs
-      SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb)
-      WHERE id = ${runId}
-    `;
-
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
       worker_id: workerId,
@@ -2632,10 +2616,10 @@ describe('agent turn completion', () => {
       ORDER BY id DESC LIMIT 1
     `) as unknown as Array<{ action_input: Record<string, unknown> }>;
     expect(reply.action_input).toMatchObject({
-      messageId: 'msg-shadow',
-      channelId: 'api_user-shadow',
-      conversationId: 'conv-shadow',
-      userId: 'user-shadow',
+      messageId: 'msg-turn',
+      channelId: 'api_user-turn',
+      conversationId: 'conv-turn',
+      userId: 'user-turn',
       platform: 'api',
       finalText: 'the isolate lane answered',
     });
@@ -2662,7 +2646,7 @@ describe('agent turn completion', () => {
     ['oversize', nativeSession([{ type: 'message', id: 'x', parentId: null, message: { role: 'user', content: 'x'.repeat(4 * 1024 * 1024) } }])],
   ])('fails a %s snapshot visibly and preserves the previous session', async (_kind, session_jsonl) => {
     const workerId = 'fleet-invalid-snapshot';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     const sql = getTestDb();
     const [run] = await sql`SELECT organization_id FROM runs WHERE id = ${runId}`;
     const [prior] = await sql`
@@ -2673,7 +2657,7 @@ describe('agent turn completion', () => {
     await sql`
       INSERT INTO agent_transcript_snapshot
         (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
-      VALUES (${run.organization_id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${previous}, ${Buffer.byteLength(previous)}, 'completed')
+      VALUES (${run.organization_id}, ${AGENT_ID}, 'conv-turn', ${prior.id}, ${previous}, ${Buffer.byteLength(previous)}, 'completed')
     `;
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId, worker_id: workerId, status: 'completed', text: 'unpersisted answer', session_jsonl,
@@ -2690,20 +2674,14 @@ describe('agent turn completion', () => {
     expect(snapshots[0]).toMatchObject({ run_id: prior.id, snapshot_jsonl: previous });
     const replies = await threadResponses();
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatchObject({ messageId: 'msg-shadow', error: result.error_message });
+    expect(replies[0]).toMatchObject({ messageId: 'msg-turn', error: result.error_message });
     expect(replies[0]).not.toHaveProperty('finalText');
   });
 
   it('a failed authoritative turn delivers the error instead of hanging the client', async () => {
     const workerId = 'fleet-delivers-error';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     const sql = getTestDb();
-    await sql`
-      UPDATE runs
-      SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb)
-      WHERE id = ${runId}
-    `;
-
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
       worker_id: workerId,
@@ -2717,7 +2695,7 @@ describe('agent turn completion', () => {
       WHERE queue_name = 'thread_response' AND run_type = 'chat_message'
       ORDER BY id DESC LIMIT 1
     `) as unknown as Array<{ action_input: Record<string, unknown> }>;
-    expect(reply.action_input).toMatchObject({ messageId: 'msg-shadow', error: 'the provider refused' });
+    expect(reply.action_input).toMatchObject({ messageId: 'msg-turn', error: 'the provider refused' });
     // A failed turn writes no transcript: there is no answer to remember.
     const [{ n }] = (await sql`
       SELECT count(*)::int AS n FROM agent_transcript_snapshot WHERE run_id = ${runId}
@@ -2743,7 +2721,7 @@ describe('agent turn completion', () => {
 
   it('drops an oversize or malformed span unpublished and unacknowledged, and keeps the beat', async () => {
     const workerId = 'fleet-oversize-span';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     // One past TURN_DELTA_MAX_CHARS (24_000): the schema bound, now enforced.
     const oversize = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
@@ -2770,7 +2748,7 @@ describe('agent turn completion', () => {
 
   it('streams an in-flight turn to the client on the heartbeat it already sends', async () => {
     const workerId = 'fleet-streams';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     // The worker beats twice as the reply grows. The text is INCREMENTAL: the
     // second beat CONTINUES the first rather than restating it, because every
@@ -2800,10 +2778,10 @@ describe('agent turn completion', () => {
     // Addressed from the RUN's own reply envelope, never from the heartbeat
     // body — the worker names no destination and cannot.
     expect(rows[0]).toMatchObject({
-      messageId: 'msg-shadow',
-      channelId: 'api_user-shadow',
-      conversationId: 'conv-shadow',
-      userId: 'user-shadow',
+      messageId: 'msg-turn',
+      channelId: 'api_user-turn',
+      conversationId: 'conv-turn',
+      userId: 'user-turn',
       platform: 'api',
       delta: 'the isolate',
       // Not a replacement: the client appends this span to what it has.
@@ -2825,7 +2803,7 @@ describe('agent turn completion', () => {
 
   it('never publishes the same span twice on a retried or reordered heartbeat', async () => {
     const workerId = 'fleet-reorder';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
@@ -2872,7 +2850,7 @@ describe('agent turn completion', () => {
   });
 
   it('refuses a delta from a worker that did not claim the run', async () => {
-    const claimantRunId = await claimedShadowRun('fleet-claimant-stream');
+    const claimantRunId = await claimedTurnRun('fleet-claimant-stream');
     // Not this worker's run: its text must not reach another turn's client.
     // The lease fence refuses it, and — critically — it gets NO ack, because
     // an ack would tell a worker to drop text it may legitimately still owe.
@@ -2890,7 +2868,7 @@ describe('agent turn completion', () => {
 
   it('publishes a finished tool call as the tool_use event both lanes use', async () => {
     const workerId = 'fleet-tool-trace';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     const beat = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
@@ -2913,7 +2891,7 @@ describe('agent turn completion', () => {
     // `tool_execution_end`, so every consumer already subscribed to `tool_use`
     // sees this lane's tools without learning a second shape.
     expect(rows[0]).toMatchObject({
-      conversationId: 'conv-shadow',
+      conversationId: 'conv-turn',
       customEvent: {
         name: 'tool_use',
         // `input` is what the SPA renders as the tool row's args, as on the subprocess lane.
@@ -2924,7 +2902,7 @@ describe('agent turn completion', () => {
 
   it('stamps repliedInBand so an in-band reply is not delivered twice', async () => {
     const workerId = 'fleet-in-band';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     // The agent called `send_message` into the conversation it is answering,
     // so the user has already READ the answer. The guest reports it; without
@@ -2953,7 +2931,7 @@ describe('agent turn completion', () => {
 
   it('leaves an ordinary turn unmarked, so only a positive signal suppresses', async () => {
     const workerId = 'fleet-not-in-band';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
@@ -2972,7 +2950,7 @@ describe('agent turn completion', () => {
 
   it('never marks a FAILED turn as replied in band', async () => {
     const workerId = 'fleet-in-band-failed';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
@@ -2993,7 +2971,7 @@ describe('agent turn completion', () => {
 
   it('refuses an authoritative turn that carries nowhere to deliver', async () => {
     const workerId = 'fleet-authoritative';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     // Authoritative, but with the reply envelope removed — the deploy-skew
     // shape where a newer producer marks turns authoritative and an older one
     // stamped no address. Completing it would transition the run and drop the
@@ -3001,8 +2979,7 @@ describe('agent turn completion', () => {
     const sql = getTestDb();
     await sql`
       UPDATE runs
-      SET action_input =
-        jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) - 'reply'
+      SET action_input = action_input - 'reply'
       WHERE id = ${runId}
     `;
 
@@ -3021,7 +2998,7 @@ describe('agent turn completion', () => {
 
   it('the generic complete route refuses an agent turn and leaves it running', async () => {
     const workerId = 'fleet-generic';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
 
     // A daemon that predates the lane would finalize the turn with sync
     // semantics, dropping the transcript and the reply. The reaper terminalizes
@@ -3038,10 +3015,10 @@ describe('agent turn completion', () => {
 });
 
 /**
- * The reaper's side of the same distinction: a fleet worker that crashes
- * mid-turn never reaches the completion route, so the run reaper is the only
- * thing left that can tell the client. An authoritative turn gets the error
- * the completion route would have published; a shadow turn ends silently.
+ * The reaper's side of delivery: a fleet worker that crashes mid-turn never
+ * reaches the completion route, so the run reaper is the only thing left that
+ * can tell the client. It publishes the error the completion route would have,
+ * as long as the run says where the reply goes.
  */
 describe('agent turn reaper', () => {
   const STALE_THRESHOLD_SECONDS = 60;
@@ -3049,11 +3026,9 @@ describe('agent turn reaper', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
     delete process.env.WORKER_API_TOKEN;
-    process.env[SHADOW_ENV] = AGENT_ID;
   });
 
   afterEach(() => {
-    delete process.env[SHADOW_ENV];
   });
 
   /** The worker died: its last heartbeat is well past any threshold. */
@@ -3077,7 +3052,7 @@ describe('agent turn reaper', () => {
   }
 
   it('a crashed worker on an authoritative turn delivers the error instead of hanging the client', async () => {
-    const runId = await claimedShadowRun('fleet-crashed');
+    const runId = await claimedTurnRun('fleet-crashed');
     await loseHeartbeat(runId);
 
     // Through the real reaper tick, so the lane is proven reachable from the
@@ -3098,14 +3073,14 @@ describe('agent turn reaper', () => {
     const replies = await threadResponses();
     expect(replies).toHaveLength(1);
     expect(replies[0].action_input).toMatchObject({
-      messageId: 'msg-shadow',
-      channelId: 'api_user-shadow',
-      conversationId: 'conv-shadow',
-      userId: 'user-shadow',
+      messageId: 'msg-turn',
+      channelId: 'api_user-turn',
+      conversationId: 'conv-turn',
+      userId: 'user-turn',
       platform: 'api',
       error: AGENT_ERRORS[AgentErrorCode.WORKER_DIED].message,
       errorCode: AgentErrorCode.WORKER_DIED,
-      processedMessageIds: ['msg-shadow'],
+      processedMessageIds: ['msg-turn'],
     });
     expect(replies[0].action_input.finalText).toBeUndefined();
 
@@ -3122,7 +3097,7 @@ describe('agent turn reaper', () => {
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    const [run] = await shadowRuns();
+    const [run] = await agentTurnRuns();
     const sql = getTestDb();
     await sql`UPDATE runs SET created_at = now() - interval '1 hour', run_at = now() - interval '1 hour' WHERE id = ${run.id}`;
 
@@ -3136,7 +3111,7 @@ describe('agent turn reaper', () => {
     const replies = await threadResponses();
     expect(replies).toHaveLength(1);
     expect(replies[0].action_input).toMatchObject({
-      messageId: 'msg-shadow',
+      messageId: 'msg-turn',
       errorCode: AgentErrorCode.WORKER_STARTUP_FAILED,
       error: AGENT_ERRORS[AgentErrorCode.WORKER_STARTUP_FAILED].message,
     });
@@ -3146,9 +3121,9 @@ describe('agent turn reaper', () => {
     // Each claimed run is its own org and worker. A stale turn next to a fresh
     // one shows the sweep terminalizing the former — and telling its client
     // why — while leaving the latter untouched.
-    const stale = await claimedShadowRun('fleet-stale');
+    const stale = await claimedTurnRun('fleet-stale');
     await loseHeartbeat(stale);
-    const live = await claimedShadowRun('fleet-live');
+    const live = await claimedTurnRun('fleet-live');
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 1,
@@ -3169,7 +3144,7 @@ describe('agent turn reaper', () => {
     // The deploy-skew case the completion route's 409 covers: a producer that
     // stamped an authoritative turn without saying where the reply goes. The
     // reaper has nowhere to deliver to, but the row must not wedge the lane.
-    const runId = await claimedShadowRun('fleet-unaddressed');
+    const runId = await claimedTurnRun('fleet-unaddressed');
     await loseHeartbeat(runId);
     const sql = getTestDb();
     await sql`UPDATE runs SET action_input = action_input - 'reply' WHERE id = ${runId}`;
@@ -3187,7 +3162,7 @@ describe('agent turn reaper', () => {
     // completion that lands after the candidate read makes the reap a no-op
     // rather than an overwrite of a live answer.
     const workerId = 'fleet-late';
-    const runId = await claimedShadowRun(workerId);
+    const runId = await claimedTurnRun(workerId);
     await loseHeartbeat(runId);
     const completion = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,

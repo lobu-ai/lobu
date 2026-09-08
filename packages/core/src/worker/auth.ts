@@ -61,7 +61,7 @@ export interface WorkerTokenData {
   source?: string;
   /**
    * Side-effect mode for this run, derived server-side from `runs.run_type`
-   * when the session was authorized. `capture` marks an eval or shadow: mutating
+   * when the session was authorized. `capture` marks an eval run: mutating
    * work is recorded and NOT performed. Absent means live — see the rollout
    * note in gateway/orchestration/worker-token-claims.ts. Signed, so a worker
    * cannot promote itself to live.

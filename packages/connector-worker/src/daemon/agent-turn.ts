@@ -168,10 +168,10 @@ export async function executeAgentTurnRun(
         traces.length > 0 ? traces : undefined
       );
       // Retire the batch only on a positive ack for ITS sequence. `published:
-      // false` is an ack too — a shadow turn and an already-passed sequence
-      // are both answers, and there is nothing more the worker can do about
-      // either. No ack at all (an older gateway, or a publish that threw)
-      // keeps the text queued for the next beat.
+      // false` is an ack too — an already-passed sequence is an answer, and
+      // there is nothing more the worker can do about it. No ack at all (an
+      // older gateway, or a publish that threw) keeps the text queued for the
+      // next beat.
       if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
       if (ack?.continue === false) stopTurn(ack.stop_reason);
       queueSteering(ack?.steer);

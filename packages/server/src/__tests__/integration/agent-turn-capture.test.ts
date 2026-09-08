@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
 import { generateWorkerToken, mintGatewayMcpToken, verifyWorkerToken, type MessagePayload } from '@lobu/core';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { enqueueAgentTurnShadow } from '../../gateway/orchestration/agent-turn-shadow';
+import { enqueueAgentTurn } from '../../gateway/orchestration/agent-turn-producer';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { createImageRoutes } from '../../gateway/routes/internal/images';
 import { createAudioRoutes } from '../../gateway/routes/internal/audio';
@@ -27,7 +27,6 @@ import { post } from '../setup/test-helpers';
 
 const AGENT = 'capture-fixture-agent';
 const CONNECTION = 'capture-fixture-connection';
-const SHADOW_ENV = 'LOBU_ISOLATE_TURN_SHADOW_AGENTS';
 const INIT = { jsonrpc: '2.0', id: 0, method: 'initialize', params: {
   protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'capture-test', version: '1' },
 } };
@@ -40,7 +39,6 @@ describe('native capture over HTTP and Postgres', () => {
   let live: string;
   let runId: number;
   let target: string;
-  let previousShadow: string | undefined;
   const delivered = vi.fn(async () => ({ id: 'synthetic-card', messageId: 'synthetic-message', threadId: 'slack:C_CAPTURE:root' }));
   const generated = vi.fn(async () => { throw new Error('media generation must be captured'); });
   const runtimeExec = vi.fn(async () => { throw new Error('remote execution must be captured'); });
@@ -72,8 +70,6 @@ describe('native capture over HTTP and Postgres', () => {
 
   beforeAll(async () => {
     await cleanupTestDatabase();
-    previousShadow = process.env[SHADOW_ENV];
-    process.env[SHADOW_ENV] = AGENT;
     org = await createTestOrganization();
     const owner = await createTestUser();
     await addUserToOrganization(owner.id, org.id, 'owner');
@@ -127,7 +123,7 @@ describe('native capture over HTTP and Postgres', () => {
       INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
       VALUES (${org.id}, 'chat_message', 'messages', 'claimed', ${sql.json(message)}) RETURNING id
     `;
-    await enqueueAgentTurnShadow({ ...message, runId: Number(source.id) }, {
+    await enqueueAgentTurn({ ...message, runId: Number(source.id) }, {
       gatewayUrl: `${origin}/lobu`, agentSettings: { getSettings: async () => ({}) } as never,
       catalog: { getInstalledModules: async () => [module], findProviderForModel: async () => module } as never,
       runtime: { runtimeProviderId: 'capture-fixture-runtime' } as never,
@@ -141,7 +137,6 @@ describe('native capture over HTTP and Postgres', () => {
   });
 
   afterAll(async () => {
-    if (previousShadow === undefined) delete process.env[SHADOW_ENV]; else process.env[SHADOW_ENV] = previousShadow;
     __setChatInstanceManagerForTests(null);
     vi.restoreAllMocks();
     workerGateway?.shutdown();

@@ -28,7 +28,7 @@ import {
 import { ChatInstanceManager } from "../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../gateway/connections/chat-response-bridge";
 import { Gateway } from "../gateway/gateway-main";
-import type { AgentTurnShadowDeps } from "../gateway/orchestration/agent-turn-shadow";
+import type { AgentTurnDeps } from "../gateway/orchestration/agent-turn-producer";
 import { Orchestrator } from "../gateway/orchestration/index";
 import {
 	startFilteringProxy,
@@ -690,7 +690,7 @@ export { ensureEmbeddedGatewaySecrets };
  */
 function agentTurnMcpDeps(
 	coreServices: CoreServices,
-): AgentTurnShadowDeps["mcp"] {
+): AgentTurnDeps["mcp"] {
 	const configService = coreServices.getMcpConfigService();
 	const proxy = coreServices.getMcpProxy();
 	return configService && proxy ? { configService, proxy } : undefined;
