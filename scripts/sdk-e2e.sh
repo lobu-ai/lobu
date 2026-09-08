@@ -527,12 +527,23 @@ api manage_automations "$(node -e 'const t=process.argv[1],w=process.argv[2],r=N
 grep -q '"action":"complete_window"\|"action": "complete_window"' "$CW" || { cat "$CW" >&2; fail "complete_window did not return the expected action"; }
 grep -qi "Failed to generate an embedded Lobu service token" "$RUN_LOG" \
   && fail "automation dispatch failed on the service token (lobu-internal oauth_client missing)"
+# Assert the dispatch landed a DURABLE agent_turn run. The old probe grepped
+# the run log for "Lobu worker for session: …automation_<id>_run", which only
+# the managed subprocess ever printed. The runs row carries the same identity in
+# `input.turn.conversation_id` (`<agent>_automation_<id>_run_<runId>`) and is the
+# stronger claim: it is the record the worker claims and reports against.
+# `automation_id` is NOT usable here — it stays null on the child agent_turn row.
+AUTO_DISPATCH="$RUN_DIR/automation-dispatch.json"
+AUTO_OK=""
 for _ in $(seq 1 30); do
-  grep -qiE "Lobu worker for session: session-[^ ]*automation_${AUTOMATION_ID}_run" "$RUN_LOG" && break
+  api manage_operations '{"action":"list_runs","run_types":["agent_turn"],"limit":50}' \
+    > "$AUTO_DISPATCH" 2>/dev/null || { sleep 1; continue; }
+  if node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.exit(1)}const want=`automation_${process.argv[1]}_run_${process.argv[2]}`;const hit=(j.runs||[]).some(r=>String(r.input?.turn?.conversation_id??"").includes(want));process.exit(hit?0:1)})' "$AUTOMATION_ID" "$TRIG_RUN_ID" < "$AUTO_DISPATCH"; then
+    AUTO_OK=1; break
+  fi
   sleep 1
 done
-grep -qiE "Lobu worker for session: session-[^ ]*automation_${AUTOMATION_ID}_run" "$RUN_LOG" \
-  || fail "automation run ${TRIG_RUN_ID} did not dispatch to a worker"
+[ -n "$AUTO_OK" ] || { tail -c 600 "$AUTO_DISPATCH" >&2; fail "automation run ${TRIG_RUN_ID} did not dispatch an agent_turn run (no run whose conversation is automation_${AUTOMATION_ID}_run_${TRIG_RUN_ID})"; }
 echo "✓ automation trigger dispatched and completed one run (run_id=$TRIG_RUN_ID)"
 
 # Assert the reaction's side effect: a SDKE2E_REACTION_OK knowledge event exists.
