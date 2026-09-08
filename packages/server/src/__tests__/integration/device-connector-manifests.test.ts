@@ -1799,7 +1799,7 @@ describe('device connector manifests', () => {
     expect((await readDefinition(orgId, CHROME_MANIFEST_KEY))?.version).toBe('1.0.0');
 
     const v2WorkerId = `chrome-wa-v2-setup-${generateSecureToken(4)}`;
-    const v2DeviceId = await seedAdditionalDevice({
+    await seedAdditionalDevice({
       userId,
       orgId,
       workerId: v2WorkerId,
@@ -1849,7 +1849,7 @@ describe('device connector manifests', () => {
     ).toBe(200);
     const upgraded = await readChromeConnectorRows(orgId);
     expect(upgraded.feeds[0]?.status).toBe('active');
-    expect(upgraded.connections[0]?.device_worker_id).toBe(v2DeviceId);
+    expect(upgraded.connections[0]?.device_worker_id).toBe(before.connections[0]?.device_worker_id);
     expect((await readDefinition(orgId, CHROME_MANIFEST_KEY))?.version).toBe('2.0.0');
   });
 

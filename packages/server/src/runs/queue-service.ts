@@ -32,6 +32,16 @@ import { getDb } from '../db/client';
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../config/intervals';
 import type { Env } from '../index';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
+import {
+  hashlessManifestArtifactMayBeClaimed,
+  selectedConnectorVersionArtifactSql,
+} from '../utils/connector-execution-placement';
+import {
+  DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
+  describeDeviceConnectorSetupRequired,
+  findDeviceConnectorReadiness,
+  loadDeviceConnectorReadiness,
+} from '../worker-api/device-connector-readiness';
 import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
 import { ToolUserError } from '../utils/errors';
 import { stableJson } from '../utils/insert-event';
@@ -294,6 +304,60 @@ async function resolveActiveConnectorVersion(
 }
 
 /**
+ * Reject an unavailable manifest on the exact execution pin before queuing.
+ * Compiled artifacts bypass this check; native hashless artifacts retain capability claims.
+ */
+async function deviceManifestAdmissionError(
+  sql: DbClient,
+  organizationId: string,
+  connectionId: number,
+  connectorKey: string,
+  connectorVersion: string,
+  deviceWorkerId: string | null
+): Promise<string | null> {
+  const [row] = await sql<{
+    owner_user_id: string | null;
+    manifest_hash: string | null;
+    runtime: Record<string, unknown> | null;
+  }>`
+    SELECT COALESCE(c.created_by, dw.user_id) AS owner_user_id, cv.artifact_hash AS manifest_hash,
+           cd.runtime
+    FROM connections c
+    LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
+    LEFT JOIN connector_definitions cd
+      ON cd.organization_id = c.organization_id AND cd.key = c.connector_key
+      AND cd.status = 'active'
+    JOIN LATERAL (
+      ${selectedConnectorVersionArtifactSql(sql, {
+        connectorKey: sql`${connectorKey}`,
+        version: sql`${connectorVersion}`,
+        organizationId: sql`${organizationId}`,
+      })}
+    ) cv ON cv.manifest_backed
+    WHERE c.id = ${connectionId} AND c.organization_id = ${organizationId}
+    LIMIT 1
+  `;
+  if (!row) return null;
+  if (row.manifest_hash == null) {
+    return hashlessManifestArtifactMayBeClaimed(connectorKey, row.runtime)
+      ? null : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+  }
+  const target = {
+    ownerUserId: row.owner_user_id,
+    connectorKey,
+    connectorVersion,
+    manifestHash: row.manifest_hash,
+    deviceWorkerId,
+  };
+  const index = await loadDeviceConnectorReadiness({ sql, targets: [target] });
+  const readiness = findDeviceConnectorReadiness(index, target);
+  if (readiness?.state === 'ready') return null;
+  return readiness?.state === 'setup_required'
+    ? describeDeviceConnectorSetupRequired(readiness)
+    : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+}
+
+/**
  * Why no sync run was queued. The reasons differ in remedy — `already_active`
  * resolves itself when the current run finishes, while the others never will
  * (the two connector reasons also retire the feed) — so callers that surface
@@ -460,6 +524,11 @@ async function createSyncRunWithClient(
     return { ok: false, reason: 'connector_version_unrunnable' };
   }
   const connectorVersion = resolved.version;
+  const admissionError = await deviceManifestAdmissionError(
+    sql, feed.organization_id, feed.connection_id, feed.connector_key,
+    connectorVersion, feed.device_worker_id
+  );
+  if (admissionError) throw new ToolUserError(admissionError, 409);
 
   // Manual feeds (schedule null) keep next_run_at null after enqueue so they
   // are not re-picked by the due-feed scheduler.
@@ -1228,6 +1297,15 @@ export async function createConnectorOperationRun(params: {
     targetDeviceWorkerId = connRows[0]?.device_worker_id ?? null;
   }
 
+  // Record a new unavailable action as terminal. Keeping the existing INSERT
+  // conflict path preserves a completed idempotent result when its device is offline.
+  const admissionError = params.approvalMode === 'device'
+    ? await deviceManifestAdmissionError(
+        sql, params.organizationId, params.connectionId, params.connectorKey,
+        connectorVersion, targetDeviceWorkerId
+      )
+    : null;
+
   const insertMetadata = params.sdkBrowserContext
     ? {
         ...params.runMetadata,
@@ -1251,13 +1329,13 @@ export async function createConnectorOperationRun(params: {
       action_idempotency_key, expires_at, claimed_at, last_heartbeat_at, claimed_by,
       activation_kind, activation_target_urls,
       run_metadata,
-      target_device_worker_id,
+      target_device_worker_id, error_message, completed_at,
       created_at
     ) VALUES (
       ${params.organizationId}, 'action', ${params.connectionId},
       ${params.connectorKey}, ${connectorVersion},
       ${params.operationKey}, ${sql.json(params.operationInput)},
-      ${approvalStatus}, ${status},
+      ${approvalStatus}, ${admissionError ? 'failed' : status},
       ${params.automationId ?? null}, ${params.parentRunId ?? null},
       ${params.policyPrincipalKind ?? null}, ${params.policyPrincipalId ?? null},
       ${params.createdByUserId ?? null},
@@ -1272,6 +1350,7 @@ export async function createConnectorOperationRun(params: {
       ${params.activation ? pgTextArray(params.activation.urls) : null}::text[],
       ${insertMetadata == null ? null : sql.json(insertMetadata)},
       ${targetDeviceWorkerId == null ? null : sql`${targetDeviceWorkerId}::uuid`},
+      ${admissionError}, ${admissionError ? sql`current_timestamp` : null},
       current_timestamp
     )
     ON CONFLICT (organization_id, action_idempotency_key)

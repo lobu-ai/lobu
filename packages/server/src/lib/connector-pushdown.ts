@@ -409,6 +409,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
       connectorKey: feed.connector_key,
       connectorVersion: feed.pinned_version ?? feed.definition_version,
       manifestHash: feed.selected_artifact_hash,
+      connectorRuntime: feed.runtime,
       deviceOwnerUserId: feed.device_owner_user_id,
       deviceWorkerId: feed.device_worker_id,
       feedStatus: feed.feed_status,

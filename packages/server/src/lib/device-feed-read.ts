@@ -40,9 +40,11 @@ import { getDb, pgTextArray } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { classifyRunOutcome } from '../runs/run-outcome';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
+import { hashlessManifestArtifactMayBeClaimed } from '../utils/connector-execution-placement';
 import { DEVICE_ONLINE_WINDOW_SECONDS, describeDeviceLastSeen } from '../utils/device-liveness';
 import logger from '../utils/logger';
 import {
+  DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
   describeDeviceConnectorSetupRequired,
   findDeviceConnectorReadiness,
   loadDeviceConnectorReadiness,
@@ -101,6 +103,8 @@ export interface DeviceFeedReadParams {
   /** Exact connector artifact selected for this read. */
   connectorVersion: string | null;
   manifestHash: string | null;
+  /** `connector_definitions.runtime` — declares which device platforms may serve it. */
+  connectorRuntime: Record<string, unknown> | null;
   /** User whose device fleet is authorized to serve this connection. */
   deviceOwnerUserId: string | null;
   /** `connections.device_worker_id` — the execution pin, or null when unpinned. */
@@ -250,7 +254,9 @@ async function describeUnservableDevice(
       },
     ],
   });
-  const connectorReadiness = findDeviceConnectorReadiness(readinessIndex, {
+  const capabilityOnly = p.manifestHash == null &&
+    hashlessManifestArtifactMayBeClaimed(p.connectorKey, p.connectorRuntime);
+  const connectorReadiness = capabilityOnly ? undefined : findDeviceConnectorReadiness(readinessIndex, {
     ownerUserId: p.deviceOwnerUserId,
     connectorKey: p.connectorKey,
     connectorVersion: p.connectorVersion,
@@ -265,6 +271,10 @@ async function describeUnservableDevice(
       )}`
     );
   }
+  // Prefer the specific pin and liveness diagnostics below.
+  const manifestError =
+    capabilityOnly || (p.manifestHash != null && connectorReadiness?.state === 'ready')
+      ? null : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
 
   if (p.deviceWorkerId) {
     // Reached THROUGH the connection, not by device id alone. The id comes off
@@ -300,7 +310,7 @@ async function describeUnservableDevice(
     if (p.requiredCapability && !capabilities.includes(p.requiredCapability)) {
       return `${name} no longer grants '${p.requiredCapability}'`;
     }
-    return null;
+    return manifestError;
   }
 
   // Unpinned. The question is which org a device may serve WITHOUT a pin, and
@@ -359,7 +369,7 @@ async function describeUnservableDevice(
       ? `no online device is serving '${p.requiredCapability}'`
       : 'no online device can serve this connection';
   }
-  return null;
+  return manifestError;
 }
 
 /**

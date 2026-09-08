@@ -1,16 +1,7 @@
 /**
- * reconcileDeviceCapabilities — a retired connection must not stay pinned to a
- * device that has dropped out of the fleet. Integration test, real Postgres.
- *
- * An org holds one connection PER DEVICE
- * (`idx_connections_org_connector_device_live`), but the fast path resolves only
- * ONE of them (`GROUP BY … LIMIT 1`, no ORDER BY) and pins that one. When it
- * returns the row that is already correctly pinned, the pin UPDATE no-ops — its
- * WHERE requires `device_worker_id IS DISTINCT FROM target` — and the sibling
- * stays bound to a worker that will never poll again. Nothing revisits it.
- *
- * Silent since #2286 stopped the 23505 crash: no error, just a connection
- * pointing at a vanished Mac, claimable by nobody.
+ * Reconciliation preserves device placement through upgrades, permission loss,
+ * and offline intervals. Availability never authorizes another device to take
+ * over an existing pin. Integration tests against real Postgres.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -24,15 +15,15 @@ import { createTestOrganization, createTestUser } from '../setup/test-fixtures';
 
 const sql = getTestDb();
 
-const CONNECTOR = 'test.pin_sweep';
-const CAPABILITY = 'test_pin_sweep';
+const CONNECTOR = 'test.pin_preservation';
+const CAPABILITY = 'test_pin_preservation';
 
 /** Bundled connectors come from the on-disk catalog (empty in tests), so the
  * connector must arrive as a device manifest to reach the wire pass at all. */
 const MANIFEST = {
   key: CONNECTOR,
   version: '1.0.0',
-  name: 'Test Pin Sweep',
+  name: 'Test Pin Preservation',
   required_capability: CAPABILITY,
   runtime: { platforms: ['macos'] },
   feeds_schema: {},
@@ -44,7 +35,7 @@ async function seedDefinition(orgId: string) {
       organization_id, key, name, version, status, required_capability,
       runtime, feeds_schema, auth_schema, actions_schema, options_schema
     ) VALUES (
-      ${orgId}, ${CONNECTOR}, 'Test Pin Sweep', '1.0.0', 'active', ${CAPABILITY},
+      ${orgId}, ${CONNECTOR}, 'Test Pin Preservation', '1.0.0', 'active', ${CAPABILITY},
       ${sql.json({ kind: 'device' })}, ${sql.json({})}, ${sql.json({})},
       ${sql.json({})}, ${sql.json({})}
     )
@@ -87,7 +78,7 @@ async function seedConn(orgId: string, userId: string, device: string | null): P
       organization_id, connector_key, slug, display_name, status,
       auth_profile_id, created_by, visibility, device_worker_id
     ) VALUES (
-      ${orgId}, ${CONNECTOR}, ${slug}, 'Test Pin Sweep', 'active',
+      ${orgId}, ${CONNECTOR}, ${slug}, 'Test Pin Preservation', 'active',
       NULL, ${userId}, 'private', ${device}::uuid
     )
     RETURNING id
@@ -171,7 +162,7 @@ async function waitForAutowireLockWaiter(lockKey: string): Promise<void> {
   throw new Error(`reconcile never blocked on the autowire advisory lock for ${lockKey}`);
 }
 
-describe('device pin stale sweep', () => {
+describe('device pin preservation', () => {
   let orgId: string;
   let userId: string;
 
@@ -192,11 +183,7 @@ describe('device pin stale sweep', () => {
     await cleanupTestDatabase();
   });
 
-  it('clears EVERY retired pin, which one selected row never could', async () => {
-    // Deterministic by construction, not by scan order: with TWO stale
-    // connections the single-row path can clear at most the one row the
-    // unordered `GROUP BY … LIMIT 1` happened to return, so without the sweep
-    // at least one stale pin survives no matter which row that is.
+  it('preserves every offline pin while another device is available', async () => {
     const staleA = await seedWorker(userId, orgId, false);
     const staleB = await seedWorker(userId, orgId, false);
     const freshDevice = await seedWorker(userId, orgId, true);
@@ -208,14 +195,12 @@ describe('device pin stale sweep', () => {
     await reconcileDeviceCapabilities(userId);
 
     expect(await pinOf(current)).toBe(freshDevice);
-    expect(await pinOf(retiredA)).toBeNull();
-    expect(await pinOf(retiredB)).toBeNull();
+    expect(await pinOf(retiredA)).toBe(staleA);
+    expect(await pinOf(retiredB)).toBe(staleB);
   });
 
   it('leaves every pin alone when several devices are fresh', async () => {
-    // Two fresh devices means `matchingDeviceIds.length !== 1`, so nothing is
-    // auto-pinned and BOTH existing pins are deliberate — the sweep must not
-    // treat either as stale.
+    // Neither device may take over the other connection.
     const deviceA = await seedWorker(userId, orgId, true);
     const deviceB = await seedWorker(userId, orgId, true);
     const connA = await seedConn(orgId, userId, deviceA);
@@ -227,10 +212,10 @@ describe('device pin stale sweep', () => {
     expect(await pinOf(connB)).toBe(deviceB);
   });
 
-  it('unpins a fresh device whose manifest hash is older than the selected active winner', async () => {
+  it.each(['0.9.0', '1.0.0'])('preserves both pins with different manifests (other version %s)', async (otherVersion) => {
     const olderDevice = await seedWorker(userId, orgId, true);
     const newerDevice = await seedWorker(userId, orgId, true);
-    const olderManifest = { ...MANIFEST, version: '0.9.0' };
+    const olderManifest = { ...MANIFEST, version: otherVersion, description: 'Other device build' };
     const newerManifest = { ...MANIFEST, version: '1.0.0' };
     await sql`
       UPDATE device_workers
@@ -261,14 +246,10 @@ describe('device pin stale sweep', () => {
     await reconcileDeviceCapabilities(userId);
 
     expect(await pinOf(newerConn)).toBe(newerDevice);
-    expect(await pinOf(olderConn)).toBeNull();
+    expect(await pinOf(olderConn)).toBe(olderDevice);
   });
 
-  it('unpins a device that is alive but no longer advertises the capability', async () => {
-    // Freshness alone is not "still serving". A device can keep heartbeating
-    // after an app update or a revoked permission drops the capability; polling
-    // is capability-gated, so leaving that pin in place strands the connection
-    // on a worker that will never claim its runs.
+  it('preserves placement when a live device loses its capability', async () => {
     const serving = await seedWorker(userId, orgId, true);
     const lapsed = await seedWorker(userId, orgId, true);
     await sql`
@@ -280,26 +261,17 @@ describe('device pin stale sweep', () => {
     await reconcileDeviceCapabilities(userId);
 
     expect(await pinOf(servingConn)).toBe(serving);
-    expect(await pinOf(lapsedConn)).toBeNull();
+    expect(await pinOf(lapsedConn)).toBe(lapsed);
   });
 
-  it('clears a pin whose device is in the snapshot but has lost the capability', async () => {
-    // `matchingDeviceIds` is captured before the advisory lock. A device present
-    // in it can drop the capability before the sweep runs — an app update or a
-    // revoked permission on another replica. Gating the sweep on that snapshot
-    // would let such a pin survive, because the snapshot still says "serving"
-    // and short-circuits the mutation-time check. Only the NOT EXISTS decides.
+  it('preserves placement when another replica observes capability loss during reconciliation', async () => {
     const serving = await seedWorker(userId, orgId, true);
     const lapsing = await seedWorker(userId, orgId, true);
     const servingConn = await seedConn(orgId, userId, serving);
     const lapsingConn = await seedConn(orgId, userId, lapsing);
 
-    // The interleave has to happen INSIDE reconcile — between its fleet read
-    // and the sweep — or the snapshot never contains the stale-positive entry
-    // and the test proves nothing. Hold the per-(user, connector) autowire lock
-    // so reconcile snapshots BOTH devices as capable, then parks; drop the
-    // capability while it waits; release. Its snapshot is now wrong in exactly
-    // the way the blocker described.
+    // Hold the autowire lock after the fleet read, then revoke the capability
+    // before reconciliation can commit. Neither snapshot may change placement.
     let release!: () => void;
     const held = new Promise<void>((r) => {
       release = r;
@@ -319,7 +291,7 @@ describe('device pin stale sweep', () => {
     await Promise.all([reconciling, holder]);
 
     expect(await pinOf(servingConn)).toBe(serving);
-    expect(await pinOf(lapsingConn)).toBeNull();
+    expect(await pinOf(lapsingConn)).toBe(lapsing);
   });
 
   it('pauses only auth-free feeds when the fleet stops serving the capability', async () => {
@@ -455,17 +427,10 @@ describe('device pin stale sweep', () => {
     expect(await pinOf(appAuthBacked)).toBe(dead);
   });
 
-  it('keeps a pin whose device came back between the fleet snapshot and the sweep', async () => {
-    // `matchingDeviceIds` is snapshotted BEFORE the advisory lock, so on another
-    // replica a device can heartbeat back into the fleet while this pass is
-    // still parked on the lock holding a snapshot that says it is gone. Sweeping
-    // from that snapshot would unpin a device that is live again; the sweep's
-    // NOT EXISTS re-checks `device_workers` at mutation time instead.
+  it('keeps a pin whose device comes back during reconciliation', async () => {
     const fresh = await seedWorker(userId, orgId, true);
     const revived = await seedWorker(userId, orgId, false);
-    // Lowest id — the row the wire pass resolves (`ORDER BY id ASC LIMIT 1`), so
-    // the single-row repair lands here and the revived row is decided purely by
-    // the sweep. Its pin is already correct, so that repair is a no-op.
+    // Exercise the sibling row as well as the first connection selected.
     const currentConn = await seedConn(orgId, userId, fresh);
     const revivedConn = await seedConn(orgId, userId, revived);
 
@@ -478,7 +443,7 @@ describe('device pin stale sweep', () => {
       running = reconcileDeviceCapabilities(userId);
       await waitForAutowireLockWaiter(lockKey);
       // The device comes back while the pass is parked, exactly the window the
-      // mutation-time re-check exists for.
+      // reconciliation must preserve.
       await sql`UPDATE device_workers SET last_seen_at = now() WHERE id = ${revived}::uuid`;
     });
     await running;
