@@ -1,6 +1,6 @@
 # Connector authoring
 
-When to write a connector, the two authoring surfaces, and the SDK contract.
+When to write a connector, the three authoring surfaces, and the SDK contract.
 The full SDK reference is `packages/connectors/src/README.md` in the repo
 (`github.com/lobu-ai/lobu/blob/main/packages/connectors/src/README.md`); the
 seed example is `examples/lobu-crm/npm-downloads.connector.ts`.
@@ -10,9 +10,10 @@ seed example is `examples/lobu-crm/npm-downloads.connector.ts`.
 Search the catalog first: `client.catalog.listInstalled({ kinds: ["connectors"] })`,
 then `client.catalog.listCatalog(...)` if it is not installed. If a matching
 connector exists, connect to it. If none matches the data source, do **not**
-conclude "no integration exists" — author a custom connector in the project.
+conclude "no integration exists" — author a custom connector (in the project,
+or over MCP, below).
 
-## Two authoring surfaces
+## Authoring surfaces
 
 1. **Project-local custom connectors** (`connectors/<name>.connector.ts`) —
    registered in `lobu.config.ts` with
@@ -21,6 +22,30 @@ conclude "no integration exists" — author a custom connector in the project.
 2. **Bundled built-ins** (`packages/connectors/src/<name>.ts`) — compiled into
    the platform catalog and auto-installed per org on first use. Only for
    connectors shipped with the platform itself.
+3. **Over MCP, no CLI** — an agent drives the whole loop through
+   `manage_connections` tool actions (see below).
+
+### The MCP loop
+
+All of these are `manage_connections` actions available to agents:
+
+1. **`validate_connector_source`** — compile-checks raw `source_code` (or a
+   `source_url`) and returns diagnostics plus the extracted actions, scopes,
+   and feed keys. Nothing is installed; this is the dry run.
+2. **`install_connector`** — installs from exactly one of `connector_id`
+   (reviewed catalog), `source_code`, `source_url`, `source_uri`, or
+   `mcp_url` (proxy an external MCP server as a connector). Org-scoped;
+   compiled code is stored in `connector_versions` with prior versions
+   retained.
+3. **`test`** — live probe of the connection's auth.
+4. **Read/sync once** — a one-shot `read_feeds` source read (or a manual sync)
+   to watch the first events land before trusting it.
+5. **Iterate** — `get_connector_source` → `update_connector_source` (each
+   update re-validates), with `rollback_connector_version` to revert.
+
+Prefer validate → install → test → read over installing blind. Two gates are
+deliberately human-only: `connection.config.action_modes` (approval overrides)
+and connector-run approvals.
 
 ## The contract
 
