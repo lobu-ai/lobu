@@ -1734,6 +1734,40 @@ describe('agent turn shadow producer', () => {
     expect(JSON.stringify(turn)).not.toContain('attacker.invalid');
   });
 
+  it.each(['application/pdf', 'image/png'])('claims an envelope with bounded %s attachment metadata', async (mimetype) => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.platformMetadata = {
+      files: [
+        { name: 'n'.repeat(513), mimetype: 't'.repeat(129), size: -1 },
+        { name: 'fractional', mimetype, size: 1.5 },
+        ...Array.from({ length: 31 }, (_, i) => ({ name: `file-${i}`, mimetype, size: 0 })),
+        { id: 'art-image', name: 'valid.png', mimetype: 'image/png' },
+      ],
+    };
+    await enqueueMessage(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+    const [run] = await shadowRuns();
+    expect(Value.Check(AgentTurnPollPayloadSchema, { turn: run.action_input.turn })).toBe(true);
+    const response = await pollFleet('fleet-attachment-boundary', { agent_turn: true });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.run_id).toBe(run.id);
+    expect(Value.Check(AgentTurnPollPayloadSchema, body.payload)).toBe(true);
+    expect(body.payload.turn.message_files).toHaveLength(32);
+    expect(body.payload.turn.message_files.slice(0, 2)).toEqual([
+      { name: 'n'.repeat(512), mime_type: 't'.repeat(128) },
+      { name: 'fractional', mime_type: mimetype },
+    ]);
+    expect(body.payload.turn.message_images).toEqual([{ mime_type: 'image/png', data: Buffer.from('PNG!').toString('base64') }]);
+    const [claimed] = await getTestDb()`SELECT status, claimed_by FROM runs WHERE id = ${run.id}`;
+    expect(claimed).toMatchObject({ status: 'running', claimed_by: 'fleet-attachment-boundary' });
+  });
+
   it('enqueues an attachment-only message once its image resolves, and refuses one whose image does not', async () => {
     const org = await createTestOrganization();
     const withImage = messageFor(org.id);

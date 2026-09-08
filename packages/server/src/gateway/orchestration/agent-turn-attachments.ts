@@ -32,9 +32,12 @@
  */
 
 import { createLogger, getErrorMessage } from "@lobu/core";
+import { AgentTurnPollPayloadSchema } from "@lobu/core/contracts/worker/protocol";
 import type { ArtifactStore } from "../files/artifact-store.js";
 
 const logger = createLogger("agent-turn-attachments");
+const fileSchema = AgentTurnPollPayloadSchema.properties.turn.properties.message_files;
+const imageMimeSchema = AgentTurnPollPayloadSchema.properties.turn.properties.message_images.items.properties.mime_type;
 
 /**
  * The slice of the artifact store this resolver needs. Narrowed so a caller
@@ -121,17 +124,30 @@ export async function resolveTurnAttachments(
   let imageBytes = 0;
 
   for (const entry of inbound) {
-    const name = typeof entry.name === "string" && entry.name ? entry.name : "attachment";
+    const name = (typeof entry.name === "string" && entry.name ? entry.name : "attachment")
+      .slice(0, fileSchema.items.properties.name.maxLength);
     const mimetype =
-      typeof entry.mimetype === "string" && entry.mimetype
+      (typeof entry.mimetype === "string" && entry.mimetype
         ? entry.mimetype
-        : "application/octet-stream";
-    const size = typeof entry.size === "number" && Number.isFinite(entry.size) ? entry.size : undefined;
+        : "application/octet-stream").slice(0, fileSchema.items.properties.mime_type.maxLength);
+    const size = typeof entry.size === "number" && Number.isInteger(entry.size) && entry.size >= 0
+      ? entry.size : undefined;
+    // Ordinary files and rejected images share the same metadata budget.
+    const appendFile = () => {
+      if (files.length >= fileSchema.maxItems!) {
+        logger.info(
+          { ...context, name, mimetype },
+          "Agent turn attachment metadata skipped: this turn's file limit is reached"
+        );
+        return;
+      }
+      files.push({ name, mime_type: mimetype, ...(size !== undefined ? { size } : {}) });
+    };
 
     if (!isImageMimeType(mimetype)) {
       // Not sent to the model on either lane; named so the model knows it
       // exists and can ask the user for the part it needs.
-      files.push({ name, mime_type: mimetype, ...(size !== undefined ? { size } : {}) });
+      appendFile();
       continue;
     }
 
@@ -142,7 +158,7 @@ export async function resolveTurnAttachments(
         { agentId: context.agentId, messageId: context.messageId, name, mimetype, ...detail },
         `Agent turn attachment skipped: ${reason}`
       );
-      files.push({ name, mime_type: mimetype, ...(size !== undefined ? { size } : {}) });
+      appendFile();
     };
 
     if (!artifacts) {
@@ -174,6 +190,10 @@ export async function resolveTurnAttachments(
         });
         continue;
       }
+      if (metadata.size === 0) {
+        skip("the stored artifact is empty");
+        continue;
+      }
       if (imageBytes + metadata.size > MAX_TURN_IMAGE_BYTES_TOTAL) {
         skip("this turn's total image budget is spent", {
           size: metadata.size,
@@ -192,6 +212,10 @@ export async function resolveTurnAttachments(
       // told what the gateway actually holds.
       if (!isImageMimeType(stored.metadata.contentType)) {
         skip("the stored artifact is not an image", { stored: stored.metadata.contentType });
+        continue;
+      }
+      if (stored.metadata.contentType.length > imageMimeSchema.maxLength!) {
+        skip("the stored image MIME type exceeds the worker contract");
         continue;
       }
       // The budget is charged the size the store REPORTED, which is what the

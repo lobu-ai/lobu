@@ -69,6 +69,70 @@ function fakeArtifacts(fixtures: Record<string, StoredFixture>): AgentTurnArtifa
 const PNG = Buffer.from('89504e470d0a1a0a', 'hex');
 
 describe('resolveTurnAttachments', () => {
+  const fileSchema = AgentTurnPollPayloadSchema.properties.turn.properties.message_files;
+  const imageSchema = AgentTurnPollPayloadSchema.properties.turn.properties.message_images;
+
+  it.each(['application/pdf', 'image/png'])('bounds metadata for %s including rejected images', async (mimetype) => {
+    const files = Array.from({ length: 33 }, (_, i) => ({ name: `file-${i}`, mimetype }));
+    const result = await resolveTurnAttachments({ files }, undefined, CONTEXT);
+    expect(Value.Check(fileSchema, result.files)).toBe(true);
+    expect(result.files.map(file => file.name)).toEqual(files.slice(0, 32).map(file => file.name));
+  });
+
+  it.each([
+    { name: 'x'.repeat(513), mimetype: 'application/pdf', size: 0 },
+    { name: 'report', mimetype: 'x'.repeat(129), size: 1 },
+    { name: 'report', mimetype: 'application/pdf', size: -1 },
+    { name: 'report', mimetype: 'application/pdf', size: 1.5 },
+    { name: 'report', mimetype: 'application/pdf', size: NaN },
+    { name: 'report', mimetype: 'application/pdf', size: Infinity },
+    { name: 'report', mimetype: 'application/pdf', size: '3' },
+    { name: '', mimetype: '', size: undefined },
+  ])('normalizes file metadata into the existing contract: %j', async (file) => {
+    const result = await resolveTurnAttachments({ files: [file] }, undefined, CONTEXT);
+    expect(Value.Check(fileSchema, result.files)).toBe(true);
+    expect(result.files).toEqual([{
+      name: (file.name || 'attachment').slice(0, 512),
+      mime_type: (file.mimetype || 'application/octet-stream').slice(0, 128),
+      ...(typeof file.size === 'number' && Number.isInteger(file.size) && file.size >= 0
+        ? { size: file.size } : {}),
+    }]);
+  });
+
+  it('preserves exact metadata boundaries and still resolves images after the file budget is full', async () => {
+    const boundary = { name: 'n'.repeat(512), mimetype: 't'.repeat(128), size: 0 };
+    const files = [boundary, ...Array.from({ length: 32 }, () => ({ name: 'missing.png', mimetype: 'image/png' })),
+      { id: 'art-1', name: 'valid.png', mimetype: 'image/png' }];
+    const result = await resolveTurnAttachments({ files }, fakeArtifacts({
+      'art-1': { contentType: 'image/png', bytes: PNG },
+    }), CONTEXT);
+    expect(result.files).toHaveLength(32);
+    expect(result.files[0]).toEqual({ name: boundary.name, mime_type: boundary.mimetype, size: 0 });
+    expect(result.images).toEqual([{ mime_type: 'image/png', data: PNG.toString('base64') }]);
+    expect(Value.Check(fileSchema, result.files)).toBe(true);
+    expect(Value.Check(imageSchema, result.images)).toBe(true);
+  });
+
+  it.each([128, 129])('checks the stored image MIME boundary (%i characters) without rewriting it', async (length) => {
+    const contentType = 'image/' + 'x'.repeat(length - 6);
+    const result = await resolveTurnAttachments({ files: [{ id: 'art-1', name: 'shot', mimetype: 'image/png' }] },
+      fakeArtifacts({ 'art-1': { contentType, bytes: PNG } }), CONTEXT);
+    expect(Value.Check(imageSchema, result.images)).toBe(true);
+    expect(result.images).toEqual(length === 128 ? [{ mime_type: contentType, data: PNG.toString('base64') }] : []);
+    expect(result.files).toEqual(length === 128 ? [] : [{ name: 'shot', mime_type: 'image/png' }]);
+  });
+
+  it('rejects an empty stored image instead of producing invalid base64', async () => {
+    const result = await resolveTurnAttachments(
+      { files: [{ id: 'art-1', name: 'empty.png', mimetype: 'image/png' }] },
+      fakeArtifacts({ 'art-1': { contentType: 'image/png', bytes: Buffer.alloc(0) } }),
+      CONTEXT
+    );
+    expect(result.images).toEqual([]);
+    expect(result.files).toEqual([{ name: 'empty.png', mime_type: 'image/png' }]);
+    expect(Value.Check(imageSchema, result.images)).toBe(true);
+  });
+
   it('resolves an image out of the artifact store and never touches its download URL', async () => {
     const artifacts = fakeArtifacts({ 'art-1': { contentType: 'image/png', bytes: PNG } });
     const result = await resolveTurnAttachments(
