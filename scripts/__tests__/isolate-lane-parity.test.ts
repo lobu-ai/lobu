@@ -53,7 +53,7 @@ describe("isolate lane parity with the subprocess lane", () => {
       "AgentTurnBuiltinTool"
     );
     const producer = quotedNamesAfter(
-      read("packages/server/src/gateway/orchestration/agent-turn-shadow.ts"),
+      read("packages/server/src/gateway/orchestration/agent-turn-producer.ts"),
       "const WORKSPACE_TOOLS"
     );
     expect(guest).toEqual(subprocess);
@@ -62,11 +62,11 @@ describe("isolate lane parity with the subprocess lane", () => {
 
   it("names every conversation and media tool the plugins publish", () => {
     const gateway = quotedNamesAfter(
-      read("packages/server/src/gateway/orchestration/agent-turn-shadow.ts"),
+      read("packages/server/src/gateway/orchestration/agent-turn-producer.ts"),
       "const GATEWAY_TOOLS"
     );
     const media = quotedNamesAfter(
-      read("packages/server/src/gateway/orchestration/agent-turn-shadow.ts"),
+      read("packages/server/src/gateway/orchestration/agent-turn-producer.ts"),
       "const MEDIA_TOOLS"
     );
     const noop = () => undefined;
