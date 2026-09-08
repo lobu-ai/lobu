@@ -3,21 +3,21 @@ import {
   defineAgent,
   defineAuthProfile,
   defineAutomation,
-  every,
   defineConfig,
   defineConnection,
   defineEntityType,
   defineRelationshipType,
   defineSkill,
+  every,
+  field,
   reactionFromFile,
   secret,
   skillFromFile,
-  field,
   Type,
 } from "@lobu/cli/config";
 import type DeliverooConnector from "./deliveroo.connector.ts";
-import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
+import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
 import type productActivityDigestReaction from "./product-activity-digest.reaction.ts";
 
 const lunchOpenSkill = defineSkill({
@@ -270,7 +270,7 @@ const productOps = defineAgent({
   name: "product-ops",
   description:
     "Summarizes Lobu production activity from organization-owned read-only feeds",
-  providers: [{ id: "qwen", model: "qwen3.8-max" }],
+  providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
   tools: {
     // Keep the headless lockdown (no native worker tools) and pre-approve the
     // one MCP write the Automation needs: run_sdk carries completeWindow, is not
@@ -439,17 +439,17 @@ const productActivityDigest = defineAutomation({
     "Every 20 minutes, summarize new signups, logins, connections, MCP clients, and Kubernetes log activity; stay silent when nothing happened.",
   triggers: [
     every("5,25,45 * * * *", {
-      skip_if_unchanged: true,
+      skip_if_unchanged: false,
     }),
   ],
-  sources: {
-    product_activity: "@connection:lobu-product-activity-db",
-    kubernetes_logs: "@connection:lobu-production-logs",
-  },
+  // An empty source list falls back to all workspace content. This explicit
+  // empty input lets the reaction own the windowed query without duplicating
+  // the backlog in the model context or hitting non-pageable source limits.
+  sources: { reaction_window: "SELECT id FROM events WHERE FALSE" },
   minCooldownSeconds: 60,
   tags: ["product-ops", "production", "slack"],
   prompt:
-    'The reaction sends the exact activity rows for this window. Return exactly {"run":true,"exclude_email":"emrekabakci@gmail.com"} — the digest excludes this operator email from presence counts.',
+    'Read this Automation window to obtain its window_token, then call client.automations.completeWindow with extracted_data {"run":true,"exclude_email":"emrekabakci@gmail.com"} — the digest excludes this operator email from presence counts. The reaction queries and formats all activity itself; do not fetch activity rows, send a separate message, or stop after printing JSON.',
   reactionsGuidance:
     "Send one rich digest containing every user email and activity detail in the window. Send nothing when both sources are empty.",
   reaction: reactionFromFile<typeof productActivityDigestReaction>(

@@ -85,9 +85,7 @@ describe("Lobu Team product activity digest reaction", () => {
       },
     ];
     const send = mock().mockResolvedValue({ notified_count: 1 });
-    const query = mock()
-      .mockResolvedValueOnce([{ created_at: "2026-08-13T12:00:00.000Z" }])
-      .mockResolvedValueOnce(rows);
+    const query = mock().mockResolvedValueOnce(rows);
     const client = {
       query,
       notifications: { send },
@@ -114,11 +112,7 @@ describe("Lobu Team product activity digest reaction", () => {
     expect(serializedCard).toContain("pool exhausted");
     expect(serializedCard).toContain("Open production logs");
 
-    const cursorQuery = String(query.mock.calls[0]?.[0]);
-    expect(cursorQuery).toContain("automation_id = 42");
-    expect(cursorQuery).toContain("ORDER BY created_at DESC, id DESC");
-
-    const queryText = String(query.mock.calls[1]?.[0]);
+    const queryText = String(query.mock.calls[0]?.[0]);
     expect(queryText).not.toContain("superseded_by");
     expect(queryText).toContain("e.created_at");
     expect(queryText).toContain("FROM events e");
@@ -204,9 +198,7 @@ describe("Lobu Team product activity digest reaction", () => {
       },
     ];
     const send = mock();
-    const query = mock()
-      .mockResolvedValueOnce([{ created_at: "2026-08-13T12:00:00.000Z" }])
-      .mockResolvedValueOnce(rows);
+    const query = mock().mockResolvedValueOnce(rows);
     const client = {
       query,
       notifications: { send },
@@ -240,7 +232,6 @@ describe("Lobu Team product activity digest reaction", () => {
     ];
     const send = mock().mockResolvedValue({ notified_count: 1 });
     const query = mock()
-      .mockResolvedValueOnce([{ created_at: "2026-08-13T12:00:00.000Z" }])
       .mockResolvedValueOnce(excludedPage)
       .mockResolvedValueOnce(validRows);
     const client = {
@@ -251,10 +242,66 @@ describe("Lobu Team product activity digest reaction", () => {
 
     await productActivityDigest(context, client);
 
-    expect(query.mock.calls).toHaveLength(3);
+    expect(query.mock.calls).toHaveLength(2);
     const serializedCard = JSON.stringify(send.mock.calls[0]?.[0]?.card);
     expect(serializedCard).toContain("ada@example.com");
     expect(serializedCard).not.toContain("emrekabakci");
+  });
+
+  it("reads only the claimed arrival window, including its lower boundary", async () => {
+    const query = mock().mockResolvedValue([]);
+    await productActivityDigest(context, {
+      query,
+      notifications: { send: mock() },
+      log: mock(),
+    } as unknown as ReactionClient);
+    expect(query).toHaveBeenCalledTimes(1);
+    const statement = String(query.mock.calls[0]?.[0]);
+    expect(statement).toContain("e.created_at >= '2026-08-13T12:00:00.000Z'");
+    expect(statement).toContain("e.created_at < '2026-08-13T12:20:00.000Z'");
+  });
+
+  it("rejects invalid windows before reading or notifying", async () => {
+    const query = mock();
+    const send = mock();
+    for (const window_end of ["invalid", context.window.window_start]) {
+      await expect(
+        productActivityDigest(
+          {
+            ...context,
+            window: { ...context.window, window_end },
+          },
+          {
+            query,
+            notifications: { send },
+            log: mock(),
+          } as unknown as ReactionClient
+        )
+      ).rejects.toThrow("requires a valid arrival window");
+    }
+    expect(query).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("fails before notifying when the row budget would truncate activity", async () => {
+    const page = Array.from({ length: 1000 }, (_, i) => ({
+      connection_slug: "lobu-product-activity-db",
+      title: "New signup",
+      payload_text: "Ada · ada@example.com",
+      _created_at: "2026-08-13T12:01:00.000Z",
+      _id: i + 1,
+    }));
+    const query = mock().mockResolvedValue(page);
+    const send = mock();
+    await expect(
+      productActivityDigest(context, {
+        query,
+        notifications: { send },
+        log: mock(),
+      } as unknown as ReactionClient)
+    ).rejects.toThrow("exceeded its row budget");
+    expect(query).toHaveBeenCalledTimes(20);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("requires the run id used to deduplicate retries", async () => {
