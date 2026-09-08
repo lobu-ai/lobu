@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -367,11 +366,9 @@ async function sendViaApi(
   const base = `${gatewayUrl}/api/v1/agents/${session.agentId}`;
   const sseUrl = `${base}/events`;
   const messagesUrl = `${base}/messages`;
-  const messageId = randomUUID();
 
   const sseController = new AbortController();
   const streaming = streamResponse(sseUrl, session.token, sseController, {
-    expectedMessageId: messageId,
     autoApprove: opts.autoApprove,
     json: opts.json,
     org: opts.org,
@@ -382,7 +379,7 @@ async function sendViaApi(
     headers: agentApiHeaders(session.token, opts.org, {
       "Content-Type": "application/json",
     }),
-    body: JSON.stringify({ content: opts.message, messageId }),
+    body: JSON.stringify({ content: opts.message }),
   });
 
   if (!msgRes.ok) {
@@ -564,6 +561,7 @@ async function streamResponse(
       for (const line of lines) {
         if (line.startsWith("event: ")) {
           currentEvent = line.slice(7).trim();
+          noteAgentActivity(currentEvent);
         } else if (line.startsWith("data: ") && currentEvent) {
           const data = parseJSON(line.slice(6));
           if (!data) continue;
@@ -577,9 +575,6 @@ async function streamResponse(
             currentEvent = "";
             continue;
           }
-          // Only an event we actually accept counts as the agent being alive:
-          // a leftover turn's output is no more our agent talking than a ping.
-          noteAgentActivity(currentEvent);
 
           if (options.json) {
             await writeStdout(
