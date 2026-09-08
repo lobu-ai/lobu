@@ -6,6 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import { truncateTail } from "@mariozechner/pi-coding-agent";
 import { createWorkspace, WORKSPACE_ROOT } from "../agent-turn/workspace.js";
 
 function toolMap(tools: AgentTool[]): Record<string, AgentTool> {
@@ -37,7 +38,7 @@ describe("createWorkspace tools", () => {
     expect(await run(t.bash, { command: "cat src/a.txt | tr a-z A-Z && echo done > src/b.log" })).toBe("HELLO\nWORLD\n");
     expect(await run(t.read, { file_path: "src/b.log" })).toBe("done\n");
     expect(await run(t.read, { file_path: `${WORKSPACE_ROOT}/src/a.txt`, offset: 2, limit: 1 })).toBe(
-      "world\n\n[Showing lines 2-2 of 3. 1 more lines. Use offset=3 to continue.]"
+      "world\n\n[1 more lines in file. Use offset=3 to continue.]"
     );
     expect(await run(t.ls, {})).toBe("src/");
     expect(await run(t.ls, { path: "src" })).toBe("a.txt\nb.log");
@@ -72,6 +73,30 @@ describe("createWorkspace tools", () => {
     );
     const open = toolMap(createWorkspace(["bash"]).tools);
     await expect(run(open.bash, { command: "pip install requests" })).rejects.toThrow("DIRECT PACKAGE INSTALL BLOCKED");
+  });
+
+  test("retains Pi's UTF-8 tail when one output line exceeds the byte cap", async () => {
+    const workspace = createWorkspace(["bash"]);
+    await workspace.ready;
+    for (const content of [" ".repeat(51200) + "x", "€".repeat(18000)]) {
+      await workspace.fs.writeFile(workspace.resolve("large.txt"), content);
+      const expected = truncateTail(content);
+      const output = await run(workspace.tools[0], { command: "cat large.txt" });
+      expect(output.startsWith(expected.content)).toBe(true);
+      expect(output).toContain("[Showing lines 1-1 of 1 (50.0KB limit)]");
+      expect(output).not.toContain("�");
+      expect(expected.lastLinePartial).toBe(true);
+    }
+  });
+
+  test("cancelled read, ls and find refuse before reading the workspace", async () => {
+    const workspace = createWorkspace(["read", "ls", "find"]);
+    await workspace.ready;
+    await workspace.fs.writeFile(workspace.resolve("a.txt"), "before");
+    for (const tool of workspace.tools) {
+      await expect(tool.execute("cancelled", { file_path: "a.txt", pattern: "*.txt" }, AbortSignal.abort()))
+        .rejects.toThrow("Operation aborted");
+    }
   });
 
   test("refuses what pi's tools refuse: missing paths, directories as files, binary reads, bad offsets", async () => {

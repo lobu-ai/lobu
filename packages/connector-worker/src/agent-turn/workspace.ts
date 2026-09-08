@@ -6,9 +6,9 @@
  * the Node logger and tracing SDKs). The shell is just-bash's browser build —
  * the same shell the subprocess lane ran its `bash` tool on, minus the real
  * binaries and the network it could reach there. Write and edit use Pi's own
- * factories with filesystem operations; the bundler excludes their unused
- * terminal renderer dependencies. Read, grep, ls and find still use local
- * implementations over just-bash's filesystem.
+ * factories with filesystem operations, as do read, ls and find. Pi also owns
+ * output truncation; the bundler excludes unused Node I/O and renderers. Grep
+ * stays local because Pi's grep always starts an rg process.
  *
  * The filesystem is in-memory and empty at the start of every turn. Nothing
  * written here outlives the turn, and nothing here can reach the network: the
@@ -16,7 +16,11 @@
  */
 
 import { withLobuFileParameters } from '@lobu/core/agent-tooling';
-import { createEditTool, createWriteTool } from '@mariozechner/pi-coding-agent';
+import {
+  createEditTool, createFindTool, createLsTool, createReadTool, createWriteTool,
+  DEFAULT_MAX_BYTES as MAX_BYTES, DEFAULT_MAX_LINES as MAX_LINES,
+  formatSize, truncateHead, truncateLine, truncateTail,
+} from '@mariozechner/pi-coding-agent';
 import { enforceBashCommandPolicy, isDirectPackageInstallCommand } from '@lobu/core/tool-policy';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { Bash, InMemoryFs } from 'just-bash/browser';
@@ -25,9 +29,6 @@ import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, Run
 /** Where a turn's files live; also the shell's working directory. */
 export const WORKSPACE_ROOT = '/workspace';
 
-/** pi's output caps, so a file or a command reads the same on both lanes. */
-const MAX_LINES = 2000;
-const MAX_BYTES = 50 * 1024;
 const LS_LIMIT = 500;
 const FIND_LIMIT = 1000;
 const FIND_IGNORED = /(^|\/)(node_modules|\.git)(\/|$)/;
@@ -35,79 +36,7 @@ const FIND_IGNORED = /(^|\/)(node_modules|\.git)(\/|$)/;
 /** The same interpreter budget the subprocess lane gave its shell. */
 const BASH_LIMITS = { maxCommandCount: 50_000, maxLoopIterations: 50_000 };
 
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-
-function byteLength(text: string): number {
-  return encoder.encode(text).length;
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-interface Truncation {
-  content: string;
-  truncated: boolean;
-  truncatedBy: 'lines' | 'bytes' | null;
-  totalLines: number;
-  outputLines: number;
-  outputBytes: number;
-  firstLineExceedsLimit: boolean;
-}
-
-/** Keep the first lines that fit, as pi's `truncateHead` does. */
-function truncateHead(content: string, maxLines = MAX_LINES, maxBytes = MAX_BYTES): Truncation {
-  const lines = content.split('\n');
-  const totalLines = lines.length;
-  const totalBytes = byteLength(content);
-  if (totalLines <= maxLines && totalBytes <= maxBytes) {
-    return { content, truncated: false, truncatedBy: null, totalLines, outputLines: totalLines, outputBytes: totalBytes, firstLineExceedsLimit: false };
-  }
-  if (byteLength(lines[0] ?? '') > maxBytes) {
-    return { content: '', truncated: true, truncatedBy: 'bytes', totalLines, outputLines: 0, outputBytes: 0, firstLineExceedsLimit: true };
-  }
-  const kept: string[] = [];
-  let bytes = 0;
-  let truncatedBy: 'lines' | 'bytes' = 'lines';
-  for (let i = 0; i < lines.length && i < maxLines; i++) {
-    const lineBytes = byteLength(lines[i] ?? '') + (i > 0 ? 1 : 0);
-    if (bytes + lineBytes > maxBytes) {
-      truncatedBy = 'bytes';
-      break;
-    }
-    kept.push(lines[i] ?? '');
-    bytes += lineBytes;
-  }
-  const out = kept.join('\n');
-  return { content: out, truncated: true, truncatedBy, totalLines, outputLines: kept.length, outputBytes: byteLength(out), firstLineExceedsLimit: false };
-}
-
-/** Keep the last lines that fit, as pi's `truncateTail` does for command output. */
-function truncateTail(content: string, maxLines = MAX_LINES, maxBytes = MAX_BYTES): Truncation {
-  const lines = content.split('\n');
-  const totalLines = lines.length;
-  const totalBytes = byteLength(content);
-  if (totalLines <= maxLines && totalBytes <= maxBytes) {
-    return { content, truncated: false, truncatedBy: null, totalLines, outputLines: totalLines, outputBytes: totalBytes, firstLineExceedsLimit: false };
-  }
-  const kept: string[] = [];
-  let bytes = 0;
-  let truncatedBy: 'lines' | 'bytes' = 'lines';
-  for (let i = lines.length - 1; i >= 0 && kept.length < maxLines; i--) {
-    const lineBytes = byteLength(lines[i] ?? '') + (kept.length > 0 ? 1 : 0);
-    if (bytes + lineBytes > maxBytes) {
-      truncatedBy = 'bytes';
-      break;
-    }
-    kept.unshift(lines[i] ?? '');
-    bytes += lineBytes;
-  }
-  const out = kept.join('\n');
-  return { content: out, truncated: true, truncatedBy, totalLines, outputLines: kept.length, outputBytes: byteLength(out), firstLineExceedsLimit: false };
-}
 
 function text(value: string): { content: [{ type: 'text'; text: string }]; details: Record<string, never> } {
   return { content: [{ type: 'text', text: value }], details: {} };
@@ -137,6 +66,22 @@ function optionalNumber(args: unknown, key: string): number | undefined {
  */
 function positiveLimit(requested: number | undefined, fallback: number): number {
   return requested !== undefined && requested >= 1 ? Math.floor(requested) : fallback;
+}
+
+/** Lobu's existing admission rule; Pi owns the listing and its result. */
+function withPositiveLimit(tool: AgentTool, fallback: number): AgentTool {
+  return {
+    ...tool,
+    execute: (id, args, signal, onUpdate) => tool.execute(id, {
+      ...(args && typeof args === 'object' ? args : {}),
+      limit: positiveLimit(optionalNumber(args, 'limit'), fallback),
+    }, signal, onUpdate),
+  };
+}
+
+/** Binary reads are a Lobu admission refusal, not text for Pi to slice. */
+class BinaryWorkspaceFile extends Error {
+  constructor(readonly size: number) { super('Binary workspace file'); }
 }
 
 /** A `*`/`**`/`?` glob to a regexp over a `/`-separated path. */
@@ -207,11 +152,6 @@ function normalizeToLF(text: string): string {
 
 const GREP_LIMIT = 100;
 const GREP_MAX_LINE_LENGTH = 500;
-
-function truncateLine(line: string): { text: string; wasTruncated: boolean } {
-  if (line.length <= GREP_MAX_LINE_LENGTH) return { text: line, wasTruncated: false };
-  return { text: `${line.slice(0, GREP_MAX_LINE_LENGTH)}... [truncated]`, wasTruncated: true };
-}
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -325,6 +265,59 @@ export function createWorkspace(
     access: async (path) => { await ready; await fs.stat(resolve(path)); },
   } }), 'edit');
 
+  const piRead: AgentTool = withLobuFileParameters(createReadTool(WORKSPACE_ROOT, { operations: {
+    access: async (path) => {
+      await ready;
+      const absolute = resolve(path);
+      if (!(await fs.exists(absolute))) throw new Error(`File not found: ${absolute}`);
+      if ((await fs.stat(absolute)).isDirectory) throw new Error(`Not a file: ${absolute}`);
+    },
+    readFile: async (path) => {
+      const bytes = await fs.readFileBuffer(resolve(path));
+      if (looksBinary(bytes)) throw new BinaryWorkspaceFile(bytes.length);
+      return Buffer.from(bytes);
+    },
+  } }), 'read');
+  const read: AgentTool = {
+    ...piRead,
+    description: `Read the contents of a text file in the workspace. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
+    async execute(...args: Parameters<typeof piRead.execute>) {
+      try { return await piRead.execute(...args); }
+      catch (error) {
+        if (error instanceof BinaryWorkspaceFile) return text(`[Binary file: ${formatSize(error.size)}. This workspace reads text files only.]`);
+        throw error;
+      }
+    },
+  };
+  const exists = async (path: string): Promise<boolean> => { await ready; return fs.exists(resolve(path)); };
+  const ls = withPositiveLimit(createLsTool(WORKSPACE_ROOT, { operations: {
+    exists,
+    stat: async (path) => { await ready; const stat = await fs.stat(resolve(path)); return { isDirectory: () => stat.isDirectory }; },
+    readdir: async (path) => { await ready; return fs.readdir(resolve(path)); },
+  } }), LS_LIMIT);
+  const find = { ...withPositiveLimit(createFindTool(WORKSPACE_ROOT, { operations: {
+    exists,
+    glob: async (pattern, cwd, { limit }) => {
+      await ready;
+      const root = resolve(cwd);
+      const prefix = `${root}/`;
+      const matcher = globToRegExp(pattern);
+      const wholePath = pattern.includes('/');
+      const matches: string[] = [];
+      for (const candidate of fs.getAllPaths().sort()) {
+        if (candidate === root || !candidate.startsWith(prefix)) continue;
+        const relative = candidate.slice(prefix.length);
+        if (FIND_IGNORED.test(relative)) continue;
+        if (!matcher.test(wholePath ? relative : (relative.split('/').pop() ?? relative))) continue;
+        matches.push(candidate);
+        if (matches.length >= limit) break;
+      }
+      return matches;
+    },
+  } }), FIND_LIMIT),
+    description: `Find files by glob pattern in the workspace. Returns paths relative to the search directory, one per line, skipping node_modules and .git. Output is truncated to ${FIND_LIMIT} results or ${MAX_BYTES / 1024}KB (whichever is hit first).`,
+  };
+
   const tools: Record<AgentTurnBuiltinTool, AgentTool> = {
     bash: {
       name: 'bash',
@@ -364,54 +357,7 @@ export function createWorkspace(
         return text(output);
       },
     },
-    read: {
-      name: 'read',
-      label: 'read',
-      description: `Read the contents of a text file in the workspace. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
-      parameters: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Path to the file to read (relative to the workspace, or absolute)' },
-          offset: { type: 'number', description: 'Line number to start reading from (1-indexed)' },
-          limit: { type: 'number', description: 'Maximum number of lines to read' },
-        },
-        required: ['file_path'],
-      } as never,
-      execute: async (_id, args) => {
-        const path = requireString(args, 'file_path');
-        const offset = optionalNumber(args, 'offset');
-        const limit = optionalNumber(args, 'limit');
-        await ready;
-        const absolute = resolve(path);
-        if (!(await fs.exists(absolute))) throw new Error(`File not found: ${absolute}`);
-        const stat = await fs.stat(absolute);
-        if (stat.isDirectory) throw new Error(`Not a file: ${absolute}`);
-        const bytes = await fs.readFileBuffer(absolute);
-        if (looksBinary(bytes)) {
-          return text(`[Binary file: ${formatSize(bytes.length)}. This workspace reads text files only.]`);
-        }
-        const lines = decoder.decode(bytes).split('\n');
-        const start = offset ? Math.max(0, offset - 1) : 0;
-        if (start >= lines.length) throw new Error(`Offset ${offset} is beyond end of file (${lines.length} lines total)`);
-        const end = limit !== undefined ? Math.min(start + limit, lines.length) : lines.length;
-        const selected = lines.slice(start, end).join('\n');
-        const truncation = truncateHead(selected);
-        const startDisplay = start + 1;
-        if (truncation.firstLineExceedsLimit) {
-          return text(
-            `[Line ${startDisplay} is ${formatSize(byteLength(lines[start] ?? ''))}, exceeds ${formatSize(MAX_BYTES)} limit. Use bash: sed -n '${startDisplay}p' ${path} | head -c ${MAX_BYTES}]`
-          );
-        }
-        let output = truncation.content;
-        if (truncation.truncated) {
-          const endDisplay = startDisplay + truncation.outputLines - 1;
-          output += `\n\n[Showing lines ${startDisplay}-${endDisplay} of ${lines.length}${truncation.truncatedBy === 'bytes' ? ` (${formatSize(MAX_BYTES)} limit)` : ''}. Use offset=${endDisplay + 1} to continue.]`;
-        } else if (end < lines.length) {
-          output += `\n\n[Showing lines ${startDisplay}-${end} of ${lines.length}. ${lines.length - end} more lines. Use offset=${end + 1} to continue.]`;
-        }
-        return text(output);
-      },
-    },
+    read,
     write,
     edit,
     grep: {
@@ -484,7 +430,7 @@ export function createWorkspace(
             const start = contextLines > 0 ? Math.max(1, lineNumber - contextLines) : lineNumber;
             const end = contextLines > 0 ? Math.min(lines.length, lineNumber + contextLines) : lineNumber;
             for (let current = start; current <= end; current++) {
-              const truncated = truncateLine(lines[current - 1] ?? '');
+              const truncated = truncateLine(lines[current - 1] ?? '', GREP_MAX_LINE_LENGTH);
               if (truncated.wasTruncated) linesTruncated = true;
               rows.push(current === lineNumber ? `${name}:${current}: ${truncated.text}` : `${name}-${current}- ${truncated.text}`);
             }
@@ -495,7 +441,7 @@ export function createWorkspace(
           }
         }
         if (matches === 0) return text('No matches found');
-        const truncation = truncateHead(rows.join('\n'), Number.MAX_SAFE_INTEGER);
+        const truncation = truncateHead(rows.join('\n'), { maxLines: Number.MAX_SAFE_INTEGER });
         let output = truncation.content;
         const notices: string[] = [];
         if (limitReached) notices.push(`${limit} matches limit reached. Use limit=${limit * 2} for more, or refine pattern`);
@@ -505,90 +451,8 @@ export function createWorkspace(
         return text(output);
       },
     },
-    ls: {
-      name: 'ls',
-      label: 'ls',
-      description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to ${LS_LIMIT} entries or ${MAX_BYTES / 1024}KB (whichever is hit first).`,
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory to list (default: the workspace root)' },
-          limit: { type: 'number', description: `Maximum number of entries to return (default: ${LS_LIMIT})` },
-        },
-      } as never,
-      execute: async (_id, args) => {
-        const path = optionalString(args, 'path');
-        const limit = positiveLimit(optionalNumber(args, 'limit'), LS_LIMIT);
-        await ready;
-        const absolute = resolve(path);
-        if (!(await fs.exists(absolute))) throw new Error(`Path not found: ${absolute}`);
-        if (!(await fs.stat(absolute)).isDirectory) throw new Error(`Not a directory: ${absolute}`);
-        const entries = (await fs.readdir(absolute)).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-        const rows: string[] = [];
-        let entryLimitReached = false;
-        for (const entry of entries) {
-          if (rows.length >= limit) {
-            entryLimitReached = true;
-            break;
-          }
-          const stat = await fs.stat(`${absolute}/${entry}`);
-          rows.push(stat.isDirectory ? `${entry}/` : entry);
-        }
-        if (rows.length === 0) return text('(empty directory)');
-        const truncation = truncateHead(rows.join('\n'), Number.MAX_SAFE_INTEGER);
-        let output = truncation.content;
-        const notices: string[] = [];
-        if (entryLimitReached) notices.push(`${limit} entries limit reached. Use limit=${limit * 2} for more`);
-        if (truncation.truncated) notices.push(`${formatSize(MAX_BYTES)} limit reached`);
-        if (notices.length > 0) output += `\n\n[${notices.join('. ')}]`;
-        return text(output);
-      },
-    },
-    find: {
-      name: 'find',
-      label: 'find',
-      description: `Find files by glob pattern in the workspace. Returns paths relative to the search directory, one per line, skipping node_modules and .git. Output is truncated to ${FIND_LIMIT} results or ${MAX_BYTES / 1024}KB (whichever is hit first).`,
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'" },
-          path: { type: 'string', description: 'Directory to search in (default: the workspace root)' },
-          limit: { type: 'number', description: `Maximum number of results (default: ${FIND_LIMIT})` },
-        },
-        required: ['pattern'],
-      } as never,
-      execute: async (_id, args) => {
-        const pattern = requireString(args, 'pattern');
-        const path = optionalString(args, 'path');
-        const limit = positiveLimit(optionalNumber(args, 'limit'), FIND_LIMIT);
-        await ready;
-        const root = resolve(path);
-        if (!(await fs.exists(root))) throw new Error(`Path not found: ${root}`);
-        const prefix = `${root}/`;
-        // A pattern without a slash names a file wherever it is, as `fd --glob`
-        // does; one with a slash is matched against the path under the search root.
-        const matcher = globToRegExp(pattern);
-        const wholePath = pattern.includes('/');
-        const matches: string[] = [];
-        for (const candidate of fs.getAllPaths().sort()) {
-          if (candidate === root || !candidate.startsWith(prefix)) continue;
-          const relative = candidate.slice(prefix.length);
-          if (FIND_IGNORED.test(relative)) continue;
-          const subject = wholePath ? relative : (relative.split('/').pop() ?? relative);
-          if (!matcher.test(subject)) continue;
-          matches.push(relative);
-          if (matches.length >= limit) break;
-        }
-        if (matches.length === 0) return text('No files found matching pattern');
-        const truncation = truncateHead(matches.join('\n'), Number.MAX_SAFE_INTEGER);
-        let output = truncation.content;
-        const notices: string[] = [];
-        if (matches.length >= limit) notices.push(`${limit} results limit reached. Use limit=${limit * 2} for more, or refine pattern`);
-        if (truncation.truncated) notices.push(`${formatSize(MAX_BYTES)} limit reached`);
-        if (notices.length > 0) output += `\n\n[${notices.join('. ')}]`;
-        return text(output);
-      },
-    },
+    ls,
+    find,
   };
 
   return {

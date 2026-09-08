@@ -648,6 +648,30 @@ describe("agent turn on the isolate lane", () => {
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult", "assistant"]);
 	}, 120_000);
 
+	it("retains a valid UTF-8 tail inside the isolate when a bash line exceeds 50 KiB", async () => {
+		hits = [];
+		toolScript = [
+			{ id: "toolu_large_write", name: "write", input: { file_path: "large.txt", content: "€".repeat(18000) } },
+			{ id: "toolu_large_bash", name: "bash", input: { command: "cat large.txt" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob({ tools: {
+			gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [], builtin: ["write", "bash"],
+		} }));
+		const end = run.events.find((event) => event.type === "tool_call_end" && event.name === "bash") as
+			| { isError: boolean; output: string } | undefined;
+		expect(end?.isError).toBe(false);
+		// Progress events are intentionally abbreviated; the native journal holds
+		// the full tool result that Pi sends back to the provider.
+		const result = sessionMessages(run.output).find((message) => message.role === "toolResult" && message.toolName === "bash");
+		const output = result?.role === "toolResult" ? result.content.map((part) => part.type === "text" ? part.text : "").join("") : "";
+		const [tail, notice] = output.split("\n\n");
+		expect(tail.length).toBe(Math.floor(51200 / 3));
+		expect(new Set(tail)).toEqual(new Set(["€"]));
+		expect(notice).toBe("[Showing lines 1-1 of 1 (50.0KB limit)]");
+		expect(hits.map((hit) => hit.url)).toEqual(["/v1/messages", "/v1/messages", "/v1/messages"]);
+	}, 120_000);
+
 	/** A turn carrying the conversation plugin's tools, addressed at one conversation. */
 	function gatewayToolJob(gateway: string[], overrides: Partial<AgentTurnInput> = {}): ExecutorJob {
 		return turnJob({
@@ -1368,7 +1392,7 @@ describe("agent turn on the isolate lane", () => {
 		});
 	}
 
-	it("uploads a file the model wrote in ITS OWN in-memory workspace, as a real multipart file part", async () => {
+	it("writes, reads, edits, lists, finds and uploads the same workspace file inside a real isolate", async () => {
 		hits = [];
 		uploads = [];
 		uploadReply = {
@@ -1376,24 +1400,36 @@ describe("agent turn on the isolate lane", () => {
 			body: { fileId: "file_iso", name: "report.csv", permalink: "https://files.test/iso" },
 		};
 		toolScript = [
-			{ id: "toolu_w1", name: "bash", input: { command: "printf 'a,b\\n1,2\\n' > report.csv" } },
+			{ id: "toolu_w1", name: "write", input: { file_path: "report.csv", content: "a,b\n" } },
+			{ id: "toolu_b1", name: "bash", input: { command: "printf '1,2\\n' >> report.csv" } },
+			{ id: "toolu_r1", name: "read", input: { file_path: "report.csv" } },
+			{ id: "toolu_e1", name: "edit", input: { file_path: "report.csv", old_string: "1,2", new_string: "3,4" } },
+			{ id: "toolu_l1", name: "ls", input: {} },
+			{ id: "toolu_f1", name: "find", input: { pattern: "*.csv" } },
 			{ id: "toolu_u1", name: "upload_file", input: { file_path: "report.csv", description: "The numbers" } },
 		];
 		armFirstDeltaGate();
-		const run = await runTurn(mediaJob(["upload_file"]));
+		const run = await runTurn(mediaJob(["upload_file"], ["write", "bash", "read", "edit", "ls", "find"]));
 
 		expect(run.output.text).toBe("Hello from the isolate");
 		// The model was offered the plugin's own tool, with the plugin's schema.
 		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string }> };
 		expect(offered.tools?.map((t) => t.name)).toContain("upload_file");
+		const ends = run.events.filter((event) => event.type === "tool_call_end") as Array<{ name: string; isError: boolean; output: string }>;
+		expect(ends.map((event) => [event.name, event.isError])).toEqual(
+			["write", "bash", "read", "edit", "ls", "find", "upload_file"].map((name) => [name, false]),
+		);
+		expect(ends.find((event) => event.name === "read")?.output).toBe("a,b\n1,2\n");
+		expect(ends.find((event) => event.name === "ls")?.output).toBe("report.csv");
+		expect(ends.find((event) => event.name === "find")?.output).toBe("report.csv");
 
-		// ONE upload, carrying the bytes `bash` wrote INSIDE the isolate — proof
-		// the read port reads the turn's own filesystem, not the host's.
+		// ONE upload, carrying the bytes `write`, `bash` and `edit` left INSIDE the
+		// isolate — proof the read port reads the turn's own filesystem, not the host's.
 		expect(uploads.length).toBe(1);
 		const upload = uploads[0] as UploadHit;
 		expect(upload.fileName).toBe("report.csv");
 		expect(upload.fileType).toBe("text/csv");
-		expect(upload.fileBytes.toString("utf8")).toBe("a,b\n1,2\n");
+		expect(upload.fileBytes.toString("utf8")).toBe("a,b\n3,4\n");
 		expect(upload.filename).toBe("report.csv");
 		expect(upload.comment).toBe("The numbers");
 		// Same one credential and the same conversation routing as every other
