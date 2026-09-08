@@ -587,7 +587,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     });
     const subscriptions = new AutomationSubscriptionService();
     const registry = new CommandRegistry();
-    registerBuiltInCommands(registry, { agentSettingsStore: {} as never });
+    registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: subscriptions });
     const dispatcher = new CommandDispatcher({ registry, automationSubscriptionService: subscriptions });
     const replies: string[] = [];
     await dispatcher.tryHandleSlashText(`/lobu link ${targetAgent}`, {

@@ -8,7 +8,7 @@ import {
   previewAgentMenu,
 } from "../../preview/slack.js";
 import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
-import { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
+import type { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import {
   resolveEffectiveModelRef,
@@ -19,6 +19,7 @@ const LINK_AUTHORITY_REVOKED_MESSAGE = "The existing chat link no longer has acc
 
 interface BuiltInCommandDeps {
   agentSettingsStore: AgentSettingsStore;
+  automationSubscriptionService: AutomationSubscriptionService;
 }
 
 /**
@@ -73,7 +74,7 @@ export function registerBuiltInCommands(
       // Command context keeps the installation's organization for /link.
       // Agent settings belong to the workspace selected by the chat subscription.
       const subscription = ctx.connectionId && ctx.organizationId
-        ? await new AutomationSubscriptionService().resolveForConnection(
+        ? await deps.automationSubscriptionService.resolveForConnection(
             ctx.connectionId, ctx.channelId, ctx.organizationId, false, ctx.teamId,
           )
         : null;

@@ -348,7 +348,7 @@ describe("Slack Preview claims + channel Automations", () => {
 
   test("the link command explains the authorized connection boundary per platform", async () => {
     const registry = new CommandRegistry();
-    registerBuiltInCommands(registry, { agentSettingsStore: {} as never });
+    registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: {} as never });
     for (const scenario of [
       {
         platform: "slack",
@@ -448,10 +448,11 @@ describe("Slack Preview claims + channel Automations", () => {
   test("the /lobu link chat command redeems a code end to end", async () => {
     const code = await createClaim(AGENT_ID);
     const registry = new CommandRegistry();
-    // registerBuiltInCommands wires `status` against an agent settings store we
-    // don't need here; only `link` is exercised.
+    // registerBuiltInCommands wires `status` against an agent settings store and
+    // a subscription service we don't need here; only `link` is exercised.
     registerBuiltInCommands(registry, {
       agentSettingsStore: {} as never,
+      automationSubscriptionService: {} as never,
     });
 
     const replies: string[] = [];
@@ -630,7 +631,7 @@ describe("Public preview — /lobu try a demo agent", () => {
 
   test("the /lobu try chat command binds end to end", async () => {
     const registry = new CommandRegistry();
-    registerBuiltInCommands(registry, { agentSettingsStore: {} as never });
+    registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: {} as never });
 
     const replies: string[] = [];
     const handled = await registry.tryHandle("try", {
@@ -818,7 +819,7 @@ describe("chat-user identity + codeless re-link by agent id", () => {
     });
 
     const registry = new CommandRegistry();
-    registerBuiltInCommands(registry, { agentSettingsStore: {} as never });
+    registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: {} as never });
 
     const replies: string[] = [];
     await registry.tryHandle("link", {

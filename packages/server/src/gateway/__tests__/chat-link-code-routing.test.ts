@@ -75,7 +75,7 @@ describe("platform-neutral chat link-code routing", () => {
     const subscriptions = new AutomationSubscriptionService();
     const registry = new CommandRegistry();
     const getSettings = mock(async () => undefined);
-    registerBuiltInCommands(registry, { agentSettingsStore: { getSettings } as never });
+    registerBuiltInCommands(registry, { agentSettingsStore: { getSettings } as never, automationSubscriptionService: subscriptions });
     const dispatcher = new CommandDispatcher({ registry, automationSubscriptionService: subscriptions });
     const conversationState = new ConversationStateStore(await createConnectedGatewayStateAdapter());
     const bridge = new MessageHandlerBridge(connection, {

@@ -90,6 +90,7 @@ describe("DM /lobu link <code> — real consume→bind chain", () => {
 			const registry = new CommandRegistry();
 			registerBuiltInCommands(registry, {
 				agentSettingsStore: {} as never,
+				automationSubscriptionService: {} as never,
 			});
 			const dispatcher = new CommandDispatcher({
 				registry,

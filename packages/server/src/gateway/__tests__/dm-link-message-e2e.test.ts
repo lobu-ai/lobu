@@ -83,7 +83,7 @@ describe("DM bare-code message → real consume→bind (previewMode)", () => {
     try {
       // Real registry + real built-in `link` command + real dispatcher.
       const registry = new CommandRegistry();
-      registerBuiltInCommands(registry, { agentSettingsStore: {} as never });
+      registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: {} as never });
       const dispatcher = new CommandDispatcher({
         registry,
 				automationSubscriptionService: {
