@@ -438,21 +438,51 @@ interface StreamOptions {
   org?: string;
 }
 
+const DEFAULT_IDLE_TIMEOUT_MS = 60 * 1000;
+
+function resolveIdleTimeoutMs(): number {
+  const raw = process.env.LOBU_CHAT_IDLE_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_IDLE_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_IDLE_TIMEOUT_MS;
+}
+
 async function streamResponse(
   sseUrl: string,
   token: string,
   controller: AbortController,
   options: StreamOptions = {}
 ): Promise<void> {
-  const OVERALL_TIMEOUT_MS = 5 * 60 * 1000;
-  const IDLE_TIMEOUT_MS = 60 * 1000;
+  // Silence, not elapsed time, is what distinguishes a dead connection from a
+  // long-running turn: the gateway heartbeats a `ping` every 30s while the run
+  // is alive. A wall-clock cap would kill healthy turns — a single `os.shell`
+  // call may legitimately run 150s, and an agent can chain several of them.
+  const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs();
 
-  const overallTimer = setTimeout(() => controller.abort(), OVERALL_TIMEOUT_MS);
-  let idleTimer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+  let idleTimedOut = false;
+  const abortIdle = () => {
+    idleTimedOut = true;
+    controller.abort();
+  };
 
-  const resetIdleTimer = () => {
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearIdleTimer = () => {
+    if (idleTimer === undefined) return;
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    idleTimer = undefined;
+  };
+  const waitForStream = async <T>(operation: Promise<T>): Promise<T> => {
+    clearIdleTimer();
+    idleTimer = setTimeout(abortIdle, IDLE_TIMEOUT_MS);
+    try {
+      return await operation;
+    } finally {
+      // Rendering a chunk can block on stdout or human approval. Neither is
+      // network silence, so the idle clock runs only while awaiting I/O.
+      clearIdleTimer();
+    }
   };
 
   // Tracked across try/finally so we can cancel the body stream on early
@@ -461,10 +491,12 @@ async function streamResponse(
   let readerForCleanup: { cancel(reason?: unknown): Promise<void> } | undefined;
 
   try {
-    const res = await fetch(sseUrl, {
-      headers: agentApiHeaders(token, options.org),
-      signal: controller.signal,
-    });
+    const res = await waitForStream(
+      fetch(sseUrl, {
+        headers: agentApiHeaders(token, options.org),
+        signal: controller.signal,
+      })
+    );
 
     if (!res.ok || !res.body) {
       console.error(chalk.red(`\n  SSE connection failed (${res.status})\n`));
@@ -480,10 +512,9 @@ async function streamResponse(
     let sawSandboxLink = false;
 
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await waitForStream(reader.read());
       if (done) break;
 
-      resetIdleTimer();
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -657,11 +688,26 @@ async function streamResponse(
       }
     }
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === "AbortError") return;
+    if (err instanceof Error && err.name === "AbortError") {
+      // Every terminal event (complete / error / ephemeral) aborts deliberately
+      // before returning, so an abort we did not schedule is a stalled stream.
+      // Reporting it as success would tell a wrapping script the turn finished.
+      if (!idleTimedOut) return;
+      const timeoutLabel =
+        IDLE_TIMEOUT_MS % 1000 === 0
+          ? `${IDLE_TIMEOUT_MS / 1000}s`
+          : `${IDLE_TIMEOUT_MS}ms`;
+      await writeStderr(
+        chalk.red(
+          `\n  Stream timed out: no data from the agent for ${timeoutLabel}. The turn may still be running server-side.\n`
+        )
+      );
+      process.exitCode = 1;
+      return;
+    }
     throw err;
   } finally {
-    clearTimeout(overallTimer);
-    clearTimeout(idleTimer);
+    clearIdleTimer();
     if (readerForCleanup) {
       // Cancel the body stream so the underlying connection is released
       // immediately on early return — otherwise the lock stays held until GC.
