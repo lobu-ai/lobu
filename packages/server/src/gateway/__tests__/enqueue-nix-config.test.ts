@@ -27,6 +27,7 @@ const ORG_ID = "org-1";
 
 const AGENT_SETTINGS = {
   models: ["openai/gpt-5"],
+  preApprovedTools: ["/mcp/test-memory/tools/*"],
   nixConfig: { packages: ["agent-pkg"] },
   skillsConfig: {
     skills: [
@@ -89,6 +90,8 @@ describe("enqueued payload carries the resolved nixConfig", () => {
 
     expect(enqueued).toHaveLength(1);
     const payload = enqueued[0]!;
+    expect(payload.preApprovedTools).toEqual(AGENT_SETTINGS.preApprovedTools);
+    expect(payload.agentOptions).not.toHaveProperty("preApprovedTools");
     expect(payload.nixConfig?.packages).toEqual(["agent-pkg"]);
     // The worker reads the top-level field; a copy left in agentOptions would
     // mean the lift never happened.
@@ -152,6 +155,8 @@ describe("enqueued payload carries the resolved nixConfig", () => {
     expect(res.status).toBe(200);
     expect(enqueued).toHaveLength(1);
     const payload = enqueued[0]!;
+    expect(payload.preApprovedTools).toEqual(AGENT_SETTINGS.preApprovedTools);
+    expect(payload.agentOptions).not.toHaveProperty("preApprovedTools");
     expect(payload.nixConfig?.packages).toEqual(["request-pkg", "agent-pkg"]);
     expect(
       (payload.agentOptions as Record<string, unknown> | undefined)?.nixConfig,
