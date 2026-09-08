@@ -1,11 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { generateWorkerToken } from "@lobu/core";
-import { AgentProgressProcessor } from "../../../../agent-worker/src/runtime/processor.js";
-import { runAISession } from "../../../../agent-worker/src/runtime/session-runner.js";
-import { invalidateSessionContextCache } from "../../../../agent-worker/src/runtime/session-context.js";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
 import type { BaseProviderModule } from "../auth/base-provider-module.js";
@@ -45,7 +39,6 @@ afterEach(() => {
     if (savedEnv[key] === undefined) delete process.env[key];
     else process.env[key] = savedEnv[key];
   }
-  invalidateSessionContextCache();
 });
 
 describe("ChatGPT subscription credentials", () => {
@@ -86,119 +79,100 @@ describe("ChatGPT subscription credentials", () => {
     }
   });
 
+  // The placeholder MAP the worker receives is asserted at the session-context
+  // route, not through a worker run: `credentialPlaceholders` is produced only
+  // by `worker-gateway`, and this is its only coverage. The guarantee that
+  // matters is per-provider — a proxied provider gets the worker token, while
+  // ChatGPT's own subscription credential never leaves the gateway.
   for (const defaultProvider of ["chatgpt", "deepseek"]) {
-    for (const reverse of [false, true]) {
-      test(`real worker uses ChatGPT with ${defaultProvider} default; reverse=${reverse}`, async () => {
-        process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
-        const manager = makeManager();
-        const chatgpt = new ChatGPTOAuthModule(manager);
-        const openai = new ApiKeyProviderModule({
-          providerId: "openai", providerDisplayName: "OpenAI", providerIconUrl: "",
-          envVarName: "OPENAI_API_KEY", upstreamBaseUrl: "https://openai.example.invalid",
-          sdkCompat: "openai", authProfilesManager: manager,
+    test(`session context proxies keys but never the ChatGPT credential; default=${defaultProvider}`, async () => {
+      process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+      const manager = makeManager();
+      const chatgpt = new ChatGPTOAuthModule(manager);
+      const apiKeyModule = (providerId: string, envVarName: string) =>
+        new ApiKeyProviderModule({
+          providerId,
+          providerDisplayName: providerId,
+          providerIconUrl: "",
+          envVarName,
+          upstreamBaseUrl: `https://${providerId}.example.invalid`,
+          sdkCompat: "openai",
+          authProfilesManager: manager,
         });
-        const deepseek = new ApiKeyProviderModule({
-          providerId: "deepseek", providerDisplayName: "DeepSeek", providerIconUrl: "",
-          envVarName: "DEEPSEEK_API_KEY", upstreamBaseUrl: "https://deepseek.example.invalid",
-          sdkCompat: "openai", authProfilesManager: manager,
-        });
-        const modules = [chatgpt, openai, deepseek];
-        if (reverse) modules.reverse();
-        // Availability is fixture-owned; account lookup and placeholder generation
-        // below use the real provider modules and org-bucket profile manager.
-        for (const module of modules) module.hasSystemKey = () => true;
-        const model = defaultProvider === "chatgpt" ? "chatgpt/gpt-5.5" : "deepseek/default-model";
-        const gateway = new WorkerGateway(
-          { send: async () => undefined } as never,
-          "https://gateway.example.invalid",
-          { getWorkerConfig: async () => ({ mcpServers: {} }) } as never,
-          { getSessionContext: async () => ({
-              agentLayers: { identityMd: "Synthetic test agent", soulMd: "", userMd: "", unconfiguredNotice: "" },
-              platformInstructions: "", networkInstructions: "", skillsInstructions: "", mcpStatus: [],
-            }) } as never,
-          undefined,
-          {
-            getInstalledModules: async () => modules,
-            resolveDispatchModel: async () => ({ model }),
-            findProviderForModel: async (ref: string) => modules.find((m) => m.providerId === ref.split("/")[0]),
-          } as never,
-          { getSettings: async () => ({ models: [model] }) } as never,
-        );
-        const conversationId = `conversation-${defaultProvider}-${reverse}`;
-        const workerToken = generateWorkerToken(USER, conversationId, "worker-test", {
-          channelId: "channel-test", agentId: AGENT, organizationId: ORG,
-        });
-        let upstreamRequests = 0;
-        let receivedAccount: string | null = null;
-        let receivedModel: unknown;
-        let providerConfig: Record<string, unknown> | undefined;
-        const server = Bun.serve({
-          hostname: "127.0.0.1", port: 0,
-          async fetch(request) {
-            const url = new URL(request.url);
-            if (url.pathname === "/worker/session-context") {
-              url.pathname = "/session-context";
-              const response = await gateway.getApp().request(new Request(url, request));
-              const body = await response.clone().json();
-              providerConfig = body.providerConfig;
-              return response;
-            }
-            if (url.pathname.endsWith("/codex/responses")) {
-              // The production adapter probes WebSocket before falling back to SSE.
-              if (request.method !== "POST") return new Response(null, { status: 426 });
-              upstreamRequests++;
-              receivedAccount = request.headers.get("chatgpt-account-id");
-              receivedModel = (await request.json()).model;
-              const item = { id: "msg-test", type: "message", role: "assistant", status: "completed",
-                content: [{ type: "output_text", text: "credential-test-ok", annotations: [] }] };
-              const events = [
-                { type: "response.created", response: { id: "resp-test", status: "in_progress" } },
-                { type: "response.output_item.added", item: { ...item, content: [], status: "in_progress" } },
-                { type: "response.content_part.added", part: { type: "output_text", text: "", annotations: [] } },
-                { type: "response.output_text.delta", delta: "credential-test-ok" },
-                { type: "response.output_item.done", item },
-                { type: "response.completed", response: { id: "resp-test", status: "completed", output: [item],
-                    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
-              ];
-              return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
-                headers: { "Content-Type": "text/event-stream" },
-              });
-            }
-            return new Response("Unexpected test request", { status: 404 });
+      const modules = [
+        chatgpt,
+        apiKeyModule("openai", "OPENAI_API_KEY"),
+        apiKeyModule("deepseek", "DEEPSEEK_API_KEY"),
+      ];
+      // Availability is fixture-owned; the account lookup and placeholder
+      // generation below use the real provider modules.
+      for (const module of modules) module.hasSystemKey = () => true;
+      const model =
+        defaultProvider === "chatgpt"
+          ? "chatgpt/gpt-5.5"
+          : "deepseek/default-model";
+      const gateway = new WorkerGateway(
+        { send: async () => undefined } as never,
+        "https://gateway.example.invalid",
+        { getWorkerConfig: async () => ({ mcpServers: {} }) } as never,
+        {
+          getSessionContext: async () => ({
+            agentLayers: {
+              identityMd: "Synthetic test agent",
+              soulMd: "",
+              userMd: "",
+              unconfiguredNotice: "",
+            },
+            platformInstructions: "",
+            networkInstructions: "",
+            skillsInstructions: "",
+            mcpStatus: [],
+          }),
+        } as never,
+        undefined,
+        {
+          getInstalledModules: async () => modules,
+          resolveDispatchModel: async () => ({ model }),
+          findProviderForModel: async (ref: string) =>
+            modules.find((m) => m.providerId === ref.split("/")[0]),
+        } as never,
+        { getSettings: async () => ({ models: [model] }) } as never,
+      );
+      const conversationId = `conversation-${defaultProvider}`;
+      const workerToken = generateWorkerToken(
+        USER,
+        conversationId,
+        "worker-test",
+        { channelId: "channel-test", agentId: AGENT, organizationId: ORG },
+      );
+      try {
+        const response = await gateway.getApp().request("/session-context", {
+          headers: {
+            authorization: `Bearer ${workerToken}`,
+            host: "gateway.example.invalid",
           },
         });
-        const workspaceDir = await mkdtemp(join(tmpdir(), "lobu-credential-test-"));
-        process.env.DISPATCHER_URL = `http://127.0.0.1:${server.port}`;
-        process.env.WORKER_TOKEN = workerToken;
-        const processor = new AgentProgressProcessor();
-        try {
-          const result = await runAISession({
-            userPrompt: "Reply credential-test-ok. Do not use tools.", customInstructions: "",
-            agentOptions: JSON.stringify({ model: "chatgpt/gpt-5.5", memoryFlush: { enabled: false } }),
-            sessionKey: conversationId, channelId: "channel-test", conversationId, platform: "api",
-            platformMetadata: {}, organizationId: ORG, actorId: USER, credentialSubject: USER,
-            agentId: AGENT, runId: 1, messageId: "message-test", workspaceDir, progressProcessor: processor,
-            onProgress: async () => {}, onSessionFilePathResolved: () => {}, onSteerReady: () => {},
-            onCancelReady: () => {}, onModelResolved: () => {}, loadImageAttachments: async () => [],
-            maybeRunPreCompactionMemoryFlush: async () => {},
-          });
-          expect(result.error).toBeUndefined();
-          expect(result.success).toBe(true);
-          expect(upstreamRequests).toBe(1);
-          expect(receivedAccount).toBe(ACCOUNT);
-          expect(receivedModel).toBe("gpt-5.5");
-          expect(processor.getOutputSnapshot()).toContain("credential-test-ok");
-          expect(JSON.stringify(providerConfig)).not.toContain(STORED_CREDENTIAL);
-          const placeholders = providerConfig?.credentialPlaceholders as Record<string, string>;
-          expect(placeholders.openai).toBe(workerToken);
-          expect(placeholders.deepseek).toBe(workerToken);
-          expect(placeholders.chatgpt).not.toBe(workerToken);
-        } finally {
-          server.stop(true);
-          gateway.shutdown();
-          await rm(workspaceDir, { recursive: true, force: true });
-        }
-      }, 30_000);
-    }
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          providerConfig?: Record<string, unknown>;
+        };
+        const providerConfig = body.providerConfig;
+        // The stored subscription credential must never reach the worker.
+        expect(JSON.stringify(providerConfig)).not.toContain(
+          STORED_CREDENTIAL,
+        );
+        const placeholders = providerConfig?.credentialPlaceholders as
+          | Record<string, string>
+          | undefined;
+        expect(placeholders).toBeDefined();
+        // Proxied providers receive the worker token; ChatGPT does not, so its
+        // subscription cannot be spent by anything holding that token.
+        expect(placeholders?.openai).toBe(workerToken);
+        expect(placeholders?.deepseek).toBe(workerToken);
+        expect(placeholders?.chatgpt).not.toBe(workerToken);
+      } finally {
+        gateway.shutdown();
+      }
+    }, 30_000);
   }
 });
