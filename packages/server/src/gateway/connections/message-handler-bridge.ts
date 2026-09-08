@@ -1623,7 +1623,9 @@ export class MessageHandlerBridge {
           senderId: userId,
           senderUsername,
           senderDisplayName,
-          teamId,
+          // Preserve known absence through queued JSON so token minting does
+          // not mistake the worker routing key for a native provider team.
+          teamId: teamId ?? null,
           conversationUrl,
           isGroup,
           connectionId: this.connection.id,

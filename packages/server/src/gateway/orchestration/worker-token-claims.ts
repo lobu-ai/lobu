@@ -99,9 +99,15 @@ export function buildWorkerTokenClaims(args: WorkerTokenClaimsArgs): {
 	// Provider comes solely from the conversation's pinned sandbox; there is
 	// no deployment-wide env-var fallback. Undefined → local just-bash.
 	const runtimeProviderId = args.runtimeProviderId;
+	// Chat payloads use top-level teamId as a worker routing key. Interactions
+	// need the provider-native team instead. Explicit null survives the queued
+	// JSON for teamless chats; callers without this metadata retain their team.
+	const teamId = args.platformMetadata && Object.hasOwn(args.platformMetadata, "teamId")
+		? args.platformMetadata.teamId
+		: args.teamId;
 	return {
 		channelId: args.channelId,
-		teamId: args.teamId,
+		teamId: typeof teamId === "string" ? teamId : undefined,
 		agentId: args.agentId,
 		organizationId: args.organizationId,
 		platform: args.platform,

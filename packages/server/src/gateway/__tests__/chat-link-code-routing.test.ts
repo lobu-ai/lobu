@@ -1,6 +1,8 @@
 /** Link codes bind a chat without inventing a platform-user identity. */
 import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { CommandRegistry } from "@lobu/core";
+import { Chat } from "chat";
+import { createSlackAdapter } from "@chat-adapter/slack";
 import type { Context } from "hono";
 import { addUserToOrganization, createTestUser, linkSlackIdentityInGraph } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
@@ -12,10 +14,18 @@ import { registerBuiltInCommands } from "../commands/built-in-commands.js";
 import { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
 import { MessageHandlerBridge } from "../connections/message-handler-bridge.js";
+import { registerInteractionBridge } from "../connections/interaction-bridge.js";
+import { readPendingSuggestion } from "../connections/pending-interaction-store.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
 import type { PlatformConnection } from "../connections/types.js";
 import { QueueProducer } from "../infrastructure/queue/queue-producer.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import { InteractionService } from "../interactions.js";
+import { buildRunJobToken } from "../orchestration/message-consumer.js";
+import { buildDeploymentWorkerToken } from "../orchestration/deployment-manager.js";
+import { createInteractionRoutes } from "../routes/internal/interactions.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
+import { blockActionsPayload, buildSignedBlockActionsRequest } from "./fixtures/slack-signing.js";
 import { ensureDbForGatewayTests, resetTestDatabase, seedAgentRow } from "./helpers/db-setup.js";
 
 const SOURCE_ORG = "org-chat-installation";
@@ -45,6 +55,7 @@ describe("platform-neutral chat link-code routing", () => {
   let queue: RunsQueue;
   let producer: QueueProducer;
   let ownerId: string;
+  const disposeInteractions: Array<() => void> = [];
 
   beforeAll(ensureDbForGatewayTests);
   beforeEach(async () => {
@@ -59,7 +70,10 @@ describe("platform-neutral chat link-code routing", () => {
     producer = new QueueProducer(queue);
     await producer.start();
   });
-  afterEach(async () => { await queue?.stop(); });
+  afterEach(async () => {
+    for (const dispose of disposeInteractions.splice(0)) dispose();
+    await queue?.stop();
+  });
 
   async function install(platform: typeof PLATFORMS[number], organizationId: string, suffix = "") {
     const slug = `chat-code-${platform}${suffix}`;
@@ -78,6 +92,11 @@ describe("platform-neutral chat link-code routing", () => {
     registerBuiltInCommands(registry, { agentSettingsStore: { getSettings } as never, automationSubscriptionService: subscriptions });
     const dispatcher = new CommandDispatcher({ registry, automationSubscriptionService: subscriptions });
     const conversationState = new ConversationStateStore(await createConnectedGatewayStateAdapter());
+    const instance: any = { connection, conversationState };
+    const manager = {
+      has: (id: string) => id === slug,
+      getInstance: () => instance,
+    };
     const bridge = new MessageHandlerBridge(connection, {
       getArtifactStore: () => null,
       getPublicGatewayUrl: () => "https://gateway.example.test",
@@ -89,10 +108,8 @@ describe("platform-neutral chat link-code routing", () => {
       getDeclaredAgentRegistry: () => undefined,
       getProviderCatalogService: () => undefined,
       getQueueProducer: () => producer,
-    } as never, {
-      has: (id: string) => id === slug,
-      getInstance: () => ({ connection, conversationState }),
-    } as never, dispatcher);
+    } as never, manager as never, dispatcher);
+    instance.messageBridge = bridge;
     const channelId = `${platform}:123456`;
     const thread = { channelId, id: channelId, subscribe: mock(async () => {}), post: mock(async () => ({})) };
     let sequence = 0;
@@ -101,7 +118,117 @@ describe("platform-neutral chat link-code routing", () => {
       author: { userId: "provider-code-redeemer", isBot: false, isMe: false },
       raw: platform === "slack" ? { team_id: "T_CODE_WORKSPACE" } : {},
     }, source);
-    return { id: Number(row.id), slug, connection, thread, send, getSettings };
+    return { id: Number(row.id), slug, connection, thread, send, getSettings, instance, manager };
+  }
+
+  async function linkedChannel(platform: typeof PLATFORMS[number]) {
+    const installed = await install(platform, SOURCE_ORG);
+    installed.thread.id += ":1700000000.000100";
+    const response = await createPreviewClaim(claimContext({
+      platform, agent_id: AGENT_ID, connection_id: installed.id, surfaces: ["channel"],
+    }, ownerId));
+    expect(response.status).toBe(200);
+    await installed.send(`/link ${(await response.json()).code}`, "mention");
+    await installed.send("Handle this channel request", "mention");
+    const [run] = await getDb()`SELECT id, action_input FROM runs WHERE run_type = 'chat_message'`;
+    expect(run.action_input.organizationId).toBe(TARGET_ORG);
+    return { installed, run };
+  }
+
+  async function suggestionHarness(installed: Awaited<ReturnType<typeof install>>) {
+    const signingSecret = "test-chat-link-suggestions-secret";
+    const posted = mock(async () => ({ ts: "1700000000.000200" }));
+    let action: (event: any) => Promise<void> = async () => {};
+    let chat: any;
+    if (installed.connection.platform === "slack") {
+      const adapter = createSlackAdapter({ signingSecret, botToken: "xoxb-test", botUserId: "U_BOT" });
+      (adapter as any).postMessage = posted;
+      // The typing indicator is a live `assistant.threads.setStatus` call.
+      (adapter as any).startTyping = mock(async () => undefined);
+      chat = new Chat({ userName: "lobu", adapters: { slack: adapter }, state: new InMemoryStateAdapter() });
+    } else {
+      chat = {
+        onAction: (handler: typeof action) => { action = handler; },
+        channel: () => ({ post: posted }),
+      };
+    }
+    let actionsCompleted = 0;
+    const registerAction = chat.onAction.bind(chat);
+    chat.onAction = (handler: typeof action) => registerAction(async (event: any) => {
+      try { await handler(event); } finally { actionsCompleted += 1; }
+    });
+    installed.instance.chat = chat;
+    const service = new InteractionService();
+    disposeInteractions.push(registerInteractionBridge(service, installed.manager as never, installed.connection, chat));
+    const routes = createInteractionRoutes(service);
+    return {
+      async post(token: string) {
+        const response = await routes.request("/internal/suggestions/create", {
+          method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ prompts: [{ title: "Continue", message: "Continue this task" }], teamId: "T_UNTRUSTED_BODY" }),
+        });
+        expect(response.status).toBe(200);
+        const { id } = await response.json() as { id: string };
+        await waitFor(async () => { expect(await readPendingSuggestion(id, SOURCE_ORG, installed.slug)).not.toBeNull(); });
+        await waitFor(async () => { expect(posted.mock.calls.length).toBeGreaterThan(0); });
+        return id;
+      },
+      async click(id: string) {
+        const previous = actionsCompleted;
+        if (installed.connection.platform === "slack") {
+          const response = await chat.webhooks.slack(buildSignedBlockActionsRequest(signingSecret, blockActionsPayload({
+            teamId: "T_CODE_WORKSPACE", userId: "provider-code-redeemer", channelId: "123456",
+            messageTs: "1700000000.000200", actionId: `suggestion:${id}:0`, value: "",
+          })));
+          expect(response.status).toBe(200);
+        } else {
+          await action({ actionId: `suggestion:${id}:0`, user: { userId: "provider-code-redeemer" }, thread: installed.thread });
+        }
+        await waitFor(async () => { expect(actionsCompleted).toBe(previous + 1); });
+      },
+    };
+  }
+
+  for (const platform of PLATFORMS) {
+    for (const mint of ["run", "deployment"]) {
+      test(`${platform}: ${mint} token preserves native team through a persisted suggestion click and dispatch`, async () => {
+        const { installed, run } = await linkedChannel(platform);
+        const args = { ...run.action_input, deploymentName: "deployment-chat-code", runId: Number(run.id) };
+        const token = mint === "run" ? buildRunJobToken(args) : buildDeploymentWorkerToken(args);
+        const harness = await suggestionHarness(installed);
+        const id = await harness.post(token);
+        const stored = await readPendingSuggestion(id, SOURCE_ORG, installed.slug);
+        await harness.click(id);
+        await waitFor(async () => {
+          const rows = await getDb()`SELECT action_input FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
+          expect(rows).toHaveLength(2);
+          expect(rows[1].action_input).toMatchObject({ agentId: AGENT_ID, organizationId: TARGET_ORG, messageText: "Continue this task", conversationId: installed.thread.id });
+        });
+        expect(stored?.suggestion.teamId).toBe(platform === "slack" ? "T_CODE_WORKSPACE" : undefined);
+      });
+    }
+
+    test.each(["foreign team", "other installation", "revoked authority", "legacy routing key"])(`${platform}: suggestion rejects %s`, async (boundary) => {
+      const { installed, run } = await linkedChannel(platform);
+      const metadata = { ...run.action_input.platformMetadata };
+      if (boundary === "foreign team") metadata.teamId = "T_OTHER_WORKSPACE";
+      if (boundary === "legacy routing key") delete metadata.teamId;
+      const token = buildRunJobToken({
+        ...run.action_input, platformMetadata: metadata,
+        deploymentName: "deployment-chat-code", runId: Number(run.id),
+      });
+      const harness = await suggestionHarness(installed);
+      const id = await harness.post(token);
+      if (boundary === "revoked authority") {
+        await getDb()`DELETE FROM member WHERE "userId" = ${ownerId} AND "organizationId" = ${SOURCE_ORG}`;
+      }
+      const clickHarness = boundary === "other installation"
+        ? await suggestionHarness(await install(platform, SOURCE_ORG, "-other"))
+        : harness;
+      await clickHarness.click(id);
+      const rows = await getDb()`SELECT id FROM runs WHERE run_type = 'chat_message'`;
+      expect(rows).toHaveLength(1);
+    });
   }
 
   for (const platform of PLATFORMS) {
