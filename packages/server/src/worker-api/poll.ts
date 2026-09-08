@@ -1071,16 +1071,33 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
 
       const row = rows[0];
       if (row?.run_type === 'agent_turn') {
-        const input = row.action_input as { turn?: Record<string, unknown> } | null;
+        const input = row.action_input as { turn?: Record<string, unknown>; reply?: { user_id?: string } } | null;
         const turn = input?.turn;
         if (typeof turn?.agent_id === 'string' && turn.agent_id.trim()
           && typeof turn.conversation_id === 'string' && turn.conversation_id.trim()) {
+          if (turn.shadow === true) {
+            const [source] = await tx`
+              SELECT id FROM runs
+              WHERE id = ${row.parent_run_id ?? null} AND organization_id = ${row.organization_id}
+                AND run_type = 'chat_message'
+                AND queue_name = 'messages'
+                AND action_input->>'agentId' = ${turn.agent_id}
+                AND action_input->>'conversationId' = ${turn.conversation_id}
+                AND action_input->>'messageId' = ${turn.message_id}
+                AND action_input->>'userId' = ${input?.reply?.user_id ?? null}
+            `;
+            row.native_source_run_id = source?.id ?? null;
+            // Commit the claim; the normal invalid-envelope path terminalizes
+            // this row rather than retrying unbound history on every poll.
+            if (!source) return row;
+          }
           // Read only after admission, while the conversation claim is held.
           // A read failure rolls back the claim so the next poll can retry.
           const sessionJsonl = await readSnapshotJsonl({
             organizationId: candidate.organization_id ?? undefined,
             agentId: turn.agent_id,
             conversationId: turn.conversation_id,
+            beforeRunId: row.native_source_run_id,
             client: tx,
           });
           row.action_input = { ...input, turn: { ...turn, session_jsonl: sessionJsonl ?? '' } };
@@ -1178,6 +1195,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     action_input: Record<string, unknown> | null;
     approved_input: Record<string, unknown> | null;
     parent_run_id: number | null;
+    native_source_run_id?: number | null;
     run_metadata: Record<string, unknown> | null;
     feed_key: string | null;
     feed_config: Record<string, unknown> | null;
@@ -1244,8 +1262,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     const credential = envelope.credential;
     if (!turn || typeof credential !== 'string' || credential.length === 0
       || typeof turn.agent_id !== 'string' || !turn.agent_id.trim()
-      || typeof turn.conversation_id !== 'string' || !turn.conversation_id.trim()) {
-      const failure = 'agent turn run has an incomplete execution envelope';
+      || typeof turn.conversation_id !== 'string' || !turn.conversation_id.trim()
+      || (turn.shadow === true && row.native_source_run_id == null)) {
+      const failure = row.native_source_run_id === null
+        ? 'agent turn shadow has no matching source message'
+        : 'agent turn run has an incomplete execution envelope';
       await failClaimedWorkerRun({
         runId: row.run_id,
         workerId: worker_id,

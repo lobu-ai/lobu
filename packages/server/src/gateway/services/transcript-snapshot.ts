@@ -13,6 +13,8 @@ export async function readSnapshotJsonl(args: {
 	agentId: string;
 	organizationId: string | undefined;
 	conversationId: string;
+	/** Exclude this source run and later snapshots when restoring a shadow. */
+	beforeRunId?: number;
 	/** Read only the leading characters when the caller needs the session header. */
 	prefixChars?: number;
 	/** Read only the trailing characters when the caller needs recent history. */
@@ -39,6 +41,7 @@ export async function readSnapshotJsonl(args: {
       AND agent_id = ${agentId}
       AND conversation_id = ${conversationId}
       AND terminal_status = 'completed'
+      ${args.beforeRunId === undefined ? sql`` : sql`AND run_id < ${args.beforeRunId}`}
     ORDER BY run_id DESC
     LIMIT 1
   `;

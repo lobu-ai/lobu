@@ -90,6 +90,11 @@ assert.equal(new Set(entries.map((entry) => entry.id)).size, entries.length);
 const messages = entries
   .filter((entry) => entry.type === "message")
   .map((entry) => entry.message);
+assert.equal(
+  messages.filter((entry) => entry.role === "user").length,
+  1,
+  "shadow restored the managed counterpart and prompted the same message again"
+);
 const results = messages.filter((entry) => entry.role === "toolResult");
 const calls = messages.flatMap((entry) =>
   entry.role === "assistant"

@@ -113,10 +113,16 @@ describe('native capture over HTTP and Postgres', () => {
       getProxyBaseUrlMappings: (url: string, agentId: string) => ({ ANTHROPIC_BASE_URL: `${url}/anthropic/a/${agentId}/o/${org.id}/u/${owner.id}` }),
       buildCredentialPlaceholder: (_agentId: string, context: { workerToken: string }) => context.workerToken,
     };
-    await enqueueAgentTurnShadow({ userId: owner.id, conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
+    const message = { userId: owner.id, conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
       agentId: AGENT, organizationId: org.id, platform: 'slack', messageText: 'Capture tool attempts',
       platformMetadata: { connectionId: CONNECTION, executionMode: 'live' }, agentOptions: { model: 'capture-fixture-provider/fixture' },
-    } as MessagePayload, {
+    } as MessagePayload;
+    const sql = getTestDb();
+    const [source] = await sql`
+      INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
+      VALUES (${org.id}, 'chat_message', 'messages', 'claimed', ${sql.json(message)}) RETURNING id
+    `;
+    await enqueueAgentTurnShadow({ ...message, runId: Number(source.id) }, {
       gatewayUrl: `${origin}/lobu`, agentSettings: { getSettings: async () => ({}) } as never,
       catalog: { getInstalledModules: async () => [module], findProviderForModel: async () => module } as never,
       runtime: { runtimeProviderId: 'capture-fixture-runtime' } as never,

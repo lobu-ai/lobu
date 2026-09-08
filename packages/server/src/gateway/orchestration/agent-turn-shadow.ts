@@ -734,6 +734,9 @@ export async function enqueueAgentTurnShadow(
     }
 
     const sql = getDb();
+    if (typeof data.runId !== "number" || !Number.isSafeInteger(data.runId) || data.runId <= 0) {
+      throw new Error("Agent turn shadow requires the admitted message run ID");
+    }
     // Allocate identity without publishing a partially assembled pending job.
     const [allocated] = await sql<{ id: number }>`
       SELECT nextval(pg_get_serial_sequence('runs', 'id')) AS id
@@ -921,14 +924,19 @@ export async function enqueueAgentTurnShadow(
     const rows = await sql<{ id: number }>`
       INSERT INTO runs (
         id, organization_id, run_type, status,
-        approval_status, action_input, created_at
-      ) VALUES (
+        approval_status, action_input, created_at, parent_run_id
+      ) SELECT
         ${runId}, ${data.organizationId}, 'agent_turn', 'pending',
         'auto', ${sql.json({ turn, credential: provider.credential, reply })},
-        current_timestamp
-      )
+        current_timestamp, source.id
+      FROM runs source
+      WHERE source.id = ${data.runId} AND source.organization_id = ${data.organizationId}
+        AND source.run_type = 'chat_message'
+        AND source.queue_name = 'messages'
+        AND source.action_input->>'messageId' = ${data.messageId}
       RETURNING id
     `;
+    if (!rows.length) throw new Error("Agent turn shadow has no matching admitted message");
 
     logger.info(
       {

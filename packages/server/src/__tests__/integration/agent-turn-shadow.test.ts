@@ -145,10 +145,15 @@ function messageFor(organizationId: string): MessagePayload {
 async function admittedMessage(message: MessagePayload): Promise<MessagePayload> {
   const sql = getTestDb();
   const [input] = await sql`
-    INSERT INTO runs (organization_id, run_type, status, action_input)
-    VALUES (${message.organizationId}, 'chat_message', 'claimed', ${sql.json(message)}) RETURNING id
+    INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
+    VALUES (${message.organizationId}, 'chat_message', 'messages', 'claimed', ${sql.json(message)}) RETURNING id
   `;
   return { ...message, runId: Number(input.id) };
+}
+
+/** The producer receives an already admitted queue message in production. */
+async function enqueueMessage(message: MessagePayload, deps: Parameters<typeof enqueueAgentTurnShadow>[1]) {
+  await enqueueAgentTurnShadow(await admittedMessage(message), deps);
 }
 
 /**
@@ -187,7 +192,7 @@ function fakeArtifacts() {
 async function shadowRuns() {
   const sql = getTestDb();
   return (await sql`
-    SELECT id, run_type, status, approval_status, organization_id, action_input
+    SELECT id, run_type, status, approval_status, organization_id, action_input, parent_run_id
     FROM runs
     WHERE run_type = 'agent_turn'
     ORDER BY id
@@ -198,6 +203,7 @@ async function shadowRuns() {
     approval_status: string;
     organization_id: string;
     action_input: Record<string, unknown>;
+    parent_run_id: number | null;
   }>;
 }
 
@@ -220,7 +226,7 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
 /** Enqueue a shadow turn and claim it, as the fleet worker would. */
 async function claimedShadowRun(workerId: string): Promise<number> {
   const org = await createTestOrganization();
-  await enqueueAgentTurnShadow(messageFor(org.id), {
+  await enqueueMessage(messageFor(org.id), {
     agentSettings: settingsStore,
     catalog: catalogFor(claudeModule()),
     gatewayUrl: GATEWAY_URL,
@@ -272,7 +278,7 @@ describe('agent turn shadow producer', () => {
 
   it('captures a real HTTP interaction made with the producer-minted shadow credential', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
@@ -301,7 +307,7 @@ describe('agent turn shadow producer', () => {
     }
   });
 
-  it('executes write/edit over worker HTTP and persists the real isolate transcript', async () => {
+  it.each([false, true])('executes write/edit over worker HTTP with admitted history (shadow=%s)', async (shadow) => {
     const calls = [
       { name: 'write', input: { file_path: 'a.txt', content: '\ufeffbefore\r\n' } },
       { name: 'edit', input: { file_path: 'a.txt', old_string: 'before', new_string: 'after' } },
@@ -381,13 +387,26 @@ describe('agent turn shadow producer', () => {
           (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
         VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${history}, ${Buffer.byteLength(history)}, 'completed')
       `;
-      await enqueueAgentTurnShadow(messageFor(org.id), {
+      const source = await admittedMessage(messageFor(org.id));
+      await enqueueAgentTurnShadow(source, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
       });
       const [run] = await shadowRuns();
       expect(run.action_input.turn).toMatchObject({ session_jsonl: '' });
-      // Exercise authoritative transcript/reply persistence in the isolated test DB.
-      await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${run.id}`;
+      if (shadow) {
+        const later = await admittedMessage({ ...messageFor(org.id), messageId: 'later-managed-message' });
+        for (const [message, text] of [[source, 'managed-current-answer'], [later, 'managed-later-answer']] as const) {
+          const snapshot = nativeSession().replace('an observational copy', text);
+          await sql`
+            INSERT INTO agent_transcript_snapshot
+              (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+            VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${message.runId}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed')
+          `;
+        }
+      } else {
+        // Exercise authoritative transcript/reply persistence in the isolated test DB.
+        await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${run.id}`;
+      }
       const client = new WorkerClient({
         apiUrl: origin, workerId: 'fleet-file-tools', authToken: 'test-file-tools-fleet', capabilities: { agent_turn: true },
       });
@@ -403,6 +422,8 @@ describe('agent turn shadow producer', () => {
       expect(providerRequests).toHaveLength(6);
       expect(JSON.stringify(providerRequests[0].messages)).toContain('retained-branch-history');
       expect(JSON.stringify(providerRequests[0].messages)).not.toContain('discarded-branch-history');
+      expect(JSON.stringify(providerRequests)).not.toContain('managed-current-answer');
+      expect(JSON.stringify(providerRequests)).not.toContain('managed-later-answer');
       expect(providerRequests[0].tools.find((tool) => tool.name === 'edit')?.input_schema).toMatchObject({
         required: ['file_path', 'old_string', 'new_string'],
       });
@@ -411,9 +432,11 @@ describe('agent turn shadow producer', () => {
       expect(completion.status).toBe('completed');
       expect((await runRow(Number(run.id))).status).toBe('completed');
       const [snapshot] = await sql`SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
-      expect(snapshot.snapshot_jsonl).toBe(completion.session_jsonl);
-      expect(snapshot.snapshot_jsonl.startsWith(history)).toBe(true);
-      const messages = parseSessionEntries(snapshot.snapshot_jsonl).entries.map((entry) => entry.message).filter(Boolean) as any[];
+      expect(completion.session_jsonl.startsWith(history)).toBe(true);
+      if (shadow) expect(snapshot).toBeUndefined();
+      else expect(snapshot.snapshot_jsonl).toBe(completion.session_jsonl);
+      expect((await runRow(Number(run.id))).action_input.result?.session_jsonl).toBe(completion.session_jsonl);
+      const messages = parseSessionEntries(completion.session_jsonl).entries.map((entry) => entry.message).filter(Boolean) as any[];
       const toolResults = messages.filter((message) => message.role === 'toolResult');
       expect(toolResults.map((message) => [message.toolName, message.isError])).toEqual([
         ['write', false], ['edit', false], ['edit', true], ['read', false], ['bash', false],
@@ -424,11 +447,12 @@ describe('agent turn shadow producer', () => {
       expect(toolResults[3].content).toEqual([{ type: 'text', text: '\ufeffafter\r\n' }]);
       expect(toolResults[4].content).toEqual([{ type: 'text', text: `${Buffer.from('\ufeffafter\r\n').toString('base64')}\n` }]);
       const [reply] = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'finalText' = ${completion.text}`;
-      expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });
+      if (shadow) expect(reply).toBeUndefined();
+      else expect(reply.action_input).toMatchObject({ conversationId: 'conv-shadow', finalText: completion.text });
       // A lost completion response must not append the same transcript twice.
       await client.completeAgentTurn(completion as never);
       const snapshots = await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${run.id}`;
-      expect(snapshots).toHaveLength(1);
+      expect(snapshots).toHaveLength(shadow ? 0 : 1);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -437,7 +461,7 @@ describe('agent turn shadow producer', () => {
 
   it('produces a claimable, schema-valid envelope with the credential lifted off the turn', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -524,7 +548,7 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
     message.agentOptions = { ...message.agentOptions, disallowedTools: 'upload_file' };
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -542,7 +566,7 @@ describe('agent turn shadow producer', () => {
     const fixture = mcpFixture();
     const message = messageFor(org.id);
     message.platformMetadata = { connectionId: 'conn-shadow' };
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       mcp: fixture.mcp,
@@ -617,7 +641,7 @@ describe('agent turn shadow producer', () => {
       toolsConfig: { strictMode: true, allowedTools: ['query_*'] },
       disallowedTools: 'query_sql',
     };
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp,
@@ -645,7 +669,7 @@ describe('agent turn shadow producer', () => {
       model: 'claude/claude-opus-4-8',
       toolsConfig: { allowedTools: ['Bash(git:*)', 'Bash(ls:*)'], deniedTools: ['write', 'Bash(rm:*)'] },
     };
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
@@ -674,7 +698,7 @@ describe('agent turn shadow producer', () => {
   it('hands the turn the conversation tools its policy admits, addressed at this conversation', async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
@@ -716,7 +740,7 @@ describe('agent turn shadow producer', () => {
       model: 'claude/claude-opus-4-8',
       toolsConfig: { deniedTools: ['ask_user', 'send_message'] },
     };
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
@@ -752,18 +776,18 @@ describe('agent turn shadow producer', () => {
     };
 
     // No MCP surface wired.
-    await enqueueAgentTurnShadow(messageFor(org.id), base);
+    await enqueueMessage(messageFor(org.id), base);
     await toolless();
 
     // The agent exposes MCP as shell commands, which this lane does not carry.
     const cli = messageFor(org.id);
     cli.agentOptions = { model: 'claude/claude-opus-4-8', toolsConfig: { mcpExposure: 'cli' } };
-    await enqueueAgentTurnShadow(cli, { ...base, mcp: mcpFixture().mcp });
+    await enqueueMessage(cli, { ...base, mcp: mcpFixture().mcp });
     await toolless();
 
     // A separate placeholder cannot enforce the signed capture policy.
     const before = (await shadowRuns()).length;
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       ...base,
       catalog: catalogFor(claudeModule({ buildCredentialPlaceholder: () => 'lobu_secret_11111111-2222-3333-4444-555555555555' })),
       mcp: mcpFixture().mcp,
@@ -771,7 +795,7 @@ describe('agent turn shadow producer', () => {
     expect(await shadowRuns()).toHaveLength(before);
 
     // Discovery failed: nothing to hand the turn, but the turn itself runs.
-    await enqueueAgentTurnShadow(messageFor(org.id), { ...base, mcp: mcpFixture({ fail: true }).mcp });
+    await enqueueMessage(messageFor(org.id), { ...base, mcp: mcpFixture({ fail: true }).mcp });
     await toolless();
   });
 
@@ -822,7 +846,7 @@ describe('agent turn shadow producer', () => {
       VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
     `;
 
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp,
@@ -904,7 +928,7 @@ describe('agent turn shadow producer', () => {
       VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
     `;
 
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp,
@@ -926,10 +950,13 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const dependencies = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
-    await enqueueAgentTurnShadow(messageFor(org.id), dependencies);
-    await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId: 'queued-second' }, dependencies);
+    const firstSource = await admittedMessage(messageFor(org.id));
+    const secondSource = await admittedMessage({ ...messageFor(org.id), messageId: 'queued-second' });
+    await enqueueAgentTurnShadow(firstSource, dependencies);
+    await enqueueAgentTurnShadow(secondSource, dependencies);
     const [first, second] = await shadowRuns();
-    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id = ${first.id}`;
+    expect(first.id).toBeGreaterThan(secondSource.runId!);
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id IN (${first.id}, ${second.id})`;
     const firstClaim = await pollFleet('fleet-native-first', { agent_turn: true });
     expect((await firstClaim.json()).run_id).toBe(first.id);
     const session = nativeSession();
@@ -946,9 +973,36 @@ describe('agent turn shadow producer', () => {
     expect(claimed.payload.turn.memory_flush).not.toHaveProperty('due');
   });
 
-  it('rolls back the claim when its native snapshot cannot be read', async () => {
+  it('excludes the managed counterpart snapshot completed before a shadow claim', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    const sql = getTestDb();
+    const prior = await admittedMessage({ ...messageFor(org.id), messageId: 'previous-message' });
+    const previous = nativeSession().replace('an observational copy', 'previous reply');
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.runId}, ${previous}, ${Buffer.byteLength(previous)}, 'completed')
+    `;
+    const source = await admittedMessage(messageFor(org.id));
+    await enqueueAgentTurnShadow(source, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const current = nativeSession();
+    await sql`UPDATE runs SET status = 'completed', completed_at = now() WHERE id = ${source.runId}`;
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${source.runId}, ${current}, ${Buffer.byteLength(current)}, 'completed')
+    `;
+    const response = await pollFleet('fleet-managed-before-shadow', { agent_turn: true });
+    expect(response.status).toBe(200);
+    const claimed = await response.json();
+    expect(claimed.payload.turn.session_jsonl).toBe(previous);
+  });
+
+  it.each(['snapshot', 'source'])('rolls back the claim when its native %s cannot be read', async (target) => {
+    const org = await createTestOrganization();
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
     });
     const [run] = await shadowRuns();
@@ -960,7 +1014,8 @@ describe('agent turn shadow producer', () => {
           target.begin((tx) => fn(new Proxy(tx, {
             apply(query, thisArg, args: unknown[]) {
               const parts = args[0] as TemplateStringsArray;
-              if (Array.isArray(parts) && parts.join('').includes('FROM public.agent_transcript_snapshot')) {
+              const needle = target === 'snapshot' ? 'FROM public.agent_transcript_snapshot' : "AND action_input->>'userId'";
+              if (Array.isArray(parts) && parts.join('').includes(needle)) {
                 attemptedRead = true;
                 throw new Error('synthetic snapshot read failure');
               }
@@ -979,14 +1034,76 @@ describe('agent turn shadow producer', () => {
     } finally {
       spy.mockRestore();
     }
+    const sql = getTestDb();
+    const current = nativeSession();
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${run.parent_run_id}, ${current}, ${Buffer.byteLength(current)}, 'completed')
+    `;
     const retry = await pollFleet('fleet-snapshot-retry', { agent_turn: true });
-    expect((await retry.json()).run_id).toBe(run.id);
+    const claimed = await retry.json();
+    expect(claimed.run_id).toBe(run.id);
+    expect(claimed.payload.turn.session_jsonl).toBe('');
+  });
+
+  it.each(['missing', 'organization', 'type', 'queue', 'agentId', 'conversationId', 'messageId', 'userId'])(
+    'terminalizes a shadow with an invalid %s source link without blocking the next message', async (invalid) => {
+      const org = await createTestOrganization();
+      const sql = getTestDb();
+      const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+      await enqueueMessage(messageFor(org.id), deps);
+      const [bad] = await shadowRuns();
+      if (invalid === 'missing') {
+        await sql`UPDATE runs SET parent_run_id = NULL WHERE id = ${bad.id}`;
+      } else if (invalid === 'organization') {
+        const other = await createTestOrganization();
+        await sql`UPDATE runs SET organization_id = ${other.id} WHERE id = ${bad.parent_run_id}`;
+      } else if (invalid === 'type') {
+        await sql`UPDATE runs SET run_type = 'internal' WHERE id = ${bad.parent_run_id}`;
+      } else if (invalid === 'queue') {
+        await sql`UPDATE runs SET queue_name = 'thread_message_source_fixture' WHERE id = ${bad.parent_run_id}`;
+      } else {
+        await sql`UPDATE runs SET action_input = action_input || ${sql.json({ [invalid]: 'other-source' })}::jsonb WHERE id = ${bad.parent_run_id}`;
+      }
+      await enqueueMessage({ ...messageFor(org.id), messageId: 'next-valid-message' }, deps);
+      const next = (await shadowRuns())[1];
+      const response = await pollFleet('fleet-invalid-source', { agent_turn: true });
+      expect(response.status).toBe(200);
+      const failed = await response.json();
+      expect(failed).toMatchObject({ skipped_run_id: bad.id, error: 'agent turn shadow has no matching source message' });
+      expect(failed).not.toHaveProperty('payload');
+      expect((await runRow(bad.id)).status).toBe('failed');
+      expect((await (await pollFleet('fleet-after-invalid-source', { agent_turn: true })).json()).run_id).toBe(next.id);
+    }
+  );
+
+  it('requires the original admitted source identity and keeps it out of the worker envelope', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const source = await admittedMessage(messageFor(org.id));
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    for (const runId of [undefined, 0, Number.NaN]) await enqueueAgentTurnShadow({ ...source, runId }, deps);
+    await enqueueAgentTurnShadow({ ...source, messageId: 'wrong-source-message' }, deps);
+    await sql`UPDATE runs SET run_type = 'internal' WHERE id = ${source.runId}`;
+    await enqueueAgentTurnShadow(source, deps);
+    await sql`UPDATE runs SET run_type = 'chat_message', queue_name = 'thread_message_source_fixture' WHERE id = ${source.runId}`;
+    await enqueueAgentTurnShadow(source, deps);
+    expect(await shadowRuns()).toHaveLength(0);
+    await sql`UPDATE runs SET queue_name = 'messages' WHERE id = ${source.runId}`;
+    await enqueueAgentTurnShadow(source, deps);
+    const [run] = await shadowRuns();
+    expect(run.parent_run_id).toBe(source.runId);
+    const claimed = await (await pollFleet('fleet-source-envelope', { agent_turn: true })).json();
+    expect(claimed.run_id).toBe(run.id);
+    expect(claimed.payload.turn).not.toHaveProperty('source_run_id');
+    expect(claimed.payload.turn).not.toHaveProperty('parent_run_id');
   });
 
   it('parks a steerable follow-up on the running turn instead of making it a turn of its own', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp,
@@ -1028,8 +1145,8 @@ describe('agent turn shadow producer', () => {
     process.env[SHADOW_ENV] = `${AGENT_ID},other-selected-agent`;
     const first = messageFor(org.id);
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
-    await enqueueAgentTurnShadow(first, deps);
-    await enqueueAgentTurnShadow({ ...first, agentId: 'other-selected-agent', messageId: 'other-agent-message' }, deps);
+    await enqueueMessage(first, deps);
+    await enqueueMessage({ ...first, agentId: 'other-selected-agent', messageId: 'other-agent-message' }, deps);
     const [target, other] = await shadowRuns();
 
     expect(await handleActiveAgentTurnMessage({ ...first, messageId: 'target-follow-up', messageText: 'for the first agent only' })).toBe(true);
@@ -1041,7 +1158,7 @@ describe('agent turn shadow producer', () => {
   it('cancels a native turn on explicit cancel admission instead of steering', async () => {
     const org = await createTestOrganization();
     const first = messageFor(org.id);
-    await enqueueAgentTurnShadow(first, {
+    await enqueueMessage(first, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
     });
     const { run_id: runId } = await (await pollFleet('fleet-explicit-cancel', { agent_turn: true })).json();
@@ -1062,7 +1179,7 @@ describe('agent turn shadow producer', () => {
     const sql = getTestDb();
     for (const status of ['pending', 'claimed', 'running']) {
       const first = { ...messageFor(org.id), messageId: `original-${status}` };
-      await enqueueAgentTurnShadow(first, {
+      await enqueueMessage(first, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
       });
       const run = (await shadowRuns()).at(-1)!;
@@ -1083,7 +1200,7 @@ describe('agent turn shadow producer', () => {
     const variants = [first, { ...first, organizationId: otherOrg.id }, { ...first, agentId: 'other-selected-agent' },
       { ...first, conversationId: 'other-conversation' }, { ...first, userId: 'other-user' }];
     for (const [i, message] of variants.entries()) {
-      await enqueueAgentTurnShadow({ ...message, messageId: `scope-${i}` }, {
+      await enqueueMessage({ ...message, messageId: `scope-${i}` }, {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
       });
     }
@@ -1097,9 +1214,9 @@ describe('agent turn shadow producer', () => {
     const sql = getTestDb();
     const first = messageFor(org.id);
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
-    await enqueueAgentTurnShadow(first, deps);
+    await enqueueMessage(first, deps);
     const { run_id: activeId } = await (await pollFleet('fleet-control-active', { agent_turn: true })).json();
-    await enqueueAgentTurnShadow({ ...first, messageId: 'queued-after-active' }, deps);
+    await enqueueMessage({ ...first, messageId: 'queued-after-active' }, deps);
     const queued = (await shadowRuns())[1];
     expect(await handleActiveAgentTurnMessage({ ...first, messageId: 'active-follow-up', messageText: 'for the active turn' })).toBe(true);
     const [active] = await sql`SELECT run_metadata->'steer' AS steer FROM runs WHERE id = ${activeId}`;
@@ -1119,7 +1236,7 @@ describe('agent turn shadow producer', () => {
     const cancel = await admittedMessage({ ...first, messageId: 'early-cancel', messageText: '/cancel' });
     expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
     expect(await shadowRuns()).toHaveLength(0);
-    await enqueueAgentTurnShadow(first, {
+    await enqueueMessage(first, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
     });
     expect(await handleActiveAgentTurnMessage(cancel)).toBe(true);
@@ -1129,7 +1246,7 @@ describe('agent turn shadow producer', () => {
   it('propagates database failures and refuses an unbound cancellation receipt', async () => {
     const org = await createTestOrganization();
     const first = messageFor(org.id);
-    await enqueueAgentTurnShadow(first, {
+    await enqueueMessage(first, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
     });
     const cancel = await admittedMessage({ ...first, messageId: 'retryable-cancel', messageText: '/cancel' });
@@ -1148,9 +1265,9 @@ describe('agent turn shadow producer', () => {
     const sql = getTestDb();
     const first = messageFor(org.id);
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
-    await enqueueAgentTurnShadow(first, deps);
+    await enqueueMessage(first, deps);
     const { run_id: activeId } = await (await pollFleet('fleet-completing-control', { agent_turn: true })).json();
-    await enqueueAgentTurnShadow({ ...first, messageId: 'queued-after-completion' }, deps);
+    await enqueueMessage({ ...first, messageId: 'queued-after-completion' }, deps);
     const queued = (await shadowRuns())[1];
     const cancel = await admittedMessage({ ...first, messageId: 'completion-race-cancel', messageText: '/cancel' });
     let locked!: () => void;
@@ -1183,7 +1300,7 @@ describe('agent turn shadow producer', () => {
 
   it('carries a pinned sandbox as signed token claims and a remote-bash marker', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(
+    await enqueueMessage(
       { ...messageFor(org.id), networkConfig: { allowedDomains: ['example.com'] }, nixConfig: { packages: ['ripgrep'] } } as MessagePayload,
       {
         agentSettings: settingsStore,
@@ -1208,7 +1325,7 @@ describe('agent turn shadow producer', () => {
 
   it('marks no remote bash for an unpinned conversation', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp,
@@ -1220,7 +1337,7 @@ describe('agent turn shadow producer', () => {
 
   it('arms no turn marker and journals no run input', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1243,7 +1360,7 @@ describe('agent turn shadow producer', () => {
   it('serializes concurrent fleet claims for one conversation until completion', async () => {
     const org = await createTestOrganization();
     for (const messageId of ['claim-first', 'claim-second']) {
-      await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+      await enqueueMessage({ ...messageFor(org.id), messageId }, {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
     }
@@ -1266,7 +1383,7 @@ describe('agent turn shadow producer', () => {
   it('does not skip a locked earlier turn to claim its later sibling', async () => {
     const org = await createTestOrganization();
     for (const messageId of ['locked-first', 'locked-second']) {
-      await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+      await enqueueMessage({ ...messageFor(org.id), messageId }, {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
     }
@@ -1284,7 +1401,7 @@ describe('agent turn shadow producer', () => {
 
   it.each(['before', 'after'])('serializes an earlier insert committed %s the locked recheck', async (position) => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
     });
     const [template] = await shadowRuns();
@@ -1296,8 +1413,8 @@ describe('agent turn shadow producer', () => {
     const earlierId = new Promise<number>((resolve) => { inserted = resolve; });
     const earlierCommit = sql.begin(async (tx) => {
       const [run] = await tx`
-        INSERT INTO runs (organization_id, run_type, status, approval_status, action_input)
-        SELECT organization_id, run_type, 'pending', 'auto', action_input FROM runs WHERE id = ${template.id}
+        INSERT INTO runs (organization_id, run_type, status, approval_status, action_input, parent_run_id)
+        SELECT organization_id, run_type, 'pending', 'auto', action_input, parent_run_id FROM runs WHERE id = ${template.id}
         RETURNING id
       `;
       inserted(run.id);
@@ -1340,8 +1457,8 @@ describe('agent turn shadow producer', () => {
     const spy = vi.spyOn(db, 'getDb').mockReturnValue(gatedDb);
     try {
       const [later] = await sql`
-        INSERT INTO runs (organization_id, run_type, status, approval_status, action_input)
-        SELECT organization_id, run_type, 'pending', 'auto', action_input FROM runs WHERE id = ${template.id}
+        INSERT INTO runs (organization_id, run_type, status, approval_status, action_input, parent_run_id)
+        SELECT organization_id, run_type, 'pending', 'auto', action_input, parent_run_id FROM runs WHERE id = ${template.id}
         RETURNING id
       `;
       const response = await pollFleet('fleet-insert-race', { agent_turn: true });
@@ -1373,7 +1490,7 @@ describe('agent turn shadow producer', () => {
     'keeps a crashed %s owner fenced until the reaper makes it terminal', async (status) => {
       const org = await createTestOrganization();
       for (const messageId of ['crashed-first', 'crashed-second']) {
-        await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+        await enqueueMessage({ ...messageFor(org.id), messageId }, {
           agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
         });
       }
@@ -1394,7 +1511,7 @@ describe('agent turn shadow producer', () => {
   it.each(['agent_id', 'conversation_id'])(
     'fails a turn with missing %s instead of executing without its conversation fence', async (field) => {
       const org = await createTestOrganization();
-      await enqueueAgentTurnShadow(messageFor(org.id), {
+      await enqueueMessage(messageFor(org.id), {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
       const [run] = await shadowRuns();
@@ -1414,7 +1531,7 @@ describe('agent turn shadow producer', () => {
     'waits for an already-running later turn to become %s', async (terminalStatus) => {
       const org = await createTestOrganization();
       for (const messageId of ['waiting-first', 'running-second']) {
-        await enqueueAgentTurnShadow({ ...messageFor(org.id), messageId }, {
+        await enqueueMessage({ ...messageFor(org.id), messageId }, {
           agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
         });
       }
@@ -1439,7 +1556,7 @@ describe('agent turn shadow producer', () => {
       { ...base, messageId: 'scope-agent', agentId: 'other-shadow-agent' },
       { ...base, messageId: 'scope-conversation', conversationId: 'other-shadow-conversation' },
     ]) {
-      await enqueueAgentTurnShadow(message, {
+      await enqueueMessage(message, {
         agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
       });
     }
@@ -1453,7 +1570,7 @@ describe('agent turn shadow producer', () => {
 
   it('a fleet worker that advertises the lane claims it and receives the turn plus the credential', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1482,7 +1599,7 @@ describe('agent turn shadow producer', () => {
 
   it('a fleet worker without the capability leaves the run pending', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1506,7 +1623,7 @@ describe('agent turn shadow producer', () => {
     const org = await createTestOrganization();
     const user = await createTestUser();
     await addUserToOrganization(user.id, org.id, 'owner');
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1545,13 +1662,13 @@ describe('agent turn shadow producer', () => {
     };
 
     process.env[SHADOW_ENV] = 'some-other-agent';
-    await enqueueAgentTurnShadow(messageFor(org.id), deps);
+    await enqueueMessage(messageFor(org.id), deps);
     expect(await shadowRuns()).toHaveLength(0);
 
     process.env[SHADOW_ENV] = AGENT_ID;
     const noModel = messageFor(org.id);
     noModel.agentOptions = {};
-    await enqueueAgentTurnShadow(noModel, deps);
+    await enqueueMessage(noModel, deps);
     expect(await shadowRuns()).toHaveLength(0);
 
     // A message with neither text nor a resolvable attachment: both providers
@@ -1560,24 +1677,24 @@ describe('agent turn shadow producer', () => {
     // — see the attachment tests below.)
     const noText = messageFor(org.id);
     noText.messageText = '   ';
-    await enqueueAgentTurnShadow(noText, deps);
+    await enqueueMessage(noText, deps);
     expect(await shadowRuns()).toHaveLength(0);
 
     // Google speaks a protocol whose pi-ai adapter is not fetch-native, so it
     // cannot be bundled for the isolate and must not produce a shadow.
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       ...deps,
       catalog: catalogFor(claudeModule({ sdkCompat: 'google' })),
     });
     expect(await shadowRuns()).toHaveLength(0);
 
     // No public gateway URL means no URL a fleet worker could reach the proxy on.
-    await enqueueAgentTurnShadow(messageFor(org.id), { ...deps, gatewayUrl: undefined });
+    await enqueueMessage(messageFor(org.id), { ...deps, gatewayUrl: undefined });
     expect(await shadowRuns()).toHaveLength(0);
 
     // `*` selects every agent — the operator's blanket switch.
     process.env[SHADOW_ENV] = '*';
-    await enqueueAgentTurnShadow(messageFor(org.id), deps);
+    await enqueueMessage(messageFor(org.id), deps);
     expect(await shadowRuns()).toHaveLength(1);
   });
 
@@ -1598,7 +1715,7 @@ describe('agent turn shadow producer', () => {
       ],
     };
 
-    await enqueueAgentTurnShadow(message, {
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1625,7 +1742,7 @@ describe('agent turn shadow producer', () => {
       files: [{ id: 'art-image', name: 'shot.png', mimetype: 'image/png', size: 4 }],
     };
 
-    await enqueueAgentTurnShadow(withImage, {
+    await enqueueMessage(withImage, {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1644,7 +1761,7 @@ describe('agent turn shadow producer', () => {
     unresolvable.platformMetadata = {
       files: [{ name: 'shot.png', mimetype: 'image/png' }],
     };
-    await enqueueAgentTurnShadow(unresolvable, {
+    await enqueueMessage(unresolvable, {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -1661,7 +1778,7 @@ describe('agent turn shadow producer', () => {
 
   it("puts the model's own modalities on the envelope, from pi-ai's registry", async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -2442,7 +2559,7 @@ describe('agent turn reaper', () => {
 
   it('a turn no worker ever claimed times out and tells the client it never started', async () => {
     const org = await createTestOrganization();
-    await enqueueAgentTurnShadow(messageFor(org.id), {
+    await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
