@@ -6,7 +6,7 @@ import {
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { DbClient } from "../db/client";
 import { getDb } from "../db/client";
-import { crossOrganizationChatLinkScope } from "../gateway/channels/chat-link-authorization";
+import { authorizedChatLinkIds } from "../gateway/channels/chat-link-authorization";
 import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection";
 import {
   type AutomationEventRunQueued,
@@ -115,13 +115,12 @@ export async function findMatchingAutomationActivations(
   const chatLinkFilter = options?.includeAuthorizedChatLinks &&
     signal.event_type === "message.created" && signal.connection_id != null &&
     typeof channelId === "string"
-    ? db`OR EXISTS (
-        SELECT 1 FROM automation_message_subscriptions s
-        WHERE s.automation_id = w.id
-          AND s.connection_id = ${signal.connection_id}
-          AND s.native_channel_id = ${channelId}
-          AND ${crossOrganizationChatLinkScope(db, organizationId, teamId)}
-      )`
+    ? db`OR w.id IN (${authorizedChatLinkIds(db, {
+        connectionOrganizationId: organizationId,
+        connection: { id: signal.connection_id },
+        channelId,
+        teamId,
+      })})`
     : db``;
   const organizationFilter = options?.crossOrganization
     ? db``

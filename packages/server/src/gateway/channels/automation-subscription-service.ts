@@ -14,7 +14,7 @@ import {
 	softDeleteChannelFeed,
 } from "./channel-feed.js";
 
-import { canLinkChatOrganizations, crossOrganizationChatLinkScope } from "./chat-link-authorization.js";
+import { authorizedChatLinkIds, canLinkChatOrganizations } from "./chat-link-authorization.js";
 
 const logger = createLogger("automation-channel-subscriptions");
 const CHAT_LINK_TAG = "system:chat-link";
@@ -33,6 +33,11 @@ interface ChatAutomationSubscription {
 	connectionId?: string;
 	model?: string;
 	createdAt: number;
+}
+
+interface ChatRoutingOptions {
+	crossOrganization?: boolean;
+	teamId?: string;
 }
 
 function rowToSubscription(
@@ -173,8 +178,19 @@ async function loadChatAutomationSubscriptions(
 	const native = filters.channelId
 		? nativeChannelIdFromAny(filters.channelId)
 		: null;
-	const linkedOrgFilter = filters.includeAuthorizedChatLinks && filters.connectionOrganizationId
-		? sql`OR ${crossOrganizationChatLinkScope(sql, filters.connectionOrganizationId, filters.teamId)}`
+	// An admitted Automation may also carry triggers for other workspaces on
+	// this channel; return only the trigger row that matches this chat's team.
+	const linkedOrgFilter = filters.includeAuthorizedChatLinks &&
+		filters.connectionOrganizationId && filters.connectionSlug && native
+		? sql`OR (
+			s.automation_id IN (${authorizedChatLinkIds(sql, {
+				connectionOrganizationId: filters.connectionOrganizationId,
+				connection: { slug: filters.connectionSlug },
+				channelId: native,
+				teamId: filters.teamId,
+			})})
+			AND s.trigger_team_id IS NOT DISTINCT FROM ${filters.teamId || null}
+		)`
 		: sql``;
 	const automationOrgFilter = filters.automationOrganizationId
 		? sql`AND (s.organization_id = ${filters.automationOrganizationId} ${linkedOrgFilter})`
@@ -242,14 +258,13 @@ export class AutomationSubscriptionService {
 		connectionId: string,
 		channelId: string,
 		connectionOrganizationId: string,
-		crossOrg = false,
-		teamId?: string,
+		options: ChatRoutingOptions = {},
 	): Promise<ChatAutomationSubscription | null> {
 		const sql = getDb();
 		const rows = await loadChatAutomationSubscriptions(sql, {
-			automationOrganizationId: crossOrg ? undefined : connectionOrganizationId,
-			includeAuthorizedChatLinks: !crossOrg,
-			teamId,
+			automationOrganizationId: options.crossOrganization ? undefined : connectionOrganizationId,
+			includeAuthorizedChatLinks: !options.crossOrganization,
+			teamId: options.teamId,
 			connectionOrganizationId,
 			connectionSlug: runtimeConnectionIdToSlug(connectionId),
 			channelId,
@@ -260,29 +275,19 @@ export class AutomationSubscriptionService {
 
 	/**
 	 * True when any active message.created Automation covers this connection+channel
-	 * (ignoring trigger match filters like mention_only/team). Used by the chat
-	 * bridge to distinguish "filters rejected a linked channel" from "channel is
-	 * unlinked" so we do not spam the "link your agent" notice on every
-	 * non-mention in a mention_only channel.
+	 * before message filters such as mention_only. Foreign links still require
+	 * their exact optional team identity. This keeps filtered messages from
+	 * receiving an incorrect "link your agent" notice.
 	 */
 	async channelHasMessageSubscription(
 		connectionId: string,
 		channelId: string,
 		connectionOrganizationId: string,
-		crossOrg = false,
-		teamId?: string,
+		options: ChatRoutingOptions = {},
 	): Promise<boolean> {
-		const sql = getDb();
-		const rows = await loadChatAutomationSubscriptions(sql, {
-			automationOrganizationId: crossOrg ? undefined : connectionOrganizationId,
-			includeAuthorizedChatLinks: !crossOrg,
-			teamId,
-			connectionOrganizationId,
-			connectionSlug: runtimeConnectionIdToSlug(connectionId),
-			channelId,
-			limit: 1,
-		});
-		return rows.length > 0;
+		return (await this.resolveForConnection(
+			connectionId, channelId, connectionOrganizationId, options,
+		)) !== null;
 	}
 
 	async healSubscriptionTeam(

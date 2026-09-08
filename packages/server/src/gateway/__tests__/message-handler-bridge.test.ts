@@ -501,8 +501,7 @@ describe("registerMessageHandlers linked-channel ingress", () => {
       "slackinst-grid",
       "slack:C0CHANNEL",
       "org-grid",
-      false,
-      "T0WORKSPACE",
+      { crossOrganization: false, teamId: "T0WORKSPACE" },
     );
     expect(handleMessage).toHaveBeenCalledWith(thread, message, "subscribed");
   });

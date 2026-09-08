@@ -58,7 +58,7 @@ describe("built-in status command", () => {
       reply: async () => {},
     });
     expect(resolveForConnection.mock.calls).toEqual([
-      ["test-installation", "telegram:123", "org-installation", false, undefined],
+      ["test-installation", "telegram:123", "org-installation", { teamId: undefined }],
     ]);
     expect(getSettings.mock.calls).toEqual([
       ["linked-agent", { organizationId: "org-linked-agent" }],

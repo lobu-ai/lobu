@@ -613,7 +613,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       });
     });
     const linked = await subscriptions.resolveForConnection(
-      RUNTIME_CONNECTION_ID, channel, sourceOrg, false, WORKSPACE_TEAM_ID,
+      RUNTIME_CONNECTION_ID, channel, sourceOrg, { teamId: WORKSPACE_TEAM_ID },
     );
     expect(linked?.organizationId).toBe(targetOrg);
     const [automation] = await getDb()`SELECT created_by FROM automations WHERE organization_id = ${targetOrg}`;
@@ -722,8 +722,8 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     expect(plan.replyTargets).toHaveLength(0);
     expect(plan.backgroundTargets).toHaveLength(0);
     const subscriptions = new AutomationSubscriptionService();
-    expect(await subscriptions.resolveForConnection(runtimeConnection, deliveryChannel, installationOrg, false, deliveryTeam)).toBeNull();
-    expect(await subscriptions.channelHasMessageSubscription(runtimeConnection, deliveryChannel, installationOrg, false, deliveryTeam)).toBe(false);
+    expect(await subscriptions.resolveForConnection(runtimeConnection, deliveryChannel, installationOrg, { teamId: deliveryTeam })).toBeNull();
+    expect(await subscriptions.channelHasMessageSubscription(runtimeConnection, deliveryChannel, installationOrg, { teamId: deliveryTeam })).toBe(false);
   });
 
   test("foreign chat links only activate their exact trigger, preserving mention filters", async () => {
@@ -745,8 +745,13 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     linkedTrigger.match.mention_only = true;
     await sql`UPDATE automations SET triggers = ${sql.json([
       { ...linkedTrigger, connection_id: undefined, match: {}, output: "silent" },
+      { ...linkedTrigger, match: { channel_id: channel, team_id: "T_OTHER_WORKSPACE" }, output: "silent" },
       linkedTrigger,
     ])} WHERE organization_id = ${targetOrg}`;
+    const subscription = await new AutomationSubscriptionService().resolveForConnection(
+      RUNTIME_CONNECTION_ID, channel, sourceOrg, { teamId: WORKSPACE_TEAM_ID },
+    );
+    expect(subscription?.teamId).toBe(WORKSPACE_TEAM_ID);
     for (const mention of [false, true]) {
       const plan = await planAutomationActivationsForRuntimeConnection({
         connectionOrganizationId: sourceOrg, runtimeConnectionId: RUNTIME_CONNECTION_ID,

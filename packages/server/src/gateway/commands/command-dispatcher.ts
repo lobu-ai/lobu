@@ -99,8 +99,7 @@ export class CommandDispatcher {
 						input.connectionId,
       input.channelId,
 						input.organizationId,
-						false,
-						input.teamId,
+						{ teamId: input.teamId },
 					)
 				: null;
     if (subscription?.agentId) {

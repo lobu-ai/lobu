@@ -75,7 +75,7 @@ export function registerBuiltInCommands(
       // Agent settings belong to the workspace selected by the chat subscription.
       const subscription = ctx.connectionId && ctx.organizationId
         ? await deps.automationSubscriptionService.resolveForConnection(
-            ctx.connectionId, ctx.channelId, ctx.organizationId, false, ctx.teamId,
+            ctx.connectionId, ctx.channelId, ctx.organizationId, { teamId: ctx.teamId },
           )
         : null;
       const settings = await deps.agentSettingsStore.getSettings(ctx.agentId, {

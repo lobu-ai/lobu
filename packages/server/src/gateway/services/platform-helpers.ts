@@ -244,8 +244,7 @@ export async function resolveAgentId(params: {
 						connectionId,
           channelId,
 						organizationId,
-						crossOrg === true,
-						params.teamId,
+						{ crossOrganization: crossOrg === true, teamId: params.teamId },
 					)
 				: null;
     if (subscription) {

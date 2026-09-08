@@ -556,8 +556,10 @@ export class MessageHandlerBridge {
       this.connection.id,
       thread.channelId,
       organizationId,
-      this.connection.settings?.previewMode === true,
-      teamIdFromRawMessage(message.raw),
+      {
+        crossOrganization: this.connection.settings?.previewMode === true,
+        teamId: teamIdFromRawMessage(message.raw),
+      },
     );
     if (!linked) return;
 
@@ -881,8 +883,7 @@ export class MessageHandlerBridge {
           this.connection.id,
           channelId,
           this.connection.organizationId,
-          isPreview,
-          teamId
+          { crossOrganization: isPreview, teamId }
         ))
       ) {
         logger.info(
