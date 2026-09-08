@@ -599,25 +599,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
 	}
 }
 
-/**
- * Activate worker connection checks only after the local HTTP listener is live.
- * The orchestrator consumes persisted turns during gateway initialization; if
- * this probe were armed then, a boot-recovered worker could not reach its SSE
- * route yet and would be recycled as though it were wedged.
- */
-export function activateLobuWorkerReadinessWatchdog(): void {
-	const workerGateway = coreServices?.getWorkerGateway();
-	if (!workerGateway || !orchestrator) return;
-	const workerConnectionManager = workerGateway.getConnectionManager();
-	orchestrator
-		.getDeploymentManager()
-		.setDeploymentReadinessProbe((deploymentName: string) =>
-			workerConnectionManager.isConnected(deploymentName),
-		);
-	logger.info(
-		"[Lobu] Worker readiness watchdog activated after HTTP listener startup",
-	);
-}
 
 /**
  * Stop the embedded Lobu gateway (for graceful shutdown).
