@@ -445,7 +445,7 @@ const productActivityDigest = defineAutomation({
   // An empty source list falls back to all workspace content. This explicit
   // empty input lets the reaction own the windowed query without duplicating
   // the backlog in the model context or hitting non-pageable source limits.
-  sources: { reaction_window: "SELECT id FROM events WHERE FALSE" },
+  sources: { reaction_window: "SELECT * FROM events WHERE FALSE" },
   minCooldownSeconds: 60,
   tags: ["product-ops", "production", "slack"],
   prompt:

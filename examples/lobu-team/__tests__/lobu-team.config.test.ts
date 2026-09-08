@@ -101,7 +101,7 @@ describe("Lobu Team configuration", () => {
       },
     ]);
     expect(digest?.sources).toEqual({
-      reaction_window: "SELECT id FROM events WHERE FALSE",
+      reaction_window: "SELECT * FROM events WHERE FALSE",
     });
     expect(digest?.agent).toMatchObject({
       id: "product-ops",
