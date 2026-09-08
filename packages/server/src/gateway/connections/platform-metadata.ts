@@ -11,7 +11,6 @@
  * absence of the field.
  */
 
-import type { BangBashCommand } from "@lobu/core";
 
 export interface PlatformMetadata {
   /** Outbound: the Chat SDK connection the response originated from. */
@@ -44,15 +43,6 @@ export interface PlatformMetadata {
   conversationUrl?: string;
   /** Outbound: marker for the session-reset signal from the worker. */
   sessionReset?: boolean;
-  /**
-   * Inbound: a `!`-bash control action. Set at ingress when the message text is
-   * `!cmd` (run `cmd` as shell in the conversation's pinned sandbox, LLM skipped)
-   * or `!!cmd` (same, but exclude command+output from later model context). The
-   * worker reads this after the session-reset return and runs the command
-   * through the hardened bash path; a bare `!`/`!!` with no command is treated
-   * as ordinary text and never sets this.
-   */
-  bangBash?: BangBashCommand;
   /** Outbound: distributed tracing context propagation. */
   traceparent?: string;
   /** Outbound: client-side message id correlation. */

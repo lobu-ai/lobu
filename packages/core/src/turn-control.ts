@@ -47,10 +47,6 @@ export function isSteerableHumanMessage(payload: MessagePayload): boolean {
   // session would treat the control command as ordinary text and preserve the
   // history the user explicitly asked to reset.
   if (payload.platformMetadata?.sessionReset === true) return false;
-  // A `!`-bash message is a control action, not model input: steering it into an
-  // active turn would feed the raw `!cmd` text to the model instead of running
-  // it. Queue it as its own turn (the worker intercept runs the shell).
-  if (payload.platformMetadata?.bangBash) return false;
   const source = payload.platformMetadata?.source;
   if (typeof source === "string" && AUTOMATION_SOURCES.has(source)) {
     return false;

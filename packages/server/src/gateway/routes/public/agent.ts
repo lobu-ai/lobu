@@ -9,7 +9,6 @@ import {
   generateWorkerToken,
   type NetworkConfig,
   normalizeDomainPatterns,
-  parseBangBashCommand,
   verifyWorkerToken,
 } from "@lobu/core";
 import { type Context, Hono } from "hono";
@@ -1801,16 +1800,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         ingestedFiles
       );
 
-      // `!`-bash from web/direct-API chat (the primary `!` surface — ChatGPT-UI
-      // style clients driving the conversation's sandbox without the LLM). Gated
-      // to genuine user chat: an automation_run's injected text must stay ordinary
-      // text, never a deterministic shell trigger. The Chat SDK bridge does the
-      // same for platform inbound.
-      const bangBash =
-        session.intent?.kind === "automation_run"
-          ? null
-          : parseBangBashCommand(messageContent);
-
       const jobId = await queueProducer.enqueueMessage({
         userId: session.userId,
         conversationId: session.conversationId || agentId,
@@ -1844,7 +1833,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
             ? { executionMode: session.executionMode }
             : {}),
           ...(ingestedFiles.length > 0 ? { files: ingestedFiles } : {}),
-          ...(bangBash ? { bangBash } : {}),
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,

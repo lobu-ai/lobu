@@ -144,7 +144,6 @@ export * from "./utils/secret-redaction";
 export * from "./utils/sentry-scrubber";
 // Shared Lobu runtime session.jsonl parser (gateway + worker).
 export {
-  type BashExecutionContent,
   entryToMessage,
   type ParsedMessage,
   type ParsedMessageType,
@@ -161,12 +160,10 @@ export type {
 } from "./worker/transport";
 // Gateway ↔ worker wire contract (MessagePayload, JobType, QueuedMessage).
 export type {
-  BangBashCommand,
   DeviceExecutionTarget,
   JobType,
   MessagePayload,
   QueuedMessage,
 } from "./worker/wire";
-export { parseBangBashCommand } from "./worker/wire";
 
 export { withLobuFileParameters } from "./agent-tooling";

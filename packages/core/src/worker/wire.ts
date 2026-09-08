@@ -38,35 +38,6 @@ export interface DeviceExecutionTarget {
 }
 
 /**
- * A `!`-bash control action carried on `platformMetadata.bangBash`. Set by the
- * gateway at ingress when the user's message is `!cmd` / `!!cmd`; read by the
- * worker, which runs `command` through the hardened bash path in the
- * conversation's pinned sandbox and returns the output as the reply (the LLM is
- * skipped). `excludeFromContext` (the `!!` form) keeps the command + output out
- * of later model context via pi's native flag.
- */
-export interface BangBashCommand {
-  command: string;
-  excludeFromContext: boolean;
-}
-
-/**
- * Parse a raw chat message into a {@link BangBashCommand}, or `null` when it is
- * not a `!`-bash message. `!cmd` → run with output in context; `!!cmd` → run
- * with output excluded from later model context. A bare `!` / `!!` (no command
- * after trimming) is NOT a bash action — it returns `null` so the text falls
- * through as ordinary input. A leading space after `!`/`!!` is allowed and
- * trimmed (`! ls` == `!ls`); a triple `!!!…` is `!!` + command `!…`.
- */
-export function parseBangBashCommand(text: string): BangBashCommand | null {
-  if (!text.startsWith("!")) return null;
-  const excludeFromContext = text.startsWith("!!");
-  const command = text.slice(excludeFromContext ? 2 : 1).trim();
-  if (!command) return null;
-  return { command, excludeFromContext };
-}
-
-/**
  * Universal message payload for every gateway → worker hop.
  * Used by: platform inbound → runs queue → MessageConsumer → worker.
  */
