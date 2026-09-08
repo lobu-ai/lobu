@@ -1008,7 +1008,6 @@ export async function enqueueAgentTurnShadow(
       // Authoritative. This run's reply IS the conversation's reply; there is
       // no second lane producing one. The completion route reads the `reply`
       // sibling below to publish it.
-      shadow: false,
     };
 
     // Where this turn's reply would be delivered, kept beside the envelope

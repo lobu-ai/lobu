@@ -1,21 +1,14 @@
 /**
  * Completion for an agent turn run.
  *
- * A shadow turn reports what the isolate produced and stops there: the
- * conversation's reply still comes from the subprocess lane, so nothing is
- * delivered. What it writes is the native Pi session the turn produced, onto
- * the run row, which is how the two lanes are compared while the shadow runs.
+ * A turn delivers: it writes the native Pi session the turn produced onto the
+ * run row, persists the conversation's snapshot, and publishes the
+ * `thread_response` the client is waiting on — all inside the same fenced
+ * terminal transition, the way `device-chat.ts` does for the device lane.
  *
- * An authoritative turn additionally delivers: it persists the conversation's
- * native Pi session snapshot and publishes the `thread_response` the
- * client is waiting on, both inside the same fenced terminal transition, the
- * way `device-chat.ts` does for the other non-subprocess lane. Which of the
- * two a run is, is the run's own `turn.shadow`, stamped by the producer.
- *
- * `sweepStaleAgentTurnRuns` is the same distinction applied by the stale-run
- * reaper: a worker that crashes mid-turn never reaches this route, so the
- * reaper terminalizes the run and, for an authoritative turn, delivers the
- * error the completion route would have.
+ * `sweepStaleAgentTurnRuns` covers the path that never reaches this route: a
+ * worker that crashes mid-turn is terminalized by the reaper, which delivers
+ * the error the completion route would have.
  */
 import {
 	AGENT_ERRORS,
@@ -48,7 +41,7 @@ import { authorizeRunForWorker } from "./shared";
 
 const logger = createLogger("agent-turn-worker-api");
 
-/** What of the turn's own text is kept on the run row for the shadow diff. */
+/** How much of the turn's own text is kept on the run row. */
 const MAX_OUTPUT_TAIL = 2_000;
 
 /** Validate the transport boundary without rebuilding Pi's session state. */
@@ -112,9 +105,9 @@ async function persistTurnSnapshot(
  * The outcome of one delta batch, as the worker needs to hear it.
  *
  * `published` distinguishes "written into the conversation" from "correctly
- * decided not to write" (a shadow turn, or a sequence already passed). Both
- * retire the batch on the worker; only a THROW leaves it queued for the next
- * beat, which is why this function returns rather than swallowing.
+ * decided not to write" (a sequence already passed). Both retire the batch on
+ * the worker; only a THROW leaves it queued for the next beat, which is why
+ * this function returns rather than swallowing.
  */
 type TurnDeltaOutcome = { published: boolean };
 
@@ -146,9 +139,8 @@ type TurnDeltaOutcome = { published: boolean };
  * the worker re-sends the same sequence until it is acknowledged, so nothing
  * is retired unwritten.
  *
- * Silent no-op for a shadow turn (nothing it produces is delivered) and for a
- * turn whose sequence has already been passed — both are `published: false`,
- * an answer rather than a failure.
+ * Silent no-op for a turn whose sequence has already been passed —
+ * `published: false` is an answer rather than a failure.
  */
 async function publishTurnDelta(
 	runId: number,
@@ -184,7 +176,7 @@ async function publishTurnDelta(
       RETURNING action_input, organization_id
     `) as unknown as Array<{
 			action_input: {
-				turn?: { shadow?: boolean; conversation_id?: string };
+				turn?: { conversation_id?: string };
 				reply?: TurnReply;
 			} | null;
 			organization_id: string | null;
@@ -192,10 +184,6 @@ async function publishTurnDelta(
 		const row = rows[0];
 		if (!row) return false;
 		const envelope = row.action_input ?? {};
-		// A shadow turn delivers nothing, by definition — it exists to be
-		// compared against the subprocess lane, not to answer anyone. Same
-		// predicate the completion route applies to the same field.
-		if (envelope.turn?.shadow === true) return false;
 		const reply = envelope.reply;
 		if (!reply) return false;
 		await insertThreadResponseRow(
@@ -233,9 +221,8 @@ async function publishTurnDelta(
  * already subscribe to `tool_use`, so this lane's tools become visible without
  * a second event name or a second consumer.
  *
- * Routing is read from the run's own row, exactly as the delta path does, and
- * a shadow turn publishes nothing. There is no sequence fence here and none is
- * needed: a trace is idempotent per `toolCallId` from the client's point of
+ * Routing is read from the run's own row, exactly as the delta path does.
+ * There is no sequence fence here and none is needed: a trace is idempotent per `toolCallId` from the client's point of
  * view, and unlike the reply it is never reconstructed by appending.
  */
 async function publishTurnToolEvents(
@@ -257,7 +244,7 @@ async function publishTurnToolEvents(
       LIMIT 1
     `) as unknown as Array<{
 			action_input: {
-				turn?: { shadow?: boolean; conversation_id?: string };
+				turn?: { conversation_id?: string };
 				reply?: TurnReply;
 			} | null;
 			organization_id: string | null;
@@ -265,7 +252,6 @@ async function publishTurnToolEvents(
 		const row = rows[0];
 		if (!row) return false;
 		const envelope = row.action_input ?? {};
-		if (envelope.turn?.shadow === true) return false;
 		const reply = envelope.reply;
 		if (!reply) return false;
 		for (const event of events) {
@@ -438,8 +424,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       return { error: 'Run is not in progress', code: 409 as const };
     }
     const envelope = run.action_input ?? {};
-    const isShadow = envelope.turn?.shadow === true;
-    if (!isShadow && !envelope.reply) return { error: 'Authoritative agent turn has no reply envelope', code: 409 as const };
+    if (!envelope.reply) return { error: 'Agent turn has no reply envelope', code: 409 as const };
     const cancelling = !!run.run_metadata?.cancel_requested_at;
     const offered = !cancelling && body.status === 'completed' ? await pendingAgentTurnInputs(tx, run) : [];
     const invalid = typeof snapshot === 'string' ? snapshot
@@ -467,7 +452,6 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
         })}::jsonb WHERE id = ${receipt.run_id} AND status = 'pending'`;
     }
     await releaseNextAgentTurn(tx, run);
-    if (isShadow) return { status };
     const reply = envelope.reply!;
     const conversationId = envelope.turn!.conversation_id;
     if (status === 'completed') await persistTurnSnapshot(tx, {

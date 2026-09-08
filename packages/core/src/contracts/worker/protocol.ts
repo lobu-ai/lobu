@@ -589,8 +589,6 @@ export const AgentTurnPollPayloadSchema = Type.Object({
      * connector's open one, so this is normally just the gateway.
      */
     allowed_hosts: Type.Array(Type.String({ minLength: 1 })),
-    /** Shadow runs report their result and never reach the conversation. */
-    shadow: Type.Boolean(),
   }),
 });
 
@@ -853,8 +851,7 @@ export const CompleteDeviceChatResponseSchema = Type.Object({
 /**
  * `POST /api/workers/complete-agent-turn`.
  *
- * `session_jsonl` is Pi's native session state, to resume the next turn. A shadow
- * run reports it and nothing else happens; when the lane becomes authoritative
+ * `session_jsonl` is Pi's native session state, to resume the next turn, and
  * the same body carries the reply.
  */
 /** Per-execution input bound shared by repeatable offers and committed receipts. */
@@ -1152,10 +1149,10 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  * so a publish that failed, was fenced out by a lost lease, or never reached
  * the database is re-sent rather than silently dropped.
  *
- * `published: false` is a real outcome, not an error: a shadow turn and a turn
- * whose sequence was already passed both acknowledge without publishing, and
- * the worker retires the batch in both cases — there is nothing more it can do
- * about either. Only the ABSENCE of an ack keeps the text queued.
+ * `published: false` is a real outcome, not an error: a turn whose sequence was
+ * already passed acknowledges without publishing, and the worker retires the
+ * batch — there is nothing more it can do about it. Only the ABSENCE of an ack
+ * keeps the text queued.
  */
 export const HeartbeatResponseSchema = Type.Object({
   continue: Type.Optional(Type.Boolean()),

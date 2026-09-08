@@ -143,7 +143,7 @@ export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun,
 }): Promise<boolean> {
   const envelope = run.action_input;
   const reply = envelope?.reply;
-  if (envelope?.turn?.shadow === true || !reply) return false;
+  if (!reply) return false;
   await insertThreadResponseRow(sql, {
     messageId: reply.message_id, channelId: reply.channel_id, conversationId: envelope?.turn?.conversation_id ?? '',
     userId: reply.user_id, teamId: reply.team_id ?? 'api', platform: reply.platform,

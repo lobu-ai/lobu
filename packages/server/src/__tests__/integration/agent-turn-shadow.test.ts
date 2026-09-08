@@ -423,10 +423,9 @@ describe('agent turn shadow producer', () => {
       });
       const [run] = await shadowRuns();
       expect(run.action_input.turn).toMatchObject({ session_jsonl: '' });
-      // The producer enqueues an authoritative turn, so nothing has to flip
-      // `shadow` here any more, and there is no managed counterpart snapshot
-      // to exclude — the assertions below are the authoritative contract.
-      expect(run.action_input.turn.shadow).toBe(false);
+      // There is no shadow lane and no managed counterpart snapshot to
+      // exclude: the assertions below are the whole contract.
+      expect(run.action_input.turn).not.toHaveProperty('shadow');
       const client = new WorkerClient({
         apiUrl: origin, workerId: 'fleet-file-tools', authToken: 'test-file-tools-fleet', capabilities: { agent_turn: true },
       });
@@ -476,9 +475,8 @@ describe('agent turn shadow producer', () => {
     }
   }, 30_000);
 
-  it.each([
-    ['mid', true], ['mid', false], ['late', true], ['late', false], ['cancel', true], ['cancel', false],
-  ] as const)('preserves accepted input across real HTTP and isolates (%s, shadow=%s)', async (timing, shadow) => {
+  it.each(['mid', 'late', 'cancel'] as const)(
+    'preserves accepted input across real HTTP and isolates (%s)', async (timing) => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const first = messageFor(org.id);
@@ -505,7 +503,6 @@ describe('agent turn shadow producer', () => {
         agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: `${origin}/lobu`,
       });
       const run = (await shadowRuns()).at(-1)!;
-      if (!shadow) await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false') WHERE id = ${run.id}`;
       return Number(run.id);
     };
     const server = createServer(async (req, res) => {
@@ -617,7 +614,7 @@ describe('agent turn shadow producer', () => {
         const successor = await client.poll();
         expect(successor.run_id).toBe(followerId);
         const history = (successor.payload as { turn: { session_jsonl: string } }).turn.session_jsonl;
-        if (timing === 'late' && !shadow) expect(history).toContain('Initial answer.');
+        if (timing === 'late') expect(history).toContain('Initial answer.');
         else expect(history).toBe('');
         expect((await executeRun(client, successor, {}, config)).error).toBeUndefined();
         expect(executions).toBe(2);
@@ -626,8 +623,8 @@ describe('agent turn shadow producer', () => {
       expect(JSON.stringify(providerRequests[0].messages)).not.toContain(followUp.messageText);
       expect(JSON.stringify(providerRequests[1].messages).split(followUp.messageText)).toHaveLength(2);
       const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->'processedMessageIds' ? 'http-follow-up'`;
-      expect(replies).toHaveLength(shadow ? 0 : 1);
-      if (!shadow && timing === 'mid') expect(replies[0].action_input.processedMessageIds).toEqual([first.messageId, followUp.messageId]);
+      expect(replies).toHaveLength(1);
+      if (timing === 'mid') expect(replies[0].action_input.processedMessageIds).toEqual([first.messageId, followUp.messageId]);
       expect(errors).toEqual([]);
     } finally {
       releaseProvider(); releaseCleanup(); server.closeAllConnections();
@@ -664,7 +661,6 @@ describe('agent turn shadow producer', () => {
       conversation_id: 'conv-shadow',
       message_id: 'msg-shadow',
       message_text: 'what is the shadow lane?',
-      shadow: true,
       provider: {
         api: 'anthropic-messages',
         provider: 'anthropic',
@@ -716,7 +712,13 @@ describe('agent turn shadow producer', () => {
     // The credential rides OUTSIDE the turn so the poll can lift it onto the
     // response's `credentials` and the worker can conceal it before the guest
     // ever sees a provider key.
-    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ executionMode: 'capture', runId: rows[0].id });
+    // No `executionMode` on an authoritative turn: `capture` suppresses side
+    // effects and reports success anyway, so pinning it here would make the
+    // agent claim it sent the message while doing nothing. Only a server-side
+    // eval run carries it, derived by `buildWorkerTokenClaims` from the run row.
+    const claims = verifyWorkerToken(envelope.credential);
+    expect(claims).toMatchObject({ runId: rows[0].id });
+    expect(claims).not.toHaveProperty('executionMode');
     expect(JSON.stringify(envelope.turn)).not.toContain('lobu_secret_');
   });
 
@@ -1189,7 +1191,6 @@ describe('agent turn shadow producer', () => {
     await enqueueAgentTurnShadow(secondSource, dependencies);
     const [first, second] = await shadowRuns();
     expect(first.id).toBeGreaterThan(secondSource.runId!);
-    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb) WHERE id IN (${first.id}, ${second.id})`;
     const firstClaim = await pollFleet('fleet-native-first', { agent_turn: true });
     expect((await firstClaim.json()).run_id).toBe(first.id);
     const session = nativeSession();
@@ -1279,37 +1280,6 @@ describe('agent turn shadow producer', () => {
     expect(claimed.run_id).toBe(run.id);
     expect(claimed.payload.turn.session_jsonl).toBe('');
   });
-
-  it.each(['missing', 'organization', 'type', 'queue', 'agentId', 'conversationId', 'messageId', 'userId'])(
-    'terminalizes a shadow with an invalid %s source link without blocking the next message', async (invalid) => {
-      const org = await createTestOrganization();
-      const sql = getTestDb();
-      const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
-      await enqueueMessage(messageFor(org.id), deps);
-      const [bad] = await shadowRuns();
-      if (invalid === 'missing') {
-        await sql`UPDATE runs SET parent_run_id = NULL WHERE id = ${bad.id}`;
-      } else if (invalid === 'organization') {
-        const other = await createTestOrganization();
-        await sql`UPDATE runs SET organization_id = ${other.id} WHERE id = ${bad.parent_run_id}`;
-      } else if (invalid === 'type') {
-        await sql`UPDATE runs SET run_type = 'internal' WHERE id = ${bad.parent_run_id}`;
-      } else if (invalid === 'queue') {
-        await sql`UPDATE runs SET queue_name = 'thread_message_source_fixture' WHERE id = ${bad.parent_run_id}`;
-      } else {
-        await sql`UPDATE runs SET action_input = action_input || ${sql.json({ [invalid]: 'other-source' })}::jsonb WHERE id = ${bad.parent_run_id}`;
-      }
-      await enqueueMessage({ ...messageFor(org.id), messageId: 'next-valid-message' }, deps);
-      const next = (await shadowRuns())[1];
-      const response = await pollFleet('fleet-invalid-source', { agent_turn: true });
-      expect(response.status).toBe(200);
-      const failed = await response.json();
-      expect(failed).toMatchObject({ skipped_run_id: bad.id, error: 'agent turn shadow has no matching source message' });
-      expect(failed).not.toHaveProperty('payload');
-      expect((await runRow(bad.id)).status).toBe('failed');
-      expect((await (await pollFleet('fleet-after-invalid-source', { agent_turn: true })).json()).run_id).toBe(next.id);
-    }
-  );
 
   it('requires the original admitted source identity and keeps it out of the worker envelope', async () => {
     const org = await createTestOrganization();
@@ -1515,7 +1485,9 @@ describe('agent turn shadow producer', () => {
       expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
       if (terminal === 'timeout') {
         await sql`UPDATE runs SET last_heartbeat_at = now() - interval '1 hour' WHERE id = ${owner.id}`;
-        expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 0 });
+        // A reaped turn is the conversation's answer, so its error is
+        // delivered rather than merely recorded on the run row.
+        expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1 });
       } else if (terminal === 'malformed') {
         await failClaimedWorkerRun({ runId: owner.id, workerId: body.worker_id, errorMessage: 'malformed envelope' });
       } else {
@@ -1530,7 +1502,7 @@ describe('agent turn shadow producer', () => {
       expect(ready.map((row) => row.fresh)).toEqual([true, false]);
       expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
       await sql`UPDATE runs SET run_at = now() - interval '1 hour' WHERE id = ${followers[0].id}`;
-      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 0 });
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1 });
       expect((await (await pollFleet('fleet-released', { agent_turn: true })).json()).run_id).toBe(followers[1].id);
     },
   );
@@ -2193,9 +2165,8 @@ describe('agent turn shadow producer', () => {
 
     const [run] = await shadowRuns();
     expect(run).toBeDefined();
-    expect(run.action_input.turn.shadow).toBe(false);
-    // The completion route 409s an authoritative run with no reply envelope,
-    // so the producer must always stamp one.
+    // The completion route 409s a turn with no reply envelope, so the
+    // producer must always stamp one.
     expect(run.action_input.reply).toMatchObject({
       message_id: expect.any(String),
       channel_id: expect.any(String),
@@ -2365,7 +2336,7 @@ describe('agent turn shadow producer', () => {
     ).toBeUndefined();
     const runs = await shadowRuns();
     expect(runs).toHaveLength(1);
-    expect(runs[0]!.action_input.turn.shadow).toBe(false);
+    expect(runs[0]!.action_input.reply).toBeDefined();
   });
 
   it("carries the message's image and non-image attachments as bytes", async () => {
@@ -2568,7 +2539,6 @@ describe('agent turn completion', () => {
   it('persists native IDs, tool pairs and summaries verbatim under the completion fence', async () => {
     const workerId = 'fleet-native-snapshot';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
     const session = nativeSession([
       { type: 'message', id: 'u1', parentId: null, message: { role: 'user', content: 'count' } },
       { type: 'message', id: 'a1', parentId: 'u1', message: { role: 'assistant', content: [
@@ -2599,7 +2569,6 @@ describe('agent turn completion', () => {
   it('does not persist a stale completion after its lease changes during the request', async () => {
     const workerId = 'fleet-lost-lease';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
     const realDb = db.getDb();
     let leaseChanged = false;
     const stolenLease = new Proxy(realDb, {
@@ -2732,7 +2701,6 @@ describe('agent turn completion', () => {
   ])('fails a %s snapshot visibly and preserves the previous session', async (_kind, session_jsonl) => {
     const workerId = 'fleet-invalid-snapshot';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
     const sql = getTestDb();
     const [run] = await sql`SELECT organization_id FROM runs WHERE id = ${runId}`;
     const [prior] = await sql`
@@ -2795,16 +2763,6 @@ describe('agent turn completion', () => {
     expect(n).toBe(0);
   });
 
-  /** Make a claimed turn authoritative, the way the cutover will. */
-  async function makeAuthoritative(runId: number): Promise<void> {
-    const sql = getTestDb();
-    await sql`
-      UPDATE runs
-      SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb)
-      WHERE id = ${runId}
-    `;
-  }
-
   /** Just the delta spans of a set of thread_response rows, in order. */
   function rows_delta(rows: Array<Record<string, unknown>>): unknown[] {
     return rows.filter((row) => row.delta !== undefined).map((row) => row.delta);
@@ -2824,7 +2782,6 @@ describe('agent turn completion', () => {
   it('drops an oversize or malformed span unpublished and unacknowledged, and keeps the beat', async () => {
     const workerId = 'fleet-oversize-span';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
     // One past TURN_DELTA_MAX_CHARS (24_000): the schema bound, now enforced.
     const oversize = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
@@ -2852,7 +2809,6 @@ describe('agent turn completion', () => {
   it('streams an in-flight turn to the client on the heartbeat it already sends', async () => {
     const workerId = 'fleet-streams';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
 
     // The worker beats twice as the reply grows. The text is INCREMENTAL: the
     // second beat CONTINUES the first rather than restating it, because every
@@ -2908,7 +2864,6 @@ describe('agent turn completion', () => {
   it('never publishes the same span twice on a retried or reordered heartbeat', async () => {
     const workerId = 'fleet-reorder';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
 
     await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
@@ -2971,7 +2926,6 @@ describe('agent turn completion', () => {
     });
 
     const claimantRunId = await claimedShadowRun('fleet-claimant-stream');
-    await makeAuthoritative(claimantRunId);
     // Not this worker's run: its text must not reach another turn's client.
     // The lease fence refuses it, and — critically — it gets NO ack, because
     // an ack would tell a worker to drop text it may legitimately still owe.
@@ -2990,7 +2944,6 @@ describe('agent turn completion', () => {
   it('publishes a finished tool call as the tool_use event both lanes use', async () => {
     const workerId = 'fleet-tool-trace';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
 
     const beat = await postAsFleet('/api/workers/heartbeat', {
       run_id: runId,
@@ -3039,7 +2992,6 @@ describe('agent turn completion', () => {
   it('stamps repliedInBand so an in-band reply is not delivered twice', async () => {
     const workerId = 'fleet-in-band';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
 
     // The agent called `send_message` into the conversation it is answering,
     // so the user has already READ the answer. The guest reports it; without
@@ -3069,7 +3021,6 @@ describe('agent turn completion', () => {
   it('leaves an ordinary turn unmarked, so only a positive signal suppresses', async () => {
     const workerId = 'fleet-not-in-band';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
 
     await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
@@ -3089,7 +3040,6 @@ describe('agent turn completion', () => {
   it('never marks a FAILED turn as replied in band', async () => {
     const workerId = 'fleet-in-band-failed';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
 
     await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
@@ -3200,16 +3150,6 @@ describe('agent turn reaper', () => {
     delete process.env[SHADOW_ENV];
   });
 
-  /** Make the run authoritative, as the cutover will. */
-  async function makeAuthoritative(runId: number) {
-    const sql = getTestDb();
-    await sql`
-      UPDATE runs
-      SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb)
-      WHERE id = ${runId}
-    `;
-  }
-
   /** The worker died: its last heartbeat is well past any threshold. */
   async function loseHeartbeat(runId: number) {
     const sql = getTestDb();
@@ -3232,7 +3172,6 @@ describe('agent turn reaper', () => {
 
   it('a crashed worker on an authoritative turn delivers the error instead of hanging the client', async () => {
     const runId = await claimedShadowRun('fleet-crashed');
-    await makeAuthoritative(runId);
     await loseHeartbeat(runId);
 
     // Through the real reaper tick, so the lane is proven reachable from the
@@ -3278,7 +3217,6 @@ describe('agent turn reaper', () => {
       gatewayUrl: GATEWAY_URL,
     });
     const [run] = await shadowRuns();
-    await makeAuthoritative(run.id);
     const sql = getTestDb();
     await sql`UPDATE runs SET created_at = now() - interval '1 hour', run_at = now() - interval '1 hour' WHERE id = ${run.id}`;
 
@@ -3305,7 +3243,6 @@ describe('agent turn reaper', () => {
     const staleShadow = await claimedShadowRun('fleet-shadow-stale');
     await loseHeartbeat(staleShadow);
     const live = await claimedShadowRun('fleet-live');
-    await makeAuthoritative(live);
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 1,
@@ -3327,7 +3264,6 @@ describe('agent turn reaper', () => {
     // stamped an authoritative turn without saying where the reply goes. The
     // reaper has nowhere to deliver to, but the row must not wedge the lane.
     const runId = await claimedShadowRun('fleet-unaddressed');
-    await makeAuthoritative(runId);
     await loseHeartbeat(runId);
     const sql = getTestDb();
     await sql`UPDATE runs SET action_input = action_input - 'reply' WHERE id = ${runId}`;
@@ -3346,7 +3282,6 @@ describe('agent turn reaper', () => {
     // rather than an overwrite of a live answer.
     const workerId = 'fleet-late';
     const runId = await claimedShadowRun(workerId);
-    await makeAuthoritative(runId);
     await loseHeartbeat(runId);
     const completion = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
