@@ -238,6 +238,31 @@ describe('search_memory direct OAuth workspace federation', () => {
     expectValidSearchResult(partialHit);
   });
 
+  it('preserves entity-ID retry guidance across workspaces without hiding partial failures', async () => {
+    const args = { entity_id: 2147483647 };
+    const result = await search(args, {} as Env, context());
+    expect(result.discovery_status).toBe('not_found');
+    expect(result.coverage).toMatchObject({ scope: 'all_granted', status: 'complete' });
+    expect(result.suggestion).toContain('entity_id only accepts entity IDs');
+    expect(result.suggestion).toContain('query: "memory 2147483647"');
+    expect(result.suggestion).not.toContain('entities.create');
+    expectValidSearchResult(result);
+
+    const targets = [
+      { id: orgA.id, slug: orgA.slug, name: orgA.name, role: 'owner', personal: false },
+      { id: orgB.id, slug: orgB.slug, name: orgB.name, role: 'admin', personal: false },
+    ];
+    const shard = await search({ ...args, workspace: orgA.slug }, {} as Env, context());
+    const partial = mergeFederatedSearchResults(args, targets, [
+      { status: 'fulfilled', value: shard },
+      { status: 'rejected', reason: new Error('synthetic unavailable workspace') },
+    ]);
+    expect(partial.discovery_status).toBe('discovering');
+    expect(partial.suggestion).toContain('partial results');
+    expect(partial.suggestion).not.toContain('not found');
+    expectValidSearchResult(partial);
+  });
+
   // The federated arm of the empty-result guidance. `partialEmpty` above covers
   // the degraded case, which deliberately says "partial results" instead — this
   // is the HEALTHY all-granted miss, the one branch of the read guidance that
