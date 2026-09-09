@@ -7,6 +7,8 @@
  * Access Rules:
  * - Upstream routing enforces public/private workspace visibility.
  * - Workspace members can read; owners/admins can edit records.
+ * - No-user contexts: an anonymous public-workspace read passes, but a write
+ *   also needs `isAuthenticated` (system/internal calls like reaction scripts).
  */
 
 import { type DbClient, getDb } from '../db/client';

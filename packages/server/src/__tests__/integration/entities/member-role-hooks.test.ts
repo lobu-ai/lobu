@@ -63,13 +63,17 @@ describe('member roles through generic entity edits', () => {
     const ctx = ownerToolContext(other.id, owner.userId);
     const sql = getTestDb();
     const message = 'This record was not found in this workspace, or you do not have access to it.';
-    for (const id of [member.entityId, 2147483647]) {
+    const foreignEntityId = member.entityId;
+    const neverAllocatedEntityId = 2147483647;
+    for (const id of [foreignEntityId, neverAllocatedEntityId]) {
       await expect(requireWriteAccess(sql, id, ctx)).rejects.toMatchObject({ message, httpStatus: 403 });
       await expect(requireReadAccess(sql, id, ctx)).rejects.toMatchObject({ message, httpStatus: 403 });
     }
   });
   it('explains workspace permissions without claiming the workspace belongs to someone else', async () => {
     const sql = getTestDb();
+    // ownerToolContext claims memberRole 'owner'; the guards must still deny,
+    // because they read the member table rather than trusting the context.
     const ctx = ownerToolContext(org.id, member.userId);
     await expect(requireOrgReadAccess(sql, ctx)).resolves.toBeUndefined();
     await expect(requireOrgWriteAccess(sql, ctx)).rejects.toMatchObject({
