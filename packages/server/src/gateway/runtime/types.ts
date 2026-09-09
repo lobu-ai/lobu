@@ -48,7 +48,11 @@ export interface RuntimeExecContext {
   command: string;
   /** Raw requested cwd from the worker; the provider maps it onto its remote root. */
   cwd: unknown;
-  /** Sanitized command env (provider-key-validated). */
+  /**
+   * Connector-contributed credentials for this command, minted gateway-side
+   * (`resolveLeasedExecEnv`). Never sourced from the worker's request body:
+   * the worker is the sandbox-ee, so it must not name its own credentials.
+   */
   env?: Record<string, string>;
   timeoutMs?: number;
   /** Raw allowed-domains list from the worker; the provider derives its policy. */

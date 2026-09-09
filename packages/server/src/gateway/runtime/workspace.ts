@@ -79,17 +79,3 @@ export function remoteCwd(
   if (normalized === "" || normalized === ".") return remoteRoot;
   return path.posix.join(remoteRoot, normalized);
 }
-
-/** Keep only `KEY=value` string entries with a valid env-var name. */
-export function commandEnv(value: unknown): Record<string, string> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const env: Record<string, string> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (typeof raw === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      env[key] = raw;
-    }
-  }
-  return env;
-}
