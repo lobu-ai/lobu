@@ -3,6 +3,7 @@ import { MCP_PROTOCOL_VERSION, REDACTED_SENTINEL } from "@lobu/core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
 import { createAutomationRun } from "../../runs/queue-service";
+import { BROWSER_GROUP_TITLE_PREFIX } from "../../worker-api/browser-action-context";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import { runSdkScript } from "../../tools/sdk_run";
 import type { ToolContext } from "../../tools/registry";
@@ -441,7 +442,9 @@ describe("operations.execute backend lifecycle", () => {
 		expect(owners[2]).toEqual(owners[3]);
 		expect(owners[0].flow_id).not.toBe(owners[2].flow_id);
 		expect(owners[0].title).toMatch(
-			/^Lobu · Check notifications · [a-f0-9]{12}$/,
+			new RegExp(
+				`^${BROWSER_GROUP_TITLE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} · Check notifications · [a-f0-9]{12}$`,
+			),
 		);
 	});
 
@@ -501,7 +504,7 @@ describe("operations.execute backend lifecycle", () => {
 		expect(run.run_metadata).toEqual({
 			browser_context: {
 				id: `automation:${sourceRunId}`,
-				title: `Lobu · Automation ${automationId} · Run ${sourceRunId}`,
+				title: `${BROWSER_GROUP_TITLE_PREFIX} · Automation ${automationId} · Run ${sourceRunId}`,
 				flow_id: String(sourceRunId),
 				kind: "automation",
 			},

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BROWSER_GROUP_TITLE_PREFIX,
   browserActionContextFromMetadata,
   deriveBrowserActionContext,
   deriveSdkBrowserActionContext,
@@ -34,7 +35,7 @@ describe('deriveBrowserActionContext', () => {
       )
     ).toEqual({
       id: 'automation:42',
-      title: 'Lobu · Automation 7 · Run 42',
+      title: `${BROWSER_GROUP_TITLE_PREFIX} · Automation 7 · Run 42`,
       flow_id: '42',
       kind: 'automation',
     });
@@ -113,7 +114,9 @@ describe('SDK browser invocation', () => {
     expect(first).not.toBeNull();
     expect(deriveSdkBrowserActionContext({ ...ctx })).toEqual(first);
     expect(first?.id).toMatch(/^run:sdk-[a-f0-9]{64}$/);
-    expect(first?.title).toMatch(/^Lobu · Check notifications · [a-f0-9]{12}$/);
+    expect(first?.title).toMatch(
+      new RegExp(`^${escapeRe(BROWSER_GROUP_TITLE_PREFIX)} · Check notifications · [a-f0-9]{12}$`)
+    );
     expect(browserActionContextFromMetadata({ browser_context: first })).toEqual(
       first
     );
@@ -152,10 +155,10 @@ describe('SDK browser invocation', () => {
       },
     })!;
     expect(changed.flow_id).toBe(original.flow_id);
-    expect(changed.title).toStartWith('Lobu · A B 😀');
+    expect(changed.title).toStartWith(`${BROWSER_GROUP_TITLE_PREFIX} · A B 😀`);
     expect(changed.title).not.toMatch(/[\u0000-\u001f]/);
     expect([...changed.title]).toHaveLength(
-      200 + 'Lobu · '.length + ' · '.length + 12
+      200 + `${BROWSER_GROUP_TITLE_PREFIX} · `.length + ' · '.length + 12
     );
   });
 
@@ -165,7 +168,9 @@ describe('SDK browser invocation', () => {
         sdkBrowserInvocation: { nonce: invocation.nonce, title: '' },
       })
     )!;
-    expect(browser.title).toMatch(/^Lobu · Browser task · [a-f0-9]{12}$/);
+    expect(browser.title).toMatch(
+      new RegExp(`^${escapeRe(BROWSER_GROUP_TITLE_PREFIX)} · Browser task · [a-f0-9]{12}$`)
+    );
     expect(
       trustedChromeActionInput(
         {
@@ -198,7 +203,7 @@ describe('SDK browser invocation', () => {
     )!;
     expect(titled).toEqual({
       ...original,
-      title: expect.stringContaining('Lobu · Check notifications · '),
+      title: expect.stringContaining(`${BROWSER_GROUP_TITLE_PREFIX} · Check notifications · `),
     });
   });
 });
@@ -241,7 +246,7 @@ describe('page-activation trust stamp', () => {
 // The extension normalizes titles outside this shape. Keep every fixed server
 // fallback within its pass-through contract; user-supplied subjects are
 // bounded by the extension.
-const EXTENSION_TITLE_PREFIX = 'Lobu · ';
+const EXTENSION_TITLE_PREFIX = `${BROWSER_GROUP_TITLE_PREFIX} · `;
 const EXTENSION_MAX_TITLE_POINTS = 64;
 
 describe('extension title pass-through contract', () => {
@@ -293,7 +298,7 @@ describe('standaloneBrowserActionContext', () => {
     const second = standaloneBrowserActionContext('org_1', 432, 1002);
     // Same visible container...
     expect(first?.id).toBe(second?.id);
-    expect(first?.title).toBe('Lobu · Browser actions');
+    expect(first?.title).toBe(`${BROWSER_GROUP_TITLE_PREFIX} · Browser actions`);
     // ...but each run keeps its own flow lease, so neither owns the other's tab.
     expect(first?.flow_id).toBe('1001');
     expect(second?.flow_id).toBe('1002');
@@ -324,3 +329,7 @@ describe('standaloneBrowserActionContext', () => {
     expect([...title].length).toBeLessThanOrEqual(EXTENSION_MAX_TITLE_POINTS);
   });
 });
+
+function escapeRe(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
