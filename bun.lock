@@ -97,8 +97,8 @@
         "typescript": "^5.8.3",
       },
       "optionalDependencies": {
-        "isolated-vm": "^6.1.2",
-        "isolated-vm-next": "npm:isolated-vm@^7.0.0",
+        "isolated-vm": "^6.2.0",
+        "isolated-vm-next": "npm:isolated-vm@^7.0.1",
       },
     },
     "packages/client": {
@@ -172,8 +172,8 @@
         "typescript": "^5.3.3",
       },
       "optionalDependencies": {
-        "isolated-vm": "^6.1.2",
-        "isolated-vm-next": "npm:isolated-vm@^7.0.0",
+        "isolated-vm": "^6.2.0",
+        "isolated-vm-next": "npm:isolated-vm@^7.0.1",
       },
     },
     "packages/connectors": {
@@ -492,8 +492,8 @@
         "vitest": "^3.2.6",
       },
       "optionalDependencies": {
-        "isolated-vm": "^6.1.2",
-        "isolated-vm-next": "npm:isolated-vm@^7.0.0",
+        "isolated-vm": "^6.2.0",
+        "isolated-vm-next": "npm:isolated-vm@^7.0.1",
       },
     },
   },
@@ -2771,9 +2771,9 @@
 
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 
-    "isolated-vm": ["isolated-vm@6.1.2", "", { "dependencies": { "node-gyp-build": "^4.8.4" } }, "sha512-GGfsHqtlZiiurZaxB/3kY7LLAXR3sgzDul0fom4cSyBjx6ZbjpTrFWiH3z/nUfLJGJ8PIq9LQmQFiAxu24+I7A=="],
+    "isolated-vm": ["isolated-vm@6.2.0", "", { "dependencies": { "node-gyp-build": "^4.8.4" } }, "sha512-UuSlxSHWt2QuJ5WvBhzlIJx2VVZN/a44SqBbEZFKNdvuSyhOvhmyDo8SQ+njVbhnh/njoL/aW0bUTiFYlpweGQ=="],
 
-    "isolated-vm-next": ["isolated-vm@7.0.0", "", { "dependencies": { "node-gyp-build": "^4.8.4" } }, "sha512-TXlJp9kiSf4AEpkCgB4VIf2M+6MRW3SEzlZUXFmQ6QcRypOnENRvK6RoZuQt/dlLOnqyFGUoZELUfH4ucsG4iw=="],
+    "isolated-vm-next": ["isolated-vm@7.0.1", "", { "dependencies": { "node-gyp-build": "^4.8.4" } }, "sha512-nBCQ1hXEaYKYJ79wwfhaF44ITOJC30Hw0wPEsFeNsdD3hdeKK7FW1SGMQYBUA+qasvkqdOazI+iBuq0lcbN/aw=="],
 
     "isomorphic-git": ["isomorphic-git@1.38.1", "", { "dependencies": { "async-lock": "^1.4.1", "clean-git-ref": "^2.0.1", "crc-32": "^1.2.0", "diff3": "0.0.3", "ignore": "^5.1.4", "minimisted": "^2.0.0", "pako": "^1.0.10", "pify": "^4.0.1", "readable-stream": "^4.0.0", "sha.js": "^2.4.12", "simple-get": "^4.0.1" }, "bin": { "isogit": "cli.cjs" } }, "sha512-Vd2u5qDLa04fA/h5nUMU5UuffPXqg+3D3bJIV3n7Sno2qS3XMinUXRvNHrGPVy2kkC1ad5SPCC3WcpXjn0L9oQ=="],
 

@@ -126,7 +126,7 @@
     "node": ">=22 <25 || >=26"
   },
   "optionalDependencies": {
-    "isolated-vm": "^6.1.2",
-    "isolated-vm-next": "npm:isolated-vm@^7.0.0"
+    "isolated-vm": "^6.2.0",
+    "isolated-vm-next": "npm:isolated-vm@^7.0.1"
   }
 }
