@@ -1045,6 +1045,47 @@ describe("agent turn on the isolate lane", () => {
 		expect(ends[0]?.output).toContain("Your turn is now ending");
 		expect(ends[1]?.isError).toBe(true);
 		expect(ends[1]?.output).toContain("already asked the user a question");
+
+		// The tool refusal is NOT the stop: Pi returns `{block:true}` to the
+		// model as a tool error and asks it again, so this test passed while
+		// the turn kept generating and could ANSWER the question it had just
+		// asked — the user saw a question and an answer to it in one turn.
+		//
+		// Asserted on the outcome rather than a provider-call count: the guard
+		// aborts mid-batch, so the next request is issued and then cancelled
+		// by its own signal. It reaches this in-process mock (which records on
+		// arrival) but yields nothing, which is the point.
+		expect(run.output.stopReason).toBe("aborted");
+		expect(run.output.text).toBe("");
+		// And a deliberate stop is not a FAILED turn — Pi records every abort
+		// as a run failure, so an unsuppressed one would throw here instead.
+		// The blocked sibling is still in the ledger: it was ATTEMPTED, which
+		// is what the retired lane recorded too (it never filtered `isError`).
+		expect(run.output.toolsUsed).toEqual(["ask_user", "suggest_actions"]);
+	}, 120_000);
+
+	it("reports every tool it called, so requireTool can actually enforce", async () => {
+		hits = [];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "4" }] } };
+		toolScript = [{ id: "toolu_c1", name: "query_sdk", input: { code: "entities.count()" } }];
+		armFirstDeltaGate();
+		const run = await runTurn(toolJob());
+
+		// The `requireTool` output guardrail PASSES on an absent ledger (it
+		// cannot prove a miss), so an unreported ledger silently disabled it.
+		expect(run.output.toolsUsed).toEqual(["query_sdk"]);
+	}, 120_000);
+
+	it("reports an EMPTY ledger for a turn that called nothing", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob());
+
+		// `[]` and absent are different answers: absent passes the guardrail,
+		// empty trips it when a tool was required. This is the case that has
+		// to be reported, not omitted.
+		expect(run.output.toolsUsed).toEqual([]);
 	}, 120_000);
 
 	it("hands a failed gateway tool to the model as text and lets the turn finish", async () => {

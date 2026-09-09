@@ -288,6 +288,7 @@ export async function executeAgentTurnRun(
           systemPrompt: turn.system_prompt,
           sessionJsonl: turn.session_jsonl,
           userMessage: turn.message_text,
+          ...(turn.ephemeral_context ? { ephemeralContext: turn.ephemeral_context } : {}),
           // Attachment bytes the gateway already resolved out of its artifact
           // store. The guest fetches nothing: an attachment URL never reaches
           // it, so a turn cannot be talked into dialling one.
@@ -485,6 +486,7 @@ export async function executeAgentTurnRun(
       stop_reason: result.turn.stopReason,
       usage: result.turn.usage,
       session_jsonl: result.turn.sessionJsonl,
+      tools_used: result.turn.toolsUsed,
       consumed_inputs: result.turn.consumedInputs.map((input) => ({
         run_id: input.runId, session_entry_id: input.sessionEntryId,
       })),

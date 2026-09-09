@@ -192,6 +192,16 @@ export interface AgentTurnInput {
   /** What the human just said. Empty when the turn carries only attachments. */
   userMessage: string;
   /**
+   * Caller-supplied context for THIS turn only — the API's `ephemeralContext`,
+   * or the first-turn attention digest the chat bridge injects.
+   *
+   * It rides the transient-context channel, never `userMessage`: the durable
+   * user message is persisted and replayed on every later turn, so folding
+   * this in would make a one-turn hint permanent history. Transient content is
+   * assembled fresh per turn and never written to the session file.
+   */
+  ephemeralContext?: string;
+  /**
    * The message's image attachments, already resolved to base64 by the host.
    * The guest puts them in the user turn beside the text; pi drops them for a
    * model whose `provider.input` does not include `'image'`.
@@ -299,6 +309,13 @@ export interface AgentTurnOutput {
   /** Pi's native session, including message IDs, summaries and custom state. */
   sessionJsonl: string;
   consumedInputs: Array<{ runId: number; sessionEntryId: string }>;
+  /**
+   * Every tool this turn invoked, in first-call order. Always present, and
+   * `[]` for a turn that called none: the `requireTool` output guardrail
+   * treats an ABSENT ledger as "cannot prove a miss" and passes, so omitting
+   * it silently disables that check.
+   */
+  toolsUsed: string[];
   /**
    * The turn posted its answer INTO the conversation it is replying to, with
    * `send_message`/`present_event`. `text` is then a report about a message the

@@ -1065,15 +1065,26 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
 
       const row = rows[0];
       if (row?.run_type === 'agent_turn') {
-        const input = row.action_input as { turn?: Record<string, unknown>; reply?: { user_id?: string } } | null;
+        const input = row.action_input as {
+          turn?: Record<string, unknown>;
+          reply?: { user_id?: string; platform_metadata?: { sessionReset?: unknown } };
+        } | null;
         const turn = input?.turn;
+        // `/new` asks for a fresh conversation. The chat bridge turns it into
+        // an ordinary turn carrying this flag, so hydrating the snapshot would
+        // hand the model the very history the user asked to leave behind —
+        // making the reset an ordinary prompt with the old context loaded.
+        // Skipping the read starts the native session empty; the reply then
+        // persists a snapshot containing only this exchange, so the reset is
+        // durable without deleting anything (`events` stays append-only).
+        const sessionReset = input?.reply?.platform_metadata?.sessionReset === true;
         if (typeof turn?.agent_id === 'string' && turn.agent_id.trim()
           && typeof turn.conversation_id === 'string' && turn.conversation_id.trim()) {
           // Read only after admission, while the conversation claim is held.
           // A read failure rolls back the claim so the next poll can retry.
           // The whole conversation replays: this turn IS the conversation's
           // answer, so there is no source message to bound history at.
-          const sessionJsonl = await readSnapshotJsonl({
+          const sessionJsonl = sessionReset ? '' : await readSnapshotJsonl({
             organizationId: candidate.organization_id ?? undefined,
             agentId: turn.agent_id,
             conversationId: turn.conversation_id,

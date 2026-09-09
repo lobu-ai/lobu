@@ -13,7 +13,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { AgentErrorCode, classifyError, classifyErrorMessage } from "../index";
+import {
+  AGENT_ERRORS,
+  AgentErrorCode,
+  classifyError,
+  classifyErrorMessage,
+} from "../index";
 
 describe("classifyError", () => {
   test("recognizes provider auth failures", () => {
@@ -199,6 +204,27 @@ describe("classifyErrorMessage", () => {
     const message = "invalid x-api-key";
     expect(classifyErrorMessage(message)).toBe(
       classifyError(new Error(message))
+    );
+  });
+});
+
+describe("isolate host wall-clock timeout", () => {
+  test("classifies as WORKER_UNRESPONSIVE, and NOT the silent SESSION_TIMEOUT", () => {
+    // `IsolateHost` terminates a runaway turn with this exact text. It used to
+    // classify as nothing, so the user got a raw internal string.
+    const code = classifyErrorMessage("wall-clock budget of 600000ms exceeded");
+    expect(code).toBe(AgentErrorCode.WORKER_UNRESPONSIVE);
+    // The distinction is the point: SESSION_TIMEOUT is `silent` because the
+    // old lane's queue retried it. Nothing retries the host kill, so silencing
+    // it would leave the user with no answer and no reason.
+    expect(AGENT_ERRORS[AgentErrorCode.SESSION_TIMEOUT].silent).toBe(true);
+    expect(AGENT_ERRORS[code!].silent).toBeUndefined();
+    expect(AGENT_ERRORS[code!].message).toBeTruthy();
+  });
+
+  test("the literal SESSION_TIMEOUT sentinel still wins its own branch", () => {
+    expect(classifyErrorMessage("SESSION_TIMEOUT")).toBe(
+      AgentErrorCode.SESSION_TIMEOUT
     );
   });
 });

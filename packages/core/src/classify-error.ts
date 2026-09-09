@@ -45,6 +45,15 @@ export function classifyErrorMessage(
   if (message === SESSION_TIMEOUT_MESSAGE)
     return AgentErrorCode.SESSION_TIMEOUT;
 
+  // The isolate host's own wall-clock kill (`IsolateHost`, "wall-clock budget
+  // of <n>ms exceeded"). Deliberately NOT SESSION_TIMEOUT: that code is
+  // `silent` because the old lane's queue retried it automatically, and
+  // nothing retries this one — a silenced terminal failure leaves the user
+  // with no answer and no reason. WORKER_UNRESPONSIVE already carries the
+  // accurate, visible "didn't finish responding in time" message.
+  if (/wall-clock budget of \d+ms exceeded/.test(message))
+    return AgentErrorCode.WORKER_UNRESPONSIVE;
+
   // Provider usage/rate limit. Covers "429 Weekly/Monthly Limit
   // Exhausted", generic rate-limit/quota phrasings, and a bare 429. Placed
   // before PROVIDER_AUTH because a rate-limited request can also echo auth-ish

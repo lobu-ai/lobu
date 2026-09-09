@@ -332,6 +332,15 @@ export const AgentTurnPollPayloadSchema = Type.Object({
     /** What the human said, verbatim. May be empty when the turn is attachments only. */
     message_text: Type.String({ maxLength: 32_000 }),
     /**
+     * Caller-supplied context for THIS turn only (the API's `ephemeralContext`,
+     * or the chat bridge's first-turn attention digest). Delivered on the
+     * guest's transient-context channel, never folded into `message_text`:
+     * the durable user message replays on every later turn, so a one-turn
+     * hint folded there would become permanent history. Bounded at the same
+     * 2 KiB the producers already clamp to.
+     */
+    ephemeral_context: Type.Optional(Type.String({ maxLength: 2_048 })),
+    /**
      * Image attachments of THIS message, already resolved to bytes by the
      * gateway and inlined here as base64.
      *
@@ -880,6 +889,13 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
       { maxItems: AGENT_TURN_INPUT_MAX }
     )
   ),
+  /**
+   * Every tool this turn invoked, first-call order. Absent and `[]` are NOT
+   * the same: the `requireTool` output guardrail passes on an absent ledger
+   * (it cannot prove a miss) and trips on an empty one, so a successful turn
+   * must send the array even when it called nothing.
+   */
+  tools_used: Type.Optional(Type.Array(Type.String())),
   /**
    * The turn already posted its answer INTO the conversation it is replying to,
    * through the `send_message`/`present_event` conversation tool. The user has

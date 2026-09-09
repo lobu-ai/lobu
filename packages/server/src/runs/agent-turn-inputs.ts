@@ -193,7 +193,7 @@ export async function extendHeartbeatedTurnMarker(
 /** Terminal delivery uses the persisted routing and joins the caller's transaction. */
 export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun, result: {
   finalText?: string; error?: string; errorCode?: string; errorContext?: AgentErrorContext;
-  repliedInBand?: boolean; processedMessageIds?: string[];
+  repliedInBand?: boolean; processedMessageIds?: string[]; toolsUsed?: string[];
 }): Promise<boolean> {
   const envelope = run.action_input;
   const reply = envelope?.reply;

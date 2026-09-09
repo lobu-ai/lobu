@@ -50,6 +50,8 @@ import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
+import { resolveAutomationRunSkills } from "../automation-run-session.js";
+import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
@@ -912,16 +914,35 @@ export async function enqueueAgentTurn(
     const memoryFlush = resolveMemoryFlushConfig(
       (data.agentOptions ?? {}) as Record<string, unknown>
     );
-    const skills = (settings?.skillsConfig?.skills ?? [])
-      .filter((skill) => skill.enabled && skill.content)
+    // An Automation run executes VERSION-PINNED instructions. Reading the live
+    // library here would let a skill edited after approval change what a
+    // frozen Automation does, and would pull unrelated live skills into the
+    // run — the fixed job text alone does not freeze the skill library.
+    // `resolveAutomationRunSkills` scopes its query by org + agent + automation
+    // + run (all derived from the canonical conversation id) and throws on a
+    // missing version, so a pinned run fails rather than silently falling back
+    // to live skills.
+    const pinnedSkills = parseAutomationRunConversationId(data.conversationId)
+      ? await resolveAutomationRunSkills({
+          conversationId: data.conversationId,
+          organizationId: data.organizationId,
+          agentId: data.agentId,
+        })
+      : null;
+    const skills = (
+      pinnedSkills ??
+      (settings?.skillsConfig?.skills ?? [])
+        .filter((skill) => skill.enabled && skill.content)
+        .map((skill) => ({ name: skill.name, content: skill.content! }))
+    )
       .flatMap((skill) => {
         // An oversized skill is DROPPED, never truncated. A skill is authored
         // instructions, so slicing one mid-sentence would hand the model a
         // corrupted rule that reads as complete — worse than not seeding it,
         // and invisible at the point where the agent acts on it.
         const name = skillDirectoryName(skill.name);
-        if (!name || skill.content!.length > TURN_SKILL_CHARS) return [];
-        return [{ name, content: skill.content! }];
+        if (!name || skill.content.length > TURN_SKILL_CHARS) return [];
+        return [{ name, content: skill.content }];
       })
       .slice(0, TURN_SKILLS_MAX);
 
@@ -936,6 +957,12 @@ export async function enqueueAgentTurn(
       conversation_id: data.conversationId,
       message_id: data.messageId,
       message_text: (data.messageText ?? "").slice(0, TURN_MESSAGE_CHARS),
+      // Turn-scoped context both producers already populate and clamp to
+      // 2 KiB. It reaches the model through the guest's transient channel, so
+      // it is never persisted into the replayed user message.
+      ...(data.ephemeralContext?.trim()
+        ? { ephemeral_context: data.ephemeralContext.slice(0, 2_048) }
+        : {}),
       // Bytes, already read out of the artifact store. An attachment URL never
       // reaches the guest, so a turn cannot be talked into dialling one.
       ...(attachments.images.length > 0 ? { message_images: attachments.images } : {}),

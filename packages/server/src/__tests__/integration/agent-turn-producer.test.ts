@@ -770,6 +770,57 @@ describe('agent turn producer', () => {
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
   });
 
+  it('REGRESSION: an Automation run seeds its VERSION-PINNED skills, not the live library', async () => {
+    // The live library must not re-enter a frozen Automation: editing or
+    // disabling a skill after approval would change the instructions an
+    // already-approved Automation runs, and unrelated live skills would join
+    // the run. The isolate producer read `agentSettings.skillsConfig`
+    // unconditionally, so both happened.
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const author = await createTestUser({ name: 'Pinned Author' });
+    const [automation] = await sql<{ id: number }>`
+      INSERT INTO automations (organization_id, created_by, automation_group_id, name, slug, managed_agent_id)
+      VALUES (${org.id}, ${author.id}, 0, 'Pinned skills', 'pinned-skills', ${AGENT_ID})
+      RETURNING id
+    `;
+    const automationId = Number(automation!.id);
+    await sql`UPDATE automations SET automation_group_id = ${automationId} WHERE id = ${automationId}`;
+    const [version] = await sql<{ id: number }>`
+      INSERT INTO automation_versions (automation_id, version, name, created_by, prompt, skills)
+      VALUES (${automationId}, 1, 'Pinned skills', ${author.id}, 'prompt',
+        ${sql.json([{ name: 'frozen', content: 'Frozen instructions.' }])})
+      RETURNING id
+    `;
+    const [runRow] = await sql<{ id: number }>`
+      INSERT INTO runs (organization_id, run_type, queue_name, status, automation_id, approved_input)
+      VALUES (${org.id}, 'automation', 'automations', 'running', ${automationId},
+        ${sql.json({ version_id: Number(version!.id) })})
+      RETURNING id
+    `;
+
+    // The live library holds a DIFFERENT skill, which must not appear.
+    const liveSettings = {
+      getSettings: async () => ({
+        identityMd: '', soulMd: '', userMd: '',
+        skillsConfig: { skills: [{ repo: 'o', name: 'edited-after-approval', enabled: true, content: 'Live drift.' }] },
+      }),
+    } as unknown as AgentSettingsStore;
+
+    await enqueueMessage(
+      {
+        ...messageFor(org.id),
+        // The canonical correlation the resolver scopes its query by.
+        conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
+      },
+      { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL },
+    );
+
+    const runs = await agentTurnRuns();
+    const turn = runs[runs.length - 1]!.action_input.turn as { skills?: Array<{ name: string; content: string }> };
+    expect(turn.skills).toEqual([{ name: 'frozen', content: 'Frozen instructions.' }]);
+  });
+
   it('does not advertise seeded inputs when a strict bash policy rejects cat', async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
@@ -2461,6 +2512,93 @@ describe('agent turn producer', () => {
     // pi-ai's to change, not this test's to pin.
     expect(turn.provider.input).toContain('text');
   });
+
+  it('carries ephemeralContext on the turn-scoped channel, NOT the durable message', async () => {
+    // Both producers populate `ephemeralContext` (API body, and the chat
+    // bridge's first-turn attention digest) and nothing read it, so a user
+    // could supply context and get an answer that never saw it.
+    const org = await createTestOrganization();
+    await enqueueMessage(
+      { ...messageFor(org.id), ephemeralContext: 'the deploy is frozen until Friday' },
+      { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL },
+    );
+    const [run] = await agentTurnRuns();
+    const turn = run.action_input.turn as { message_text: string; ephemeral_context?: string };
+    expect(turn.ephemeral_context).toBe('the deploy is frozen until Friday');
+    // The durable user message replays on EVERY later turn, so folding a
+    // one-turn hint into it would make it permanent history.
+    expect(turn.message_text).toBe('what is the isolate lane?');
+    expect(turn.message_text).not.toContain('frozen until Friday');
+  });
+
+  it('omits ephemeral_context entirely when the caller supplied none', async () => {
+    const org = await createTestOrganization();
+    await enqueueMessage(messageFor(org.id), {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    expect(run.action_input.turn).not.toHaveProperty('ephemeral_context');
+  });
+
+  it('REGRESSION: /new starts the native session empty instead of replaying history', async () => {
+    // The chat bridge turns `/new` into an ordinary turn stamped
+    // `sessionReset`. Nothing consumed it, so poll hydrated the latest
+    // snapshot and the reset became a normal prompt with the old context
+    // still loaded — the user asked to start over and did not.
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const [prior] = await sql<{ id: number }>`
+      INSERT INTO runs (run_type, status, organization_id, run_at)
+      VALUES ('chat_message', 'completed', ${org.id}, now()) RETURNING id
+    `;
+    const history = nativeSession([
+      { type: 'message', id: 'pre-reset', parentId: null,
+        message: { role: 'user', content: 'history-the-user-asked-to-drop', timestamp: 1 } },
+    ]);
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-turn', ${prior!.id}, ${history}, ${Buffer.byteLength(history)}, 'completed')
+    `;
+
+    const reset = { ...messageFor(org.id), platformMetadata: { sessionReset: true } };
+    await enqueueMessage(reset, {
+      agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const claimed = await (await pollFleet('fleet-reset', { agent_turn: true })).json();
+    // Hydration is SKIPPED: the guest starts from an empty native session even
+    // though a snapshot for this conversation exists.
+    expect(claimed.payload.turn.session_jsonl).toBe('');
+    // Nothing was deleted to achieve it — the prior snapshot row still stands,
+    // so the reset stays forward-only and `events` is untouched.
+    const [kept] = (await sql`
+      SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${prior!.id}
+    `) as unknown as Array<{ snapshot_jsonl: string }>;
+    expect(kept?.snapshot_jsonl).toBe(history);
+  });
+
+  it('an ordinary turn in that same conversation still replays its history', async () => {
+    // The control for the reset case above: without the flag, the snapshot is
+    // hydrated. Asserting only the reset would pass if hydration broke wholesale.
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const [prior] = await sql<{ id: number }>`
+      INSERT INTO runs (run_type, status, organization_id, run_at)
+      VALUES ('chat_message', 'completed', ${org.id}, now()) RETURNING id
+    `;
+    const history = nativeSession();
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-turn', ${prior!.id}, ${history}, ${Buffer.byteLength(history)}, 'completed')
+    `;
+    await enqueueMessage(messageFor(org.id), {
+      agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const claimed = await (await pollFleet('fleet-no-reset', { agent_turn: true })).json();
+    expect(claimed.payload.turn.session_jsonl).toBe(history);
+  });
+
 });
 
 

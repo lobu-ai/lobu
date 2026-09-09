@@ -460,7 +460,19 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       runId: body.run_id, sessionJsonl: body.session_jsonl!,
     });
     await insertAgentTurnResponse(tx, run, {
-      ...(status === 'completed' ? { finalText: text, ...(body.replied_in_band ? { repliedInBand: true } : {}) }
+      // `tools_used` is forwarded as sent, NOT defaulted to `[]`. Absent and
+      // empty are different claims downstream: `requireTool` passes on absent
+      // (it cannot prove a miss) and trips on empty, and the follow-up bridge
+      // skips on absent to avoid duplicating a card mid-deployment. Turning a
+      // worker that reported nothing into "called nothing" would invent that
+      // claim. The guest always sends the array, so absent means a genuinely
+      // older worker.
+      ...(status === 'completed'
+        ? {
+            finalText: text,
+            ...(body.tools_used ? { toolsUsed: body.tools_used } : {}),
+            ...(body.replied_in_band ? { repliedInBand: true } : {}),
+          }
         : {
             error: error || 'agent turn failed',
             ...(errorCode ? { errorCode, errorContext: envelope.reply!.error_context } : {}),

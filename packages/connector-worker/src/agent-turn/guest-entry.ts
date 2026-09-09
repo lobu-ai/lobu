@@ -344,11 +344,16 @@ export async function runAgentTurn(
       : null;
 
   let toolCalls = 0;
+  /** Insertion-ordered, so the ledger reads in first-call order. */
+  const toolsUsed = new Set<string>();
+
   // `ask_user` hands the conversation back to the human: the question is posted
   // as buttons and the click returns as a NEW inbound message, which is a new
   // turn. Stop the session at that point, or the model keeps calling tools
   // and answering a question nobody has read yet.
   let askedUser = false;
+  /** The guard stopped this turn deliberately; the abort is not a failure. */
+  let guardStopped = false;
   // `send_message`/`present_event` posted into the conversation this turn is
   // already answering, so the user has READ the answer and the terminal reply
   // would be the same message twice. Report that signal so the
@@ -370,8 +375,21 @@ export async function runAgentTurn(
   });
   const agent = session.agent;
   const nativeBeforeToolCall = agent.beforeToolCall;
+  // Blocking a tool is not stopping a turn: Pi returns `{block:true}` to the
+  // model as a tool ERROR and asks it again, so a spent budget produced
+  // another request every time and an answer could still follow `ask_user`.
+  //
+  // `block` keeps its job — a sibling scheduled in the same batch must not
+  // RUN, since `suggest_actions`/`send_message` post to the user — and
+  // `agent.abort()` is what ends generation. Pi's own `terminate` hint cannot
+  // do it here: `shouldTerminateToolBatch` needs every result in the batch to
+  // set it, and a blocked call is short-circuited as `kind:'immediate'`, which
+  // skips `afterToolCall` and so can never carry the flag. `shouldStopAfterTurn`
+  // would be the clean seam, but `Agent` never wires it into the loop config.
   agent.beforeToolCall = async (context) => {
     if (askedUser) {
+      guardStopped = true;
+      agent.abort();
       return {
         block: true,
         reason: 'You have already asked the user a question; this turn is over. Stop and wait for their reply.',
@@ -379,6 +397,8 @@ export async function runAgentTurn(
     }
     toolCalls += 1;
     if (toolCalls <= MAX_TOOL_CALLS_PER_TURN) return nativeBeforeToolCall?.(context);
+    guardStopped = true;
+    agent.abort();
     return {
       block: true,
       reason: `This turn's tool-call budget (${MAX_TOOL_CALLS_PER_TURN}) is spent; answer with what you have.`,
@@ -393,6 +413,9 @@ export async function runAgentTurn(
     const recalled = memory ? await memory.recall(input.userMessage, agent.state.messages) : '';
     transientContext = [
       recalled,
+      input.ephemeralContext?.trim()
+        ? `Context for this message:\n${input.ephemeralContext.trim()}`
+        : '',
       describeFiles(input.files, built.canReadFiles),
       describeSkills(input.skills, built.canReadFiles),
     ]
@@ -461,6 +484,11 @@ export async function runAgentTurn(
         return;
       }
       if (event.type === 'tool_execution_end') {
+        // Recorded on END, not start, and without filtering `isError` —
+        // matching what the retired lane stamped (`recordToolUsed`, from its
+        // own `tool_use` event). A failed call still counts as attempted; the
+        // guardrail asks whether the tool was reached, not whether it worked.
+        toolsUsed.add(event.toolName);
         const result = event.result as { content?: Array<{ type?: string; text?: string }> };
         emit({
           type: 'tool_call_end',
@@ -512,7 +540,13 @@ export async function runAgentTurn(
     await promptNativeSession(session, input.userMessage, input.images);
     // A recovered native retry may have emitted an earlier error. Only the
     // final Agent state decides whether this run failed.
-    const ended = agent.state.errorMessage;
+    //
+    // Our own guard abort is the exception. Pi records EVERY abort as a run
+    // failure (`handleRunFailure` pushes a message and sets `errorMessage`),
+    // but a spent budget or an asked question is a deliberate stop, and the
+    // text streamed before it is a real answer worth delivering — throwing
+    // here would turn it into a failed turn with nothing shown.
+    const ended = guardStopped ? null : agent.state.errorMessage;
 
     // Capture BEFORE returning, and await it. `agentEnd` itself only starts the
     // write; this isolate is disposed the moment this function resolves, so an
@@ -534,6 +568,7 @@ export async function runAgentTurn(
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),
+      toolsUsed: [...toolsUsed],
       // Pi emits message events before persistence. Receipt identity comes from
       // the finished native branch after retries/compaction have drained.
       consumedInputs: session.sessionManager.getBranch().flatMap((entry) => {
