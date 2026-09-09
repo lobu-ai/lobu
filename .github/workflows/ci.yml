@@ -95,6 +95,7 @@ jobs:
     outputs:
       packages: ${{ steps.filter.outputs.packages }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      chromeExt: ${{ steps.filter.outputs.chromeExt }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,6 +112,7 @@ jobs:
           if [ -z "${BASE_SHA:-}" ]; then
             echo "packages=true" >> "$GITHUB_OUTPUT"
             echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "chromeExt=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$BASE_SHA"...HEAD)
@@ -125,6 +127,17 @@ jobs:
           else
             echo "frontend=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No frontend paths changed - skipping frontend."
+          fi
+          # The extension smoke downloads a Playwright Chromium build, so it is
+          # gated separately from the rest of the frontend job (which runs for any
+          # `packages` change). `packages/owletto` is a submodule POINTER file, so
+          # a pointer bump shows up as that exact path with nothing under it —
+          # that still moves apps/chrome and must run the smoke.
+          if echo "$changed" | grep -E '^(packages/owletto$|packages/owletto/apps/chrome/|\.github/workflows/ci\.yml$)' >/dev/null; then
+            echo "chromeExt=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "chromeExt=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Chrome extension paths changed - skipping the extension smoke."
           fi
 
   # Fast unit tests — no Postgres, no submodule needed for most.
@@ -628,6 +641,24 @@ jobs:
         # /usr/bin/google-chrome-stable itself and refuses snap Chromium.
         if: steps.submodule.outputs.stubbed != 'true'
         run: cd packages/owletto && bun run smoke:boot
+
+      - name: Install Playwright Chromium (extension smoke)
+        # channel "chromium" needs the Playwright browser build on disk; the
+        # runner's google-chrome-stable cannot host extension service workers in
+        # headless mode. --with-deps pulls the shared libs the Ubuntu image lacks.
+        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
+        run: ../../node_modules/.bin/playwright install --with-deps chromium
+        working-directory: packages/owletto
+
+      - name: Chrome extension smoke (real Chromium, --load-extension)
+        # Loads apps/chrome into headless Chromium against a loopback gateway
+        # fixture: action dispatch, flow isolation, worker eviction/recovery, and
+        # tab-presence reaping. This is the only CI coverage that exercises the
+        # extension in a real browser instead of the hand-written chrome stub, so
+        # it catches behavior the unit suites structurally cannot. One probe
+        # (unfocused-window reaping) self-skips headless -- see the script.
+        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
+        run: cd packages/owletto && bun run smoke:chrome-ext
 
       - name: MCP App failure smoke (built bundle in Chrome)
         if: steps.submodule.outputs.stubbed != 'true'
