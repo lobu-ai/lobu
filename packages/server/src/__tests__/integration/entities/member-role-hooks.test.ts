@@ -5,8 +5,9 @@ import { TestApiClient } from '../../setup/test-mcp-client';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ensureMemberEntity } from '../../../utils/member-entity';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
+import { requireOrgReadAccess, requireOrgWriteAccess, requireReadAccess, requireWriteAccess } from '../../../utils/organization-access';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { addUserToOrganization, createTestAccessToken, createTestOAuthClient, createTestOrganization, createTestSession, createTestUser } from '../../setup/test-fixtures';
+import { addUserToOrganization, createTestAccessToken, createTestOAuthClient, createTestOrganization, createTestSession, createTestUser, ownerToolContext } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 
 describe('member roles through generic entity edits', () => {
@@ -49,11 +50,46 @@ describe('member roles through generic entity edits', () => {
     expect(await roles(member)).toMatchObject({ role: 'member', displayed: 'member' });
   });
   it('rejects self promotion, invalid roles, and last owner demotion without changing metadata', async () => {
-    expect((await edit(member, member.entityId, 'admin')).status).toBeGreaterThanOrEqual(400);
+    const denied = await edit(member, member.entityId, 'admin');
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("You don't have permission to edit records in this workspace. Ask a workspace owner or admin.");
     expect((await edit(owner, member.entityId, 'superadmin')).status).toBeGreaterThanOrEqual(400);
     expect((await edit(owner, owner.entityId, 'member')).status).toBeGreaterThanOrEqual(400);
     expect(await roles(owner)).toMatchObject({ role: 'owner', displayed: 'owner' });
     expect(await roles(member)).toMatchObject({ role: 'member', displayed: 'member' });
+  });
+  it('does not disclose whether an inaccessible record exists in another workspace', async () => {
+    const other = await createTestOrganization({ name: 'Other access workspace' });
+    const ctx = ownerToolContext(other.id, owner.userId);
+    const sql = getTestDb();
+    const message = 'This record was not found in this workspace, or you do not have access to it.';
+    for (const id of [member.entityId, 2147483647]) {
+      await expect(requireWriteAccess(sql, id, ctx)).rejects.toMatchObject({ message, httpStatus: 403 });
+      await expect(requireReadAccess(sql, id, ctx)).rejects.toMatchObject({ message, httpStatus: 403 });
+    }
+  });
+  it('explains workspace permissions without claiming the workspace belongs to someone else', async () => {
+    const sql = getTestDb();
+    const ctx = ownerToolContext(org.id, member.userId);
+    await expect(requireOrgReadAccess(sql, ctx)).resolves.toBeUndefined();
+    await expect(requireOrgWriteAccess(sql, ctx)).rejects.toMatchObject({
+      message: "You don't have permission to make changes in this workspace. Ask a workspace owner or admin.", httpStatus: 403,
+    });
+    await expect(requireOrgWriteAccess(sql, ownerToolContext(org.id, owner.userId))).resolves.toBeUndefined();
+    const outsider = await createTestUser({ email: 'outside@roles.example.com' });
+    await expect(requireOrgReadAccess(sql, ownerToolContext(org.id, outsider.id))).rejects.toMatchObject({
+      message: "You don't have permission to view this workspace. Ask a workspace owner or admin for access.", httpStatus: 403,
+    });
+  });
+  it('applies the same existing write permission to ordinary entities', async () => {
+    const client = await TestApiClient.for({ organizationId: org.id, userId: owner.userId, memberRole: 'owner' });
+    await client.entity_schema.createType({ slug: 'contact', name: 'Contact' });
+    const created = await client.entities.create({ type: 'contact', name: 'Example contact' }) as { entity: { id: number } };
+    const body = { action: 'update', entity_id: created.entity.id, name: 'Updated contact' };
+    const denied = await post(`/api/${org.slug}/manage_entity`, { cookie: member.cookie, body });
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("You don't have permission to edit records in this workspace. Ask a workspace owner or admin.");
+    expect((await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body })).status).toBe(200);
   });
   it('honors selected invitation roles and later edits', async () => {
     const response = await post(`/api/${org.slug}/manage_entity`, { cookie: owner.cookie, body: { action: 'create', entity_type: '$member', name: 'Invited', metadata: { email: 'invited@roles.example.com', role: 'admin' } } });

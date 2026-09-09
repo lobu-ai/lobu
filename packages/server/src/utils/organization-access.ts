@@ -5,13 +5,20 @@
  * public/private organization support.
  *
  * Access Rules:
- * - Public orgs: Anyone can READ, only members can WRITE
- * - Private orgs: Members only for READ and WRITE
+ * - Upstream routing enforces public/private workspace visibility.
+ * - Workspace members can read; owners/admins can edit records.
  */
 
 import { type DbClient, getDb } from '../db/client';
 import type { ToolContext } from '../tools/registry';
 import { ToolUserError } from './errors';
+
+/**
+ * Read and write denials on an entity must be byte-identical: a caller that is
+ * told "no access" for a record in another workspace must not be able to tell
+ * it apart from one that never existed.
+ */
+const NO_RECORD_ACCESS = 'This record was not found in this workspace, or you do not have access to it.';
 
 /**
  * Get the user's role in a workspace (organization).
@@ -52,37 +59,6 @@ async function canReadEntity(sql: DbClient, entityId: number, ctx: ToolContext):
 }
 
 /**
- * Check if user can write to an entity (must own it)
- * Only allowed if entity is in user's own organization
- */
-async function canWriteEntity(sql: DbClient, entityId: number, ctx: ToolContext): Promise<boolean> {
-  const entityRows = await getDb()`
-    SELECT organization_id
-    FROM entities
-    WHERE id = ${entityId}
-    LIMIT 1
-  `;
-  if (entityRows.length === 0) return false;
-
-  const entityOrgId = String(entityRows[0].organization_id);
-  if (entityOrgId !== ctx.organizationId) return false;
-
-  // System/internal calls (e.g. reaction scripts) — org match is sufficient
-  if (!ctx.userId && ctx.isAuthenticated) return true;
-  if (!ctx.userId) return false;
-
-  const membership = await sql`
-    SELECT 1
-    FROM "member"
-    WHERE "organizationId" = ${ctx.organizationId}
-      AND "userId" = ${ctx.userId}
-      AND role IN ('owner', 'admin')
-    LIMIT 1
-  `;
-  return membership.length > 0;
-}
-
-/**
  * Require read access or throw
  */
 export async function requireReadAccess(
@@ -92,7 +68,7 @@ export async function requireReadAccess(
 ): Promise<void> {
   const canRead = await canReadEntity(sql, entityId, ctx);
   if (!canRead) {
-    throw new ToolUserError(`Access denied: entity ${entityId} is not accessible to your organization`, 403);
+    throw new ToolUserError(NO_RECORD_ACCESS, 403);
   }
 }
 
@@ -104,9 +80,17 @@ export async function requireWriteAccess(
   entityId: number,
   ctx: ToolContext
 ): Promise<void> {
-  const canWrite = await canWriteEntity(sql, entityId, ctx);
+  const rows = await getDb()`
+    SELECT 1 FROM entities
+    WHERE id = ${entityId} AND organization_id = ${ctx.organizationId}
+    LIMIT 1
+  `;
+  if (rows.length === 0) {
+    throw new ToolUserError(NO_RECORD_ACCESS, 403);
+  }
+  const canWrite = await canWriteOrg(sql, ctx);
   if (!canWrite) {
-    throw new ToolUserError(`Access denied: entity ${entityId} does not belong to your organization`, 403);
+    throw new ToolUserError("You don't have permission to edit records in this workspace. Ask a workspace owner or admin.", 403);
   }
 }
 
@@ -151,7 +135,7 @@ async function canReadOrg(sql: DbClient, ctx: ToolContext): Promise<boolean> {
 export async function requireOrgReadAccess(sql: DbClient, ctx: ToolContext): Promise<void> {
   const ok = await canReadOrg(sql, ctx);
   if (!ok) {
-    throw new ToolUserError('Access denied: organization-level read access is required', 403);
+    throw new ToolUserError("You don't have permission to view this workspace. Ask a workspace owner or admin for access.", 403);
   }
 }
 
@@ -161,6 +145,6 @@ export async function requireOrgReadAccess(sql: DbClient, ctx: ToolContext): Pro
 export async function requireOrgWriteAccess(sql: DbClient, ctx: ToolContext): Promise<void> {
   const ok = await canWriteOrg(sql, ctx);
   if (!ok) {
-    throw new ToolUserError('Access denied: organization-level write access is required', 403);
+    throw new ToolUserError("You don't have permission to make changes in this workspace. Ask a workspace owner or admin.", 403);
   }
 }
