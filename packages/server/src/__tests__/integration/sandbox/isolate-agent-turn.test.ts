@@ -313,7 +313,7 @@ beforeAll(async () => {
 				apiKeyHeader: (req.headers["x-api-key"] as string | undefined) ?? null,
 				body,
 			});
-			if (req.url === TOOL_ROUTE) {
+			if (req.url === TOOL_ROUTE || req.url === "/lobu/mcp/lobu-memory/tools/search_memory") {
 				res.writeHead(toolReply.status, { "content-type": "application/json" });
 				res.end(JSON.stringify(toolReply.body));
 				return;
@@ -717,6 +717,63 @@ describe("agent turn on the isolate lane", () => {
 		const run = await runTurn(turnJob());
 
 		expect(run.output.text).toBe("Hello from the isolate");
+	}, 120_000);
+
+	// R9: retrieval evidence has to be summarised in the GUEST, from the result
+	// as the tool returned it. The trace's `output` is clipped for display, so a
+	// retrieval body over that cap parses to nothing — the host cannot re-derive
+	// this, and the promptfoo provider builds `retrievedContext` from it alone.
+	it("summarises retrieval evidence from the unclipped result, past the display cap", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_01", name: "search_memory", input: { query: "deploy" } }];
+		// Deliberately larger than TOOL_EVENT_OUTPUT_CHARS: the clipped `output`
+		// is unparseable JSON, which is the whole reason the summary is built
+		// before the clip.
+		const filler = "x".repeat(2_500);
+		toolReply = {
+			status: 200,
+			body: {
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({
+							content: [
+								{ id: 41, text_content: `frozen until Friday ${filler}` },
+								{ id: 42, text_content: "ask the platform team" },
+							],
+						}),
+					},
+				],
+			},
+		};
+		armFirstDeltaGate();
+		const run = await runTurn(
+			toolJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [
+						{
+							mcpId: "lobu-memory",
+							name: "search_memory",
+							description: "Search past messages and saved knowledge.",
+							inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+						},
+					],
+				},
+			}),
+		);
+
+		const end = run.events.find((e) => e.type === "tool_call_end") as
+			| { output: string; resultSummary?: { event_ids?: number[]; snippets?: Array<{ id: number; text: string }> } }
+			| undefined;
+		// The display output IS clipped — proving the summary could not have been
+		// parsed back out of it.
+		expect(end?.output.endsWith("…")).toBe(true);
+		expect(() => JSON.parse(end?.output ?? "")).toThrow();
+		// ...and the evidence survives anyway, both ids and their text.
+		expect(end?.resultSummary?.event_ids).toEqual([41, 42]);
+		expect(end?.resultSummary?.snippets?.map((s) => s.id)).toEqual([41, 42]);
+		expect(end?.resultSummary?.snippets?.[0]?.text).toContain("frozen until Friday");
 	}, 120_000);
 
 	it("hands a refused tool call to the model as an error result and lets the turn finish", async () => {

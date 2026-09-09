@@ -5,6 +5,7 @@
  * seam that makes the isolate turn lane REACHABLE — the executor suite proves
  * the turn runs, this proves a real message reaches it and comes back.
  */
+import { getModel } from '@mariozechner/pi-ai';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { serve } from '@hono/node-server';
@@ -15,7 +16,7 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
@@ -669,7 +670,10 @@ describe('agent turn producer', () => {
       allowed_hosts: ['gateway.test.invalid'],
     });
     expect(envelope.turn.system_prompt).toBe(
-      '## Agent Identity\n\nI am the turn agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
+      // The anti-fabrication and disclosure rules lead every turn, whatever
+      // tools it carries: "do not claim you checked something unless you did".
+      renderBaselineAgentPolicy() +
+        '\n\n## Agent Identity\n\nI am the turn agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
         // Policy text must match the tools this envelope actually offers.
         '## Built-In Tool Policies\n\n' +
         '### Structured User Choices\nTools: `ask_user`\n' +
@@ -2511,6 +2515,58 @@ describe('agent turn producer', () => {
     // that always contains text, because the registry's per-model answer is
     // pi-ai's to change, not this test's to pin.
     expect(turn.provider.input).toContain('text');
+  });
+
+  // R7: the guest builds its `Model` from this envelope and has no registry to
+  // ask, so a field the producer omits becomes a hardcoded default there. The
+  // lane ran every agent with `reasoning:false` and an 8192-token ceiling
+  // while the registry said otherwise for the same model.
+  it("carries the registry's reasoning support and output ceiling for a known model", async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    // A model pi-ai's registry actually carries, unlike the suite's default.
+    message.agentOptions = { ...message.agentOptions, model: 'claude/claude-sonnet-4-5-20250929' };
+    await enqueueMessage(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const turn = (run?.action_input as {
+      turn: { provider: { model_id: string; reasoning?: boolean; max_tokens?: number } };
+    }).turn;
+    expect(turn.provider.model_id).toBe('claude-sonnet-4-5-20250929');
+    // Asserted against the registry rather than a literal: pinning 64000 here
+    // would keep passing after pi-ai revised the model.
+    const registryModel = getModel('anthropic' as never, 'claude-sonnet-4-5-20250929' as never) as
+      | { reasoning?: boolean; maxTokens?: number }
+      | undefined;
+    expect(registryModel).toBeDefined();
+    expect(turn.provider.reasoning).toBe(registryModel?.reasoning === true);
+    expect(turn.provider.max_tokens).toBe(registryModel?.maxTokens);
+    // The regression this replaces: a reasoning model described as incapable.
+    expect(turn.provider.reasoning).toBe(true);
+  });
+
+  it("omits the output ceiling for a model the registry does not carry", async () => {
+    // `claude-opus-4-8` is not in pi-ai's registry, so there is no ceiling to
+    // state — and an absent field is how the envelope says "let the adapter
+    // apply its own default" instead of inventing a number on either side.
+    const org = await createTestOrganization();
+    await enqueueMessage(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const turn = (run?.action_input as {
+      turn: { provider: { model_id: string; reasoning?: boolean; max_tokens?: number } };
+    }).turn;
+    expect(turn.provider.model_id).toBe('claude-opus-4-8');
+    expect(turn.provider.max_tokens).toBeUndefined();
+    expect(turn.provider.reasoning).toBe(false);
   });
 
   it('carries ephemeralContext on the turn-scoped channel, NOT the durable message', async () => {

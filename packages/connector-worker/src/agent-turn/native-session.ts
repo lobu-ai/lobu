@@ -32,10 +32,20 @@ export function createNativeSession(
     api: input.provider.api,
     provider: input.provider.provider,
     baseUrl: input.provider.baseUrl,
-    reasoning: false,
+    // Registry facts, carried on the envelope because the guest has no
+    // registry to ask. Hardcoding them here made the model lie about itself:
+    // `claude-sonnet-4` reports `reasoning:true, maxTokens:64000` upstream and
+    // was described to the adapter as `false`/8192, capping every long answer
+    // on this lane at an eighth of what the model allows.
+    reasoning: input.provider.reasoning ?? false,
     input: input.provider.input ?? ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: input.compaction?.contextWindow ?? 200_000,
+    // Required by `Model`, and the adapter divides it: it asks the provider for
+    // `options.maxTokens || (model.maxTokens / 3)`, so a zero or missing value
+    // becomes a `max_tokens: 0` request rather than a sensible default. The
+    // registry's own number when there is one; otherwise the legacy 8192,
+    // which is the value this lane has always shipped for unknown models.
     maxTokens: input.provider.maxTokens ?? 8192,
   };
   // One registration per wire protocol. `openai-responses` is NOT a fallback
@@ -66,6 +76,14 @@ export function createNativeSession(
   } as unknown as ModelRegistry;
   let session: AgentSession;
   const agent = new Agent({
+    // `thinkingLevel` stays off even for a reasoning-capable model, and that is
+    // now a choice rather than a side effect of the model metadata: Pi's own
+    // `Agent` default is also `'off'` (only `AgentSession` picks a level), and
+    // nothing in Lobu configures one per agent or per turn. Turning it on would
+    // be a new product decision and a spend change, not a restored regression —
+    // so it needs a configured level to read, not a default invented here. The
+    // model's `reasoning` flag is still carried honestly above, because that is
+    // what the adapter inspects to shape the request.
     initialState: { model, messages: context.messages, thinkingLevel: 'off' },
     // Keep native custom/summary conversion. Pi stores an empty text block for
     // image-only prompts; omit it only on the wire, where OpenAI rejects it.

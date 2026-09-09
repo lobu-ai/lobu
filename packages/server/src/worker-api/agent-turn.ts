@@ -274,9 +274,14 @@ async function publishTurnToolEvents(
 							// `buildToolUseEventPayload`'s shape: the SPA reads the args here.
 							input: event.input ?? null,
 							isError: event.is_error,
+							// An error's summary is its message; a successful call's is the
+							// retrieval evidence the worker summarised from the unclipped
+							// result. The promptfoo provider reads `snippets` to build
+							// `metadata.retrievedContext`, so dropping it on success left
+							// every RAG assertion with nothing to assert against.
 							result_summary: event.is_error
 								? { error: event.output }
-								: undefined,
+								: event.result_summary,
 						},
 					},
 					timestamp: Date.now(),

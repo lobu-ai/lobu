@@ -29,7 +29,19 @@ export interface AgentTurnProvider {
    * refuses those.
    */
   apiKey?: string;
+  /**
+   * The model's output ceiling from pi-ai's registry. Undefined → let the
+   * adapter apply its own default; the guest must not substitute a number,
+   * which is how a 64000-token model came to be capped at 8192.
+   */
   maxTokens?: number;
+  /**
+   * Whether the model supports extended thinking, from pi-ai's registry. The
+   * guest has no registry to ask, so this is the only thing that can tell it:
+   * a reasoning-capable model gets Pi's own default thinking level, and
+   * anything else gets `'off'`.
+   */
+  reasoning?: boolean;
   /**
    * The modalities the model accepts, in pi-ai's `Model.input` vocabulary. The
    * gateway resolves it from pi-ai's registry; the guest only passes it
@@ -304,7 +316,21 @@ export type AgentTurnEvent =
   | { type: 'thinking_delta'; delta: string }
   | { type: 'message_end' }
   | { type: 'tool_call_start'; toolCallId: string; name: string; args: unknown }
-  | { type: 'tool_call_end'; toolCallId: string; name: string; isError: boolean; output: string }
+  | {
+      type: 'tool_call_end';
+      toolCallId: string;
+      name: string;
+      isError: boolean;
+      output: string;
+      /**
+       * Retrieval evidence, summarised from the result as the tool returned
+       * it. Built in the guest because `output` above is clipped for display:
+       * a retrieval body over that cap parses to nothing, so the host cannot
+       * re-derive this. Structurally `ToolTraceSummary` from `@lobu/core`,
+       * restated here because this module deliberately has no imports.
+       */
+      resultSummary?: { event_ids?: number[]; snippets?: Array<{ id: number; text: string }> };
+    }
   /**
    * A file `upload_file` delivered, with the gateway's own reply for it. It
    * rides the turn's event stream, so the guest needs no second host callback.

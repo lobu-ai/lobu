@@ -39,6 +39,12 @@
       "import": "./dist/testing/index.js",
       "require": "./dist/testing/index.js"
     },
+    "./tool-trace-summary": {
+      "types": "./dist/tool-trace-summary.d.ts",
+      "bun": "./src/tool-trace-summary.ts",
+      "import": "./dist/tool-trace-summary.js",
+      "require": "./dist/tool-trace-summary.js"
+    },
     "./tool-policy": {
       "types": "./dist/tool-policy.d.ts",
       "bun": "./src/tool-policy.ts",

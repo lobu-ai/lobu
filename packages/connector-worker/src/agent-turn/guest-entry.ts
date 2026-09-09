@@ -25,6 +25,7 @@ import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
 import { enforceBashCommandPolicy } from '@lobu/core/tool-policy';
+import { summarizeToolTrace } from '@lobu/core/tool-trace-summary';
 import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
 import { MAX_TOOL_CALLS_PER_TURN } from './types.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
@@ -486,12 +487,17 @@ export async function runAgentTurn(
         // guardrail asks whether the tool was reached, not whether it worked.
         toolsUsed.add(event.toolName);
         const result = event.result as { content?: Array<{ type?: string; text?: string }> };
+        // Summarised BEFORE the clip, from the result as the tool returned it:
+        // a retrieval body over the display cap would otherwise parse to
+        // nothing and the turn would carry no evidence for its own answer.
+        const resultSummary = event.isError ? null : summarizeToolTrace(event.toolName, event.result);
         emit({
           type: 'tool_call_end',
           toolCallId: event.toolCallId,
           name: event.toolName,
           isError: event.isError,
           output: clip(joinText(result?.content)),
+          ...(resultSummary ? { resultSummary } : {}),
         });
       }
     });

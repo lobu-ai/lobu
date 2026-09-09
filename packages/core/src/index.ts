@@ -3,6 +3,7 @@
 // Shared exports for @lobu/core consumers (gateway, worker, external tools)
 
 export * from "./agent-policy";
+export * from "./tool-trace-summary";
 export * from "./tool-policy";
 export * from "./turn-control";
 export * from "./memory-flush";

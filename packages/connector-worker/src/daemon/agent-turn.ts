@@ -281,6 +281,7 @@ export async function executeAgentTurnRun(
             modelId: turn.provider.model_id,
             baseUrl: turn.provider.base_url,
             ...(turn.provider.max_tokens !== undefined ? { maxTokens: turn.provider.max_tokens } : {}),
+            ...(turn.provider.reasoning !== undefined ? { reasoning: turn.provider.reasoning } : {}),
             // pi-ai's own `Model.input`, resolved by the gateway from pi-ai's
             // model registry. Passed through untouched: pi is what enforces it.
             ...(turn.provider.input ? { input: turn.provider.input } : {}),
@@ -463,6 +464,7 @@ export async function executeAgentTurnRun(
               ...(input !== undefined ? { input } : {}),
               is_error: event.isError,
               output: event.output,
+              ...(event.resultSummary ? { result_summary: event.resultSummary } : {}),
             });
             if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) toolEvents.shift();
           }

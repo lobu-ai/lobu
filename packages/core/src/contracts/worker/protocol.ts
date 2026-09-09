@@ -437,7 +437,20 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       model_id: Type.String({ minLength: 1 }),
       /** The gateway's agent-scoped secret-proxy base URL. */
       base_url: Type.String({ minLength: 1 }),
+      /**
+       * pi-ai's `Model.maxTokens` for this model: the output ceiling the
+       * selected adapter is allowed to ask for. Absent → the guest lets the
+       * adapter apply its own default rather than inventing a number.
+       */
       max_tokens: Type.Optional(Type.Integer({ minimum: 1 })),
+      /**
+       * pi-ai's `Model.reasoning`: whether this model supports extended
+       * thinking. The guest builds its `Model` from this envelope and has no
+       * registry to consult, so an absent value means "not reasoning-capable"
+       * — which is what every agent on this lane silently got before the
+       * field existed, registry-capable models included.
+       */
+      reasoning: Type.Optional(Type.Boolean()),
       /**
        * The modalities this model accepts, in pi-ai's own `Model.input`
        * vocabulary and resolved from pi-ai's model registry — NOT guessed
@@ -977,6 +990,26 @@ export const TurnToolEventSchema = Type.Object({
   input: Type.Optional(Type.Unknown()),
   is_error: Type.Boolean(),
   output: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
+  /**
+   * Structured retrieval evidence, built by the worker from the UNCLIPPED
+   * result. `output` above is clipped for display and a truncated JSON body
+   * parses to nothing, so this cannot be re-derived server-side — the
+   * promptfoo provider's `retrievedContext` is only as complete as this field.
+   */
+  result_summary: Type.Optional(
+    Type.Object({
+      event_ids: Type.Optional(Type.Array(Type.Integer())),
+      snippets: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.Integer(),
+            text: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
+          }),
+          { maxItems: 16 }
+        )
+      ),
+    })
+  ),
 });
 
 /**

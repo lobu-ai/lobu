@@ -3,20 +3,18 @@
  *
  * The existing agent-policy.test.ts covers file delivery detection.
  * This file covers: renderBaselineAgentPolicy, renderAlwaysOnToolPolicyRulesFor,
- * getCustomToolDescription for unknown tools, detectToolIntentRules edge cases
- * (empty prompt, whitespace-only, alwaysInclude exclusion, ordering, multiple
+ * getCustomToolDescription for unknown tools, always-on rule narrowing
+ * (rule narrowing by offered tool, ordering, multiple
  * rule matches), and buildUnconfiguredAgentNotice.
  */
 
 import { describe, expect, test } from "bun:test";
 import {
   buildUnconfiguredAgentNotice,
-  detectToolIntentRules,
   getCustomToolDescription,
   renderAlwaysOnToolPolicyRulesFor,
   renderBaselineAgentPolicy,
-  renderDetectedToolIntentRules,
-  TOOL_INTENT_RULES,
+  TOOL_RULES,
 } from "../agent-policy";
 
 // ── renderBaselineAgentPolicy ─────────────────────────────────────────────────
@@ -47,17 +45,12 @@ describe("renderBaselineAgentPolicy", () => {
 // deleted unfiltered renderer used to emit. The narrowing itself — a rule is
 // dropped when the turn carries none of its tools — is asserted separately
 // below, because that is the whole reason only the filtered renderer survives.
-const ALL_ALWAYS_ON_TOOLS = TOOL_INTENT_RULES.filter(
-  (r) => r.alwaysInclude
-).flatMap((r) => r.tools);
+const ALL_ALWAYS_ON_TOOLS = TOOL_RULES.flatMap((r) => r.tools);
 
 describe("renderAlwaysOnToolPolicyRulesFor", () => {
-  test("returns a non-empty string because there are alwaysInclude rules", () => {
-    const alwaysOnCount = TOOL_INTENT_RULES.filter(
-      (r) => r.alwaysInclude
-    ).length;
-    // Confirm the assumption: there are always-on rules
-    expect(alwaysOnCount).toBeGreaterThan(0);
+  test("returns a non-empty string because there are always-on rules", () => {
+    // Confirm the assumption: there are rules to render at all.
+    expect(TOOL_RULES.length).toBeGreaterThan(0);
 
     const output = renderAlwaysOnToolPolicyRulesFor(ALL_ALWAYS_ON_TOOLS);
     expect(output.length).toBeGreaterThan(0);
@@ -81,14 +74,14 @@ describe("renderAlwaysOnToolPolicyRulesFor", () => {
     );
   });
 
-  test("does NOT include image-generation rule (not alwaysInclude)", () => {
-    // image-generation has no alwaysInclude flag, so offering its tool is
-    // still not enough to emit it here.
-    const output = renderAlwaysOnToolPolicyRulesFor([
-      ...ALL_ALWAYS_ON_TOOLS,
-      "generate_image",
-    ]);
-    expect(output).not.toContain("Image Generation");
+  test("ignores a tool no rule is about", () => {
+    // An unknown tool neither adds a rule nor suppresses the real ones.
+    expect(
+      renderAlwaysOnToolPolicyRulesFor([
+        ...ALL_ALWAYS_ON_TOOLS,
+        "generate_image",
+      ])
+    ).toBe(renderAlwaysOnToolPolicyRulesFor(ALL_ALWAYS_ON_TOOLS));
   });
 
   test("is deterministic across calls", () => {
@@ -158,113 +151,6 @@ describe("getCustomToolDescription", () => {
   });
 });
 
-// ── detectToolIntentRules ─────────────────────────────────────────────────────
-
-describe("detectToolIntentRules", () => {
-  test("returns empty array for empty prompt", () => {
-    expect(detectToolIntentRules("")).toEqual([]);
-  });
-
-  test("returns empty array for whitespace-only prompt", () => {
-    expect(detectToolIntentRules("   \t\n   ")).toEqual([]);
-  });
-
-  test("returns empty array for a generic unrelated prompt", () => {
-    const rules = detectToolIntentRules("What is 2 + 2?");
-    expect(rules).toEqual([]);
-  });
-
-  test("does NOT return alwaysInclude rules (they go via renderAlwaysOnToolPolicyRulesFor)", () => {
-    // A prompt that definitely matches patterns should not include alwaysInclude rules
-    const rules = detectToolIntentRules(
-      "send me the file as an attachment please"
-    );
-    for (const rule of rules) {
-      expect(rule.alwaysInclude).not.toBe(true);
-    }
-  });
-
-  test("detects image generation request", () => {
-    const rules = detectToolIntentRules("generate an image of a sunset");
-    const ids = rules.map((r) => r.id);
-    expect(ids).toContain("image-generation");
-  });
-
-  test("detects download file request", () => {
-    const rules = detectToolIntentRules(
-      "save this as a PDF file and give it to me"
-    );
-    const ids = rules.map((r) => r.id);
-    expect(ids).toContain("file-delivery");
-  });
-
-  test("returns rules sorted by ascending priority", () => {
-    // Trigger both file-delivery (priority 30) and image-generation (priority 70)
-    const rules = detectToolIntentRules(
-      "generate an image and export it as a file for download"
-    );
-    const priorities = rules.map((r) => r.priority);
-    // Should be in ascending order
-    for (let i = 1; i < priorities.length; i++) {
-      expect(priorities[i]!).toBeGreaterThanOrEqual(priorities[i - 1]!);
-    }
-  });
-
-  test("file delivery pattern: noun-verb order", () => {
-    const rules = detectToolIntentRules(
-      "the CSV file, please share it with me"
-    );
-    const ids = rules.map((r) => r.id);
-    expect(ids).toContain("file-delivery");
-  });
-
-  test("image generation pattern: verb-noun order", () => {
-    const rules = detectToolIntentRules("design a logo for my company");
-    const ids = rules.map((r) => r.id);
-    expect(ids).toContain("image-generation");
-  });
-
-  test("does not include conversation-history rule from detectToolIntentRules (alwaysInclude=true)", () => {
-    const rules = detectToolIntentRules("what did we talk about earlier?");
-    for (const rule of rules) {
-      expect(rule.id).not.toBe("conversation-history");
-    }
-  });
-});
-
-// ── renderDetectedToolIntentRules ─────────────────────────────────────────────
-
-describe("renderDetectedToolIntentRules", () => {
-  test("returns empty string for unrelated prompt", () => {
-    expect(renderDetectedToolIntentRules("hello there")).toBe("");
-  });
-
-  test("returns empty string for empty prompt", () => {
-    expect(renderDetectedToolIntentRules("")).toBe("");
-  });
-
-  test("includes Priority Tool Guidance heading when rules detected", () => {
-    const out = renderDetectedToolIntentRules(
-      "generate an image of a mountain"
-    );
-    expect(out).toContain("## Priority Tool Guidance For This Request");
-  });
-
-  test("includes tool name in output", () => {
-    const out = renderDetectedToolIntentRules(
-      "generate an image of a mountain"
-    );
-    expect(out).toContain("generate_image");
-  });
-
-  test("is deterministic for same input", () => {
-    const prompt = "send me the report as a PDF";
-    expect(renderDetectedToolIntentRules(prompt)).toBe(
-      renderDetectedToolIntentRules(prompt)
-    );
-  });
-});
-
 // ── buildUnconfiguredAgentNotice ──────────────────────────────────────────────
 
 describe("buildUnconfiguredAgentNotice", () => {
@@ -300,38 +186,37 @@ describe("buildUnconfiguredAgentNotice", () => {
   });
 });
 
-// ── TOOL_INTENT_RULES structural invariants ───────────────────────────────────
+// ── TOOL_RULES structural invariants ───────────────────────────────────
 
-describe("TOOL_INTENT_RULES structural invariants", () => {
+describe("TOOL_RULES structural invariants", () => {
   test("every rule has a unique id", () => {
-    const ids = TOOL_INTENT_RULES.map((r) => r.id);
+    const ids = TOOL_RULES.map((r) => r.id);
     const unique = new Set(ids);
     expect(unique.size).toBe(ids.length);
   });
 
   test("every rule has a non-empty title", () => {
-    for (const rule of TOOL_INTENT_RULES) {
+    for (const rule of TOOL_RULES) {
       expect(rule.title.length).toBeGreaterThan(0);
     }
   });
 
   test("every rule has at least one tool", () => {
-    for (const rule of TOOL_INTENT_RULES) {
+    for (const rule of TOOL_RULES) {
       expect(rule.tools.length).toBeGreaterThan(0);
     }
   });
 
   test("every rule has a positive numeric priority", () => {
-    for (const rule of TOOL_INTENT_RULES) {
+    for (const rule of TOOL_RULES) {
       expect(rule.priority).toBeGreaterThan(0);
     }
   });
 
-  test("non-alwaysInclude rules have at least one pattern", () => {
-    for (const rule of TOOL_INTENT_RULES) {
-      if (!rule.alwaysInclude) {
-        expect(rule.patterns.length).toBeGreaterThan(0);
-      }
+  test("every rule has at least one instruction line", () => {
+    // A rule with no lines would render a heading and tell the model nothing.
+    for (const rule of TOOL_RULES) {
+      expect(rule.instructionLines.length).toBeGreaterThan(0);
     }
   });
 });
