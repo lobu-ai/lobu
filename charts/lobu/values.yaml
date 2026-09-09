@@ -32,21 +32,21 @@ app:
 
   resources:
     requests:
-      # The app pod embeds the orchestrator AND spawns agent-worker subprocesses
-      # in-pod, so this container does far more than serve HTTP — yet it was
-      # capped at 1 core (the connector worker, which does comparable work, gets
-      # 2-4). Under-resourced regardless of the exact stall mechanism; give the
-      # event loop real headroom. Request stays modest so it isn't over-reserved.
+      # The app pod embeds the orchestrator and the gateway proxies, so this
+      # container does far more than serve HTTP — yet it was capped at 1 core
+      # (the connector worker, which runs the turns themselves, gets 2-4).
+      # Under-resourced regardless of the exact stall mechanism; give the event
+      # loop real headroom. Request stays modest so it isn't over-reserved.
       cpu: 500m
       memory: 512Mi
     limits:
       cpu: 3000m
-      # Prod pods OOM-killed (exit 137) at a 2Gi limit — repeatedly. The parent
-      # Node heap is only ~300MB; the rest of RSS is the in-pod agent-worker
-      # child subprocesses, whose memory counts toward this pod cgroup. Per-child
-      # heap is now capped (LOBU_WORKER_MAX_OLD_SPACE_MB), but the pod still needs
-      # room for several concurrent workers + parent + proxies. 4Gi matches the
-      # connector worker, which does comparable per-run work.
+      # Prod pods OOM-killed (exit 137) at a 2Gi limit — repeatedly, back when
+      # this pod also spawned agent-worker child processes whose RSS counted
+      # toward its cgroup. Agent turns now run in the connector worker, but the
+      # headroom stays: the orchestrator, the secret and egress proxies, and the
+      # embedded MCP surface all live here. Revisit against measured RSS rather
+      # than by assuming the old children were the whole story.
       memory: 4Gi
 
   # Non-secret environment variables
@@ -100,8 +100,8 @@ app:
     enabled: true
     minAvailable: 1
 
-  # Persistent workspaces volume. The embedded worker stores the
-  # durable transcript in Postgres (`agent_transcript_snapshot`); the
+  # Persistent workspaces volume. A turn's durable transcript lives in
+  # Postgres (`agent_transcript_snapshot`); the
   # rest of {WORKSPACE_DIR} (input/output/temp) is pod-local ephemeral
   # — a per-conversation advisory lock pins runs to one pod for the
   # run lifetime. Disable by default so the deployment can roll across
@@ -117,11 +117,17 @@ app:
   # does not survive restarts or reliably cross replicas. The default stays off
   # for local/self-hosted installs; production should enable this with storage
   # that every scheduled app pod can mount.
-  # When enabled, ReadWriteOnce is supported only with replicaCount: 1; more
-  # than one app replica requires an RWX-capable class and accessMode:
-  # ReadWriteMany, and rendering fails closed otherwise. Leaving this disabled
-  # on a multi-replica install still renders — media then lands on pod-local
-  # /tmp and neither survives a restart nor crosses replicas.
+  # Rendering fails closed on any multi-replica topology that cannot share
+  # these bytes, because the failure mode is otherwise invisible: a publish and
+  # a download are separate requests, so a download served by a different pod
+  # 404s intermittently and reads as flakiness. Two rules, both enforced in
+  # `_helpers.tpl`:
+  #   * replicaCount > 1 requires enabled: true — with this off, every pod
+  #     writes to its own /tmp/lobu-artifacts.
+  #   * replicaCount > 1 with enabled: true requires an RWX-capable class and
+  #     accessMode: ReadWriteMany.
+  # ReadWriteOnce is therefore supported only at replicaCount: 1, where one pod
+  # both writes and serves.
   artifacts:
     enabled: false
     size: 20Gi
@@ -380,8 +386,9 @@ releaseGates:
     #
     # When enabled, the Job POSTs to /api/internal/smoke/dispatch, which
     # inserts a synthetic chat_message run. The runs-queue MessageConsumer
-    # claims it, spawns a worker subprocess, and on completion writes a
-    # row into `agent_transcript_snapshot`. The Job polls for that row
+    # admits it, a connector worker claims the turn over HTTP, and on
+    # completion the gateway writes a row into `agent_transcript_snapshot`.
+    # The Job polls for that row
     # and fails the deploy if `terminal_status='completed'` doesn't
     # materialise within `timeoutSeconds`.
     #
