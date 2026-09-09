@@ -3,11 +3,17 @@
     "name": "Lobu QA User",
     "description": "QA-only Slack app that sends test messages as a real user",
     "background_color": "#2c3e50",
-    "long_description": "This app exists solely to mint a user OAuth token (xoxp-) for automated QA of Lobu agents. It is installed to a workspace by the developer, who then copies the User OAuth Token into QA_SLACK_USER_TOKEN. The test-bot.sh script uses that token to call chat.postMessage as the installing user, so the target Lobu bot sees a genuine Slack event instead of a gateway-forged message. This app has no bot user, no event subscriptions, and no slash commands — it is intentionally minimal."
+    "long_description": "This app exists solely to mint a user OAuth token (xoxp-) for automated QA of Lobu agents. It is installed to a workspace by the developer, who then copies the User OAuth Token into QA_SLACK_USER_TOKEN. The test-bot.sh script uses that token to post as the installing user and read the target bot's thread reply, so the smoke test exercises a genuine Slack event instead of a gateway-forged message. This app has no bot user, no event subscriptions, and no slash commands — it is intentionally minimal."
   },
   "oauth_config": {
     "scopes": {
-      "user": ["chat:write"]
+      "user": [
+        "channels:history",
+        "chat:write",
+        "groups:history",
+        "im:history",
+        "mpim:history"
+      ]
     }
   },
   "settings": {
