@@ -1261,6 +1261,14 @@ jobs:
           bash scripts/lib/__tests__/review-cache.test.sh
           bash scripts/lib/__tests__/process-cleanup.test.sh
 
+      - name: Published-artifact smoke helper tests
+        # The smoke installs whatever is on npm right now, so its guest-bundle
+        # assertion has to decide from the artifact whether that version even
+        # owes us the file. Getting that wrong is silent in both directions:
+        # too strict reds main for every pre-feature release, too loose lets a
+        # broken publish through.
+        run: bash scripts/lib/__tests__/guest-bundle-expectation.test.sh
+
       - name: Preview and staging workflow guards
         # The preview deploy's mid-flight teardown decides whether to delete a
         # namespace out from under a running PR. It only ever executes on a
