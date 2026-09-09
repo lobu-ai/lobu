@@ -24,7 +24,6 @@ export async function authorizeMemberRole(
   actorId: string | null,
   role: MemberRole,
   previousRole?: string,
-  checkLastOwner = true,
 ): Promise<void> {
   const [actor] = await sql`SELECT role FROM member WHERE "organizationId" = ${organizationId} AND "userId" = ${actorId}`;
   if (!actor || (actor.role !== 'owner' && actor.role !== 'admin')) {
@@ -33,9 +32,10 @@ export async function authorizeMemberRole(
   if ((role === 'owner' || previousRole === 'owner') && actor.role !== 'owner') {
     throw new ToolUserError('Only owners can grant or change ownership', 403);
   }
-  if (checkLastOwner && previousRole === 'owner' && role !== 'owner') {
-    const owners = await sql`SELECT id FROM member WHERE "organizationId" = ${organizationId} AND role = 'owner'`;
-    if (owners.length <= 1) throw new ToolUserError('The workspace must retain at least one owner', 400);
-  }
+}
+
+export async function assertWorkspaceRetainsOwner(sql: DbClient, organizationId: string): Promise<void> {
+  const owners = await sql`SELECT id FROM member WHERE "organizationId" = ${organizationId} AND role = 'owner'`;
+  if (owners.length <= 1) throw new ToolUserError('The workspace must retain at least one owner', 400);
 }
 

@@ -7,7 +7,7 @@ import { insertWorkspaceChangeEventInTransaction } from '../utils/insert-event';
 import { updateMemberEntityAccess } from '../utils/member-entity';
 import { withEntityWriteTransaction } from '../utils/entity-management';
 
-import { authorizeMemberRole, lockMemberRoleChanges, parseMemberRole, type MemberRole } from './member-role-policy';
+import { assertWorkspaceRetainsOwner, authorizeMemberRole, lockMemberRoleChanges, parseMemberRole, type MemberRole } from './member-role-policy';
 
 export async function changeMemberRoleInTransaction(
   sql: DbClient,
@@ -17,6 +17,7 @@ export async function changeMemberRoleInTransaction(
   if (!member) throw new ToolUserError('Workspace member not found', 404);
   await authorizeMemberRole(sql, params.organizationId, params.actorId, params.role, member.role as string);
   if (member.role === params.role) return member;
+  if (member.role === 'owner') await assertWorkspaceRetainsOwner(sql, params.organizationId);
   await sql`UPDATE member SET role = ${params.role} WHERE id = ${member.id} AND "organizationId" = ${params.organizationId}`;
   await insertWorkspaceChangeEventInTransaction({
     organizationId: params.organizationId,
@@ -49,7 +50,7 @@ export const memberRoleAuthHook = createAuthMiddleware(async (ctx) => {
       const member = await changeMemberRoleInTransaction(sql, { organizationId, actorId: session.user.id, memberId: body.memberId, role, actorSource: 'ui' });
       // Target by the authentication claim, never by email: the displayed role
       // must follow the identity whose permission actually changed.
-      await updateMemberEntityAccess(organizationId, null, { role, status: 'active' }, sql, member.userId as string);
+      await updateMemberEntityAccess(organizationId, member.userId as string, { role, status: 'active' }, sql);
       return member;
     });
     return ctx.json(result);

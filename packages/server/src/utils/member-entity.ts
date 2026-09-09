@@ -199,21 +199,13 @@ export async function updateMemberEntityStatus(
   });
 }
 
-/**
- * Project role/status onto the $member entity. Targets by `authUserId` when
- * given (the `auth:signup` identity claim), which is the only identifier a
- * permission write may follow; `email` is used solely when no claim is passed
- * and must then be non-null.
- */
+/** Project role/status using the trusted authentication identity claim. */
 export async function updateMemberEntityAccess(
   organizationId: string,
-  email: string | null,
+  authUserId: string,
   updates: { role?: string; status?: 'active' | 'invited' },
   transaction?: DbClient,
-  authUserId?: string
 ): Promise<void> {
-  if (!transaction) await ensureMemberEntityType(organizationId);
-  const { emailField } = await resolveMemberSchemaFields(organizationId, transaction);
   const sql = transaction ?? getDb();
   await withEntityWriteTransaction(sql, async (tx) => {
     const rows = await tx.unsafe<{ id: number; metadata: Record<string, unknown> | null }>(
@@ -224,17 +216,17 @@ export async function updateMemberEntityAccess(
          AND et.organization_id = $1
          AND et.deleted_at IS NULL
          AND e.organization_id = $1
-         AND (($4::text IS NULL AND e.metadata->>$2 = $3) OR EXISTS (
+         AND EXISTS (
            SELECT 1 FROM entity_identities ei WHERE ei.entity_id = e.id
              AND ei.organization_id = e.organization_id AND ei.namespace = 'auth_user_id'
              AND ei.source_connector = 'auth:signup' AND ei.deleted_at IS NULL
-             AND ei.identifier = $4
-         ))
+             AND ei.identifier = $2
+         )
          AND e.deleted_at IS NULL
        ORDER BY e.id
        LIMIT 1
        FOR UPDATE OF e`,
-      [organizationId, emailField, email, authUserId ?? null]
+      [organizationId, authUserId]
     );
     if (rows.length === 0) return;
 

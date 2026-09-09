@@ -220,6 +220,7 @@ registerEntityHooks('$member', {
 
   async afterUpdate(before, after, ctx) {
     if (before.metadata?.role === after.metadata?.role) return;
+    if (!hasRequiredMcpScope('admin', ctx.scopes)) throw new ToolUserError('Changing membership requires mcp:admin scope', 403);
     const sql = ctx.sql;
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const oldEmail = before.metadata?.[emailField];
@@ -228,7 +229,6 @@ registerEntityHooks('$member', {
     if (oldEmail !== newEmail) {
       throw new ToolUserError('Change member email separately from its permission role', 400);
     }
-    if (!hasRequiredMcpScope('admin', ctx.scopes)) throw new ToolUserError('Changing membership requires mcp:admin scope', 403);
     const role = parseMemberRole(after.metadata?.role);
     const members = await sql`
       SELECT m.id FROM entity_identities ei JOIN member m
@@ -260,7 +260,7 @@ registerEntityHooks('$member', {
     }
     const invitation = invitations[0];
     await authorizeMemberRole(sql, ctx.organizationId, ctx.userId, role,
-      invitation.role as string, false);
+      invitation.role as string);
     await sql`UPDATE invitation SET role = ${role} WHERE id = ${invitation.id}`;
     await insertWorkspaceChangeEventInTransaction({
       organizationId: ctx.organizationId, resourceKind: 'invitation',
