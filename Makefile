@@ -1,6 +1,6 @@
 # Development Makefile for Lobu
 
-.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review review-fix ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
+.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-agent-turn test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review review-fix ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
 
 # Default target
 help:
@@ -203,6 +203,17 @@ test-integration:
 # the SDK lifecycle step in CI's `sdk-cli-e2e` job; run it locally the same way.
 test-e2e-sdk:
 	@./scripts/sdk-e2e.sh
+
+# Agent-turn live e2e (isolate lane). NOT in CI on purpose: it needs the built
+# CLI dist and takes ~4 minutes, which is more than the sdk-e2e job's budget.
+# Every scenario also has unit/integration coverage, so this is not the
+# regression gate — it is the gate that exercises the REAL MCP route, Postgres
+# and isolate together, which is how it found the first-turn steering gap and
+# the memory-scope gap that unit suites could not see. Run it after changing
+# the agent-turn lane. See scripts/agent-turn-e2e/README.md.
+test-e2e-agent-turn:
+	@(cd packages/server && bun run build:server) && (cd packages/cli && bun run build)
+	@bash scripts/agent-turn-e2e/agent-turn-e2e.sh
 
 # Error-taxonomy e2e: the failure-path companion to sdk-e2e. Boots `lobu run`
 # with the mock provider in 429 mode and drives a real turn through a spawned
