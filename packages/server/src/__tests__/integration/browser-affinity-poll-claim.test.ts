@@ -550,4 +550,53 @@ describe('browser-affinity poll claim', () => {
     });
     expect(body).not.toHaveProperty('run_metadata');
   });
+
+  // Two unparented chrome actions with no stored browser_context: the SDK
+  // path. They must share one visible group (one standalone context id per
+  // organization+connection) while keeping separate per-run flow ids, so ten
+  // SDK navigates are one group with ten independently leased tabs rather than
+  // ten groups. Helper-level coverage cannot see the poll wiring that decides
+  // this, which is the only place the fallback chain is actually exercised.
+  it('gives unparented chrome actions a shared standalone context with per-run flows', async () => {
+    const { orgId, userId, workerId, deviceWorkerId } = await seedWorker();
+    const connId = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'chrome',
+      deviceWorkerId,
+    });
+
+    const pollOne = async (url: string) => {
+      const runId = await seedPendingAction({
+        orgId,
+        connectionId: connId,
+        connectorKey: 'chrome',
+        connectorVersion: '1.0.0',
+        actionInput: { url },
+        expiresAtAgoSeconds: -60,
+      });
+      const res = await pollExtension(workerId);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        run_id?: number;
+        action_input?: Record<string, unknown>;
+      };
+      expect(body.run_id).toBe(runId);
+      return { runId, input: body.action_input ?? {} };
+    };
+
+    const first = await pollOne('https://a.example/');
+    const second = await pollOne('https://b.example/');
+
+    // One group: same context id, and it is the standalone shape, not run:<id>.
+    expect(first.input.browser_context_id).toBe(second.input.browser_context_id);
+    expect(String(first.input.browser_context_id)).toMatch(/^run:standalone-/);
+    expect(first.input.browser_context_title).toBe(second.input.browser_context_title);
+
+    // Unshared ownership: each run leases its own tabs under its own flow.
+    expect(first.input.browser_flow_id).toBe(String(first.runId));
+    expect(second.input.browser_flow_id).toBe(String(second.runId));
+    expect(first.input.browser_flow_id).not.toBe(second.input.browser_flow_id);
+    expect(first.input.holder_run_id).toBe(String(first.runId));
+  });
 });
