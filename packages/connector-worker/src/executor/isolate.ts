@@ -635,7 +635,19 @@ export class IsolateExecutor implements SyncExecutor {
     };
     // A caller's abort ends the run the way an uncaught guest error does:
     // the guest is torn down and the pending result rejects with this state.
-    const onCancel = () => terminate({ name: 'RunCancelled', message: 'the run was cancelled' });
+    //
+    // Latched, because `terminate` reaches the isolate through `host?.` and
+    // `host` is assigned only after `IsolateHost.create` resolves — an await
+    // away. An abort that lands before that (a signal already aborted on
+    // entry, or one that fires while the isolate is being built) would
+    // otherwise terminate nothing and the guest would run to completion for a
+    // run the caller had already cancelled.
+    const cancelState: IsolateTerminalState = { name: 'RunCancelled', message: 'the run was cancelled' };
+    let cancelled = false;
+    const onCancel = () => {
+      cancelled = true;
+      terminate(cancelState);
+    };
     if (hooks?.signal?.aborted) onCancel();
     else hooks?.signal?.addEventListener('abort', onCancel, { once: true });
 
@@ -1088,6 +1100,12 @@ export class IsolateExecutor implements SyncExecutor {
       const source = `var __job_json = ${jsonLiteral(guestJob)};\nvar __config_json = ${jsonLiteral(mergedConfig)};\n${compiledCode}\n${GUEST_RUNNER}`;
       let raw: unknown;
       try {
+        // The host exists now, so the latched cancellation finally has
+        // something to tear down. Applied BEFORE the guest is handed any
+        // source: this run was cancelled, so it must not execute at all.
+        // `host.run` then rejects with the terminal state, and the cancel
+        // reports through exactly the path a mid-run cancel takes.
+        if (cancelled || hooks?.signal?.aborted) host.terminate(cancelState);
         raw = await host.run(source, { timeoutMs: this.options.timeoutMs });
       } catch (error) {
         if (hookFailure !== null) throw hookFailure;
