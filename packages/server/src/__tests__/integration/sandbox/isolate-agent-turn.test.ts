@@ -1507,6 +1507,37 @@ describe("agent turn on the isolate lane", () => {
 		expect(withFollower).not.toContain("OPENER-CONTEXT-attention-run-1");
 	}, 120_000);
 
+	it("sends a caption-less upload its file description and context", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The file-only path: an upload with no caption. The producer admits this
+		// whenever attachments resolve (`!messageText && files.length > 0` is NOT
+		// a skip), so `userMessage` is legitimately `''` here. Its context is the
+		// model's only account of what it was sent, and because per-message
+		// context is keyed by message text, `''` has to be a real key rather than
+		// a stand-in for "no text at all".
+		await runTurn(
+			turnJob({
+				userMessage: "",
+				ephemeralContext: "CAPTIONLESS-CONTEXT-digest",
+				files: [{ name: "report.pdf", mimeType: "application/pdf" }],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["read"],
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("CAPTIONLESS-CONTEXT-digest");
+		// And the file is named, so the model can ask to read it.
+		expect(sent).toContain("report.pdf");
+	}, 120_000);
+
 	it("steers: a follow-up with no context of its own is answered with none", async () => {
 		hits = [];
 		toolScript = [{ id: "toolu_s3", name: "query_sdk", input: { code: "entities.count()" } }];

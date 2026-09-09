@@ -210,18 +210,23 @@ const guestLogger = {
 function messageText(message: unknown): string | undefined {
   // `AgentMessage` includes a branch-summary variant with no `content` at all,
   // so this reads defensively rather than narrowing to one shape.
+  //
+  // `''` and `undefined` are DIFFERENT answers and both are returned as-is: a
+  // file-only turn (an upload with no caption, which the producer admits
+  // whenever attachments are present) has empty text, and that empty string is
+  // the key its context is stored under. Collapsing it to `undefined` loses the
+  // file description — the model's only account of what it was sent.
   if (!message || typeof message !== 'object') return undefined;
   const content = (message as { content?: unknown }).content;
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return undefined;
-  const text = content
+  return content
     .map((part) =>
       part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
         ? String((part as { text?: unknown }).text ?? '')
         : ''
     )
     .join('');
-  return text || undefined;
 }
 
 function clip(text: string): string {
@@ -420,8 +425,10 @@ export async function runAgentTurn(
     // The context of THIS message, or nothing. No per-turn fallback: the
     // extension prepends to the newest user message, so falling back would
     // hand a context-less follow-up the opener's block.
+    // `undefined` means the message has no text field to key on at all (a
+    // branch summary); `''` is a real key, held by a file-only turn.
     const text = messageText(message);
-    return text ? messageContext.get(text) : undefined;
+    return text === undefined ? undefined : messageContext.get(text);
   });
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
