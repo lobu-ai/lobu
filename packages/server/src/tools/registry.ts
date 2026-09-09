@@ -21,6 +21,7 @@
 
 import { SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
 import { type Static, Type } from '@sinclair/typebox';
+import { getMcpConnectionScopes } from '../auth/oauth/scopes';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
@@ -237,11 +238,13 @@ const READ_ONLY = {
 // CHANGE public internet or third-party state. Live reads from a user's private
 // connectors remain closed-world even though they contact an external service.
 //
-// These tools only retrieve data. Their invocation audit is server bookkeeping,
-// not an operation on workspace or third-party state, so it does not make the
-// tool a write. Authorization stays separately pinned by `authorizationReadOnly`.
+// These operations retrieve data, but every OAuth and PAT invocation appends an
+// audit/activity record, and `readOnlyHint` asserts the tool "does not modify
+// its environment" — that append does, so the hint cannot be claimed. Access
+// enforcement stays separate through `authorizationReadOnly`, so a read grant
+// still invokes these tools while the SDK keeps rejecting data writes.
 const AUDITED_READ = {
-  readOnlyHint: true,
+  readOnlyHint: false,
   destructiveHint: false,
   openWorldHint: false,
   idempotentHint: false,
@@ -844,7 +847,9 @@ function computeListedTools(
         inputSchema,
         ...(tool.annotations && { annotations: tool.annotations }),
         ...(securityScopes && {
-          securitySchemes: [{ type: 'oauth2' as const, scopes: securityScopes }],
+          securitySchemes: [
+            { type: 'oauth2' as const, scopes: getMcpConnectionScopes(securityScopes) },
+          ],
         }),
         ...(tool.mcpMeta && { _meta: tool.mcpMeta }),
         // outputSchema keeps its discriminated variants (no flattening, no

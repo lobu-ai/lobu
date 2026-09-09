@@ -275,7 +275,7 @@ const productOps = defineAgent({
     // Keep the headless lockdown (no native worker tools) and pre-approve the
     // one MCP write the Automation needs: run_sdk carries completeWindow, is not
     // read-only, and would otherwise stall an unattended run on an approval
-    // card. query_sdk is readOnlyHint and needs no grant.
+    // card. query_sdk is non-destructive and needs no grant.
     allowed: [],
     strict: true,
     preApproved: ["/mcp/lobu-memory/tools/run_sdk"],

@@ -1,6 +1,7 @@
 /**
  * Bare-OAuth federated search, through the real local wire:
- * DCR -> explicit PKCE consent -> token exchange -> `/mcp` initialize/call.
+ * DCR -> explicit PKCE consent -> token exchange -> `/oauth/userinfo` ->
+ * `/mcp` initialize/call.
  *
  * The only direct database mutation after setup is membership revocation,
  * which proves an already-established MCP session revalidates live membership
@@ -12,6 +13,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createAuthorizationIntent } from '../../../auth/oauth/authorization-intent';
 import { hashToken } from '../../../auth/oauth/utils';
 import { parsePgTextArray } from '../../../db/client';
+import { getMcpTools } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -21,7 +23,7 @@ import {
   createTestSession,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { mcpToolsCall, post } from '../../setup/test-helpers';
+import { get, mcpToolsCall, post } from '../../setup/test-helpers';
 
 const ORIGIN = 'http://localhost';
 const SEARCH_NAME = 'Bare OAuth Federated Needle';
@@ -88,13 +90,20 @@ describe('bare OAuth /mcp federated search end to end', () => {
     expect(registration.status).toBe(201);
     const { client_id: clientId } = (await registration.json()) as { client_id: string };
 
+    // Request exactly what the published tool metadata advertises, as an MCP
+    // host does. Hardcoding the scope here would still pass if that metadata
+    // stopped asking for identity, which is the failure this covers.
+    const searchTool = getMcpTools().find((tool) => tool.name === 'search_memory');
+    const scope = (searchTool?.securitySchemes?.[0]?.scopes ?? []).join(' ');
+    expect(scope).toContain('mcp:read');
+
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     const consent = await post('/oauth/authorize/consent', {
       body: {
         client_id: clientId,
         redirect_uri: redirectUri,
-        scope: 'mcp:read profile:read',
+        scope,
         code_challenge: challenge,
         code_challenge_method: 'S256',
         resource,
@@ -105,7 +114,7 @@ describe('bare OAuth /mcp federated search end to end', () => {
             client_id: clientId,
             redirect_uri: redirectUri,
             response_type: 'code',
-            scope: 'mcp:read profile:read',
+            scope,
             code_challenge: challenge,
             code_challenge_method: 'S256',
             resource,
@@ -135,10 +144,32 @@ describe('bare OAuth /mcp federated search end to end', () => {
       env: MULTI_GRANT_ENV,
     });
     expect(tokenResponse.status).toBe(200);
-    const { access_token: accessToken } = (await tokenResponse.json()) as {
-      access_token: string;
-    };
+    const { access_token: accessToken, refresh_token: refreshToken } =
+      (await tokenResponse.json()) as { access_token: string; refresh_token: string };
     expect(accessToken).toBeTruthy();
+
+    // The metadata-derived scope must actually unlock the identity call a host
+    // makes before it initializes MCP.
+    const identity = await get('/oauth/userinfo', { token: accessToken });
+    expect(identity.status).toBe(200);
+    expect(((await identity.json()) as { sub: string }).sub).toBe(user.id);
+
+    // Advertising `profile:read` only shapes the REQUEST: a token refreshed
+    // without it loses identity access instead of being silently widened.
+    const withoutIdentity = await post('/oauth/token', {
+      body: {
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: clientId,
+        resource,
+        scope: 'mcp:read',
+      },
+      env: MULTI_GRANT_ENV,
+    });
+    expect(withoutIdentity.status).toBe(200);
+    const mcpOnly = (await withoutIdentity.json()) as { access_token: string; scope: string };
+    expect(mcpOnly.scope).toBe('mcp:read');
+    expect((await get('/oauth/userinfo', { token: mcpOnly.access_token })).status).toBe(403);
 
     const tokenRows = await sql`
       SELECT organization_id, granted_organization_ids

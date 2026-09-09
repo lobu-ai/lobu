@@ -484,14 +484,14 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     expect(tool).toEqual(
       expect.objectContaining({
         annotations: expect.objectContaining({
-          readOnlyHint: true,
+          readOnlyHint: false,
           destructiveHint: false,
           openWorldHint: false,
           idempotentHint: false,
         }),
-        securitySchemes: [{ type: 'oauth2', scopes: ['mcp:read'] }],
+        securitySchemes: [{ type: 'oauth2', scopes: ['mcp:read', 'profile:read'] }],
         _meta: expect.objectContaining({
-          securitySchemes: [{ type: 'oauth2', scopes: ['mcp:read'] }],
+          securitySchemes: [{ type: 'oauth2', scopes: ['mcp:read', 'profile:read'] }],
           ui: expect.objectContaining({
             resourceUri: 'ui://lobu/interaction/v44.html',
             visibility: ['model', 'app'],
@@ -507,9 +507,9 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     );
     expect(saveMemory).toEqual(
       expect.objectContaining({
-        securitySchemes: [{ type: 'oauth2', scopes: ['mcp:write'] }],
+        securitySchemes: [{ type: 'oauth2', scopes: ['mcp:write', 'profile:read'] }],
         _meta: expect.objectContaining({
-          securitySchemes: [{ type: 'oauth2', scopes: ['mcp:write'] }],
+          securitySchemes: [{ type: 'oauth2', scopes: ['mcp:write', 'profile:read'] }],
           ui: expect.objectContaining({
             resourceUri: 'ui://lobu/interaction/v44.html',
             visibility: ['model', 'app'],
@@ -551,7 +551,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
           idempotentHint: false,
         }),
         outputSchema: expect.objectContaining({ type: 'object' }),
-        securitySchemes: [{ type: 'oauth2', scopes: ['mcp:write'] }],
+        securitySchemes: [{ type: 'oauth2', scopes: ['mcp:write', 'profile:read'] }],
         _meta: expect.objectContaining({
           ui: {
             visibility: ['app'],
@@ -2454,7 +2454,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
       `resource_metadata="https://mcp.public.example/.well-known/oauth-protected-resource/mcp/${org.slug}"`
     );
     expect(challenge).toContain('error="insufficient_scope"');
-    expect(challenge).toContain('scope="mcp:read"');
+    expect(challenge).toContain('scope="mcp:read profile:read"');
     expect(challenge).not.toContain('internal.service');
   });
 
@@ -2488,7 +2488,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     const challenge = body.result?._meta?.['mcp/www_authenticate']?.[0];
     expect(body.result?.isError).toBe(true);
     expect(challenge).toContain('error="insufficient_scope"');
-    expect(challenge).toContain('scope="mcp:read"');
+    expect(challenge).toContain('scope="mcp:read profile:read"');
     expect(body.result?._meta?.['lobu/member-role']).toBe('owner');
   });
 
