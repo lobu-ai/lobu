@@ -1,6 +1,6 @@
 # Security
 
-This page covers the self-hosted deployment (`lobu run` or the [Docker image](DOCKER.md)): the gateway, embeddings, and Lobu memory backend share one Node process, while embedded workers run as child processes; Postgres is the only user-provided external. Lobu does not orchestrate per-worker containers. (Lobu Cloud runs the same image with multiple replicas on Kubernetes; the multi-replica correctness rules live in `packages/server/AGENTS.md` and are out of scope here.) This page documents what's isolated, what's policy, and what isn't a security boundary at all.
+This page covers the self-hosted deployment (`lobu run` or the [Docker image](DOCKER.md)): the gateway, embeddings, and Lobu memory backend share one Node process, and an agent turn runs inside a V8 isolate in that process; Postgres is the only user-provided external. Lobu does not spawn per-agent worker processes or orchestrate per-worker containers. (Lobu Cloud runs the same image with multiple replicas on Kubernetes; the multi-replica correctness rules live in `packages/server/AGENTS.md` and are out of scope here.) This page documents what's isolated, what's policy, and what isn't a security boundary at all.
 
 ## Threat model
 
@@ -39,16 +39,18 @@ Workers run with `HTTP_PROXY` pointing at the gateway's authenticated in-process
 - **Blocklist mode** — allow all except denied domains.
 - **LLM egress judge** — risky domains get LLM verdict per request, with a 5 min cache and a circuit breaker.
 
-In embedded mode, `HTTP_PROXY` is **advisory** at the language layer — a worker process that explicitly bypasses the env var can `connect()` directly. On Linux hosts with an enabled, usable systemd user manager, the worker spawn path uses `systemd-run --user --scope` with `IPAddressDeny=any` + `IPAddressAllow=127.0.0.1` + `IPAddressAllow=::1`, so the kernel drops non-loopback IP traffic. That boundary is host-based and port-independent: it confines the worker's IP traffic to loopback but does not stop it reaching another loopback listener, so do not treat a custom `WORKER_PROXY_PORT` as an isolation control. Without that systemd scope the worker runs without this kernel rule unless `LOBU_REQUIRE_WORKER_SANDBOX=1` makes the spawn fail closed; macOS has no kernel-level enforcement.
+An agent turn runs in a V8 isolate with no network primitive of its own: the guest is built without `fetch`, and its bash tool's in-memory shell has no `curl` or `wget`. Egress is therefore not advisory at the language layer — there is no socket API to bypass a proxy env var with. Every request an agent makes is a call the host mediates, and the gateway's egress proxy resolves the hostname, rejects private and loopback address literals, and applies the agent's network policy before connecting. This holds identically on Linux and macOS, because it does not depend on a host kernel feature.
 
-## Worker process hardening (Linux)
+## Turn isolation
 
-When the systemd wrapper is enabled and `systemd-run` can reach a usable user manager, `EmbeddedDeploymentManager` wraps each worker spawn in a transient scope with:
+An agent turn executes as a job in a V8 isolate inside the gateway process, not as an operating-system process, so the relevant boundary is the isolate's, not a cgroup's:
 
-- `MemoryMax=512M`, `CPUQuota=200%`, `TasksMax=64` by default; `LOBU_WORKER_MEMORY_MAX`, `LOBU_WORKER_CPU_QUOTA`, and `LOBU_WORKER_TASKS_MAX` override them
-- `IPAddressDeny=any`, `IPAddressAllow=127.0.0.1`, `IPAddressAllow=::1`
+- The guest has no Node bindings — no `fs`, no `net`, no `child_process` — and no `fetch`. It cannot open a socket or read the host filesystem.
+- Its file tools act on an in-memory filesystem that is created for the turn and discarded when the turn ends. Nothing written there reaches the host disk or the next turn.
+- Its bash tool is either that same in-memory shell (no network, no package manager) or, when the conversation pins one, a remote sandbox that is a separate machine with its own filesystem and its own network policy — never the gateway host's shell.
+- Every outbound request is mediated by the host and subject to the agent's network policy; see Egress above.
 
-A `--scope` can apply those cgroup and network properties, but it cannot apply exec-context controls such as `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem`, `ProtectHome`, `ReadWritePaths`, `LimitNOFILE`, `CapabilityBoundingSet`, or `RestrictAddressFamilies`. Without the scope, workers run as ordinary subprocesses unless `LOBU_REQUIRE_WORKER_SANDBOX=1` is set to fail closed.
+Because a turn is not a process, per-process controls do not apply to it: there is no cgroup, no `systemd-run` scope, and no exec-context hardening (`NoNewPrivileges`, `PrivateTmp`, and similar) in this path. What bounds a turn is the isolate's own limits — memory and wall-clock caps enforced by the runtime, and a heartbeat the gateway uses to reap a turn that stops reporting. A runaway turn is terminated rather than confined.
 
 ## Credentials
 
@@ -90,4 +92,4 @@ Skills are executable, security-sensitive input:
 
 ## What changed from earlier docs
 
-Previous versions of this page described Kubernetes pod isolation, NetworkPolicies, gVisor, Kata, and per-pod PVCs. None of that is shipped any more — the gateway now spawns local worker subprocesses instead of orchestrating per-worker containers. On Linux hosts with an enabled, usable systemd user manager, the worker spawn path applies loopback-only IP rules and cgroup limits through `systemd-run --scope`; it does not apply capability drops or other exec-context hardening. The rest were paying isolation costs for a multi-tenant deployment Lobu doesn't ship.
+Earlier versions of this page described Kubernetes pod isolation, NetworkPolicies, gVisor, Kata, and per-pod PVCs, and later ones described local worker subprocesses wrapped in `systemd-run --scope` with cgroup and loopback-only IP rules. Neither is shipped any more: an agent turn runs in a V8 isolate in the gateway process, so the boundary is the isolate's lack of Node bindings and of any network primitive rather than a per-process kernel rule. The earlier models were paying isolation costs for a multi-tenant deployment Lobu doesn't ship, and the subprocess model's kernel rules only ever applied on Linux hosts with a usable systemd user manager.

@@ -16,7 +16,7 @@ help:
 	@echo "  make test-integration                      - Run the CI integration suite (needs DATABASE_URL with pgvector)"
 	@echo "  make test-e2e-cli                          - Boot lobu run + walk every CLI command (the CI sdk-cli-e2e job)"
 	@echo "  make test-providers-live                   - Validate every provider against its live API (keyless tier + key-gated smoke)"
-	@echo "  make clean-workers                         - Stop any running embedded worker subprocesses"
+	@echo "  make clean-workers                         - Stop orphaned gateway processes from a crashed dev run"
 	@echo "  make dev-recover [RESTART=1]               - Free this checkout's dev ports + clean workers; RESTART=1 also boots make dev"
 	@echo "  make clean-test-pg                         - Reap orphaned lobu-test-pg embedded-Postgres clusters (frees macOS shm slots)"
 	@echo "  make typecheck                             - Strict typecheck (same as Dockerfile) for server + owletto"
@@ -233,14 +233,15 @@ test-providers-live:
 	@echo "🌐 Live provider smoke (key-gated)…"
 	@bun test --timeout 60000 packages/server/src/__tests__/live-providers
 
-# Stop any embedded worker subprocesses left over from a crashed gateway.
-# Workers are normally cleaned up when the gateway exits; this target is a
-# safety net for orphaned bun processes spawned by EmbeddedDeploymentManager.
+# Reap gateway processes left over from a crashed `make dev`.
+# An agent turn runs in a V8 isolate inside the gateway process, so there is
+# no per-agent child to kill any more — a turn cannot outlive its gateway.
+# Killing an orphaned gateway is what actually frees the port, and
+# `scripts/dev-recover.sh` calls this before restarting.
 clean-workers:
-	@echo "🧹 Stopping embedded worker subprocesses..."
-	@pkill -f 'packages/agent-worker/src/index.ts' 2>/dev/null || true
-	@pkill -f '@lobu/worker' 2>/dev/null || true
-	@echo "✅ Worker subprocesses stopped"
+	@echo "🧹 Stopping orphaned gateway processes..."
+	@pkill -f 'tsx watch.*packages/server/src/server.ts' 2>/dev/null || true
+	@echo "✅ Orphaned gateway processes stopped"
 
 # Orphaned `lobu-test-pg-*` embedded-Postgres clusters from other worktrees'
 # integration runs eat macOS shared-memory slots (SHMMNI=32), and `lobu run` /
