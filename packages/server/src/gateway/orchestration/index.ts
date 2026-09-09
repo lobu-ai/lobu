@@ -1,5 +1,4 @@
 export * from "./deployment-manager.js";
-export * from "./deployment-utils.js";
 
 import {
 	createLogger,
@@ -21,7 +20,6 @@ import {
   DeploymentManager,
   type OrchestratorConfig,
 } from "./deployment-manager.js";
-import { buildModuleEnvVars } from "./deployment-utils.js";
 import type { AgentTurnDeps } from "./agent-turn-producer.js";
 import { MessageConsumer } from "./message-consumer.js";
 
@@ -41,11 +39,7 @@ export class Orchestrator {
   constructor(config: OrchestratorConfig) {
     this.config = config;
     const providerModules: ModelProviderModule[] = getModelProviderModules();
-    this.deploymentManager = new DeploymentManager(
-      config,
-      buildModuleEnvVars,
-      providerModules
-    );
+    this.deploymentManager = new DeploymentManager(config, providerModules);
     this.queueConsumer = new MessageConsumer(this.deploymentManager);
   }
 
