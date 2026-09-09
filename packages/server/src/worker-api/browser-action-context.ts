@@ -32,6 +32,35 @@ export function runScopedBrowserActionContext(runIdValue: unknown): BrowserActio
   };
 }
 
+/**
+ * Shared container for standalone Chrome actions that belong to no richer
+ * context. Without this, every unparented action fell back to its own run id as
+ * the context key, so ten SDK navigates produced ten visible tab groups.
+ *
+ * The key is derived from server-held provenance (organization + browser
+ * connection) — never from caller input, which `trustedChromeActionInput`
+ * strips precisely so an agent cannot address another flow's group. Two
+ * unrelated actions therefore share the visible GROUP while each tab keeps its
+ * own per-run flow lease, so they display together without either being able
+ * to close or drive the other's tab.
+ */
+export function standaloneBrowserActionContext(
+  organizationId: string | null,
+  connectionId: number | null,
+  runIdValue: unknown
+): BrowserActionContext | null {
+  const runId = positiveRunId(runIdValue);
+  if (runId == null || !organizationId || connectionId == null) return null;
+  const digest = shortDigest([organizationId, String(connectionId)]);
+  return {
+    id: `run:standalone-${digest}`,
+    title: 'Lobu · Browser actions',
+    // The flow stays per-run: shared group, unshared ownership.
+    flow_id: String(runId),
+    kind: 'run',
+  };
+}
+
 export function browserContextWithFlow(
   context: BrowserActionContext,
   runIdValue: unknown
@@ -138,7 +167,8 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
 
 export function trustedChromeActionInput(
   input: Record<string, unknown>,
-  context: BrowserActionContext
+  context: BrowserActionContext,
+  activationTabId?: number | null
 ): Record<string, unknown> {
   const trusted = { ...input };
   delete trusted.browser_context_id;
@@ -146,11 +176,20 @@ export function trustedChromeActionInput(
   delete trusted.browser_flow_id;
   delete trusted.holder_run_id;
   delete trusted.parent_run_id;
+  // Always deleted, then re-added only from the server's own resolution below.
+  // A connector that names an activated tab itself must never be believed: this
+  // field is what lets the extension mutate a tab the USER owns, so a
+  // caller-supplied copy would be a way to launder any tab id into that
+  // authority.
+  delete trusted.activation_tab_id;
   return {
     ...trusted,
     browser_context_id: context.id,
     browser_context_title: context.title,
     browser_flow_id: context.flow_id,
     holder_run_id: context.flow_id,
+    ...(Number.isInteger(activationTabId) && (activationTabId as number) > 0
+      ? { activation_tab_id: activationTabId as number }
+      : {}),
   };
 }
