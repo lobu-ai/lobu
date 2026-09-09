@@ -1,9 +1,5 @@
 #!/usr/bin/env bun
 
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AgentOptions, LogLevel } from "@lobu/core";
 import {
   DEFAULTS as CORE_DEFAULTS,
@@ -15,10 +11,8 @@ import {
   TIME,
 } from "@lobu/core";
 import type { OrchestratorConfig } from "../orchestration/deployment-manager.js";
-import { findEnclosingMonorepoRoot } from "../../utils/monorepo-root.js";
 import { normalizePublicGatewayUrl } from "../../utils/public-origin.js";
 
-const __filename = fileURLToPath(import.meta.url);
 const logger = createLogger("cli-config");
 const GATEWAY_DEFAULTS = {
   HTTP_PORT: 3000,
@@ -166,87 +160,6 @@ function deepMerge<T extends Record<string, any>>(
   return result;
 }
 
-function buildEmbeddedWorkerPaths(projectRoot: string): {
-  entryPoint: string;
-  binPathEntries: string[];
-} {
-  // path.resolve so a relative LOBU_DEV_PROJECT_PATH still yields absolute
-  // paths — workers are spawned with cwd=workspaceDir, so relative entries
-  // would resolve against the workspace and fail.
-  const explicitEntryPoint = process.env.LOBU_WORKER_ENTRYPOINT;
-  const explicitBinPathEntries = process.env.LOBU_WORKER_BIN_PATHS?.split(
-    path.delimiter
-  ).filter(Boolean);
-
-  const binPathsFor = (root: string) => [
-    path.join(root, "node_modules/.bin"),
-    path.join(root, "packages/agent-worker/node_modules/.bin"),
-  ];
-
-  // The passed root (LOBU_DEV_PROJECT_PATH / cwd) may be a project subdir
-  // inside the monorepo — in that case the `src/index.ts` worker entry lives
-  // at the enclosing workspace root, not under the subdir. Resolve it.
-  const passedRoot = path.resolve(projectRoot);
-  const monorepoRoot =
-    existsSync(path.join(passedRoot, "packages/agent-worker/src/index.ts"))
-      ? passedRoot
-      : findEnclosingMonorepoRoot(passedRoot);
-
-  if (explicitEntryPoint) {
-    return {
-      entryPoint: path.resolve(explicitEntryPoint),
-      binPathEntries:
-        explicitBinPathEntries ?? binPathsFor(monorepoRoot ?? passedRoot),
-    };
-  }
-
-  if (monorepoRoot) {
-    return {
-      entryPoint: path.join(monorepoRoot, "packages/agent-worker/src/index.ts"),
-      binPathEntries: binPathsFor(monorepoRoot),
-    };
-  }
-
-  try {
-    const workerPackageJson = createRequire(__filename).resolve(
-      "@lobu/worker/package.json"
-    );
-    const workerPackageRoot = path.dirname(workerPackageJson);
-    // In-repo, prefer the ESM TypeScript source (spawned via `bun run`): the
-    // CJS `dist/index.js` is a dead end because `@mariozechner/pi-coding-agent`
-    // only exposes an `import` condition, so a `node`-loaded `require()` of it
-    // throws ERR_PACKAGE_PATH_NOT_EXPORTED. The workspace package keeps `src/`
-    // and a `bun` exports condition for exactly this path. `bun` is a declared
-    // peerDependency of `@lobu/worker`.
-    //
-    // Installed from the registry there is no `src/`: the published package
-    // ships a single ESM bundle (`dist/index.bundle.mjs`) with the whole @lobu
-    // workspace graph inlined — see packages/agent-worker/scripts/
-    // build-worker-bundle.mjs. This used to fall through to `dist/index.js`,
-    // which the tarball no longer contains (and which could never have loaded
-    // pi-coding-agent under node anyway), so the bundle is the installed entry.
-    // A guard test asserts every dist path named here is actually published.
-    const workerSrcEntry = path.join(workerPackageRoot, "src/index.ts");
-    return {
-      entryPoint: existsSync(workerSrcEntry)
-        ? workerSrcEntry
-        : path.join(workerPackageRoot, "dist/index.bundle.mjs"),
-      binPathEntries: [
-        path.join(workerPackageRoot, "node_modules/.bin"),
-        path.resolve(workerPackageRoot, "..", "..", ".bin"),
-      ],
-    };
-  } catch {
-    return {
-      entryPoint: path.join(
-        passedRoot,
-        "packages/agent-worker/src/index.ts"
-      ),
-      binPathEntries: binPathsFor(passedRoot),
-    };
-  }
-}
-
 /**
  * Build complete gateway configuration from environment variables,
  * optionally deep-merged with explicit overrides.
@@ -363,13 +276,6 @@ export function buildGatewayConfig(
         maxDeployments: getOptionalNumber(
           "MAX_WORKER_DEPLOYMENTS",
           DEFAULTS.MAX_WORKER_DEPLOYMENTS
-        ),
-        // Embedded-mode paths. Resolved from the monorepo root pointed at by
-        // LOBU_DEV_PROJECT_PATH (defaults to cwd so CLI invocations from the
-        // repo root still work). Published CLIs fall back to the installed
-        // @lobu/worker package.
-        ...buildEmbeddedWorkerPaths(
-          process.env.LOBU_DEV_PROJECT_PATH || process.cwd()
         ),
       },
       cleanup: {

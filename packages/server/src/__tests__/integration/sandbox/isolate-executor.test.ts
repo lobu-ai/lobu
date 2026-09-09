@@ -427,6 +427,71 @@ describe("isolate lane: hackernews against the live API", () => {
 });
 
 describe("isolate lane: fixture connector", () => {
+	it("refuses a run whose signal is already aborted, without running the guest", async () => {
+		// `terminate` reaches the isolate through `host?.`, and `host` is assigned
+		// only after `IsolateHost.create` resolves — an await away. An abort that
+		// lands before that terminated nothing, so the guest ran to completion and
+		// the run REPORTED SUCCESS for work the caller had already cancelled.
+		const code = `
+			class Runtime {
+				async sync() { console.log("GUEST_RAN"); return { items: [] }; }
+				async execute() { return { ok: true }; }
+			}
+			module.exports = { default: Runtime };
+		`;
+		const controller = new AbortController();
+		controller.abort();
+
+		const captured = emptyCapture();
+		const executor = new IsolateExecutor({
+			timeoutMs: 60_000,
+			logSink: (level, line) => captured.logs.push({ level, line }),
+		});
+		const failure = await executor
+			.execute(code, syncJob({}), { ...captureHooks(captured), signal: controller.signal })
+			.then(
+				() => null,
+				(error: unknown) => error as LaneError,
+			);
+
+		// It fails, as the caller's cancellation asked.
+		expect(failure).not.toBeNull();
+		expect(String(failure?.message)).toContain("cancelled");
+		// And the guest never ran at all — the point of cancelling before it starts.
+		expect(captured.logs.some((entry) => entry.line.includes("GUEST_RAN"))).toBe(false);
+	}, 120_000);
+
+	it("cancels a run whose signal aborts while the isolate is still being built", async () => {
+		// The same window, entered from the other side: the signal is live on
+		// entry and fires during `IsolateHost.create`. The latch is what carries
+		// that abort across the await to a host that can act on it.
+		const code = `
+			class Runtime {
+				async sync() { console.log("GUEST_RAN"); return { items: [] }; }
+				async execute() { return { ok: true }; }
+			}
+			module.exports = { default: Runtime };
+		`;
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 0);
+
+		const captured = emptyCapture();
+		const executor = new IsolateExecutor({
+			timeoutMs: 60_000,
+			logSink: (level, line) => captured.logs.push({ level, line }),
+		});
+		const failure = await executor
+			.execute(code, syncJob({}), { ...captureHooks(captured), signal: controller.signal })
+			.then(
+				() => null,
+				(error: unknown) => error as LaneError,
+			);
+
+		expect(failure).not.toBeNull();
+		expect(String(failure?.message)).toContain("cancelled");
+		expect(captured.logs.some((entry) => entry.line.includes("GUEST_RAN"))).toBe(false);
+	}, 120_000);
+
 	it("streams events in chunks of 100 and forwards checkpoint updates", async () => {
 		const run = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "emit", count: 250 }));
 		expect(run.chunks).toEqual([100, 100, 50, 1]);

@@ -50,7 +50,6 @@ vi.mock("../workspace", () => ({
 // late-built app would silently 404.
 const gwAppSlot = vi.hoisted(() => ({ app: null as unknown }));
 vi.mock("../lobu/gateway", () => ({
-	activateLobuWorkerReadinessWatchdog: vi.fn(),
 	initLobuGateway: vi.fn(async () => gwAppSlot.app),
 	stopLobuGateway: vi.fn(async () => {}),
 	getLobuCoreServices: vi.fn(() => ({})),
@@ -455,11 +454,8 @@ describe("createServerLifecycle (source-level contract)", () => {
 
 	it("starts the embedded connector worker inside the listen callback", () => {
 		const listen = indexOf("httpServer.listen(port, host");
-		const readiness = indexOf("activateLobuWorkerReadinessWatchdog();");
 		const embedded = indexOf("embeddedWorker = startEmbeddedConnectorWorker");
 		const postHooks = indexOf("for (const hook of postListenHooks)");
-		expect(readiness).toBeGreaterThan(listen);
-		expect(readiness).toBeLessThan(postHooks);
 		expect(embedded).toBeGreaterThan(listen);
 		expect(postHooks).toBeGreaterThan(listen);
 		// postListenHooks fire BEFORE the embedded worker so any synchronous

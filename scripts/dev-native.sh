@@ -4,7 +4,7 @@
 # What runs:
 #   - server (Hono + tsx watch) on :$PORT (default 8787)
 #   - embedded gateway (in-process) with HTTP egress proxy on :$WORKER_PROXY_PORT (default 8118)
-#   - embedded workers (spawned as Bun subprocesses on demand)
+#   - agent turns (run as isolate jobs in the connector-worker)
 #   - Vite dev middleware for web on the same :$PORT (HMR via WS)
 #
 # Requires, managed outside this script:
@@ -64,7 +64,7 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-if [ ! -d packages/core/dist ] || [ ! -d packages/connector-sdk/dist ] || [ ! -d packages/agent-worker/dist ]; then
+if [ ! -d packages/core/dist ] || [ ! -d packages/connector-sdk/dist ]; then
   echo "📦 Building workspace packages (one-time)…"
   make build-packages
 fi

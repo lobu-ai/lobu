@@ -15,7 +15,14 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "verbatimModuleSyntax": false,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@lobu/core/agent-tooling": [
+        "packages/core/dist/agent-tooling.d.ts",
+        "packages/core/src/agent-tooling.ts"
+      ]
+    }
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "src/__tests__/**/*"]

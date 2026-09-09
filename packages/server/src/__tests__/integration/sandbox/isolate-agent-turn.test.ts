@@ -22,19 +22,24 @@
  *     back with the call and its result in it;
  *  6. the workspace tools run inside the isolate against a filesystem the
  *     turn owns: a `bash` write is visible to `read`, and no request leaves
- *     the guest for either.
+ *     the guest for either;
+ *  7. the GATEWAY tools (`ask_user` and the rest of
+ *     `@lobu/plugin-conversations`) run the plugin package's OWN code inside
+ *     the guest — same route, same body, same one credential the MCP call
+ *     uses — and `ask_user` ends the turn, as it does on the subprocess lane.
  *
  * Runs under Node (vitest); like the other lane suites it FAILS rather than
  * skips when `isolated-vm` cannot load.
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { agentGuestBundle } from "@lobu/connector-worker/agent-turn";
+import { agentGuestBundle, MAX_TOOL_CALLS_PER_TURN } from "@lobu/connector-worker/agent-turn";
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput } from "@lobu/connector-worker/agent-turn";
-import type { ExecutorJob } from "@lobu/connector-worker/executor/interface";
+import type { ExecutionHooks, ExecutorJob } from "@lobu/connector-worker/executor/interface";
 import { IsolateExecutor, type IsolateLogLevel } from "@lobu/connector-worker/executor/isolate";
 import { assertIsolateEligible } from "@lobu/connector-worker/isolate";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { SessionEntry } from "@mariozechner/pi-coding-agent";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 /** Requests the fake provider has answered. */
 interface ProviderHit {
@@ -42,6 +47,8 @@ interface ProviderHit {
 	url: string;
 	authorization: string | null;
 	apiKeyHeader: string | null;
+	/** `x-mcp-format`, which a retrieval tool call must send to get a JSON body. */
+	mcpFormat: string | null;
 	body: string;
 }
 
@@ -49,9 +56,25 @@ let guestCode: string;
 let server: Server;
 let port: number;
 let hits: ProviderHit[] = [];
+let providerScript: ((body: string, res: Parameters<typeof writeAnthropicStream>[0]) => void) | undefined;
+
+afterEach(() => { providerScript = undefined; });
+
+function writeAnthropicError(res: Parameters<typeof writeAnthropicStream>[0], message: string): void {
+	res.writeHead(200, { "content-type": "text/event-stream" });
+	res.end(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`);
+}
 
 /** The gateway's own placeholder for the agent's provider key. */
 const GATEWAY_PLACEHOLDER = "lobu_secret_00000000-0000-4000-8000-000000000000";
+
+/**
+ * A 1x1 PNG, base64 — the shape the producer resolves an image attachment into
+ * after reading it out of the artifact store. Small enough to assert on
+ * verbatim in the request body the fake provider captured.
+ */
+const PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 /**
  * Resolved by the test when the HOST has seen its first token. The fake
@@ -100,10 +123,52 @@ async function writeAnthropicStream(res: Parameters<Parameters<typeof createServ
 	res.end();
 }
 
+function writeOpenAIResponsesStream(
+	res: Parameters<Parameters<typeof createServer>[0]>[1],
+	text: string,
+): void {
+	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+	const send = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+	const item = {
+		type: "message",
+		id: "msg_responses",
+		role: "assistant",
+		status: "completed",
+		content: [{ type: "output_text", text, annotations: [] }],
+	};
+	send({ type: "response.created", response: { id: "resp_isolate" } });
+	send({ type: "response.output_item.added", item: { ...item, status: "in_progress", content: [] } });
+	send({
+		type: "response.content_part.added",
+		part: { type: "output_text", text: "", annotations: [] },
+	});
+	send({ type: "response.output_text.delta", delta: text });
+	send({ type: "response.output_item.done", item });
+	send({
+		type: "response.completed",
+		response: {
+			id: "resp_isolate",
+			status: "completed",
+			usage: {
+				input_tokens: 5,
+				output_tokens: 3,
+				total_tokens: 8,
+				input_tokens_details: { cached_tokens: 0 },
+			},
+		},
+	});
+	res.end();
+}
+
 /** An assistant turn that calls one tool and stops for its result. */
 function writeAnthropicToolUse(
 	res: Parameters<Parameters<typeof createServer>[0]>[1],
 	call: { id: string; name: string; input: Record<string, unknown> },
+	/**
+	 * Text the model narrates BEFORE the tool call, in the same assistant
+	 * message. This is the shape that used to glue itself onto the answer.
+	 */
+	narration?: string,
 ): void {
 	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
 	const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -120,17 +185,24 @@ function writeAnthropicToolUse(
 			usage: { input_tokens: 5, output_tokens: 0 },
 		},
 	});
+	let index = 0;
+	if (narration) {
+		send("content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } });
+		send("content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: narration } });
+		send("content_block_stop", { type: "content_block_stop", index });
+		index += 1;
+	}
 	send("content_block_start", {
 		type: "content_block_start",
-		index: 0,
+		index,
 		content_block: { type: "tool_use", id: call.id, name: call.name, input: {} },
 	});
 	send("content_block_delta", {
 		type: "content_block_delta",
-		index: 0,
+		index,
 		delta: { type: "input_json_delta", partial_json: JSON.stringify(call.input) },
 	});
-	send("content_block_stop", { type: "content_block_stop", index: 0 });
+	send("content_block_stop", { type: "content_block_stop", index });
 	send("message_delta", {
 		type: "message_delta",
 		delta: { stop_reason: "tool_use", stop_sequence: null },
@@ -150,13 +222,73 @@ let toolReply: { status: number; body: unknown } = {
 	body: { content: [{ type: "text", text: "3 entities" }] },
 };
 
+/** What the fake gateway answers on its `/internal/...` routes. */
+let internalReply: { status: number; body: unknown } = { status: 200, body: { id: "int_1" } };
+
+/**
+ * The memory MCP server the `lobu-memory` plugin's hooks call. `search_memory`
+ * before the model runs, `save_memory` after it answers — the same two tools,
+ * on the same MCP route, that the subprocess lane invokes through
+ * `@lobu/plugin-mcp`.
+ */
+const MEMORY_MCP_ID = "lobu";
+let memoryReplies: Record<string, { status: number; body: unknown }> = {};
+/** Every memory tool call the guest made, in order, with its parsed body. */
+let memoryCalls: Array<{ tool: string; body: Record<string, unknown> }> = [];
+
+/** The multipart uploads the fake gateway received, already parsed. */
+interface UploadHit {
+	filename: string;
+	fileName: string;
+	fileType: string;
+	fileBytes: Buffer;
+	comment: string | null;
+	voiceHeader: string | null;
+	authorization: string | null;
+	channelId: string | null;
+	conversationId: string | null;
+}
+let uploads: UploadHit[] = [];
+let uploadReply: { status: number; body: unknown } = {
+	status: 200,
+	body: { fileId: "file_iso", name: "report.csv", permalink: "https://files.test/iso" },
+};
+
+/**
+ * Parse a multipart body the way the real `/internal/files/upload` route does
+ * — `Request.formData()`, i.e. the platform parser, not a regex over the raw
+ * bytes. If the guest's `FormData` did not produce a well-formed body with a
+ * real file part, this throws and the test fails, which is the point.
+ */
+async function readUpload(
+	headers: Record<string, string | undefined>,
+	raw: Buffer,
+): Promise<{ filename: string; fileName: string; fileType: string; fileBytes: Buffer; comment: string | null }> {
+	const contentType = headers["content-type"] ?? "";
+	const form = await new Response(new Uint8Array(raw), { headers: { "content-type": contentType } }).formData();
+	const file = form.get("file");
+	if (!(file instanceof File)) throw new Error(`the upload's "file" part is not a file (got ${typeof file})`);
+	const comment = form.get("comment");
+	return {
+		filename: String(form.get("filename")),
+		fileName: file.name,
+		fileType: file.type,
+		fileBytes: Buffer.from(await file.arrayBuffer()),
+		comment: comment === null ? null : String(comment),
+	};
+}
+
 /**
  * The tool calls the fake model makes, in order, one per provider round; the
  * round after the last one answers with text. The MCP scenario is the default.
  */
-let toolScript: Array<{ id: string; name: string; input: Record<string, unknown> }> = [
-	{ id: "toolu_01", name: "query_sdk", input: { code: "entities.count()" } },
-];
+let toolScript: Array<{
+	id: string;
+	name: string;
+	input: Record<string, unknown>;
+	/** Text narrated in the same assistant message as the call, if any. */
+	narration?: string;
+}> = [{ id: "toolu_01", name: "query_sdk", input: { code: "entities.count()" } }];
 
 /** How many tool results the transcript already carries. */
 function toolResultCount(messages: Array<{ role: string; content: unknown }>): number {
@@ -174,25 +306,79 @@ beforeAll(async () => {
 		const chunks: Buffer[] = [];
 		req.on("data", (c: Buffer) => chunks.push(c));
 		req.on("end", () => {
-			const body = Buffer.concat(chunks).toString("utf8");
+			const rawBody = Buffer.concat(chunks);
+			const body = rawBody.toString("utf8");
 			hits.push({
 				method: req.method ?? "",
 				url: req.url ?? "",
 				authorization: (req.headers.authorization as string | undefined) ?? null,
 				apiKeyHeader: (req.headers["x-api-key"] as string | undefined) ?? null,
+				mcpFormat: (req.headers["x-mcp-format"] as string | undefined) ?? null,
 				body,
 			});
-			if (req.url === TOOL_ROUTE) {
+			if (req.url === TOOL_ROUTE || req.url === "/lobu/mcp/lobu-memory/tools/search_memory") {
 				res.writeHead(toolReply.status, { "content-type": "application/json" });
 				res.end(JSON.stringify(toolReply.body));
 				return;
 			}
+			// The memory plugin's own two tools, on the MCP route.
+			const memoryTool = /^\/lobu\/mcp\/([^/]+)\/tools\/(search_memory|save_memory)$/.exec(req.url ?? "");
+			if (memoryTool) {
+				const tool = memoryTool[2] as string;
+				memoryCalls.push({ tool, body: JSON.parse(body || "{}") as Record<string, unknown> });
+				const reply = memoryReplies[tool] ?? { status: 200, body: { content: [] } };
+				res.writeHead(reply.status, { "content-type": "application/json" });
+				res.end(JSON.stringify(reply.body));
+				return;
+			}
+			// The media plugin's file delivery. Parsed with the platform's own
+			// multipart parser, exactly as the real route does.
+			if (req.url === "/lobu/internal/files/upload") {
+				void readUpload(req.headers as Record<string, string | undefined>, rawBody).then(
+					(parsed) => {
+						uploads.push({
+							...parsed,
+							voiceHeader: (req.headers["x-voice-message"] as string | undefined) ?? null,
+							authorization: (req.headers.authorization as string | undefined) ?? null,
+							channelId: (req.headers["x-channel-id"] as string | undefined) ?? null,
+							conversationId: (req.headers["x-conversation-id"] as string | undefined) ?? null,
+						});
+						res.writeHead(uploadReply.status, { "content-type": "application/json" });
+						res.end(JSON.stringify(uploadReply.body));
+					},
+					(error: Error) => {
+						res.writeHead(400, { "content-type": "application/json" });
+						res.end(JSON.stringify({ error: `unparseable upload: ${error.message}` }));
+					},
+				);
+				return;
+			}
+			// The generation endpoints answer BINARY, which is the whole reason
+			// the upload path had to stop round-tripping bodies through UTF-8.
+			if (req.url === "/lobu/internal/images/generate") {
+				res.writeHead(200, { "content-type": "image/png", "x-image-provider": "openai" });
+				res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]));
+				return;
+			}
+			if (req.url === "/lobu/internal/audio/synthesize") {
+				res.writeHead(200, { "content-type": "audio/mpeg", "x-audio-provider": "openai" });
+				res.end(Buffer.from([0xff, 0xfb, 0x00, 0x1c]));
+				return;
+			}
+			// The gateway's own internal routes, which the conversation plugin's
+			// tools call directly rather than through the MCP proxy.
+			if (req.url?.startsWith("/lobu/internal/")) {
+				res.writeHead(internalReply.status, { "content-type": "application/json" });
+				res.end(JSON.stringify(internalReply.body));
+				return;
+			}
+			if (providerScript) { providerScript(body, res); return; }
 			// The fake model follows its script: one tool call per round until
 			// every scripted call has its result in the transcript, then the answer.
 			const request = JSON.parse(body) as { tools?: unknown[]; messages: Array<{ role: string; content: unknown }> };
 			const next = Array.isArray(request.tools) && request.tools.length > 0 ? toolScript[toolResultCount(request.messages)] : undefined;
 			if (next) {
-				writeAnthropicToolUse(res, next);
+				writeAnthropicToolUse(res, next, next.narration);
 				return;
 			}
 			void writeAnthropicStream(res, ["Hello", " from", " the", " isolate"]);
@@ -218,7 +404,7 @@ function turnJob(input: Partial<AgentTurnInput> = {}, baseUrl?: string): Executo
 				maxTokens: 64,
 			},
 			systemPrompt: "You are a test agent.",
-			messages: [],
+			sessionJsonl: "",
 			userMessage: "hi",
 			...input,
 		},
@@ -238,7 +424,24 @@ interface TurnRun {
 	output: AgentTurnOutput;
 }
 
-async function runTurn(job: ExecutorJob, allowedDomains: readonly string[] = ["127.0.0.1"]): Promise<TurnRun> {
+function sessionEntries(output: AgentTurnOutput): SessionEntry[] {
+	return output.sessionJsonl.trim().split("\n").slice(1).map((line) => JSON.parse(line));
+}
+
+function sessionMessages(output: AgentTurnOutput) {
+	return sessionEntries(output).flatMap((entry) => entry.type === "message" ? [entry.message] : []);
+}
+
+function savedSession(entries: unknown[]): string {
+	return [{ type: "session", version: 3, id: "synthetic-session", timestamp: new Date(0).toISOString(), cwd: "/workspace" }, ...entries]
+		.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+}
+
+async function runTurn(
+	job: ExecutorJob,
+	allowedDomains: readonly string[] = ["127.0.0.1"],
+	extraHooks: Partial<ExecutionHooks> = {},
+): Promise<TurnRun> {
 	const events: AgentTurnEvent[] = [];
 	const logs: { level: IsolateLogLevel; line: string }[] = [];
 	const executor = new IsolateExecutor({
@@ -247,6 +450,7 @@ async function runTurn(job: ExecutorJob, allowedDomains: readonly string[] = ["1
 		logSink: (level, line) => logs.push({ level, line }),
 	});
 	const result = await executor.execute(guestCode, job, {
+		...extraHooks,
 		onTurnEvent: (event) => {
 			events.push(event);
 			if (event.type === "text_delta") markFirstDelta();
@@ -276,6 +480,19 @@ async function failTurn(
 }
 
 describe("agent turn on the isolate lane", () => {
+	it("returns a native Pi session snapshot rather than reconstructing entry IDs at the gateway", async () => {
+		hits = [];
+		toolScript = [];
+		const run = await runTurn(turnJob());
+		const jsonl = (run.output as unknown as { sessionJsonl: string }).sessionJsonl;
+		expect(typeof jsonl).toBe("string");
+		const entries = jsonl.trim().split("\n").map((line) => JSON.parse(line));
+		expect(entries[0]).toMatchObject({ type: "session", version: 3 });
+		const messages = entries.filter((entry) => entry.type === "message");
+		expect(messages.map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
+		expect(messages[1].parentId).toBe(messages[0].id);
+	});
+
 	it("bundles the agent guest with no Node builtin left in it", () => {
 		expect(guestCode.length).toBeGreaterThan(1_000_000);
 		expect(() => assertIsolateEligible(guestCode)).not.toThrow();
@@ -298,8 +515,30 @@ describe("agent turn on the isolate lane", () => {
 		// guest never saw a real key: it sent the gateway's placeholder.
 		expect(hits.length).toBe(1);
 		expect(hits[0]?.url).toBe("/v1/messages");
-		expect(hits[0]?.apiKeyHeader).toBe(GATEWAY_PLACEHOLDER);
+		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 		expect(JSON.parse(hits[0]?.body ?? "{}")).toMatchObject({ model: "claude-test", system: expect.anything() });
+	}, 120_000);
+
+	it("admits the OpenAI Responses endpoint through the agent-turn egress gate", async () => {
+		hits = [];
+		toolScript = [];
+		providerScript = (_body, res) => writeOpenAIResponsesStream(res, "Hello from Responses");
+		const run = await runTurn(
+			turnJob({
+				provider: {
+					api: "openai-responses",
+					provider: "openai",
+					modelId: "gpt-5",
+					baseUrl: `http://127.0.0.1:${port}`,
+					maxTokens: 64,
+				},
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from Responses");
+		expect(hits).toHaveLength(1);
+		expect(hits[0]?.url).toBe("/responses");
+		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 	}, 120_000);
 
 	it("returns the transcript with the turn appended so the next turn resumes from it", async () => {
@@ -307,20 +546,21 @@ describe("agent turn on the isolate lane", () => {
 		armFirstDeltaGate();
 		const first = await runTurn(turnJob());
 		armFirstDeltaGate();
-		expect(first.output.messages.length).toBeGreaterThanOrEqual(2);
-		expect(first.output.messages[0]).toMatchObject({ role: "user" });
-		expect(first.output.messages.at(-1)).toMatchObject({ role: "assistant" });
+		expect(sessionMessages(first.output).length).toBeGreaterThanOrEqual(2);
+		expect(sessionMessages(first.output)[0]).toMatchObject({ role: "user" });
+		expect(sessionMessages(first.output).at(-1)).toMatchObject({ role: "assistant" });
 
 		// pi prices every assistant entry off the model's four cost keys. A model
 		// missing one puts NaN there, which JSON turns to null on the way to the
 		// run row — so the entry must be finite before it is ever persisted.
-		const priced = first.output.messages.at(-1) as {
+		const priced = sessionMessages(first.output).at(-1) as {
 			usage?: { cost?: Record<string, number> };
 		};
 		expect(Object.values(priced.usage?.cost ?? {}).every(Number.isFinite)).toBe(true);
 
-		const second = await runTurn(turnJob({ messages: first.output.messages, userMessage: "and again" }));
-		expect(second.output.messages.length).toBe(first.output.messages.length + 2);
+		const second = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "and again" }));
+		expect(sessionMessages(second.output).length).toBe(sessionMessages(first.output).length + 2);
+		expect(sessionEntries(second.output).slice(0, sessionEntries(first.output).length)).toEqual(sessionEntries(first.output));
 		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as { messages: unknown[] };
 		expect(sent.messages.length).toBe(3);
 	}, 120_000);
@@ -347,7 +587,7 @@ describe("agent turn on the isolate lane", () => {
 
 		// Upstream got the gateway's placeholder, so the secret-proxy can still
 		// resolve it...
-		expect(hits[0]?.apiKeyHeader).toBe(GATEWAY_PLACEHOLDER);
+		expect(hits[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
 		// ...but what the guest held was a different, per-run placeholder, and the
 		// host recorded spending it. Same audit line a connector's OAuth token gets.
 		const spends = run.logs.filter((l) => l.line.startsWith("credential "));
@@ -390,6 +630,9 @@ describe("agent turn on the isolate lane", () => {
 			"POST /lobu/mcp/lobu-memory/tools/query_sdk",
 			"POST /v1/messages",
 		]);
+		// An ordinary tool takes the gateway's markdown rendering; only a
+		// retrieval tool asks for JSON (below).
+		expect(hits[1]?.mcpFormat).toBeNull();
 		// The model was offered the tool with the schema the gateway published...
 		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string; input_schema: unknown }> };
 		expect(offered.tools).toEqual([
@@ -418,15 +661,130 @@ describe("agent turn on the isolate lane", () => {
 		]);
 
 		// The transcript the next turn resumes from carries the call and its result.
-		const roles = run.output.messages.map((m) => (m as { role: string }).role);
+		const roles = sessionMessages(run.output).map((m) => (m as { role: string }).role);
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
-		expect(run.output.messages[2]).toMatchObject({ role: "toolResult", toolCallId: "toolu_01", toolName: "query_sdk", isError: false });
+		expect(sessionMessages(run.output)[2]).toMatchObject({ role: "toolResult", toolCallId: "toolu_01", toolName: "query_sdk", isError: false });
 
 		// One credential, one host: the audit line is written once per
 		// (placeholder, host), so the tool call adds no second line — the bearer
 		// hit above is the evidence it was spent there too.
 		const spends = run.logs.filter((l) => l.line.startsWith("credential ")).map((l) => l.line.replace(/^credential [0-9a-f]{12} /, ""));
 		expect(spends).toEqual(["spent on 127.0.0.1 in header x-api-key"]);
+	}, 120_000);
+
+	// The turn's answer is the model's LAST assistant message, not the sum of
+	// every delta it streamed. The retired lane shipped the summing version and
+	// had to fix it (`finalText` authoritative, PR #1087): the accumulator is
+	// the STREAM, and `finalText` is what a possibly-different replica delivers
+	// to the user and writes to history, so gluing narration onto the answer
+	// corrupts the durable record, not just one render.
+	it("answers with the final message only, not the narration glued to it", async () => {
+		hits = [];
+		toolScript = [
+			{
+				id: "toolu_01",
+				name: "query_sdk",
+				input: { code: "entities.count()" },
+				narration: "Let me check the deploy status.",
+			},
+		];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		const run = await runTurn(toolJob());
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.output.text).not.toContain("Let me check the deploy status");
+
+		// The narration still STREAMED — it is the live typing indicator, and
+		// dropping it from the stream would be a different regression.
+		const streamed = run.events
+			.filter((e): e is { type: "text_delta"; delta: string } => e.type === "text_delta")
+			.map((e) => e.delta)
+			.join("");
+		expect(streamed).toBe("Let me check the deploy status.Hello from the isolate");
+
+		// Both assistant messages survive in the transcript the next turn resumes
+		// from; only the ANSWER is narrowed.
+		expect(sessionMessages(run.output).map((m) => (m as { role: string }).role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+	}, 120_000);
+
+	// The fallback the retired lane's suite proved was needed: a turn whose only
+	// assistant text arrives as deltas with no separate final message must still
+	// answer with that text rather than an empty string.
+	it("answers from the stream when a turn produces one message and no tool call", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob());
+
+		expect(run.output.text).toBe("Hello from the isolate");
+	}, 120_000);
+
+	// R9: retrieval evidence has to be summarised in the GUEST, from the result
+	// as the tool returned it. The trace's `output` is clipped for display, so a
+	// retrieval body over that cap parses to nothing — the host cannot re-derive
+	// this, and the promptfoo provider builds `retrievedContext` from it alone.
+	it("summarises retrieval evidence from the unclipped result, past the display cap", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_01", name: "search_memory", input: { query: "deploy" } }];
+		// Deliberately larger than TOOL_EVENT_OUTPUT_CHARS: the clipped `output`
+		// is unparseable JSON, which is the whole reason the summary is built
+		// before the clip.
+		const filler = "x".repeat(2_500);
+		toolReply = {
+			status: 200,
+			body: {
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({
+							content: [
+								{ id: 41, text_content: `frozen until Friday ${filler}` },
+								{ id: 42, text_content: "ask the platform team" },
+							],
+						}),
+					},
+				],
+			},
+		};
+		armFirstDeltaGate();
+		const run = await runTurn(
+			toolJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [
+						{
+							mcpId: "lobu-memory",
+							name: "search_memory",
+							description: "Search past messages and saved knowledge.",
+							inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+						},
+					],
+				},
+			}),
+		);
+
+		// The gateway renders a tool result as markdown unless the caller asks
+		// for JSON, and markdown parses to no summary at all — so the ask is
+		// what makes the JSON body above realistic, and its absence is why the
+		// summary was never produced in production.
+		expect(hits.find((h) => h.url.endsWith("/tools/search_memory"))?.mcpFormat).toBe("json");
+		const end = run.events.find((e) => e.type === "tool_call_end") as
+			| { output: string; resultSummary?: { event_ids?: number[]; snippets?: Array<{ id: number; text: string }> } }
+			| undefined;
+		// The display output IS clipped — proving the summary could not have been
+		// parsed back out of it.
+		expect(end?.output.endsWith("…")).toBe(true);
+		expect(() => JSON.parse(end?.output ?? "")).toThrow();
+		// ...and the evidence survives anyway, both ids and their text.
+		expect(end?.resultSummary?.event_ids).toEqual([41, 42]);
+		expect(end?.resultSummary?.snippets?.map((s) => s.id)).toEqual([41, 42]);
+		expect(end?.resultSummary?.snippets?.[0]?.text).toContain("frozen until Friday");
 	}, 120_000);
 
 	it("hands a refused tool call to the model as an error result and lets the turn finish", async () => {
@@ -482,8 +840,1412 @@ describe("agent turn on the isolate lane", () => {
 			["read", false, "hello\n"],
 			["find", false, "notes.txt"],
 		]);
-		const roles = run.output.messages.map((m) => (m as { role: string }).role);
+		const roles = sessionMessages(run.output).map((m) => (m as { role: string }).role);
 		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult", "assistant"]);
+	}, 120_000);
+
+	it("seeds a non-image attachment into input/ so the agent can read its bytes", async () => {
+		hits = [];
+		const csv = "region,revenue\nemea,4200\napac,3100\n";
+		toolScript = [
+			{ id: "toolu_s1", name: "read", input: { file_path: "/workspace/input/folder\\report.csv" } },
+			{ id: "toolu_s2", name: "bash", input: { command: "wc -l < '/workspace/input/folder\\report.csv'" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				files: [
+					{
+						name: "folder\\report.csv",
+						mimeType: "text/csv",
+						size: Buffer.byteLength(csv),
+						data: Buffer.from(csv).toString("base64"),
+					},
+				],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash", "read", "ls"],
+					bashPolicy: { allowAll: false, allowPrefixes: [], denyPrefixes: ["rm "] },
+				},
+			}),
+		);
+
+		// The bytes were there before the model ran, and they are the SAME bytes.
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{
+			name: string;
+			isError: boolean;
+			output: string;
+		}>;
+		expect(ends.map((e) => [e.name, e.isError, e.output])).toEqual([
+			["read", false, csv],
+			["bash", false, "3\n"],
+		]);
+		// Nothing was fetched to get them: no attachment URL crosses into the guest.
+		expect(hits.every((h) => h.url === "/v1/messages")).toBe(true);
+		// And the model was told where to look.
+		const first = JSON.parse(hits[0]?.body ?? "{}") as { messages?: Array<{ content?: unknown }> };
+		expect(JSON.stringify(first.messages)).toContain("/workspace/input/folder\\\\report.csv");
+	}, 120_000);
+
+	it("seeds an enabled skill as .skills/<name>/SKILL.md", async () => {
+		hits = [];
+		const body = "# Triage\n\nAlways label the issue before replying.\n";
+		toolScript = [
+			{ id: "toolu_k1", name: "read", input: { file_path: "/workspace/.skills/triage/SKILL.md" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				skills: [{ name: "triage", content: body }],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["read", "ls"],
+				},
+			}),
+		);
+
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{
+			name: string;
+			isError: boolean;
+			output: string;
+		}>;
+		expect(ends.map((e) => [e.name, e.isError, e.output])).toEqual([["read", false, body]]);
+	}, 120_000);
+
+	it("names an unresolvable attachment without claiming it can be opened", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// No `data`: the gateway could not resolve the bytes.
+		await runTurn(
+			turnJob({
+				files: [{ name: "missing.pdf", mimeType: "application/pdf" }],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["read"],
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("missing.pdf");
+		expect(sent).toContain("could not be retrieved");
+		// It must NOT be advertised as a readable workspace path.
+		expect(sent).not.toContain("/workspace/input/missing.pdf");
+	}, 120_000);
+
+	it("does not offer a workspace path when the turn carries no tool that can read one", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const csv = "a,b\n1,2\n";
+		// Bytes ARE resolved, but the turn admits no `read` and no `bash`, so
+		// there is nothing that could open the file. Naming a path here would
+		// send the model after a tool it was never given.
+		await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [
+					{
+						name: "report.csv",
+						mimeType: "text/csv",
+						data: Buffer.from(csv).toString("base64"),
+					},
+				],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					bashPolicy: { allowAll: false, allowPrefixes: ["git "], denyPrefixes: [] },
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("report.csv");
+		expect(sent).toContain("cannot open");
+		expect(sent).not.toContain("/workspace/input/report.csv");
+	}, 120_000);
+
+	it("does not offer locally seeded files to a turn whose only bash runs remotely", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const csv = "a,b\n1,2\n";
+		await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [{
+					name: "report.csv",
+					mimeType: "text/csv",
+					data: Buffer.from(csv).toString("base64"),
+				}],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async () => ({ status: 200, stdout: "", exitCode: 0 }),
+			},
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("report.csv");
+		expect(sent).toContain("cannot open");
+		expect(sent).not.toContain("/workspace/input/report.csv");
+	}, 120_000);
+
+	it("does not offer a workspace path when bash is present but its policy forbids reading", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// `bash` IS admitted, so a tool-name check would call this readable. But
+		// the allowlist admits only `echo`, so no seeded file can actually be
+		// opened, and the prompt must not claim otherwise.
+		await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [
+					{
+						name: "report.csv",
+						mimeType: "text/csv",
+						data: Buffer.from("a,b\n1,2\n").toString("base64"),
+					},
+				],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					bashPolicy: { allowAll: false, allowPrefixes: ["echo "], denyPrefixes: [] },
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("report.csv");
+		expect(sent).toContain("cannot open");
+		expect(sent).not.toContain("/workspace/input/report.csv");
+	}, 120_000);
+
+	it("retains a valid UTF-8 tail inside the isolate when a bash line exceeds 50 KiB", async () => {
+		hits = [];
+		toolScript = [
+			{ id: "toolu_large_write", name: "write", input: { file_path: "large.txt", content: "€".repeat(18000) } },
+			{ id: "toolu_large_bash", name: "bash", input: { command: "cat large.txt" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob({ tools: {
+			gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [], builtin: ["write", "bash"],
+		} }));
+		const end = run.events.find((event) => event.type === "tool_call_end" && event.name === "bash") as
+			| { isError: boolean; output: string } | undefined;
+		expect(end?.isError).toBe(false);
+		// Progress events are intentionally abbreviated; the native journal holds
+		// the full tool result that Pi sends back to the provider.
+		const result = sessionMessages(run.output).find((message) => message.role === "toolResult" && message.toolName === "bash");
+		const output = result?.role === "toolResult" ? result.content.map((part) => part.type === "text" ? part.text : "").join("") : "";
+		const [tail, notice] = output.split("\n\n");
+		expect(tail.length).toBe(Math.floor(51200 / 3));
+		expect(new Set(tail)).toEqual(new Set(["€"]));
+		expect(notice).toBe("[Showing lines 1-1 of 1 (50.0KB limit)]");
+		expect(hits.map((hit) => hit.url)).toEqual(["/v1/messages", "/v1/messages", "/v1/messages"]);
+	}, 120_000);
+
+	/** A turn carrying the conversation plugin's tools, addressed at one conversation. */
+	function gatewayToolJob(gateway: string[], overrides: Partial<AgentTurnInput> = {}): ExecutorJob {
+		return turnJob({
+			tools: {
+				gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+				definitions: [],
+				gateway: gateway as never,
+				conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+			},
+			...overrides,
+		});
+	}
+
+	it("runs the conversation plugin's own tools in the guest, on the same route and the same one credential", async () => {
+		hits = [];
+		internalReply = { status: 200, body: { success: true } };
+		toolScript = [
+			{
+				id: "toolu_s1",
+				name: "suggest_actions",
+				input: { prompts: [{ title: "Next", message: "What should I do next?" }] },
+			},
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["suggest_actions", "send_message"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The model was offered exactly the two the producer named, with the
+		// descriptions the plugin package ships — not a copy written here. The
+		// ORDER is the plugin's own declaration order, not the producer's
+		// request order: the guest selects out of `createConversationTools`
+		// rather than rebuilding the list, which is what keeps one tool set.
+		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string; description: string }> };
+		expect(offered.tools?.map((t) => t.name)).toEqual(["send_message", "suggest_actions"]);
+		expect(offered.tools?.find((t) => t.name === "suggest_actions")?.description).toContain("chip");
+
+		// The call went to the gateway's own internal route — the plugin's route,
+		// not the MCP proxy's — under the same bearer the provider hop resolves.
+		expect(hits.map((h) => `${h.method} ${h.url}`)).toEqual([
+			"POST /v1/messages",
+			"POST /lobu/internal/suggestions/create",
+			"POST /v1/messages",
+		]);
+		expect(hits[1]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
+		expect(JSON.parse(hits[1]?.body ?? "{}")).toEqual({
+			prompts: [{ title: "Next", message: "What should I do next?" }],
+		});
+
+		// And the model got the plugin's own result prose back.
+		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean; output: string } | undefined;
+		expect(end?.isError).toBe(false);
+		expect(end?.output).toContain("Posted 1 suggested action(s)");
+	}, 120_000);
+
+	it("reports an in-band reply, so the terminal delivery is not the same answer twice", async () => {
+		hits = [];
+		// The gateway's send route matched the target against this run's own
+		// conversation, so it says the post landed IN BAND. On the subprocess lane
+		// this is what sets `repliedInBand` and suppresses the terminal reply; the
+		// isolate lane must reach the same place through the same plugin hook.
+		internalReply = { status: 200, body: { messageId: "m_inband", deliveredInBand: true } };
+		toolScript = [
+			{ id: "toolu_ib1", name: "send_message", input: { target: "conv_test", text: "Here is the summary." } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["send_message"]));
+
+		expect(hits[1]?.url).toBe("/lobu/internal/conversations/send");
+		// The guest carries the plugin's own signal out on the turn result, which
+		// is what the completion route stamps onto the terminal thread_response.
+		expect(run.output.repliedInBand).toBe(true);
+		// And the model is told not to repeat it, by the plugin's own prose.
+		const end = run.events.find((e) => e.type === "tool_call_end") as { output: string } | undefined;
+		expect(end?.output).toContain("This in-band post is your reply for the turn");
+	}, 120_000);
+
+	it("leaves an out-of-band send unmarked, so a normal reply is still delivered", async () => {
+		hits = [];
+		// A post into a DIFFERENT conversation: the user reading THIS thread has
+		// not seen it, so the terminal reply must still arrive.
+		internalReply = { status: 200, body: { messageId: "m_other", deliveredInBand: false } };
+		toolScript = [
+			{ id: "toolu_ib2", name: "send_message", input: { target: "some_other_thread", text: "FYI" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["send_message"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.output.repliedInBand).toBeUndefined();
+	}, 120_000);
+
+	it("ends the turn when the model asks the user a question", async () => {
+		hits = [];
+		internalReply = { status: 200, body: { id: "int_ask" } };
+		// The model tries to keep working after asking. It must not get to.
+		toolScript = [
+			{ id: "toolu_a1", name: "ask_user", input: { question: "Which one?", options: ["A", "B"] } },
+			{ id: "toolu_a2", name: "suggest_actions", input: { prompts: [{ title: "T", message: "M" }] } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["ask_user", "suggest_actions"]));
+
+		expect(hits[1]?.url).toBe("/lobu/internal/interactions/create");
+		expect(JSON.parse(hits[1]?.body ?? "{}")).toEqual({
+			interactionType: "question",
+			question: "Which one?",
+			options: ["A", "B"],
+		});
+
+		// The second tool call was refused rather than run: no second internal hit.
+		expect(hits.filter((h) => h.url.startsWith("/lobu/internal/")).length).toBe(1);
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{ name: string; isError: boolean; output: string }>;
+		expect(ends[0]?.name).toBe("ask_user");
+		expect(ends[0]?.output).toContain("Your turn is now ending");
+		expect(ends[1]?.isError).toBe(true);
+		expect(ends[1]?.output).toContain("already asked the user a question");
+
+		// The tool refusal is NOT the stop: Pi returns `{block:true}` to the
+		// model as a tool error and asks it again, so this test passed while
+		// the turn kept generating and could ANSWER the question it had just
+		// asked — the user saw a question and an answer to it in one turn.
+		//
+		// Asserted on the outcome rather than a provider-call count: the guard
+		// aborts mid-batch, so the next request is issued and then cancelled
+		// by its own signal. It reaches this in-process mock (which records on
+		// arrival) but yields nothing, which is the point.
+		expect(run.output.stopReason).toBe("aborted");
+		expect(run.output.text).toBe("");
+		// And a deliberate stop is not a FAILED turn — Pi records every abort
+		// as a run failure, so an unsuppressed one would throw here instead.
+		// The blocked sibling is still in the ledger: it was ATTEMPTED, which
+		// is what the retired lane recorded too (it never filtered `isError`).
+		expect(run.output.toolsUsed).toEqual(["ask_user", "suggest_actions"]);
+	}, 120_000);
+
+	it("stops the turn when the tool-call budget is spent, not just refuses", async () => {
+		// The budget branch of the same guard `ask_user` exercises. It had no
+		// coverage, and a refusal-only guard let the model keep asking: every
+		// block came back as a tool error and produced another provider request.
+		hits = [];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "4" }] } };
+		// One more call than the budget allows. The constant is imported, not
+		// restated: a duplicated literal keeps passing after the budget changes.
+		toolScript = Array.from({ length: MAX_TOOL_CALLS_PER_TURN + 1 }, (_v, i) => ({
+			id: `toolu_bud${i}`,
+			name: "query_sdk",
+			input: { code: "entities.count()" },
+			// The model says something before the call that trips the guard.
+			...(i === MAX_TOOL_CALLS_PER_TURN ? { narration: "Still counting; one more query." } : {}),
+		}));
+		armFirstDeltaGate();
+		const run = await runTurn(toolJob());
+
+		// Exactly the allowed calls ran; the one past the ceiling was refused.
+		const ran = run.events.filter(
+			(e) => e.type === "tool_call_end" && !(e as { isError?: boolean }).isError,
+		);
+		expect(ran).toHaveLength(MAX_TOOL_CALLS_PER_TURN);
+		// And the guard STOPPED the turn rather than looping on refusals.
+		expect(run.output.stopReason).toBe("aborted");
+		// The abort ends the turn on an EMPTY assistant message. That message is
+		// not the answer: the text the model had settled before the guard fired
+		// is what the user gets, not "" — which Slack posts as nothing at all.
+		expect(run.output.text).toBe("Still counting; one more query.");
+	}, 240_000);
+
+	it("reports every tool it called, so requireTool can actually enforce", async () => {
+		hits = [];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "4" }] } };
+		toolScript = [{ id: "toolu_c1", name: "query_sdk", input: { code: "entities.count()" } }];
+		armFirstDeltaGate();
+		const run = await runTurn(toolJob());
+
+		// The `requireTool` output guardrail PASSES on an absent ledger (it
+		// cannot prove a miss), so an unreported ledger silently disabled it.
+		expect(run.output.toolsUsed).toEqual(["query_sdk"]);
+	}, 120_000);
+
+	it("reports an EMPTY ledger for a turn that called nothing", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob());
+
+		// `[]` and absent are different answers: absent passes the guardrail,
+		// empty trips it when a tool was required. This is the case that has
+		// to be reported, not omitted.
+		expect(run.output.toolsUsed).toEqual([]);
+	}, 120_000);
+
+	it("hands a failed gateway tool to the model as text and lets the turn finish", async () => {
+		hits = [];
+		internalReply = { status: 500, body: { error: "interaction service unavailable" } };
+		toolScript = [{ id: "toolu_a3", name: "ask_user", input: { question: "Which one?", options: ["A"] } }];
+		armFirstDeltaGate();
+		const run = await runTurn(gatewayToolJob(["ask_user"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The plugin answers a failure as an ordinary text result, so the turn
+		// continues and is NOT ended by an ask_user that never posted.
+		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean; output: string } | undefined;
+		expect(end?.output).toContain("interaction service unavailable");
+	}, 120_000);
+
+	it("puts an image attachment on the wire as the provider's own image block", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				userMessage: "what is in this?",
+				provider: {
+					api: "anthropic-messages",
+					provider: "anthropic",
+					modelId: "claude-test",
+					baseUrl: `http://127.0.0.1:${port}`,
+					maxTokens: 64,
+					// pi-ai's own `Model.input`, resolved by the gateway from its
+					// model registry. Without "image" pi downgrades the block.
+					input: ["text", "image"],
+				},
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
+		};
+		// `cache_control` is the adapter's own prompt-caching stamp on the last
+		// block; the shape under test is the text-then-image pair.
+		expect(sent.messages[0]?.content).toMatchObject([
+			{ type: "text", text: "what is in this?" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG_BASE64 } },
+		]);
+	}, 120_000);
+
+	it("sends an attachment-only turn as a valid request: an image block and no empty text block", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				// What the composer produces when the user uploads and says nothing.
+				userMessage: "",
+				provider: {
+					api: "anthropic-messages",
+					provider: "anthropic",
+					modelId: "claude-test",
+					baseUrl: `http://127.0.0.1:${port}`,
+					maxTokens: 64,
+					input: ["text", "image"],
+				},
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
+		};
+		const content = sent.messages[0]?.content ?? [];
+		// pi-ai's Anthropic adapter supplies the placeholder an image-only user
+		// turn needs. What must NOT be there is an EMPTY text block, which is
+		// what `Agent.prompt(text, images)` would have produced and which the
+		// provider rejects with a 400.
+		expect(content.some((block) => block.type === "text" && block.text === "")).toBe(false);
+		expect(content.filter((block) => block.type === "image")).toMatchObject([
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG_BASE64 } },
+		]);
+		// The whole user turn is the image, and that is a valid request: Lobu
+		// invents no prose the user never wrote.
+		expect(content.length).toBe(1);
+	}, 120_000);
+
+	it("sends no image to a model whose declared modalities do not include one", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				userMessage: "what is in this?",
+				// The lane's default when the gateway resolved no modalities: text
+				// only. `input` is deliberately omitted here rather than set to
+				// ["text"], so the guest's own default is what is under test.
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ role: string; content: unknown }>;
+		};
+		const body = hits.at(-1)?.body ?? "";
+		// pi replaces the block with its own placeholder before the request is
+		// built, so the bytes never leave the isolate.
+		expect(body).not.toContain(PNG_BASE64);
+		expect(JSON.stringify(sent.messages[0]?.content)).toContain("model does not support images");
+	}, 120_000);
+
+	it("names an attachment whose bytes the gateway could not resolve, without offering a path", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				userMessage: "summarize this",
+				files: [{ name: "report.pdf", mimeType: "application/pdf", size: 2048 }],
+			}),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const sent = JSON.parse(hits.at(-1)?.body ?? "{}") as {
+			messages: Array<{ content: Array<Record<string, unknown>> }>;
+		};
+		// No `data` on the wire means the gateway could not resolve the bytes, so
+		// nothing was seeded. The file is still NAMED — a model told nothing
+		// about an attachment answers as though the message were bare text — but
+		// it is not advertised at a workspace path it would fail to read.
+		expect(sent.messages[0]?.content).toMatchObject([
+			{
+				type: "text",
+				text:
+					"The user also attached 1 file(s) whose contents could not be retrieved, "
+					+ "so this turn cannot open them:\n- report.pdf (application/pdf)\n\n",
+			},
+			{ type: "text", text: "summarize this" },
+		]);
+		expect(sessionMessages(run.output)[0]).toMatchObject({ content: [{ type: "text", text: "summarize this" }] });
+	}, 120_000);
+
+	it("fails a turn that reached the guest with neither text nor a readable attachment", async () => {
+		hits = [];
+		toolScript = [];
+		const { error } = await failTurn(turnJob({ userMessage: "" }), ["127.0.0.1"]);
+
+		expect(error.message).toContain("neither text nor a readable attachment");
+		// It never reached the provider, so no invalid request was ever made.
+		expect(hits.length).toBe(0);
+	}, 120_000);
+
+	// ---------------------------------------------------------------------
+	// lobu-memory: the plugin's two hooks, on this lane
+	// ---------------------------------------------------------------------
+
+	/** A turn that recalls and captures, addressed at the fake memory server. */
+	function memoryJob(overrides: Partial<AgentTurnInput> = {}): ExecutorJob {
+		return turnJob({
+			userMessage: "what did we decide about pricing?",
+			tools: {
+				gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+				definitions: [],
+				conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+			},
+			memory: { mcpId: MEMORY_MCP_ID, agentId: "agent-under-test" },
+			...overrides,
+		});
+	}
+
+	it("steers: a follow-up the host parked reaches pi between model calls, as the user's own message", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s1", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		const run = await runTurn(toolJob(), ["127.0.0.1"], {
+			// The first ask — after the tool result — finds the follow-up; later asks find nothing.
+			takeSteering: () => (asked++ === 0 ? [{ runId: 2, messageId: "m-2", text: "also check companies" }] : []),
+		});
+		expect(asked).toBeGreaterThan(0);
+		// The model saw the follow-up as a user message in a later request, after
+		// the tool result it was drained behind.
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+		expect(requests.length).toBeGreaterThanOrEqual(2);
+		expect(requests[0]).not.toContain("also check companies");
+		expect(requests.some((body) => body.includes("also check companies"))).toBe(true);
+		// And it is in the transcript the next turn resumes from, as pi wrote it.
+		const steered = sessionMessages(run.output).find(
+			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
+		);
+		expect(steered).toBeDefined();
+		const receipts = (run.output as { consumedInputs: Array<{ runId: number; sessionEntryId: string }>; sessionJsonl: string });
+		expect(receipts.consumedInputs).toHaveLength(1);
+		expect(receipts.consumedInputs[0].runId).toBe(2);
+		const entry = receipts.sessionJsonl.trim().split('\n').map((line) => JSON.parse(line))
+			.find((entry) => entry.id === receipts.consumedInputs[0].sessionEntryId);
+		expect(entry.message).toEqual(steered);
+	}, 120_000);
+
+	/**
+	 * The delivery half of per-message transient context.
+	 *
+	 * A steered follow-up carries its own block (the API's live attention
+	 * digest, an automation's instructions). It must reach the model BESIDE
+	 * THAT MESSAGE — not the turn opener's, and not folded into the follow-up's
+	 * text, which would make a one-turn hint permanent history on every later
+	 * replay of that message.
+	 */
+	it("steers: a follow-up's own transient context reaches the model beside its message", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s2", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		const run = await runTurn(
+			toolJob({ ephemeralContext: "OPENER-CONTEXT-attention-run-1" }),
+			["127.0.0.1"],
+			{
+				takeSteering: () =>
+					asked++ === 0
+						? [{
+								runId: 2,
+								messageId: "m-2",
+								text: "also check companies",
+								ephemeralContext: "FOLLOWER-CONTEXT-attention-run-2",
+							}]
+						: [],
+			},
+		);
+		expect(asked).toBeGreaterThan(0);
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+		const withFollower = requests.find((body) => body.includes("also check companies"));
+		expect(withFollower).toBeDefined();
+		// The follower's own block travels with it.
+		expect(withFollower).toContain("FOLLOWER-CONTEXT-attention-run-2");
+
+		// And it is TRANSIENT: the durable session entry carries the follow-up's
+		// text only, so a later turn replaying this message does not inherit a
+		// one-turn hint as permanent history.
+		const steered = sessionMessages(run.output).find(
+			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
+		);
+		expect(steered).toBeDefined();
+		expect(JSON.stringify(steered)).not.toContain("FOLLOWER-CONTEXT-attention-run-2");
+
+		// And the OPENER's block does not ride along. The context extension
+		// prepends to whichever user message is newest, so a per-turn fallback
+		// would re-attach the opener's attention digest to every later message.
+		expect(withFollower).not.toContain("OPENER-CONTEXT-attention-run-1");
+	}, 120_000);
+
+	it("sends a caption-less upload its file description and context", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The file-only path: an upload with no caption. The producer admits this
+		// whenever attachments resolve (`!messageText && files.length > 0` is NOT
+		// a skip), so `userMessage` is legitimately `''` here. Its context is the
+		// model's only account of what it was sent, and because per-message
+		// context is keyed by message text, `''` has to be a real key rather than
+		// a stand-in for "no text at all".
+		await runTurn(
+			turnJob({
+				userMessage: "",
+				ephemeralContext: "CAPTIONLESS-CONTEXT-digest",
+				files: [{ name: "report.pdf", mimeType: "application/pdf" }],
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["read"],
+				},
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("CAPTIONLESS-CONTEXT-digest");
+		// And the file is named, so the model can ask to read it.
+		expect(sent).toContain("report.pdf");
+	}, 120_000);
+
+	it("sends a caption-less image its context too", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The other half of the producer's admission rule: it admits an
+		// empty-text message when EITHER files or images resolve, so the image
+		// path reaches the same empty-text key and needs the same guarantee.
+		await runTurn(
+			turnJob({
+				userMessage: "",
+				ephemeralContext: "CAPTIONLESS-IMAGE-digest",
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("CAPTIONLESS-IMAGE-digest");
+		expect(sent).toContain("image");
+	}, 120_000);
+
+	it("steers: a follow-up with no context of its own is answered with none", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s3", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		await runTurn(
+			toolJob({ ephemeralContext: "OPENER-ONLY-attention-digest" }),
+			["127.0.0.1"],
+			{
+				// A bare follow-up: the caller attached no `ephemeralContext`.
+				takeSteering: () =>
+					asked++ === 0
+						? [{ runId: 2, messageId: "m-2", text: "also check companies" }]
+						: [],
+			},
+		);
+		expect(asked).toBeGreaterThan(0);
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+
+		// The opener still gets its own block — the fix must not withhold it.
+		expect(requests[0]).toContain("OPENER-ONLY-attention-digest");
+
+		// The follow-up gets nothing, because it brought nothing. Inheriting the
+		// opener's would mean a stale attention digest presented as current, and
+		// a prompt-cache prefix that changes on every call.
+		const withFollower = requests.find((body) => body.includes("also check companies"));
+		expect(withFollower).toBeDefined();
+		expect(withFollower).not.toContain("OPENER-ONLY-attention-digest");
+	}, 120_000);
+
+	it("runs bash in the remote runtime through the host when the conversation is sandbox-pinned", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_r1", name: "bash", input: { command: "uname -a" } }];
+		armFirstDeltaGate();
+		const execs: Array<{ command: string; timeoutMs?: number }> = [];
+		const run = await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash", "read"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async (request) => {
+					execs.push(request);
+					return { status: 200, stdout: "Linux sandbox 6.1\n", exitCode: 0 };
+				},
+			},
+		);
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The command went to the host, not to the in-memory shell.
+		expect(execs).toEqual([{ command: "uname -a" }]);
+		// And the model saw the sandbox's answer as the tool result.
+		const second = hits.filter((h) => h.url === "/v1/messages")[1];
+		expect(second?.body).toContain("Linux sandbox 6.1");
+		// The guest itself dialled nothing but the provider: no exec route call of its own.
+		expect(hits.some((h) => h.url.includes("/internal/runtime/exec"))).toBe(false);
+	}, 120_000);
+
+	it("tells the model when the SANDBOX failed rather than the command", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_r2", name: "bash", input: { command: "ls" } }];
+		armFirstDeltaGate();
+		await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"],
+					remoteRuntime: { providerId: "vercel" },
+				},
+			}),
+			["127.0.0.1"],
+			{
+				onRuntimeExec: async () => ({
+					status: 503,
+					error: "sandbox is provisioning",
+					kind: "infrastructure",
+					outcome: "not_started",
+					retryable: true,
+				}),
+			},
+		);
+		const second = hits.filter((h) => h.url === "/v1/messages")[1];
+		expect(second?.body).toContain("sandbox runtime error");
+		expect(second?.body).toContain("your command did not run");
+		expect(second?.body).toContain("Command exited with code 126");
+	}, 120_000);
+
+	it("compacts after answering when the context has outgrown the window, with pi's own prompts", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The fake model reports 11 in + 7 out = 18 tokens; a 20-token window with a
+		// 5-token reserve is therefore over the line the moment the turn ends.
+		const run = await runTurn(
+			turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }),
+		);
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		const entries = sessionEntries(run.output);
+		const compaction = entries.find((entry) => entry.type === "compaction");
+		expect(compaction).toBeDefined();
+		expect(compaction?.tokensBefore).toBe(18);
+		expect(entries.some((entry) => entry.id === compaction?.firstKeptEntryId)).toBe(true);
+		// The summary came from the model, asked with pi's summarisation prompt on
+		// the same route and the same credential as the turn itself.
+		expect(compaction?.summary).toContain("Hello from the isolate");
+		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
+		expect(providerCalls.length).toBeGreaterThanOrEqual(2);
+		const summarization = providerCalls.find((h) => h.body.includes("context summarization assistant"));
+		expect(summarization).toBeDefined();
+		expect(summarization?.body).toContain("<conversation>");
+		expect(summarization?.body).toContain("Do NOT continue the conversation");
+		// The turn's own answer was streamed; the summary was not.
+		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+	}, 120_000);
+
+	it("waits for a delayed native summary before returning the snapshot", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		let summaryFinished = false;
+		providerScript = (body, res) => {
+			if (body.includes("context summarization assistant")) {
+				setTimeout(() => {
+					summaryFinished = true;
+					void writeAnthropicStream(res, ["delayed native summary"]);
+				}, 150);
+			} else if (body.includes("remember this input")) void writeAnthropicStream(res, ["steered answer"]);
+			else void writeAnthropicStream(res, ["main answer"]);
+		};
+		let offered = false;
+		const run = await runTurn(turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }), ['127.0.0.1'], {
+			takeSteering: () => { if (offered) return []; offered = true; return [{ runId: 7, messageId: 'compacted-input', text: 'remember this input' }]; },
+		});
+		expect(summaryFinished).toBe(true);
+		expect(sessionEntries(run.output).at(-1)).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
+		// TWO user messages are answered here (the steered input queues a
+		// second round), and the host delivers `text` ONCE — to Slack at
+		// completion, and to history. Both answers have to be in it: taking the
+		// newest message alone dropped the first answer from both, and the
+		// earlier version of this assertion could not tell, because both rounds
+		// answered with the same words.
+		expect(run.output.text).toBe("main answer\n\nsteered answer");
+		expect(run.output.consumedInputs).toHaveLength(1);
+		expect(run.output.consumedInputs[0].runId).toBe(7);
+		expect(sessionEntries(run.output).find((entry) => entry.id === run.output.consumedInputs[0].sessionEntryId))
+			.toMatchObject({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'remember this input' }] } });
+	}, 120_000);
+
+	it("resumes native compaction and custom entries without changing their IDs", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const first = await runTurn(turnJob({ userMessage: "original history ".repeat(100),
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		const original = sessionEntries(first.output);
+		expect(original.at(-1)?.type).toBe("compaction");
+		const custom = { type: "custom", id: "synthetic-custom", parentId: original.at(-1)!.id,
+			timestamp: new Date(0).toISOString(), customType: "synthetic.state", data: { preserved: true } };
+		const snapshot = first.output.sessionJsonl + JSON.stringify(custom) + "\n";
+		hits = [];
+		const second = await runTurn(turnJob({ sessionJsonl: snapshot, userMessage: "continue" }));
+		expect(sessionEntries(second.output).slice(0, original.length + 1)).toEqual([...original, custom]);
+		expect(hits[0]?.body).toContain("Hello from the isolate");
+		expect(hits[0]?.body).toContain("summary");
+	}, 120_000);
+
+	it("waits across Pi's delayed overflow continuation and returns the recovered answer", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const first = await runTurn(turnJob({ userMessage: "saved context ".repeat(300) }));
+		let ordinaryCalls = 0;
+		providerScript = (body, res) => {
+			if (body.includes("context summarization assistant")) {
+				void writeAnthropicStream(res, ["overflow summary"]);
+			} else if (ordinaryCalls++ === 0) {
+				writeAnthropicError(res, "prompt is too long: 300000 tokens > 200000 maximum");
+			} else void writeAnthropicStream(res, ["recovered answer"]);
+		};
+		const run = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "overflow context ".repeat(200),
+			compaction: { enabled: true, contextWindow: 200_000, reserveTokens: 256, keepRecentTokens: 32 } }));
+		expect(ordinaryCalls).toBe(2);
+		expect(run.output.text).toBe("recovered answer");
+		expect(run.output.stopReason).toBe("stop");
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(true);
+		expect(sessionMessages(run.output).at(-1)).toMatchObject({ role: "assistant", content: [{ type: "text", text: "recovered answer" }] });
+	}, 120_000);
+
+	it("lets native Pi retry a transient stream error before completing", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		let calls = 0;
+		providerScript = (_body, res) => {
+			if (calls++ === 0) writeAnthropicError(res, "503 service unavailable");
+			else void writeAnthropicStream(res, ["retry recovered"]);
+		};
+		const run = await runTurn(turnJob());
+		expect(calls).toBe(2);
+		expect(run.output.text).toBe("retry recovered");
+		expect(sessionMessages(run.output).at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	}, 120_000);
+
+	it("keeps the original native history when summarization fails", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const first = await runTurn(turnJob({ userMessage: "saved context ".repeat(100) }));
+		providerScript = (body, res) => {
+			if (body.includes("context summarization assistant")) writeAnthropicError(res, "synthetic summary rejected");
+			else void writeAnthropicStream(res, ["answer survives"]);
+		};
+		const run = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "continue",
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		expect(run.output.text).toBe("answer survives");
+		expect(sessionEntries(run.output).slice(0, sessionEntries(first.output).length)).toEqual(sessionEntries(first.output));
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(false);
+	}, 120_000);
+
+	it("lets original Pi migrate an older native session version on restore", async () => {
+		hits = [];
+		toolScript = [];
+		sawFirstDelta = Promise.resolve();
+		const entry = { type: "message", id: "synthetic-old-user", parentId: null, timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "original older session", timestamp: 0 } };
+		const run = await runTurn(turnJob({ sessionJsonl: savedSession([entry]).replace('"version":3', '"version":2') }));
+		expect(JSON.parse(run.output.sessionJsonl.split("\n")[0]!)).toMatchObject({ type: "session", version: 3 });
+		expect(sessionEntries(run.output)[0]).toEqual(entry);
+		expect(hits[0]?.body).toContain("original older session");
+	});
+
+	it("rejects malformed restored JSONL instead of silently losing history", async () => {
+		sawFirstDelta = Promise.resolve();
+		const { error } = await failTurn(turnJob({ sessionJsonl: savedSession([]) + "broken JSON\n" }), ["127.0.0.1"]);
+		expect(error.message).toMatch(/JSON|Unexpected/);
+	});
+
+	it("does not compact a turn that fits", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({ compaction: { enabled: true, contextWindow: 200_000, reserveTokens: 16_384, keepRecentTokens: 20_000 } }),
+		);
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(false);
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+	}, 120_000);
+
+	it("runs the memory flush silently before a prompt that would land near compaction", async () => {
+		hits = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		toolScript = [];
+		// No first-delta gate here: the flush's reply is deliberately never
+		// streamed to the host, so a fake stream waiting on a delta would hang.
+		const run = await runTurn(
+			turnJob({
+				memory: { mcpId: "lobu", agentId: "agent-test" },
+				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+				// Any prompt is "near compaction" against a zero threshold.
+				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
+				memoryFlush: {
+					enabled: true,
+					softThresholdTokens: 1_000,
+					systemPrompt: "Session nearing compaction. Store durable memories now.",
+					prompt: "Write any lasting notes to memory. Reply with NO_REPLY if nothing to store.",
+				},
+			}),
+		);
+
+		// Two model rounds: the flush, then the human's turn. Only the second is
+		// the answer, and only the second streamed.
+		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
+		expect(providerCalls).toHaveLength(2);
+		expect(providerCalls[0]?.body).toContain("Store durable memories now");
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+		// Pi persists the flush cycle as a native custom entry after its exchange.
+		expect(sessionEntries(run.output).find((entry) => entry.type === "custom")).toMatchObject({
+			customType: "lobu.memory_flush_state", data: { outcome: "stored", compactionCount: 0 },
+		});
+		expect(sessionMessages(run.output)).toHaveLength(4);
+		expect((sessionMessages(run.output)[0] as { role: string }).role).toBe("user");
+		expect(JSON.stringify(sessionMessages(run.output)[0])).toContain("Store durable memories now");
+		// The human's own entry is their text, not the prompt the guest composed.
+		expect(sessionMessages(run.output)[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "hi" }] });
+	}, 120_000);
+
+	it("captures the original exchange even when native compaction removes its user from model context", async () => {
+		hits = [];
+		toolScript = [];
+		memoryCalls = [];
+		sawFirstDelta = Promise.resolve();
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		const run = await runTurn(turnJob({
+			userMessage: "Remember this original user request",
+			memory: { mcpId: "lobu", agentId: "agent-test" },
+			tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 0 },
+		}));
+		expect(sessionEntries(run.output).at(-1)?.type).toBe("compaction");
+		const captures = memoryCalls.filter((call) => call.tool === "save_memory");
+		expect(captures).toHaveLength(1);
+		expect(captures[0]?.body.content).toBe("User: Remember this original user request\nAssistant: Hello from the isolate");
+	}, 120_000);
+
+	it("skips the flush when this compaction cycle already flushed", async () => {
+		const flushed = { type: "custom", id: "synthetic-flush", parentId: null, timestamp: new Date(0).toISOString(),
+			customType: "lobu.memory_flush_state", data: { outcome: "stored", compactionCount: 0 } };
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				memory: { mcpId: "lobu", agentId: "agent-test" },
+				tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
+				compaction: { enabled: true, contextWindow: 1_000, reserveTokens: 0, keepRecentTokens: 500 },
+				sessionJsonl: savedSession([flushed]),
+				memoryFlush: { enabled: true, softThresholdTokens: 1_000, systemPrompt: "s", prompt: "p" },
+			}),
+		);
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+		expect(sessionEntries(run.output).filter((entry) => entry.type === "custom")).toEqual([flushed]);
+	}, 120_000);
+
+	it("recalls memory before the model runs and injects the plugin's own block", async () => {
+		hits = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [{ type: "text", text: "We settled on usage-based pricing." }] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(memoryJob());
+
+		expect(run.output.text).toBe("Hello from the isolate");
+
+		// The recall went out on the MCP route, as `search_memory`, with the
+		// plugin's own bounded arguments — not a query this test wrote.
+		const recall = memoryCalls.find((c) => c.tool === "search_memory");
+		expect(recall).toBeDefined();
+		expect(recall?.body).toMatchObject({
+			query: "what did we decide about pricing?",
+			include_content: true,
+			content_limit: 6,
+			include_connections: false,
+			limit: 3,
+		});
+
+		// And what it recalled reached the MODEL, inside the plugin's own
+		// <lobu-memory> envelope, ahead of what the human said.
+		const provider = hits.find((h) => h.url === "/v1/messages");
+		const sent = JSON.parse(provider?.body ?? "{}") as { messages: Array<{ content: unknown }> };
+		const firstUserText = JSON.stringify(sent.messages[0]?.content);
+		expect(firstUserText).toContain("<lobu-memory>");
+		expect(firstUserText).toContain("We settled on usage-based pricing.");
+		expect(firstUserText).toContain("what did we decide about pricing?");
+	}, 120_000);
+
+	/**
+	 * THE REGRESSION THIS LANE WOULD OTHERWISE HAVE. `agentEnd` starts the
+	 * `save_memory` write and returns without awaiting it, which is correct on
+	 * the subprocess lane (the worker process outlives the turn) and lossy here:
+	 * the isolate is disposed the moment `runAgentTurn` resolves. If the capture
+	 * were still fire-and-forget, this request would never arrive.
+	 */
+	it("captures the exchange and the write COMPLETES before the isolate is disposed", async () => {
+		hits = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [{ type: "text", text: "prior context" }] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		toolScript = [];
+		armFirstDeltaGate();
+		await runTurn(memoryJob());
+
+		const save = memoryCalls.find((c) => c.tool === "save_memory");
+		expect(save).toBeDefined();
+		// No `metadata.agent_id` argument: the memory scope is stamped SERVER-side
+		// from the bound tool context (`save_content.ts`), so the plugin no longer
+		// sends an identity claim the server would have to trust. This call rides
+		// the turn's own agent-bound token, which is what carries the scope.
+		expect(save?.body).toMatchObject({ semantic_type: "observation" });
+		expect((save?.body as { metadata?: unknown }).metadata).toBeUndefined();
+		const content = String(save?.body.content);
+		expect(content).toContain("User: what did we decide about pricing?");
+		expect(content).toContain("Assistant: Hello from the isolate");
+		// The recall block the hook injected must NOT be saved back: the plugin
+		// strips its own envelope so memory does not eat its own output.
+		expect(content).not.toContain("<lobu-memory>");
+		expect(content).not.toContain("prior context");
+
+		// Capture happens after the answer, so the save is the LAST memory call.
+		expect(memoryCalls.map((c) => c.tool)).toEqual(["search_memory", "save_memory"]);
+	}, 120_000);
+
+	it("still answers when memory is down, and says so in the run log rather than failing the turn", async () => {
+		hits = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 500, body: { error: "memory server unavailable" } },
+			save_memory: { status: 500, body: { error: "memory server unavailable" } },
+		};
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(memoryJob());
+
+		// The user still got their answer — memory is best-effort on both lanes.
+		expect(run.output.text).toBe("Hello from the isolate");
+		// Both hooks ran and both failed; neither was swallowed silently.
+		expect(memoryCalls.map((c) => c.tool)).toEqual(["search_memory", "save_memory"]);
+		const lines = run.logs.map((l) => l.line).join("\n");
+		expect(lines).toMatch(/memory (recall skipped|capture failed)/i);
+		// No <lobu-memory> block reached the model, because nothing was recalled.
+		const provider = hits.find((h) => h.url === "/v1/messages");
+		expect(provider?.body).not.toContain("<lobu-memory>");
+	}, 120_000);
+
+	it("runs no memory hook at all for a turn that carries no memory", async () => {
+		hits = [];
+		memoryCalls = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob());
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(memoryCalls).toEqual([]);
+	}, 120_000);
+
+	// ---------------------------------------------------------------------
+	// lobu-media: the plugin's three tools, on this lane
+	// ---------------------------------------------------------------------
+
+	/** A turn carrying the media tools plus a workspace to produce files in. */
+	function mediaJob(media: string[], builtin: string[] = ["bash", "write", "read", "ls"]): ExecutorJob {
+		return turnJob({
+			tools: {
+				gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+				definitions: [],
+				builtin: builtin as never,
+				media: media as never,
+				conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+			},
+		});
+	}
+
+	it("writes, reads, edits, lists, finds and uploads the same workspace file inside a real isolate", async () => {
+		hits = [];
+		uploads = [];
+		uploadReply = {
+			status: 200,
+			body: { fileId: "file_iso", name: "report.csv", permalink: "https://files.test/iso" },
+		};
+		toolScript = [
+			{ id: "toolu_w1", name: "write", input: { file_path: "report.csv", content: "a,b\n" } },
+			{ id: "toolu_b1", name: "bash", input: { command: "printf '1,2\\n' >> report.csv" } },
+			{ id: "toolu_r1", name: "read", input: { file_path: "report.csv" } },
+			{ id: "toolu_e1", name: "edit", input: { file_path: "report.csv", old_string: "1,2", new_string: "3,4" } },
+			{ id: "toolu_l1", name: "ls", input: {} },
+			{ id: "toolu_f1", name: "find", input: { pattern: "*.csv" } },
+			{ id: "toolu_u1", name: "upload_file", input: { file_path: "report.csv", description: "The numbers" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(mediaJob(["upload_file"], ["write", "bash", "read", "edit", "ls", "find"]));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		// The model was offered the plugin's own tool, with the plugin's schema.
+		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string }> };
+		expect(offered.tools?.map((t) => t.name)).toContain("upload_file");
+		const ends = run.events.filter((event) => event.type === "tool_call_end") as Array<{ name: string; isError: boolean; output: string }>;
+		expect(ends.map((event) => [event.name, event.isError])).toEqual(
+			["write", "bash", "read", "edit", "ls", "find", "upload_file"].map((name) => [name, false]),
+		);
+		expect(ends.find((event) => event.name === "read")?.output).toBe("a,b\n1,2\n");
+		expect(ends.find((event) => event.name === "ls")?.output).toBe("report.csv");
+		expect(ends.find((event) => event.name === "find")?.output).toBe("report.csv");
+
+		// ONE upload, carrying the bytes `write`, `bash` and `edit` left INSIDE the
+		// isolate — proof the read port reads the turn's own filesystem, not the host's.
+		expect(uploads.length).toBe(1);
+		const upload = uploads[0] as UploadHit;
+		expect(upload.fileName).toBe("report.csv");
+		expect(upload.fileType).toBe("text/csv");
+		expect(upload.fileBytes.toString("utf8")).toBe("a,b\n3,4\n");
+		expect(upload.filename).toBe("report.csv");
+		expect(upload.comment).toBe("The numbers");
+		// Same one credential and the same conversation routing as every other
+		// call this turn makes.
+		expect(upload.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
+		expect(upload.channelId).toBe("C_TEST");
+		expect(upload.conversationId).toBe("conv_test");
+
+		// The model got the plugin's own success prose, and the host saw the
+		// delivery as a turn event.
+		const end = run.events.find((e) => e.type === "tool_call_end" && e.name === "upload_file") as
+			| { isError: boolean; output: string }
+			| undefined;
+		expect(end?.isError).toBe(false);
+		expect(end?.output).toContain("Successfully showed report.csv to the user");
+		const uploaded = run.events.find((e) => e.type === "file_uploaded") as { data: Record<string, unknown> } | undefined;
+		expect(uploaded?.data).toMatchObject({ tool: "upload_file", fileId: "file_iso", platform: "slack", size: 8 });
+	}, 120_000);
+
+	it("keeps upload_file inside the workspace and refuses what `read` would refuse", async () => {
+		hits = [];
+		uploads = [];
+		toolScript = [
+			{ id: "toolu_e1", name: "upload_file", input: { file_path: "../../etc/passwd" } },
+			{ id: "toolu_e2", name: "upload_file", input: { file_path: "/etc/passwd" } },
+			{ id: "toolu_e3", name: "upload_file", input: { file_path: "missing.txt" } },
+			{ id: "toolu_e4", name: "bash", input: { command: ": > empty.txt" } },
+			{ id: "toolu_e5", name: "upload_file", input: { file_path: "empty.txt" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(mediaJob(["upload_file"]));
+
+		// Not one of them reached the gateway.
+		expect(uploads).toEqual([]);
+		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{ name: string; output: string }>;
+		const outputs = ends.filter((e) => e.name === "upload_file").map((e) => e.output);
+		expect(outputs[0]).toContain("Refusing to upload file outside workspace");
+		// An absolute path outside /workspace is the same refusal, even though
+		// just-bash's in-memory tree really does have an /etc.
+		expect(outputs[1]).toContain("Refusing to upload file outside workspace");
+		expect(outputs[2]).toContain("not found or is not a file");
+		expect(outputs[3]).toContain("Cannot show empty file");
+	}, 120_000);
+
+	it("does not offer upload_file to a turn with no workspace to read from", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					media: ["upload_file", "generate_image"] as never,
+					conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+				},
+			}),
+		);
+		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string }> };
+		// `generate_image` needs no filesystem, so it stays; `upload_file` would
+		// only ever fail, so it is not offered at all.
+		expect(offered.tools?.map((t) => t.name)).toEqual(["generate_image"]);
+	}, 120_000);
+
+	it("generates media and sends the provider's bytes straight through, with no temp file", async () => {
+		hits = [];
+		uploads = [];
+		uploadReply = { status: 200, body: { fileId: "file_img", name: "generated_image.png", permalink: "https://files.test/img" } };
+		// The generation endpoints answer binary; `internalReply` covers the
+		// capabilities preflight.
+		internalReply = { status: 200, body: { available: true } };
+		toolScript = [{ id: "toolu_g1", name: "generate_image", input: { prompt: "a fox" } }];
+		armFirstDeltaGate();
+		const run = await runTurn(mediaJob(["generate_image"]));
+
+		expect(uploads.length).toBe(1);
+		const upload = uploads[0] as UploadHit;
+		expect(upload.fileName).toBe("generated_image.png");
+		expect(upload.fileType).toBe("image/png");
+		// The exact bytes the fake provider emitted, including the 0x00 and 0x89
+		// that no UTF-8 round trip would survive.
+		expect([...upload.fileBytes]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+		expect(upload.comment).toBe("Generated content");
+		const end = run.events.find((e) => e.type === "tool_call_end" && e.name === "generate_image") as
+			| { isError: boolean; output: string }
+			| undefined;
+		expect(end?.isError).toBe(false);
+		expect(end?.output).toContain("Image sent successfully");
+	}, 120_000);
+
+	/**
+	 * A media upload is not exempt from the lane's deny-all egress policy. The
+	 * turn's provider host stays reachable — so the model runs and the tool is
+	 * actually called — while the upload is addressed at a DIFFERENT host that
+	 * the allowlist does not carry. The refusal must come from the same egress
+	 * module every other request on this lane goes through, be legible in the
+	 * run log, and reach the model as a tool error rather than killing the turn.
+	 */
+	it("enforces the same egress policy on a media upload: the gateway host and nothing else", async () => {
+		hits = [];
+		uploads = [];
+		toolScript = [
+			{ id: "toolu_p1", name: "bash", input: { command: "echo hi > note.txt" } },
+			{ id: "toolu_p2", name: "upload_file", input: { file_path: "note.txt" } },
+		];
+		armFirstDeltaGate();
+		const job = turnJob({
+			tools: {
+				// A host the run's allowlist does not name. Everything else about
+				// the turn is unchanged.
+				gatewayUrl: "http://gateway.invalid/lobu",
+				definitions: [],
+				builtin: ["bash"] as never,
+				media: ["upload_file"] as never,
+				conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+			},
+		});
+		const run = await runTurn(job, ["127.0.0.1"]);
+
+		// The turn still finished: a refused upload is a failed TOOL, not a
+		// failed run.
+		expect(run.output.text).toBe("Hello from the isolate");
+		// Nothing was delivered, and the refusal is named in the run log.
+		expect(uploads).toEqual([]);
+		expect(run.logs).toContainEqual({
+			level: "warn",
+			line: "egress denied: fetch to gateway.invalid is not permitted (this run may reach: 127.0.0.1)",
+		});
+		// And the model was told, in the plugin's own error wording.
+		const end = run.events.find((e) => e.type === "tool_call_end" && e.name === "upload_file") as
+			| { isError: boolean; output: string }
+			| undefined;
+		expect(end?.output).toContain("Error");
+	}, 120_000);
+
+	/**
+	 * The memory hooks and the media upload are two more requests on the turn's
+	 * ONE credential, and the same vault indirection covers them: the guest only
+	 * ever holds a per-run placeholder, the host swaps in the gateway's, and no
+	 * run log line prints either secret.
+	 */
+	it("carries the turn's one credential through the memory and media paths, and never logs it", async () => {
+		hits = [];
+		uploads = [];
+		memoryCalls = [];
+		memoryReplies = {
+			search_memory: { status: 200, body: { content: [{ type: "text", text: "recalled" }] } },
+			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+		};
+		uploadReply = { status: 200, body: { fileId: "f1", name: "note.txt", permalink: "p" } };
+		toolScript = [
+			{ id: "toolu_c1", name: "bash", input: { command: "echo hi > note.txt" } },
+			{ id: "toolu_c2", name: "upload_file", input: { file_path: "note.txt" } },
+		];
+		armFirstDeltaGate();
+		const run = await runTurn(
+			turnJob({
+				tools: {
+					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+					definitions: [],
+					builtin: ["bash"] as never,
+					media: ["upload_file"] as never,
+					conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "slack" },
+				},
+				memory: { mcpId: MEMORY_MCP_ID, agentId: "agent-under-test" },
+			}),
+		);
+
+		// Every hop upstream authenticates with the gateway's placeholder — the
+		// model call, both memory calls, and the upload.
+		const memoryHits = hits.filter((h) => h.url.includes("/tools/search_memory") || h.url.includes("/tools/save_memory"));
+		expect(memoryHits.length).toBe(2);
+		for (const hit of memoryHits) expect(hit.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
+		expect(uploads[0]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
+
+		// And NOTHING the host logged contains either the gateway's credential
+		// or the per-run placeholder the guest actually held.
+		const logText = run.logs.map((l) => l.line).join("\n");
+		expect(logText).not.toContain(GATEWAY_PLACEHOLDER);
+		expect(logText).not.toMatch(/lobu_secret_[0-9a-f-]{36}/);
+		// The one credential line that IS emitted is the redacted audit digest.
+		for (const line of run.logs.filter((l) => l.line.startsWith("credential "))) {
+			expect(line.line).toMatch(/^credential [0-9a-f]{12} spent on /);
+		}
 	}, 120_000);
 
 	it("enforces the bash policy inside the guest and starts every turn from an empty workspace", async () => {

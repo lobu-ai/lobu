@@ -164,8 +164,8 @@ export async function resolveCompletionTarget(
   // would mis-deliver the request to the wrong vendor with a model ID it does
   // not know, surfacing as a baffling "400 <model> is not a valid model ID"
   // rather than "this provider isn't wired up". Mirrors the run path's
-  // reliability invariant (`buildDynamicOpenAIModel` in
-  // agent-worker/src/runtime/model-resolver.ts). Returning undefined makes the
+  // reliability invariant (`buildDynamicOpenAIModel`, now in the turn
+  // producer's model resolution). Returning undefined makes the
   // caller skip the feature — a missing chip beats a wrong-vendor call.
   const baseUrl =
     config.baseUrl ??

@@ -237,7 +237,7 @@ describe("worker auth token", () => {
     ).toBe(null);
   });
 
-  test("capture without automationRunId is rejected", () => {
+  test("capture without either run identity is rejected", () => {
     // A capture run that cannot record is the one state evals must never
     // reach: side effects are suppressed but nothing says what was suppressed,
     // so the replay scores as clean while its intent is lost.
@@ -249,6 +249,26 @@ describe("worker auth token", () => {
         })
       )
     ).toBe(null);
+  });
+
+  test("native capture retains its own run identity through the embedded MCP hop", () => {
+    const token = generateWorkerToken("user-1", "conv-1", "native-turn", {
+      channelId: "C1",
+      organizationId: "capture-org",
+      agentId: "capture-agent",
+      executionMode: "capture",
+      runId: 1234,
+    });
+    const worker = verifyWorkerToken(token);
+    expect(worker).toMatchObject({ executionMode: "capture", runId: 1234 });
+    expect(worker?.automationRunId).toBeUndefined();
+    const derived = mintGatewayMcpToken(token)!;
+    expect(verifyGatewayMcpToken(derived)).toMatchObject({
+      executionMode: "capture",
+      runId: 1234,
+      organizationId: "capture-org",
+    });
+    expect(verifyWorkerToken(derived)).toBeNull();
   });
 
   test("live Automation provenance round-trips without capture", () => {

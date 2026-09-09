@@ -28,7 +28,7 @@ import {
 import { ChatInstanceManager } from "../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../gateway/connections/chat-response-bridge";
 import { Gateway } from "../gateway/gateway-main";
-import type { AgentTurnShadowDeps } from "../gateway/orchestration/agent-turn-shadow";
+import type { AgentTurnDeps } from "../gateway/orchestration/agent-turn-producer";
 import { Orchestrator } from "../gateway/orchestration/index";
 import {
 	startFilteringProxy,
@@ -404,6 +404,8 @@ export async function initLobuGateway(): Promise<Hono | null> {
 			coreServices.getGuardrailRegistry() ?? undefined,
 			coreServices.getAgentSettingsStore() ?? undefined,
 			agentTurnMcpDeps(coreServices),
+			coreServices.getArtifactStore(),
+			coreServices.getInstructionService(),
 		);
 		logger.info("[Lobu] Embedded orchestrator injected core services");
 
@@ -436,15 +438,12 @@ export async function initLobuGateway(): Promise<Hono | null> {
 			workerGatewayToWire.setDeploymentActivityTracker(
 				deploymentManager,
 			);
-			workerGatewayToWire.setDispatchRecycler(
-				deploymentManager,
-			);
 			logger.info(
-				"[Lobu] Worker idle-clock tracker and claim-side recycle gate wired; readiness watchdog awaiting HTTP listener startup",
+				"[Lobu] Worker idle-clock tracker wired; readiness watchdog awaiting HTTP listener startup",
 			);
 		} else {
 			logger.warn(
-				"[Lobu] No worker gateway on this pod — the readiness watchdog, idle-clock tracker, and claim-side recycle gate are ALL inactive; workers can be reported ready before connecting, and warm workers will not be recycled when their connector lease or tooling goes stale",
+				"[Lobu] No worker gateway on this pod — the readiness watchdog and idle-clock tracker are inactive; workers can be reported ready before connecting",
 			);
 		}
 
@@ -601,25 +600,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
 	}
 }
 
-/**
- * Activate worker connection checks only after the local HTTP listener is live.
- * The orchestrator consumes persisted turns during gateway initialization; if
- * this probe were armed then, a boot-recovered worker could not reach its SSE
- * route yet and would be recycled as though it were wedged.
- */
-export function activateLobuWorkerReadinessWatchdog(): void {
-	const workerGateway = coreServices?.getWorkerGateway();
-	if (!workerGateway || !orchestrator) return;
-	const workerConnectionManager = workerGateway.getConnectionManager();
-	orchestrator
-		.getDeploymentManager()
-		.setDeploymentReadinessProbe((deploymentName: string) =>
-			workerConnectionManager.isConnected(deploymentName),
-		);
-	logger.info(
-		"[Lobu] Worker readiness watchdog activated after HTTP listener startup",
-	);
-}
 
 /**
  * Stop the embedded Lobu gateway (for graceful shutdown).
@@ -689,7 +669,7 @@ export { ensureEmbeddedGatewaySecrets };
  */
 function agentTurnMcpDeps(
 	coreServices: CoreServices,
-): AgentTurnShadowDeps["mcp"] {
+): AgentTurnDeps["mcp"] {
 	const configService = coreServices.getMcpConfigService();
 	const proxy = coreServices.getMcpProxy();
 	return configService && proxy ? { configService, proxy } : undefined;

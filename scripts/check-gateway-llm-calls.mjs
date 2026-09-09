@@ -18,8 +18,8 @@
 // indirection (a URL built far from the fetch, an SDK re-exported by a local
 // module) will not be caught. The durable backstop for those is review plus the
 // fact that a NEW credential triple is itself flagged, and a hand-rolled client
-// needs credentials from somewhere. It also does not scan packages outside
-// packages/server; agent-worker legitimately owns model routing (pi-ai).
+// needs credentials from somewhere. It does not scan packages outside
+// packages/server; connector-worker legitimately owns agent-turn model routing.
 //
 // Escape hatch: put `gateway-llm-ok` in a comment on the flagged line (or the
 // line above) with a reason.

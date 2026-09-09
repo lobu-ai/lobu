@@ -7,7 +7,7 @@
 /** Which provider the turn talks to, and how it authenticates. */
 export interface AgentTurnProvider {
   /** pi-ai's api id. Only the two fetch-native families run on this lane. */
-  api: 'anthropic-messages' | 'openai-completions';
+  api: 'anthropic-messages' | 'openai-completions' | 'openai-responses';
   /** Provider slug pi-ai reports on the model (`anthropic`, `openai`, ...). */
   provider: string;
   modelId: string;
@@ -29,7 +29,63 @@ export interface AgentTurnProvider {
    * refuses those.
    */
   apiKey?: string;
+  /**
+   * The model's output ceiling from pi-ai's registry. Undefined → let the
+   * adapter apply its own default; the guest must not substitute a number,
+   * which is how a 64000-token model came to be capped at 8192.
+   */
   maxTokens?: number;
+  /**
+   * Whether the model supports extended thinking, from pi-ai's registry. The
+   * guest has no registry to ask, so this is the only thing that can tell it:
+   * a reasoning-capable model gets Pi's own default thinking level, and
+   * anything else gets `'off'`.
+   */
+  reasoning?: boolean;
+  /**
+   * The modalities the model accepts, in pi-ai's `Model.input` vocabulary. The
+   * gateway resolves it from pi-ai's registry; the guest only passes it
+   * through, because pi is what enforces it — `transformMessages` replaces
+   * every image block with a "model does not support images" placeholder when
+   * `"image"` is absent. Undefined → text only, which is the safe default: a
+   * turn never sends an image to a model nobody said could read one.
+   */
+  input?: Array<'text' | 'image'>;
+}
+
+/** One image attachment of the turn's message, resolved to bytes by the host. */
+export interface AgentTurnImage {
+  mimeType: string;
+  /** Base64 of the artifact's bytes. The guest never fetches an attachment itself. */
+  data: string;
+}
+
+/**
+ * A NON-IMAGE attachment of the turn's message.
+ *
+ * The host resolves the bytes and the guest seeds them into the turn's
+ * in-memory `input/`, the established agent-visible attachment path.
+ *
+ * `data` absent means the gateway could not resolve the bytes. The file is
+ * still named, because a model told nothing about an attachment will answer as
+ * though the message were bare text; it is told it cannot open that one.
+ */
+export interface AgentTurnFile {
+  name: string;
+  mimeType: string;
+  size?: number;
+  /** Base64 of the file's bytes. Absent when the host could not resolve them. */
+  data?: string;
+}
+
+/**
+ * One of the agent's enabled skills, already rendered to its `SKILL.md` body.
+ *
+ * Seeded at `.skills/<name>/SKILL.md`, the agent-visible skill layout.
+ */
+export interface AgentTurnSkill {
+  name: string;
+  content: string;
 }
 
 /** One tool the turn may call, as the gateway's MCP proxy published it. */
@@ -42,7 +98,42 @@ export interface AgentTurnTool {
 }
 
 /** The guest's own workspace tools, by name. */
-export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'ls' | 'find';
+export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'edit' | 'grep' | 'ls' | 'find';
+
+/**
+ * A gateway tool the turn may call — `ask_user`, `send_message`,
+ * `suggest_actions` and the rest of `@lobu/plugin-conversations`.
+ *
+ * The producer names them; the guest runs the plugin package's OWN
+ * implementation, bundled in. They are not reimplemented here and not proxied
+ * through a second route: each one is already a plain `fetch` to an
+ * `/internal/...` gateway endpoint under the same bearer the MCP route takes,
+ * so the turn still carries exactly one credential and reaches exactly one
+ * host.
+ */
+export type AgentTurnGatewayTool =
+  | 'list_conversations'
+  | 'read_conversation'
+  | 'send_message'
+  | 'present_event'
+  | 'schedule_followup'
+  | 'react'
+  | 'edit_message'
+  | 'delete_message'
+  | 'ask_user'
+  | 'suggest_actions';
+
+/**
+ * A media tool the turn may call — `@lobu/plugin-media`'s own.
+ *
+ * As with the gateway tools, the producer names them and the guest runs the
+ * plugin package's OWN implementation. `upload_file` differs from the other two
+ * in one respect only: it reads a file, and the two lanes hold the agent's
+ * workspace in different places, so the guest injects a read port over the
+ * turn's in-memory filesystem. The tool, its schema and its prose are the
+ * plugin's on both lanes.
+ */
+export type AgentTurnMediaTool = 'upload_file' | 'generate_image' | 'generate_audio';
 
 /**
  * The agent's bash prefix policy, in the shape `@lobu/core/tool-policy`
@@ -67,25 +158,162 @@ export interface AgentTurnTools {
    */
   builtin?: AgentTurnBuiltinTool[];
   bashPolicy?: AgentTurnBashPolicy;
+  /**
+   * The conversation is pinned to a remote runtime sandbox: `bash` runs there
+   * through the host, not in the in-memory workspace. Absent → local bash.
+   */
+  remoteRuntime?: { providerId: string };
+  /**
+   * Gateway tools the agent's policy admits, by name. Their routing lives in
+   * the plugin package, so the wire carries only the names.
+   */
+  gateway?: AgentTurnGatewayTool[];
+  /**
+   * Media tools the agent's policy admits, by name. Same contract as
+   * `gateway`: names only, because the routing lives in the plugin package.
+   * `upload_file` additionally needs `builtin` to include a workspace tool —
+   * with no filesystem there is no file to show — and the guest drops it if
+   * the turn has none.
+   */
+  media?: AgentTurnMediaTool[];
+  /**
+   * Conversation routing the gateway and media tools post into. Required
+   * whenever `gateway` or `media` is non-empty.
+   */
+  conversation?: AgentTurnConversation;
 }
 
 /**
- * One transcript entry, in pi's own `AgentMessage` shape. The host does not
- * interpret it; it round-trips whatever the guest returns back into the run row
- * so the next turn resumes from it.
+ * What `@lobu/plugin-conversations` calls `GatewayParams` minus the two the
+ * guest already holds (the URL and the credential): who this turn is talking
+ * to. The plugin's tools read these off their params to address the
+ * conversation they post into.
  */
-export type AgentTurnMessage = Record<string, unknown>;
+export interface AgentTurnConversation {
+  channelId: string;
+  conversationId: string;
+  platform: string;
+}
+
+/**
+ * A turn's tool-call budget. pi would otherwise loop for as long as the model
+ * keeps calling tools and the wall clock allows; past this many calls the
+ * guard stops the turn so it ends with an answer instead of a timeout.
+ *
+ * Exported so a test can assert the boundary without restating the number —
+ * a duplicated literal would keep passing after the budget changed.
+ */
+export const MAX_TOOL_CALLS_PER_TURN = 50;
 
 /** Everything a single turn needs. */
 export interface AgentTurnInput {
   provider: AgentTurnProvider;
   systemPrompt: string;
-  /** The transcript this turn continues, oldest first. */
-  messages: AgentTurnMessage[];
-  /** What the human just said. */
+  /** Native Pi session JSONL; empty for a new conversation. */
+  sessionJsonl: string;
+  /** What the human just said. Empty when the turn carries only attachments. */
   userMessage: string;
+  /**
+   * Caller-supplied context for THIS turn only — the API's `ephemeralContext`,
+   * or the first-turn attention digest the chat bridge injects.
+   *
+   * It rides the transient-context channel, never `userMessage`: the durable
+   * user message is persisted and replayed on every later turn, so folding
+   * this in would make a one-turn hint permanent history. Transient content is
+   * assembled fresh per turn and never written to the session file.
+   */
+  ephemeralContext?: string;
+  /**
+   * The message's image attachments, already resolved to base64 by the host.
+   * The guest puts them in the user turn beside the text; pi drops them for a
+   * model whose `provider.input` does not include `'image'`.
+   */
+  images?: AgentTurnImage[];
+  /** The message's non-image attachments, including bytes the host resolved. */
+  files?: AgentTurnFile[];
+  skills?: AgentTurnSkill[];
   /** Absent → the turn runs with no tools. */
   tools?: AgentTurnTools;
+  /**
+   * Long-term memory for this turn: recall before the model runs, capture
+   * after it answers. Absent → the turn runs with no memory, which is what a
+   * turn whose agent has no `lobu` MCP server gets.
+   *
+   * Both hooks are `@lobu/plugin-memory`'s own and reach `search_memory` /
+   * `save_memory` over the MCP route this turn already calls, so no extra
+   * credential and no extra host is involved.
+   */
+  memory?: AgentTurnMemory;
+  /**
+   * pi's compaction settings and the model's context window. Pi's own
+   * auto-compaction runs inside the session, and its `compaction` entry comes
+   * back in `sessionJsonl`. Absent → the turn never compacts.
+   */
+  compaction?: AgentTurnCompaction;
+  /**
+   * Lobu's pre-compaction memory flush. When the next prompt would land within
+   * `softThresholdTokens` of compaction and this cycle has not flushed yet, the
+   * turn first runs the flush prompt silently so the model stores what it is
+   * about to lose. Absent → no flush.
+   */
+  memoryFlush?: AgentTurnMemoryFlush;
+}
+
+export interface AgentTurnCompaction {
+  enabled: boolean;
+  contextWindow: number;
+  reserveTokens: number;
+  keepRecentTokens: number;
+}
+
+export interface AgentTurnMemoryFlush {
+  enabled: boolean;
+  softThresholdTokens: number;
+  systemPrompt: string;
+  prompt: string;
+}
+
+/** Whether this turn recalls and captures long-term memory, and as whom. */
+export interface AgentTurnMemory {
+  /**
+   * The MCP server id the memory tools live on. Carried rather than assumed so
+   * a turn whose Lobu server is mounted elsewhere still recalls.
+   */
+  mcpId: string;
+  /** The agent the capture is attributed to. */
+  agentId: string;
+}
+
+/** One command sent to the remote runtime sandbox, and what came back. */
+export interface RuntimeExecRequest {
+  command: string;
+  timeoutMs?: number;
+}
+export interface RuntimeExecResult {
+  /** HTTP status the gateway answered; 2xx means the command ran. */
+  status: number;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  error?: string;
+  /** "infrastructure" when the RUNTIME failed and the command never ran. */
+  kind?: string;
+  retryable?: boolean;
+  outcome?: string;
+  sandbox?: unknown;
+}
+
+/** A message that arrived mid-turn and is for the model now: pi's steering. */
+export interface AgentTurnSteer {
+  runId: number;
+  messageId: string;
+  text: string;
+  /**
+   * This message's own transient context, shown to the model beside THIS
+   * message only — the same channel `AgentTurnInput.ephemeralContext` uses for
+   * the turn's own message. Absent when the follow-up carried none.
+   */
+  ephemeralContext?: string;
 }
 
 /** What the guest streams out while the turn runs. */
@@ -94,13 +322,48 @@ export type AgentTurnEvent =
   | { type: 'thinking_delta'; delta: string }
   | { type: 'message_end' }
   | { type: 'tool_call_start'; toolCallId: string; name: string; args: unknown }
-  | { type: 'tool_call_end'; toolCallId: string; name: string; isError: boolean; output: string };
+  | {
+      type: 'tool_call_end';
+      toolCallId: string;
+      name: string;
+      isError: boolean;
+      output: string;
+      /**
+       * Retrieval evidence, summarised from the result as the tool returned
+       * it. Built in the guest because `output` above is clipped for display:
+       * a retrieval body over that cap parses to nothing, so the host cannot
+       * re-derive this. Structurally `ToolTraceSummary` from `@lobu/core`,
+       * restated here because this module deliberately has no imports.
+       */
+      resultSummary?: { event_ids?: number[]; snippets?: Array<{ id: number; text: string }> };
+    }
+  /**
+   * A file `upload_file` delivered, with the gateway's own reply for it. It
+   * rides the turn's event stream, so the guest needs no second host callback.
+   */
+  | { type: 'file_uploaded'; data: Record<string, unknown> };
 
 /** What the turn produced. */
 export interface AgentTurnOutput {
   text: string;
   stopReason: string | null;
   usage: { input: number; output: number } | null;
-  /** The transcript after the turn, to persist and resume from. */
-  messages: AgentTurnMessage[];
+  /** Pi's native session, including message IDs, summaries and custom state. */
+  sessionJsonl: string;
+  consumedInputs: Array<{ runId: number; sessionEntryId: string }>;
+  /**
+   * Every tool this turn invoked, in first-call order. Always present, and
+   * `[]` for a turn that called none: the `requireTool` output guardrail
+   * treats an ABSENT ledger as "cannot prove a miss" and passes, so omitting
+   * it silently disables that check.
+   */
+  toolsUsed: string[];
+  /**
+   * The turn posted its answer INTO the conversation it is replying to, with
+   * `send_message`/`present_event`. `text` is then a report about a message the
+   * user has already read, so the terminal reply must not be delivered as well
+   * — the completion route stamps `repliedInBand` and the renderers' existing
+   * suppression does the rest.
+   */
+  repliedInBand?: boolean;
 }

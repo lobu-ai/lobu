@@ -422,8 +422,8 @@ temporal/dedupe/segment) are ours regardless and never move (see Decisions).
 
 **Routing is soft but instrumented.** `query_sql` stays available — it fails open and ad-hoc
 questions are legitimate. The contract steers metrics-first via tool descriptions + agent-policy rules
-(`packages/core/src/agent-policy.ts` `TOOL_INTENT_RULES`, surfaced through
-`packages/agent-worker/src/runtime/instructions.ts`): *if a `query_metric` covers the ask, use it;
+(`packages/core/src/agent-policy.ts` `TOOL_RULES`, surfaced through the turn
+system prompt in `packages/server/src/gateway/orchestration/agent-turn-producer.ts`): *if a `query_metric` covers the ask, use it;
 reach for `query_sql` only when no measure/dimension does — and then pass an explicit `reason`.* That
 fallback is logged as a **semantic miss** (§Coverage). This is the cheap middle between pure
 prompt-nudging (which agents ignore) and hard gating (which blocks legitimate ad-hoc work).

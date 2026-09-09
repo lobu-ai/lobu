@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
@@ -103,6 +104,8 @@ export interface AuthContext {
    * by sdk_run to force the SDK's per-method capture path.
    */
   executionMode?: 'live' | 'capture' | null;
+  /** Verified capture owner; never taken from tool arguments. */
+  captureIdentity?: CaptureIdentity | null;
 }
 
 /**
@@ -185,6 +188,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     // and role × scope decide, so the old two-tool external allowlist is gone.
     adminTools: mcpAuthInfo?.adminTools ?? null,
     executionMode: mcpAuthInfo?.executionMode ?? null,
+    captureIdentity: mcpAuthInfo?.captureIdentity ?? null,
   };
 }
 
@@ -323,6 +327,17 @@ export async function executeTool(
     }
     const requiredAccess = checkToolAccess(toolName, args, authCtx);
     toolContext = toAccountToolContext(authCtx);
+
+    // A capture run records the effect it WOULD have had instead of performing
+    // it. SDK capture and eval-window finalization enforce their own
+    // per-method policy, so they run for real; everything else that is not
+    // read-tier is recorded and returned here.
+    const captureAware = toolName === 'run_sdk' || toolName === 'query_sdk' ||
+      (toolName === 'manage_automations' && args.action === 'complete_window' &&
+        authCtx.captureIdentity?.automationRunId !== undefined);
+    if (authCtx.executionMode === 'capture' && requiredAccess !== 'read' && !captureAware) {
+      return captureEffect(authCtx.captureIdentity, `tools.${toolName}`, args);
+    }
 
     // Promotions pause, enforced where config is actually mutated. `lobu apply`
     // writes through these tools, so this is the chokepoint that binds every
@@ -512,5 +527,6 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     mcpAppEventActionCapability: authCtx.mcpAppEventActionCapability ?? null,
     mcpConversationId: authCtx.mcpConversationId ?? null,
     executionMode: authCtx.executionMode ?? null,
+    captureIdentity: authCtx.captureIdentity ?? null,
   };
 }

@@ -63,11 +63,6 @@ gate_provision() {
   # The baseline ivfflat index needs ~150MB maintenance_work_mem; default 64MB fails.
   $SUDO -u postgres psql -q -c "ALTER SYSTEM SET maintenance_work_mem='256MB'" -c "SELECT pg_reload_conf()"
 
-  echo ">> [provision] bubblewrap (worker exec-sandbox)..."
-  if ! command -v bwrap >/dev/null 2>&1; then
-    $SUDO apt-get install -y --no-install-recommends bubblewrap coreutils >/dev/null
-  fi
-
   echo ">> [provision] dbmate (migrations ledger verify)..."
   if ! command -v dbmate >/dev/null 2>&1; then
     curl -fsSL --retry 5 --retry-delay 2       -o /tmp/dbmate       https://github.com/amacneil/dbmate/releases/download/v2.21.0/dbmate-linux-amd64

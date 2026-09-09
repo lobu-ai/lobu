@@ -16,6 +16,14 @@ export interface ExecutorSelection {
   allowedDomains?: readonly string[];
   /** Console sink override (tests). */
   logSink?: IsolateExecutorOptions['logSink'];
+  /**
+   * Cap on one string crossing the isolate bridge. Unset keeps the default.
+   *
+   * An agent turn raises this: its envelope carries the session journal and
+   * base64'd attachments in ONE string, so the connector default is too small
+   * for a lane the gateway already bounds at admission.
+   */
+  messageBytes?: number;
 }
 
 /**
@@ -33,5 +41,6 @@ export async function selectExecutor(selection: ExecutorSelection = {}): Promise
   if (selection.memoryMb !== undefined) options.memoryMb = selection.memoryMb;
   if (selection.allowedDomains !== undefined) options.allowedDomains = selection.allowedDomains;
   if (selection.logSink !== undefined) options.logSink = selection.logSink;
+  if (selection.messageBytes !== undefined) options.messageBytes = selection.messageBytes;
   return new IsolateExecutor(options);
 }

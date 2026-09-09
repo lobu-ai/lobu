@@ -109,14 +109,6 @@ export function createFileRoutes(
         return errorResponse(c, "Missing channel or conversation ID", 400);
       }
 
-      const fileHandler = await resolveFileHandler(platformRegistry, {
-        platformName: worker.platform,
-        connectionId: worker.connectionId,
-        channelId,
-        conversationId,
-        teamId: worker.teamId,
-      });
-
       const formData = await c.req.formData();
       const file = formData.get("file") as File | null;
 
@@ -141,6 +133,14 @@ export function createFileRoutes(
         voiceMessage,
       });
       if (captured) return captured;
+
+      const fileHandler = await resolveFileHandler(platformRegistry, {
+        platformName: worker.platform,
+        connectionId: worker.connectionId,
+        channelId,
+        conversationId,
+        teamId: worker.teamId,
+      });
 
       logger.info(
         `Worker uploading file ${filename} via ${worker.platform || "unknown"} for conversation ${worker.conversationId} to conversation ${conversationId}${voiceMessage ? " as voice message" : ""}`
@@ -234,14 +234,6 @@ export function createFileRoutes(
         return errorResponse(c, "Missing channel or conversation ID", 400);
       }
 
-      const fileHandler = await resolveFileHandler(platformRegistry, {
-        platformName: worker.platform,
-        connectionId: worker.connectionId,
-        channelId,
-        conversationId,
-        teamId: worker.teamId,
-      });
-
       const formData = await c.req.formData();
       const fileEntries = formData.getAll("files");
 
@@ -272,6 +264,14 @@ export function createFileRoutes(
         filenames: files.map((entry) => entry.name),
       });
       if (captured) return captured;
+
+      const fileHandler = await resolveFileHandler(platformRegistry, {
+        platformName: worker.platform,
+        connectionId: worker.connectionId,
+        channelId,
+        conversationId,
+        teamId: worker.teamId,
+      });
 
       logger.info(
         `Worker uploading ${files.length} files for conversation ${worker.conversationId}`

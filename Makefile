@@ -1,6 +1,6 @@
 # Development Makefile for Lobu
 
-.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review review-fix ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
+.PHONY: help setup build test clean ctx land sandbox sandbox-sync sandbox-url sandbox-logs sandbox-run sandbox-stop sandbox-ls dev dev-db dev-embedded build-packages ensure-submodule clean-workers clean-test-pg test-unit test-integration test-e2e-sdk test-e2e-agent-turn test-e2e-cli test-providers-live typecheck task-setup task-clean dev-recover clean-merged e2e-browser bump review review-fix ui-review pre-pr pr-fast pr-full owletto-mac owletto-mac-e2e
 
 # Default target
 help:
@@ -16,7 +16,7 @@ help:
 	@echo "  make test-integration                      - Run the CI integration suite (needs DATABASE_URL with pgvector)"
 	@echo "  make test-e2e-cli                          - Boot lobu run + walk every CLI command (the CI sdk-cli-e2e job)"
 	@echo "  make test-providers-live                   - Validate every provider against its live API (keyless tier + key-gated smoke)"
-	@echo "  make clean-workers                         - Stop any running embedded worker subprocesses"
+	@echo "  make clean-workers                         - Stop orphaned gateway processes from a crashed dev run"
 	@echo "  make dev-recover [RESTART=1]               - Free this checkout's dev ports + clean workers; RESTART=1 also boots make dev"
 	@echo "  make clean-test-pg                         - Reap orphaned lobu-test-pg embedded-Postgres clusters (frees macOS shm slots)"
 	@echo "  make typecheck                             - Strict typecheck (same as Dockerfile) for server + owletto"
@@ -160,7 +160,6 @@ bump:
 test-unit:
 	@echo "🧪 Unit suite (no Postgres)…"
 	@bun test packages/core packages/plugin-api packages/plugin-host packages/plugin-toolkit packages/plugin-memory packages/plugin-conversations packages/plugin-media packages/plugin-mcp packages/cli
-	@bun test packages/agent-worker
 	@bun test packages/server/src/__tests__/unit
 	@# src/gateway/infrastructure/queue runs in the gateway loop in test-integration (#1238)
 	@bun test packages/connector-worker
@@ -205,6 +204,17 @@ test-integration:
 test-e2e-sdk:
 	@./scripts/sdk-e2e.sh
 
+# Agent-turn live e2e (isolate lane). NOT in CI on purpose: it needs the built
+# CLI dist and takes ~4 minutes, which is more than the sdk-e2e job's budget.
+# Every scenario also has unit/integration coverage, so this is not the
+# regression gate — it is the gate that exercises the REAL MCP route, Postgres
+# and isolate together, which is how it found the first-turn steering gap and
+# the memory-scope gap that unit suites could not see. Run it after changing
+# the agent-turn lane. See scripts/agent-turn-e2e/README.md.
+test-e2e-agent-turn:
+	@(cd packages/server && bun run build:server) && (cd packages/cli && bun run build)
+	@bash scripts/agent-turn-e2e/agent-turn-e2e.sh
+
 # Error-taxonomy e2e: the failure-path companion to sdk-e2e. Boots `lobu run`
 # with the mock provider in 429 mode and drives a real turn through a spawned
 # worker, asserting the provider's own 429 message reaches the user verbatim
@@ -233,14 +243,15 @@ test-providers-live:
 	@echo "🌐 Live provider smoke (key-gated)…"
 	@bun test --timeout 60000 packages/server/src/__tests__/live-providers
 
-# Stop any embedded worker subprocesses left over from a crashed gateway.
-# Workers are normally cleaned up when the gateway exits; this target is a
-# safety net for orphaned bun processes spawned by EmbeddedDeploymentManager.
+# Reap gateway processes left over from a crashed `make dev`.
+# An agent turn runs in a V8 isolate inside the gateway process, so there is
+# no per-agent child to kill any more — a turn cannot outlive its gateway.
+# Killing an orphaned gateway is what actually frees the port, and
+# `scripts/dev-recover.sh` calls this before restarting.
 clean-workers:
-	@echo "🧹 Stopping embedded worker subprocesses..."
-	@pkill -f 'packages/agent-worker/src/index.ts' 2>/dev/null || true
-	@pkill -f '@lobu/worker' 2>/dev/null || true
-	@echo "✅ Worker subprocesses stopped"
+	@echo "🧹 Stopping orphaned gateway processes..."
+	@pkill -f 'tsx watch.*packages/server/src/server.ts' 2>/dev/null || true
+	@echo "✅ Orphaned gateway processes stopped"
 
 # Orphaned `lobu-test-pg-*` embedded-Postgres clusters from other worktrees'
 # integration runs eat macOS shared-memory slots (SHMMNI=32), and `lobu run` /

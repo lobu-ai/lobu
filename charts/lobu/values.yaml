@@ -32,29 +32,28 @@ app:
 
   resources:
     requests:
-      # The app pod embeds the orchestrator AND spawns agent-worker subprocesses
-      # in-pod, so this container does far more than serve HTTP — yet it was
-      # capped at 1 core (the connector worker, which does comparable work, gets
-      # 2-4). Under-resourced regardless of the exact stall mechanism; give the
-      # event loop real headroom. Request stays modest so it isn't over-reserved.
+      # The app pod embeds the orchestrator and the gateway proxies, so this
+      # container does far more than serve HTTP — yet it was capped at 1 core
+      # (the connector worker, which runs the turns themselves, gets 2-4).
+      # Under-resourced regardless of the exact stall mechanism; give the event
+      # loop real headroom. Request stays modest so it isn't over-reserved.
       cpu: 500m
       memory: 512Mi
     limits:
       cpu: 3000m
-      # Prod pods OOM-killed (exit 137) at a 2Gi limit — repeatedly. The parent
-      # Node heap is only ~300MB; the rest of RSS is the in-pod agent-worker
-      # child subprocesses, whose memory counts toward this pod cgroup. Per-child
-      # heap is now capped (LOBU_WORKER_MAX_OLD_SPACE_MB), but the pod still needs
-      # room for several concurrent workers + parent + proxies. 4Gi matches the
-      # connector worker, which does comparable per-run work.
+      # Prod pods OOM-killed (exit 137) at a 2Gi limit — repeatedly, back when
+      # this pod also spawned agent-worker child processes whose RSS counted
+      # toward its cgroup. Agent turns now run in the connector worker, but the
+      # headroom stays: the orchestrator, the secret and egress proxies, and the
+      # embedded MCP surface all live here. Revisit against measured RSS rather
+      # than by assuming the old children were the whole story.
       memory: 4Gi
 
   # Non-secret environment variables
   env:
     NODE_ENV: production
-    # Tags all Sentry events (server + forwarded to the worker subprocess) so a
-    # prod deploy can never report under environment=development. Worker spawn
-    # forwards this via assembleBaseEnv (base-deployment-manager.ts).
+    # Tags all Sentry events so a prod deploy can never report under
+    # environment=development.
     ENVIRONMENT: production
     # Hold teardown after SIGTERM so /health/ready returns 503 and kube-proxy
     # removes this pod from the Service endpoints before in-flight connections
@@ -81,47 +80,11 @@ app:
   # currently has no non-root USER (docker/app/Dockerfile) — enable it once the
   # image ships a non-root user. The defaults below are safe to apply even as
   # root and drop a meaningful amount of attack surface.
-  # NOTE on connector-contributed CLIs (e.g. `gh`): the embedded worker registers
-  # spawned binaries ONLY when it has a working per-exec sandbox. bubblewrap
-  # needs `unshare(CLONE_NEWUSER)`, which the RuntimeDefault profile below
-  # filters on most runtimes — so as shipped, probeSandboxStrategy reports
-  # "none" and a contributed CLI exits 127.
-  #
-  # That is the SAFE default and is deliberate. Every worker and the gateway
-  # share this container as the same user, so without a per-exec sandbox a
-  # shell-capable CLI can read sibling `workspaces/{agentId}` directories and
-  # the gateway's environment — verified, not theoretical. The pod boundary is
-  # per-POD, and the tenants are inside it.
-  #
-  # MEASURED on this cluster (k3s v1.32.8, containerd 2.0.5, Ubuntu 24.04 /
-  # kernel 6.8): bubblewrap CANNOT be enabled by any securityContext change.
-  # `unshare --user` succeeds once SYS_ADMIN is added, but bwrap then fails at
-  #
-  #     bwrap: setting up uid map: Operation not permitted
-  #
-  # which still failed with SETUID+SETGID+SYS_CHROOT+MKNOD+DAC_OVERRIDE added,
-  # allowPrivilegeEscalation: true, AND seccomp removed entirely. Writing
-  # /proc/self/uid_map is restricted by the container runtime, not by seccomp or
-  # capabilities, so no chart-level knob reaches it.
-  #
-  # Consequence: connector-contributed CLIs (`gh`) exit 127 on this cluster, by
-  # design, and that is the SAFE outcome — see the isolation note above.
-  # Enabling them needs a runtime-level change, not a values.yaml edit. Also
-  # measured: this cluster declares `crun` and `gvisor` RuntimeClasses, but
-  # neither handler is installed on the nodes ("no runtime for \"crun\" is
-  # configured" / "...\"runsc\"..."), so switching runtimeClassName is not an
-  # available workaround here either.
-  #
-  # Verify on any cluster before assuming otherwise:
-  #   kubectl exec <app-pod> -- bwrap --unshare-user --unshare-pid --ro-bind \
-  #     /usr /usr --proc /proc --dev /dev -- /usr/bin/true
-  # Exit 0 means contributed CLIs will register; anything else means 127.
-  # Do NOT "fix" a non-zero result with LOBU_ALLOW_UNSANDBOXED_EXEC: workers and
-  # the gateway share this container, and /proc/1/environ is readable from it.
-  #
-  # Do NOT reach for `type: Unconfined` (drops the whole filter) or for
-  # LOBU_ALLOW_UNSANDBOXED_EXEC (skips the sandbox AND unlocks full
-  # interpreters); the latter is a per-agent decision for trusted agents.
+  # NOTE on connector-contributed CLIs (e.g. `gh`): an agent turn runs in a V8
+  # isolate in the gateway process and its `bash` runs in a remote sandbox, so
+  # nothing in this pod spawns a per-agent binary. A connector declares what it
+  # needs (`nix: { packages: ['gh'] }`) and the sandbox provisions it there; no
+  # securityContext setting on this pod affects that.
   containerSecurityContext:
     allowPrivilegeEscalation: false
     capabilities:
@@ -137,8 +100,8 @@ app:
     enabled: true
     minAvailable: 1
 
-  # Persistent workspaces volume. The embedded worker stores the
-  # durable transcript in Postgres (`agent_transcript_snapshot`); the
+  # Persistent workspaces volume. A turn's durable transcript lives in
+  # Postgres (`agent_transcript_snapshot`); the
   # rest of {WORKSPACE_DIR} (input/output/temp) is pod-local ephemeral
   # — a per-conversation advisory lock pins runs to one pod for the
   # run lifetime. Disable by default so the deployment can roll across
@@ -154,11 +117,17 @@ app:
   # does not survive restarts or reliably cross replicas. The default stays off
   # for local/self-hosted installs; production should enable this with storage
   # that every scheduled app pod can mount.
-  # When enabled, ReadWriteOnce is supported only with replicaCount: 1; more
-  # than one app replica requires an RWX-capable class and accessMode:
-  # ReadWriteMany, and rendering fails closed otherwise. Leaving this disabled
-  # on a multi-replica install still renders — media then lands on pod-local
-  # /tmp and neither survives a restart nor crosses replicas.
+  # Rendering fails closed on any multi-replica topology that cannot share
+  # these bytes, because the failure mode is otherwise invisible: a publish and
+  # a download are separate requests, so a download served by a different pod
+  # 404s intermittently and reads as flakiness. Two rules, both enforced in
+  # `_helpers.tpl`:
+  #   * replicaCount > 1 requires enabled: true — with this off, every pod
+  #     writes to its own /tmp/lobu-artifacts.
+  #   * replicaCount > 1 with enabled: true requires an RWX-capable class and
+  #     accessMode: ReadWriteMany.
+  # ReadWriteOnce is therefore supported only at replicaCount: 1, where one pod
+  # both writes and serves.
   artifacts:
     enabled: false
     size: 20Gi
@@ -417,8 +386,9 @@ releaseGates:
     #
     # When enabled, the Job POSTs to /api/internal/smoke/dispatch, which
     # inserts a synthetic chat_message run. The runs-queue MessageConsumer
-    # claims it, spawns a worker subprocess, and on completion writes a
-    # row into `agent_transcript_snapshot`. The Job polls for that row
+    # admits it, a connector worker claims the turn over HTTP, and on
+    # completion the gateway writes a row into `agent_transcript_snapshot`.
+    # The Job polls for that row
     # and fails the deploy if `terminal_status='completed'` doesn't
     # materialise within `timeoutSeconds`.
     #

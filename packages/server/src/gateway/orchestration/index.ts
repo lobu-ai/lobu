@@ -1,5 +1,4 @@
 export * from "./deployment-manager.js";
-export * from "./deployment-utils.js";
 
 import {
 	createLogger,
@@ -21,8 +20,7 @@ import {
   DeploymentManager,
   type OrchestratorConfig,
 } from "./deployment-manager.js";
-import { buildModuleEnvVars } from "./deployment-utils.js";
-import type { AgentTurnShadowDeps } from "./agent-turn-shadow.js";
+import type { AgentTurnDeps } from "./agent-turn-producer.js";
 import { MessageConsumer } from "./message-consumer.js";
 
 const logger = createLogger("orchestrator");
@@ -41,12 +39,8 @@ export class Orchestrator {
   constructor(config: OrchestratorConfig) {
     this.config = config;
     const providerModules: ModelProviderModule[] = getModelProviderModules();
-    this.deploymentManager = new DeploymentManager(
-      config,
-      buildModuleEnvVars,
-      providerModules
-    );
-    this.queueConsumer = new MessageConsumer(config, this.deploymentManager);
+    this.deploymentManager = new DeploymentManager(config, providerModules);
+    this.queueConsumer = new MessageConsumer(this.deploymentManager);
   }
 
   /**
@@ -62,7 +56,9 @@ export class Orchestrator {
     policyStore?: PolicyStore,
     guardrailRegistry?: GuardrailRegistry,
     agentSettingsStore?: AgentSettingsStore,
-    agentTurnMcp?: AgentTurnShadowDeps["mcp"]
+    agentTurnMcp?: AgentTurnDeps["mcp"],
+    agentTurnArtifacts?: AgentTurnDeps["artifacts"],
+    agentTurnInstructions?: AgentTurnDeps["instructions"]
   ): Promise<void> {
     this.deploymentManager.setSecretStore(secretStore);
     // Lets a connection contribute an authenticated CLI to the agent sandbox
@@ -92,9 +88,15 @@ export class Orchestrator {
       logger.debug("Input-stage guardrails wired into MessageConsumer");
     }
 
-    // The isolate-lane shadow reads the agent's MCP servers and tools through
-    // the same services the worker gateway hands the subprocess lane.
+    // Native turns read the agent's MCP servers and tools through the gateway's
+    // existing MCP services.
     this.queueConsumer.setAgentTurnMcp(agentTurnMcp);
+    // And a turn's attachments out of the same artifact store the gateway
+    // published them into on the way in.
+    this.queueConsumer.setAgentTurnArtifacts(agentTurnArtifacts);
+    // And the platform identity block out of the providers the platform
+    // adapters register on the instruction service.
+    this.queueConsumer.setAgentTurnInstructions(agentTurnInstructions);
 
     const providerModules = getModelProviderModules();
     this.deploymentManager.setProviderModules(providerModules);
@@ -108,8 +110,6 @@ export class Orchestrator {
       await moduleRegistry.initAll();
       const providerModules = getModelProviderModules();
       this.deploymentManager.setProviderModules(providerModules);
-
-      await this.deploymentManager.validateWorkerImage();
 
       await this.queueConsumer.start();
 

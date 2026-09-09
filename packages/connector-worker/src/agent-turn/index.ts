@@ -8,4 +8,5 @@
  */
 
 export { agentGuestBundle } from './bundle.js';
+export { MAX_TOOL_CALLS_PER_TURN } from './types.js';
 export type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput } from './types.js';

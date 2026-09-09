@@ -152,7 +152,34 @@ function initializeMetrics() {
     "Terminal thread_response rows rendered locally after the owner-gate retry budget was exhausted",
     "counter"
   );
-
+  // Delta publishes that threw on the heartbeat path. The failure is absorbed
+  // so a cosmetic path can never get a live turn reaped, and the worker retries
+  // the batch — but a persistently broken delta path would otherwise be
+  // indistinguishable from a working one, which is what this counts.
+  registerMetric(
+    "lobu_turn_delta_publish_failed_total",
+    "Agent-turn streamed delta publishes that failed on the worker heartbeat path",
+    "counter"
+  );
+  registerMetric(
+    "lobu_turn_tool_event_publish_failed_total",
+    "Agent-turn tool-trace publishes that failed on the worker heartbeat path",
+    "counter"
+  );
+  // A conversation whose native session outgrew the snapshot cap. Trimmed to
+  // its latest compaction when it has one (no context lost), reset otherwise.
+  // Both rare by design; a rising rate says the cap or the tool-result sizes
+  // need attention.
+  registerMetric(
+    "lobu_agent_turn_snapshot_trimmed_total",
+    "Agent-turn native sessions trimmed to their latest compaction because the completed snapshot exceeded the storage cap",
+    "counter"
+  );
+  registerMetric(
+    "lobu_agent_turn_snapshot_reset_total",
+    "Agent-turn native sessions reset because the completed snapshot exceeded the storage cap with no compaction to trim to",
+    "counter"
+  );
   // Scheduler + Automation health. These back the prod alerting rules
   // (charts/lobu PrometheusRule): a silent scheduler / failing Automation tick is
   // exactly the failure mode that went undetected for 12 days (lobu#1046).
@@ -274,9 +301,10 @@ export function getMetricsText(): string {
   lines.push("# TYPE nodejs_external_memory_bytes gauge");
   lines.push(`nodejs_external_memory_bytes ${memUsage.external}`);
 
-  // Resident set size: the whole process's memory. On the app pod this runs far
-  // above heapUsed because agent-worker child subprocesses' memory counts toward
-  // the pod cgroup — the gap between RSS and heap is what OOM-kills the pod.
+  // Resident set size: the whole process's memory. This runs above heapUsed
+  // because off-heap allocations — V8 isolates for agent turns, buffers, native
+  // modules — count toward the pod cgroup, and the gap between RSS and heap is
+  // what OOM-kills the pod.
   lines.push("# HELP nodejs_rss_bytes Node.js resident set size in bytes");
   lines.push("# TYPE nodejs_rss_bytes gauge");
   lines.push(`nodejs_rss_bytes ${memUsage.rss}`);

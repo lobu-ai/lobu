@@ -84,22 +84,8 @@ gate_require_docker() {
 # ── jobs (each mirrors the ci.yml job of the same name) ────────────────────
 
 gate_unit() {
-  # bash-3.2-safe: no array (an empty array errors under set -u on 3.2) — branch
-  # on bwrap presence directly. CI sets LOBU_REQUIRE_EXEC_SANDBOX so a missing
-  # exec-sandbox fails the job; without bwrap the escape matrix self-skips (the
-  # macOS situation), so only force the env when the backend is present.
-  local bwrap_present=0
-  command -v bwrap >/dev/null 2>&1 && bwrap_present=1
-  if [ "$bwrap_present" -eq 0 ]; then
-    echo "   (bwrap not present — exec-sandbox escape matrix self-skips)"
-  fi
   bun test packages/core packages/cli --timeout 30000 || return 1
   bun test packages/plugin-api packages/plugin-host packages/plugin-toolkit packages/plugin-memory packages/plugin-conversations packages/plugin-media packages/plugin-mcp --timeout 30000 || return 1
-  if [ "$bwrap_present" -eq 1 ]; then
-    env LOBU_REQUIRE_EXEC_SANDBOX=1 bun test packages/agent-worker --timeout 30000 || return 1
-  else
-    bun test packages/agent-worker --timeout 30000 || return 1
-  fi
   bun test packages/server/src/__tests__/unit --timeout 30000 || return 1
   bun test packages/server/src/auth/__tests__/system-provider-resolution.test.ts --timeout 30000 || return 1
   bun test packages/server/src/utils/__tests__/device-pin-tombstones.test.ts packages/server/src/tools/admin/manage_operations/__tests__/activity-feed-collapse.test.ts --timeout 30000 || return 1

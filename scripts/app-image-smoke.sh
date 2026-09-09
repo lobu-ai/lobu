@@ -121,32 +121,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Worker-entrypoint invariant.
-#
-#    `gateway/config/index.ts` picks the worker entrypoint by probing for
-#    `packages/agent-worker/src/index.ts`, and `buildWorkerInvocation` spawns a
-#    `.ts` under bun but a `.mjs` under node. Both halves must hold or the image
-#    silently falls to the bundle-under-node path — the one that raised
-#    `ReferenceError: __filename is not defined` for CLI users.
-#
-#    Asserting the two preconditions is what keeps that scoping true over time;
-#    dropping `src/` from the Dockerfile COPY, or dropping bun from the runtime
-#    stage, would each flip prod onto the broken path with no other signal.
-# ---------------------------------------------------------------------------
-note "worker entrypoint"
-if docker exec "$CID" test -f /app/packages/agent-worker/src/index.ts; then
-  ok "agent-worker src/index.ts present (resolves to the .ts entrypoint)"
-else
-  bad "agent-worker src/index.ts missing — worker would fall back to dist/index.bundle.mjs under node"
-fi
-if docker exec "$CID" bun --version >/dev/null 2>&1; then
-  ok "bun present in the runtime stage (can spawn the .ts entrypoint)"
-else
-  bad "bun missing — a .ts worker entrypoint cannot be spawned"
-fi
-
-# ---------------------------------------------------------------------------
-# 4. The web UI, and every asset it references (#2183).
+# 3. The web UI, and every asset it references (#2183).
 #
 #    Fetching `/` alone proves nothing: the SPA shell is served by a catch-all,
 #    so it returns 200 even when the built bundle was never copied. The real
@@ -191,7 +166,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. MCP is mounted. Unauthenticated we expect an auth challenge, NOT a 404 —
+# 4. MCP is mounted. Unauthenticated we expect an auth challenge, NOT a 404 —
 #    401 proves the handler is wired; 404 means the route vanished.
 # ---------------------------------------------------------------------------
 note "MCP mount"
@@ -208,7 +183,7 @@ case "$mcp_code" in
 esac
 
 # ---------------------------------------------------------------------------
-# 6. Connector runtime, inside the APP image.
+# 5. Connector runtime, inside the APP image.
 #
 #    `connector-parity-smoke` runs this on the worker image and the host CLI,
 #    but the app image is a third build with its own COPY list — and the bug it

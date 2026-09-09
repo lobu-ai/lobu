@@ -31,8 +31,6 @@
     "paths": {
       "@lobu/core": ["packages/core/src/index.ts"],
       "@lobu/core/*": ["packages/core/src/*"],
-      "@lobu/worker": ["packages/agent-worker/src/index.ts"],
-      "@lobu/worker/*": ["packages/agent-worker/src/*"],
       "@lobu/plugin-api": ["packages/plugin-api/src/index.ts"],
       "@lobu/plugin-api/*": ["packages/plugin-api/src/*"],
       "@lobu/plugin-host": ["packages/plugin-host/src/index.ts"],

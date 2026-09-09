@@ -34,6 +34,14 @@ import {
  */
 const HEAL_MIGRATIONS = [
 	{
+		files: ["20260907163000_runs_agent_turn_conversation_active.sql"],
+		index: "idx_runs_agent_turn_conversation_active",
+		seedSql: `
+      CREATE INDEX IF NOT EXISTS idx_runs_agent_turn_conversation_active
+        ON runs (id)
+    `,
+	},
+	{
 		files: [
 			"20260719115959_channel_messages_org_dedupe_heal.sql",
 			"20260719120000_channel_messages_org_dedupe.sql",

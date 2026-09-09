@@ -63,7 +63,6 @@ class TestConsumer extends MessageConsumer {
 
 function buildConsumer(): TestConsumer {
   return new TestConsumer(
-    CONFIG,
     new NoopManager(CONFIG),
     {} as unknown as IMessageQueue,
     async () => {}

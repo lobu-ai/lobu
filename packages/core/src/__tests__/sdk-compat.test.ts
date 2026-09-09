@@ -24,12 +24,43 @@ describe("sdk-compat registry", () => {
 
   test("isSdkCompat gates routable protocols", () => {
     expect(isSdkCompat("openai")).toBe(true);
+    expect(isSdkCompat("openai-responses")).toBe(true);
     expect(isSdkCompat("anthropic")).toBe(true);
-    expect(isSdkCompat("google")).toBe(true);
     // Not routable:
     expect(isSdkCompat(null)).toBe(false);
     expect(isSdkCompat(undefined)).toBe(false);
     expect(isSdkCompat("made-up")).toBe(false);
+  });
+
+  test("rejects a protocol no turn can execute, at CONFIGURATION time", () => {
+    // These three were routable per this gate and unrunnable in the isolate:
+    // their pi-ai adapters need Node-bound SDKs (AWS SigV4, `@google/genai`,
+    // `@mistralai/mistralai`), which do not bundle into the guest. A config
+    // declaring one passed here and then failed at turn time reporting
+    // NO_MODEL_CONFIGURED — sending the user to look for a missing setting
+    // when the protocol was the problem.
+    //
+    // These vendors are still supported; they are reached by translating
+    // server-side and offering an OpenAI-compatible endpoint, which is what
+    // `BedrockOpenAIService` does for Bedrock.
+    for (const unrunnable of ["google", "bedrock", "mistral"]) {
+      expect(isSdkCompat(unrunnable), unrunnable).toBe(false);
+      expect(resolveSdkCompat(unrunnable), unrunnable).toBeNull();
+    }
+  });
+
+  test("every routable protocol is one a turn envelope can carry", () => {
+    // The isolate lane admits exactly these three adapters (`LANE_APIS` in the
+    // agent-turn producer). A row whose `api` is not among them cannot run, so
+    // this is the invariant that keeps the table honest as it grows.
+    const laneAdapters = new Set([
+      "openai-completions",
+      "openai-responses",
+      "anthropic-messages",
+    ]);
+    for (const [key, p] of Object.entries(SDK_COMPAT_PROTOCOLS)) {
+      expect(laneAdapters.has(p.api), `${key} -> ${p.api}`).toBe(true);
+    }
   });
 
   test("resolveSdkCompat returns null for unroutable input", () => {

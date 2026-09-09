@@ -53,3 +53,21 @@ expect_render_failure \
   "app.env.LOBU_ARTIFACTS_DIR must equal app.artifacts.mountPath" \
   --set app.artifacts.enabled=true \
   --set app.env.LOBU_ARTIFACTS_DIR=/tmp/wrong
+
+# Multi-replica with artifact storage OFF is the case the accessMode guard
+# cannot see: nothing is misconfigured about the volume, there is no volume.
+# Every pod writes to its own /tmp/lobu-artifacts, so a download served by a
+# different pod than the publish 404s — intermittently, which reads as
+# flakiness. The server cannot catch it either: it only checks that
+# LOBU_ARTIFACTS_DIR is set, and pod-local /tmp satisfies that.
+expect_render_failure \
+  "app.replicaCount > 1 requires app.artifacts.enabled=true" \
+  --show-only templates/deployment.yaml \
+  --set app.replicaCount=2 \
+  --set app.artifacts.enabled=false
+
+# ...and the single-replica default must still render: pod-local artifacts are
+# correct when there is only ever one pod to serve them.
+single_replica_render="$(render --set app.replicaCount=1 --set app.artifacts.enabled=false)"
+grep -q 'value: "/tmp/lobu-artifacts"' <<<"$single_replica_render"
+grep -q 'replicas: 1' <<<"$single_replica_render"

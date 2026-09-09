@@ -1,6 +1,16 @@
 {
   "extends": "../plugin-toolkit/tsconfig.json",
-  "compilerOptions": { "outDir": "dist", "rootDir": "src" },
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "baseUrl": "../..",
+    "paths": {
+      "@lobu/core/agent-tooling": [
+        "packages/core/dist/agent-tooling.d.ts",
+        "packages/core/src/agent-tooling.ts"
+      ]
+    }
+  },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "src/__tests__/**/*"]
 }

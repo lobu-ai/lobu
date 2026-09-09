@@ -7,6 +7,7 @@ import {
 import type { McpProxy } from "./proxy.js";
 import {
 	authenticateRequest,
+	captureMcpTool,
 	buildSessionKey,
 	computeScopeKey,
 	getRequestBodyAsText,
@@ -113,7 +114,7 @@ async function handleCallToolAuthenticated(
 	if (!httpServer) {
 		return c.json({ error: `MCP server '${mcpId}' not found` }, 404);
 	}
-	const scopeKey = computeScopeKey(requesterUserId);
+	const scopeKey = computeScopeKey(requesterUserId, auth.tokenData);
 
 	// Parse body early so tool arguments are available for the approval message.
 	let toolArguments: Record<string, unknown> = {};
@@ -127,6 +128,10 @@ async function handleCallToolAuthenticated(
 			return c.json({ error: "Request body too large" }, 413);
 		}
 		return c.json({ error: "Invalid JSON body" }, 400);
+	}
+
+	if (auth.tokenData.executionMode === "capture" && !httpServer.internal) {
+		return c.json(await captureMcpTool(auth.tokenData, mcpId, toolName, toolArguments));
 	}
 
 	// Pre-tool guardrails — same enforcement as the JSON-RPC path so this REST
@@ -147,7 +152,7 @@ async function handleCallToolAuthenticated(
 	}
 
 	// Check tool approval based on annotations and grants.
-	const approval = await proxy.evaluateToolApproval(
+	const approval = auth.tokenData.executionMode === "capture" ? "allow" : await proxy.evaluateToolApproval(
 		mcpId,
 		toolName,
 		toolArguments,

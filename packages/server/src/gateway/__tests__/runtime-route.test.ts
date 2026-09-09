@@ -27,7 +27,8 @@ const rmMock = mock(async (remotePath: string) => {
 });
 const writeFilesMock = mock(async () => undefined);
 const readFileToBufferMock = mock(async () => null);
-const runCommandMock = mock(async (params: { args?: string[] }) => {
+const runCommandMock = mock(
+  async (params: { args?: string[]; env?: Record<string, string> }) => {
   // args = ["-lc", <wrapper script>, "lobu-exec", <cwd>, <command>] — the
   // submitted command is the last positional, not the script at index 1.
   const command = params.args?.[4] ?? "";
@@ -48,12 +49,13 @@ const runCommandMock = mock(async (params: { args?: string[] }) => {
   if (command.includes("rm input.txt")) {
     remoteFiles.delete("/vercel/sandbox/input.txt");
   }
-  return {
-    exitCode,
-    stdout: async () => stdout,
-    stderr: async () => "",
-  };
-});
+    return {
+      exitCode,
+      stdout: async () => stdout,
+      stderr: async () => "",
+    };
+  }
+);
 const updateMock = mock(async () => undefined);
 const getOrCreateMock = mock(async () => fakeSandbox);
 
@@ -89,6 +91,24 @@ const readSandboxSecretSpy = spyOn(
   providerSecrets,
   "readSandboxSecret"
 ).mockResolvedValue(null);
+
+/**
+ * Connector-contributed leases, mocked at the resolver boundary. The real
+ * resolver reads `connections` and mints through the installation-token
+ * registry; neither belongs in a route test, and both are covered by
+ * `agent-tooling-resolver.test.ts`. What this file owns is the DELIVERY
+ * contract: what the route does with a minted lease, and what it refuses to
+ * take from the worker.
+ */
+const leasedEnv = new Map<string, string>();
+let leaseMintThrows = false;
+const resolveLeasedEnvMock = mock(async () => {
+  if (leaseMintThrows) throw new Error("mint failed");
+  return Object.fromEntries(leasedEnv);
+});
+mock.module("../agent-tooling/exec-credentials.js", () => ({
+  resolveLeasedExecEnv: resolveLeasedEnvMock,
+}));
 
 // Importing the route pulls in the gateway runtime registry barrel, which
 // registers the Vercel provider. The @vercel/sandbox mock above is installed
@@ -207,6 +227,9 @@ afterEach(async () => {
   rmMock.mockClear();
   updateMock.mockClear();
   noProvisionExecMock.mockClear();
+  leasedEnv.clear();
+  leaseMintThrows = false;
+  resolveLeasedEnvMock.mockClear();
   await fs.rm(path.resolve("workspaces", "verceltestagent"), {
     recursive: true,
     force: true,
@@ -1053,5 +1076,111 @@ describe("createRuntimeRoutes", () => {
     expect(writeFilesMock).not.toHaveBeenCalled();
     expect(readFileToBufferMock).not.toHaveBeenCalled();
     expect(rmMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Connector-contributed credentials on the isolate lane.
+ *
+ * A connector that declares `credential: 'lease'` (the GitHub connector's
+ * `GH_TOKEN`) promises the agent an authenticated CLI. The retired subprocess
+ * lane kept that promise by baking the lease into the worker's environment at
+ * spawn; there is no worker process now, so the lease has to be minted
+ * gateway-side and attached per command.
+ *
+ * Minting HERE is not a port of the old design but a better fit for it: the
+ * subprocess lane had to recycle a warm worker before its lease lapsed,
+ * because a process reads its env once at start. A per-command mint has no
+ * such window.
+ */
+describe("createRuntimeRoutes — connector credential leases", () => {
+  test("a declared lease reaches the sandbox as a real env var", async () => {
+    setVercelSystemCreds();
+    leasedEnv.set("GH_TOKEN", "ghs_minted_for_this_command");
+    const router = createRuntimeRoutes();
+
+    const res = await router.request("/internal/runtime/exec", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token({
+          agentId: "verceltestagent",
+          runtimeProviderId: "vercel",
+        })}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ command: "gh auth status" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(runCommandMock.mock.calls[0]?.[0]?.env).toMatchObject({
+      GH_TOKEN: "ghs_minted_for_this_command",
+    });
+  });
+
+  /**
+   * The worker is the sandbox-ee, so its body must not be able to name its own
+   * credentials — the same rule the route already applies to `allowedDomains`
+   * and `nixPackages`. A body value must neither introduce an env var nor
+   * override a minted lease, or a compromised isolate could pin `GH_TOKEN` to
+   * a token it controls and have the sandbox act as that identity.
+   */
+  test("a worker-supplied env cannot inject or override a credential", async () => {
+    setVercelSystemCreds();
+    leasedEnv.set("GH_TOKEN", "ghs_minted_for_this_command");
+    const router = createRuntimeRoutes();
+
+    const res = await router.request("/internal/runtime/exec", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token({
+          agentId: "verceltestagent",
+          runtimeProviderId: "vercel",
+        })}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        command: "gh auth status",
+        env: {
+          GH_TOKEN: "ghs_attacker_supplied",
+          AWS_SECRET_ACCESS_KEY: "smuggled",
+        },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const sent = runCommandMock.mock.calls[0]?.[0]?.env ?? {};
+    expect(sent.GH_TOKEN).toBe("ghs_minted_for_this_command");
+    expect(sent).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
+  });
+
+  /**
+   * Honest degradation, the rule the lease module already states: a connection
+   * whose lease cannot be minted contributes nothing and the command still
+   * runs. A `gh` that reports "not logged in" is a better failure than a turn
+   * that dies, and far better than one that reports success having done
+   * nothing.
+   */
+  test("a failed mint runs the command without the credential", async () => {
+    setVercelSystemCreds();
+    leaseMintThrows = true;
+    const router = createRuntimeRoutes();
+
+    const res = await router.request("/internal/runtime/exec", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token({
+          agentId: "verceltestagent",
+          runtimeProviderId: "vercel",
+        })}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ command: "gh auth status" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(runCommandMock).toHaveBeenCalledTimes(1);
+    expect(runCommandMock.mock.calls[0]?.[0]?.env ?? {}).not.toHaveProperty(
+      "GH_TOKEN"
+    );
   });
 });

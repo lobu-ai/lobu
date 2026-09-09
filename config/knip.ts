@@ -35,6 +35,9 @@ const config: KnipConfig = {
         // (agent-turn/bundle.ts) so it can be compiled for the isolate, which
         // is exactly the import knip cannot see.
         "src/agent-turn/guest-entry.ts",
+        // Build step run from the package `build` script after tsc; it writes
+        // the prebuilt guest bundle the published package ships.
+        "src/agent-turn/build-guest-bundle.ts",
         "src/**/*.test.ts",
       ],
       ignoreDependencies: [
@@ -43,6 +46,10 @@ const config: KnipConfig = {
         "@xenova/transformers",
         "jimp",
         "sharp",
+        // Resolved by path at guest-bundle build time (agent-turn/
+        // pi-file-tools-bundle.ts) to stand in for `node:path` inside Pi's
+        // file tools; never statically imported in src/.
+        "pathe",
       ],
     },
     "packages/connector-sdk": {
@@ -76,16 +83,19 @@ const config: KnipConfig = {
       // Generated openapi-ts client (ignored above) is the only consumer.
       ignoreDependencies: ["@hey-api/client-fetch"],
     },
+    "packages/core": {
+      // `./testing` is a declared public export of @lobu/core, consumed by
+      // other packages' test setup (packages/server/src/gateway/__tests__/
+      // setup.ts) rather than by production source. Knip reached it through
+      // the root `test` script's path list, which no longer names every
+      // package, so name the entry here instead of depending on that.
+      entry: ["src/index.ts", "src/testing/index.ts"],
+    },
     "packages/embeddings": {
       // main points at dist/; the source entries are index and the standalone
       // embeddings server. openai/embedding-utils are reached transitively from
       // those, so they don't need explicit entries.
       entry: ["src/index.ts", "src/server.ts", "src/**/*.test.ts"],
-    },
-    "packages/agent-worker": {
-      // The publish bundler is invoked from the package's `build` script, not
-      // imported, so knip can't reach it through the module graph.
-      entry: ["src/index.ts", "scripts/build-worker-bundle.mjs"],
     },
     "packages/server": {
       entry: [
@@ -133,11 +143,11 @@ const config: KnipConfig = {
         // Build helper invoked as `node scripts/build.cjs`.
         "scripts/build.cjs",
       ],
-      // The published `lobu` CLI is an umbrella: its build bundles @lobu/server
-      // and @lobu/worker, so it re-declares THEIR runtime deps in its own
+      // The published `lobu` CLI is an umbrella: its build bundles @lobu/server,
+      // so it re-declares ITS runtime deps in its own
       // package.json (npm installs them for the bundled output). knip only sees
       // cli/src, which doesn't import these directly, so it flags them — but
-      // every one is used by the bundled server/worker at runtime. Listed
+      // every one is used by the bundled server at runtime. Listed
       // explicitly so a real unused cli dep would still surface.
       ignoreDependencies: [
         "@aws-sdk/client-bedrock",
@@ -151,8 +161,8 @@ const config: KnipConfig = {
         "@hono/node-server",
         "@hono/zod-openapi",
         "@lobu/embeddings",
-        "@lobu/worker",
         "@mariozechner/pi-ai",
+        "@mariozechner/pi-coding-agent",
         "@modelcontextprotocol/sdk",
         "@opentelemetry/api",
         "@opentelemetry/exporter-trace-otlp-grpc",

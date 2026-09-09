@@ -416,6 +416,11 @@ export class MultiTenantProvider implements WorkspaceProvider {
           // Signed side-effect mode: 'capture' turns every non-read SDK call
           // into a recorded no-op (see tools/sdk_run.ts).
           executionMode: tokenData.executionMode ?? null,
+          captureIdentity: tokenData.executionMode === "capture" ? {
+            organizationId: tokenData.organizationId, agentId: tokenData.agentId,
+            conversationId: tokenData.conversationId, runId: tokenData.runId,
+            automationRunId: tokenData.automationRunId,
+          } : null,
         },
         mcpIsAuthenticated: true,
         organizationId: requestedOrgId,

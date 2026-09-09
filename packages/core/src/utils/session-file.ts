@@ -32,23 +32,12 @@ export interface SessionEntry {
   id: string;
   parentId: string | null;
   timestamp: string;
+  /** `custom` entries: the recorder's own payload. */
+  data?: unknown;
   message?: {
     role: string;
     content?: unknown;
     usage?: { inputTokens?: number; outputTokens?: number };
-    /**
-     * `bashExecution` messages (pi's `!command` records) carry their payload
-     * directly on `message` rather than in `content` — see pi's
-     * `BashExecutionMessage` / `recordBashResult`. These fields are only
-     * present when `role === "bashExecution"`.
-     */
-    command?: string;
-    output?: string;
-    exitCode?: number;
-    cancelled?: boolean;
-    truncated?: boolean;
-    fullOutputPath?: string;
-    excludeFromContext?: boolean;
   };
   summary?: string;
   provider?: string;
@@ -56,36 +45,24 @@ export interface SessionEntry {
   customType?: string;
   content?: unknown;
   display?: boolean;
+  /** `compaction` entries: the first entry kept verbatim after the summary. */
+  firstKeptEntryId?: string;
+  /** `compaction` entries: context size the summary replaced. */
+  tokensBefore?: number;
+  /** `branch_summary` entries: the branch the summary came back from. */
+  fromId?: string;
 }
 
 /**
  * The set of `type` discriminants a {@link ParsedMessage} can carry. Kept as a
  * closed union so API consumers (and the typed client) can exhaustively switch
- * on it. `bashExecution` projects pi's `!command` records — the command and its
- * output, so a `!`-bash turn survives a page reload.
+ * on it.
  */
 export type ParsedMessageType =
   | "message"
   | "compaction"
   | "model_change"
-  | "custom_message"
-  | "bashExecution";
-
-/**
- * Structured `content` for a `bashExecution` {@link ParsedMessage}. `exitCode`
- * is `undefined` while a command is still running / was cancelled before exit.
- * `excludeFromContext` mirrors pi's `!!` (hidden-from-model) flag — it does NOT
- * hide the record from the transcript.
- */
-export interface BashExecutionContent {
-  command: string;
-  output: string;
-  exitCode?: number;
-  cancelled: boolean;
-  truncated: boolean;
-  excludeFromContext?: boolean;
-  fullOutputPath?: string;
-}
+  | "custom_message";
 
 /** Display-friendly projection emitted to API consumers (`/session/messages`). */
 export interface ParsedMessage {
@@ -134,37 +111,11 @@ export function parseSessionEntries(content: string): {
  * user-visible messages (everything other than `message`, `compaction`,
  * `model_change`, `custom_message`).
  *
- * A `message` entry whose inner `role` is `bashExecution` (pi's `!command`
- * record) is projected as a `bashExecution` message with a structured
- * {@link BashExecutionContent} payload, so a `!`-bash turn survives reload.
- *
  * `isVerbose` marks entries the UI hides behind a "verbose" toggle —
  * tool results, compaction/model-change markers, custom system events
- * that aren't explicitly displayed. A `bashExecution` record is never
- * verbose: even `!!` (`excludeFromContext: true`) is hidden only from the
- * model's context, not from the transcript.
+ * that aren't explicitly displayed.
  */
 export function entryToMessage(entry: SessionEntry): ParsedMessage | null {
-  if (entry.type === "message" && entry.message?.role === "bashExecution") {
-    const m = entry.message;
-    const content: BashExecutionContent = {
-      command: m.command ?? "",
-      output: m.output ?? "",
-      exitCode: m.exitCode,
-      cancelled: m.cancelled ?? false,
-      truncated: m.truncated ?? false,
-      excludeFromContext: m.excludeFromContext,
-      fullOutputPath: m.fullOutputPath,
-    };
-    return {
-      id: entry.id,
-      type: "bashExecution",
-      role: "bashExecution",
-      content,
-      timestamp: entry.timestamp,
-      isVerbose: false,
-    };
-  }
   if (entry.type === "message" && entry.message) {
     return {
       id: entry.id,

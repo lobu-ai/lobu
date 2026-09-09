@@ -6,11 +6,24 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./pi-resources": {
+      "types": "./dist/pi-resources.d.mts",
+      "bun": "./src/pi-resources.mts",
+      "import": "./dist/pi-resources.mjs",
+      "require": "./dist/pi-resources.mjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "pi-resources": [
+        "dist/pi-resources.d.mts"
+      ]
     }
   },
   "scripts": {

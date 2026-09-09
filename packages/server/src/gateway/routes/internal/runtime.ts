@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import { resolveRuntimeCredentials } from "../../runtime/credentials.js";
 import { getGatewayRuntimeProvider } from "../../runtime/index.js";
 import { sanitizeNixPackages } from "../../runtime/packages.js";
-import { commandEnv, errorStatus, resolveWorkspacePath } from "../../runtime/workspace.js";
+import { errorStatus, resolveWorkspacePath } from "../../runtime/workspace.js";
+import { resolveLeasedExecEnv } from "../../agent-tooling/exec-credentials.js";
 import { type PackageProvisionResult, RuntimeInfrastructureError } from "../../runtime/types.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
@@ -16,8 +17,16 @@ type ExecRequest = {
   command?: unknown;
   cwd?: unknown;
   workspaceDir?: unknown;
-  env?: unknown;
   timeoutMs?: unknown;
+  // NOTE: no `env` here. Connector-contributed credentials are minted
+  // GATEWAY-side per command (`resolveLeasedExecEnv`) and the worker has no say
+  // in them, for the same reason the two lists below are signed claims: the
+  // worker is the sandbox-ee. A body value was previously passed through
+  // verbatim, so a compromised isolate could have pinned `GH_TOKEN` to a token
+  // it controlled and had the sandbox act as that identity. The isolate lane's
+  // own exec client never sent the field (`RuntimeExecRequest` is
+  // `{ command, timeoutMs }`), so nothing legitimate is losing a capability.
+  //
   // NOTE: no `allowedDomains` here — the egress allowlist is NOT trusted from the
   // request body (the worker is the sandbox-ee). It's read from the signed worker
   // token claim below, same as `runtimeProviderId`.
@@ -120,6 +129,39 @@ export function createRuntimeRoutes(): Hono<WorkerContext> {
       // check on the path EVERY provider inherits.
       const nixPackages = sanitizeNixPackages(worker.nixPackages);
 
+      // The org's connector-contributed leases, minted for THIS command.
+      //
+      // Caught HERE as well as inside the resolver: the contract is "a
+      // credential lookup never fails the command", and a contract that lives
+      // only in the callee is one refactor away from being lost. An
+      // unauthenticated `gh` tells the user something they can act on; a 500
+      // from the shell tells them nothing and looks like the sandbox is down.
+      //
+      // No org on the token → nothing to mint: connector contributions are
+      // resolved per organization, so an unscoped token has no connections to
+      // read. Skipped rather than defaulted, because guessing a tenant here is
+      // how a credential crosses one.
+      let env: Record<string, string> = {};
+      try {
+        env = worker.organizationId
+          ? await resolveLeasedExecEnv({
+              agentId: worker.agentId,
+              organizationId: worker.organizationId,
+              conversationId: worker.conversationId,
+              runId: worker.runId,
+            })
+          : {};
+      } catch (error) {
+        logger.warn(
+          {
+            agent_id: worker.agentId,
+            organization_id: worker.organizationId,
+            err: error instanceof Error ? error.message : String(error),
+          },
+          "Connector credential resolution failed; running the command without those credentials"
+        );
+      }
+
       const execContext = {
         organizationId: worker.organizationId,
         agentId: worker.agentId,
@@ -128,7 +170,7 @@ export function createRuntimeRoutes(): Hono<WorkerContext> {
         credentials,
         command: body.command,
         cwd: body.cwd,
-        env: commandEnv(body.env),
+        env,
         timeoutMs,
         // Authoritative egress allow/deny lists from the SIGNED token, never
         // the body — a compromised worker cannot widen its own sandbox policy.

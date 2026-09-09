@@ -3,7 +3,10 @@
 // Shared exports for @lobu/core consumers (gateway, worker, external tools)
 
 export * from "./agent-policy";
+export * from "./tool-trace-summary";
 export * from "./tool-policy";
+export * from "./turn-control";
+export * from "./memory-flush";
 // Agent store interface (unified storage abstraction)
 export type {
   AgentAccessStore,
@@ -42,7 +45,9 @@ export * from "./contracts/interaction-envelope";
 // Shared credential-store primitives (CLI + embedded server share one impl)
 export * from "./credentials";
 // Errors & logging
+export * from "./classify-error";
 export * from "./errors";
+export * from "./provider-auth-hints";
 // Guardrail primitive (type + registry + parallel runner + no-op builtin)
 export * from "./guardrails";
 // Shared base for InstructionProvider implementations (server + worker)
@@ -106,7 +111,6 @@ export type {
   AgentInlineGuardrail,
   AgentOptions,
   AuthProfile,
-  CliBackendConfig,
   ConversationMessage,
   DeclaredCredential,
   HistoryMessage,
@@ -142,7 +146,6 @@ export * from "./utils/secret-redaction";
 export * from "./utils/sentry-scrubber";
 // Shared Lobu runtime session.jsonl parser (gateway + worker).
 export {
-  type BashExecutionContent,
   entryToMessage,
   type ParsedMessage,
   type ParsedMessageType,
@@ -159,10 +162,10 @@ export type {
 } from "./worker/transport";
 // Gateway ↔ worker wire contract (MessagePayload, JobType, QueuedMessage).
 export type {
-  BangBashCommand,
   DeviceExecutionTarget,
   JobType,
   MessagePayload,
   QueuedMessage,
 } from "./worker/wire";
-export { parseBangBashCommand } from "./worker/wire";
+
+export { withLobuFileParameters } from "./agent-tooling";
