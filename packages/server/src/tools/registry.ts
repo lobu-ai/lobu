@@ -238,11 +238,13 @@ const READ_ONLY = {
 // CHANGE public internet or third-party state. Live reads from a user's private
 // connectors remain closed-world even though they contact an external service.
 //
-// These tools only retrieve data. Their invocation audit is server bookkeeping,
-// not an operation on workspace or third-party state, so it does not make the
-// tool a write. Authorization stays separately pinned by `authorizationReadOnly`.
+// These operations retrieve data, but every OAuth and PAT invocation appends an
+// audit/activity record, and `readOnlyHint` asserts the tool "does not modify
+// its environment" — that append does, so the hint cannot be claimed. Access
+// enforcement stays separate through `authorizationReadOnly`, so a read grant
+// still invokes these tools while the SDK keeps rejecting data writes.
 const AUDITED_READ = {
-  readOnlyHint: true,
+  readOnlyHint: false,
   destructiveHint: false,
   openWorldHint: false,
   idempotentHint: false,

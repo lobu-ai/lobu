@@ -9,6 +9,7 @@ import {
 	getAllTools,
 	getMcpTools,
 	getTool,
+	isAuthorizationReadOnly,
 	isInternalDispatchTool,
 	isRestDispatchTool,
 } from "../../tools/registry";
@@ -88,6 +89,19 @@ describe("tool registry split", () => {
 		expect(isRestDispatchTool("get_approval")).toBe(false);
 		expect(isRestDispatchTool("resolve_approval")).toBe(false);
 		expect(isRestDispatchTool("manage_connections")).toBe(true);
+	});
+
+	it("discloses audit writes without requiring write access for data reads", () => {
+		const listed = getMcpTools({ maxAccessLevel: "read" });
+		for (const name of ["search_memory", "search_sdk", "query_sdk", "query_sql", "get_approval"]) {
+			const tool = listed.find((entry) => entry.name === name);
+			expect(tool).toBeDefined();
+			expect(tool?.annotations?.readOnlyHint).toBe(false);
+			expect(isAuthorizationReadOnly(getTool(name))).toBe(true);
+			expect(tool?.securitySchemes).toEqual([
+				{ type: "oauth2", scopes: ["mcp:read", "profile:read"] },
+			]);
+		}
 	});
 
 	it("advertises identity permission on every scoped tool", () => {
