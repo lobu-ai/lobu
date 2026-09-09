@@ -90,6 +90,16 @@ describe("tool registry split", () => {
 		expect(isRestDispatchTool("manage_connections")).toBe(true);
 	});
 
+	it("advertises identity permission on every scoped tool", () => {
+		const scoped = getMcpTools().filter((tool) => tool.securitySchemes);
+		expect(scoped.length).toBeGreaterThan(0);
+		for (const tool of scoped) {
+			for (const scheme of tool.securitySchemes ?? []) {
+				expect(scheme.scopes).toContain("profile:read");
+			}
+		}
+	});
+
 	it("advertises progressive admin scope only to role-eligible MCP sessions", () => {
 		const eligibleRun = getMcpTools({
 			maxAccessLevel: "write",
@@ -101,10 +111,10 @@ describe("tool registry split", () => {
 		}).find((tool) => tool.name === "run_sdk");
 
 		expect(eligibleRun?.securitySchemes).toEqual([
-			{ type: "oauth2", scopes: ["mcp:write", "mcp:admin"] },
+			{ type: "oauth2", scopes: ["mcp:write", "mcp:admin", "profile:read"] },
 		]);
 		expect(memberRun?.securitySchemes).toEqual([
-			{ type: "oauth2", scopes: ["mcp:write"] },
+			{ type: "oauth2", scopes: ["mcp:write", "profile:read"] },
 		]);
 	});
 

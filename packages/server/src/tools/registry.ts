@@ -21,6 +21,7 @@
 
 import { SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
 import { type Static, Type } from '@sinclair/typebox';
+import { getMcpConnectionScopes } from '../auth/oauth/scopes';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
@@ -844,7 +845,9 @@ function computeListedTools(
         inputSchema,
         ...(tool.annotations && { annotations: tool.annotations }),
         ...(securityScopes && {
-          securitySchemes: [{ type: 'oauth2' as const, scopes: securityScopes }],
+          securitySchemes: [
+            { type: 'oauth2' as const, scopes: getMcpConnectionScopes(securityScopes) },
+          ],
         }),
         ...(tool.mcpMeta && { _meta: tool.mcpMeta }),
         // outputSchema keeps its discriminated variants (no flattening, no

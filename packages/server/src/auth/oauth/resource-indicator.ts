@@ -11,7 +11,7 @@ import {
   getConfiguredSubdomainZone,
 } from '../../utils/public-origin';
 import { resolveBaseUrl, safeParseUrl } from '../base-url';
-import { DEFAULT_SCOPES_STRING } from './scopes';
+import { DEFAULT_SCOPES_STRING, getMcpConnectionScopes } from './scopes';
 
 /**
  * The request URL as the client sees it: the serving/forwarded origin when it
@@ -181,9 +181,12 @@ export function buildMcpBearerChallenge(
 ): string {
   const options: McpBearerChallengeOptions =
     typeof errorOrOptions === 'string' ? { error: errorOrOptions } : (errorOrOptions ?? {});
+  const scopes = getMcpConnectionScopes(
+    (options.scope ?? DEFAULT_SCOPES_STRING).split(/\s+/).filter(Boolean)
+  );
   const params = [
     `resource_metadata=${quoteChallengeValue(getProtectedResourceMetadataUrl(requestUrl))}`,
-    `scope=${quoteChallengeValue(options.scope ?? DEFAULT_SCOPES_STRING)}`,
+    `scope=${quoteChallengeValue(scopes.join(' '))}`,
   ];
   if (options.error) params.push(`error=${quoteChallengeValue(options.error)}`);
   if (options.errorDescription) {
