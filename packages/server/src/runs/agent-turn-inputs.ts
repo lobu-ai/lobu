@@ -95,11 +95,14 @@ function executionPolicy(run: NativeTurnRun) {
     || claims.runId !== Number(run.id) || claims.messageId !== input.turn.message_id
     || claims.deploymentName !== `agent-turn:${input.turn.message_id}`) return undefined;
   const { runId, messageId, deploymentName, timestamp, jti, traceId, ...scope } = claims;
-  // Per-message payload is not policy. `ephemeral_context` is the transient
-  // block the guest shows the model beside one message (the API route's
-  // first-turn attention feed, an automation's instructions); a steer offer
-  // carries only the follow-up's text, so the block is dropped either way and
-  // must not decide whether the follow-up joins the running turn.
+  // Per-message payload is not policy: the fields below travel WITH the
+  // message rather than describing the envelope it must execute in.
+  // `ephemeral_context` is among them because the steer offer now carries it
+  // (`HeartbeatResponseSchema.steer`), so a follower whose transient block
+  // differs from the owner's loses nothing by joining the running turn — the
+  // guest shows each message its own. Before that field existed the block was
+  // dropped on the way through, and excluding it here meant offering a message
+  // whose context could not be delivered.
   const { message_id, message_text, message_images, message_files, session_jsonl, ephemeral_context, ...turn } = input.turn;
   const { message_id: replyMessageId, ...reply } = input.reply;
   return { scope, turn, reply };
@@ -136,7 +139,18 @@ export async function pendingAgentTurnInputs(sql: DbClient, owner: NativeTurnRun
       || isExplicitCancelMessage(source) || !isSteerableHumanMessage(source)
       || row.has_attachments
       || !isDeepStrictEqual(policy, executionPolicy(row))) break;
-    const next = { run_id: Number(row.id), message_id: turn.message_id, text: turn.message_text };
+    // The follower's OWN transient context rides with it. Per-message, because
+    // that is what it is: the API attaches a live attention digest that differs
+    // between two messages sent seconds apart. Delivered on the guest's
+    // transient-context channel, never folded into `text`.
+    const next = {
+      run_id: Number(row.id),
+      message_id: turn.message_id,
+      text: turn.message_text,
+      ...(typeof turn.ephemeral_context === 'string' && turn.ephemeral_context.trim()
+        ? { ephemeral_context: turn.ephemeral_context }
+        : {}),
+    };
     if (Buffer.byteLength(JSON.stringify([...offered, next]), 'utf8') > 64 * 1024) break;
     offered.push(next);
   }

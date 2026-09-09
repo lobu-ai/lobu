@@ -58,6 +58,23 @@ import type { BuildSystemPromptOptions } from "@mariozechner/pi-coding-agent";
 
 type LobuSystemPromptRenderer = (context?: BuildSystemPromptOptions) => string;
 
+/**
+ * Transient context for ONE user message, resolved as the model is about to
+ * answer it.
+ *
+ * Keyed by the message rather than the turn because the block is per-message:
+ * a steered follow-up brings its own (the API's live workspace-attention
+ * digest, an automation's instructions), and the turn's opening message brings
+ * the turn's. Callers identify a message by object identity — the guest holds
+ * the same `AgentMessage` references it handed to pi.
+ *
+ * Returning undefined means "nothing for this message", which is the normal
+ * case for an assistant-adjacent or replayed message.
+ */
+export type TransientTurnContextLookup = (
+  message: ContextEvent["messages"][number]
+) => string | undefined;
+
 /** Identifies our synthetic extension in pi's diagnostics and error reports. */
 const SYSTEM_PROMPT_EXTENSION_PATH = "<lobu:system-prompt>";
 const TRANSIENT_TURN_CONTEXT_EXTENSION_PATH = "<lobu:transient-turn-context>";
@@ -115,15 +132,12 @@ function createSystemPromptExtension(
  * session.jsonl and transcript snapshots equal to what the user authored.
  */
 function createTransientTurnContextExtension(
-  getTransientTurnContext: () => string | undefined
+  getTransientTurnContext: TransientTurnContextLookup
 ): Extension {
   const handler: ExtensionHandler<
     ContextEvent,
     { messages?: ContextEvent["messages"] }
   > = (event) => {
-    const transientContext = getTransientTurnContext()?.trim();
-    if (!transientContext) return;
-
     let latestUserIndex = -1;
     for (let index = event.messages.length - 1; index >= 0; index -= 1) {
       if (event.messages[index]?.role === "user") {
@@ -135,6 +149,14 @@ function createTransientTurnContextExtension(
 
     const userMessage = event.messages[latestUserIndex];
     if (!userMessage || userMessage.role !== "user") return;
+
+    // Resolved for THIS message, not for the turn. A steered follow-up carries
+    // its own transient block (a live attention digest, an automation's
+    // instructions), and the message the model is about to answer is the one
+    // whose context belongs beside it. The lookup is asked on every model call
+    // because which message is newest changes as steering injects more.
+    const transientContext = getTransientTurnContext(userMessage)?.trim();
+    if (!transientContext) return;
 
     const content =
       typeof userMessage.content === "string"
@@ -166,7 +188,7 @@ function createTransientTurnContextExtension(
 
 export function createLobuResourceLoader(
   renderSystemPrompt?: LobuSystemPromptRenderer,
-  getTransientTurnContext?: () => string | undefined
+  getTransientTurnContext?: TransientTurnContextLookup
 ): ResourceLoader {
   // Built once, not per call: `AgentSession._buildRuntime` reads this result and
   // writes extension flag values onto `runtime`, which a fresh object per call

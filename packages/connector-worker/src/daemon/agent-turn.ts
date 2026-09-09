@@ -237,7 +237,12 @@ export async function executeAgentTurnRun(
     for (const message of batch ?? []) {
       if (seenInputs.has(message.run_id) || seenInputs.size >= AGENT_TURN_INPUT_MAX) continue;
       seenInputs.add(message.run_id);
-      steering.push({ runId: message.run_id, messageId: message.message_id, text: message.text });
+      steering.push({
+        runId: message.run_id,
+        messageId: message.message_id,
+        text: message.text,
+        ...(message.ephemeral_context ? { ephemeralContext: message.ephemeral_context } : {}),
+      });
     }
   };
   const cancel = new AbortController();

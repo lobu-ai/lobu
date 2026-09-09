@@ -308,6 +308,12 @@ export interface AgentTurnSteer {
   runId: number;
   messageId: string;
   text: string;
+  /**
+   * This message's own transient context, shown to the model beside THIS
+   * message only — the same channel `AgentTurnInput.ephemeralContext` uses for
+   * the turn's own message. Absent when the follow-up carried none.
+   */
+  ephemeralContext?: string;
 }
 
 /** What the guest streams out while the turn runs. */

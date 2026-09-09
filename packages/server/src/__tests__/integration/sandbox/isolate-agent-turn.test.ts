@@ -1455,6 +1455,53 @@ describe("agent turn on the isolate lane", () => {
 		expect(entry.message).toEqual(steered);
 	}, 120_000);
 
+	/**
+	 * The delivery half of per-message transient context.
+	 *
+	 * A steered follow-up carries its own block (the API's live attention
+	 * digest, an automation's instructions). It must reach the model BESIDE
+	 * THAT MESSAGE — not the turn opener's, and not folded into the follow-up's
+	 * text, which would make a one-turn hint permanent history on every later
+	 * replay of that message.
+	 */
+	it("steers: a follow-up's own transient context reaches the model beside its message", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s2", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		const run = await runTurn(
+			toolJob({ ephemeralContext: "OPENER-CONTEXT-attention-run-1" }),
+			["127.0.0.1"],
+			{
+				takeSteering: () =>
+					asked++ === 0
+						? [{
+								runId: 2,
+								messageId: "m-2",
+								text: "also check companies",
+								ephemeralContext: "FOLLOWER-CONTEXT-attention-run-2",
+							}]
+						: [],
+			},
+		);
+		expect(asked).toBeGreaterThan(0);
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+		const withFollower = requests.find((body) => body.includes("also check companies"));
+		expect(withFollower).toBeDefined();
+		// The follower's own block travels with it.
+		expect(withFollower).toContain("FOLLOWER-CONTEXT-attention-run-2");
+
+		// And it is TRANSIENT: the durable session entry carries the follow-up's
+		// text only, so a later turn replaying this message does not inherit a
+		// one-turn hint as permanent history.
+		const steered = sessionMessages(run.output).find(
+			(m) => (m as { role: string }).role === "user" && JSON.stringify(m).includes("also check companies"),
+		);
+		expect(steered).toBeDefined();
+		expect(JSON.stringify(steered)).not.toContain("FOLLOWER-CONTEXT-attention-run-2");
+	}, 120_000);
+
 	it("runs bash in the remote runtime through the host when the conversation is sandbox-pinned", async () => {
 		hits = [];
 		toolScript = [{ id: "toolu_r1", name: "bash", input: { command: "uname -a" } }];

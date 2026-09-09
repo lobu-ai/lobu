@@ -200,6 +200,30 @@ const guestLogger = {
   error: (message: string, data?: Record<string, unknown>) => console.error(message, data ?? {}),
 };
 
+/**
+ * The plain text of a user message, for keying per-message transient context.
+ *
+ * Pi normalises `content` to either a string or a block array depending on the
+ * path, and rewrites blocks on the way to the provider, so the text is what is
+ * stable across both ends.
+ */
+function messageText(message: unknown): string | undefined {
+  // `AgentMessage` includes a branch-summary variant with no `content` at all,
+  // so this reads defensively rather than narrowing to one shape.
+  if (!message || typeof message !== 'object') return undefined;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .map((part) =>
+      part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
+        ? String((part as { text?: unknown }).text ?? '')
+        : ''
+    )
+    .join('');
+  return text || undefined;
+}
+
 function clip(text: string): string {
   return text.length > TOOL_EVENT_OUTPUT_CHARS ? `${text.slice(0, TOOL_EVENT_OUTPUT_CHARS)}…` : text;
 }
@@ -359,7 +383,27 @@ export async function runAgentTurn(
   // would be the same message twice. Report that signal so the
   // completion route can stamp the flag the renderers already act on.
   let repliedInBand = false;
+  // The turn's OWN transient block — the context for `input.userMessage`.
+  // Suppressed (set undefined) around the pre-compaction memory flush, which
+  // is a side prompt that must not carry it.
   let transientContext: string | undefined;
+  /**
+   * Transient context per STEERED message, keyed by the message's own text.
+   *
+   * A steered follow-up brings its own block (the API's live attention digest,
+   * an automation's instructions), so the model must see that message's
+   * context beside that message — not the turn opener's. Populated as steering
+   * injects, and read on every model call, because which message is newest
+   * changes as more arrive.
+   *
+   * Keyed by TEXT, not object identity: pi rewrites messages on the way to the
+   * provider (it stamps `cache_control`, among other things), so the object the
+   * context extension sees is not the one `agent.steer` was handed. Text is the
+   * stable key available at both ends — `steeredMessages` can use identity
+   * because it reads the persisted session branch, where the reference does
+   * survive.
+   */
+  const steeredContext = new Map<string, string>();
   const built = buildTools(
     input,
     credential,
@@ -369,7 +413,15 @@ export async function runAgentTurn(
     runtimeExec
   );
   const tools = built.tools;
-  const session = createNativeSession(input, tools, () => transientContext);
+  const session = createNativeSession(input, tools, (message) => {
+    // A steered message answers with its own context; anything else — the
+    // turn's opening message — gets the turn's. `transientContext` is
+    // consulted last so the flush suppression above still applies to the
+    // opener.
+    const text = messageText(message);
+    const own = text ? steeredContext.get(text) : undefined;
+    return own ?? transientContext;
+  });
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
   });
@@ -449,6 +501,21 @@ export async function runAgentTurn(
           role: 'user', content: [{ type: 'text', text: message.text }], timestamp: Date.now(),
         };
         steeredMessages.set(nativeMessage, message.runId);
+        // Its own block, beside its own message. Recorded BEFORE the steer so
+        // the loader can never see the message without its context.
+        // Last writer wins on identical text. Two follow-ups with the SAME
+        // words are one key, and the newer message is the one the model is
+        // about to answer, so its context is the right answer for that key.
+        // The alternative — keeping the first — would show the model stale
+        // context beside the message it is answering now.
+        const context = message.ephemeralContext?.trim();
+        if (context) {
+          steeredContext.set(message.text, `Context for this message:\n${context}`);
+        } else {
+          // A follow-up carrying NO context must not inherit an earlier
+          // identical message's block.
+          steeredContext.delete(message.text);
+        }
         agent.steer(nativeMessage);
       }
     };

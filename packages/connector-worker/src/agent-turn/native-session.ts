@@ -4,7 +4,7 @@ import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
 import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
 import { streamOpenAIResponses } from '@mariozechner/pi-ai/openai-responses';
 import { AgentSession, SessionManager, SettingsManager, convertToLlm, CURRENT_SESSION_VERSION, type ModelRegistry } from '@mariozechner/pi-coding-agent';
-import { createLobuResourceLoader } from '@lobu/plugin-toolkit/pi-resources';
+import { createLobuResourceLoader, type TransientTurnContextLookup } from '@lobu/plugin-toolkit/pi-resources';
 import { SESSION_PATH, withSessionSnapshot } from './pi-session-fs.js';
 import type { AgentTurnInput } from './types.js';
 
@@ -12,7 +12,7 @@ import type { AgentTurnInput } from './types.js';
 export function createNativeSession(
   input: AgentTurnInput,
   tools: AgentTool[],
-  getTransientContext: () => string | undefined
+  getTransientContext: TransientTurnContextLookup
 ): AgentSession {
   const manager = SessionManager.inMemory('/workspace');
   if (input.sessionJsonl) {

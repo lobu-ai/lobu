@@ -1223,6 +1223,21 @@ export const HeartbeatResponseSchema = Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         message_id: Type.String(),
         text: Type.String(),
+        /**
+         * This message's own transient context, delivered on the guest's
+         * transient-context channel exactly as the turn's own
+         * `turn.ephemeral_context` is — see that field for why it never rides
+         * `text`.
+         *
+         * Carried per steered message rather than per turn because it IS
+         * per-message: the API attaches a live workspace-attention digest that
+         * differs between two messages sent seconds apart, and an automation
+         * attaches its own instructions. Dropping it here would silently lose
+         * a caller's `ephemeralContext`, so the offer policy would have to
+         * refuse to steer any message carrying one — which is the same data
+         * loss, moved earlier.
+         */
+        ephemeral_context: Type.Optional(Type.String({ maxLength: 2_048 })),
       }),
       { maxItems: AGENT_TURN_INPUT_MAX }
     )

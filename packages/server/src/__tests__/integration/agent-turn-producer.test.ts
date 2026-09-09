@@ -1450,12 +1450,15 @@ describe('agent turn producer', () => {
     expect((await runRow(follower.id)).status).toBe('pending');
   });
 
-  it('offers a follow-up whose transient context differs from the running turn', async () => {
-    // The API route attaches a workspace-attention block to a session's first
-    // turn, and that block changes as runs appear, so two messages sent within
-    // the first turn almost never carry the same one. It is per-message content
-    // the steer path drops anyway, not execution policy: the follow-up must
-    // still be offered.
+  it('offers a follow-up whose transient context differs, and carries that context', async () => {
+    // The API route attaches a live workspace-attention block, and it changes
+    // as runs appear, so two messages sent seconds apart almost never carry
+    // the same one. Per-message content is not execution policy, so the
+    // follow-up is still offered — AND the offer carries the follower's own
+    // block, so the guest can show the model the context that belongs beside
+    // that message. Dropping it here would have meant the offer policy had to
+    // refuse any message carrying one, which is the same data loss moved
+    // earlier.
     const org = await createTestOrganization();
     const first = { ...messageFor(org.id), ephemeralContext: '## Workspace attention (recent)\n- Run #1 [pending]' };
     const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
@@ -1469,8 +1472,33 @@ describe('agent turn producer', () => {
     expect(owner.action_input.turn.ephemeral_context).not.toBe(follower.action_input.turn.ephemeral_context);
     const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-transient-context' });
     expect(await response.json()).toMatchObject({ continue: true, steer: [
-      { run_id: follower.id, message_id: 'context-follow-up', text: 'and this too' },
+      {
+        run_id: follower.id,
+        message_id: 'context-follow-up',
+        text: 'and this too',
+        // The FOLLOWER's block, not the owner's: this is the message the model
+        // is about to answer.
+        ephemeral_context: '## Workspace attention (recent)\n- Run #1 [pending]\n- Run #2 [pending]',
+      },
     ] });
+  });
+
+  it('offers a follow-up with no transient context without inventing one', async () => {
+    // The owner carries a block and the follower does not. The offer must omit
+    // the field rather than inherit the owner's, or the model would be told
+    // stale context belongs beside a message that never had any.
+    const org = await createTestOrganization();
+    const first = { ...messageFor(org.id), ephemeralContext: '## Workspace attention (recent)\n- Run #1 [pending]' };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-no-context', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'bare-follow-up', messageText: 'no context here', ephemeralContext: undefined }, deps);
+    const [, follower] = await agentTurnRuns();
+
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-no-context' });
+    const body = (await response.json()) as { steer?: Array<Record<string, unknown>> };
+    expect(body.steer?.[0]).toMatchObject({ run_id: follower.id, message_id: 'bare-follow-up' });
+    expect(body.steer?.[0]).not.toHaveProperty('ephemeral_context');
   });
 
   it('does not offer a follow-up admitted under a different model', async () => {
