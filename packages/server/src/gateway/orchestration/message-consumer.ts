@@ -129,6 +129,7 @@ export class MessageConsumer {
   private agentSettingsStore?: AgentSettingsStore;
   private agentTurnMcp?: AgentTurnDeps["mcp"];
   private agentTurnArtifacts?: AgentTurnDeps["artifacts"];
+  private agentTurnInstructions?: AgentTurnDeps["instructions"];
   private guardrailRegistry?: GuardrailRegistry;
   private recordRunInput: typeof recordAgentRunInput;
   constructor(
@@ -160,6 +161,14 @@ export class MessageConsumer {
    */
   setAgentTurnArtifacts(artifacts?: AgentTurnDeps["artifacts"]): void {
     this.agentTurnArtifacts = artifacts;
+  }
+
+  /**
+   * The platform instruction providers a turn's prompt takes its chat identity
+   * block from. Same post-construction injection. Absent → no identity block.
+   */
+  setAgentTurnInstructions(instructions?: AgentTurnDeps["instructions"]): void {
+    this.agentTurnInstructions = instructions;
   }
 
   /**
@@ -631,6 +640,7 @@ export class MessageConsumer {
         artifacts: this.agentTurnArtifacts,
         // The conversation's pinned sandbox, already resolved above.
         runtime: runtimeSelection,
+        instructions: this.agentTurnInstructions,
       });
 
       // The agent cannot run at all — no model, no provider that routes, or no

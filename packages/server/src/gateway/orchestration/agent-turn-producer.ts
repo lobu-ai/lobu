@@ -35,6 +35,7 @@ import {
   enforceBashCommandPolicy,
   generateWorkerToken,
   getErrorMessage,
+  type InstructionContext,
   isExplicitCancelMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
@@ -238,14 +239,31 @@ export interface AgentTurnDeps {
    * runs in that sandbox.
    */
   runtime?: AgentRuntimeSelection;
+  /**
+   * The gateway's per-platform instruction providers — the chat identity block
+   * ("you are reachable in Slack as `@bot`; mentions of `<@U…>` are you") the
+   * platform's adapter registered. Absent → the prompt carries no identity
+   * block, and a chat agent has to guess whether the message is addressed to it.
+   */
+  instructions?: TurnInstructionSource;
+}
+
+/** The one method of `InstructionService` a turn needs. */
+export interface TurnInstructionSource {
+  getPlatformInstructions(platform: string, context: InstructionContext): Promise<string>;
 }
 
 /**
  * The system prompt for the turn.
  *
- * Composes the three agent layers, policy rules, workspace contract and each
- * MCP server's own instructions. Seeded skills remain files, so the prompt
- * names their directory only when this turn can read it.
+ * Composes the three agent layers, the platform's identity block, policy
+ * rules, workspace contract, each MCP server's own instructions and the date.
+ * Seeded skills remain files, so the prompt names their directory only when
+ * this turn can read it.
+ *
+ * The guest applies this string VERBATIM as Pi's system prompt, so anything
+ * Pi's own prompt builder would have added — the current date among them — has
+ * to be here or the model never sees it.
  */
 function composeTurnSystemPrompt(
   layers: {
@@ -253,12 +271,14 @@ function composeTurnSystemPrompt(
     soulMd?: string | null;
     userMd?: string | null;
   },
+  platformInstructions: string,
   mcpInstructions: string[],
   workspace: boolean,
   canUpload: boolean,
   remoteBash: boolean,
   toolNames: readonly string[],
-  seeded: { files: boolean; skills: boolean } = { files: false, skills: false }
+  seeded: { files: boolean; skills: boolean } = { files: false, skills: false },
+  now: Date = new Date()
 ): string {
   const sections: string[] = [];
   // First, and unconditionally: the anti-fabrication and disclosure rules that
@@ -273,6 +293,11 @@ function composeTurnSystemPrompt(
   if (identity) sections.push(`## Agent Identity\n\n${identity}`);
   if (soul) sections.push(`## Agent Instructions\n\n${soul}`);
   if (user) sections.push(`## User Context\n\n${user}`);
+  // Who the agent is in this channel and that the messages are addressed TO
+  // it. Connection-scoped by contract (see chat-identity-instruction-provider),
+  // so every conversation on the connection shares the prefix.
+  const platform = platformInstructions.trim();
+  if (platform) sections.push(platform);
   // Always-on tool rules are narrowed to the tools THIS turn carries —
   // `ask_user`'s "after calling it, stop" among
   // them, which is how the model learns the rule the guest enforces.
@@ -283,6 +308,9 @@ function composeTurnSystemPrompt(
     const text = instructions.trim();
     if (text) sections.push(text);
   }
+  // Last, as the retired lane placed it: a model with no date answers "when
+  // is the deadline" and "what happened this week" from its training cutoff.
+  sections.push(`Current date: ${now.toISOString().slice(0, 10)}`);
   return sections.join("\n\n");
 }
 
@@ -960,6 +988,22 @@ export async function enqueueAgentTurn(
         "Agent turn: the agent has the memory server but the turn carries no tools, so it runs without memory"
       );
     }
+    // The platform's identity block, from the same provider the platform
+    // adapter registered for the retired lane. `orgScoped` is true by
+    // construction: a turn with no org returned above. The connection id rides
+    // `platformMetadata`, where the token claims read it from too.
+    const connectionId = data.platformMetadata?.connectionId;
+    const platformInstructions = deps.instructions
+      ? await deps.instructions.getPlatformInstructions(data.platform, {
+          userId: data.userId,
+          agentId: data.agentId,
+          ...(typeof connectionId === "string" && connectionId ? { connectionId } : {}),
+          organizationId: data.organizationId,
+          orgScoped: true,
+          sessionKey: data.conversationId,
+          workingDirectory: "/workspace",
+        })
+      : "";
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
       conversation_id: data.conversationId,
@@ -982,6 +1026,7 @@ export async function enqueueAgentTurn(
       ...(skills.length > 0 ? { skills } : {}),
       system_prompt: composeTurnSystemPrompt(
         settings ?? {},
+        platformInstructions,
         mcpInstructions,
         builtin.length > 0,
         // The guest drops `upload_file` when the turn has no workspace, so the

@@ -263,31 +263,50 @@ export class InstructionService {
   /**
    * Get session context data for a worker
    */
+  /**
+   * The platform's own instructions for a turn — the chat identity block
+   * ("you are reachable as `@bot`") a connection's provider renders.
+   *
+   * A platform provider may do an agent-scoped DB read (e.g.
+   * SlackInstructionProvider.listConnections), so it is gated by the SAME
+   * org-scope guard as skills/agent instructions: an orgless DB-backed agent
+   * (`orgScoped === false`) skips it entirely and gets "" to avoid leaking
+   * another tenant's data. A provider failure is logged and yields "" too — the
+   * identity block is a prompt improvement, never a reason to lose the turn.
+   */
+  async getPlatformInstructions(
+    platform: string,
+    context: InstructionContext
+  ): Promise<string> {
+    const platformProvider = this.platformProviders.get(platform);
+    if (!platformProvider || context.orgScoped === false) return "";
+    try {
+      const instructions = await platformProvider.getInstructions(context);
+      logger.info(
+        `Got ${platform} platform instructions (${instructions.length} chars)`
+      );
+      return instructions;
+    } catch (error) {
+      logger.error(
+        `Failed to get instructions from ${platform} provider:`,
+        error
+      );
+      return "";
+    }
+  }
+
+  /**
+   * Get session context data for a worker
+   */
   async getSessionContext(
     platform: string,
     context: InstructionContext,
     options?: { settingsUrl?: string }
   ): Promise<SessionContextData> {
-    // Get platform-specific instructions. A platform provider may do an
-    // agent-scoped DB read (e.g. SlackInstructionProvider.listConnections),
-    // so it is gated by the SAME org-scope guard as skills/agent instructions:
-    // an orgless DB-backed agent (`orgScoped === false`) skips it entirely
-    // (platformInstructions stays "") to avoid leaking another tenant's data.
-    let platformInstructions = "";
-    const platformProvider = this.platformProviders.get(platform);
-    if (platformProvider && context.orgScoped !== false) {
-      try {
-        platformInstructions = await platformProvider.getInstructions(context);
-        logger.info(
-          `Got ${platform} platform instructions (${platformInstructions.length} chars)`
-        );
-      } catch (error) {
-        logger.error(
-          `Failed to get instructions from ${platform} provider:`,
-          error
-        );
-      }
-    }
+    const platformInstructions = await this.getPlatformInstructions(
+      platform,
+      context
+    );
 
     // Get network access instructions
     let networkInstructions = "";

@@ -693,7 +693,10 @@ describe('agent turn producer', () => {
         'Nothing written to that in-memory workspace persists after the turn ends.\n' +
         'Your bash tool uses the same in-memory workspace when available.\n' +
         'The in-memory environment has no network access and no package manager; use your other tools to reach data.\n' +
-        'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.'
+        'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.\n\n' +
+        // The guest applies this prompt verbatim, so Pi's own date line never
+        // reaches the model; the retired lane sent one on every turn.
+        `Current date: ${new Date().toISOString().slice(0, 10)}`
     );
     expect(envelope.turn.session_jsonl).toBe('');
     // With no tool policy every workspace tool is admitted, bash with the
@@ -915,7 +918,9 @@ describe('agent turn producer', () => {
       ],
     });
     // The server's own instructions join the prompt after the agent layers.
-    expect(envelope.turn.system_prompt.endsWith('\n\nUse query_sdk before run_sdk.')).toBe(true);
+    expect(envelope.turn.system_prompt.endsWith(
+      `\n\nUse query_sdk before run_sdk.\n\nCurrent date: ${new Date().toISOString().slice(0, 10)}`,
+    )).toBe(true);
   });
 
   // The policy is the agent's own (`buildToolPolicy`, shared with the
@@ -1272,6 +1277,111 @@ describe('agent turn producer', () => {
     expect(claimed.payload.turn).not.toHaveProperty('messages');
     expect(claimed.payload.turn).not.toHaveProperty('message_entry_ids');
     expect(claimed.payload.turn.memory_flush).not.toHaveProperty('due');
+  });
+
+  it('trims the persisted session to its latest compaction when it outgrows the cap', async () => {
+    // Pi's session log is append-only, so a conversation that has crossed the
+    // cap crosses it again on every later turn: failing the completion here
+    // handed the user a raw internal error and then failed every message
+    // after it, since each one re-hydrated the same last stored snapshot.
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const dependencies = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurn(await admittedMessage(messageFor(org.id)), dependencies);
+    await enqueueAgentTurn(await admittedMessage({ ...messageFor(org.id), messageId: 'after-trim' }), dependencies);
+    const [first, second] = await agentTurnRuns();
+    expect((await (await pollFleet('fleet-oversize', { agent_turn: true })).json()).run_id).toBe(first.id);
+    const message = (id: string, parentId: string | null, role: string, text: string) => ({
+      type: 'message', id, parentId, message: { role, content: [{ type: 'text', text }], timestamp: 1 },
+    });
+    // Ten exchanges, one of them alone larger than the cap, then the compaction
+    // pi wrote for them: it keeps `u8` onward and summarised the rest.
+    const before = Array.from({ length: 10 }, (_v, i) => [
+      message(`u${i}`, i === 0 ? null : `a${i - 1}`, 'user', i === 3 ? 'x'.repeat(4 * 1024 * 1024) : `question ${i}`),
+      message(`a${i}`, `u${i}`, 'assistant', `answer ${i}`),
+    ]).flat();
+    const compaction = { type: 'compaction', id: 'c1', parentId: 'a9', summary: 'The first eight exchanges were small talk.', firstKeptEntryId: 'u8', tokensBefore: 90_000 };
+    const after = [message('u10', 'c1', 'user', 'what is the isolate lane?'), message('a10', 'u10', 'assistant', 'the isolate answer')];
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: first.id, worker_id: 'fleet-oversize', status: 'completed', text: 'the isolate answer',
+      session_jsonl: nativeSession([...before, compaction, ...after]),
+    });
+    expect((await completed.json()).status).toBe('completed');
+
+    // Exactly what pi still sends the model, and nothing it no longer does: the
+    // kept exchanges from `u8` (now the root), the summary, and everything
+    // after it. The row is the trimmed log, and the run row keeps the same.
+    const trimmed = nativeSession([{ ...before[16]!, parentId: null }, ...before.slice(17), compaction, ...after]);
+    const [snapshot] = await sql`SELECT snapshot_jsonl, byte_size FROM agent_transcript_snapshot WHERE run_id = ${first.id}`;
+    expect(snapshot.snapshot_jsonl).toBe(trimmed);
+    expect(snapshot.byte_size).toBe(Buffer.byteLength(trimmed));
+    const row = await runRow(first.id);
+    expect(row.status).toBe('completed');
+    expect(row.output_tail).toBe('the isolate answer');
+    expect(row.action_input.result).toMatchObject({ session_jsonl: trimmed });
+    const [reply] = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'finalText' = 'the isolate answer'`;
+    expect(reply.action_input).toMatchObject({ conversationId: 'conv-turn', finalText: 'the isolate answer' });
+    // And the next turn resumes from it rather than failing the same way.
+    const claimed = await (await pollFleet('fleet-after-trim', { agent_turn: true })).json();
+    expect(claimed.run_id).toBe(second.id);
+    expect(claimed.payload.turn.session_jsonl).toBe(trimmed);
+  });
+
+  it('resets the native session when an oversize snapshot has no compaction to trim to', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const dependencies = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurn(await admittedMessage(messageFor(org.id)), dependencies);
+    await enqueueAgentTurn(await admittedMessage({ ...messageFor(org.id), messageId: 'after-reset' }), dependencies);
+    const [first, second] = await agentTurnRuns();
+    expect((await (await pollFleet('fleet-oversize', { agent_turn: true })).json()).run_id).toBe(first.id);
+    const oversized = nativeSession([
+      { type: 'message', id: 'native-user', parentId: null,
+        message: { role: 'user', content: 'what is the isolate lane?', timestamp: 1 } },
+      { type: 'message', id: 'native-answer', parentId: 'native-user',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(4 * 1024 * 1024) }], timestamp: 2 } },
+    ]);
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: first.id, worker_id: 'fleet-oversize', status: 'completed', text: 'the isolate answer', session_jsonl: oversized,
+    });
+    expect((await completed.json()).status).toBe('completed');
+
+    // The turn still delivered; the session row exists, empty, and the next
+    // turn starts fresh instead of failing.
+    const row = await runRow(first.id);
+    expect(row.status).toBe('completed');
+    expect(row.output_tail).toBe('the isolate answer');
+    expect(row.action_input.result).toMatchObject({ session_jsonl: '' });
+    const [snapshot] = await sql`SELECT byte_size FROM agent_transcript_snapshot WHERE run_id = ${first.id}`;
+    expect(snapshot.byte_size).toBe(0);
+    const claimed = await (await pollFleet('fleet-after-reset', { agent_turn: true })).json();
+    expect(claimed.run_id).toBe(second.id);
+    expect(claimed.payload.turn.session_jsonl).toBe('');
+  });
+
+  it('carries the platform identity block the platform adapter registered', async () => {
+    // The retired lane's `platformInstructions` — "you are reachable in Slack
+    // as `@bot`; mentions of `<@U…>` are you". Without it a chat agent has
+    // only third-person identity markdown and guesses whether the message is
+    // addressed to it.
+    const org = await createTestOrganization();
+    const asked: Array<{ platform: string; connectionId?: string; organizationId?: string }> = [];
+    await enqueueMessage({ ...messageFor(org.id), platform: 'slack', platformMetadata: { connectionId: 'conn-slack-1' } }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      instructions: {
+        getPlatformInstructions: async (platform, context) => {
+          asked.push({ platform, connectionId: context.connectionId, organizationId: context.organizationId });
+          return '**Slack identity:**\n- You are reachable in Slack as `@lobu` (user ID `U123`).';
+        },
+      },
+    });
+    const [run] = await agentTurnRuns();
+    const prompt = (run.action_input.turn as { system_prompt: string }).system_prompt;
+    expect(asked).toEqual([{ platform: 'slack', connectionId: 'conn-slack-1', organizationId: org.id }]);
+    // After the agent's own layers, before the tool policies.
+    expect(prompt).toContain('## Agent Instructions\n\nAnswer briefly.\n\n**Slack identity:**\n- You are reachable in Slack as `@lobu` (user ID `U123`).\n\n## Built-In Tool Policies');
   });
 
   it('rolls back the claim when its native snapshot cannot be read', async () => {
@@ -2952,7 +3062,11 @@ describe('agent turn completion', () => {
     ['dangling parent', nativeSession([{ type: 'message', id: 'x', parentId: 'missing', message: { role: 'user' } }])],
     ['dangling summary', nativeSession([{ type: 'compaction', id: 'x', parentId: null, firstKeptEntryId: 'missing', summary: 'lost history', tokensBefore: 1 }])],
     ['NUL byte', nativeSession() + '\0'],
-    ['oversize', nativeSession([{ type: 'message', id: 'x', parentId: null, message: { role: 'user', content: 'x'.repeat(4 * 1024 * 1024) } }])],
+    // Not in this table: an OVERSIZE snapshot. It is valid, and failing it
+    // failed every later turn of the conversation too (the log is append-only,
+    // so each one re-hydrated and outgrew the same stored snapshot). It is
+    // trimmed to its latest compaction instead — see "trims the persisted
+    // session to its latest compaction".
   ])('fails a %s snapshot visibly and preserves the previous session', async (_kind, session_jsonl) => {
     const workerId = 'fleet-invalid-snapshot';
     const runId = await claimedTurnRun(workerId);

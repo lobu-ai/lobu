@@ -166,6 +166,20 @@ function initializeMetrics() {
     "Agent-turn tool-trace publishes that failed on the worker heartbeat path",
     "counter"
   );
+  // A conversation whose native session outgrew the snapshot cap. Trimmed to
+  // its latest compaction when it has one (no context lost), reset otherwise.
+  // Both rare by design; a rising rate says the cap or the tool-result sizes
+  // need attention.
+  registerMetric(
+    "lobu_agent_turn_snapshot_trimmed_total",
+    "Agent-turn native sessions trimmed to their latest compaction because the completed snapshot exceeded the storage cap",
+    "counter"
+  );
+  registerMetric(
+    "lobu_agent_turn_snapshot_reset_total",
+    "Agent-turn native sessions reset because the completed snapshot exceeded the storage cap with no compaction to trim to",
+    "counter"
+  );
   // Scheduler + Automation health. These back the prod alerting rules
   // (charts/lobu PrometheusRule): a silent scheduler / failing Automation tick is
   // exactly the failure mode that went undetected for 12 days (lobu#1046).

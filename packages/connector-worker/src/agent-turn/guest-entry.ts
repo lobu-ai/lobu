@@ -25,7 +25,7 @@ import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
 import { enforceBashCommandPolicy } from '@lobu/core/tool-policy';
-import { summarizeToolTrace } from '@lobu/core/tool-trace-summary';
+import { isRetrievalTool, summarizeToolTrace } from '@lobu/core/tool-trace-summary';
 import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
 import { MAX_TOOL_CALLS_PER_TURN } from './types.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
@@ -73,7 +73,13 @@ async function callMcpTool(
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${credential}`,
+        'Content-Type': 'application/json',
+        // A retrieval result is summarised into the tool trace from its
+        // structured body; the gateway renders markdown unless asked.
+        ...(isRetrievalTool(tool.name) ? { 'x-mcp-format': 'json' } : {}),
+      },
       body: JSON.stringify(args ?? {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -430,6 +436,12 @@ export async function runAgentTurn(
     // arrived at exactly those points — after an assistant message, after a tool
     // result — and queue it as the user message it is.
     const steeredMessages = new Map<AgentMessage, number>();
+    // The turn's answer(s), one per user message the model replied to. Tracked
+    // from events rather than read back out of `agent.state.messages` at the
+    // end: compaction replaces that array mid-turn, and the newest message is
+    // the wrong one to read anyway — see the `text` field of the result.
+    const answers: string[] = [];
+    let answer: string | null = null;
     const steer = () => {
       if (flushing) return;
       for (const message of takeSteering()) {
@@ -459,13 +471,27 @@ export async function runAgentTurn(
       if (event.type === 'message_end') {
         const message = event.message as unknown as {
           role?: string;
+          content?: unknown;
           stopReason?: string;
           errorMessage?: string;
           usage?: { input?: number; output?: number };
         };
+        // A user message — the prompt, or a steered follow-up Pi injected —
+        // closes the answer to the message before it.
+        if (message.role === 'user') {
+          if (answer) answers.push(answer);
+          answer = null;
+          return;
+        }
         // Tool results end a message too; only the assistant's own carry the
         // turn's outcome.
         if (message.role !== 'assistant') return;
+        // The LAST assistant message with text answers its user message: a
+        // narration before a tool call is superseded by the message that
+        // follows the result. An EMPTY one (an aborted or errored request)
+        // supersedes nothing — the answer already settled stands.
+        const settled = assistantText(message.content);
+        if (settled.trim()) answer = settled;
         if (typeof message.stopReason === 'string') stopReason = message.stopReason;
         if (message.usage) {
           usage = {
@@ -564,20 +590,29 @@ export async function runAgentTurn(
     }
 
     if (ended) throw new Error(ended);
+    if (answer) answers.push(answer);
 
     return {
-      // The answer is the LAST assistant message, not the accumulated stream:
-      // a model that narrates before a tool call ("Let me check...") would
-      // otherwise deliver that narration glued to its answer, and deltas
-      // replayed by a retry or compaction would appear twice. The retired lane
-      // shipped the summing version and had to fix it the same way (`finalText`
-      // authoritative, PR #1087) — this is the text a possibly-different
-      // replica delivers to the user and writes to history, so a garbled value
-      // corrupts the durable record, not just one render.
+      // The answer is the last assistant message WITH TEXT after each user
+      // message, not the accumulated stream: a model that narrates before a
+      // tool call ("Let me check...") would otherwise deliver that narration
+      // glued to its answer, and deltas replayed by a retry or compaction
+      // would appear twice. The retired lane shipped the summing version and
+      // had to fix it the same way (`finalText` authoritative, PR #1087) —
+      // this is the text a possibly-different replica delivers to the user
+      // and writes to history, so a garbled value corrupts the durable
+      // record, not just one render.
+      //
+      // One answer PER user message, because a steered follow-up makes Pi
+      // answer twice in one turn and the host delivers this field once: taking
+      // only the newest message dropped the first answer from Slack (which
+      // posts at completion) and from history. And the newest message is
+      // ignored when it is EMPTY — a guard abort or a failed request ends the
+      // turn on one — so the answer that did settle is still delivered.
       //
       // Falls back to the stream when no assistant message settled: a turn
       // aborted mid-answer still owes the user what it managed to say.
-      text: latestAssistantText(agent.state.messages) ?? text,
+      text: answers.length > 0 ? answers.join('\n\n') : text,
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),
@@ -595,16 +630,21 @@ export async function runAgentTurn(
   }
 }
 
+/** The text blocks of one assistant message, joined. */
+function assistantText(content: unknown): string {
+  const blocks = Array.isArray(content) ? (content as Array<{ type?: string; text?: string }>) : [];
+  return blocks
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text ?? '')
+    .join('');
+}
+
 /** The text of the newest assistant message, or null when there is none. */
 function latestAssistantText(messages: readonly AgentMessage[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message || message.role !== 'assistant') continue;
-    const content = Array.isArray(message.content) ? (message.content as Array<{ type?: string; text?: string }>) : [];
-    return content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text ?? '')
-      .join('');
+    return assistantText(message.content);
   }
   return null;
 }

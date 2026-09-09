@@ -57,7 +57,8 @@ export class Orchestrator {
     guardrailRegistry?: GuardrailRegistry,
     agentSettingsStore?: AgentSettingsStore,
     agentTurnMcp?: AgentTurnDeps["mcp"],
-    agentTurnArtifacts?: AgentTurnDeps["artifacts"]
+    agentTurnArtifacts?: AgentTurnDeps["artifacts"],
+    agentTurnInstructions?: AgentTurnDeps["instructions"]
   ): Promise<void> {
     this.deploymentManager.setSecretStore(secretStore);
     // Lets a connection contribute an authenticated CLI to the agent sandbox
@@ -93,6 +94,9 @@ export class Orchestrator {
     // And a turn's attachments out of the same artifact store the gateway
     // published them into on the way in.
     this.queueConsumer.setAgentTurnArtifacts(agentTurnArtifacts);
+    // And the platform identity block out of the providers the platform
+    // adapters register on the instruction service.
+    this.queueConsumer.setAgentTurnInstructions(agentTurnInstructions);
 
     const providerModules = getModelProviderModules();
     this.deploymentManager.setProviderModules(providerModules);

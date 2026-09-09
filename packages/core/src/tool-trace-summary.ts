@@ -33,6 +33,16 @@ export interface ToolTraceSummary {
  */
 const RETRIEVAL_TOOL_NAMES = new Set(["search_memory", "lobu_search_memory"]);
 
+/**
+ * Whether a tool's result should be requested as JSON (`x-mcp-format: json`)
+ * so `summarizeToolTrace` has a structured body to read. The gateway renders
+ * every tool result as markdown unless the caller asks, and markdown parses to
+ * nothing here.
+ */
+export function isRetrievalTool(toolName: string): boolean {
+  return RETRIEVAL_TOOL_NAMES.has(toolName);
+}
+
 /** How many snippets one trace may carry, and how much text each keeps. */
 const MAX_SNIPPETS = 16;
 const MAX_SNIPPET_CHARS = 2_000;

@@ -47,6 +47,8 @@ interface ProviderHit {
 	url: string;
 	authorization: string | null;
 	apiKeyHeader: string | null;
+	/** `x-mcp-format`, which a retrieval tool call must send to get a JSON body. */
+	mcpFormat: string | null;
 	body: string;
 }
 
@@ -311,6 +313,7 @@ beforeAll(async () => {
 				url: req.url ?? "",
 				authorization: (req.headers.authorization as string | undefined) ?? null,
 				apiKeyHeader: (req.headers["x-api-key"] as string | undefined) ?? null,
+				mcpFormat: (req.headers["x-mcp-format"] as string | undefined) ?? null,
 				body,
 			});
 			if (req.url === TOOL_ROUTE || req.url === "/lobu/mcp/lobu-memory/tools/search_memory") {
@@ -627,6 +630,9 @@ describe("agent turn on the isolate lane", () => {
 			"POST /lobu/mcp/lobu-memory/tools/query_sdk",
 			"POST /v1/messages",
 		]);
+		// An ordinary tool takes the gateway's markdown rendering; only a
+		// retrieval tool asks for JSON (below).
+		expect(hits[1]?.mcpFormat).toBeNull();
 		// The model was offered the tool with the schema the gateway published...
 		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string; input_schema: unknown }> };
 		expect(offered.tools).toEqual([
@@ -763,6 +769,11 @@ describe("agent turn on the isolate lane", () => {
 			}),
 		);
 
+		// The gateway renders a tool result as markdown unless the caller asks
+		// for JSON, and markdown parses to no summary at all — so the ask is
+		// what makes the JSON body above realistic, and its absence is why the
+		// summary was never produced in production.
+		expect(hits.find((h) => h.url.endsWith("/tools/search_memory"))?.mcpFormat).toBe("json");
 		const end = run.events.find((e) => e.type === "tool_call_end") as
 			| { output: string; resultSummary?: { event_ids?: number[]; snippets?: Array<{ id: number; text: string }> } }
 			| undefined;
@@ -1202,6 +1213,8 @@ describe("agent turn on the isolate lane", () => {
 			id: `toolu_bud${i}`,
 			name: "query_sdk",
 			input: { code: "entities.count()" },
+			// The model says something before the call that trips the guard.
+			...(i === MAX_TOOL_CALLS_PER_TURN ? { narration: "Still counting; one more query." } : {}),
 		}));
 		armFirstDeltaGate();
 		const run = await runTurn(toolJob());
@@ -1213,6 +1226,10 @@ describe("agent turn on the isolate lane", () => {
 		expect(ran).toHaveLength(MAX_TOOL_CALLS_PER_TURN);
 		// And the guard STOPPED the turn rather than looping on refusals.
 		expect(run.output.stopReason).toBe("aborted");
+		// The abort ends the turn on an EMPTY assistant message. That message is
+		// not the answer: the text the model had settled before the guard fired
+		// is what the user gets, not "" — which Slack posts as nothing at all.
+		expect(run.output.text).toBe("Still counting; one more query.");
 	}, 240_000);
 
 	it("reports every tool it called, so requireTool can actually enforce", async () => {
@@ -1542,7 +1559,8 @@ describe("agent turn on the isolate lane", () => {
 					summaryFinished = true;
 					void writeAnthropicStream(res, ["delayed native summary"]);
 				}, 150);
-			} else void writeAnthropicStream(res, ["main answer"]);
+			} else if (body.includes("remember this input")) void writeAnthropicStream(res, ["steered answer"]);
+			else void writeAnthropicStream(res, ["main answer"]);
 		};
 		let offered = false;
 		const run = await runTurn(turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }), ['127.0.0.1'], {
@@ -1550,11 +1568,13 @@ describe("agent turn on the isolate lane", () => {
 		});
 		expect(summaryFinished).toBe(true);
 		expect(sessionEntries(run.output).at(-1)).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
-		// TWO model rounds answer here (the steered input queues a second), and
-		// the answer is the LAST message — not both concatenated. The doubled
-		// value this asserted before was the accumulator bug: the user was
-		// delivered, and history recorded, the same answer twice.
-		expect(run.output.text).toBe("main answer");
+		// TWO user messages are answered here (the steered input queues a
+		// second round), and the host delivers `text` ONCE — to Slack at
+		// completion, and to history. Both answers have to be in it: taking the
+		// newest message alone dropped the first answer from both, and the
+		// earlier version of this assertion could not tell, because both rounds
+		// answered with the same words.
+		expect(run.output.text).toBe("main answer\n\nsteered answer");
 		expect(run.output.consumedInputs).toHaveLength(1);
 		expect(run.output.consumedInputs[0].runId).toBe(7);
 		expect(sessionEntries(run.output).find((entry) => entry.id === run.output.consumedInputs[0].sessionEntryId))

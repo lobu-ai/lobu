@@ -49,9 +49,6 @@ const MAX_OUTPUT_TAIL = 2_000;
 type TurnSnapshot = { header: SessionHeader; entries: SessionEntry[] };
 function parseTurnSnapshot(snapshot: string | undefined): TurnSnapshot | string {
 	if (!snapshot) return "agent turn completed without a native session snapshot";
-	if (Buffer.byteLength(snapshot, "utf8") > MAX_SNAPSHOT_BYTES) {
-		return "agent turn session snapshot exceeds the 4 MiB limit";
-	}
 	if (snapshot.includes("\0")) return "agent turn session snapshot contains a NUL byte";
 	try {
 		const [header, ...entries] = snapshot.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
@@ -85,7 +82,69 @@ function parseTurnSnapshot(snapshot: string | undefined): TurnSnapshot | string 
 	}
 }
 
-/** Persist Pi's complete snapshot verbatim inside the fenced terminal transaction. */
+/**
+ * The session the next turn hydrates, bounded to the storage cap.
+ *
+ * Pi's session log is append-only: compaction appends a summary and removes
+ * nothing, so once a conversation has outgrown the cap every later turn would
+ * too. Failing the turn here handed the user a raw error and then failed every
+ * message after it, since each one re-hydrated the same last stored snapshot
+ * and grew it again.
+ *
+ * Within the cap the snapshot is kept verbatim. Over it, the log is trimmed to
+ * what Pi still sends the model: from the newest compaction's first kept entry
+ * (re-rooted) through the compaction summary to the end. That is exactly the
+ * context `buildSessionContext` derives from the full log — the entries dropped
+ * are the ones the summary already replaced. Only when there is no compaction
+ * to trim to, or the kept part alone is over the cap, does the session start
+ * fresh; the memory hooks hold the long-term record either way.
+ */
+function boundSnapshot(
+	snapshot: TurnSnapshot,
+	sessionJsonl: string,
+	context: { runId: number; conversationId: string },
+): string {
+	const byteSize = Buffer.byteLength(sessionJsonl, "utf8");
+	if (byteSize <= MAX_SNAPSHOT_BYTES) return sessionJsonl;
+	const trimmed = trimToCompaction(snapshot);
+	if (trimmed !== null && Buffer.byteLength(trimmed, "utf8") <= MAX_SNAPSHOT_BYTES) {
+		logger.info(
+			{ ...context, byteSize, trimmedBytes: Buffer.byteLength(trimmed, "utf8"), cap: MAX_SNAPSHOT_BYTES },
+			"Agent turn session snapshot exceeds the cap; trimmed to its latest compaction",
+		);
+		incrementCounter("lobu_agent_turn_snapshot_trimmed_total");
+		return trimmed;
+	}
+	logger.warn(
+		{ ...context, byteSize, cap: MAX_SNAPSHOT_BYTES },
+		"Agent turn session snapshot exceeds the cap with no compaction to trim to; resetting the conversation's native session",
+	);
+	incrementCounter("lobu_agent_turn_snapshot_reset_total");
+	return "";
+}
+
+/**
+ * The final branch from the newest compaction's first kept entry onward, the
+ * first kept entry re-rooted, or `null` when there is nothing to trim to. The
+ * result is re-validated as a snapshot so a dangling reference (a label or
+ * branch summary pointing before the cut) reverts to the reset path rather
+ * than failing the NEXT turn's completion.
+ */
+function trimToCompaction(snapshot: TurnSnapshot): string | null {
+	const byId = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
+	const path: SessionEntry[] = [];
+	for (let leaf = snapshot.entries.at(-1); leaf; leaf = leaf.parentId ? byId.get(leaf.parentId) : undefined) path.unshift(leaf);
+	let compaction: SessionEntry | undefined;
+	for (let i = path.length - 1; i >= 0 && !compaction; i--) if (path[i]!.type === "compaction") compaction = path[i];
+	if (!compaction || compaction.type !== "compaction") return null;
+	const firstKept = path.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+	if (firstKept <= 0) return null;
+	const kept = path.slice(firstKept).map((entry, index) => (index === 0 ? { ...entry, parentId: null } : entry));
+	const trimmed = `${[snapshot.header, ...kept].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+	return typeof parseTurnSnapshot(trimmed) === "string" ? null : trimmed;
+}
+
+/** Persist the turn's bounded snapshot inside the fenced terminal transaction. */
 async function persistTurnSnapshot(
 	tx: DbClient,
 	args: { organizationId: string; agentId: string; conversationId: string; runId: number; sessionJsonl: string },
@@ -438,6 +497,11 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
     const errorCode = status === 'failed' ? classifyErrorMessage(error) : undefined;
     const consumed = status === 'completed' ? body.consumed_inputs! : [];
+    const conversationId = envelope.turn!.conversation_id;
+    // What this turn leaves for the next one to hydrate — bounded once, here,
+    // so the run row and the snapshot table keep the same thing.
+    const stored = status === 'completed' && snapshot && typeof snapshot !== 'string'
+      ? boundSnapshot(snapshot, body.session_jsonl!, { runId: body.run_id, conversationId }) : undefined;
     await tx`UPDATE runs SET status = ${status}, completed_at = now(),
       outcome = ${classifyRunOutcome({ status, errorMessage: error })},
       error_message = ${status === 'completed' ? null : error || 'agent turn failed'},
@@ -445,7 +509,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       exit_reason = ${cancelling ? 'cancelled' : invalid ? 'error_message' : body.exit_reason ?? (status === 'completed' ? 'ok' : 'error_message')},
       action_input = ${tx.json({ ...envelope, result: {
         text, stop_reason: body.stop_reason ?? null, usage: body.usage ?? null,
-        ...(snapshot && typeof snapshot !== 'string' ? { session_jsonl: body.session_jsonl } : {}),
+        ...(stored !== undefined ? { session_jsonl: stored } : {}),
       } })}
       WHERE id = ${run.id}`;
     // Offered rows are newer than the owner and ordered by ID. The conversation
@@ -459,10 +523,9 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     }
     await releaseNextAgentTurn(tx, run);
     const reply = envelope.reply!;
-    const conversationId = envelope.turn!.conversation_id;
-    if (status === 'completed') await persistTurnSnapshot(tx, {
+    if (stored !== undefined) await persistTurnSnapshot(tx, {
       organizationId: run.organization_id, agentId: envelope.turn!.agent_id, conversationId,
-      runId: body.run_id, sessionJsonl: body.session_jsonl!,
+      runId: body.run_id, sessionJsonl: stored,
     });
     await insertAgentTurnResponse(tx, run, {
       // `tools_used` is forwarded as sent, NOT defaulted to `[]`. Absent and

@@ -405,6 +405,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
 			coreServices.getAgentSettingsStore() ?? undefined,
 			agentTurnMcpDeps(coreServices),
 			coreServices.getArtifactStore(),
+			coreServices.getInstructionService(),
 		);
 		logger.info("[Lobu] Embedded orchestrator injected core services");
 
