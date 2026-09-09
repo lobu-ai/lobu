@@ -203,6 +203,41 @@ describe('SDK browser invocation', () => {
   });
 });
 
+describe('page-activation trust stamp', () => {
+  const browser = runScopedBrowserActionContext(4242);
+
+  it('stamps the tab the server resolved and strips the caller\'s copy', () => {
+    expect(
+      trustedChromeActionInput(
+        { tab_id: 23, activation_tab_id: 999 },
+        browser,
+        23
+      )
+    ).toMatchObject({ tab_id: 23, activation_tab_id: 23 });
+  });
+
+  it('omits the stamp entirely when the run was never page-activated', () => {
+    // A caller-supplied id must not survive into a non-activated run — that
+    // would be a way to launder any tab into user-owned authority.
+    for (const activation of [null, undefined]) {
+      const out = trustedChromeActionInput(
+        { tab_id: 7, activation_tab_id: 7 },
+        browser,
+        activation
+      );
+      expect(out).not.toHaveProperty('activation_tab_id');
+    }
+  });
+
+  it('refuses a non-positive or non-integer resolved id', () => {
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      expect(
+        trustedChromeActionInput({ tab_id: 7 }, browser, bad)
+      ).not.toHaveProperty('activation_tab_id');
+    }
+  });
+});
+
 // The extension normalizes titles outside this shape. Keep every fixed server
 // fallback within its pass-through contract; user-supplied subjects are
 // bounded by the extension.
