@@ -81,47 +81,11 @@ app:
   # currently has no non-root USER (docker/app/Dockerfile) — enable it once the
   # image ships a non-root user. The defaults below are safe to apply even as
   # root and drop a meaningful amount of attack surface.
-  # NOTE on connector-contributed CLIs (e.g. `gh`): the embedded worker registers
-  # spawned binaries ONLY when it has a working per-exec sandbox. bubblewrap
-  # needs `unshare(CLONE_NEWUSER)`, which the RuntimeDefault profile below
-  # filters on most runtimes — so as shipped, probeSandboxStrategy reports
-  # "none" and a contributed CLI exits 127.
-  #
-  # That is the SAFE default and is deliberate. Every worker and the gateway
-  # share this container as the same user, so without a per-exec sandbox a
-  # shell-capable CLI can read sibling `workspaces/{agentId}` directories and
-  # the gateway's environment — verified, not theoretical. The pod boundary is
-  # per-POD, and the tenants are inside it.
-  #
-  # MEASURED on this cluster (k3s v1.32.8, containerd 2.0.5, Ubuntu 24.04 /
-  # kernel 6.8): bubblewrap CANNOT be enabled by any securityContext change.
-  # `unshare --user` succeeds once SYS_ADMIN is added, but bwrap then fails at
-  #
-  #     bwrap: setting up uid map: Operation not permitted
-  #
-  # which still failed with SETUID+SETGID+SYS_CHROOT+MKNOD+DAC_OVERRIDE added,
-  # allowPrivilegeEscalation: true, AND seccomp removed entirely. Writing
-  # /proc/self/uid_map is restricted by the container runtime, not by seccomp or
-  # capabilities, so no chart-level knob reaches it.
-  #
-  # Consequence: connector-contributed CLIs (`gh`) exit 127 on this cluster, by
-  # design, and that is the SAFE outcome — see the isolation note above.
-  # Enabling them needs a runtime-level change, not a values.yaml edit. Also
-  # measured: this cluster declares `crun` and `gvisor` RuntimeClasses, but
-  # neither handler is installed on the nodes ("no runtime for \"crun\" is
-  # configured" / "...\"runsc\"..."), so switching runtimeClassName is not an
-  # available workaround here either.
-  #
-  # Verify on any cluster before assuming otherwise:
-  #   kubectl exec <app-pod> -- bwrap --unshare-user --unshare-pid --ro-bind \
-  #     /usr /usr --proc /proc --dev /dev -- /usr/bin/true
-  # Exit 0 means contributed CLIs will register; anything else means 127.
-  # Do NOT "fix" a non-zero result with LOBU_ALLOW_UNSANDBOXED_EXEC: workers and
-  # the gateway share this container, and /proc/1/environ is readable from it.
-  #
-  # Do NOT reach for `type: Unconfined` (drops the whole filter) or for
-  # LOBU_ALLOW_UNSANDBOXED_EXEC (skips the sandbox AND unlocks full
-  # interpreters); the latter is a per-agent decision for trusted agents.
+  # NOTE on connector-contributed CLIs (e.g. `gh`): an agent turn runs in a V8
+  # isolate in the gateway process and its `bash` runs in a remote sandbox, so
+  # nothing in this pod spawns a per-agent binary. A connector declares what it
+  # needs (`nix: { packages: ['gh'] }`) and the sandbox provisions it there; no
+  # securityContext setting on this pod affects that.
   containerSecurityContext:
     allowPrivilegeEscalation: false
     capabilities:

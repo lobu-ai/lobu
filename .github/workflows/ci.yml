@@ -155,33 +155,6 @@ jobs:
         with:
           node-version: "22"
 
-      # Cache the .deb so the steady-state install touches no apt mirror at all.
-      # The mirror stall this avoids is a HANG, not an error, so no retry policy
-      # can bound it — only not needing the network can.
-      #
-      # ImageOS is in the key because runner.os/runner.arch are Linux/X64 on
-      # EVERY Ubuntu image: without it a .deb cached on 24.04 would be restored
-      # onto whatever image comes next. A stale .deb degrades safely (dpkg
-      # fails, the script falls through to apt) but it would spend the runtime
-      # this cache exists to save, on exactly the runs where the image just
-      # changed.
-      - name: Cache bubblewrap package
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/lobu-bwrap
-          key: bwrap-deb-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
-
-      - name: Install bubblewrap (for embedded exec-sandbox tests)
-        # The ONLY job that requires bwrap: the worker exec-sandbox escape
-        # matrix here (LOBU_REQUIRE_EXEC_SANDBOX=1) hard-fails without it, and
-        # this is the only Linux isolation verification path. The SDK
-        # lifecycle/transcript gates dropped their installs - their workers
-        # probe the strategy and fall back to kind:"none" (pass-through).
-        # Ubuntu 24.04 (ubuntu-latest) blocks unprivileged user namespaces via
-        # AppArmor by default; bwrap needs them, so flip the sysctl. See
-        # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
-        run: bash scripts/install-bubblewrap.sh probe
-
       - name: Compute cache keys
         id: cache-keys
         shell: bash
@@ -455,10 +428,6 @@ jobs:
           key: ${{ steps.cache-keys.outputs.bun-key }}
       - name: Install dependencies
         run: bun install
-      # No bwrap: the worker probes the backend and falls back to kind:"none"
-      # — shell/transcript gates still pass, but contributed-CLI registration
-      # is dropped with it, so isolation + binaries stay covered by unit's
-      # escape matrix (LOBU_REQUIRE_EXEC_SANDBOX=1), the only job with bwrap.
       - name: Download built distributions
         uses: actions/download-artifact@v8
         with:
@@ -469,43 +438,6 @@ jobs:
       - name: SDK lifecycle e2e (apply + prune + real worker turn)
         run: bash scripts/sdk-e2e.sh
 
-      # Measurement only. Reuse this already-running main-push job instead of
-      # allocating another hosted runner to inspect the same Ubuntu host.
-      - name: Report available exec-sandbox backends
-        if: github.event_name == 'push'
-        continue-on-error: true
-        run: |
-          {
-            echo "### exec-sandbox backend probe"
-            echo ""
-            if command -v bwrap >/dev/null 2>&1; then
-              if bwrap --unshare-user --unshare-pid \
-                   --ro-bind /usr /usr \
-                   --ro-bind-try /lib /lib \
-                   --ro-bind-try /lib64 /lib64 \
-                   --ro-bind-try /bin /bin \
-                   --proc /proc --dev /dev -- /usr/bin/true >/tmp/bwrap.err 2>&1; then
-                echo "- bwrap: **isolation works**"
-              else
-                echo "- bwrap: present but refused — \`$(head -c 200 /tmp/bwrap.err)\`"
-              fi
-            else
-              echo "- bwrap: not installed"
-            fi
-            if command -v systemd-run >/dev/null 2>&1; then
-              if systemd-run --user --scope --quiet /bin/true >/tmp/sdr.err 2>&1; then
-                echo "- systemd-run --user: **works** (viable alternative backend)"
-              else
-                echo "- systemd-run --user: present but failed — \`$(head -c 200 /tmp/sdr.err)\`"
-              fi
-            else
-              echo "- systemd-run: not installed"
-            fi
-            echo ""
-            echo "kernel.unprivileged_userns_clone=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo 'unset')"
-            echo "kernel.apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'unset')"
-          } >> "$GITHUB_STEP_SUMMARY"
-          cat "$GITHUB_STEP_SUMMARY"
 
   sdk-error-taxonomy-e2e:
     needs: sdk-cli-build
@@ -536,10 +468,6 @@ jobs:
           key: ${{ steps.cache-keys.outputs.bun-key }}
       - name: Install dependencies
         run: bun install
-      # No bwrap: the worker probes the backend and falls back to kind:"none"
-      # — shell/transcript gates still pass, but contributed-CLI registration
-      # is dropped with it, so isolation + binaries stay covered by unit's
-      # escape matrix (LOBU_REQUIRE_EXEC_SANDBOX=1), the only job with bwrap.
       - name: Download built distributions
         uses: actions/download-artifact@v8
         with:
@@ -579,10 +507,6 @@ jobs:
           key: ${{ steps.cache-keys.outputs.bun-key }}
       - name: Install dependencies
         run: bun install
-      # No bwrap: the worker probes the backend and falls back to kind:"none"
-      # — shell/transcript gates still pass, but contributed-CLI registration
-      # is dropped with it, so isolation + binaries stay covered by unit's
-      # escape matrix (LOBU_REQUIRE_EXEC_SANDBOX=1), the only job with bwrap.
       - name: Download built distributions
         uses: actions/download-artifact@v8
         with:
@@ -1300,7 +1224,6 @@ jobs:
           bash scripts/lib/__tests__/review-upstream-guard.test.sh
           bash scripts/lib/__tests__/review-skip.test.sh
           bash scripts/lib/__tests__/review-cache.test.sh
-          bash scripts/lib/__tests__/install-bubblewrap.test.sh
           bash scripts/lib/__tests__/process-cleanup.test.sh
 
       - name: Preview and staging workflow guards
