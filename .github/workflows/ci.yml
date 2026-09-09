@@ -132,8 +132,8 @@ jobs:
           # gated separately from the rest of the frontend job (which runs for any
           # `packages` change). `packages/owletto` is a submodule POINTER file, so
           # a pointer bump shows up as that exact path with nothing under it —
-          # that still moves apps/chrome and must run the smoke.
-          if echo "$changed" | grep -E '^(packages/owletto$|packages/owletto/apps/chrome/|\.github/workflows/ci\.yml$)' >/dev/null; then
+          # it can move apps/chrome and must run the smoke conservatively.
+          if echo "$changed" | grep -E '^(packages/owletto$|\.github/workflows/ci\.yml$)' >/dev/null; then
             echo "chromeExt=true" >> "$GITHUB_OUTPUT"
           else
             echo "chromeExt=false" >> "$GITHUB_OUTPUT"
@@ -655,7 +655,7 @@ jobs:
         # fixture: action dispatch, flow isolation, worker eviction/recovery, and
         # tab-presence reaping. This is the only CI coverage that exercises the
         # extension in a real browser instead of the hand-written chrome stub, so
-        # it catches behavior the unit suites structurally cannot. One probe
+        # it catches what the unit suites structurally cannot. One probe
         # (unfocused-window reaping) self-skips headless -- see the script.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
         run: node packages/owletto/scripts/chrome-reliability-smoke.mjs
