@@ -9,15 +9,23 @@ set -euo pipefail
 #   TEST_PLATFORM   - "slack", "whatsapp", or "telegram" (default: auto-detect)
 #   TEST_CHANNEL    - Channel ID (Slack), phone number (WhatsApp), or peer/chat ID (Telegram)
 #   TEST_TIMEOUT    - Timeout in seconds (default: 120)
+#   TEST_EXPECT_RESPONSE - Exact Slack reply required for a successful smoke test
 #
 # Platform-specific:
 #   Slack: QA_SLACK_CHANNEL, QA_SLACK_USER_TOKEN (xoxp-) to send as real user,
 #          or QA_SLACK_BOT_TOKEN (xoxb- from a *separate* QA-only Slack app) to
-#          send as a distinct bot — the target bot's isMessageFromSelf filter
-#          only skips its own bot_id, so a different app's bot posts through.
-#          Optional SLACK_BOT_TOKEN for reply polling when QA tokens absent.
+#          send an explicit target mention as a distinct bot. The sender or
+#          SLACK_BOT_TOKEN needs the relevant history scope for reply polling.
+#          QA_SLACK_TARGET_USER_ID identifies the bot whose reply must match;
+#          alternatively, SLACK_BOT_TOKEN resolves the target via auth.test.
+#          When present, SLACK_BOT_TOKEN is also used for reply polling.
 #   WhatsApp: WHATSAPP_SELF_PHONE (defaults to bot's own number for self-chat)
 #   Telegram: TELEGRAM_TEST_CHAT_ID, TG_API_ID, TG_API_HASH (uses tguser to send as real user)
+#
+# Slack smoke example (tokens already exported):
+#   marker="LOBU_SMOKE_$(date +%s)"
+#   TEST_PLATFORM=slack TEST_EXPECT_RESPONSE="$marker" ./scripts/test-bot.sh \
+#     "<@$QA_SLACK_TARGET_USER_ID> Reply exactly $marker. Do not use tools."
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8787/lobu}"
 
@@ -134,6 +142,15 @@ if [ -f .env ]; then
     done < .env
 fi
 
+QA_SEND_TOKEN="${QA_SLACK_USER_TOKEN:-${QA_SLACK_BOT_TOKEN:-}}"
+if [ -z "${TEST_PLATFORM:-}" ] && [ -n "${TEST_EXPECT_RESPONSE:-}" ] && [ -n "$QA_SEND_TOKEN" ]; then
+    TEST_PLATFORM=slack
+fi
+if [ -n "${TEST_EXPECT_RESPONSE:-}" ] && { [ "${TEST_PLATFORM:-}" != "slack" ] || [ -z "$QA_SEND_TOKEN" ]; }; then
+    echo "❌ TEST_EXPECT_RESPONSE requires Slack with a QA sender token"
+    exit 1
+fi
+
 resolve_auth_token() {
     if [ -n "${TEST_AUTH_TOKEN:-}" ]; then
         printf '%s\n' "$TEST_AUTH_TOKEN"
@@ -248,9 +265,12 @@ PY
 # Fetch gateway's active test targets once; used for both platform auto-detect
 # and agent-id fallback so explicit TEST_PLATFORM runs still resolve the owning
 # agent (otherwise the default `test-<platform>` placeholder has no provider).
-TEST_TARGETS=$(curl -sf "$GATEWAY_URL/internal/connections/test-targets" 2>/dev/null || \
-    curl -sf "$GATEWAY_URL/api/internal/connections/test-targets" 2>/dev/null || \
-    echo "")
+TEST_TARGETS=""
+if [ "${TEST_PLATFORM:-}" != "slack" ] || [ -z "$QA_SEND_TOKEN" ]; then
+    TEST_TARGETS=$(curl -sf "$GATEWAY_URL/internal/connections/test-targets" 2>/dev/null || \
+        curl -sf "$GATEWAY_URL/api/internal/connections/test-targets" 2>/dev/null || \
+        echo "")
+fi
 
 if [ -n "$TEST_TARGETS" ] && [ -z "${TEST_AGENT_ID:-}" ]; then
     if [ -n "${TEST_PLATFORM:-}" ]; then
@@ -298,11 +318,40 @@ TIMEOUT="${TEST_TIMEOUT:-120}"
 # Platform-specific setup
 case "$TEST_PLATFORM" in
     slack)
-        AUTH_TOKEN="$(resolve_auth_token)"
+        AUTH_TOKEN=""
+        if [ -z "$QA_SEND_TOKEN" ]; then
+            AUTH_TOKEN="$(resolve_auth_token)"
+        fi
         CHANNEL="${TEST_CHANNEL:-${QA_SLACK_CHANNEL:-}}"
         if [ -z "$CHANNEL" ]; then
             echo "❌ QA_SLACK_CHANNEL or TEST_CHANNEL environment variable is required for Slack"
             exit 1
+        fi
+        if [ -n "$QA_SEND_TOKEN" ]; then
+            TARGET_BOT_USER_ID="${QA_SLACK_TARGET_USER_ID:-}"
+            if [ -z "$TARGET_BOT_USER_ID" ] && [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+                TARGET_AUTH=$(curl -fsS --max-time 30 https://slack.com/api/auth.test \
+                    -H "Authorization: Bearer $SLACK_BOT_TOKEN")
+                if ! printf '%s' "$TARGET_AUTH" | jq -e '.ok == true' >/dev/null; then
+                    echo "❌ Target auth.test failed: $(printf '%s' "$TARGET_AUTH" | jq -r '.error')"
+                    exit 1
+                fi
+                TARGET_BOT_USER_ID=$(printf '%s' "$TARGET_AUTH" | jq -r '.user_id // empty')
+            fi
+            if [ -z "$TARGET_BOT_USER_ID" ]; then
+                echo "❌ Set QA_SLACK_TARGET_USER_ID or SLACK_BOT_TOKEN to identify the target bot"
+                exit 1
+            fi
+            SENDER_AUTH=$(curl -fsS --max-time 30 https://slack.com/api/auth.test \
+                -H "Authorization: Bearer $QA_SEND_TOKEN")
+            if ! printf '%s' "$SENDER_AUTH" | jq -e '.ok == true and (.user_id | type == "string")' >/dev/null; then
+                echo "❌ Sender auth.test failed: $(printf '%s' "$SENDER_AUTH" | jq -r '.error')"
+                exit 1
+            fi
+            if [ "$(printf '%s' "$SENDER_AUTH" | jq -r '.user_id')" = "$TARGET_BOT_USER_ID" ]; then
+                echo "❌ QA sender and target are the same Slack user; use a separate sender"
+                exit 1
+            fi
         fi
         ;;
     whatsapp)
@@ -350,7 +399,7 @@ case "$TEST_PLATFORM" in
         ;;
 esac
 
-if [ -z "$AUTH_TOKEN" ]; then
+if [ -z "$AUTH_TOKEN" ] && { [ "$TEST_PLATFORM" != "slack" ] || [ -z "$QA_SEND_TOKEN" ]; }; then
     echo "❌ Authentication token required. Set TEST_AUTH_TOKEN/LOBU_API_TOKEN or run \`lobu login\`."
     exit 1
 fi
@@ -409,10 +458,8 @@ for i in "${!MESSAGES[@]}"; do
     # Slack QA-sender path: post via chat.postMessage so the target bot sees a
     # genuine Slack event instead of a gateway-forged enqueue.
     #   - QA_SLACK_USER_TOKEN (xoxp-): posts as a real user.
-    #   - QA_SLACK_BOT_TOKEN  (xoxb-): posts as a *separate* QA bot. The target
-    #     bot's isMessageFromSelf only matches its own bot_id, so cross-app
-    #     bot posts are delivered normally.
-    QA_SEND_TOKEN="${QA_SLACK_USER_TOKEN:-${QA_SLACK_BOT_TOKEN:-}}"
+    #   - QA_SLACK_BOT_TOKEN  (xoxb-): posts an explicit target mention as a
+    #     separate QA bot.
     if [ "$TEST_PLATFORM" = "slack" ] && [ -z "$QA_SEND_TOKEN" ]; then
         echo "   ⚠️  No QA Slack token set — using gateway-forged send."
         echo "       The message is queued directly to the worker; nothing"
@@ -431,7 +478,7 @@ for i in "${!MESSAGES[@]}"; do
         if [ -n "$LAST_THREAD_ID" ]; then
             POST_BODY="$POST_BODY&thread_ts=$LAST_THREAD_ID"
         fi
-        POST_RESP=$(curl -s -X POST https://slack.com/api/chat.postMessage \
+        POST_RESP=$(curl -fsS --max-time 30 -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $QA_SEND_TOKEN" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "$POST_BODY")
@@ -449,22 +496,41 @@ for i in "${!MESSAGES[@]}"; do
         POLL_TOKEN="${SLACK_BOT_TOKEN:-$QA_SEND_TOKEN}"
         echo "   ⏳ Waiting for bot response..."
         START_TIME=$(date +%s)
+        BOT_RESPONSE=""
         while true; do
             CURRENT_TIME=$(date +%s)
             ELAPSED=$((CURRENT_TIME - START_TIME))
             if [ $ELAPSED -ge $TIMEOUT ]; then
-                echo "   ❌ Timeout: No bot response within ${TIMEOUT}s"
+                echo "   ❌ Timeout: No matching reply from $TARGET_BOT_USER_ID within ${TIMEOUT}s"
+                if [ -n "$BOT_RESPONSE" ]; then
+                    printf '      Last reply: %s\n' "$BOT_RESPONSE"
+                fi
                 exit 1
             fi
-            REPLIES=$(curl -s -X POST https://slack.com/api/conversations.replies \
+            REPLIES=$(curl -fsS --max-time 30 -X POST https://slack.com/api/conversations.replies \
                 -H "Authorization: Bearer $POLL_TOKEN" \
                 -H "Content-Type: application/x-www-form-urlencoded" \
-                -d "channel=$CHANNEL&ts=$LAST_THREAD_ID&limit=20")
-            BOT_RESPONSE=$(echo "$REPLIES" | jq -r '.messages[]? | select(.bot_id != null) | select(.ts > "'"$MESSAGE_ID"'") | .text' | head -1)
+                -d "channel=$CHANNEL&ts=$LAST_THREAD_ID&oldest=$MESSAGE_ID&limit=20")
+            if ! printf '%s' "$REPLIES" | jq -e '.ok == true' >/dev/null; then
+                echo "   ❌ Slack conversations.replies failed: $(printf '%s' "$REPLIES" | jq -r '.error')"
+                exit 1
+            fi
+            BOT_RESPONSE=$(printf '%s' "$REPLIES" | jq -r \
+                --arg user "$TARGET_BOT_USER_ID" --arg expected "${TEST_EXPECT_RESPONSE:-}" \
+                '([.messages[]? | select(.user == $user and .text != null) | .text]) as $responses
+                | if $expected != "" and any($responses[]; . == $expected)
+                  then $expected
+                  else ($responses | last // empty)
+                  end')
             if [ -n "$BOT_RESPONSE" ]; then
-                echo "   ✅ Bot responded:"
-                echo "      $(echo "$BOT_RESPONSE" | head -c 200)..."
-                break
+                if [ -z "${TEST_EXPECT_RESPONSE:-}" ] || [ "$BOT_RESPONSE" = "$TEST_EXPECT_RESPONSE" ]; then
+                    if [ -n "${TEST_EXPECT_RESPONSE:-}" ]; then
+                        printf '   ✅ Matched expected response: %s\n' "$BOT_RESPONSE"
+                    else
+                        printf '   ✅ Target bot responded: %s\n' "$BOT_RESPONSE"
+                    fi
+                    break
+                fi
             fi
             sleep 2
         done
