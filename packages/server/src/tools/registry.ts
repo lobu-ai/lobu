@@ -189,6 +189,8 @@ interface ToolDefinitionMetadata {
   name: string;
   description: string;
   inputSchema: any; // JSON Schema
+  /** Explicit workspace selector shared by discovery and dispatch. */
+  workspaceTarget?: string;
   /**
    * Narrower schema advertised on `tools/list` when the tool accepts fields
    * that are server-internal (e.g. pre-computed embeddings, identity-bound
@@ -300,6 +302,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'save_memory',
+    workspaceTarget: 'org_slug',
     description:
       'Save user-shared facts, preferences, decisions, observations, and notes to workspace memory. The returned id is immediately readable with `client.knowledge.read`; the result also echoes the bounded saved payload for inline display. Semantic search indexing is asynchronous and reported as `indexing_status`. Storage is append-only — pass `supersedes_event_id` to replace an existing fact (the old event is hidden from future searches without losing history). Use a stable `idempotency_key` when a write may be retried. Optionally attach to entities via `entity_ids`. Always search first to avoid duplicates.',
     inputSchema: SaveMemorySchema,
@@ -340,6 +343,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'query_sql',
+    workspaceTarget: 'org_slug',
     description:
       'Run a paginated, sortable, searchable read-only SQL query (member-safe). Table references auto-scope to the bound org, or pass `connection` to push read-only SQL fully into an external database connector. Source-backed feeds are queried explicitly with query_sdk client.feeds.readMany. Prefer client.metrics.query for declared measures; use client.query in query_sdk for simple one-shot SQL. Do NOT use positional parameters ($1, $2, …). `org_slug` selects a granted workspace on bare OAuth /mcp and is required when the connection has no workspace binding. The query does not change workspace content or external systems, but Lobu appends a private audit/activity record for the invocation.',
     inputSchema: QuerySqlSchema,
@@ -377,6 +381,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
 const MCP_APP_TOOLS: ToolDefinition[] = [
   {
     name: 'get_approval',
+    workspaceTarget: 'organization',
     scope: 'account',
     description:
       'Get the server-authored review card for one approval run returned by a pending action. On an unscoped OAuth session, pass organization with the target workspace slug or id. The card reads the canonical durable approval, exposes in-card controls only when this OAuth app context can resolve it, and always includes a review link while pending. Reading does not change workspace content or external systems. OAuth and PAT calls append a private audit/activity record.',
@@ -689,6 +694,8 @@ function filterSchemaForAccessLevel(
 const listedToolsCache = new Map<string, ReturnType<typeof computeListedTools>>();
 
 type ListedToolOptions = {
+  /** Bare account MCP has no implicit target. */
+  requireWorkspaceTarget?: boolean;
   publicOnly?: boolean;
   maxAccessLevel?: 'read' | 'write' | 'admin';
   /**
@@ -703,7 +710,21 @@ type ListedToolOptions = {
  * Agent-facing tools for MCP `tools/list` and external OpenAPI.
  */
 export function getMcpTools(options?: ListedToolOptions) {
-  return getListedTools(ALL_MCP_TOOLS, options);
+  const tools = getListedTools(ALL_MCP_TOOLS, options);
+  if (!options?.requireWorkspaceTarget) return tools;
+  // Never mutate cached schemas: a bound connection may list immediately after
+  // an account connection in the same process.
+  return tools.map((tool) => {
+    const field = getTool(tool.name)?.workspaceTarget;
+    if (!field) return tool;
+    return {
+      ...tool,
+      inputSchema: {
+        ...tool.inputSchema,
+        required: [...new Set([...(tool.inputSchema.required ?? []), field])],
+      },
+    };
+  });
 }
 
 /**

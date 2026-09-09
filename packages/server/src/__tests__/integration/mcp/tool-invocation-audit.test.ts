@@ -645,6 +645,44 @@ describe('tool invocation audit coverage', () => {
     ]);
   });
 
+  it('audits a pre-handler denial under the bound org without clearing the conversation workspace', async () => {
+    // Every throw before the handler runs — role/scope denial, deployment
+    // pause, an unresolvable workspace target — now reaches the audit/activity
+    // writers. A bound connection's org is already verified by auth, so it must
+    // survive: `mcp_client_conversations.organization_id` collapses to NULL the
+    // moment an upsert arrives with a different value, and that is permanent.
+    const conversationId = 'denied-call-session';
+    const ctx = {
+      ...authCtxFor('oauth'),
+      mcpSessionId: 'denied-call-transport',
+      mcpConversationId: conversationId,
+    };
+    await executeTool('list_organizations', {}, {} as Env, ctx);
+    await expect(
+      executeTool(
+        'manage_agents',
+        { action: 'create', name: 'denied-agent' },
+        {} as Env,
+        { ...ctx, memberRole: 'member' }
+      )
+    ).rejects.toThrow();
+
+    const row = await latestAuditRow(orgId, 'manage_agents');
+    expect(row).not.toBeNull();
+    expect(row!.payload_data.success).toBe(false);
+
+    const [conversation] = await getDb()`
+      SELECT organization_id, call_count::int AS call_count, failed_count::int AS failed_count
+      FROM mcp_client_conversations
+      WHERE client_identity = ${clientId} AND conversation_id = ${conversationId}
+    `;
+    expect(conversation).toMatchObject({
+      organization_id: orgId,
+      call_count: 2,
+      failed_count: 1,
+    });
+  });
+
   it('records resolved tool failures as failed', async () => {
     // A failure the HANDLER resolves, not one the arg validator throws:
     // manage_classifiers' per-action schema now supplies `classifier_id`'s
