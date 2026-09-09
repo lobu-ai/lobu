@@ -558,7 +558,20 @@ describe('browser-affinity poll claim', () => {
   // ten groups. Helper-level coverage cannot see the poll wiring that decides
   // this, which is the only place the fallback chain is actually exercised.
   it('gives unparented chrome actions a shared standalone context with per-run flows', async () => {
-    const { orgId, userId, workerId, deviceWorkerId } = await seedWorker();
+    const { userId, orgId } = await seedOrg();
+    await createTestConnectorDefinition({
+      key: 'chrome',
+      name: 'Chrome',
+      organization_id: orgId,
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions
+      SET compiled_code = 'export class ConnectorRuntime {}',
+          compile_config_hash = ${COMPILE_CONFIG_HASH}
+      WHERE connector_key = 'chrome'
+    `;
+    const { deviceWorkerId, workerId } = await seedExtWorker(userId, orgId);
     const connId = await seedConnection({
       orgId,
       userId,
@@ -566,6 +579,8 @@ describe('browser-affinity poll claim', () => {
       deviceWorkerId,
     });
 
+    // No runMetadata and no parent run: the SDK shape the fallback chain
+    // handles. Poll one at a time, since a poll claims a single run.
     const pollOne = async (url: string) => {
       const runId = await seedPendingAction({
         orgId,
@@ -588,7 +603,8 @@ describe('browser-affinity poll claim', () => {
     const first = await pollOne('https://a.example/');
     const second = await pollOne('https://b.example/');
 
-    // One group: same context id, and it is the standalone shape, not run:<id>.
+    // One visible group: same context id, in the standalone shape (not run:<id>,
+    // which would mint a group per run — ten SDK navigates, ten groups).
     expect(first.input.browser_context_id).toBe(second.input.browser_context_id);
     expect(String(first.input.browser_context_id)).toMatch(/^run:standalone-/);
     expect(first.input.browser_context_title).toBe(second.input.browser_context_title);
