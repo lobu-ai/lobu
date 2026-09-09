@@ -61,16 +61,17 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
 
     const expectedSafetyHints = {
       // The retrieval tools mutate nothing in the workspace or in an external
-      // system, but every invocation appends an audit/activity record, so they
-      // are not `readOnlyHint`. Read ACCESS is pinned separately by
-      // `authorizationReadOnly` (see tool-registry-split.test.ts).
-      search_memory: [false, false, false],
-      search_sdk: [false, false, false],
-      query_sdk: [false, false, false],
-      query_sql: [false, false, false],
+      // system, so they ARE `readOnlyHint`. The audit/activity record each
+      // invocation appends is server bookkeeping, not a change to the caller's
+      // environment. Read ACCESS is pinned separately by `authorizationReadOnly`
+      // (see tool-registry-split.test.ts).
+      search_memory: [true, false, false],
+      search_sdk: [true, false, false],
+      query_sdk: [true, false, false],
+      query_sql: [true, false, false],
       save_memory: [false, false, false],
       run_sdk: [false, true, true],
-      get_approval: [false, false, false],
+      get_approval: [true, false, false],
     } as const;
 
     for (const [toolName, [readOnlyHint, openWorldHint, destructiveHint]] of Object.entries(
@@ -292,5 +293,18 @@ describe('MCP query_sdk / run_sdk tool surface', () => {
     expect(names).not.toContain('run_sdk');
     expect(names).not.toContain('query_sdk');
     expect(names).not.toContain('query_sql');
+
+    // The public path builds its own listing (publicOnly + read tier), so it
+    // needs its own annotation assertion: a regression here is invisible to the
+    // authenticated case above and reaches unauthenticated clients directly.
+    const publicTools = body.result?.tools as Array<{
+      name: string;
+      annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+    }>;
+    for (const name of ['search_memory', 'search_sdk']) {
+      const annotations = publicTools.find((t) => t.name === name)?.annotations;
+      expect(annotations?.readOnlyHint, `public ${name}.readOnlyHint`).toBe(true);
+      expect(annotations?.destructiveHint, `public ${name}.destructiveHint`).toBe(false);
+    }
   });
 });

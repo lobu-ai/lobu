@@ -238,13 +238,21 @@ const READ_ONLY = {
 // CHANGE public internet or third-party state. Live reads from a user's private
 // connectors remain closed-world even though they contact an external service.
 //
-// These operations retrieve data, but every OAuth and PAT invocation appends an
-// audit/activity record, and `readOnlyHint` asserts the tool "does not modify
-// its environment" — that append does, so the hint cannot be claimed. Access
-// enforcement stays separate through `authorizationReadOnly`, so a read grant
-// still invokes these tools while the SDK keeps rejecting data writes.
+// These operations only retrieve data. Every OAuth and PAT invocation appends an
+// audit/activity record, but `readOnlyHint` describes the CALLER'S environment —
+// the workspace content and external systems a client prompts the user about —
+// and server-side bookkeeping is not part of it. Claiming `false` for the audit
+// row would make the hint unclaimable by any audited server and spends the
+// user's attention on confirmations that protect nothing, which in turn dulls
+// the prompts on `run_sdk`, where a write really can happen.
+//
+// Do not flip this back on the strength of the audit append alone. Access
+// enforcement is separate and explicit: each of these tools sets
+// `authorizationReadOnly: true` and `securityScopes: ['mcp:read']`, so the
+// `isAuthorizationReadOnly` fallback to `readOnlyHint` never fires for them and
+// this hint carries no access-control weight.
 const AUDITED_READ = {
-  readOnlyHint: false,
+  readOnlyHint: true,
   destructiveHint: false,
   openWorldHint: false,
   idempotentHint: false,

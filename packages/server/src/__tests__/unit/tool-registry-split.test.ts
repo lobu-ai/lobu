@@ -91,12 +91,12 @@ describe("tool registry split", () => {
 		expect(isRestDispatchTool("manage_connections")).toBe(true);
 	});
 
-	it("discloses audit writes without requiring write access for data reads", () => {
+	it("advertises data reads as read-only without requiring write access", () => {
 		const listed = getMcpTools({ maxAccessLevel: "read" });
 		for (const name of ["search_memory", "search_sdk", "query_sdk", "query_sql", "get_approval"]) {
 			const tool = listed.find((entry) => entry.name === name);
 			expect(tool).toBeDefined();
-			expect(tool?.annotations?.readOnlyHint).toBe(false);
+			expect(tool?.annotations?.readOnlyHint).toBe(true);
 			expect(isAuthorizationReadOnly(getTool(name))).toBe(true);
 			expect(tool?.securitySchemes).toEqual([
 				{ type: "oauth2", scopes: ["mcp:read", "profile:read"] },

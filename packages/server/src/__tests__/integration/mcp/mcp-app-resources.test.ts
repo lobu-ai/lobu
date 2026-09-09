@@ -484,7 +484,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     expect(tool).toEqual(
       expect.objectContaining({
         annotations: expect.objectContaining({
-          readOnlyHint: false,
+          readOnlyHint: true,
           destructiveHint: false,
           openWorldHint: false,
           idempotentHint: false,
