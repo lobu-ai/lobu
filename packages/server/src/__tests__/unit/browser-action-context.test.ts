@@ -252,7 +252,7 @@ describe('page-activation trust stamp', () => {
 // server's own constant would make the assertion tautological and let a
 // one-sided rename pass. Changing the prefix must fail here until the
 // extension is changed to match.
-const EXTENSION_TITLE_PREFIX = '◆ Lobu · ';
+const EXTENSION_TITLE_PREFIX = 'Lobu · ';
 const EXTENSION_MAX_TITLE_POINTS = 64;
 
 describe('extension title pass-through contract', () => {

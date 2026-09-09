@@ -3,13 +3,14 @@ import { currentMcpActivityAttribution, normalizeMcpConversationTitle } from '..
 import type { ToolContext } from '../tools/registry';
 
 /**
- * The one place either side of the wire spells the group-title namespace. The
- * extension enforces the identical prefix in titleFor (apps/chrome/tab-groups.js)
- * before storing any title, so a change here without the matching change there
- * makes every server-sent title get re-prefixed; the contract test below pins
- * the separator form so the two cannot drift silently.
+ * The one place the server spells the group-title namespace. The extension
+ * enforces the identical prefix in titleFor (apps/chrome/tab-groups.js) before
+ * storing any title, and there is deliberately no migration on either side: a
+ * change here without the matching change there would re-prefix every
+ * server-sent title. The contract test pins the separator form as a LITERAL so
+ * a one-sided rename fails loudly instead of silently stacking prefixes.
  */
-export const BROWSER_GROUP_TITLE_PREFIX = '◆ Lobu';
+export const BROWSER_GROUP_TITLE_PREFIX = 'Lobu';
 const TITLE_HEAD = `${BROWSER_GROUP_TITLE_PREFIX} · `;
 
 export type BrowserActionContext = {
