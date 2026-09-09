@@ -853,18 +853,6 @@ export async function enqueueAgentTurn(
     let hasMemoryServer = false;
     let mcpInstructions: string[] = [];
     const policy = turnToolPolicy(data.agentOptions);
-    // `mcpExposure: "cli"` presents the agent's MCP servers as SHELL COMMANDS
-    // instead of model tools — same capability, an interface some coding models
-    // handle better than a tool manifest. This lane does not carry that surface
-    // yet, so the agent gets the default `"tools"` exposure and the setting says
-    // so out loud. Stated rather than ignored: an option that silently means
-    // something else is worse than one that reports what it did.
-    if ((data.agentOptions?.toolsConfig as ToolsConfig | undefined)?.mcpExposure === "cli") {
-      logger.info(
-        { agentId: data.agentId },
-        "Agent turn: this agent exposes MCP as shell commands, which the isolate lane does not carry; the turn runs with MCP tools exposure instead"
-      );
-    }
     if (!deps.mcp) {
       logger.info(
         { agentId: data.agentId },

@@ -1067,19 +1067,25 @@ describe('agent turn producer', () => {
     await enqueueMessage(messageFor(org.id), base);
     await toolless();
 
-    // The agent exposes MCP as shell commands, which this lane does not carry.
-    // It keeps the CAPABILITY and loses only the interface: the servers ship as
-    // model tools instead, and the producer logs the substitution. Dropping the
-    // MCP surface entirely would disable the agent's tools over a presentation
-    // preference.
-    const cli = messageFor(org.id);
-    cli.agentOptions = { model: 'claude/claude-opus-4-8', toolsConfig: { mcpExposure: 'cli' } };
-    await enqueueMessage(cli, { ...base, mcp: mcpFixture().mcp });
+    // An unrecognised `toolsConfig` key must not cost the agent its tools. The
+    // retired `mcpExposure: 'cli'` setting is what made this worth asserting:
+    // its only implementation lived in the deleted worker package, and a
+    // producer that treated an unknown presentation preference as "no tools"
+    // would disable a working agent over a field it simply does not read.
+    const extra = messageFor(org.id);
+    extra.agentOptions = {
+      model: 'claude/claude-opus-4-8',
+      // A key the producer does not read at all — `mcpExposure` was exactly
+      // this shape once its implementation was deleted. Not `strictMode`,
+      // which really does filter the tool list.
+      toolsConfig: { mcpPresentation: 'shell' } as never,
+    };
+    await enqueueMessage(extra, { ...base, mcp: mcpFixture().mcp });
     produced += 1;
-    const cliRows = await agentTurnRuns();
-    expect(cliRows).toHaveLength(produced);
-    const cliTurn = cliRows[produced - 1].action_input.turn as { tools?: { definitions?: Array<{ name: string }> } };
-    expect(cliTurn.tools?.definitions?.map((tool) => tool.name)).toContain('query_sdk');
+    const extraRows = await agentTurnRuns();
+    expect(extraRows).toHaveLength(produced);
+    const extraTurn = extraRows[produced - 1].action_input.turn as { tools?: { definitions?: Array<{ name: string }> } };
+    expect(extraTurn.tools?.definitions?.map((tool) => tool.name)).toContain('query_sdk');
 
     // A separate placeholder cannot enforce the signed capture policy.
     const before = (await agentTurnRuns()).length;

@@ -45,9 +45,6 @@ export const ToolsConfigSchema = Type.Object({
   allowedTools: Type.Optional(Type.Array(Type.String())),
   deniedTools: Type.Optional(Type.Array(Type.String())),
   strictMode: Type.Optional(Type.Boolean()),
-  mcpExposure: Type.Optional(
-    Type.Union([Type.Literal("tools"), Type.Literal("cli")])
-  ),
 });
 export type ToolsConfig = Static<typeof ToolsConfigSchema>;
 

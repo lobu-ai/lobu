@@ -31,12 +31,6 @@ export function providerCompletionPath(api: ProviderApi): string {
 			return "/codex/responses";
 		case "openai-completions":
 			return "/chat/completions";
-		case "google-generative-ai":
-		case "bedrock-converse-stream":
-		case "mistral-conversations":
-			throw new Error(
-				`Live URL composition is not implemented for adapter ${api}`,
-			);
 	}
 }
 
