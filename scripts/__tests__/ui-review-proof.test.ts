@@ -173,10 +173,20 @@ describe("UI review proof", () => {
       ])
     ).toBe(false);
 
-    // `deploy/` is a path prefix, not a substring.
+    // Markdown design notes have no hosted surface: not referenced by
+    // vite.config.ts, never bundled into the SPA.
+    expect(
+      isUnhostedRange([
+        { filename: "docs/tab-group-model.md" },
+        { filename: "apps/chrome/tab-groups.js" },
+      ])
+    ).toBe(true);
+
+    // `deploy/` is a path prefix, not a substring — and so is `docs/`.
     expect(isUnhostedRange([{ filename: "src/deploy/widget.tsx" }])).toBe(
       false
     );
+    expect(isUnhostedRange([{ filename: "src/docs/viewer.tsx" }])).toBe(false);
     expect(
       isUnhostedRange([
         {
