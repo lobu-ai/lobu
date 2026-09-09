@@ -6,6 +6,7 @@
  * Organization scoping ensures data isolation.
  */
 
+import { deriveToolActorSource } from './apply-context';
 import { slugify } from "@lobu/core";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import type {
@@ -40,7 +41,11 @@ import {
 	type FieldMergeResult,
 	type FieldWriteSource,
 } from "./entity-field-merge";
-import { type EntityHookContext, getEntityHooks } from "./entity-hooks";
+import {
+	type EntityHookContext,
+	type EntityTransactionHookContext,
+	getEntityHooks,
+} from "./entity-hooks";
 import { ToolUserError } from "./errors";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
 import logger from "./logger";
@@ -1085,6 +1090,26 @@ export async function updateEntity(
 	// updates to the same entity serialize on the row lock, fixing the pre-existing
 	// non-transactional read-modify-write race on entities.metadata.
 	const result = await withEntityWriteTransaction(sql, async (tx) => {
+		// Resolve the type before any lock: `beforeUpdate` exists so a hook can
+		// claim a coarser lock (e.g. the organization row) ahead of the entity
+		// row, which the `current` SELECT below takes.
+		const [type] = await tx`
+			SELECT et.slug FROM entities e
+			JOIN entity_types et ON et.id = e.entity_type_id
+			WHERE e.id = ${entityId}
+			  AND e.organization_id = ${ctx.organizationId}
+			  AND e.deleted_at IS NULL
+		`;
+		const hooks = type ? getEntityHooks(type.slug as string) : undefined;
+		const hookContext: EntityTransactionHookContext = {
+			organizationId: ctx.organizationId,
+			userId: ctx.userId,
+			env: _env,
+			sql: tx,
+			scopes: ctx.scopes,
+			actorSource: deriveToolActorSource(ctx),
+		};
+		await hooks?.beforeUpdate?.(metadataUpdates, hookContext);
 		// Canonical change events take an organization FK lock before commit. Claim
 		// it before the entity row so organization deletion cannot hold the parent
 		// while waiting on this row in the opposite order.
@@ -1423,6 +1448,13 @@ export async function updateEntity(
 			proposedFields: Record<string, unknown>;
 			proposedCurrent: Record<string, unknown>;
 		};
+		if (validated) {
+			await hooks?.afterUpdate?.(
+				{ id: entityId, metadata: existing },
+				updated,
+				hookContext,
+			);
+		}
 		await opts?.afterPersist?.(
 			{
 				name: (current[0].name as string | null) ?? null,
@@ -1645,7 +1677,7 @@ export async function deleteEntity(
           if (!beforeDelete) return;
           await beforeDelete(
             { id: entityId, ...entityRow },
-            { organizationId: ctx.organizationId, userId: ctx.userId, sql: tx }
+            { organizationId: ctx.organizationId, userId: ctx.userId, sql: tx, actorSource: deriveToolActorSource(ctx) }
           );
         }
       : null;

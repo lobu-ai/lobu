@@ -1,11 +1,16 @@
 /**
  * Generic entity lifecycle hook registry.
  *
- * Entity types can register hooks that fire during create/delete operations.
+ * Entity types can register hooks that fire during semantic create/update/delete operations.
  * Hooks are skipped when `skipHooks: true` is passed (used by auth callbacks
  * to prevent circular calls).
  */
 
+import type { ConfigActorSource } from './apply-context';
+import { ToolUserError } from './errors';
+import { hasRequiredMcpScope } from '../auth/tool-access';
+import { authorizeMemberRole, lockMemberRoleChanges, parseMemberRole } from '../auth/member-role-policy';
+import { changeMemberRoleInTransaction } from '../auth/member-roles';
 import { createElement } from 'react';
 import { sendTransactionalEmail } from '../email/send';
 import { InvitationEmail, invitationSubject } from '../email/templates/invitation';
@@ -25,17 +30,41 @@ export interface EntityHookContext {
   organizationId: string;
   userId: string | null;
   env?: Env;
+  scopes?: readonly string[] | null;
+  actorSource?: ConfigActorSource;
   /** Caller-owned transaction for hook database work. */
   sql?: DbClient;
   /** Register network side effects that may run only after the caller commits. */
   deferAfterCommit?: (effect: () => Promise<void>) => void;
 }
 
+/**
+ * Context for hooks that must run inside the caller's write transaction: their
+ * locks and writes are only meaningful on that connection, so `sql` is required
+ * rather than falling back to a fresh pool client.
+ */
+export type EntityTransactionHookContext = EntityHookContext & { sql: DbClient };
+
 interface EntityLifecycleHooks {
   /** Runs before INSERT. Can mutate data (e.g. set status). Throw to abort. */
   beforeCreate?: (data: EntityData, ctx: EntityHookContext) => Promise<EntityData>;
   /** Runs after INSERT. For side-effects (e.g. sending notifications). */
   afterCreate?: (entity: CreatedEntity, ctx: EntityHookContext) => Promise<void>;
+  /**
+   * Runs in the write transaction before any row lock, so a hook can claim a
+   * coarser lock first. `fields` is the proposed metadata patch, letting a hook
+   * skip work when the write cannot touch what it guards.
+   */
+  beforeUpdate?: (
+    fields: Record<string, unknown>,
+    ctx: EntityTransactionHookContext
+  ) => Promise<void>;
+  /** Runs after an applied update, in the same transaction. Throw to roll back. */
+  afterUpdate?: (
+    before: { id: number; metadata: Record<string, unknown> | null },
+    after: { id: number; metadata?: Record<string, unknown> | null },
+    ctx: EntityTransactionHookContext
+  ) => Promise<void>;
   /** Runs before soft/hard delete. For cleanup (e.g. cancelling invitations). */
   beforeDelete?: (
     entity: { id: number; entity_type: string; metadata: Record<string, unknown> | null },
@@ -106,9 +135,14 @@ async function sendMemberInvitationEmail(
 
 registerEntityHooks('$member', {
   async beforeCreate(data, ctx) {
+    if (!hasRequiredMcpScope('admin', ctx.scopes)) throw new ToolUserError('Changing membership requires mcp:admin scope', 403);
     const sql = ctx.sql ?? getDb();
     const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
     const meta = { ...(data.metadata ?? {}) };
+    const role = parseMemberRole(meta.role ?? 'member');
+    await lockMemberRoleChanges(sql, ctx.organizationId);
+    await authorizeMemberRole(sql, ctx.organizationId, ctx.userId, role);
+    meta.role = role;
     const email = meta[emailField] as string | undefined;
 
     if (email) {
@@ -119,7 +153,7 @@ registerEntityHooks('$member', {
           gen_random_uuid()::text,
           ${ctx.organizationId},
           ${email},
-          'member',
+          ${role},
           'pending',
           ${new Date(Date.now() + 48 * 60 * 60 * 1000)},
           ${ctx.userId},
@@ -132,6 +166,13 @@ registerEntityHooks('$member', {
         )
         RETURNING id
       `) as unknown as Array<{ id: string }>;
+      if (inserted.length === 0) {
+        const [pending] = await sql`SELECT role FROM invitation
+          WHERE "organizationId" = ${ctx.organizationId} AND email = ${email} AND status = 'pending'`;
+        if (!pending || pending.role !== role) {
+          throw new ToolUserError('A pending invitation already exists; edit its member record to change the role', 400);
+        }
+      }
       if (inserted.length > 0) {
         const event: WorkspaceChangeEventParams = {
           organizationId: ctx.organizationId,
@@ -141,11 +182,11 @@ registerEntityHooks('$member', {
           summary: 'Invitation sent',
           state: {
             id: inserted[0].id,
-            role: 'member',
+            role,
             status: 'pending',
           },
           changedFields: ['role', 'status'],
-          actorSource: 'ui',
+          actorSource: ctx.actorSource,
           createdBy: ctx.userId ?? null,
         };
         if (ctx.sql) {
@@ -168,6 +209,65 @@ registerEntityHooks('$member', {
       return;
     }
     await sendMemberInvitationEmail(entity, ctx);
+  },
+
+  async beforeUpdate(fields, ctx) {
+    // Only a role write needs the org-wide serialization; taking it for every
+    // profile edit would block unrelated entity writes in the workspace.
+    if (!Object.hasOwn(fields, 'role')) return;
+    await lockMemberRoleChanges(ctx.sql, ctx.organizationId);
+  },
+
+  async afterUpdate(before, after, ctx) {
+    if (before.metadata?.role === after.metadata?.role) return;
+    const sql = ctx.sql;
+    const { emailField } = await resolveMemberSchemaFields(ctx.organizationId, sql);
+    const oldEmail = before.metadata?.[emailField];
+    const newEmail = after.metadata?.[emailField];
+    // An editable profile field must never retarget a permission mutation.
+    if (oldEmail !== newEmail) {
+      throw new ToolUserError('Change member email separately from its permission role', 400);
+    }
+    if (!hasRequiredMcpScope('admin', ctx.scopes)) throw new ToolUserError('Changing membership requires mcp:admin scope', 403);
+    const role = parseMemberRole(after.metadata?.role);
+    const members = await sql`
+      SELECT m.id FROM entity_identities ei JOIN member m
+        ON m."userId" = ei.identifier AND m."organizationId" = ei.organization_id
+      WHERE ei.organization_id = ${ctx.organizationId} AND ei.entity_id = ${before.id}
+        AND ei.namespace = 'auth_user_id' AND ei.source_connector = 'auth:signup'
+        AND ei.deleted_at IS NULL
+    `;
+    if (members.length === 1) {
+      await changeMemberRoleInTransaction(sql, {
+        organizationId: ctx.organizationId, actorId: ctx.userId,
+        memberId: members[0].id as string, role, actorSource: ctx.actorSource ?? 'api',
+      });
+      return;
+    }
+    if (members.length > 1) {
+      throw new ToolUserError('Member has more than one authentication identity', 400);
+    }
+    if (typeof oldEmail !== 'string') {
+      throw new ToolUserError('Member has no active membership or pending invitation', 400);
+    }
+    const invitations = await sql`
+      SELECT id, role FROM invitation WHERE "organizationId" = ${ctx.organizationId}
+        AND email = ${oldEmail} AND status = 'pending'
+      FOR UPDATE
+    `;
+    if (invitations.length !== 1) {
+      throw new ToolUserError('Member has no active membership or pending invitation', 400);
+    }
+    const invitation = invitations[0];
+    await authorizeMemberRole(sql, ctx.organizationId, ctx.userId, role,
+      invitation.role as string, false);
+    await sql`UPDATE invitation SET role = ${role} WHERE id = ${invitation.id}`;
+    await insertWorkspaceChangeEventInTransaction({
+      organizationId: ctx.organizationId, resourceKind: 'invitation',
+      resourceId: invitation.id as string, op: 'updated', summary: `Invitation role set to ${role}`,
+      state: { id: invitation.id, role, status: 'pending' }, changedFields: ['role'],
+      actorSource: ctx.actorSource, createdBy: ctx.userId,
+    }, sql);
   },
 
   async beforeDelete(entity, ctx) {
@@ -205,7 +305,7 @@ registerEntityHooks('$member', {
           status: inv.status ?? 'canceled',
         },
         changedFields: ['status'],
-        actorSource: 'ui',
+        actorSource: ctx.actorSource,
         createdBy: ctx.userId ?? null,
       };
       if (ctx.sql) {

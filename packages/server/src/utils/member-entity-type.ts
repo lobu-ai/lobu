@@ -2,6 +2,7 @@
  * Shared defaults and helpers for the built-in $member entity type.
  */
 
+import { MEMBER_ROLES } from '../auth/member-role-policy';
 import { getDb } from '../db/client';
 import { type EventKindDefinition, primeMemberEventKinds } from './event-kind-validation';
 import { GUIDANCE_SEMANTIC_TYPE } from './org-guidance';
@@ -117,6 +118,7 @@ const DEFAULT_MEMBER_METADATA_SCHEMA = {
     role: {
       type: 'string',
       description: 'Role',
+      enum: [...MEMBER_ROLES],
       'x-table-column': true,
     },
     status: {
@@ -209,7 +211,8 @@ function mergeMemberMetadataSchema(
   properties.role = properties.role
     ? {
         ...properties.role,
-        type: properties.role.type ?? 'string',
+        type: 'string',
+        enum: [...MEMBER_ROLES],
         description: properties.role.description ?? 'Role',
         'x-table-column': properties.role['x-table-column'] ?? true,
       }

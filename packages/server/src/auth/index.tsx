@@ -27,7 +27,6 @@ import logger from "../utils/logger";
 import {
 	deleteMemberEntity,
 	ensureMemberEntity,
-	updateMemberEntityAccess,
 	updateMemberEntityStatus,
 } from "../utils/member-entity";
 import {
@@ -44,6 +43,7 @@ import {
 	resolveLoginProviderCredentials,
 	resolveRequestOrganizationId,
 } from "./config";
+import { memberRoleAuthHook } from "./member-roles";
 import {
 	findExistingPersonalOrg,
 	isPersonalOrgDeletionBlocked,
@@ -529,39 +529,6 @@ export async function createAuth(
 							);
 						}
 					},
-					afterUpdateMemberRole: async ({
-						member,
-						user,
-						organization: org,
-					}) => {
-						// The role change is already committed. Audit first; `user` is
-						// the affected member (subject), not the acting session user.
-						recordWorkspaceChangeEvent({
-							organizationId: org.id,
-							resourceKind: "member",
-							resourceId: member.id,
-							op: "updated",
-							summary: `Member "${user.name || 'a member'}" role set to ${member.role}`,
-							state: {
-								id: member.id,
-								user_id: user.id,
-								role: member.role,
-							},
-							changedFields: ["role"],
-							actorSource: "ui",
-						});
-						try {
-							await updateMemberEntityAccess(org.id, user.email, {
-								role: member.role,
-								status: "active",
-							});
-						} catch (err) {
-							console.error(
-								"[Auth] Failed to update $member entity after updateMemberRole:",
-								err,
-							);
-						}
-					},
 					afterCreateInvitation: async ({
 						invitation,
 						inviter,
@@ -856,6 +823,8 @@ export async function createAuth(
 				origin: null,
 			}),
 		],
+
+		hooks: { before: memberRoleAuthHook },
 
 		databaseHooks: {
 			user: {

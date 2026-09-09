@@ -19,6 +19,7 @@
  * - unmerge: Reverse a ledger-backed merge when its after-state is unchanged
  */
 
+import { deriveToolActorSource } from '../../utils/apply-context';
 import { randomUUID } from "node:crypto";
 
 import {
@@ -500,6 +501,8 @@ async function handleCreate(
 			hookContext: {
 				organizationId: ctx.organizationId,
 				userId: ctx.userId,
+				scopes: ctx.scopes,
+				actorSource: deriveToolActorSource(ctx),
 				env,
 			},
 		});
