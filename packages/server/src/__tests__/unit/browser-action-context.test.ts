@@ -246,7 +246,13 @@ describe('page-activation trust stamp', () => {
 // The extension normalizes titles outside this shape. Keep every fixed server
 // fallback within its pass-through contract; user-supplied subjects are
 // bounded by the extension.
-const EXTENSION_TITLE_PREFIX = `${BROWSER_GROUP_TITLE_PREFIX} · `;
+//
+// Pinned as a LITERAL on purpose. This is the cross-side contract with
+// GROUP_TITLE_PREFIX in apps/chrome/tab-groups.js, so deriving it from the
+// server's own constant would make the assertion tautological and let a
+// one-sided rename pass. Changing the prefix must fail here until the
+// extension is changed to match.
+const EXTENSION_TITLE_PREFIX = '◆ Lobu · ';
 const EXTENSION_MAX_TITLE_POINTS = 64;
 
 describe('extension title pass-through contract', () => {
