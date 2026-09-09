@@ -87,9 +87,9 @@ export const EMPTY_AGENT_TOOLING: ResolvedAgentTooling = {
 };
 
 /**
- * Env var names a connector may never contribute. The deployment manager builds
- * the base worker environment first and then merges the contribution over it, so
- * an unguarded name would REPLACE gateway-owned runtime state:
+ * Env var names a connector may never contribute. A consumer that builds a base
+ * environment and merges a contribution over it would let an unguarded name
+ * REPLACE gateway-owned runtime state:
  * `WORKER_TOKEN` is the signed gateway credential (a contributed one would also
  * inherit the lease exemption from placeholder injection, so the worker would
  * authenticate with an attacker-chosen token), `HTTP_PROXY`/`HTTPS_PROXY`/
@@ -400,6 +400,18 @@ export async function resolveAgentToolingDeclaration(params: {
     // in the digest even though it contributes nothing to packages/domains.
     identity.push(toolingIdentityEntry(row, tooling, authSchema));
   }
+  // NOTE: packages and domains only — deliberately NO env. A connector's
+  // `credential: 'lease'` declarations (the GitHub connector's `GH_TOKEN`) are
+  // NOT minted on this path, so a turn gets `gh` on PATH with no
+  // authentication and reports itself unauthenticated. `resolveAgentTooling`
+  // below is what mints leases, and its only caller was the subprocess lane's
+  // env assembly; nothing calls it now.
+  //
+  // Left as a known gap rather than half-wired: delivering a lease to a turn
+  // needs a server-owned lease-to-runtime boundary (the runtime exec route
+  // takes its command environment from the worker body today), and that is a
+  // contract decision, not a mechanical port. Until it exists, the connector's
+  // env declaration is a promise nothing keeps.
   return {
     packages: [...packages],
     domains: [...domains],
@@ -408,7 +420,14 @@ export async function resolveAgentToolingDeclaration(params: {
 }
 
 /**
- * Resolve every eligible connection's sandbox contribution for one deployment.
+ * Resolve every eligible connection's sandbox contribution for one deployment,
+ * minting the short-lived provider leases its env vars name.
+ *
+ * CURRENTLY UNREACHABLE: its only caller was the retired subprocess lane's
+ * environment assembly. It is kept because it is the working half of the lease
+ * path — the registry, the recycle margin, the per-connection failure rule —
+ * and the missing half is the delivery boundary to a turn, not this. Deleting
+ * it would mean rebuilding lease minting from scratch when that boundary lands.
  *
  * Eligibility (v1): every ACTIVE, non-deleted connection in the agent's org
  * whose connector declares `agent_tooling`. `connections.agent_id` is not an

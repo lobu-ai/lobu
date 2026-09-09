@@ -2107,10 +2107,26 @@ describe('agent turn producer', () => {
     expect(body.run_type).toBe('agent_turn');
     expect(body.organization_id).toBe(org.id);
     expect(body.payload.turn.provider.model_id).toBe('claude-opus-4-8');
-    expect(body.credentials).toEqual({
-      provider: 'anthropic',
-      accessToken: expect.any(String),
+    // T2: `expect.any(String)` accepted ANY token here, so this would have
+    // passed on a credential minted for another run or another org. The polled
+    // token must be the one persisted on this run's envelope, and its claims
+    // must scope it to this run and org — that scoping is what the secret
+    // proxy and the MCP route authorize against.
+    expect(body.credentials.provider).toBe('anthropic');
+    expect(body.credentials.accessToken).toBe(run.action_input.credential);
+    expect(verifyWorkerToken(body.credentials.accessToken)).toMatchObject({
+      runId: run.id,
+      organizationId: org.id,
+      conversationId: 'conv-turn',
     });
+    // A token from a DIFFERENT run must not verify as this one: proves the
+    // assertion above is discriminating and not just re-reading one value.
+    await enqueueMessage({ ...messageFor(org.id), messageId: 'msg-other' }, {
+      agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const other = (await agentTurnRuns()).find((candidate) => candidate.id !== run.id);
+    expect(other).toBeDefined();
+    expect(verifyWorkerToken(other?.action_input.credential as string)?.runId).not.toBe(run.id);
 
     const sql = getTestDb();
     const [claimed] = (await sql`
