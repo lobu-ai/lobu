@@ -1538,6 +1538,28 @@ describe("agent turn on the isolate lane", () => {
 		expect(sent).toContain("report.pdf");
 	}, 120_000);
 
+	it("sends a caption-less image its context too", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		// The other half of the producer's admission rule: it admits an
+		// empty-text message when EITHER files or images resolve, so the image
+		// path reaches the same empty-text key and needs the same guarantee.
+		await runTurn(
+			turnJob({
+				userMessage: "",
+				ephemeralContext: "CAPTIONLESS-IMAGE-digest",
+				images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+			}),
+		);
+
+		const sent = JSON.stringify(
+			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
+		);
+		expect(sent).toContain("CAPTIONLESS-IMAGE-digest");
+		expect(sent).toContain("image");
+	}, 120_000);
+
 	it("steers: a follow-up with no context of its own is answered with none", async () => {
 		hits = [];
 		toolScript = [{ id: "toolu_s3", name: "query_sdk", input: { code: "entities.count()" } }];
