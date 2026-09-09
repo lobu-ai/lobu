@@ -1995,6 +1995,7 @@ describe('MCP Authentication', () => {
       const listed = await mcpListTools({ token, orgSlug: roleOrg.slug });
       const runSdk = listed.tools.find((tool: any) => tool.name === 'run_sdk');
       expect(runSdk?.securitySchemes).toEqual([
+        { type: 'oauth2', scopes: ['mcp:write', 'profile:read'] },
         { type: 'oauth2', scopes: ['mcp:write', 'mcp:admin', 'profile:read'] },
       ]);
       expect(runSdk?._meta?.securitySchemes).toEqual(runSdk?.securitySchemes);

@@ -542,12 +542,22 @@ export function highestGrantedRole(
   return best;
 }
 
+function entityIdNotFoundSuggestion(entityId: number): string {
+  return (
+    `Entity with ID ${entityId} not found. entity_id only accepts entity IDs. ` +
+    `If this is a memory, event, or content ID, retry with query: "memory ${entityId}", ` +
+    'include_content: true, and no entity_id, keeping the same workspace scope.'
+  );
+}
+
 function buildEmptySearchSuggestion(
   query: string | null,
   args: SearchArgs,
   coverage?: SearchCoverage,
   callerMax?: ToolAccessLevel
 ): string {
+  if (args.entity_id) return entityIdNotFoundSuggestion(args.entity_id);
+
   const isFederated = coverage?.scope === 'all_granted';
   const queryLabel = !isFederated && query ? ` for "${query}"` : '';
   const scopeLabel = isFederated
@@ -1602,7 +1612,7 @@ async function searchWorkspaceImpl(
     return emptyResult({
       ...(title ? { title } : {}),
       entity_type: args.entity_type || null,
-      suggestion: `Entity with ID ${args.entity_id} not found`,
+      suggestion: entityIdNotFoundSuggestion(args.entity_id),
     });
   }
 

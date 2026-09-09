@@ -291,7 +291,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
     name: 'search_memory',
     scope: 'account',
     description:
-      'Search local saved workspace memory: entities, facts, decisions, preferences, observations, notes, and authorized channel transcripts. Source-backed feeds are never queried implicitly; `coverage` reports local stores searched and visible source feeds with status `not_queried`, which agents can read explicitly through query_sdk client.feeds.readMany. A query such as `memory 1234` performs an exact permission-checked content read. Pair writes with `save_memory`. The search does not change workspace content or external systems. OAuth and PAT calls append a private audit/activity record.',
+      'Search local saved workspace memory: entities, facts, decisions, preferences, observations, notes, and authorized channel transcripts. To open a known memory, event, or content ID, pass query: "memory 1234" and include_content: true. entity_id is only for entity records, never memory IDs. Source-backed feeds are never queried implicitly; `coverage` reports local stores searched and visible source feeds with status `not_queried`, which agents can read explicitly through query_sdk client.feeds.readMany. Pair writes with `save_memory`. The search does not change workspace content or external systems. OAuth and PAT calls append a private audit/activity record.',
     inputSchema: SearchSchema,
     // Advertise the narrower public schema: query_embedding (server pre-compute
     // optimization) and agent_id (auth-bound) are server-internal, not client
@@ -814,16 +814,23 @@ function computeListedTools(
       }
       if (!inputSchema) return null;
 
-      // `run_sdk` is a write tool whose nested SDK surface also contains
-      // admin methods. OpenAI hosts require that possible elevation in the
-      // tool's securitySchemes before they will act on an insufficient-scope
-      // challenge. Keep it role-aware: advertising an ungrantable admin scope
-      // to regular members makes strict clients reject an otherwise valid
-      // read/write connection.
-      const securityScopes =
-        tool.name === 'run_sdk' && adminScopeEligible
-          ? Array.from(new Set([...(tool.securityScopes ?? []), 'mcp:admin']))
-          : tool.securityScopes;
+      // Each scheme is an alternative; scopes within a scheme are all required.
+      // Keep ordinary writes callable at write tier, while declaring optional
+      // elevation for nested admin methods only when the user's role allows it.
+      // The SDK dispatch still enforces each method's scope and membership role.
+      const securitySchemes = tool.securityScopes
+        ? [
+            { type: 'oauth2' as const, scopes: getMcpConnectionScopes(tool.securityScopes) },
+            ...(tool.name === 'run_sdk' && adminScopeEligible
+              ? [
+                  {
+                    type: 'oauth2' as const,
+                    scopes: getMcpConnectionScopes([...tool.securityScopes, 'mcp:admin']),
+                  },
+                ]
+              : []),
+          ]
+        : undefined;
 
       inputSchema = filterSchemaForAccessLevel(
         tool.name,
@@ -846,11 +853,7 @@ function computeListedTools(
         description: tool.description,
         inputSchema,
         ...(tool.annotations && { annotations: tool.annotations }),
-        ...(securityScopes && {
-          securitySchemes: [
-            { type: 'oauth2' as const, scopes: getMcpConnectionScopes(securityScopes) },
-          ],
-        }),
+        ...(securitySchemes && { securitySchemes }),
         ...(tool.mcpMeta && { _meta: tool.mcpMeta }),
         // outputSchema keeps its discriminated variants (no flattening, no
         // access-level filtering — those are input concerns) but the MCP spec

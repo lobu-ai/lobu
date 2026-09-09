@@ -114,7 +114,7 @@ describe("tool registry split", () => {
 		}
 	});
 
-	it("advertises progressive admin scope only to role-eligible MCP sessions", () => {
+	it("allows ordinary writes without admin while advertising eligible elevation separately", () => {
 		const eligibleRun = getMcpTools({
 			maxAccessLevel: "write",
 			adminScopeEligible: true,
@@ -125,6 +125,7 @@ describe("tool registry split", () => {
 		}).find((tool) => tool.name === "run_sdk");
 
 		expect(eligibleRun?.securitySchemes).toEqual([
+			{ type: "oauth2", scopes: ["mcp:write", "profile:read"] },
 			{ type: "oauth2", scopes: ["mcp:write", "mcp:admin", "profile:read"] },
 		]);
 		expect(memberRun?.securitySchemes).toEqual([
