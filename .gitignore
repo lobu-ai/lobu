@@ -106,3 +106,10 @@ examples/lobu-crm/evals/discovery-surface/last-run.json
 # visualizations (.codex). Local run artifacts, never project sources.
 .pi-subagents/
 .codex/
+
+# Ad-hoc `.tmp-<name>.<ext>` probe scripts written into the checkout root
+# during debugging. The existing `.tmp/*` rule only covers a directory, so
+# these stayed untracked-but-stageable, and `git add -A` would commit them.
+# They routinely hold live session material — Keychain-decrypted browser
+# cookies, tenant slugs, machine hostnames — so keep them unstageable.
+.tmp-*
