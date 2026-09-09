@@ -298,6 +298,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # Isolated exact-version browser driver; no workspace install or secrets.
+      # Ubuntu's runner image supplies Google Chrome.
+      - name: Install MCP smoke browser driver
+        run: |
+          mkdir -p "$RUNNER_TEMP/mcp-smoke"
+          echo '{"private":true}' > "$RUNNER_TEMP/mcp-smoke/package.json"
+          bun add --cwd "$RUNNER_TEMP/mcp-smoke" --exact playwright-core@1.60.0
+          echo "NODE_PATH=$RUNNER_TEMP/mcp-smoke/node_modules" >> "$GITHUB_ENV"
+
       - name: Smoke the candidate app digest
         run: |
           chmod +x scripts/app-image-smoke.sh

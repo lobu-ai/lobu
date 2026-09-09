@@ -722,6 +722,10 @@ jobs:
         if: steps.submodule.outputs.stubbed != 'true'
         run: cd packages/owletto && bun run smoke:boot
 
+      - name: MCP App failure smoke (built bundle in Chrome)
+        if: steps.submodule.outputs.stubbed != 'true'
+        run: node scripts/mcp-app-smoke.mjs --dist packages/owletto/dist-mcp-apps/interaction
+
   # Backend integration tests need a real Postgres + pgvector. The Vitest
   # files share a module graph and database within one process, so each shard
   # remains single-forked; the shards themselves get isolated runners and
