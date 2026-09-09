@@ -658,7 +658,7 @@ jobs:
         # it catches behavior the unit suites structurally cannot. One probe
         # (unfocused-window reaping) self-skips headless -- see the script.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        run: cd packages/owletto && bun run smoke:chrome-ext
+        run: node packages/owletto/scripts/chrome-reliability-smoke.mjs
 
       - name: MCP App failure smoke (built bundle in Chrome)
         if: steps.submodule.outputs.stubbed != 'true'
