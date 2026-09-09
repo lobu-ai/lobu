@@ -200,3 +200,44 @@ describe('SDK browser invocation', () => {
     });
   });
 });
+
+// The Chrome extension enforces its own prefix and 64-code-point bound on every
+// group title it writes (packages/owletto/apps/chrome/tab-groups.js titleFor).
+// A server title that trips either one silently renders differently from what
+// this file says, so lock the shared shape here rather than discovering it in a
+// browser. Mirrors the extension's rule; it is not imported (separate runtime).
+const EXTENSION_TITLE_PREFIX = 'Lobu';
+const EXTENSION_MAX_TITLE_POINTS = 64;
+
+describe('titles survive the extension title contract', () => {
+  const titles = [
+    deriveBrowserActionContext(
+      context({ actingAutomationId: 12, actingRunId: 4821 })
+    )?.title,
+    deriveBrowserActionContext(
+      context({
+        sourceContext: {
+          platform: 'slack',
+          connectionId: 'conn_1',
+          channelId: 'chan_1',
+          conversationId: 'conv_1',
+        },
+      } as Partial<ToolContext>)
+    )?.title,
+  ];
+
+  it('prefixes every derived title so the extension keeps it verbatim', () => {
+    for (const title of titles) {
+      expect(title).toBeTruthy();
+      expect(title?.startsWith(EXTENSION_TITLE_PREFIX)).toBe(true);
+    }
+  });
+
+  it('keeps derived titles inside the extension code-point bound', () => {
+    for (const title of titles) {
+      expect([...(title ?? '')].length).toBeLessThanOrEqual(
+        EXTENSION_MAX_TITLE_POINTS
+      );
+    }
+  });
+});
