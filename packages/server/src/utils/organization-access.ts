@@ -133,6 +133,7 @@ async function canReadOrg(sql: DbClient, ctx: ToolContext): Promise<boolean> {
  * Require organization-level read access or throw.
  */
 export async function requireOrgReadAccess(sql: DbClient, ctx: ToolContext): Promise<void> {
+  if (!ctx.organizationId) throw new ToolUserError('Select a workspace to view its records.', 403);
   const ok = await canReadOrg(sql, ctx);
   if (!ok) {
     throw new ToolUserError("You don't have permission to view this workspace. Ask a workspace owner or admin for access.", 403);
@@ -143,6 +144,7 @@ export async function requireOrgReadAccess(sql: DbClient, ctx: ToolContext): Pro
  * Require organization-level write access or throw.
  */
 export async function requireOrgWriteAccess(sql: DbClient, ctx: ToolContext): Promise<void> {
+  if (!ctx.organizationId) throw new ToolUserError('Select a workspace before making changes.', 403);
   const ok = await canWriteOrg(sql, ctx);
   if (!ok) {
     throw new ToolUserError("You don't have permission to make changes in this workspace. Ask a workspace owner or admin.", 403);

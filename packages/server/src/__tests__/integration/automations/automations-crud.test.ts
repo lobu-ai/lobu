@@ -1091,7 +1091,7 @@ describe('automation CRUD', () => {
         prompt: 'should fail',
         managed_agent_id: agentId,
       })
-    ).rejects.toThrow(/organization|entity_id/i);
+    ).rejects.toThrow('Select a workspace before making changes.');
   });
 
   it('blocks cross-org reads and writes for org-scoped automations', async () => {

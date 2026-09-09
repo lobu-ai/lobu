@@ -76,6 +76,7 @@ describe('member roles through generic entity edits', () => {
       message: "You don't have permission to make changes in this workspace. Ask a workspace owner or admin.", httpStatus: 403,
     });
     await expect(requireOrgWriteAccess(sql, ownerToolContext(org.id, owner.userId))).resolves.toBeUndefined();
+    await expect(requireOrgReadAccess(sql, { ...ctx, organizationId: null })).rejects.toMatchObject({ message: 'Select a workspace to view its records.', httpStatus: 403 });
     const outsider = await createTestUser({ email: 'outside@roles.example.com' });
     await expect(requireOrgReadAccess(sql, ownerToolContext(org.id, outsider.id))).rejects.toMatchObject({
       message: "You don't have permission to view this workspace. Ask a workspace owner or admin for access.", httpStatus: 403,
