@@ -247,6 +247,9 @@ export const UNHOSTED_PREFIXES = [
   "apps/chrome/",
   "apps/mac/",
   "scripts/",
+  // Markdown design notes. Not referenced by vite.config.ts and never enter the
+  // hosted SPA, so a docs-only pointer change has no UI to screenshot.
+  "docs/",
 ];
 
 const isUnhostedPath = (path: string) =>

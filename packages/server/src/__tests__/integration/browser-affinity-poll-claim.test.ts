@@ -110,13 +110,14 @@ async function seedPendingAction(opts: {
   actionInput?: Record<string, unknown>;
   approvedInput?: Record<string, unknown> | null;
   runMetadata?: Record<string, unknown> | null;
+  parentRunId?: number | null;
 }): Promise<number> {
   const sql = getTestDb();
   const [row] = (await sql`
     INSERT INTO runs (
       organization_id, run_type, connection_id, connector_key, connector_version,
       action_key, action_input, approved_input, run_metadata,
-      approval_status, status, created_at, expires_at
+      approval_status, status, created_at, expires_at, parent_run_id
     ) VALUES (
       ${opts.orgId}, 'action', ${opts.connectionId}, ${opts.connectorKey},
       ${opts.connectorVersion ?? null},
@@ -126,7 +127,8 @@ async function seedPendingAction(opts: {
       'auto', 'pending', current_timestamp,
       ${opts.expiresAtAgoSeconds == null
         ? null
-        : sql`current_timestamp - make_interval(secs => ${opts.expiresAtAgoSeconds})`}
+        : sql`current_timestamp - make_interval(secs => ${opts.expiresAtAgoSeconds})`},
+      ${opts.parentRunId ?? null}
     )
     RETURNING id
   `) as unknown as Array<{ id: number }>;
@@ -549,5 +551,203 @@ describe('browser-affinity poll claim', () => {
       holder_run_id: 'conversation:abc123def456',
     });
     expect(body).not.toHaveProperty('run_metadata');
+  });
+
+  // END-TO-END for page activation. x.prepare_reply navigates with
+  // require_page_activation, which the server answers itself — it never reaches
+  // the extension. Every mutating call AFTER that does, carrying a tab the user
+  // owns: no lease, no site entry, no container. The extension's ownership guard
+  // therefore refuses it unless the server hands down which tab the human
+  // opened. This asserts the whole seam, because the two halves passing
+  // separately is exactly how the regression shipped.
+  it('hands a page-activated parent tab down to the extension, ignoring forgery', async () => {
+    const { userId, orgId } = await seedOrg();
+    await createTestConnectorDefinition({
+      key: 'chrome',
+      name: 'Chrome',
+      organization_id: orgId,
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions
+      SET compiled_code = 'export class ConnectorRuntime {}',
+          compile_config_hash = ${COMPILE_CONFIG_HASH}
+      WHERE connector_key = 'chrome'
+    `;
+    const { deviceWorkerId, workerId } = await seedExtWorker(userId, orgId);
+    const connId = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'chrome',
+      deviceWorkerId,
+    });
+
+    // The parent: a draft the human activated by visiting the page. Tab 23 is
+    // the user's own tab, recorded when they opened it.
+    const [parent] = (await sql`
+      INSERT INTO runs (
+        organization_id, run_type, connection_id, connector_key, action_key,
+        action_input, approval_status, status, created_at, expires_at,
+        activation_kind, activation_target_urls, activated_at,
+        activated_by_device_worker_id, activation_tab_id, created_by_user_id
+      ) VALUES (
+        ${orgId}, 'action', ${connId}, 'chrome', 'prepare_reply',
+        ${sql.json({ body: 'draft' })}, 'auto', 'running',
+        current_timestamp, current_timestamp + interval '1 day',
+        'page_visit', ARRAY['https://x.example/status/1']::text[],
+        current_timestamp, ${deviceWorkerId}::uuid, 23, ${userId}
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+
+    // The child: the mutating step. It forges the ownership fields, including
+    // the activation tab, which is precisely why the gateway strips them.
+    const runId = await seedPendingAction({
+      orgId,
+      connectionId: connId,
+      connectorKey: 'chrome',
+      connectorVersion: '1.0.0',
+      parentRunId: Number(parent.id),
+      actionInput: {
+        tab_id: 23,
+        expression: '1',
+        activation_tab_id: 9999,
+        browser_flow_id: 'forged-flow',
+      },
+      expiresAtAgoSeconds: -60,
+    });
+
+    const res = await pollExtension(workerId);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      run_id?: number;
+      action_input?: Record<string, unknown>;
+    };
+    expect(body.run_id).toBe(runId);
+    // The server's resolution reached the worker, so the guard can authorize
+    // the one tab the human opened...
+    expect(body.action_input?.activation_tab_id).toBe(23);
+    // ...and neither forged field survived.
+    expect(body.action_input?.browser_flow_id).not.toBe('forged-flow');
+  });
+
+  // A child whose parent was never page-activated must carry no stamp at all —
+  // otherwise the field becomes a way to launder any tab into user-owned
+  // authority.
+  it('sends no activation stamp when the parent was never activated', async () => {
+    const { userId, orgId } = await seedOrg();
+    await createTestConnectorDefinition({
+      key: 'chrome',
+      name: 'Chrome',
+      organization_id: orgId,
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions
+      SET compiled_code = 'export class ConnectorRuntime {}',
+          compile_config_hash = ${COMPILE_CONFIG_HASH}
+      WHERE connector_key = 'chrome'
+    `;
+    const { deviceWorkerId, workerId } = await seedExtWorker(userId, orgId);
+    const connId = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'chrome',
+      deviceWorkerId,
+    });
+    const [parent] = (await sql`
+      INSERT INTO runs (
+        organization_id, run_type, connection_id, connector_key, action_key,
+        action_input, approval_status, status, created_at, expires_at,
+        created_by_user_id
+      ) VALUES (
+        ${orgId}, 'action', ${connId}, 'chrome', 'scrape',
+        ${sql.json({})}, 'auto', 'running',
+        current_timestamp, current_timestamp + interval '1 day', ${userId}
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+    const runId = await seedPendingAction({
+      orgId,
+      connectionId: connId,
+      connectorKey: 'chrome',
+      connectorVersion: '1.0.0',
+      parentRunId: Number(parent.id),
+      actionInput: { tab_id: 5, expression: '1', activation_tab_id: 5 },
+      expiresAtAgoSeconds: -60,
+    });
+
+    const res = await pollExtension(workerId);
+    const body = (await res.json()) as {
+      run_id?: number;
+      action_input?: Record<string, unknown>;
+    };
+    expect(body.run_id).toBe(runId);
+    expect(body.action_input).not.toHaveProperty('activation_tab_id');
+  });
+
+  // Two unparented chrome actions with no stored browser_context: the SDK
+  // path. They must share one visible group (one standalone context id per
+  // organization+connection) while keeping separate per-run flow ids, so ten
+  // SDK navigates are one group with ten independently leased tabs rather than
+  // ten groups. Helper-level coverage cannot see the poll wiring that decides
+  // this, which is the only place the fallback chain is actually exercised.
+  it('gives unparented chrome actions a shared standalone context with per-run flows', async () => {
+    const { userId, orgId } = await seedOrg();
+    await createTestConnectorDefinition({
+      key: 'chrome',
+      name: 'Chrome',
+      organization_id: orgId,
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE connector_versions
+      SET compiled_code = 'export class ConnectorRuntime {}',
+          compile_config_hash = ${COMPILE_CONFIG_HASH}
+      WHERE connector_key = 'chrome'
+    `;
+    const { deviceWorkerId, workerId } = await seedExtWorker(userId, orgId);
+    const connId = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'chrome',
+      deviceWorkerId,
+    });
+
+    // No runMetadata and no parent run: the SDK shape the fallback chain
+    // handles. Poll one at a time, since a poll claims a single run.
+    const pollOne = async (url: string) => {
+      const runId = await seedPendingAction({
+        orgId,
+        connectionId: connId,
+        connectorKey: 'chrome',
+        connectorVersion: '1.0.0',
+        actionInput: { url },
+        expiresAtAgoSeconds: -60,
+      });
+      const res = await pollExtension(workerId);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        run_id?: number;
+        action_input?: Record<string, unknown>;
+      };
+      expect(body.run_id).toBe(runId);
+      return { runId, input: body.action_input ?? {} };
+    };
+
+    const first = await pollOne('https://a.example/');
+    const second = await pollOne('https://b.example/');
+
+    // One visible group: same context id, in the standalone shape (not run:<id>,
+    // which would mint a group per run — ten SDK navigates, ten groups).
+    expect(first.input.browser_context_id).toBe(second.input.browser_context_id);
+    expect(String(first.input.browser_context_id)).toMatch(/^run:standalone-/);
+    expect(first.input.browser_context_title).toBe(second.input.browser_context_title);
+
+    // Unshared ownership: each run leases its own tabs under its own flow.
+    expect(first.input.browser_flow_id).toBe(String(first.runId));
+    expect(second.input.browser_flow_id).toBe(String(second.runId));
+    expect(first.input.browser_flow_id).not.toBe(second.input.browser_flow_id);
+    expect(first.input.holder_run_id).toBe(String(first.runId));
   });
 });
