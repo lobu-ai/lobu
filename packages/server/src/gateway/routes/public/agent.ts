@@ -1730,11 +1730,18 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         ...remainingOptions
       } = agentOptions;
 
-      // First turn only: client ephemeralContext wins; otherwise auto-inject a
-      // short workspace attention digest (same cards as manage_operations.list_activity).
+      // A client-supplied `ephemeralContext` wins; otherwise auto-inject a short
+      // workspace attention digest (the same cards as
+      // manage_operations.list_activity).
+      //
+      // Attached to EVERY message, not just a session's first. The guard here
+      // used to read `session.turnCount`, which nothing ever assigned — so the
+      // "first turn only" it claimed was never in effect. Scoping the digest to
+      // the opening turn needs real per-conversation turn state (Postgres-
+      // mediated, since replicas do not share memory); until that exists this
+      // says what it does.
       let ephemeralForTurn = rawEphemeralContext;
       if (
-        (session.turnCount ?? 0) === 0 &&
         !ephemeralForTurn &&
         session.intent?.kind !== "automation_run" &&
         messageOrganizationId
@@ -1766,8 +1773,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
           // Attention is best-effort — never block chat on feed failure.
         }
       }
-      const applyEphemeralContext =
-        ephemeralForTurn.length > 0 && (session.turnCount ?? 0) === 0;
+      const applyEphemeralContext = ephemeralForTurn.length > 0;
 
       // Inbound attachments: publish each uploaded file as a signed gateway
       // artifact and forward the worker-facing `files` array in
