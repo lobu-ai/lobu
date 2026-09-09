@@ -971,6 +971,22 @@ export const TURN_DELTA_MAX_CHARS = 24_000;
 export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
 
 /**
+ * The isolate bridge's string cap for one agent turn.
+ *
+ * The guest receives the whole turn as ONE JSON string across the bridge, and
+ * the worker terminates the run over this many bytes. The server's admission
+ * budget is counted in RAW bytes against the same ceiling, so raw admission
+ * has to leave room for base64's ~4/3 inflation plus the session journal and
+ * the system prompt.
+ *
+ * ONE value, in the contract both sides already import: the producer that
+ * admits an envelope and the bridge that terminates over it must agree, and
+ * two package-local literals agreed only by coincidence — a change on either
+ * side left the other's assertion green.
+ */
+export const AGENT_TURN_BRIDGE_BYTES = 32 * 1024 * 1024;
+
+/**
  * One finished tool call on an `agent_turn`, as the client should see it.
  *
  * The server renders this into the established `tool_use` custom event, so the

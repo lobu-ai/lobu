@@ -9,6 +9,7 @@
  */
 
 import {
+  AGENT_TURN_BRIDGE_BYTES,
   AGENT_TURN_INPUT_MAX,
   type AgentTurnPollPayload,
   type AgentTurnToolEvent,
@@ -60,13 +61,6 @@ const TURN_DELTA_DRAIN_BATCHES = 4;
  * to see is what the agent is doing now.
  */
 const TURN_TOOL_EVENT_QUEUE_MAX = 20;
-
-/**
- * Bridge string cap for an agent turn. Unlike a connector job, this message can
- * carry bounded base64 attachments alongside a bounded transcript snapshot,
- * skills, tools, and the prompt.
- */
-const AGENT_TURN_BRIDGE_BYTES = 32 * 1024 * 1024;
 
 function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;

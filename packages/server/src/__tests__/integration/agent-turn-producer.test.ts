@@ -1431,6 +1431,10 @@ describe('agent turn producer', () => {
     const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'`;
     expect(replies).toHaveLength(1);
     expect(replies[0].action_input.processedMessageIds).toEqual(['msg-turn', 'input-0', 'input-1']);
+    // This scenario arms no marker and queues no pending input, so these two
+    // assert that completion INVENTS neither — not that discharge works. Real
+    // discharge (arm, extend, discharge) is proven in the dedicated
+    // `agent-turn-marker-discharge` suite, which calls `armTurnTimeout`.
     expect(await sql`SELECT id FROM runs WHERE queue_name = 'internal:turn_timeout'`).toHaveLength(0);
     expect(await sql`SELECT message_id FROM agent_run_input`).toHaveLength(0);
   });
@@ -1472,7 +1476,7 @@ describe('agent turn producer', () => {
   );
 
   it('rolls back owner, input receipts, snapshot and delivery together', async () => {
-    const { sql, owner, body } = await inputScenario(undefined, '', false);
+    const { sql, owner, body } = await inputScenario();
     const realDb = db.getDb();
     const broken = new Proxy(realDb, { get(target, property) {
       if (property === 'begin') return (fn: (tx: db.DbClient) => Promise<unknown>) => target.begin((tx) => fn(new Proxy(tx, {
@@ -1536,7 +1540,7 @@ describe('agent turn producer', () => {
   });
 
   it('delivers pending cancellation and malformed dispatch errors atomically', async () => {
-    const { sql, owner, followers, body, first } = await inputScenario(undefined, '', false);
+    const { sql, owner, followers, body, first } = await inputScenario();
     await postAsFleet('/api/workers/complete-agent-turn', { ...body, consumed_inputs: [] });
     await cancelAgentTurn(await admittedMessage({ ...first, messageId: 'cancel-pending', messageText: '/cancel' }));
     expect((await runRow(followers[0].id)).status).toBe('cancelled');
@@ -1585,7 +1589,7 @@ describe('agent turn producer', () => {
   });
 
   it('upgrades an older base alone and offers followers on the next current-version turn', async () => {
-    const { body, followers } = await inputScenario(['second', 'third'], nativeSession().replace('"version":3', '"version":2'), false);
+    const { body, followers } = await inputScenario(['second', 'third'], nativeSession().replace('"version":3', '"version":2'));
     body.session_jsonl = body.session_jsonl.trim().split('\n').filter((line) => !JSON.parse(line).id?.startsWith('input-entry-')).join('\n') + '\n';
     const response = await postAsFleet('/api/workers/complete-agent-turn', { ...body, consumed_inputs: [] });
     expect((await response.json()).status).toBe('completed');

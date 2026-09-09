@@ -12,6 +12,7 @@
  * should move: admission is user-visible, the bridge is a local guard, and the
  * headroom is what a long conversation actually needs.
  */
+import { AGENT_TURN_BRIDGE_BYTES } from "@lobu/core/contracts/worker/protocol";
 import { describe, expect, it } from "vitest";
 import {
 	MAX_TURN_FILE_BYTES,
@@ -21,17 +22,13 @@ import {
 	turnEnvelopeBudget,
 } from "../orchestration/agent-turn-attachments.js";
 
-/**
- * The worker's own bridge cap for an agent turn
- * (`AGENT_TURN_BRIDGE_BYTES` in `connector-worker/src/daemon/agent-turn.ts`).
- * Restated because the server does not depend on the worker package; this test
- * is what keeps the two numbers from drifting apart silently.
- */
-const WORKER_BRIDGE_BYTES = 32 * 1024 * 1024;
-
 describe("turn envelope budget", () => {
-	it("agrees with the bridge cap the worker actually configures", () => {
-		expect(turnEnvelopeBudget().bridge).toBe(WORKER_BRIDGE_BYTES);
+	it("budgets against the contract value the worker's bridge is configured with", () => {
+		// Not a restated literal: both ends now import `AGENT_TURN_BRIDGE_BYTES`
+		// from the contract, which is what makes them agree. This test used to
+		// compare the server's number to its own copy of 32 MiB, so a change on
+		// the worker side left it green — the drift it claimed to catch.
+		expect(turnEnvelopeBudget().bridge).toBe(AGENT_TURN_BRIDGE_BYTES);
 	});
 
 	it("leaves real headroom for history and the system prompt", () => {

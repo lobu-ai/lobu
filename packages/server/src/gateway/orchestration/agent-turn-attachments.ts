@@ -23,7 +23,7 @@
  */
 
 import { createLogger, getErrorMessage } from "@lobu/core";
-import { AgentTurnPollPayloadSchema } from "@lobu/core/contracts/worker/protocol";
+import { AGENT_TURN_BRIDGE_BYTES, AgentTurnPollPayloadSchema } from "@lobu/core/contracts/worker/protocol";
 import type { ArtifactStore } from "../files/artifact-store.js";
 
 const logger = createLogger("agent-turn-attachments");
@@ -315,17 +315,7 @@ export async function resolveTurnAttachments(
   return { images, files };
 }
 
-/**
- * The isolate bridge's string cap, restated where the envelope is built.
- *
- * The guest receives the whole turn as ONE JSON string across the isolate
- * bridge, and the bridge terminates the run over `messageBytes`
- * (`AGENT_TURN_BRIDGE_BYTES` in `connector-worker/src/daemon/agent-turn.ts`).
- * Admission budgets are counted in RAW bytes; the bridge counts the base64'd
- * envelope, so raw admission has to leave room for the ~4/3 inflation plus the
- * session journal and the system prompt.
- */
-const ISOLATE_BRIDGE_BYTES = 32 * 1024 * 1024;
+
 
 /** Base64 grows 3 bytes into 4 characters, padded up to the quantum. */
 function base64Length(rawBytes: number): number {
@@ -355,7 +345,7 @@ export function turnEnvelopeBudget(): {
     base64Length(MAX_TURN_IMAGE_BYTES_TOTAL) + base64Length(MAX_TURN_FILE_BYTES_TOTAL);
   return {
     attachmentsBase64,
-    bridge: ISOLATE_BRIDGE_BYTES,
-    historyHeadroom: ISOLATE_BRIDGE_BYTES - attachmentsBase64,
+    bridge: AGENT_TURN_BRIDGE_BYTES,
+    historyHeadroom: AGENT_TURN_BRIDGE_BYTES - attachmentsBase64,
   };
 }
