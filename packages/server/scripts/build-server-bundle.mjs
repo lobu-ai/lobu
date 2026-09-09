@@ -138,6 +138,13 @@ function assertSingleConnectorWorkerIdentity(metafile, outfile) {
 await buildBundle('src/server.ts', 'dist/server-main.bundle.mjs');
 await buildBundle('src/server-entry.ts', 'dist/server.bundle.mjs');
 
+// Inlining the guest loader moves its import.meta.url here. Keep its
+// prebuilt guest beside the server graph, just as in connector-worker/dist.
+cpSync(
+  join(pkgDir, '..', 'connector-worker', 'dist', 'agent-turn', 'guest.bundle.js'),
+  join(pkgDir, 'dist', 'guest.bundle.js'),
+);
+
 const connectorsSrc = join(pkgDir, '..', 'connectors', 'src');
 const connectorsDest = join(pkgDir, 'dist', 'connectors');
 if (existsSync(connectorsSrc)) {

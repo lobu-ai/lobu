@@ -1,6 +1,4 @@
 import {
-	AgentErrorCode,
-	ConversationOwnedElsewhereError,
 	createChildSpan,
 	createLogger,
 	ErrorCode,
@@ -8,11 +6,9 @@ import {
 	generateTraceId,
 	generateWorkerToken,
 	getErrorMessage,
-	getTraceparent,
 	type GuardrailRegistry,
 	type MessagePayload,
 	OrchestratorError,
-	retryWithBackoff,
 	runGuardrailInstances,
 	SpanStatusCode,
 } from "@lobu/core";
@@ -35,14 +31,14 @@ import {
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { recordAgentRunInput } from "./agent-run-input.js";
 import {
-  type AgentTurnShadowDeps,
-  enqueueAgentTurnShadow,
-} from "./agent-turn-shadow.js";
+  type AgentTurnDeps,
+  enqueueAgentTurn,
+  cancelAgentTurn,
+} from "./agent-turn-producer.js";
 import {
   buildCanonicalConversationKey,
   type DeploymentManager,
   generateDeploymentName,
-  type OrchestratorConfig,
 } from "./deployment-manager.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 import { getConfiguredPublicGatewayUrl } from "../../utils/public-origin.js";
@@ -122,42 +118,48 @@ export function buildRunJobToken(args: {
 export class MessageConsumer {
   private queue: IMessageQueue;
   private deploymentManager: DeploymentManager;
-  private config: OrchestratorConfig;
   private isRunning = false;
-  /**
-   * Per-process deployment-creation lock. The embedded-only server
-   * has a single MessageConsumer instance per process, so an in-memory Set
-   * is sufficient for the "two consecutive messages for the same thread
-   * race to create the deployment" guard. The cross-pod guard is the PG
-   * advisory lock in DeploymentManager — this Set is pod-local only.
-   */
-  private deploymentLocks = new Set<string>();
   private agentSettingsStore?: AgentSettingsStore;
-  private agentTurnMcp?: AgentTurnShadowDeps["mcp"];
+  private agentTurnMcp?: AgentTurnDeps["mcp"];
+  private agentTurnArtifacts?: AgentTurnDeps["artifacts"];
+  private agentTurnInstructions?: AgentTurnDeps["instructions"];
   private guardrailRegistry?: GuardrailRegistry;
   private recordRunInput: typeof recordAgentRunInput;
   constructor(
-    config: OrchestratorConfig,
     deploymentManager: DeploymentManager,
     // Test seams: production uses the real Postgres-backed queue and durable
     // input journal. Unit tests can capture either boundary without a database.
     queue: IMessageQueue = new RunsQueue(),
     recordRunInput: typeof recordAgentRunInput = recordAgentRunInput,
   ) {
-    this.config = config;
     this.deploymentManager = deploymentManager;
     this.queue = queue;
     this.recordRunInput = recordRunInput;
   }
 
   /**
-   * The gateway's MCP surface for the isolate-lane shadow: which servers an
-   * agent has and what tools they publish. Same post-construction injection
-   * as the guardrails, for the same reason. Absent → shadow turns run with no
-   * tools.
+   * The gateway's MCP surface for the agent turn: which servers an agent has
+   * and what tools they publish. Same post-construction injection as the
+   * guardrails, for the same reason. Absent → a turn runs with no tools.
    */
-  setAgentTurnMcp(mcp?: AgentTurnShadowDeps["mcp"]): void {
+  setAgentTurnMcp(mcp?: AgentTurnDeps["mcp"]): void {
     this.agentTurnMcp = mcp;
+  }
+
+  /**
+   * The artifact store the agent turn resolves its attachments out of. Same post-construction injection as the MCP surface. Absent → an
+   * image attachment travels as its name only.
+   */
+  setAgentTurnArtifacts(artifacts?: AgentTurnDeps["artifacts"]): void {
+    this.agentTurnArtifacts = artifacts;
+  }
+
+  /**
+   * The platform instruction providers a turn's prompt takes its chat identity
+   * block from. Same post-construction injection. Absent → no identity block.
+   */
+  setAgentTurnInstructions(instructions?: AgentTurnDeps["instructions"]): void {
+    this.agentTurnInstructions = instructions;
   }
 
   /**
@@ -250,7 +252,6 @@ export class MessageConsumer {
     });
 
     // Get traceparent to pass to worker (for further context propagation)
-    const childTraceparent = getTraceparent(queueSpan) || traceparent;
 
     logger.info(
       {
@@ -564,6 +565,20 @@ export class MessageConsumer {
         return;
       }
 
+      // An explicit cancel is a control message: it stops the active turn
+      // instead of becoming one. Handled BEFORE the marker is armed, because
+      // it starts no turn and so nothing would ever discharge a marker armed
+      // for it — the sweep would blame an unresponsive worker for a
+      // cancellation that worked. It also needs none of the turn-only work
+      // below (model policy, grant reconciliation, run input), since no turn
+      // is being dispatched.
+      if (await cancelAgentTurn(data)) {
+        queueSpan?.setStatus({ code: SpanStatusCode.OK });
+        queueSpan?.end();
+        logger.info({ traceId, jobId }, "Cancellation applied to the active turn");
+        return;
+      }
+
       // Arm the turn-liveness marker BEFORE the message is deliverable to the
       // worker. The marker is the durable record that this turn owes the client
       // a terminal event; it is discharged on the worker's reply and otherwise
@@ -591,106 +606,56 @@ export class MessageConsumer {
       // agent's exact allow-list on the payload model NOW, before it's persisted.
       await this.enforceModelPolicyAtEnqueue(data);
 
+      // Reconcile the agent's declared egress domains and pre-approved MCP
+      // tools into the grant store. The MCP proxy answers "allow" for a tool
+      // only when `grantStore.hasGrant(agentId, '/mcp/<id>/tools/<name>')`
+      // holds, and `http-proxy` gates domains the same way — so without this,
+      // every pre-approved tool falls through to an approval prompt and a
+      // declared domain is not reachable.
+      //
+      // Runs on EVERY dispatch, cold or warm. The subprocess lane reached this
+      // twice (cold through `createWorkerDeployment`'s env build, warm through
+      // an explicit call before scale-up); both of those paths went with the
+      // lane, so one unconditional call replaces them. The sync is
+      // drift-gated internally — it writes only when the pattern set changed.
+      await this.deploymentManager.syncNetworkConfigGrants(data);
+
       // Persist before queue delivery so a worker reconnect cannot lose the input.
       await this.recordRunInput(data, deploymentName);
 
-      // 1) Send to thread queue immediately (queue persists; worker will drain on attach)
-      await Sentry.startSpan(
-        {
-          name: "orchestrator.send_to_worker_queue",
-          op: "orchestrator.message_routing",
-          attributes: {
-            "user.id": data.userId,
-            "conversation.id": effectiveConversationId || "unknown",
-            "deployment.name": deploymentName,
-          },
-        },
-        async () => {
-          await this.sendToWorkerQueue(data, deploymentName);
-        }
-      );
-
-      logger.info(
-        { traceId, traceparent: childTraceparent, deploymentName },
-        "Enqueued message to thread queue"
-      );
-
-      // 2) Ensure worker exists in the background (don't block queue send)
-      // Pass traceparent for propagation to worker deployment
-      this.ensureWorkerExists(
-        deploymentName,
-        data,
-        effectiveConversationId,
-        traceId,
-        childTraceparent
-      ).catch((bgError) => {
-        // Cross-pod handled-elsewhere signal: another replica won the
-        // per-conversation lock and is running this turn to completion. This is
-        // NOT a failure on this pod — drop silently. No Sentry capture, no
-        // Critical log, no `trackFailedDeployment` (which would surface a
-        // spurious "Worker startup failed" to the user and, via
-        // `failTurnIfPending`, race the winning pod's reply to terminalize the
-        // shared turn marker). The winner discharges the marker on its reply.
-        if (bgError instanceof ConversationOwnedElsewhereError) {
-          logger.info(
-            {
-              traceId,
-              deploymentName,
-              userId: data.userId,
-              conversationId: effectiveConversationId,
-            },
-            "Conversation owned by another replica — dropping this pod's spawn (handled elsewhere)"
-          );
-          return;
-        }
-
-        // Capture error for monitoring and alerting
-        Sentry.captureException(bgError, {
-          tags: {
-            component: "deployment-creation",
-            deploymentName,
-            userId: data.userId,
-            conversationId: effectiveConversationId,
-          },
-          level: "error",
-        });
-
-        logger.error(
-          {
-            traceId,
-            error: getErrorMessage(bgError),
-            stack: bgError instanceof Error ? bgError.stack : undefined,
-            deploymentName,
-            userId: data.userId,
-            conversationId: effectiveConversationId,
-          },
-          "Critical: Background worker creation failed. Messages are queued but worker unavailable."
-        );
-
-        // Track failed deployments for monitoring and potential retry
-        this.trackFailedDeployment(deploymentName, data, bgError).catch(
-          (trackError) => {
-            logger.error("Failed to track deployment failure:", trackError);
-          }
-        );
-      });
-
-      // 3) Shadow the same turn onto the isolate lane when the operator has
-      // selected this agent. It observes the turn queued above and never
-      // reaches the conversation, so it goes last: `ensureWorkerExists` is
-      // fired-and-forgotten precisely so a cold worker starts booting without
-      // waiting on anything, and the shadow's own work (catalog, provider
-      // resolution, agent settings, snapshot read, INSERT) is several round
-      // trips that must not sit in front of that boot.
-      // `enqueueAgentTurnShadow` never throws, and for an agent the operator
-      // has not selected it returns on an env-var read before touching the
-      // database — the unselected path costs the enqueue nothing.
-      await enqueueAgentTurnShadow(data, {
+      // The agent turn runs in an isolate, and it is the ONLY execution path:
+      // nothing spawns a managed worker for this message any more. Because
+      // nothing else can answer, the two ways this can fail both have to
+      // surface: an unexpected failure THROWS into the queue's retry/fail
+      // handling, and a misconfiguration the producer can name is returned so
+      // the armed marker is discharged with that reason below.
+      // Every message that reaches here is admitted as its own pending native
+      // run, including while another turn is active; the one control message
+      // that is not a turn (an explicit cancel) returned above.
+      const unrunnable = await enqueueAgentTurn(data, {
         agentSettings: this.agentSettingsStore,
         catalog: this.deploymentManager.getProviderCatalogService?.(),
         mcp: this.agentTurnMcp,
         gatewayUrl: getConfiguredPublicGatewayUrl(),
+        // Where this message's attachments already live: the gateway published
+        // each one as an artifact on the way in. The producer reads their bytes
+        // from here rather than from the signed URL it also stamped, so no
+        // attachment URL crosses into the isolate.
+        artifacts: this.agentTurnArtifacts,
+        // The conversation's pinned sandbox, already resolved above.
+        runtime: runtimeSelection,
+        instructions: this.agentTurnInstructions,
       });
+
+      // The agent cannot run at all — no model, no provider that routes, or no
+      // public gateway URL. The marker armed above is the client's only
+      // promise of a terminal event, and nothing else will discharge it, so
+      // waiting would spend the full deadline and then blame an unresponsive
+      // worker. Discharge it now with the reason the producer identified,
+      // which carries its own remediation CTA.
+      if (unrunnable) {
+        await failTurnIfPending(deploymentName, data.messageId, unrunnable);
+      }
 
       queueSpan?.setStatus({ code: SpanStatusCode.OK });
       queueSpan?.end();
@@ -815,56 +780,6 @@ export class MessageConsumer {
     }
   }
 
-  private async sendToWorkerQueue(
-    data: MessagePayload,
-    deploymentName: string
-  ): Promise<void> {
-    try {
-      // Create thread-specific queue name: thread_message_[deploymentid]
-      const threadQueueName = `thread_message_${deploymentName}`;
-
-      // Create the thread-specific queue if it doesn't exist
-      await this.queue.createQueue(threadQueueName);
-
-      // Send message to thread-specific queue.
-      //
-      // The retry budget bounds GENUINE failures only. Dispatch-gate deferrals
-      // (stale worker mid-turn, FIFO fence, recycle) throw `StaleWorkerError`,
-      // which carries the queue's deferral contract (`isDeferralError`) and is
-      // rescheduled every `retryDelay` seconds WITHOUT consuming an attempt —
-      // so a follow-up can wait out an arbitrarily long prior turn on this
-      // small budget, while a genuinely undeliverable job still fails fast
-      // instead of surviving long enough to zombie-deliver after its
-      // turn-liveness marker has been swept.
-      const jobId = await this.queue.send(threadQueueName, data, {
-        expireInSeconds: this.config.queues.expireInSeconds,
-        retryLimit: this.config.queues.retryLimit,
-        retryDelay: 2, // 2 seconds — fast retry for stale connection recovery
-        priority: 10, // Thread messages have high priority
-      });
-
-      if (!jobId) {
-        throw new OrchestratorError(
-          ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
-          `queue.send() returned null/undefined for queue: ${threadQueueName}`,
-          { threadQueueName, deploymentName },
-          true
-        );
-      }
-
-      logger.info(
-        `✅ Sent message to thread queue ${threadQueueName} for conversation ${data.conversationId}, jobId: ${jobId}`
-      );
-    } catch (error) {
-      logger.error(`❌ [ERROR] sendToWorkerQueue failed:`, error);
-      throw new OrchestratorError(
-        ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
-        `Failed to send message to thread queue: ${getErrorMessage(error)}`,
-        { deploymentName, data, error },
-        true
-      );
-    }
-  }
 
   /**
    * Acquire a per-process lock for deployment creation. Prevents two
@@ -873,16 +788,6 @@ export class MessageConsumer {
    * the right primitive here (TTL is not needed because the lock is held
    * for the duration of the awaited create call and released in finally).
    */
-  private acquireDeploymentLock(deploymentName: string): boolean {
-    if (this.deploymentLocks.has(deploymentName)) return false;
-    this.deploymentLocks.add(deploymentName);
-    return true;
-  }
-
-  private releaseDeploymentLock(deploymentName: string): void {
-    this.deploymentLocks.delete(deploymentName);
-  }
-
   /** Test seam around the durable conversation-pin resolver. */
   protected resolveRuntimeSelection(
     args: Parameters<typeof resolvePinnedSelection>[0]
@@ -939,203 +844,7 @@ export class MessageConsumer {
     return contribution.fingerprint;
   }
 
-  private async ensureWorkerExists(
-    deploymentName: string,
-    data: MessagePayload,
-    conversationId: string,
-    traceId: string,
-    traceparent?: string
-  ): Promise<void> {
-    return retryWithBackoff(
-      async () => {
-        // Ensure traceparent is in platformMetadata for worker deployment
-        const dataWithTrace: MessagePayload = {
-          ...data,
-          platformMetadata: {
-            ...data.platformMetadata,
-            traceparent: traceparent || data.platformMetadata?.traceparent,
-          },
-        };
 
-        // Check if this is truly a new thread by looking for existing deployment
-        const existingDeployments =
-          await this.deploymentManager.listDeployments();
-        const isNewThread = !existingDeployments.some(
-          (d) => d.deploymentName === deploymentName
-        );
-
-        if (isNewThread) {
-          const acquired = this.acquireDeploymentLock(deploymentName);
-          if (!acquired) {
-            logger.info(
-              { traceId, deploymentName },
-              "Another handler is creating this deployment, waiting"
-            );
-            // Poll for the other handler's create to land: one 3s-spaced
-            // recheck, same total wait as the prior hand-rolled sleep (the
-            // added up-front check is a cheap read that only lets us scale
-            // up sooner when the create has already finished). Exhausting
-            // the poll throws to the outer retryWithBackoff, exactly like
-            // the old single-recheck throw did.
-            await retryWithBackoff(
-              async () => {
-                const rechecked =
-                  await this.deploymentManager.listDeployments();
-                if (
-                  !rechecked.some((d) => d.deploymentName === deploymentName)
-                ) {
-                  throw new Error(
-                    "Deployment lock held but deployment not created"
-                  );
-                }
-              },
-              {
-                maxRetries: 1,
-                baseDelay: 3000,
-                strategy: "linear",
-                // Quiet retry — the "waiting" log above already covers it.
-                onRetry: () => {},
-              }
-            );
-            await this.deploymentManager.scaleDeployment(deploymentName, 1);
-            logger.info(
-              { traceId, deploymentName },
-              "Deployment created by other handler, scaled up"
-            );
-            await this.deploymentManager.updateDeploymentActivity(
-              deploymentName
-            );
-            return;
-          }
-
-          try {
-            // Re-check after acquiring lock — another handler in this process
-            // may have completed creation between our initial check and the
-            // lock acquisition.
-            const recheckAfterLock =
-              await this.deploymentManager.listDeployments();
-            if (
-              recheckAfterLock.some((d) => d.deploymentName === deploymentName)
-            ) {
-              logger.info(
-                { traceId, deploymentName },
-                "Deployment already created by another handler after lock acquired"
-              );
-              await this.deploymentManager.scaleDeployment(deploymentName, 1);
-              await this.deploymentManager.updateDeploymentActivity(
-                deploymentName
-              );
-              return;
-            }
-
-            logger.info(
-              { traceId, traceparent, conversationId, deploymentName },
-              "New thread - creating deployment"
-            );
-            await this.deploymentManager.createWorkerDeployment(
-              data.userId,
-              conversationId,
-              dataWithTrace,
-              recheckAfterLock
-            );
-            logger.info({ traceId, deploymentName }, "Created deployment");
-          } finally {
-            this.releaseDeploymentLock(deploymentName);
-          }
-        } else {
-          logger.info(
-            { traceId, conversationId, deploymentName },
-            "Existing thread - ensuring worker exists"
-          );
-          // Sync network config domains to grant store (picks up settings changes)
-          await this.deploymentManager.syncNetworkConfigGrants(dataWithTrace);
-          try {
-            await this.deploymentManager.scaleDeployment(deploymentName, 1);
-            logger.info(
-              { traceId, deploymentName },
-              "Scaled existing worker to 1"
-            );
-          } catch {
-            logger.info(
-              { traceId, conversationId, deploymentName },
-              "Worker doesn't exist, creating it"
-            );
-            await this.deploymentManager.createWorkerDeployment(
-              data.userId,
-              conversationId,
-              dataWithTrace
-            );
-            logger.info({ traceId, deploymentName }, "Created worker");
-          }
-        }
-
-        // Update deployment activity annotation for simplified tracking
-        await this.deploymentManager.updateDeploymentActivity(deploymentName);
-
-        logger.info({ traceId, deploymentName }, "Worker is ready");
-      },
-      {
-        // Two orchestration attempts leave room inside the default 60s
-        // turn-liveness budget for stale-worker checks, teardown, and backoff.
-        maxRetries: 1,
-        baseDelay: 2000,
-        strategy: "linear",
-        jitter: true,
-        // Don't burn the remaining retry on the cross-pod handled-elsewhere signal:
-        // the winning replica holds the session-level advisory lock for the
-        // whole worker subprocess lifetime, so a retry here can never win.
-        // Abort immediately and let the `.catch` above drop silently.
-        shouldRetry: (error) =>
-          !(error instanceof ConversationOwnedElsewhereError),
-        onRetry: (attempt, error) => {
-          logger.warn(
-            { traceId, deploymentName, attempt, maxAttempts: 2 },
-            `Retry attempt failed: ${error.message}`
-          );
-        },
-      }
-    );
-  }
-
-  /**
-   * Track failed deployment creation. Sends the error response to the user
-   * via the thread_response queue; structured logs cover ops visibility.
-   */
-  private async trackFailedDeployment(
-    deploymentName: string,
-    data: MessagePayload,
-    error: unknown
-  ): Promise<void> {
-    try {
-      logger.error(
-        {
-          deploymentName,
-          userId: data.userId,
-          conversationId: data.conversationId,
-          error: getErrorMessage(error),
-          stack: error instanceof Error ? error.stack : undefined,
-          queueName: `thread_message_${deploymentName}`,
-        },
-        "Deployment creation failed"
-      );
-
-      // Emit the startup-failure notice through the first-writer-wins election
-      // (atomic delete-marker + enqueue-error in one tx). This is gated on the
-      // marker still being pending: if a still-attached worker raced a real
-      // terminal reply (which discharged the marker), this no-ops instead of
-      // double-signalling the client. Carries a code so it renders end-to-end
-      // through the AGENT_ERRORS catalog (SSE + CLI + platforms) with one
-      // source of prose. If the marker was never armed it also no-ops.
-      await failTurnIfPending(
-        deploymentName,
-        data.messageId,
-        AgentErrorCode.WORKER_STARTUP_FAILED
-      );
-    } catch (trackError) {
-      // Don't fail the main flow if tracking fails
-      logger.error("Failed to track deployment failure:", trackError);
-    }
-  }
 
   /**
    * Get queue statistics

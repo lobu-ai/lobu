@@ -483,9 +483,25 @@ async function saveContentImpl(
   for (const key of Object.keys(callerMetadata)) {
     if (key.startsWith('_lobu_')) delete callerMetadata[key];
   }
+  // Memory scope, stamped from the BOUND context rather than caller metadata.
+  //
+  // `search_memory` fences content recall to `events.metadata->>'agent_id' =
+  // ctx.agentId` (`ContentSearchFilters.agent_id`, documented as "populated
+  // automatically by Lobu-owned save paths"). This is such a path, and it was
+  // not populating it: only the memory plugin's auto-capture passed `agent_id`
+  // as caller metadata, so a model's own `save_memory` call landed with `{}`
+  // and the agent could not recall what it had just written — a PAT search
+  // found the row, the agent's own search returned nothing.
+  //
+  // Written LAST so it wins over a caller-supplied `agent_id`: the scope is an
+  // identity assertion, and a caller that could set it for another agent would
+  // write into that agent's memory. An unbound caller (a PAT, a session, a
+  // system context) stamps nothing, which is what keeps workspace nouns and
+  // connector ingest out of any agent's private scope.
   const eventMetadata: Record<string, unknown> = {
     ...callerMetadata,
     ...(args.idempotency_key ? { _lobu_idempotency_key: args.idempotency_key } : {}),
+    ...(ctx.agentId ? { agent_id: ctx.agentId } : {}),
   };
 
   let row: Awaited<ReturnType<typeof insertEvent>>;

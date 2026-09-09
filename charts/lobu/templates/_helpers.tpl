@@ -98,8 +98,20 @@ Create the embeddings service image name
 
 {{/* Fail before rendering an app topology that cannot share durable artifacts. */}}
 {{- define "lobu.validateArtifactTopology" -}}
-{{- if .Values.app.artifacts.enabled }}
 {{- $appEnv := default dict .Values.app.env }}
+{{/*
+Multi-replica with artifact storage DISABLED points every pod at its own
+/tmp/lobu-artifacts. The publish and the download are separate requests, so a
+download served by a different pod than the publish 404s — intermittently,
+which reads as flakiness rather than a topology error. The server cannot catch
+this: it only checks that LOBU_ARTIFACTS_DIR is set, and a pod-local /tmp
+satisfies that. This is the only place that knows both the replica count and
+whether the volume is shared.
+*/}}
+{{- if and (gt (int .Values.app.replicaCount) 1) (not .Values.app.artifacts.enabled) }}
+{{- fail "app.replicaCount > 1 requires app.artifacts.enabled=true: with artifact storage off every replica writes to its own pod-local /tmp, so a download that lands on a different pod than the publish returns 404 intermittently. Enable artifacts with an RWX class, or keep app.replicaCount at 1." }}
+{{- end }}
+{{- if .Values.app.artifacts.enabled }}
 {{- if and (gt (int .Values.app.replicaCount) 1) (ne .Values.app.artifacts.accessMode "ReadWriteMany") }}
 {{- fail "app.replicaCount > 1 with app.artifacts.enabled=true requires app.artifacts.accessMode=ReadWriteMany so every replica can read the same durable bytes" }}
 {{- end }}

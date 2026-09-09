@@ -563,6 +563,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
             messageId: message,
           };
         }
+        const captured = await captureSideEffect(c, `conversations.${label}`, body);
+        if (captured) return captured;
         return await handler(c, target, body);
       } catch (error) {
         logger.error(`${label} failed: ${String(error)}`);

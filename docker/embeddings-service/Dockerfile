@@ -27,12 +27,11 @@ COPY packages/embeddings/package.json packages/embeddings/
 RUN mkdir -p packages/cli packages/core \
                packages/server packages/lobu-cli packages/connectors \
                packages/browser-extension packages/plugin-api packages/plugin-host packages/connector-sdk \
-               packages/owletto packages/connector-worker packages/agent-worker packages/mcpsandbox \
+               packages/owletto packages/connector-worker packages/mcpsandbox \
     && for p in cli core server connectors \
-                browser-extension plugin-api plugin-host connector-sdk owletto connector-worker agent-worker mcpsandbox; do \
+                browser-extension plugin-api plugin-host connector-sdk owletto connector-worker mcpsandbox; do \
         echo "{\"name\":\"@lobu/$p\",\"version\":\"0.0.0\",\"private\":true}" > "packages/$p/package.json"; \
       done \
-    && echo '{"name":"@lobu/worker","version":"0.0.0","private":true}' > packages/agent-worker/package.json \
     && echo '{"name":"lobu","version":"0.0.0","private":true}' > packages/lobu-cli/package.json
 
 RUN --mount=type=cache,target=/root/.bun/install/cache bun install

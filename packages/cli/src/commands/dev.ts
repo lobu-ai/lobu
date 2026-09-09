@@ -373,8 +373,7 @@ export async function devCommand(
   // .env values fill in the rest.
   //
   // LOBU_DEV_PROJECT_PATH points the embedded server at the monorepo root so
-  // it can find the `packages/agent-worker/src/index.ts` worker entry (and
-  // packages/owletto). When `lobu run` is invoked from a project subdir inside the
+  // it can find packages/owletto. When `lobu run` is invoked from a project subdir inside the
   // monorepo, cwd is *not* the root — walk up to the enclosing workspace root.
   const enclosingRoot = findEnclosingMonorepoRoot(cwd);
   const projectPath =
@@ -569,7 +568,7 @@ export async function autoApplyLocalProject(
 /**
  * Walk up from `startDir` looking for the Lobu monorepo workspace root: a
  * `package.json` with a non-empty `workspaces` field AND a
- * `packages/agent-worker/src/index.ts` underneath it. Returns the absolute
+ * `packages/server/src/index.ts` underneath it. Returns the absolute
  * path, or `null`. (Mirrors `@lobu/server`'s `findEnclosingMonorepoRoot` — kept
  * local so the CLI doesn't take a dep on the server package.)
  */
@@ -593,7 +592,7 @@ export function findEnclosingMonorepoRoot(startDir: string): string | null {
       }
       if (
         hasWorkspaces &&
-        existsSync(join(cur, "packages/agent-worker/src/index.ts"))
+        existsSync(join(cur, "packages/server/src/index.ts"))
       ) {
         return cur;
       }

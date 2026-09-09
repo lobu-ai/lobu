@@ -1,10 +1,7 @@
 import type { MessagePayload } from "@lobu/core";
 import type { AgentRuntimeSelection } from "../../../lobu/stores/sandbox-store.js";
 import type { IMessageQueue } from "../../infrastructure/queue/index.js";
-import type {
-  DeploymentManager,
-  OrchestratorConfig,
-} from "../../orchestration/deployment-manager.js";
+import type { DeploymentManager } from "../../orchestration/deployment-manager.js";
 import { MessageConsumer } from "../../orchestration/message-consumer.js";
 
 type RecordRunInput = (payload: MessagePayload, deploymentName: string) => Promise<void>;
@@ -21,12 +18,11 @@ type RecordRunInput = (payload: MessagePayload, deploymentName: string) => Promi
  */
 export class TestMessageConsumer extends MessageConsumer {
   constructor(
-    config: OrchestratorConfig,
     deploymentManager: DeploymentManager,
     queue: IMessageQueue = {} as IMessageQueue,
     recordRunInput: RecordRunInput = async () => {},
   ) {
-    super(config, deploymentManager, queue, recordRunInput);
+    super(deploymentManager, queue, recordRunInput);
   }
 
   /** No connector tooling contribution — fake-based tests never need one. */

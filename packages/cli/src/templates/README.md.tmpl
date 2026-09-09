@@ -47,7 +47,7 @@ Worker execution is controlled by:
 
 - Install MCP-backed services as connectors so they inherit connection auth, approval, and audit semantics.
 - `defineAgent({ tools: { allowed, denied, preApproved, strict } })` — configure tool visibility and approval bypasses.
-- `defineAgent({ nixPackages })` — pulls binaries onto the worker's `PATH` via `nix-shell`. The worker uses [just-bash](https://github.com/nicholasgasior/just-bash) to wrap shell commands; interpreters and package managers are excluded from the allowlist by default. Set `LOBU_ALLOW_UNSANDBOXED_EXEC=1` per-agent to opt back in if you genuinely need them.
+- `defineAgent({ nixPackages })` — pulls binaries onto the `PATH` of the sandbox your agent's `bash` runs in. Shell commands execute in a remote sandbox provisioned per turn, not on the gateway host, so they are isolated from the machine running Lobu.
 
 ## Learn More
 

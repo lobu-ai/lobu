@@ -29,6 +29,8 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { search } from '../../../tools/search';
+import { saveContent } from '../../../tools/save_content';
+import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
@@ -557,5 +559,116 @@ describe('search_memory > recall contract', () => {
     expect(suggestion).toContain('client.entities.create');
     // Still not admin: type creation stays behind the admin gate.
     expect(suggestion).not.toContain('client.entitySchema.createType(...)');
+  });
+  /**
+   * The round trip an agent actually performs: save a memory through the tool,
+   * then recall it. `search_memory` fences content recall to
+   * `events.metadata->>'agent_id' = ctx.agentId`, and `ContentSearchFilters`
+   * documents that axis as "populated automatically by Lobu-owned save paths"
+   * — so the save path has to be the thing that stamps it.
+   *
+   * It did not. Only the memory plugin's auto-capture passed `agent_id` as
+   * caller metadata, so a model's own `save_memory` call landed with `{}` and
+   * the agent could not recall what it had just written. Live symptom: a PAT
+   * search found the row, the agent's own search returned `content: []`.
+   */
+  it('recalls a memory the calling agent saved through the tool', async () => {
+    const agentCtx = {
+      organizationId: org.id,
+      userId: user.id,
+      agentId: 'recall-contract-agent',
+      tokenType: 'session',
+      memberRole: 'owner',
+      isAuthenticated: true,
+      scopes: ['*'],
+    } as ToolContext;
+
+    const saved = await saveContent(
+      {
+        content: 'Zaphod prefers the second-best coffee on deck seven',
+        semantic_type: 'observation',
+      },
+      env,
+      agentCtx
+    );
+    expect(saved.id).toBeGreaterThan(0);
+
+    const recalled = await search(
+      { query: 'second-best coffee deck seven', include_content: true },
+      env,
+      agentCtx
+    );
+
+    expect(recalled.content?.map((c) => c.id)).toContain(saved.id);
+  });
+
+  /**
+   * The other half of the fence: the stamp must scope to the agent that wrote
+   * the row, not merely exist. A different agent recalling the same query must
+   * not see it, or the fix would have widened memory across agents instead of
+   * making one agent's own memory reachable.
+   */
+  it('does not leak an agent-saved memory to a different agent', async () => {
+    const writer = {
+      organizationId: org.id,
+      userId: user.id,
+      agentId: 'memory-writer-agent',
+      tokenType: 'session',
+      memberRole: 'owner',
+      isAuthenticated: true,
+      scopes: ['*'],
+    } as ToolContext;
+
+    const saved = await saveContent(
+      {
+        content: 'Marvin catalogued the diodes on his left side',
+        semantic_type: 'observation',
+      },
+      env,
+      writer
+    );
+
+    const other = await search(
+      { query: 'diodes left side catalogue', include_content: true },
+      env,
+      { ...writer, agentId: 'memory-reader-agent' } as ToolContext
+    );
+
+    expect(other.content?.map((c) => c.id) ?? []).not.toContain(saved.id);
+  });
+  /**
+   * The control for the stamp: an UNBOUND caller (a PAT, a session, an
+   * automation with no agent) must leave `metadata.agent_id` unset. Workspace
+   * nouns and connector ingest have no writing agent, so stamping one would
+   * put ordinary org writes inside some agent's private recall scope and hide
+   * them from everyone else.
+   *
+   * Worth pinning because `proxy-rest-routes.ts` derives its own routing id as
+   * `tokenData.agentId || tokenData.userId`. That fallback is for MCP session
+   * keying only — `ToolContext.agentId` comes from `tokenData.agentId` alone
+   * (`multi-tenant.ts`) — and this test fails loudly if the two are ever
+   * conflated, which would file a user id as an agent scope.
+   */
+  it('leaves the memory scope unset for a caller with no bound agent', async () => {
+    const saved = await saveContent(
+      {
+        content: 'Trillian logged the improbability drive readings',
+        semantic_type: 'observation',
+      },
+      env,
+      {
+        organizationId: org.id,
+        userId: user.id,
+        tokenType: 'pat',
+        memberRole: 'owner',
+        isAuthenticated: true,
+        scopes: ['*'],
+      } as ToolContext
+    );
+
+    const [row] = await getDb()`
+      SELECT metadata FROM events WHERE id = ${saved.id}
+    `;
+    expect((row?.metadata as Record<string, unknown>)?.agent_id).toBeUndefined();
   });
 });

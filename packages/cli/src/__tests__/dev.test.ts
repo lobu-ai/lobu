@@ -78,7 +78,6 @@ describe("lobu run backend bundle resolution", () => {
       ...cli.optionalDependencies,
     };
 
-    expect(cliRuntimeDeps["@lobu/worker"]).toBeDefined();
     expect(cliRuntimeDeps["@lobu/embeddings"]).toBeDefined();
 
     const assertDeclared = (deps: Record<string, string> | undefined) => {
@@ -131,11 +130,11 @@ describe("lobu run backend bundle resolution", () => {
       join(root, "package.json"),
       JSON.stringify({ name: "root", workspaces: ["packages/*"] })
     );
-    mkdirSync(join(root, "packages", "agent-worker", "src"), {
+    mkdirSync(join(root, "packages", "server", "src"), {
       recursive: true,
     });
     writeFileSync(
-      join(root, "packages", "agent-worker", "src", "index.ts"),
+      join(root, "packages", "server", "src", "index.ts"),
       "// worker"
     );
     const subdir = join(root, "examples", "lobu-team");
@@ -153,7 +152,7 @@ describe("lobu run backend bundle resolution", () => {
     const found = findEnclosingMonorepoRoot(here);
     expect(found).not.toBeNull();
     expect(
-      existsSync(join(found!, "packages", "agent-worker", "src", "index.ts"))
+      existsSync(join(found!, "packages", "server", "src", "index.ts"))
     ).toBe(true);
   });
 

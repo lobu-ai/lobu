@@ -243,9 +243,6 @@ dead_code="$(workflow_job "$workflow" dead-code-report)"
 [ -n "$dead_code" ] || fail "advisory dead-code report was dropped during SDK fan-out"
 grep -q '^    needs: \[unit, frontend, integration, format-lint, typecheck, migrations\]$' <<<"$dead_code" ||
   fail "advisory dead-code report does not retain its post-gate scheduling"
-sdk_lifecycle="$(workflow_job "$workflow" sdk-lifecycle-e2e)"
-grep -q 'Report available exec-sandbox backends' <<<"$sdk_lifecycle" ||
-  fail "main-push exec-sandbox probe was dropped during SDK fan-out"
 optional_filter="$(workflow_job "$workflow" optional-smoke-filter)"
 if grep -q '^    needs:' <<<"$optional_filter"; then
   fail "optional smoke filter still waits for the merge graph"

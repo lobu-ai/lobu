@@ -21,14 +21,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "bun:test";
-import { buildPublishedDeclaration } from "../../packages/agent-worker/scripts/published-declaration.mjs";
 import { __testing, rewriteWorkspaceRefs } from "../publish-packages.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-function workerManifest() {
+function unpublishableManifest() {
   return {
-    name: "@lobu/worker",
+    name: "@lobu/unpublishable-fixture",
     version: "14.3.0",
     dependencies: {
       "@lobu/core": "workspace:*",
@@ -45,18 +44,18 @@ describe("rewriteWorkspaceRefs publishability guard", () => {
     let message = "";
     expect(() => {
       try {
-        rewriteWorkspaceRefs(workerManifest());
+        rewriteWorkspaceRefs(unpublishableManifest());
       } catch (error) {
         message = error instanceof Error ? error.message : String(error);
         throw error;
       }
       // plugin-api is the first unpublishable dep in this manifest. It is not
-      // in PACKAGES (nothing on npm can resolve it, and @lobu/worker inlines
-      // it), so the guard must name it exactly as it names a private plugin.
+      // in PACKAGES — nothing on npm can resolve it — so the guard must name
+      // it exactly as it names any other private plugin.
     }).toThrow(/@lobu\/plugin-api/);
     // An actionable message is the point: "failed" would leave the next
     // person guessing which of the two fixes applies.
-    expect(message).toContain("@lobu/worker");
+    expect(message).toContain("@lobu/unpublishable-fixture");
     expect(message).toContain("bundling");
     expect(message).toContain("PACKAGES");
   });
@@ -69,7 +68,7 @@ describe("rewriteWorkspaceRefs publishability guard", () => {
     ]) {
       expect(() =>
         rewriteWorkspaceRefs({
-          name: "@lobu/worker",
+          name: "@lobu/unpublishable-fixture",
           version: "14.3.0",
           [section]: { "@lobu/plugin-mcp": "1.2.3" },
         })
@@ -235,20 +234,14 @@ describe("publish loop (subprocess, stub npm)", () => {
     // Packages with no runtime @lobu dependency are unaffected and still ship
     // — the guard must not turn one blocked package into a total outage.
     expect(attempted).toContain("@lobu/client");
-    // @lobu/worker still declares @lobu/core on disk, but publishes a manifest
-    // with zero @lobu dependencies because the bundle inlines the graph. The
-    // gate must read the transformed manifest: reading the raw one skipped the
-    // worker here, reinstating the bootstrap wait this change removes.
-    expect(attempted).toContain("@lobu/worker");
 
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain("skipped");
   });
 
   it("publishes the whole fleet when every manifest is publishable", () => {
-    // With @lobu/worker's private plugins now inlined into its bundle, no
-    // manifest declares an unpublishable dependency, so a release run should
-    // complete. Before that fix this aborted at @lobu/worker (#2186).
+    // No manifest declares an unpublishable dependency, so a release run
+    // completes. This aborted mid-fleet before #2186 was fixed.
     writeStubNpm([]);
     const result = runPublishScript();
     const attempted = existsSync(logFile)
@@ -257,101 +250,7 @@ describe("publish loop (subprocess, stub npm)", () => {
 
     expect(result.status).toBe(0);
     expect(attempted.length).toBe(__testing.PACKAGES.length);
-    expect(attempted).toContain("@lobu/worker");
     expect(attempted).toContain("@lobu/cli");
-  });
-});
-
-/**
- * The published @lobu/worker manifest is the artifact consumers actually
- * install, and it diverges from the in-repo one on purpose (bundle entry, no
- * src/, no @lobu deps). These lock that shape in — verified end to end by
- * packing the tarball and installing it into an empty directory, where it
- * imports and the `lobu-worker` bin runs.
- */
-describe("published @lobu/worker manifest", () => {
-  const transformed = (() => {
-    const entry = __testing.PACKAGES.find(
-      (p: { dir: string }) => p.dir === "packages/agent-worker"
-    );
-    const manifest = JSON.parse(
-      readFileSync(
-        join(REPO_ROOT, "packages/agent-worker/package.json"),
-        "utf8"
-      )
-    );
-    return entry.transform(manifest) as {
-      main: string;
-      types: string;
-      bin: Record<string, string>;
-      files: string[];
-      exports: Record<string, unknown>;
-      dependencies: Record<string, string>;
-    };
-  })();
-
-  it("declares no @lobu dependencies — the whole workspace graph is inlined", () => {
-    // The exact defect from #2186. @lobu/core, plugin-api and plugin-host are
-    // CommonJS while the bundle is ESM, so they are inlined too; declaring
-    // them would also keep the release blocked on a bootstrap publish.
-    const lobuDeps = Object.keys(transformed.dependencies ?? {}).filter((d) =>
-      d.startsWith("@lobu/")
-    );
-    expect(lobuDeps).toEqual([]);
-  });
-
-  it("ships a self-contained declaration, not one importing @lobu", () => {
-    // The module declaring WorkerConfig imports @lobu/core, which the published
-    // manifest no longer declares — shipping tsc's emitted d.ts verbatim failed
-    // every consumer's tsc with TS2307. The build drives the generator below.
-    // Reading the emitted dist/index.bundle.d.ts instead only works after a
-    // build; this gate runs in the lint job, which never builds one.
-    const decl = buildPublishedDeclaration(
-      readFileSync(
-        join(REPO_ROOT, "packages/agent-worker/src/core/types.ts"),
-        "utf8"
-      )
-    );
-    expect(decl).toContain("WorkerConfig");
-    expect(decl).not.toContain("@lobu/");
-    // ...and it refuses rather than emitting a declaration that would dangle.
-    expect(() =>
-      buildPublishedDeclaration(
-        'export interface WorkerConfig {\n  transport: import("@lobu/core").WorkerTransport;\n}\n'
-      )
-    ).toThrow(/@lobu/);
-
-    expect(transformed.files).toContain("dist/index.bundle.d.ts");
-    expect(JSON.stringify(transformed.exports)).not.toContain(
-      "dist/index.d.ts"
-    );
-    // BOTH type entries must move. Node10 resolution reads the top-level
-    // `types`, so leaving it on the unshipped dist/index.d.ts handed consumers
-    // an untyped bundle (TS7016) even with exports.types correct. Verified
-    // against the installed tarball under node10, node16 and bundler.
-    expect(transformed.types).toBe("./dist/index.bundle.d.ts");
-  });
-
-  it("points every entry at the bundle and ships no src/", () => {
-    expect(transformed.main).toBe("./dist/index.bundle.mjs");
-    expect(transformed.bin["lobu-worker"]).toBe("./dist/index.bundle.mjs");
-    // Shipping src/ would reintroduce the unresolvable private-plugin imports,
-    // and the `bun` export condition pointed straight at it.
-    expect(transformed.files).not.toContain("src");
-    expect(JSON.stringify(transformed.exports)).not.toContain("src/");
-  });
-
-  it("keeps the in-repo manifest on the src/ dev path", () => {
-    // The transform is publish-time only. The server resolves @lobu/worker's
-    // src/index.ts in-repo, so mutating the real manifest would break dev.
-    const inRepo = JSON.parse(
-      readFileSync(
-        join(REPO_ROOT, "packages/agent-worker/package.json"),
-        "utf8"
-      )
-    );
-    expect(inRepo.files).toContain("src");
-    expect(inRepo.exports["."].bun).toBe("./src/index.ts");
   });
 });
 
@@ -431,61 +330,14 @@ describe("published manifests ship no unrunnable scripts", () => {
 
   it("leaves the in-repo dev scripts untouched", () => {
     // Publish-time only. Stripping the real manifests would break the dev loop.
-    const worker = JSON.parse(
+    const manifest = JSON.parse(
       readFileSync(
-        join(REPO_ROOT, "packages/agent-worker/package.json"),
+        join(REPO_ROOT, "packages/connector-worker/package.json"),
         "utf8"
       )
     );
-    expect(worker.scripts.build).toContain("build-worker-bundle.mjs");
-    expect(worker.scripts.typecheck).toBe("tsc --noEmit");
-  });
-});
-
-/**
- * The server spawns the worker by resolving a path inside the INSTALLED
- * @lobu/worker package. If the publish transform stops shipping the file that
- * resolver names, every published-CLI worker start fails at runtime with a
- * missing entry point — invisible to typecheck and to any in-repo test, because
- * in-repo the src/ path wins. This pins the two together.
- */
-describe("installed worker entry point is actually published", () => {
-  const RESOLVER = join(
-    REPO_ROOT,
-    "packages/server/src/gateway/config/index.ts"
-  );
-
-  /** dist/... paths the resolver can hand back for an installed package. */
-  function resolverInstalledEntries() {
-    const source = readFileSync(RESOLVER, "utf8");
-    return [
-      ...source.matchAll(/workerPackageRoot,\s*\n?\s*"(dist\/[^"]+)"/g),
-    ].map((m) => m[1]);
-  }
-
-  it("ships every dist entry the server can resolve to", () => {
-    const entry = __testing.PACKAGES.find(
-      (p: { dir: string }) => p.dir === "packages/agent-worker"
-    );
-    const published = entry.transform(
-      JSON.parse(
-        readFileSync(
-          join(REPO_ROOT, "packages/agent-worker/package.json"),
-          "utf8"
-        )
-      )
-    ) as { files: string[] };
-
-    const candidates = resolverInstalledEntries();
-    // Guard the guard: if the resolver is refactored so this regex stops
-    // matching, an empty list would vacuously pass.
-    expect(candidates.length).toBeGreaterThan(0);
-
-    // EVERY dist path the resolver can name must be shipped. Asserting only
-    // the first is too weak — source order is not resolution order, so a
-    // resolver that fell back to an unshipped path would still pass.
-    const unshipped = candidates.filter((c) => !published.files.includes(c));
-    expect(unshipped).toEqual([]);
+    expect(manifest.scripts.build).toContain("build-guest-bundle.js");
+    expect(manifest.scripts.typecheck).toBe("tsc --noEmit");
   });
 });
 

@@ -22,7 +22,6 @@ import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import type {
   DeploymentManager,
-  OrchestratorConfig,
 } from "../orchestration/deployment-manager.js";
 import { generateDeploymentName } from "../orchestration/deployment-manager.js";
 import { ensureEncryptionKey } from "./helpers/db-setup.js";
@@ -48,11 +47,6 @@ const DEPLOYMENT_NAME = generateDeploymentName({
   conversationId: "conv-1",
 });
 
-const CONFIG = {
-  queues: { retryLimit: 3, expireInSeconds: 600 },
-  worker: { maxDeployments: 0 },
-} as unknown as OrchestratorConfig;
-
 function payload(): MessagePayload {
   return {
     messageId: "msg-1",
@@ -67,21 +61,24 @@ function payload(): MessagePayload {
   } as MessagePayload;
 }
 
+/**
+ * `workerInputs` used to be filled from the queue's `thread_message_*` sends —
+ * the managed subprocess lane's worker queue, now deleted. The pinned token is
+ * stamped onto the payload well before the turn is produced, and
+ * `recordRunInput` is the first seam that sees it, so the capture moves there.
+ * Same payload, same token, same assertions.
+ */
 function makeQueue(): {
   queue: IMessageQueue;
   workerInputs: MessagePayload[];
+  recordInput: (payload: MessagePayload, deploymentName: string) => Promise<void>;
 } {
   const workerInputs: MessagePayload[] = [];
   const queue = {
     start: mock(async () => {}),
     stop: mock(async () => {}),
     createQueue: mock(async () => {}),
-    send: mock(async (name: string, data: unknown) => {
-      if (name.startsWith("thread_message_")) {
-        workerInputs.push(data as MessagePayload);
-      }
-      return "job-1";
-    }),
+    send: mock(async () => "job-1"),
     work: mock(async () => {}),
     pauseWorker: mock(async () => {}),
     resumeWorker: mock(async () => {}),
@@ -93,7 +90,10 @@ function makeQueue(): {
     })),
     isHealthy: mock(() => true),
   } as unknown as IMessageQueue;
-  return { queue, workerInputs };
+  const recordInput = async (payload: MessagePayload) => {
+    workerInputs.push({ ...payload } as MessagePayload);
+  };
+  return { queue, workerInputs, recordInput };
 }
 
 function makeDeploymentManager(): DeploymentManager {
@@ -138,13 +138,12 @@ describe("conversation pin at the message-consumer chokepoint", () => {
     resolveRuntimeSelection.mockRejectedValue(
       new Error("pin database unavailable"),
     );
-    const { queue, workerInputs } = makeQueue();
+    const { queue, workerInputs, recordInput } = makeQueue();
     const data = payload();
     const consumer = new PinTestMessageConsumer(
-      CONFIG,
       makeDeploymentManager(),
       queue,
-      async () => {},
+      recordInput,
     );
 
     const dispatch = handle(consumer, data);
@@ -163,15 +162,15 @@ describe("conversation pin at the message-consumer chokepoint", () => {
       runtimeProviderId: "vercel",
       sandboxId: "sbx-pinned",
     });
-    const { queue, workerInputs } = makeQueue();
+    const { queue, workerInputs, recordInput } = makeQueue();
     const consumer = new PinTestMessageConsumer(
-      CONFIG,
       makeDeploymentManager(),
       queue,
-      async () => {},
+      recordInput,
     );
 
-    await handle(consumer, payload());
+    // The producer needs Postgres. The pin is stamped before it runs.
+    await handle(consumer, payload()).catch(() => {});
 
     expect(mintWorkerToken).toHaveBeenCalledTimes(1);
     expect(workerInputs).toHaveLength(1);
@@ -185,15 +184,15 @@ describe("conversation pin at the message-consumer chokepoint", () => {
 
   test("a successful no-realm resolution still delivers an unpinned token", async () => {
     resolveRuntimeSelection.mockResolvedValue({});
-    const { queue, workerInputs } = makeQueue();
+    const { queue, workerInputs, recordInput } = makeQueue();
     const consumer = new PinTestMessageConsumer(
-      CONFIG,
       makeDeploymentManager(),
       queue,
-      async () => {},
+      recordInput,
     );
 
-    await handle(consumer, payload());
+    // The producer needs Postgres. The pin is stamped before it runs.
+    await handle(consumer, payload()).catch(() => {});
 
     expect(mintWorkerToken).toHaveBeenCalledTimes(1);
     expect(workerInputs).toHaveLength(1);

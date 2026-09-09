@@ -21,7 +21,7 @@ This is a fast index, not a replacement for repository instructions. Root `AGENT
 make task-setup NAME=<slug>
 cd .claude/worktrees/<slug>
 make dev                  # gateway + workers + Vite on the allocated port
-make clean-workers        # after agent-worker changes
+make clean-workers        # reap an orphaned gateway from a crashed dev run
 ```
 
 Prerequisites are Bun, the supported Node version, and Postgres with pgvector via `DATABASE_URL`. `make dev` uses the shared local Postgres; `make dev-embedded` uses per-worktree embedded Postgres. Read `.env.local` for the allocated ports.

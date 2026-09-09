@@ -7,7 +7,8 @@
  * handful of internal routes DIRECTLY, without going through the SDK — sending
  * a real chat message, posting an interaction card, delivering files into the
  * conversation, executing in a sandbox, generating billable media. Those are
- * the ones that would still reach the outside world during an eval replay.
+ * the ones that would still reach the outside world during an eval replay or
+ * a native agent turn.
  *
  * This guard is the one thing those routes need. It reads the signed
  * `executionMode` claim off the already-verified worker token — no DB lookup,
@@ -18,11 +19,11 @@
  * to score.
  */
 
+import type { WorkerTokenData } from "@lobu/core";
 import type { Context } from "hono";
 import { getDb } from "../../../db/client.js";
 import { AUTOMATION_EVAL_RUN_TYPE } from "../../../runs/run-types.js";
 import logger from "../../../utils/logger.js";
-import { getVerifiedWorker } from "../shared/helpers.js";
 import type { WorkerContext } from "./types.js";
 
 /**
@@ -57,15 +58,8 @@ function boundDetails(details: Record<string, unknown>): Record<string, unknown>
 }
 
 /**
- * True when this worker's run must not perform side effects. Sourced from the
- * signed token claim set at session creation from `runs.run_type`.
- */
-function isCaptureRun(c: Context<WorkerContext>): boolean {
-	return getVerifiedWorker(c).executionMode === "capture";
-}
-
-/**
- * Short-circuit a mutating internal route when the run is an eval replay.
+ * Short-circuit a mutating internal route when the run captures side effects
+ * (an eval replay or a native agent turn).
  * Returns a Response to return immediately, or null to proceed for real.
  *
  * `action` and `details` are appended to `runs.dry_run_preview.side_effects` —
@@ -85,55 +79,38 @@ export async function captureSideEffect(
 	details: Record<string, unknown>,
 	responseBody?: Record<string, unknown>,
 ): Promise<Response | null> {
-	if (!isCaptureRun(c)) return null;
-	const worker = getVerifiedWorker(c);
-	logger.info(
-		{
-			evalCapture: true,
-			action,
-			// Bounded here too — the log is as durable a sink as the column, and
-			// these payloads are agent-authored free text.
-			details: boundDetails(details),
-			agentId: worker.agentId,
-			organizationId: worker.organizationId,
-			conversationId: worker.conversationId,
-			automationRunId: worker.automationRunId,
-		},
-		`[eval-capture] suppressed ${action} for a capture run`,
-	);
-	// Suppression above is keyed on `executionMode` alone and must stay that
-	// way — gating it on the run id too would let a token missing the id fall
-	// through and perform the side effect. Recording is what needs the id.
-	// `verifyWorkerToken` rejects a capture token that arrives without one, so
-	// in practice this logs nothing; the branch is how that invariant narrows
-	// to `number`, which the token type cannot express (`automationRunId` is
-	// required only when the mode is capture). It degrades to
-	// suppress-without-record rather than throwing, for the same reason
-	// `recordCapturedSideEffect` swallows its errors: a route error sends a
-	// capture run into retry loops instead of letting it finish its turn.
-	// Falsy rather than `=== undefined`: the verifier already rejects <= 0 and
-	// non-integers, but a future non-token caller reaching this helper with 0 or
-	// NaN should take the log, not address `WHERE id = 0`.
-	if (!worker.automationRunId) {
-		logger.error(
-			{ action },
-			"[eval-capture] no automationRunId on the token — side effect suppressed but NOT recorded",
-		);
+	const worker = c.get("worker");
+	if (worker.executionMode !== "capture") return null;
+	const result = await captureEffect(worker, action, details);
+	return c.json(responseBody ?? result);
+}
+
+/** Signed identity, propagated per request through internal MCP and SDK calls. */
+export type CaptureIdentity = Pick<WorkerTokenData,
+	"organizationId" | "agentId" | "conversationId" | "automationRunId" | "runId"
+>;
+
+/** Shared capture result for HTTP, direct tools and proxied MCP invocations. */
+export async function captureEffect(
+	identity: CaptureIdentity | null | undefined,
+	action: string,
+	details: Record<string, unknown>,
+) {
+	if (identity?.organizationId && (identity.automationRunId || identity.runId)) {
+		await recordCapturedSideEffect(identity, action, details);
 	} else {
-		await recordCapturedSideEffect(worker.automationRunId, action, details);
+		logger.error({ action }, "Capture identity missing: effect suppressed but not recorded");
 	}
-	return c.json(
-		responseBody ?? {
-			success: true,
-			captured: true,
-			action,
-			message: "Recorded but not performed: this run is an evaluation replay.",
-		},
-	);
+	return {
+		success: true,
+		captured: true,
+		action,
+		message: "Recorded but not performed: this run captures side effects.",
+	};
 }
 
 /**
- * Append one suppressed side effect to the eval run's record.
+ * Append one suppressed side effect to its eval or native agent-turn run.
  *
  * One UPDATE reading and rewriting under the row lock, so concurrent handlers
  * on different replicas cannot lose each other's entry. `run_type` is guarded
@@ -145,7 +122,7 @@ export async function captureSideEffect(
  * the side effect would break the guarantee.
  */
 async function recordCapturedSideEffect(
-	automationRunId: number,
+	identity: CaptureIdentity,
 	action: string,
 	details: Record<string, unknown>,
 ): Promise<void> {
@@ -185,12 +162,20 @@ async function recordCapturedSideEffect(
               ) >= ${MAX_CAPTURED_SIDE_EFFECTS}
             )
           )
-      WHERE id = ${automationRunId}
-        AND run_type = ${AUTOMATION_EVAL_RUN_TYPE}
+      WHERE id = ${identity.automationRunId ?? identity.runId ?? null}
+        AND organization_id = ${identity.organizationId!}
+        AND (
+          (${identity.automationRunId !== undefined} AND run_type = ${AUTOMATION_EVAL_RUN_TYPE})
+          OR (
+            ${identity.automationRunId === undefined} AND run_type = 'agent_turn'
+            AND action_input->'turn'->>'agent_id' = ${identity.agentId ?? null}
+            AND action_input->'turn'->>'conversation_id' = ${identity.conversationId ?? null}
+          )
+        )
     `;
 	} catch (error) {
 		logger.error(
-			{ error, automationRunId, action },
+			{ error, runId: identity.automationRunId ?? identity.runId, action },
 			"[eval-capture] side effect suppressed but its record could not be written",
 		);
 	}

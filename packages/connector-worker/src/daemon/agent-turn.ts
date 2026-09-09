@@ -8,13 +8,51 @@
  * and reporting the result.
  */
 
-import type { AgentTurnPollPayload, PollResponse } from '@lobu/core/contracts/worker/protocol';
+import {
+  AGENT_TURN_BRIDGE_BYTES,
+  AGENT_TURN_INPUT_MAX,
+  type AgentTurnPollPayload,
+  type AgentTurnToolEvent,
+  type PollResponse,
+  TURN_DELTA_MAX_CHARS,
+  TURN_TOOL_EVENT_QUEUE_MAX,
+} from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
-import type { AgentTurnEvent } from '../agent-turn/types.js';
+import type { HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
+import type {
+  AgentTurnEvent,
+  AgentTurnGatewayTool,
+  AgentTurnMediaTool,
+  AgentTurnSteer,
+  RuntimeExecRequest,
+  RuntimeExecResult,
+} from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
-import type { ExecutorClient } from './client.js';
+import { type ExecutorClient, trimTrailingSlashes } from './client.js';
 import { log } from './log.js';
+
+/**
+ * How often a streaming turn pushes what it has produced.
+ *
+ * This is the DELTA cadence, deliberately separate from the liveness heartbeat
+ * (30s in production, shared with five other lanes). A reply delivered in 30s
+ * clumps is not streaming, and lowering the shared interval to fix that would
+ * multiply heartbeat write load across every lane that does not need it. Only
+ * a turn that is actively producing text beats this often, and each beat is
+ * the same request the liveness beat would have made.
+ */
+const TURN_DELTA_FLUSH_MS = 400;
+
+/**
+ * How many batches the pre-completion drain will push before giving up.
+ *
+ * A bound, not a budget for the whole reply: the terminal `finalText` is
+ * authoritative and repairs anything left behind, so waiting longer here buys
+ * a cosmetic improvement at the cost of the completion the client is blocked
+ * on.
+ */
+const TURN_DELTA_DRAIN_BATCHES = 4;
 
 function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;
@@ -30,14 +68,14 @@ export async function executeAgentTurnRun(
   if (!runId) return { itemsCollected: 0, error: 'agent turn run missing its run id' };
 
   const fail = async (error: string) => {
-    await client.completeAgentTurn({
+    const receipt = await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
       status: 'failed',
       error,
       exit_reason: 'error_message',
     });
-    return { itemsCollected: 0, error };
+    return { itemsCollected: 0, ...(receipt.status === 'completed' ? {} : { error }) };
   };
 
   // The run is already claimed, so a rejected envelope must be REPORTED, not
@@ -47,21 +85,191 @@ export async function executeAgentTurnRun(
     return fail('agent turn run received a non-turn payload envelope');
   }
   const turn = payload.turn;
+  const runtimeGatewayUrl = turn.tools?.remote_runtime ? turn.tools.gateway_url : undefined;
   if (!job.credentials?.accessToken) {
     return fail('agent turn run arrived without its provider credential');
   }
 
-  let deltas = 0;
   let toolCalls = 0;
+  // Text the guest has produced that the SERVER has not acknowledged yet.
+  //
+  // Incremental, because that is what every renderer of a `thread_response`
+  // delta does with it — the API renderer broadcasts the span and the SPA
+  // appends it. A cumulative snapshot down the same path renders as the
+  // reply repeated back to itself.
+  //
+  // Nothing leaves this queue until the server names its sequence in the
+  // heartbeat's ack, so a beat that fails or is fenced out re-sends the same
+  // span rather than dropping it. The server's own sequence fence makes the
+  // duplicate a no-op, which is what lets a retry be safe.
+  let pending = '';
+  // The batch currently in flight, and the sequence it was sent under. A retry
+  // reuses BOTH: a new sequence for the same text would be a second span the
+  // server's fence has no reason to refuse.
+  let inFlight: { text: string; sequence: number } | null = null;
+  let deltaSequence = 0;
+  let sending = false;
+  // Tool traces waiting for the next beat, oldest first.
+  let toolEvents: AgentTurnToolEvent[] = [];
+  // Traces handed to a beat that has not answered yet. A beat is fire-and-
+  // forget from the delta timer, so one can still be in flight when the turn
+  // completes; these come back rather than vanishing in that window.
+  let tracesInFlight: AgentTurnToolEvent[] = [];
+  /** The delta timer's most recent beat, awaited before the turn completes. */
+  let beatInFlight: Promise<void> = Promise.resolve();
+  /** Arguments of the calls still running, by call id, for the trace their end produces. */
+  const toolArgs = new Map<string, unknown>();
+
+  /**
+   * Send the next batch, if there is one and none is already in flight.
+   *
+   * Serial by construction (`sending`): two batches in parallel would race to
+   * the same run row and the loser's span would be fenced out and — because
+   * its ack would still name its own sequence — retired unwritten. One batch,
+   * one ack, then the next.
+   */
+  const flushDelta = async (): Promise<void> => {
+    if (sending) return;
+    if (!inFlight) {
+      if (!pending) {
+        // Nothing to say about the text, but a tool may have finished. That
+        // still rides a beat — just without a delta.
+        if (toolEvents.length === 0) return;
+      } else {
+        // Bounded per batch, never per reply: the text this cap holds back
+        // stays in `pending` and rides the next batch. Slicing the HEAD is what
+        // makes that true — the tail is the part not sent yet.
+        const text = pending.slice(0, TURN_DELTA_MAX_CHARS);
+        pending = pending.slice(text.length);
+        inFlight = { text, sequence: (deltaSequence += 1) };
+      }
+    }
+    sending = true;
+    const batch = inFlight;
+    // Taken before the await so a trace arriving mid-flight queues for the
+    // next beat rather than being dropped by the reset below. Held in
+    // `tracesInFlight` rather than simply dropped: the completion below is what
+    // ends the run's `running` status, and a beat still in flight when that
+    // lands loses the server's lease fence. Returning them makes the trace the
+    // completion's to deliver instead of nobody's.
+    const traces = toolEvents;
+    toolEvents = [];
+    tracesInFlight = traces;
+    try {
+      const ack = await client.heartbeat(
+        runId,
+        { items_collected_so_far: deltaSequence },
+        undefined,
+        batch ?? undefined,
+        traces.length > 0 ? traces : undefined
+      );
+      // Retire the batch only on a positive ack for ITS sequence. `published:
+      // false` is an ack too — an already-passed sequence is an answer, and
+      // there is nothing more the worker can do about it. No ack at all (an
+      // older gateway, or a publish that threw) keeps the text queued for the
+      // next beat.
+      if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
+      if (ack?.continue === false) stopTurn(ack.stop_reason);
+      queueSteering(ack?.steer);
+      // The beat was answered, so its traces are the server's now.
+      tracesInFlight = [];
+    } catch (err) {
+      // The batch stays in flight and is re-sent under the same sequence, and
+      // so do the traces — but only back onto the queue, never re-sent here.
+      // Whatever is still queued when the turn ends rides the completion,
+      // which is the one write that cannot lose the lease fence to itself.
+      log.debug('[agent-turn] delta beat failed:', err);
+    } finally {
+      // Anything this beat could not retire goes back to the front of the
+      // queue: it is older than whatever arrived while the beat was in flight.
+      if (tracesInFlight.length) {
+        toolEvents = [...tracesInFlight, ...toolEvents];
+        tracesInFlight = [];
+        if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) {
+          toolEvents = toolEvents.slice(-TURN_TOOL_EVENT_QUEUE_MAX);
+        }
+      }
+      sending = false;
+    }
+  };
+
+  /**
+   * Flush what is left before the completion row lands, so the last span of
+   * the reply arrives as a delta rather than as a jump at completion.
+   *
+   * Bounded on BOTH axes. `TURN_DELTA_DRAIN_BATCHES` caps how many batches it
+   * will push, so a long reply cannot make the turn's completion wait on its
+   * whole backlog; and the loop stops the moment a batch fails to retire, so a
+   * server that is refusing cannot spin here. Whatever is left is not lost —
+   * the terminal `finalText` is the authoritative reply and repairs it.
+   */
+  const drainDeltas = async (): Promise<void> => {
+    for (let batch = 0; batch < TURN_DELTA_DRAIN_BATCHES; batch += 1) {
+      if (!pending && !inFlight && toolEvents.length === 0) return;
+      const before = inFlight;
+      await flushDelta();
+      // No progress — the batch is still in flight under the same sequence —
+      // means the server is not taking it, and retrying inline would only
+      // delay the completion the client is actually waiting for.
+      if (inFlight && inFlight === before) return;
+    }
+  };
+
+  // The delta cadence, which is NOT the liveness cadence. The reaper's
+  // contract is satisfied by a beat every `cfg.heartbeatIntervalMs` (30s in
+  // production), but a reply that arrives in 30s clumps is not streaming — so
+  // deltas run on their own short timer and the liveness beat below only fires
+  // when the turn has produced nothing to say. Both call the same endpoint, so
+  // a delta beat IS a liveness beat; this adds write load only while a turn is
+  // actively streaming, and only on this lane.
+  const deltaTimer = setInterval(() => {
+    // Tracked, not merely fired: the completion path awaits this so a beat
+    // holding traces cannot still be in flight when the run stops being
+    // `running` and the server's fence starts refusing them.
+    beatInFlight = flushDelta();
+    void beatInFlight;
+  }, Math.min(TURN_DELTA_FLUSH_MS, cfg.heartbeatIntervalMs));
   // The connector-lane reaper writes a claimed run off once its heartbeat goes
   // stale, and a turn's wall clock is far longer than that threshold. Beat on
   // the same interval every other lane does, so a live turn is never reaped and
-  // a crashed worker's turn still is.
+  // a crashed worker's turn still is. Skipped while a delta beat is in flight
+  // or due: that beat already proves the same thing.
   const heartbeat = setInterval(() => {
+    if (sending || inFlight || pending || toolEvents.length > 0) return;
     void client
-      .heartbeat(runId, { items_collected_so_far: deltas })
+      .heartbeat(runId, { items_collected_so_far: deltaSequence })
+      .then((ack) => {
+        if (ack?.continue === false) stopTurn(ack.stop_reason);
+        queueSteering(ack?.steer);
+      })
       .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
   }, cfg.heartbeatIntervalMs);
+  // The heartbeat's answer is the gateway's only way to reach a turn in
+  // flight. `continue: false` means the human cancelled: the guest is torn
+  // down through the executor's abort hook. Completion after cleanup reports
+  // that the owner stopped, allowing the gateway to release the next input.
+  // Pending turns the gateway offers as mid-turn inputs, in arrival order,
+  // until the guest asks for them (`takeSteering`) and hands them to pi.
+  const steering: AgentTurnSteer[] = [];
+  const seenInputs = new Set<number>();
+  const queueSteering = (batch: HeartbeatResponse['steer']) => {
+    for (const message of batch ?? []) {
+      if (seenInputs.has(message.run_id) || seenInputs.size >= AGENT_TURN_INPUT_MAX) continue;
+      seenInputs.add(message.run_id);
+      steering.push({
+        runId: message.run_id,
+        messageId: message.message_id,
+        text: message.text,
+        ...(message.ephemeral_context ? { ephemeralContext: message.ephemeral_context } : {}),
+      });
+    }
+  };
+  const cancel = new AbortController();
+  const stopTurn = (reason: string | undefined) => {
+    if (cancel.signal.aborted) return;
+    log.info(`[agent-turn] run ${runId} stopping: ${reason ?? 'the gateway said stop'}`);
+    cancel.abort();
+  };
   try {
     const guestCode = await agentGuestBundle();
     // Same executor seam every other lane uses (`resolveJobExecution`): an
@@ -74,6 +282,11 @@ export async function executeAgentTurnRun(
         // connector's open default would let a prompt-injected turn reach the
         // whole internet.
         allowedDomains: turn.allowed_hosts,
+        // The turn envelope is one bridge string: session journal, system
+        // prompt and base64'd attachments together. The gateway bounds each
+        // attachment payload and stored history separately; the connector
+        // default is sized for a connector payload, not for that.
+        messageBytes: AGENT_TURN_BRIDGE_BYTES,
       }));
     const result = await executor.execute(
       guestCode,
@@ -86,10 +299,44 @@ export async function executeAgentTurnRun(
             modelId: turn.provider.model_id,
             baseUrl: turn.provider.base_url,
             ...(turn.provider.max_tokens !== undefined ? { maxTokens: turn.provider.max_tokens } : {}),
+            ...(turn.provider.reasoning !== undefined ? { reasoning: turn.provider.reasoning } : {}),
+            // pi-ai's own `Model.input`, resolved by the gateway from pi-ai's
+            // model registry. Passed through untouched: pi is what enforces it.
+            ...(turn.provider.input ? { input: turn.provider.input } : {}),
           },
           systemPrompt: turn.system_prompt,
-          messages: turn.messages,
+          sessionJsonl: turn.session_jsonl,
           userMessage: turn.message_text,
+          ...(turn.ephemeral_context ? { ephemeralContext: turn.ephemeral_context } : {}),
+          // Attachment bytes the gateway already resolved out of its artifact
+          // store. The guest fetches nothing: an attachment URL never reaches
+          // it, so a turn cannot be talked into dialling one.
+          ...(turn.message_images && turn.message_images.length > 0
+            ? {
+                images: turn.message_images.map((image) => ({
+                  mimeType: image.mime_type,
+                  data: image.data,
+                })),
+              }
+            : {}),
+          // Non-image attachments WITH their bytes, which the guest seeds into
+          // the turn's `input/` directory. A file
+          // whose bytes the gateway could not resolve arrives named but without
+          // `data`, and the guest tells the model it cannot open that one.
+          ...(turn.message_files && turn.message_files.length > 0
+            ? {
+                files: turn.message_files.map((file) => ({
+                  name: file.name,
+                  mimeType: file.mime_type,
+                  ...(file.size !== undefined ? { size: file.size } : {}),
+                  ...(file.data !== undefined ? { data: file.data } : {}),
+                })),
+              }
+            : {}),
+          // The agent's enabled skills, seeded as `.skills/<name>/SKILL.md`.
+          ...(turn.skills && turn.skills.length > 0
+            ? { skills: turn.skills.map((skill) => ({ name: skill.name, content: skill.content })) }
+            : {}),
           ...(turn.tools
             ? {
                 tools: {
@@ -101,6 +348,7 @@ export async function executeAgentTurnRun(
                     inputSchema: tool.input_schema,
                   })),
                   ...(turn.tools.builtin ? { builtin: turn.tools.builtin } : {}),
+        ...(turn.tools.remote_runtime ? { remoteRuntime: { providerId: turn.tools.remote_runtime.provider_id } } : {}),
                   ...(turn.tools.bash_policy
                     ? {
                         bashPolicy: {
@@ -110,6 +358,59 @@ export async function executeAgentTurnRun(
                         },
                       }
                     : {}),
+                  // Names only; the guest selects them out of the plugin
+                  // package, which is where their routing and schemas live.
+                  // Without the conversation they address there is nothing to
+                  // post into, so the names travel with it or not at all —
+                  // which is why the conversation is mapped once, below, for
+                  // whichever of the two families the turn carries.
+                  ...(turn.tools.conversation
+                    ? {
+                        ...(turn.tools.gateway && turn.tools.gateway.length > 0
+                          ? { gateway: turn.tools.gateway as AgentTurnGatewayTool[] }
+                          : {}),
+                        ...(turn.tools.media && turn.tools.media.length > 0
+                          ? { media: turn.tools.media as AgentTurnMediaTool[] }
+                          : {}),
+                        ...((turn.tools.gateway && turn.tools.gateway.length > 0) ||
+                        (turn.tools.media && turn.tools.media.length > 0)
+                          ? {
+                              conversation: {
+                                channelId: turn.tools.conversation.channel_id,
+                                conversationId: turn.tools.conversation.conversation_id,
+                                platform: turn.tools.conversation.platform,
+                              },
+                            }
+                          : {}),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          // The memory hooks reach the same MCP route the tools do, so they
+          // need nothing on the wire but which server and which agent.
+          ...(turn.memory
+            ? { memory: { mcpId: turn.memory.mcp_id, agentId: turn.memory.agent_id } }
+            : {}),
+          // pi's compaction settings and the flush that precedes it: the guest
+          // decides and acts, the server records what it reports.
+          ...(turn.compaction
+            ? {
+                compaction: {
+                  enabled: turn.compaction.enabled,
+                  contextWindow: turn.compaction.context_window,
+                  reserveTokens: turn.compaction.reserve_tokens,
+                  keepRecentTokens: turn.compaction.keep_recent_tokens,
+                },
+              }
+            : {}),
+          ...(turn.memory_flush
+            ? {
+                memoryFlush: {
+                  enabled: turn.memory_flush.enabled,
+                  softThresholdTokens: turn.memory_flush.soft_threshold_tokens,
+                  systemPrompt: turn.memory_flush.system_prompt,
+                  prompt: turn.memory_flush.prompt,
                 },
               }
             : {}),
@@ -120,30 +421,125 @@ export async function executeAgentTurnRun(
         env,
       },
       {
+        signal: cancel.signal,
+        takeSteering: () => steering.splice(0),
+        // Remote bash for a sandbox-pinned conversation is posted by the host
+        // under the turn token, so the guest keeps its deny-all egress.
+        ...(runtimeGatewayUrl
+          ? {
+              onRuntimeExec: async (request: RuntimeExecRequest): Promise<RuntimeExecResult> => {
+                const response = await fetch(`${trimTrailingSlashes(runtimeGatewayUrl)}/internal/runtime/exec`, {
+                  method: 'POST',
+                  headers: { authorization: `Bearer ${job.credentials?.accessToken ?? ''}`, 'content-type': 'application/json' },
+                  body: JSON.stringify({
+                    command: request.command,
+                    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+                  }),
+                });
+                const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+                return {
+                  status: response.status,
+                  ...(typeof payload.stdout === 'string' ? { stdout: payload.stdout } : {}),
+                  ...(typeof payload.stderr === 'string' ? { stderr: payload.stderr } : {}),
+                  ...(typeof payload.exitCode === 'number' ? { exitCode: payload.exitCode } : {}),
+                  ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
+                  ...(typeof payload.kind === 'string' ? { kind: payload.kind } : {}),
+                  ...(typeof payload.retryable === 'boolean' ? { retryable: payload.retryable } : {}),
+                  ...(typeof payload.outcome === 'string' ? { outcome: payload.outcome } : {}),
+                  ...(payload.sandbox !== undefined ? { sandbox: payload.sandbox } : {}),
+                };
+              },
+            }
+          : {}),
         onTurnEvent: (event: AgentTurnEvent) => {
-          if (event.type === 'text_delta') deltas += 1;
-          if (event.type === 'tool_call_start') toolCalls += 1;
+          if (event.type === 'text_delta') {
+            // Queued, not accumulated: the next batch carries what the server
+            // has not acknowledged, and nothing here is ever discarded. The
+            // per-batch cap lives in `flushDelta`.
+            pending += event.delta;
+            return;
+          }
+          if (event.type === 'tool_call_start') {
+            toolCalls += 1;
+            // Remembered until the call ends so the trace carries the arguments
+            // the model sent.
+            toolArgs.set(event.toolCallId, event.args);
+            return;
+          }
+          if (event.type === 'tool_call_end') {
+            // The turn's tool trace, queued onto the same beat the text takes.
+            // The server turns it into the established `tool_use` custom event,
+            // so the SPA, promptfoo provider and menubar keep one trace shape.
+            //
+            // Bounded, and the newest are the ones kept: a tool trace is a view
+            // of the turn, not its answer, and a turn that spends its budget on
+            // tool calls must not grow an unbounded queue in the worker.
+            const input = toolArgs.get(event.toolCallId);
+            toolArgs.delete(event.toolCallId);
+            toolEvents.push({
+              tool_call_id: event.toolCallId,
+              name: event.name,
+              ...(input !== undefined ? { input } : {}),
+              is_error: event.isError,
+              output: event.output,
+              ...(event.resultSummary ? { result_summary: event.resultSummary } : {}),
+            });
+            if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) toolEvents.shift();
+          }
         },
       }
     );
     if (result.mode !== 'agent_turn') {
       return fail(`agent turn produced a ${result.mode} result`);
     }
-    await client.completeAgentTurn({
+    // Everything the guest streamed, before the completion row lands. The
+    // terminal reply is authoritative and repairs any delta the client missed,
+    // so this is not correctness — it is the last span arriving as a delta
+    // rather than as a jump at completion. Bounded so a turn cannot hang on a
+    // queue the server keeps refusing.
+    // The delta timer beats fire-and-forget, so one can still be awaiting the
+    // server here. Stop the timer and let that beat settle BEFORE reading the
+    // queue: a trace it could not land comes back on its `finally`, and
+    // reading first would leave it owned by neither the beat nor the
+    // completion. This is the window that made the harness lose whichever of
+    // the two traced tools happened to finish nearest the answer.
+    clearInterval(deltaTimer);
+    clearInterval(heartbeat);
+    await beatInFlight;
+    await drainDeltas();
+    // Whatever drainDeltas could not place rides the completion instead of
+    // being dropped. A turn's LAST tool call always lands here: its trace is
+    // queued after the final beat, and the server's heartbeat publish is
+    // fenced on the run still being `running`, which the completion below
+    // ends. Taken before the request so a trace cannot be sent twice.
+    const trailingTraces = [...tracesInFlight, ...toolEvents];
+    tracesInFlight = [];
+    toolEvents = [];
+    const receipt = await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
       status: 'completed',
       text: result.turn.text,
+      ...(trailingTraces.length ? { turn_tool_events: trailingTraces } : {}),
       stop_reason: result.turn.stopReason,
       usage: result.turn.usage,
-      transcript: result.turn.messages,
+      session_jsonl: result.turn.sessionJsonl,
+      tools_used: result.turn.toolsUsed,
+      consumed_inputs: result.turn.consumedInputs.map((input) => ({
+        run_id: input.runId, session_entry_id: input.sessionEntryId,
+      })),
+      ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
       exit_reason: 'ok',
     });
-    log.info(`[agent-turn] run ${runId} completed after ${deltas} deltas and ${toolCalls} tool calls`);
+    if (receipt.status !== 'completed') return { itemsCollected: 0, error: `agent turn ${receipt.status}` };
+    log.info(
+      `[agent-turn] run ${runId} completed after ${deltaSequence} delta batches and ${toolCalls} tool calls`
+    );
     return { itemsCollected: 0 };
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   } finally {
+    clearInterval(deltaTimer);
     clearInterval(heartbeat);
   }
 }

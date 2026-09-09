@@ -50,7 +50,9 @@ if [ -x /opt/homebrew/opt/node@22/bin/node ] && { [ "$NODE_MAJOR" -lt 22 ] || [ 
 fi
 
 MOCK_PID=""
+RUN_PID=""
 cleanup() {
+  [ -z "$RUN_PID" ] || lobu_terminate_child "$RUN_PID"
   [ -n "$MOCK_PID" ] && kill -9 "$MOCK_PID" 2>/dev/null || true
   lobu_kill_listening_port "$GW_PORT"
   lobu_kill_listening_port "$MOCK_PORT"
@@ -110,6 +112,18 @@ const digestSkill = defineSkill({ name: "digest", content: "summarize" });
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
   skills: [digestSkill],
+  providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
+});
+// The skill body carries a token the turn has to READ off the seeded file to
+// report, so a pass proves the file reached the isolate's filesystem rather
+// than that the prompt merely mentioned a skill.
+const isolateSkill = defineSkill({
+  name: "isolate-smoke-skill",
+  content: "# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n",
+});
+const isolateAgent = defineAgent({
+  id: "isolate-smoke", name: "Isolate smoke", dir: "./agents/isolate-smoke",
+  skills: [isolateSkill],
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // `company` exercises the declarative rendering config: event_kinds (with a
@@ -177,7 +191,7 @@ const publisher = defineAutomation({
 
 // prune:true so the gate exercises the destructive path on every run (this is
 // what catches the system-type $member halt class of bug).
-export default defineConfig({ prune: true, agents: [agent], entities: [company, contact], relationships: [worksAt], connectors: [connectorFromFile<typeof PulseConnector>("./connectors/pulse.connector.ts")], connections: [pulseConn], automations: [digest, publisher] });
+export default defineConfig({ prune: true, agents: [agent, isolateAgent], entities: [company, contact], relationships: [worksAt], connectors: [connectorFromFile<typeof PulseConnector>("./connectors/pulse.connector.ts")], connections: [pulseConn], automations: [digest, publisher] });
 TS
 
 # Local connector: deterministic, zero-dep, no network. `sync()` returns one
@@ -288,7 +302,13 @@ TS
   [ -n "${DATABASE_URL:-}" ] && echo "DATABASE_URL=$DATABASE_URL"
 } >> "$PROJ/.env"
 
-export LOBU_PROVIDER_REGISTRY_PATH="$HARNESS/providers.json"
+export LOBU_PROVIDER_REGISTRY_PATH="$RUN_DIR/providers.json"
+node - "$HARNESS/providers.json" "$LOBU_PROVIDER_REGISTRY_PATH" "$MOCK_PORT" <<'JS'
+const fs = require('node:fs');
+const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+config.providers[0].providers[0].upstreamBaseUrl = `http://127.0.0.1:${process.argv[4]}/v1`;
+fs.writeFileSync(process.argv[3], JSON.stringify(config));
+JS
 
 # 2c) Static CLI checks (no server needed): the typed-config validator and the
 # doctor health check. doctor must NOT false-fail the DB check on the scaffold's
@@ -313,7 +333,8 @@ fi
 echo "✓ lobu doctor reports a healthy DB (no false connect failure on embedded file://)"
 
 # 3) Boot lobu run — it auto-applies the project (the apply + prune E2E).
-( cd "$PROJ" && $LOBU run --port "$GW_PORT" > "$RUN_LOG" 2>&1 ) &
+( cd "$PROJ" && exec $LOBU run --port "$GW_PORT" > "$RUN_LOG" 2>&1 ) &
+RUN_PID=$!
 for _ in $(seq 1 80); do
   grep -qiE "Apply complete|auto-apply skipped|Apply halted" "$RUN_LOG" 2>/dev/null && break
   sleep 1
@@ -377,11 +398,15 @@ cat > "$CLIENT_DIR/package.json" <<JSON
 { "name": "sdk-e2e-consumer", "private": true, "type": "module", "dependencies": { "@lobu/client": "file:$CLIENT_TGZ" } }
 JSON
 cp "$HARNESS/client-consumer.mjs" "$CLIENT_DIR/consumer.mjs"
+cp "$HARNESS/isolate-conversation.mjs" "$CLIENT_DIR/isolate-conversation.mjs"
 ( cd "$CLIENT_DIR" && bun install >/dev/null 2>&1 ) \
   || fail "could not install the @lobu/client tarball into the consumer project"
 
 DEVTOKEN="$(curl -fsS -X POST "$GW/api/local-init" -H 'X-Lobu-Client: cli' | jget device_token)"
 [ -n "$DEVTOKEN" ] || fail "could not obtain an Agent-API token (device_token) from /api/local-init"
+
+( cd "$CLIENT_DIR" && node isolate-conversation.mjs "$GW" "$MOCK_REQLOG" "$RUN_LOG" ) \
+  || fail "public API conversation did not complete through the isolate"
 
 CLIENT_OUT="$RUN_DIR/client-consumer.out"
 ( cd "$CLIENT_DIR" && LOBU_BASE_URL="$GW/lobu" LOBU_TOKEN="$DEVTOKEN" LOBU_AGENT_ID="echo" \
@@ -407,186 +432,6 @@ CSEND_REPLY="$(jget return_value.reply < "$CSEND")"
 [ "$CSEND_REPLY" = "$MOCK_REPLY" ] \
   || { cat "$CSEND" >&2; fail "conversations.send returned reply='$CSEND_REPLY', expected '$MOCK_REPLY' (worker turn / finalText read mismatch)"; }
 echo "✓ conversations.send round-tripped the agent reply via the durable runs poll ($MOCK_REPLY)"
-
-# 5d) `!`-bash: a message starting with `!` runs shell in the conversation's
-#     pinned sandbox, records a `bashExecution` transcript entry, and returns the
-#     output as the reply — the LLM is SKIPPED. Sent over the Direct API (the
-#     primary `!` surface: a ChatGPT-UI-style client driving the sandbox without
-#     the LLM). Crucially the `!` is the FIRST message in a FRESH conversation —
-#     the real launch use case, and the case that surfaced the persistence bug:
-#     pi defers its session-file flush until an assistant message exists, so an
-#     assistant-less `!` turn left the checkpoint reading an empty file and the
-#     record was lost. The worker now force-flushes an assistant-less `!` turn.
-#     A `!` turn finishes in ~20ms (no model roundtrip), beating any SSE
-#     subscription, so the durable transcript — the same projection the web reads
-#     on reload, exercising the core `entryToMessage` bashExecution branch — is
-#     the only race-free assert. We assert:
-#       (a) the shell RAN — a `bashExecution` message whose output carries a
-#           unique marker only `echo` can produce;
-#       (b) the model was SKIPPED — no new upstream provider call for the turn;
-#       (c) a normal LLM turn AFTER the `!` still checkpoints (no snapshot
-#           monotonic-prefix 409 from the force-flush) and both records coexist.
-BANG_MARKER="bang_ran_$$_$RANDOM"
-UPSTREAM_BEFORE=$(grep -c "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" 2>/dev/null || echo 0)
-# Create a DEVTOKEN session for agent `echo` on a NAMED thread, then message
-# its conversationId — the messages route is addressed by the session's
-# conversationId, not the bare agent id. The named thread makes the read side
-# deterministic: /history/threads/bang-e2e/messages rebuilds the identical
-# conversation id from (agent, DEVTOKEN user, org, thread).
-BANG_SESS="$RUN_DIR/bang-session.json"
-curl -fsS -X POST "$GW/lobu/api/v1/agents" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d '{"agentId":"echo","thread":"bang-e2e"}' > "$BANG_SESS" \
-  || { cat "$BANG_SESS" >&2; fail "!-bash: POST /api/v1/agents (create session) failed"; }
-BANG_CONV="$(jget agentId < "$BANG_SESS")"
-[ -n "$BANG_CONV" ] || { cat "$BANG_SESS" >&2; fail "!-bash: session create returned no conversationId"; }
-BANG_SEND="$RUN_DIR/bang-send.json"
-curl -fsS -X POST "$GW/lobu/api/v1/agents/$BANG_CONV/messages" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d "{\"content\":\"!echo $BANG_MARKER\"}" > "$BANG_SEND" \
-  || { cat "$BANG_SEND" >&2; fail "!-bash: POST /agents/$BANG_CONV/messages failed"; }
-[ "$(jget queued < "$BANG_SEND")" = "true" ] || { cat "$BANG_SEND" >&2; fail "!-bash message was not queued"; }
-# Poll the THREAD-addressed history endpoint (the same one the web uses to
-# render a chat thread on reload — it rebuilds the conversation id from
-# (agent, DEVTOKEN user, org, thread) and reads the durable snapshot, so it
-# also exercises the core `entryToMessage` bashExecution projection). NOT
-# `/history/session/messages` — that one is proxy-or-fallback: while any live
-# agent worker is still connected it proxies to THAT worker's own session
-# (whatever conversation it holds), so the assert would flake on which earlier
-# worker was still alive.
-BANG_HIST="$RUN_DIR/bang-history.json"
-BANG_OK=""
-for _ in $(seq 1 30); do
-  curl -fsS "$GW/lobu/api/v1/agents/echo/history/threads/bang-e2e/messages?limit=100" \
-    -H "authorization: Bearer $DEVTOKEN" > "$BANG_HIST" 2>/dev/null || { sleep 1; continue; }
-  if node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.exit(1)}const m=(j.messages||[]).find(x=>x.type==="bashExecution"&&JSON.stringify(x.content||"").includes(process.argv[1]));process.exit(m?0:1)})' "$BANG_MARKER" < "$BANG_HIST"; then
-    BANG_OK=1; break
-  fi
-  sleep 1
-done
-[ -n "$BANG_OK" ] || { tail -c 400 "$BANG_HIST" >&2; fail "!-bash: no bashExecution transcript entry carrying marker '$BANG_MARKER' (shell did not run, or D3 projection dropped it)"; }
-# The LLM must have been SKIPPED: no new upstream provider call for the `!` turn.
-UPSTREAM_AFTER=$(grep -c "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" 2>/dev/null || echo 0)
-[ "$UPSTREAM_AFTER" -eq "$UPSTREAM_BEFORE" ] || fail "!-bash hit the model provider ($UPSTREAM_BEFORE → $UPSTREAM_AFTER upstream calls); the LLM must be skipped"
-echo "✓ !-bash ran shell in the sandbox, recorded a bashExecution transcript entry, and skipped the LLM (marker: $BANG_MARKER)"
-
-# 5d.2) A NORMAL LLM turn in the SAME conversation, right after the assistant-less
-#       `!` force-flushed the session file. This guards the cross-turn regression:
-#       the force-flush must not desync the transcript so the next turn's
-#       checkpoint hits the snapshot monotonic-prefix guard (a 409 would surface
-#       as a durable agent-error and the assistant reply would never land).
-curl -fsS -X POST "$GW/lobu/api/v1/agents/$BANG_CONV/messages" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d '{"content":"after the bang"}' > "$RUN_DIR/bang-followup-send.json" \
-  || { cat "$RUN_DIR/bang-followup-send.json" >&2; fail "!-bash follow-up: POST failed"; }
-BANG_FOLLOW=""
-for _ in $(seq 1 30); do
-  curl -fsS "$GW/lobu/api/v1/agents/echo/history/threads/bang-e2e/messages?limit=100" \
-    -H "authorization: Bearer $DEVTOKEN" > "$BANG_HIST" 2>/dev/null || { sleep 1; continue; }
-  # Assert the follow-up turn checkpointed cleanly: EXACTLY ONE bashExecution
-  # carrying the marker (a second copy would mean the force-flush desynced the
-  # SessionManager and the assistant turn re-appended the whole branch) AND a
-  # fresh assistant reply, both in the same durable thread.
-  if node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.exit(1)}const ms=j.messages||[];const bangs=ms.filter(x=>x.type==="bashExecution"&&JSON.stringify(x.content||"").includes(process.argv[1]));const asst=ms.some(x=>x.role==="assistant");process.exit(bangs.length===1&&asst?0:1)})' "$BANG_MARKER" < "$BANG_HIST"; then
-    BANG_FOLLOW=1; break
-  fi
-  sleep 1
-done
-[ -n "$BANG_FOLLOW" ] || { tail -c 400 "$BANG_HIST" >&2; fail "!-bash follow-up: normal turn after the force-flushed \`!\` did not land (snapshot prefix 409?) or the bashExecution record was dropped"; }
-echo "✓ !-bash: a normal LLM turn after the force-flushed \`!\` checkpointed cleanly; both records coexist in the durable thread"
-
-# 5d.3) A preflight-BLOCKED `!` as the FIRST message of a FRESH conversation.
-#       enforceBashPreflight throws (package-install guard) → no pi bashExecution
-#       record is written, so this is the exact case where an assistant-less
-#       session would leave the checkpoint reading an empty file and REJECT the
-#       run. Assert the run reaches terminal completion (the durable runs row is
-#       `complete`, not a checkpoint-failure), proving the force-flush covers the
-#       blocked branch too — the friendly "blocked" reply still reaches the user.
-BLOCK_CONV="$RUN_DIR/bang-block-session.json"
-curl -fsS -X POST "$GW/lobu/api/v1/agents" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d '{"agentId":"echo","thread":"bang-block"}' > "$BLOCK_CONV" \
-  || { cat "$BLOCK_CONV" >&2; fail "!-bash blocked: create session failed"; }
-BLOCK_ID="$(jget agentId < "$BLOCK_CONV")"
-UPSTREAM_BLK_BEFORE=$(grep -c "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" 2>/dev/null || echo 0)
-curl -fsS -X POST "$GW/lobu/api/v1/agents/$BLOCK_ID/messages" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d '{"content":"!npm install left-pad"}' > "$RUN_DIR/bang-block-send.json" \
-  || { cat "$RUN_DIR/bang-block-send.json" >&2; fail "!-bash blocked: POST failed"; }
-# The run must not be rejected by a transcript-checkpoint failure. That failure
-# writes a durable agent-error interaction; assert none appears for this thread.
-BLOCK_OK=""
-for _ in $(seq 1 30); do
-  curl -fsS "$GW/lobu/api/v1/agents/echo/history/threads/bang-block/messages?limit=100" \
-    -H "authorization: Bearer $DEVTOKEN" > "$RUN_DIR/bang-block-hist.json" 2>/dev/null || { sleep 1; continue; }
-  if node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.exit(1)}const err=(j.interactions||[]).some(x=>x.type==="agent-error");process.exit(err?1:0)})' < "$RUN_DIR/bang-block-hist.json"; then
-    # No agent-error yet — give the run a beat to settle, then confirm it stays clean.
-    if grep -q "Transcript checkpoint failed" "$RUN_LOG"; then BLOCK_OK=""; else BLOCK_OK=1; fi
-    [ -n "$BLOCK_OK" ] && break
-  fi
-  sleep 1
-done
-[ -n "$BLOCK_OK" ] || { grep "Transcript checkpoint failed" "$RUN_LOG" | tail -2 >&2; fail "!-bash blocked: a preflight-blocked \`!\` on a fresh conversation failed the transcript checkpoint (assistant-less session not persisted)"; }
-UPSTREAM_BLK_AFTER=$(grep -c "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" 2>/dev/null || echo 0)
-[ "$UPSTREAM_BLK_AFTER" -eq "$UPSTREAM_BLK_BEFORE" ] || fail "!-bash blocked hit the model provider; a blocked \`!\` must still skip the LLM"
-echo "✓ !-bash: a preflight-blocked \`!\` on a fresh conversation completes cleanly (no checkpoint failure) and skips the LLM"
-
-# 5d.4) `!!` context exclusion. The excludeFromContext flag must keep the `!!`
-#       command AND its output out of every LATER model request, while the
-#       plain-`!` record from 5d DOES flow into context. The exclusion itself
-#       is implemented inside pi when it assembles the next turn's context, so
-#       this is the ONLY lobu-side proof the flag works end-to-end — no unit
-#       test can see it. Asserts against $MOCK_REQLOG (every /chat/completions
-#       body, JSONL). Reuses the bang-e2e thread, which already holds
-#       `!echo $BANG_MARKER` plus an assistant turn.
-EXCL_MARKER="excl_kept_out_$$_$RANDOM"
-UPSTREAM_EXCL_BEFORE=$(grep -c "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" 2>/dev/null || echo 0)
-curl -fsS -X POST "$GW/lobu/api/v1/agents/$BANG_CONV/messages" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d "{\"content\":\"!!echo $EXCL_MARKER\"}" > "$RUN_DIR/bang-excl-send.json" \
-  || { cat "$RUN_DIR/bang-excl-send.json" >&2; fail "!!-bash: POST failed"; }
-[ "$(jget queued < "$RUN_DIR/bang-excl-send.json")" = "true" ] || { cat "$RUN_DIR/bang-excl-send.json" >&2; fail "!!-bash message was not queued"; }
-# The `!!` record must still be VISIBLE in the durable transcript — it is
-# excluded from model context only, never from the user.
-EXCL_OK=""
-for _ in $(seq 1 30); do
-  curl -fsS "$GW/lobu/api/v1/agents/echo/history/threads/bang-e2e/messages?limit=100" \
-    -H "authorization: Bearer $DEVTOKEN" > "$BANG_HIST" 2>/dev/null || { sleep 1; continue; }
-  if node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.exit(1)}const m=(j.messages||[]).find(x=>x.type==="bashExecution"&&JSON.stringify(x.content||"").includes(process.argv[1]));process.exit(m?0:1)})' "$EXCL_MARKER" < "$BANG_HIST"; then
-    EXCL_OK=1; break
-  fi
-  sleep 1
-done
-[ -n "$EXCL_OK" ] || { tail -c 400 "$BANG_HIST" >&2; fail "!!-bash: no visible bashExecution entry carrying '$EXCL_MARKER' (\`!!\` must hide from the model, not the transcript)"; }
-UPSTREAM_EXCL_AFTER=$(grep -c "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" 2>/dev/null || echo 0)
-[ "$UPSTREAM_EXCL_AFTER" -eq "$UPSTREAM_EXCL_BEFORE" ] || fail "!!-bash hit the model provider; a \`!!\` turn must skip the LLM"
-# Scope the request-body asserts to model requests made AFTER the `!!` turn.
-EXCL_REQS_BEFORE=$(awk 'END { print NR }' "$MOCK_REQLOG" 2>/dev/null || echo 0)
-curl -fsS -X POST "$GW/lobu/api/v1/agents/$BANG_CONV/messages" \
-  -H "authorization: Bearer $DEVTOKEN" -H 'content-type: application/json' \
-  -d '{"content":"after the double bang"}' > "$RUN_DIR/bang-excl-followup.json" \
-  || { cat "$RUN_DIR/bang-excl-followup.json" >&2; fail "!!-bash follow-up: POST failed"; }
-EXCL_REQS_AFTER="$EXCL_REQS_BEFORE"
-for _ in $(seq 1 30); do
-  EXCL_REQS_AFTER=$(awk 'END { print NR }' "$MOCK_REQLOG" 2>/dev/null || echo 0)
-  [ "$EXCL_REQS_AFTER" -gt "$EXCL_REQS_BEFORE" ] && break
-  sleep 1
-done
-[ "$EXCL_REQS_AFTER" -gt "$EXCL_REQS_BEFORE" ] || fail "!!-bash follow-up turn never produced a model request (nothing to assert exclusion against)"
-# Negative: the excluded marker must not reach the model in ANY later request.
-if awk -v start="$((EXCL_REQS_BEFORE + 1))" -v marker="$EXCL_MARKER" \
-  'NR >= start && index($0, marker) { found=1 } END { exit !found }' \
-  "$MOCK_REQLOG"; then
-  fail "!!-bash: excluded marker '$EXCL_MARKER' leaked into a later model request (excludeFromContext broken)"
-fi
-# Positive control: the PLAIN-`!` marker from 5d must be IN that same request —
-# unexcluded bashExecution records do flow into model context. Without this the
-# negative assert would pass vacuously if bash records never reached context.
-awk -v start="$((EXCL_REQS_BEFORE + 1))" -v marker="$BANG_MARKER" \
-  'NR >= start && index($0, marker) { found=1 } END { exit !found }' \
-  "$MOCK_REQLOG" \
-  || fail "!!-bash positive control: plain-\`!\` marker '$BANG_MARKER' missing from the later model request — bash records aren't reaching context, absence assert is vacuous"
-echo "✓ !!-bash: record visible in transcript, absent from later model context (plain-! record present — control non-vacuous)"
 
 # 6) Connector sync — prove the COMPILED connector actually RUNS and emits events.
 #    Find the feed manage_feeds created from the `pulse` connection, trigger an
@@ -682,13 +527,30 @@ api manage_automations "$(node -e 'const t=process.argv[1],w=process.argv[2],r=N
 grep -q '"action":"complete_window"\|"action": "complete_window"' "$CW" || { cat "$CW" >&2; fail "complete_window did not return the expected action"; }
 grep -qi "Failed to generate an embedded Lobu service token" "$RUN_LOG" \
   && fail "automation dispatch failed on the service token (lobu-internal oauth_client missing)"
+# Assert the dispatch landed a DURABLE agent_turn run. The old probe grepped
+# the run log for "Lobu worker for session: …automation_<id>_run", which only
+# the managed subprocess ever printed. The runs row carries the same identity in
+# `input.turn.conversation_id` (`<agent>_automation_<id>_run_<runId>`) and is the
+# stronger claim: it is the record the worker claims and reports against.
+# `automation_id` is NOT usable here — it stays null on the child agent_turn row.
+AUTO_DISPATCH="$RUN_DIR/automation-dispatch.json"
+AUTO_OK=""
 for _ in $(seq 1 30); do
-  grep -qiE "Lobu worker for session: session-[^ ]*automation_${AUTOMATION_ID}_run" "$RUN_LOG" && break
+  api manage_operations '{"action":"list_runs","run_types":["agent_turn"],"limit":50}' \
+    > "$AUTO_DISPATCH" 2>/dev/null || { sleep 1; continue; }
+  # The child must reach `completed`, not merely exist: matching on the
+  # conversation alone was satisfied by a failed or still-running turn while
+  # the line below claimed it completed.
+  if node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.exit(1)}const want=`automation_${process.argv[1]}_run_${process.argv[2]}`;const mine=(j.runs||[]).filter(r=>String(r.input?.turn?.conversation_id??"").includes(want));if(mine.length===0)process.exit(1);const bad=mine.find(r=>["failed","cancelled","timeout"].includes(String(r.status)));if(bad){console.error(`agent_turn run ${bad.id} reached ${bad.status}`);process.exit(2)}process.exit(mine.some(r=>String(r.status)==="completed")?0:1)})' "$AUTOMATION_ID" "$TRIG_RUN_ID" < "$AUTO_DISPATCH"; then
+    AUTO_OK=1; break
+  elif [ $? -eq 2 ]; then
+    # Terminal failure: waiting longer cannot turn this green.
+    break
+  fi
   sleep 1
 done
-grep -qiE "Lobu worker for session: session-[^ ]*automation_${AUTOMATION_ID}_run" "$RUN_LOG" \
-  || fail "automation run ${TRIG_RUN_ID} did not dispatch to a worker"
-echo "✓ automation trigger dispatched and completed one run (run_id=$TRIG_RUN_ID)"
+[ -n "$AUTO_OK" ] || { tail -c 600 "$AUTO_DISPATCH" >&2; fail "automation run ${TRIG_RUN_ID} did not COMPLETE an agent_turn run (conversation automation_${AUTOMATION_ID}_run_${TRIG_RUN_ID})"; }
+echo "✓ automation trigger dispatched and completed one agent turn (run_id=$TRIG_RUN_ID)"
 
 # Assert the reaction's side effect: a SDKE2E_REACTION_OK knowledge event exists.
 # query_sql auto-scopes to the org and auto-adds ORDER BY/LIMIT, so we pass a

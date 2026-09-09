@@ -39,14 +39,19 @@ import type {
 const logger = createLogger("agent-tooling-resolver");
 
 /**
- * Mirrors `DeploymentManager.LEASE_RECYCLE_MARGIN_MS`. A lease minted with less
- * life than this is reported immediately. Its expiry is still recorded; the
- * deployment age floor prevents a recycle loop while preserving later renewal.
+ * A lease minted with less life than this is reported, because a provider
+ * handing out a nearly-dead credential is a fault worth a log line even when
+ * the command it is attached to will finish long before it lapses.
+ *
+ * No longer a recycle trigger: it mirrored the subprocess lane's
+ * `DeploymentManager.LEASE_RECYCLE_MARGIN_MS`, which decided when to retire a
+ * warm worker that had read its env at startup. Nothing is warm now, so this
+ * is a reporting threshold only.
  */
-const RECYCLE_MARGIN_MS = 5 * 60_000;
+const SHORT_LEASE_WARN_MS = 5 * 60_000;
 
-function isWithinRecycleMargin(expiresAt: Date): boolean {
-  return expiresAt.getTime() - Date.now() <= RECYCLE_MARGIN_MS;
+function isShortLivedLease(expiresAt: Date): boolean {
+  return expiresAt.getTime() - Date.now() <= SHORT_LEASE_WARN_MS;
 }
 
 /** The sandbox contribution of every eligible connection, already unioned. */
@@ -87,9 +92,9 @@ export const EMPTY_AGENT_TOOLING: ResolvedAgentTooling = {
 };
 
 /**
- * Env var names a connector may never contribute. The deployment manager builds
- * the base worker environment first and then merges the contribution over it, so
- * an unguarded name would REPLACE gateway-owned runtime state:
+ * Env var names a connector may never contribute. A consumer that builds a base
+ * environment and merges a contribution over it would let an unguarded name
+ * REPLACE gateway-owned runtime state:
  * `WORKER_TOKEN` is the signed gateway credential (a contributed one would also
  * inherit the lease exemption from placeholder injection, so the worker would
  * authenticate with an attacker-chosen token), `HTTP_PROXY`/`HTTPS_PROXY`/
@@ -400,6 +405,15 @@ export async function resolveAgentToolingDeclaration(params: {
     // in the digest even though it contributes nothing to packages/domains.
     identity.push(toolingIdentityEntry(row, tooling, authSchema));
   }
+  // NOTE: packages and domains only — deliberately NO env, and no lease is
+  // minted here. This path runs at DISPATCH, to decide what the sandbox needs
+  // on PATH and which hosts it may reach; a credential minted at dispatch
+  // would start ageing before the agent ran its first command.
+  //
+  // Leases are minted per command instead, by `resolveLeasedExecEnv` on the
+  // exec route, which calls `resolveAgentTooling` below. Keeping the two apart
+  // is what lets the declaration be cached per turn while the credential stays
+  // as young as the command that uses it.
   return {
     packages: [...packages],
     domains: [...domains],
@@ -408,7 +422,18 @@ export async function resolveAgentToolingDeclaration(params: {
 }
 
 /**
- * Resolve every eligible connection's sandbox contribution for one deployment.
+ * Resolve every eligible connection's sandbox contribution for one deployment,
+ * minting the short-lived provider leases its env vars name.
+ *
+ * Called per sandbox command by `resolveLeasedExecEnv` (the exec route), which
+ * is the delivery boundary: the env it returns is attached to that one command
+ * gateway-side and never round-trips through the worker.
+ *
+ * The `leaseExpiresAt` it reports is vestigial on this path. It existed so a
+ * warm subprocess worker could be recycled before the credential it read at
+ * startup lapsed; a per-command mint has no such window. It stays on the
+ * result because the value is a true fact about the leases minted, and the
+ * caller is free to ignore it.
  *
  * Eligibility (v1): every ACTIVE, non-deleted connection in the agent's org
  * whose connector declares `agent_tooling`. `connections.agent_id` is not an
@@ -521,17 +546,14 @@ export async function resolveAgentTooling(params: {
       if (!lease) continue;
       env[entry.name] = lease.token;
       envSource.set(entry.name, connectionId);
-      // Earliest wins: the deployment is only good until its FIRST credential
-      // lapses, not its last.
+      // Earliest wins: the reported expiry is the FIRST credential to lapse,
+      // not the last.
       //
-      // A freshly minted token that is ALREADY inside the recycle margin means
-      // the provider is issuing short-lived credentials (clock skew, or a
-      // fault). It is still delivered — a short life beats none — and its
-      // expiry is still recorded so renewal happens. The deployment manager's
-      // minimum-age floor is what prevents this from becoming a recycle loop;
-      // suppressing the expiry here instead would leave the deployment unable
-      // to renew at all.
-      if (lease.expiresAt && isWithinRecycleMargin(lease.expiresAt)) {
+      // A freshly minted token that is already near expiry means the provider
+      // is issuing short-lived credentials (clock skew, or a fault). It is
+      // still delivered — a short life beats none, and the command it is
+      // attached to runs now.
+      if (lease.expiresAt && isShortLivedLease(lease.expiresAt)) {
         logger.warn(
           {
             env_name: entry.name,

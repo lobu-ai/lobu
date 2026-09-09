@@ -1,113 +1,55 @@
 /**
- * The turn's workspace tools: `bash`, `read`, `write`, `ls` and `find` over a
- * filesystem that exists for this turn only.
+ * The turn's workspace tools over a filesystem that exists for this turn only.
  *
  * GUEST code, bundled with the agent entry, so it must stay portable: no
  * `node:` import, no host module, no root `@lobu/core` import (that root drags
- * the Node logger and tracing SDKs). The shell is just-bash's browser build —
- * the same shell the subprocess lane ran its `bash` tool on, minus the real
- * binaries and the network it could reach there. The file tools implement pi's
- * `read`/`write`/`ls`/`find` contracts (schemas, limits and the notices the
- * model has been reading) directly over just-bash's `IFileSystem`: pi's own
- * factories pull the terminal UI, syntax highlighting and an image codec into
- * any bundle that imports them, none of which loads in an isolate.
+ * the Node logger and tracing SDKs). The local shell is just-bash's browser
+ * build, without real binaries or network access. Write and edit use Pi's own
+ * factories with filesystem operations, as do read, ls and find. Pi also owns
+ * output truncation; the bundler excludes unused Node I/O and renderers. Grep
+ * stays local because Pi's grep always starts an rg process.
  *
- * The filesystem is in-memory and empty at the start of every turn. Nothing
+ * The filesystem is in-memory and lives for one turn only. It starts empty
+ * except for what the HOST seeds into it before the model runs — this turn's
+ * non-image attachments under `input/` and the agent's enabled skills under
+ * `.skills/`, the two established agent-visible locations. Nothing
  * written here outlives the turn, and nothing here can reach the network: the
  * shell is built without `fetch`, so `curl` and `wget` do not exist in it.
  */
 
+import { withLobuFileParameters } from '@lobu/core/agent-tooling';
+import {
+  createEditTool, createFindTool, createLsTool, createReadTool, createWriteTool,
+  DEFAULT_MAX_BYTES as MAX_BYTES, DEFAULT_MAX_LINES as MAX_LINES,
+  formatSize, truncateHead, truncateLine, truncateTail,
+} from '@mariozechner/pi-coding-agent';
 import { enforceBashCommandPolicy, isDirectPackageInstallCommand } from '@lobu/core/tool-policy';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { Bash, InMemoryFs } from 'just-bash/browser';
-import type { AgentTurnBashPolicy, AgentTurnBuiltinTool } from './types.js';
+import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 
 /** Where a turn's files live; also the shell's working directory. */
 export const WORKSPACE_ROOT = '/workspace';
 
-/** pi's output caps, so a file or a command reads the same on both lanes. */
-const MAX_LINES = 2000;
-const MAX_BYTES = 50 * 1024;
+/**
+ * Where the turn's own attachments are seeded. The name is part of the
+ * agent-visible contract: the system prompt lists each upload by this path.
+ */
+export const INPUT_DIR = `${WORKSPACE_ROOT}/input`;
+
+/**
+ * Where the agent's enabled skills are seeded, one `SKILL.md` per skill.
+ */
+export const SKILLS_DIR = `${WORKSPACE_ROOT}/.skills`;
+
 const LS_LIMIT = 500;
 const FIND_LIMIT = 1000;
 const FIND_IGNORED = /(^|\/)(node_modules|\.git)(\/|$)/;
 
-/** The same interpreter budget the subprocess lane gave its shell. */
+/** The local shell's interpreter budget. */
 const BASH_LIMITS = { maxCommandCount: 50_000, maxLoopIterations: 50_000 };
 
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-
-function byteLength(text: string): number {
-  return encoder.encode(text).length;
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-interface Truncation {
-  content: string;
-  truncated: boolean;
-  truncatedBy: 'lines' | 'bytes' | null;
-  totalLines: number;
-  outputLines: number;
-  outputBytes: number;
-  firstLineExceedsLimit: boolean;
-}
-
-/** Keep the first lines that fit, as pi's `truncateHead` does. */
-function truncateHead(content: string, maxLines = MAX_LINES, maxBytes = MAX_BYTES): Truncation {
-  const lines = content.split('\n');
-  const totalLines = lines.length;
-  const totalBytes = byteLength(content);
-  if (totalLines <= maxLines && totalBytes <= maxBytes) {
-    return { content, truncated: false, truncatedBy: null, totalLines, outputLines: totalLines, outputBytes: totalBytes, firstLineExceedsLimit: false };
-  }
-  if (byteLength(lines[0] ?? '') > maxBytes) {
-    return { content: '', truncated: true, truncatedBy: 'bytes', totalLines, outputLines: 0, outputBytes: 0, firstLineExceedsLimit: true };
-  }
-  const kept: string[] = [];
-  let bytes = 0;
-  let truncatedBy: 'lines' | 'bytes' = 'lines';
-  for (let i = 0; i < lines.length && i < maxLines; i++) {
-    const lineBytes = byteLength(lines[i] ?? '') + (i > 0 ? 1 : 0);
-    if (bytes + lineBytes > maxBytes) {
-      truncatedBy = 'bytes';
-      break;
-    }
-    kept.push(lines[i] ?? '');
-    bytes += lineBytes;
-  }
-  const out = kept.join('\n');
-  return { content: out, truncated: true, truncatedBy, totalLines, outputLines: kept.length, outputBytes: byteLength(out), firstLineExceedsLimit: false };
-}
-
-/** Keep the last lines that fit, as pi's `truncateTail` does for command output. */
-function truncateTail(content: string, maxLines = MAX_LINES, maxBytes = MAX_BYTES): Truncation {
-  const lines = content.split('\n');
-  const totalLines = lines.length;
-  const totalBytes = byteLength(content);
-  if (totalLines <= maxLines && totalBytes <= maxBytes) {
-    return { content, truncated: false, truncatedBy: null, totalLines, outputLines: totalLines, outputBytes: totalBytes, firstLineExceedsLimit: false };
-  }
-  const kept: string[] = [];
-  let bytes = 0;
-  let truncatedBy: 'lines' | 'bytes' = 'lines';
-  for (let i = lines.length - 1; i >= 0 && kept.length < maxLines; i--) {
-    const lineBytes = byteLength(lines[i] ?? '') + (kept.length > 0 ? 1 : 0);
-    if (bytes + lineBytes > maxBytes) {
-      truncatedBy = 'bytes';
-      break;
-    }
-    kept.unshift(lines[i] ?? '');
-    bytes += lineBytes;
-  }
-  const out = kept.join('\n');
-  return { content: out, truncated: true, truncatedBy, totalLines, outputLines: kept.length, outputBytes: byteLength(out), firstLineExceedsLimit: false };
-}
 
 function text(value: string): { content: [{ type: 'text'; text: string }]; details: Record<string, never> } {
   return { content: [{ type: 'text', text: value }], details: {} };
@@ -137,6 +79,22 @@ function optionalNumber(args: unknown, key: string): number | undefined {
  */
 function positiveLimit(requested: number | undefined, fallback: number): number {
   return requested !== undefined && requested >= 1 ? Math.floor(requested) : fallback;
+}
+
+/** Lobu's existing admission rule; Pi owns the listing and its result. */
+function withPositiveLimit(tool: AgentTool, fallback: number): AgentTool {
+  return {
+    ...tool,
+    execute: (id, args, signal, onUpdate) => tool.execute(id, {
+      ...(args && typeof args === 'object' ? args : {}),
+      limit: positiveLimit(optionalNumber(args, 'limit'), fallback),
+    }, signal, onUpdate),
+  };
+}
+
+/** Binary reads are a Lobu admission refusal, not text for Pi to slice. */
+class BinaryWorkspaceFile extends Error {
+  constructor(readonly size: number) { super('Binary workspace file'); }
 }
 
 /** A `*`/`**`/`?` glob to a regexp over a `/`-separated path. */
@@ -174,10 +132,146 @@ function looksBinary(bytes: Uint8Array): boolean {
 }
 
 /**
- * Build the workspace tools the turn admits, over one fresh filesystem. The
- * shell and every file tool share it, so what `bash` writes `read` sees.
+ * One file the HOST places in the turn's filesystem before the model runs.
+ *
+ * The guest never fetches: the gateway reads an attachment out of the artifact
+ * store it already owns, and a skill straight out of agent settings, then hands
+ * the bytes over the same signed envelope as everything else. `data` is base64
+ * so arbitrary bytes survive the JSON hop intact; `text` is the convenience for
+ * content that is already a string, and exactly one of the two is given.
  */
-export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bashPolicy?: AgentTurnBashPolicy): AgentTool[] {
+export type WorkspaceSeedFile =
+  | { path: string; data: string; text?: never }
+  | { path: string; text: string; data?: never };
+
+/**
+ * The turn's filesystem, and the tools that act on it.
+ *
+ * Returned together because more than the file tools need the FS: `upload_file`
+ * reads the very same in-memory tree, so the workspace the model wrote with
+ * `bash` is the workspace it can hand to the user. Handing out the `InMemoryFs`
+ * is what keeps that one filesystem, rather than giving the media port a second
+ * one that would always look empty.
+ */
+export interface AgentWorkspace {
+  /** The turn's filesystem: seeded by the host, gone at the end of the turn. */
+  fs: InMemoryFs;
+  /** Resolved once the root directory exists; every tool awaits it first. */
+  ready: Promise<unknown>;
+  tools: AgentTool[];
+  /**
+   * Write host-supplied files into the turn's tree before the model runs.
+   *
+   * Containment goes through the SAME `resolve` the file tools use, so a
+   * traversing path is refused here for the reason it is refused there rather
+   * than by a second check that could drift. Throws on the first bad path and
+   * writes nothing further, because a partially seeded workspace would tell the
+   * model a file exists when its sibling silently did not.
+   */
+  seed(files: readonly WorkspaceSeedFile[]): Promise<void>;
+  /**
+   * Resolve a model-supplied path inside the workspace root, or throw.
+   * Exported so a non-file tool that takes a path — `upload_file` — enforces
+   * containment through the SAME check the file tools do, rather than a second
+   * implementation that could drift from it.
+   */
+  resolve(path: string | undefined): string;
+}
+
+// ---------------------------------------------------------------------------
+// grep: pi's tool over the in-memory tree, no ripgrep needed.
+// ---------------------------------------------------------------------------
+
+function normalizeToLF(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+const GREP_LIMIT = 100;
+const GREP_MAX_LINE_LENGTH = 500;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ---------------------------------------------------------------------------
+// Remote bash: a sandbox-pinned conversation runs its commands in the remote
+// runtime through the host, while file tools remain in memory.
+// ---------------------------------------------------------------------------
+
+/** How the host runs one command in the remote runtime sandbox. */
+export interface RemoteRuntime {
+  exec(request: RuntimeExecRequest): Promise<RuntimeExecResult>;
+}
+
+/** The agent-facing half of the honest-degradation contract for a failed package install. */
+function provisionNotice(sandbox: unknown): string | undefined {
+  if (!sandbox || typeof sandbox !== 'object') return undefined;
+  const packages = (sandbox as { packages?: unknown }).packages;
+  if (!packages || typeof packages !== 'object') return undefined;
+  const failed = ((packages as { failed?: unknown }).failed ?? []) as unknown[];
+  const names = Array.isArray(failed) ? failed.filter((f): f is string => typeof f === 'string' && f.length > 0) : [];
+  if (names.length === 0) return undefined;
+  const error = (packages as { error?: unknown }).error;
+  const why = typeof error === 'string' && error.trim() ? ` (${error.trim()})` : '';
+  return (
+    `lobu: these tools could not be installed and are NOT available in this sandbox: ${names.join(', ')}${why}. ` +
+    'Commands that need them will fail — do not try to install them yourself; ' +
+    'an admin must fix the package configuration.\n'
+  );
+}
+
+async function runRemoteBash(remote: RemoteRuntime, command: string, timeout: number | undefined): Promise<string> {
+  const result = await remote.exec({
+    command,
+    ...(timeout !== undefined && timeout > 0 ? { timeoutMs: timeout * 1000 } : {}),
+  });
+  if (result.status < 200 || result.status >= 300) {
+    const message = result.error ?? `Runtime exec failed with HTTP ${result.status}`;
+    if (result.kind === 'infrastructure') {
+      // The SANDBOX failed, not the command; say so, or the model rewrites a
+      // correct command and retries into an already failing endpoint.
+      const ran =
+        result.outcome === 'not_started'
+          ? 'your command did not run'
+          : result.outcome === 'completed'
+            ? 'your command RAN but its output could not be retrieved'
+            : 'it is unknown whether your command ran';
+      const advice =
+        result.outcome === 'not_started'
+          ? result.retryable
+            ? ' This is usually transient — the same command may succeed shortly.'
+            : ''
+          : ' Do NOT re-run it blindly; check whether it took effect first.';
+      return `lobu: sandbox runtime error — ${ran}.${advice}\n${message}\n\nCommand exited with code 126`;
+    }
+    return `${message}\n\nCommand exited with code 1`;
+  }
+  let output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const notice = provisionNotice(result.sandbox);
+  if (notice) output += `${output.length > 0 && !output.endsWith('\n') ? '\n' : ''}${notice}`;
+  const truncation = truncateTail(output);
+  let rendered = truncation.content || '(no output)';
+  if (truncation.truncated) {
+    const start = truncation.totalLines - truncation.outputLines + 1;
+    rendered += `\n\n[Showing lines ${start}-${truncation.totalLines} of ${truncation.totalLines}${truncation.truncatedBy === 'bytes' ? ` (${formatSize(MAX_BYTES)} limit)` : ''}]`;
+  }
+  // The route reports a missing exit code as the command failing with 1.
+  const exitCode = result.exitCode ?? 1;
+  if (exitCode !== 0) rendered += `\n\nCommand exited with code ${exitCode}`;
+  return rendered;
+}
+
+/**
+ * Build the workspace tools the turn admits, over one fresh filesystem. The
+ * local shell and every file tool share it, so what local `bash` writes `read`
+ * sees. A supplied remote runtime replaces only `bash`; file tools remain on
+ * this in-memory filesystem.
+ */
+export function createWorkspace(
+  names: readonly AgentTurnBuiltinTool[],
+  bashPolicy?: AgentTurnBashPolicy,
+  remote?: RemoteRuntime
+): AgentWorkspace {
   const fs = new InMemoryFs();
   const ready = fs.mkdir(WORKSPACE_ROOT, { recursive: true });
   const shell = new Bash({ fs, cwd: WORKSPACE_ROOT, executionLimits: BASH_LIMITS });
@@ -192,15 +286,97 @@ export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bas
     }
     return absolute;
   };
-  // `resolve` guarantees a path under the workspace root, so the last slash is
-  // always at a positive index.
-  const dirname = (path: string): string => path.slice(0, path.lastIndexOf('/'));
+  // Pi owns mutation ordering, matching, cancellation, and result formatting.
+  // Only filesystem access changes: every operation stays in this turn's tree.
+  const writeFile = async (path: string, content: string): Promise<void> => {
+    await ready;
+    await fs.writeFile(resolve(path), content);
+  };
+  // Host-placed files. Bytes go in as a Uint8Array rather than a string: a
+  // decoded-to-UTF-8 round trip would corrupt every attachment that is not
+  // text, and an attachment is exactly the case this exists for.
+  const seed = async (files: readonly WorkspaceSeedFile[]): Promise<void> => {
+    await ready;
+    for (const file of files) {
+      const absolute = resolve(file.path);
+      const parent = absolute.slice(0, absolute.lastIndexOf('/'));
+      if (parent && parent !== absolute) await fs.mkdir(parent, { recursive: true });
+      await fs.writeFile(
+        absolute,
+        file.data !== undefined ? new Uint8Array(Buffer.from(file.data, 'base64')) : file.text
+      );
+    }
+  };
+  const write = withLobuFileParameters(createWriteTool(WORKSPACE_ROOT, { operations: {
+    writeFile,
+    mkdir: async (path) => { await ready; await fs.mkdir(resolve(path), { recursive: true }); },
+  } }), 'write');
+  const edit = withLobuFileParameters(createEditTool(WORKSPACE_ROOT, { operations: {
+    writeFile,
+    readFile: async (path) => { await ready; return Buffer.from(await fs.readFileBuffer(resolve(path))); },
+    access: async (path) => { await ready; await fs.stat(resolve(path)); },
+  } }), 'edit');
+
+  const piRead: AgentTool = withLobuFileParameters(createReadTool(WORKSPACE_ROOT, { operations: {
+    access: async (path) => {
+      await ready;
+      const absolute = resolve(path);
+      if (!(await fs.exists(absolute))) throw new Error(`File not found: ${absolute}`);
+      if ((await fs.stat(absolute)).isDirectory) throw new Error(`Not a file: ${absolute}`);
+    },
+    readFile: async (path) => {
+      const bytes = await fs.readFileBuffer(resolve(path));
+      if (looksBinary(bytes)) throw new BinaryWorkspaceFile(bytes.length);
+      return Buffer.from(bytes);
+    },
+  } }), 'read');
+  const read: AgentTool = {
+    ...piRead,
+    description: `Read the contents of a text file in the workspace. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
+    async execute(...args: Parameters<typeof piRead.execute>) {
+      try { return await piRead.execute(...args); }
+      catch (error) {
+        if (error instanceof BinaryWorkspaceFile) return text(`[Binary file: ${formatSize(error.size)}. This workspace reads text files only.]`);
+        throw error;
+      }
+    },
+  };
+  const exists = async (path: string): Promise<boolean> => { await ready; return fs.exists(resolve(path)); };
+  const ls = withPositiveLimit(createLsTool(WORKSPACE_ROOT, { operations: {
+    exists,
+    stat: async (path) => { await ready; const stat = await fs.stat(resolve(path)); return { isDirectory: () => stat.isDirectory }; },
+    readdir: async (path) => { await ready; return fs.readdir(resolve(path)); },
+  } }), LS_LIMIT);
+  const find = { ...withPositiveLimit(createFindTool(WORKSPACE_ROOT, { operations: {
+    exists,
+    glob: async (pattern, cwd, { limit }) => {
+      await ready;
+      const root = resolve(cwd);
+      const prefix = `${root}/`;
+      const matcher = globToRegExp(pattern);
+      const wholePath = pattern.includes('/');
+      const matches: string[] = [];
+      for (const candidate of fs.getAllPaths().sort()) {
+        if (candidate === root || !candidate.startsWith(prefix)) continue;
+        const relative = candidate.slice(prefix.length);
+        if (FIND_IGNORED.test(relative)) continue;
+        if (!matcher.test(wholePath ? relative : (relative.split('/').pop() ?? relative))) continue;
+        matches.push(candidate);
+        if (matches.length >= limit) break;
+      }
+      return matches;
+    },
+  } }), FIND_LIMIT),
+    description: `Find files by glob pattern in the workspace. Returns paths relative to the search directory, one per line, skipping node_modules and .git. Output is truncated to ${FIND_LIMIT} results or ${MAX_BYTES / 1024}KB (whichever is hit first).`,
+  };
 
   const tools: Record<AgentTurnBuiltinTool, AgentTool> = {
     bash: {
       name: 'bash',
       label: 'bash',
-      description: `Execute a bash command in the workspace (${WORKSPACE_ROOT}). Returns stdout and stderr. Output is truncated to last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). The workspace has no network access and no package manager. Optionally provide a timeout in seconds.`,
+      description: remote
+        ? `Execute a bash command in the conversation's pinned remote sandbox. The sandbox does not share the file tools' in-memory workspace. Returns stdout and stderr. Output is truncated to last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Network and installed tools follow the sandbox configuration; direct package installation is blocked. Optionally provide a timeout in seconds.`
+        : `Execute a bash command in the workspace (${WORKSPACE_ROOT}). Returns stdout and stderr. Output is truncated to last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). The workspace has no network access and no package manager. Optionally provide a timeout in seconds.`,
       parameters: {
         type: 'object',
         properties: {
@@ -215,9 +391,12 @@ export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bas
         if (bashPolicy) enforceBashCommandPolicy(command, bashPolicy);
         if (isDirectPackageInstallCommand(command)) {
           throw new Error(
-            'DIRECT PACKAGE INSTALL BLOCKED. This workspace has no package manager and no network; use your other tools to reach data instead.'
+            remote
+              ? 'DIRECT PACKAGE INSTALL BLOCKED. Use the sandbox packages configured by an admin.'
+              : 'DIRECT PACKAGE INSTALL BLOCKED. This workspace has no package manager and no network; use your other tools to reach data instead.'
           );
         }
+        if (remote) return text(await runRemoteBash(remote, command, timeout));
         await ready;
         const result = await shell.exec(command, {
           cwd: WORKSPACE_ROOT,
@@ -234,162 +413,109 @@ export function createWorkspaceTools(names: readonly AgentTurnBuiltinTool[], bas
         return text(output);
       },
     },
-    read: {
-      name: 'read',
-      label: 'read',
-      description: `Read the contents of a text file in the workspace. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
+    read,
+    write,
+    edit,
+    grep: {
+      name: 'grep',
+      label: 'grep',
+      description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Output is truncated to ${GREP_LIMIT} matches or ${MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`,
       parameters: {
         type: 'object',
         properties: {
-          file_path: { type: 'string', description: 'Path to the file to read (relative to the workspace, or absolute)' },
-          offset: { type: 'number', description: 'Line number to start reading from (1-indexed)' },
-          limit: { type: 'number', description: 'Maximum number of lines to read' },
-        },
-        required: ['file_path'],
-      } as never,
-      execute: async (_id, args) => {
-        const path = requireString(args, 'file_path');
-        const offset = optionalNumber(args, 'offset');
-        const limit = optionalNumber(args, 'limit');
-        await ready;
-        const absolute = resolve(path);
-        if (!(await fs.exists(absolute))) throw new Error(`File not found: ${absolute}`);
-        const stat = await fs.stat(absolute);
-        if (stat.isDirectory) throw new Error(`Not a file: ${absolute}`);
-        const bytes = await fs.readFileBuffer(absolute);
-        if (looksBinary(bytes)) {
-          return text(`[Binary file: ${formatSize(bytes.length)}. This workspace reads text files only.]`);
-        }
-        const lines = decoder.decode(bytes).split('\n');
-        const start = offset ? Math.max(0, offset - 1) : 0;
-        if (start >= lines.length) throw new Error(`Offset ${offset} is beyond end of file (${lines.length} lines total)`);
-        const end = limit !== undefined ? Math.min(start + limit, lines.length) : lines.length;
-        const selected = lines.slice(start, end).join('\n');
-        const truncation = truncateHead(selected);
-        const startDisplay = start + 1;
-        if (truncation.firstLineExceedsLimit) {
-          return text(
-            `[Line ${startDisplay} is ${formatSize(byteLength(lines[start] ?? ''))}, exceeds ${formatSize(MAX_BYTES)} limit. Use bash: sed -n '${startDisplay}p' ${path} | head -c ${MAX_BYTES}]`
-          );
-        }
-        let output = truncation.content;
-        if (truncation.truncated) {
-          const endDisplay = startDisplay + truncation.outputLines - 1;
-          output += `\n\n[Showing lines ${startDisplay}-${endDisplay} of ${lines.length}${truncation.truncatedBy === 'bytes' ? ` (${formatSize(MAX_BYTES)} limit)` : ''}. Use offset=${endDisplay + 1} to continue.]`;
-        } else if (end < lines.length) {
-          output += `\n\n[Showing lines ${startDisplay}-${end} of ${lines.length}. ${lines.length - end} more lines. Use offset=${end + 1} to continue.]`;
-        }
-        return text(output);
-      },
-    },
-    write: {
-      name: 'write',
-      label: 'write',
-      description: "Write content to a file in the workspace. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
-      parameters: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Path to the file to write (relative to the workspace, or absolute)' },
-          content: { type: 'string', description: 'Content to write to the file' },
-        },
-        required: ['file_path', 'content'],
-      } as never,
-      execute: async (_id, args) => {
-        const path = requireString(args, 'file_path');
-        const content = args && typeof args === 'object' ? (args as Record<string, unknown>).content : undefined;
-        if (typeof content !== 'string') throw new Error('Missing required parameter: content');
-        await ready;
-        const absolute = resolve(path);
-        await fs.mkdir(dirname(absolute), { recursive: true });
-        await fs.writeFile(absolute, content);
-        return text(`Successfully wrote ${byteLength(content)} bytes to ${path}`);
-      },
-    },
-    ls: {
-      name: 'ls',
-      label: 'ls',
-      description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to ${LS_LIMIT} entries or ${MAX_BYTES / 1024}KB (whichever is hit first).`,
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory to list (default: the workspace root)' },
-          limit: { type: 'number', description: `Maximum number of entries to return (default: ${LS_LIMIT})` },
-        },
-      } as never,
-      execute: async (_id, args) => {
-        const path = optionalString(args, 'path');
-        const limit = positiveLimit(optionalNumber(args, 'limit'), LS_LIMIT);
-        await ready;
-        const absolute = resolve(path);
-        if (!(await fs.exists(absolute))) throw new Error(`Path not found: ${absolute}`);
-        if (!(await fs.stat(absolute)).isDirectory) throw new Error(`Not a directory: ${absolute}`);
-        const entries = (await fs.readdir(absolute)).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-        const rows: string[] = [];
-        let entryLimitReached = false;
-        for (const entry of entries) {
-          if (rows.length >= limit) {
-            entryLimitReached = true;
-            break;
-          }
-          const stat = await fs.stat(`${absolute}/${entry}`);
-          rows.push(stat.isDirectory ? `${entry}/` : entry);
-        }
-        if (rows.length === 0) return text('(empty directory)');
-        const truncation = truncateHead(rows.join('\n'), Number.MAX_SAFE_INTEGER);
-        let output = truncation.content;
-        const notices: string[] = [];
-        if (entryLimitReached) notices.push(`${limit} entries limit reached. Use limit=${limit * 2} for more`);
-        if (truncation.truncated) notices.push(`${formatSize(MAX_BYTES)} limit reached`);
-        if (notices.length > 0) output += `\n\n[${notices.join('. ')}]`;
-        return text(output);
-      },
-    },
-    find: {
-      name: 'find',
-      label: 'find',
-      description: `Find files by glob pattern in the workspace. Returns paths relative to the search directory, one per line, skipping node_modules and .git. Output is truncated to ${FIND_LIMIT} results or ${MAX_BYTES / 1024}KB (whichever is hit first).`,
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'" },
-          path: { type: 'string', description: 'Directory to search in (default: the workspace root)' },
-          limit: { type: 'number', description: `Maximum number of results (default: ${FIND_LIMIT})` },
+          pattern: { type: 'string', description: 'Search pattern (regex or literal string)' },
+          path: { type: 'string', description: 'Directory or file to search (default: the workspace root)' },
+          glob: { type: 'string', description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'" },
+          ignoreCase: { type: 'boolean', description: 'Case-insensitive search (default: false)' },
+          literal: { type: 'boolean', description: 'Treat pattern as literal string instead of regex (default: false)' },
+          context: { type: 'number', description: 'Number of lines to show before and after each match (default: 0)' },
+          limit: { type: 'number', description: `Maximum number of matches to return (default: ${GREP_LIMIT})` },
         },
         required: ['pattern'],
       } as never,
       execute: async (_id, args) => {
         const pattern = requireString(args, 'pattern');
         const path = optionalString(args, 'path');
-        const limit = positiveLimit(optionalNumber(args, 'limit'), FIND_LIMIT);
+        const glob = optionalString(args, 'glob');
+        const record = args as Record<string, unknown>;
+        const ignoreCase = record.ignoreCase === true;
+        const literal = record.literal === true;
+        const contextLines = Math.max(0, Math.floor(optionalNumber(args, 'context') ?? 0));
+        const limit = positiveLimit(optionalNumber(args, 'limit'), GREP_LIMIT);
         await ready;
         const root = resolve(path);
         if (!(await fs.exists(root))) throw new Error(`Path not found: ${root}`);
-        const prefix = `${root}/`;
-        // A pattern without a slash names a file wherever it is, as `fd --glob`
-        // does; one with a slash is matched against the path under the search root.
-        const matcher = globToRegExp(pattern);
-        const wholePath = pattern.includes('/');
-        const matches: string[] = [];
-        for (const candidate of fs.getAllPaths().sort()) {
-          if (candidate === root || !candidate.startsWith(prefix)) continue;
-          const relative = candidate.slice(prefix.length);
-          if (FIND_IGNORED.test(relative)) continue;
-          const subject = wholePath ? relative : (relative.split('/').pop() ?? relative);
-          if (!matcher.test(subject)) continue;
-          matches.push(relative);
-          if (matches.length >= limit) break;
+        const isDirectory = (await fs.stat(root)).isDirectory;
+        let matcher: RegExp;
+        try {
+          matcher = new RegExp(literal ? escapeRegExp(pattern) : pattern, ignoreCase ? 'i' : '');
+        } catch (error) {
+          throw new Error(`Invalid regex pattern: ${error instanceof Error ? error.message : String(error)}`);
         }
-        if (matches.length === 0) return text('No files found matching pattern');
-        const truncation = truncateHead(matches.join('\n'), Number.MAX_SAFE_INTEGER);
+        const globMatcher = glob ? globToRegExp(glob) : null;
+        const globWholePath = glob?.includes('/') ?? false;
+        const prefix = `${root}/`;
+        const files = isDirectory
+          ? fs
+              .getAllPaths()
+              .sort()
+              .filter((candidate) => candidate !== root && candidate.startsWith(prefix))
+              .filter((candidate) => {
+                const relative = candidate.slice(prefix.length);
+                if (FIND_IGNORED.test(relative)) return false;
+                if (!globMatcher) return true;
+                return globMatcher.test(globWholePath ? relative : (relative.split('/').pop() ?? relative));
+              })
+          : [root];
+        const relativeName = (file: string) => (isDirectory ? file.slice(prefix.length) : (file.split('/').pop() ?? file));
+        const rows: string[] = [];
+        let matches = 0;
+        let limitReached = false;
+        let linesTruncated = false;
+        for (const file of files) {
+          if (limitReached) break;
+          if ((await fs.stat(file)).isDirectory) continue;
+          const bytes = await fs.readFileBuffer(file);
+          if (looksBinary(bytes)) continue;
+          const lines = normalizeToLF(decoder.decode(bytes)).split('\n');
+          const name = relativeName(file);
+          for (let i = 0; i < lines.length; i++) {
+            if (!matcher.test(lines[i] ?? '')) continue;
+            matches += 1;
+            const lineNumber = i + 1;
+            const start = contextLines > 0 ? Math.max(1, lineNumber - contextLines) : lineNumber;
+            const end = contextLines > 0 ? Math.min(lines.length, lineNumber + contextLines) : lineNumber;
+            for (let current = start; current <= end; current++) {
+              const truncated = truncateLine(lines[current - 1] ?? '', GREP_MAX_LINE_LENGTH);
+              if (truncated.wasTruncated) linesTruncated = true;
+              rows.push(current === lineNumber ? `${name}:${current}: ${truncated.text}` : `${name}-${current}- ${truncated.text}`);
+            }
+            if (matches >= limit) {
+              limitReached = true;
+              break;
+            }
+          }
+        }
+        if (matches === 0) return text('No matches found');
+        const truncation = truncateHead(rows.join('\n'), { maxLines: Number.MAX_SAFE_INTEGER });
         let output = truncation.content;
         const notices: string[] = [];
-        if (matches.length >= limit) notices.push(`${limit} results limit reached. Use limit=${limit * 2} for more, or refine pattern`);
+        if (limitReached) notices.push(`${limit} matches limit reached. Use limit=${limit * 2} for more, or refine pattern`);
         if (truncation.truncated) notices.push(`${formatSize(MAX_BYTES)} limit reached`);
+        if (linesTruncated) notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
         if (notices.length > 0) output += `\n\n[${notices.join('. ')}]`;
         return text(output);
       },
     },
+    ls,
+    find,
   };
 
-  return names.filter((name, index) => name in tools && names.indexOf(name) === index).map((name) => tools[name]);
+  return {
+    fs,
+    ready,
+    resolve,
+    seed,
+    tools: names.filter((name, index) => name in tools && names.indexOf(name) === index).map((name) => tools[name]),
+  };
 }

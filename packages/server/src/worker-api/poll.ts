@@ -83,6 +83,7 @@ import {
   trustedChromeActionInput,
 } from './browser-action-context';
 import { runLeaseFence } from '../runs/run-lease';
+import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lockAgentTurnRun, nativeSessionBase, releaseNextAgentTurn } from '../runs/agent-turn-inputs';
 
 // A failure at the DISPATCH stage means the agent never ran: the run is not
 // evidence about the agent regardless of the message, so no message
@@ -106,7 +107,9 @@ export async function failClaimedWorkerRun(params: {
   errorMessage: string;
 }): Promise<boolean> {
   const sql = getDb();
-  return sql.begin(async (tx) => {
+  let delivered = false;
+  const transitioned = await sql.begin(async (tx) => {
+    const nativeRun = await lockAgentTurnRun(tx, params.runId, true);
     const rows = await tx<{
       organization_id: string;
       run_type: string;
@@ -114,8 +117,8 @@ export async function failClaimedWorkerRun(params: {
       action_key: string | null;
     }>`
       UPDATE runs
-      SET status = 'failed',
-          outcome = ${DISPATCH_FAILURE_OUTCOME},
+      SET status = ${nativeRun?.run_metadata?.cancel_requested_at ? 'cancelled' : 'failed'},
+          outcome = ${nativeRun?.run_metadata?.cancel_requested_at ? null : DISPATCH_FAILURE_OUTCOME},
           completed_at = current_timestamp,
           error_message = ${params.errorMessage}
       WHERE id = ${params.runId}
@@ -124,6 +127,12 @@ export async function failClaimedWorkerRun(params: {
     `;
     if (rows.length === 0) return false;
 
+    if (nativeRun) {
+      await releaseNextAgentTurn(tx, nativeRun);
+      delivered = await insertAgentTurnResponse(tx, nativeRun, {
+        error: nativeRun.run_metadata?.cancel_requested_at ? 'agent turn cancelled' : params.errorMessage,
+      });
+    }
     const row = rows[0];
     if (row.run_type === 'action' && row.approval_status === 'approved') {
       const actionKey = row.action_key ?? 'Action';
@@ -145,6 +154,8 @@ export async function failClaimedWorkerRun(params: {
     }
     return true;
   });
+  if (delivered) await notifyThreadResponse();
+  return transitioned;
 }
 
 /** Fail a claimed device-chat dispatch and emit its visible terminal response atomically. */
@@ -717,7 +728,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     sql.begin(async (tx) => {
       const candidates = await tx`
       WITH next_run AS (
-        SELECT r.id, r.run_type, r.automation_id
+        SELECT r.id, r.run_type, r.automation_id, r.organization_id,
+          r.action_input->'turn'->>'agent_id' AS turn_agent_id,
+          r.action_input->'turn'->>'conversation_id' AS turn_conversation_id
         FROM runs r
         LEFT JOIN connections con ON con.id = r.connection_id
         -- Pin target platform: chrome-extension pins on non-chrome connectors mean
@@ -783,6 +796,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             OR (
               ${!isUserScopedWorker && workerRunsAgentTurns}
               AND r.run_type = 'agent_turn'
+              AND ${agentTurnClaimEligible(tx)}
             )
             -- (1b) Embedding backfills have no connector identity. They are
             -- server-side work and may only be claimed by the trusted fleet.
@@ -884,7 +898,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         FOR UPDATE OF r SKIP LOCKED
         LIMIT 1
       )
-      SELECT id, run_type, automation_id
+      SELECT id, run_type, automation_id, organization_id, turn_agent_id, turn_conversation_id
       FROM next_run
     `;
 
@@ -896,8 +910,31 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         id: unknown;
         run_type: unknown;
         automation_id: unknown;
+        organization_id: string | null;
+        turn_agent_id: string | null;
+        turn_conversation_id: string | null;
       };
       const runId = Number(candidate.id);
+      if (candidate.run_type === 'agent_turn') {
+        // Hold the conversation through commit: a lower-id insert can become
+        // visible after the recheck and otherwise claim a different locked row.
+        // This namespace is separate from the old worker's session lock.
+        const [lock] = await tx<{ acquired: boolean }>`
+          SELECT pg_try_advisory_xact_lock(${agentTurnLockKey(tx, candidate.organization_id,
+            candidate.turn_agent_id, candidate.turn_conversation_id)}) AS acquired
+        `;
+        if (!lock?.acquired) return null;
+        // A lower-id insert can commit after candidate selection. Re-read in
+        // a fresh statement so a row the first snapshot could not see fences
+        // this claim. One committing after the recheck still waits: the
+        // claimed row fences it until this turn is terminal.
+        const eligible = await tx`
+          SELECT r.id FROM runs r
+          WHERE r.id = ${runId} AND r.status = 'pending'
+            AND ${agentTurnClaimEligible(tx)}
+        `;
+        if (eligible.length === 0) return null;
+      }
       if (candidate.run_type === 'automation') {
         const claimed = await claimPendingAutomationRun(tx, {
           runId,
@@ -1035,7 +1072,39 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       LIMIT 1
     `;
 
-      return rows[0] ?? null;
+      const row = rows[0];
+      if (row?.run_type === 'agent_turn') {
+        const input = row.action_input as {
+          turn?: Record<string, unknown>;
+          reply?: { user_id?: string; platform_metadata?: { sessionReset?: unknown } };
+        } | null;
+        const turn = input?.turn;
+        // `/new` asks for a fresh conversation. The chat bridge turns it into
+        // an ordinary turn carrying this flag, so hydrating the snapshot would
+        // hand the model the very history the user asked to leave behind —
+        // making the reset an ordinary prompt with the old context loaded.
+        // Skipping the read starts the native session empty; the reply then
+        // persists a snapshot containing only this exchange, so the reset is
+        // durable without deleting anything (`events` stays append-only).
+        const sessionReset = input?.reply?.platform_metadata?.sessionReset === true;
+        if (typeof turn?.agent_id === 'string' && turn.agent_id.trim()
+          && typeof turn.conversation_id === 'string' && turn.conversation_id.trim()) {
+          // Read only after admission, while the conversation claim is held.
+          // A read failure rolls back the claim so the next poll can retry.
+          // The whole conversation replays: this turn IS the conversation's
+          // answer, so there is no source message to bound history at.
+          const sessionJsonl = sessionReset ? '' : await readSnapshotJsonl({
+            organizationId: candidate.organization_id ?? undefined,
+            agentId: turn.agent_id,
+            conversationId: turn.conversation_id,
+            client: tx,
+          });
+          await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb)
+            || ${tx.json(nativeSessionBase(sessionJsonl ?? ''))}::jsonb WHERE id = ${runId}`;
+          row.action_input = { ...input, turn: { ...turn, session_jsonl: sessionJsonl ?? '' } };
+        }
+      }
+      return row ?? null;
     });
 
   const claimWithDiagnostics = async () => {
@@ -1180,8 +1249,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const isDeviceOwnedRun = isUserScopedWorker && row.connector_manifest_backed;
 
   // An agent turn ships its whole envelope in `action_input`: the producer
-  // already resolved the model, the prompt, the transcript and the gateway
-  // proxy, so there is nothing for the poll to look up. The provider
+  // resolved the model, prompt and proxy; the claim refreshed the native
+  // session snapshot after all earlier turns finished. The provider
   // credential is lifted OUT of the payload and onto the response's
   // `credentials`, so the worker host conceals it behind a per-run placeholder
   // the way it does a connector's OAuth token — the guest never sees either.
@@ -1192,7 +1261,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     };
     const turn = envelope.turn;
     const credential = envelope.credential;
-    if (!turn || typeof credential !== 'string' || credential.length === 0) {
+    if (!turn || typeof credential !== 'string' || credential.length === 0
+      || typeof turn.agent_id !== 'string' || !turn.agent_id.trim()
+      || typeof turn.conversation_id !== 'string' || !turn.conversation_id.trim()) {
       const failure = 'agent turn run has an incomplete execution envelope';
       await failClaimedWorkerRun({
         runId: row.run_id,

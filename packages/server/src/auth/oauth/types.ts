@@ -5,6 +5,8 @@
  * and RFC 7591 (Dynamic Client Registration)
  */
 
+import type { CaptureIdentity } from '../../gateway/routes/internal/capture-mode';
+
 // ============================================
 // Client Types (RFC 7591)
 // ============================================
@@ -250,6 +252,8 @@ export interface AuthInfo {
    * mutating work must be recorded rather than performed.
    */
   executionMode?: 'live' | 'capture' | null;
+  /** Verified capture owner; never taken from tool arguments. */
+  captureIdentity?: CaptureIdentity | null;
 }
 
 // ============================================

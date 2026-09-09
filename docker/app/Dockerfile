@@ -39,7 +39,6 @@ COPY packages/plugin-memory/package.json packages/plugin-memory/
 COPY packages/plugin-conversations/package.json packages/plugin-conversations/
 COPY packages/plugin-media/package.json packages/plugin-media/
 COPY packages/plugin-mcp/package.json packages/plugin-mcp/
-COPY packages/agent-worker/package.json packages/agent-worker/
 COPY packages/server/package.json packages/server/
 COPY packages/connector-sdk/package.json packages/connector-sdk/
 COPY packages/connectors/package.json packages/connectors/
@@ -93,7 +92,6 @@ COPY packages/plugin-memory/ packages/plugin-memory/
 COPY packages/plugin-conversations/ packages/plugin-conversations/
 COPY packages/plugin-media/ packages/plugin-media/
 COPY packages/plugin-mcp/ packages/plugin-mcp/
-COPY packages/agent-worker/ packages/agent-worker/
 COPY packages/connector-sdk/ packages/connector-sdk/
 COPY packages/connectors/ packages/connectors/
 COPY packages/embeddings/ packages/embeddings/
@@ -120,7 +118,11 @@ RUN cd packages/core && bunx tsc \
     && cd ../plugin-mcp && bunx tsc \
     && cd ../connector-sdk && bunx tsc \
     && cd ../embeddings && bunx tsc \
-    && cd ../connector-worker && bunx tsc \
+    `# connector-worker alone needs its full build, not tsc: the script also` \
+    `# runs build-guest-bundle, and build:server below copies that bundle out` \
+    `# of its dist. .dockerignore keeps dist out of the image, so tsc-only` \
+    `# left the copy with no source and failed the image build.` \
+    && cd ../connector-worker && bun run build \
     && cd ../pgvector-embedded && bunx tsc
 
 # Type check
@@ -178,13 +180,12 @@ WORKDIR /app
 # curl for health checks, git/gh for GitHub connector agent tooling, bun for
 # tsx-equivalent, Chromium deps for connectors.
 #
-# bubblewrap is what makes the contributed CLIs REACHABLE: the embedded worker
-# registers spawned binaries only when it has an exec sandbox (probeSandbox ->
-# bwrap) or an explicit unsandboxed opt-in. Without it `gh` sits in /usr/bin and
-# every agent invocation exits 127 — the credential works and the command does
-# not.
+# `gh` stays because the GitHub connector declares it (`nix: { packages: ['gh'] }`)
+# and a nix-less host still needs it on PATH. bubblewrap is gone: it existed to
+# give the managed worker subprocess an exec sandbox before it would register
+# spawned binaries, and nothing probes for one now that turns run in-isolate.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates git gh unzip bubblewrap socat \
+      curl ca-certificates git gh unzip socat \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 \
       libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
       libgbm1 libpango-1.0-0 libcairo2 libasound2 libwayland-client0 \
@@ -207,7 +208,6 @@ COPY --from=builder /app/packages/plugin-memory ./packages/plugin-memory
 COPY --from=builder /app/packages/plugin-conversations ./packages/plugin-conversations
 COPY --from=builder /app/packages/plugin-media ./packages/plugin-media
 COPY --from=builder /app/packages/plugin-mcp ./packages/plugin-mcp
-COPY --from=builder /app/packages/agent-worker ./packages/agent-worker
 COPY --from=builder /app/packages/connector-sdk ./packages/connector-sdk
 COPY --from=builder /app/packages/connectors ./packages/connectors
 COPY --from=builder /app/packages/embeddings ./packages/embeddings

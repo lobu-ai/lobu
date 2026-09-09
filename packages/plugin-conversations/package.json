@@ -20,6 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@lobu/core": "workspace:*",
     "@lobu/plugin-api": "workspace:*",
     "@lobu/plugin-toolkit": "workspace:*",
     "@mariozechner/pi-coding-agent": "^0.73.1",

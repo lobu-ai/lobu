@@ -35,7 +35,7 @@ type AutomationTerminalResult =
  * attempt); 0 disables. Each re-dispatch is a full agent turn, so keep it low.
  *
  * NOTE: this is a re-dispatch (a fresh session via the existing dispatch loop),
- * not a warm in-session nudge — the agent-worker is platform-agnostic and has
+ * not a warm in-session nudge — the turn runtime is platform-agnostic and has
  * no notion of automations/complete_window, so a worker-side self-nudge would
  * break that isolation. This constant is the GLOBAL default; an automation can
  * override it via execution_config.finalize_nudges (see

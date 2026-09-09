@@ -164,12 +164,15 @@ else
   tail -40 "$RUNTIME_CHECK_LOG" >&2
 fi
 
-# The worker bundle is the artifact that actually has to load under node.
-WORKER_BUNDLE="$INSTALL_DIR/node_modules/@lobu/worker/dist/index.bundle.mjs"
-if [ -f "$WORKER_BUNDLE" ]; then
-  pass "worker bundle present ($(wc -c < "$WORKER_BUNDLE" | tr -d ' ') bytes)"
+# The guest bundle is the artifact that actually has to load, inside the
+# isolate. `@lobu/worker` used to ship the equivalent for the managed
+# subprocess; that package is no longer published, and a turn now evaluates
+# this bundle in-isolate.
+GUEST_BUNDLE="$INSTALL_DIR/node_modules/@lobu/connector-worker/dist/agent-turn/guest.bundle.js"
+if [ -f "$GUEST_BUNDLE" ]; then
+  pass "isolate guest bundle present ($(wc -c < "$GUEST_BUNDLE" | tr -d ' ') bytes)"
 else
-  fail "no worker bundle at $WORKER_BUNDLE — the agent turn cannot work"
+  fail "no guest bundle at $GUEST_BUNDLE — the agent turn cannot work"
 fi
 
 # ---------------------------------------------------------------------------

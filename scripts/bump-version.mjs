@@ -7,7 +7,6 @@ const PACKAGES = [
   "packages/core",
   "packages/plugin-api",
   "packages/plugin-host",
-  "packages/agent-worker",
   "packages/cli",
   "packages/connector-sdk",
   "packages/client",

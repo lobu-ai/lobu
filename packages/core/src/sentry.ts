@@ -62,9 +62,8 @@ export async function initSentry() {
       transportOptions: egressProxy ? { proxy: egressProxy } : undefined,
       // Tag worker events with the same environment/release the server uses
       // (instrument.ts) so worker and server issues group and filter together.
-      // The gateway forwards ENVIRONMENT / SENTRY_RELEASE into the worker spawn
-      // env (deployment-manager.assembleBaseEnv); APP_GIT_SHA is the
-      // image-baked fallback when SENTRY_RELEASE is unset.
+      // ENVIRONMENT / SENTRY_RELEASE come from the pod env; APP_GIT_SHA is
+      // the image-baked fallback when SENTRY_RELEASE is unset.
       environment: process.env.ENVIRONMENT || "production",
       release:
         process.env.SENTRY_RELEASE || process.env.APP_GIT_SHA || undefined,

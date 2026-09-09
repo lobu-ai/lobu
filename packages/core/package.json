@@ -39,11 +39,23 @@
       "import": "./dist/testing/index.js",
       "require": "./dist/testing/index.js"
     },
+    "./tool-trace-summary": {
+      "types": "./dist/tool-trace-summary.d.ts",
+      "bun": "./src/tool-trace-summary.ts",
+      "import": "./dist/tool-trace-summary.js",
+      "require": "./dist/tool-trace-summary.js"
+    },
     "./tool-policy": {
       "types": "./dist/tool-policy.d.ts",
       "bun": "./src/tool-policy.ts",
       "import": "./dist/tool-policy.js",
       "require": "./dist/tool-policy.js"
+    },
+    "./memory-flush": {
+      "types": "./dist/memory-flush.d.ts",
+      "bun": "./src/memory-flush.ts",
+      "import": "./dist/memory-flush.js",
+      "require": "./dist/memory-flush.js"
     },
     "./errors": {
       "types": "./dist/errors.d.ts",
@@ -212,6 +224,12 @@
       "bun": "./src/contracts/tools/search-memory.ts",
       "import": "./dist/contracts/tools/search-memory.js",
       "require": "./dist/contracts/tools/search-memory.js"
+    },
+    "./agent-tooling": {
+      "types": "./dist/agent-tooling.d.ts",
+      "bun": "./src/agent-tooling.ts",
+      "import": "./dist/agent-tooling.js",
+      "require": "./dist/agent-tooling.js"
     }
   },
   "scripts": {

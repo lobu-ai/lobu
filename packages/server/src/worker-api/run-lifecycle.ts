@@ -7,6 +7,7 @@
  * poll-auth-signal.
  */
 
+import { extendHeartbeatedTurnMarker, lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
 import type {
 	CompleteActionRequest,
 	CompleteAuthRequest,
@@ -15,9 +16,12 @@ import type {
 	CompleteRequest,
 	EmitAuthArtifactRequest,
 	HeartbeatRequest,
+	HeartbeatResponse,
 	PollAuthSignalRequest,
 	StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
+import { HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
+import { Value } from "@sinclair/typebox/value";
 import type { Context } from "hono";
 import {
 	activateAutomationSignal,
@@ -81,6 +85,10 @@ import {
 	deviceProviderQuotaResetNotBefore,
 } from "../automations/schedule-cursor";
 import { recordScheduledExecutionFailure } from "../automations/scheduled-failure-policy";
+import {
+	publishTurnDeltaBestEffort,
+	publishTurnToolEventsBestEffort,
+} from "./agent-turn";
 import { authorizeRunForWorker } from "./shared";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import { runLeaseFence, runOwnerFence } from "../runs/run-lease";
@@ -214,11 +222,61 @@ async function reactivateProfileCascade(
  */
 export async function heartbeat(c: Context<{ Bindings: Env }>) {
 	try {
-		const { run_id, worker_id, progress, agent_session } =
-			await c.req.json<HeartbeatRequest>();
+		const raw: unknown = await c.req.json();
+		const body = raw as HeartbeatRequest;
+		const { run_id, worker_id, progress, agent_session } = body;
 
 		const denied = await authorizeRunForWorker(c, run_id, worker_id);
 		if (denied) return denied;
+
+		// The streamed fields are bounded by the schema (`TURN_DELTA_MAX_CHARS`,
+		// `TURN_TOOL_OUTPUT_MAX_CHARS`) and the bound only holds if it is checked
+		// here: a span that fails it is dropped unpublished and unacknowledged, so
+		// the worker cannot push an unbounded delta into `thread_response`, and
+		// the beat itself still counts — liveness is not the streamed text's
+		// problem.
+		const wellFormed = Value.Check(HeartbeatRequestSchema, raw);
+		if (!wellFormed && (body.turn_delta || body.turn_tool_events)) {
+			logger.warn(
+				{ runId: run_id, workerId: worker_id },
+				"heartbeat carried a malformed or oversize turn payload; dropped",
+			);
+		}
+		const turn_delta = wellFormed ? body.turn_delta : undefined;
+		const turn_tool_events = wellFormed ? body.turn_tool_events : undefined;
+
+		// An agent turn rides its streamed reply on the heartbeat it already
+		// sends, so the client sees the answer arrive rather than a blank screen
+		// for the length of the turn. Best-effort and awaited: the publish is
+		// fenced on the same lease the heartbeat below re-asserts, and a failure
+		// must never fail the heartbeat itself.
+		//
+		// The outcome is answered rather than swallowed. The worker holds the
+		// text it sent until this ack names its sequence, so an unacknowledged
+		// batch is re-sent instead of lost; `undefined` here (the publish threw)
+		// deliberately produces no ack.
+		const turnDeltaAck = turn_delta
+			? await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta)
+			: undefined;
+		// Tool traces ride the same beat. They are not acknowledged: a trace is a
+		// VIEW of the turn, not its answer, so the worker drops one it could not
+		// deliver rather than growing a queue against a failing gateway.
+		if (turn_tool_events && turn_tool_events.length > 0) {
+			await publishTurnToolEventsBestEffort(
+				run_id,
+				worker_id,
+				turn_tool_events
+			);
+		}
+		const ackBody: Pick<HeartbeatResponse, "turn_delta_ack"> =
+			turn_delta && turnDeltaAck
+				? {
+						turn_delta_ack: {
+							sequence: turn_delta.sequence,
+							published: turnDeltaAck.published,
+						},
+					}
+				: {};
 
 		const sql = getDb();
 		// Stamped with the reporting worker so poll can only resume an agent
@@ -246,19 +304,73 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// the UPDATE itself; the 409 below is the same body and status
 		// `authorizeRunForWorker` returns for the same condition, so it is not a
 		// new outcome for the worker to handle.
-		const updated = await sql`
-      UPDATE runs
-      SET last_heartbeat_at = current_timestamp,
-          items_collected = COALESCE(${progress?.items_collected_so_far ?? null}, items_collected)${agentSessionCheckpoint}
-      WHERE id = ${run_id}
-        ${runLeaseFence(sql, worker_id)}
-      RETURNING id
+		const updateHeartbeat = (tx: typeof sql, nonNative: boolean) => tx<{ id: number; run_type: string }>`
+      UPDATE runs SET last_heartbeat_at = current_timestamp,
+        items_collected = COALESCE(${progress?.items_collected_so_far ?? null}, items_collected)${agentSessionCheckpoint}
+      WHERE id = ${run_id} AND (${!nonNative} OR run_type <> 'agent_turn')
+        ${runLeaseFence(tx, worker_id)} RETURNING id, run_type
     `;
+		let updated: Array<{ id: number; run_type: string }> = await updateHeartbeat(sql, true);
+		let steer: NonNullable<HeartbeatResponse['steer']> = [];
+		let cancelRequested = false;
+		if (!updated.length) {
+			({ updated, steer, cancelRequested } = await sql.begin(async (tx) => {
+				const nativeRun = await lockAgentTurnRun(tx, run_id);
+				const updated = nativeRun ? await updateHeartbeat(tx, false) : [];
+				const owned = updated.length > 0 && nativeRun;
+				const cancelRequested = !!owned && !!nativeRun.run_metadata?.cancel_requested_at;
+				return { updated, cancelRequested, steer: owned && !cancelRequested ? await pendingAgentTurnInputs(tx, nativeRun) : [] };
+			}));
+		}
+		// A heartbeat is the isolate lane's liveness signal, so it must refresh the
+		// TURN marker too, not just `runs.last_heartbeat_at`. There are two
+		// independent deadlines: the run reaper reads the heartbeat column, while
+		// the marker carries its own `run_at`. Refreshing only the column let any
+		// turn longer than TURN_DEFAULT_DEADLINE_MS (60s) collect a spurious
+		// WORKER_UNRESPONSIVE mid-flight, while it was still working. The
+		// subprocess lane extended the marker from `/worker/response`, a route the
+		// isolate lane does not use. `extendTurnDeadlines` never throws and skips a
+		// provider-failed turn, so a wedged run still lapses into the backstop.
+		if (updated.some((row) => row.run_type === 'agent_turn')) {
+			void extendHeartbeatedTurnMarker(run_id);
+		}
 		if (updated.length === 0) {
+			// The fence requires `status = 'running'`, so a cancelled run fails it
+			// exactly like a lost lease does. The agent-turn lane has to tell those
+			// apart: on a cancel it still owns the run and stops the model rather
+			// than spending the rest of the turn; on a lost lease another worker
+			// owns it and this one must touch nothing. Re-read on ownership alone
+			// to say which. Every OTHER lane keeps the 409: the automation CLI
+			// daemon and the Chrome heartbeat detect a cancel only through a
+			// non-2xx, so a 200 here would leave their runs going.
+			const [owned] = (await sql`
+        SELECT status, run_type FROM runs
+        WHERE id = ${run_id}
+          ${runOwnerFence(sql, worker_id)}
+        LIMIT 1
+      `) as unknown as Array<{ status: string; run_type: string } | undefined>;
+			if (owned?.status === 'cancelled' && owned.run_type === 'agent_turn') {
+				return c.json<HeartbeatResponse>({
+					continue: false,
+					stop_reason: 'cancelled',
+				});
+			}
 			return c.json({ error: 'Run is not in progress' }, 409);
 		}
 
-		return c.json({ continue: true });
+		if (updated[0].run_type !== 'agent_turn') {
+			return c.json<HeartbeatResponse>({ continue: true, ...ackBody });
+		}
+
+		if (cancelRequested) {
+			return c.json<HeartbeatResponse>({ continue: false, stop_reason: 'cancelled' });
+		}
+
+		return c.json<HeartbeatResponse>({
+			continue: true,
+			...ackBody,
+			...(steer.length > 0 ? { steer } : {}),
+		});
 	} catch (err: unknown) {
 		return c.json({ error: errorMessage(err) }, 500);
 	}

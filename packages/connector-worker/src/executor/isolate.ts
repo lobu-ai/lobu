@@ -44,7 +44,7 @@ import { IsolateHost, IsolateHostError, type IsolateTerminalState } from '../iso
 import { assertIsolateEligible } from '../isolate/eligibility.js';
 import type { IsolatedVm } from '../isolate/ivm-types.js';
 import { isolatedVmUnavailableReason, loadIsolatedVm } from '../isolate/load.js';
-import type { AgentTurnEvent } from '../agent-turn/types.js';
+import type { AgentTurnEvent, AgentTurnInput } from '../agent-turn/types.js';
 import { buildConnectorConfig } from './connector-config.js';
 import type {
   ExecutionHooks,
@@ -349,6 +349,13 @@ const GUEST_RUNNER = String.raw`
       // waiting for the host, and the host reports its own hook failures by
       // terminating the run.
       H.async('emitTurnEvent', JSON.stringify(event));
+    }, function () {
+      // Synchronous: pi drains steering between model calls, and the answer
+      // is whatever the host has parked by then.
+      return JSON.parse(H.sync('takeSteering'));
+    }, function (request) {
+      // A sandbox-pinned conversation's bash: the host runs it remotely.
+      return H.async('runtimeExec', JSON.stringify(request)).then(function (json) { return JSON.parse(json); });
     });
     return { mode: 'agent_turn', turn: output };
   }
@@ -393,6 +400,24 @@ interface RunNetwork {
   /** `placeholder\nhost` pairs already logged: one audit line per credential per host, however chatty the connector. */
   spends: Set<string>;
   log: RunLog;
+  /** Native turns use one gateway credential, pinned outside guest control. */
+  agentGateway?: {
+    origin: string;
+    credential: string;
+    inferenceUrl: string;
+    toolPrefixes: string[];
+  };
+}
+
+function agentInferencePath(api: AgentTurnInput['provider']['api']): string {
+  switch (api) {
+    case 'anthropic-messages':
+      return '/v1/messages';
+    case 'openai-completions':
+      return '/chat/completions';
+    case 'openai-responses':
+      return '/responses';
+  }
 }
 
 /**
@@ -608,6 +633,23 @@ export class IsolateExecutor implements SyncExecutor {
       vault.clear();
       host?.terminate(state);
     };
+    // A caller's abort ends the run the way an uncaught guest error does:
+    // the guest is torn down and the pending result rejects with this state.
+    //
+    // Latched, because `terminate` reaches the isolate through `host?.` and
+    // `host` is assigned only after `IsolateHost.create` resolves — an await
+    // away. An abort that lands before that (a signal already aborted on
+    // entry, or one that fires while the isolate is being built) would
+    // otherwise terminate nothing and the guest would run to completion for a
+    // run the caller had already cancelled.
+    const cancelState: IsolateTerminalState = { name: 'RunCancelled', message: 'the run was cancelled' };
+    let cancelled = false;
+    const onCancel = () => {
+      cancelled = true;
+      terminate(cancelState);
+    };
+    if (hooks?.signal?.aborted) onCancel();
+    else hooks?.signal?.addEventListener('abort', onCancel, { once: true });
 
     const queueHook = (task: () => Promise<void> | void): Promise<void> => {
       const next = processingChain.then(async () => {
@@ -640,7 +682,21 @@ export class IsolateExecutor implements SyncExecutor {
       return undefined;
     };
 
-    const network: RunNetwork = { egress, vault, spends: new Set<string>(), log };
+    const network: RunNetwork = {
+      egress, vault, spends: new Set<string>(), log,
+      ...(job.mode === 'agent_turn' && job.credentials?.accessToken ? {
+        agentGateway: {
+          origin: new URL(job.turn.provider.baseUrl).origin,
+          credential: job.credentials.accessToken,
+          inferenceUrl: new URL(
+            job.turn.provider.baseUrl.replace(/\/$/, '') + agentInferencePath(job.turn.provider.api)
+          ).href,
+          toolPrefixes: job.turn.tools
+            ? ['internal', 'mcp'].map((path) => `${job.turn.tools!.gatewayUrl.replace(/\/$/, '')}/${path}/`)
+            : [],
+        },
+      } : {}),
+    };
 
     const fetchOpen = async (request: unknown, body: unknown): Promise<HostFetchReply> => {
       const req = request as GuestFetchRequest;
@@ -729,6 +785,10 @@ export class IsolateExecutor implements SyncExecutor {
         // Before the headers: the request fails with the guest's abort reason.
         // After them: the body stream errors with it, and the upstream socket
         // is released either way.
+        // Steering, pulled rather than pushed: the guest asks at the points pi
+        // drains steering messages, so nothing has to reach into a running
+        // isolate. Empty for every lane but an agent turn with a follow-up.
+        takeSteering: () => JSON.stringify(hooks?.takeSteering?.() ?? []),
         fetchAbort: (id: unknown) => {
           const active = typeof id === 'number' ? activeFetches.get(id) : undefined;
           if (active) {
@@ -756,6 +816,17 @@ export class IsolateExecutor implements SyncExecutor {
             await hooks?.onEventChunk?.(events);
           });
           return undefined;
+        },
+        runtimeExec: async (json: unknown) => {
+          if (!hooks?.onRuntimeExec) throw new Error('the remote runtime is not available in this execution context');
+          const parsed = parseGuestJson(json, 'runtimeExec');
+          const request = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+          if (typeof request.command !== 'string') throw new Error('runtimeExec: command must be a string');
+          const result = await hooks.onRuntimeExec({
+            command: request.command,
+            ...(typeof request.timeoutMs === 'number' ? { timeoutMs: request.timeoutMs } : {}),
+          });
+          return JSON.stringify(result);
         },
         emitTurnEvent: async (json: unknown) => {
           const event = parseGuestJson(json, 'emitTurnEvent') as AgentTurnEvent;
@@ -817,6 +888,7 @@ export class IsolateExecutor implements SyncExecutor {
         fetchOpen,
         fetchRead,
         socketOpen: async (hostParam: unknown, portParam: unknown, optionsJson: unknown) => {
+          if (job.mode === 'agent_turn') throw refuse(log, 'native agent turns use authenticated gateway HTTP, not raw sockets');
           const rawHost = String(hostParam);
           const hostname = stripIpv6Brackets(rawHost);
           const port = typeof portParam === 'number' ? portParam : parseInt(String(portParam), 10);
@@ -1028,6 +1100,12 @@ export class IsolateExecutor implements SyncExecutor {
       const source = `var __job_json = ${jsonLiteral(guestJob)};\nvar __config_json = ${jsonLiteral(mergedConfig)};\n${compiledCode}\n${GUEST_RUNNER}`;
       let raw: unknown;
       try {
+        // The host exists now, so the latched cancellation finally has
+        // something to tear down. Applied BEFORE the guest is handed any
+        // source: this run was cancelled, so it must not execute at all.
+        // `host.run` then rejects with the terminal state, and the cancel
+        // reports through exactly the path a mid-run cancel takes.
+        if (cancelled || hooks?.signal?.aborted) host.terminate(cancelState);
         raw = await host.run(source, { timeoutMs: this.options.timeoutMs });
       } catch (error) {
         if (hookFailure !== null) throw hookFailure;
@@ -1076,6 +1154,7 @@ export class IsolateExecutor implements SyncExecutor {
       }
       return outcome.result;
     } finally {
+      hooks?.signal?.removeEventListener('abort', onCancel);
       runAbort.abort();
       for (const timer of pendingSleeps) clearTimeout(timer);
       pendingSleeps.clear();
@@ -1129,6 +1208,16 @@ export class IsolateExecutor implements SyncExecutor {
 
     for (let hop = 0; ; hop++) {
       await this.assertHostAllowed('fetch', url.hostname, net.log);
+      if (net.agentGateway && url.origin !== net.agentGateway.origin) {
+        throw refuse(net.log, 'native agent turns may fetch only their gateway origin');
+      }
+      if (net.agentGateway &&
+          !(method === 'POST' && url.href === net.agentGateway.inferenceUrl) &&
+          !net.agentGateway.toolPrefixes.some((prefix) => url.href.startsWith(prefix))) {
+        // Same-origin worker response, transcript and public APIs are separate
+        // capabilities. Only the admitted model and capture-aware tools belong here.
+        throw refuse(net.log, 'native agent turns require an admitted inference or tool endpoint');
+      }
       if (hop === 0) {
         // Placeholders resolve only now, with the destination admitted, and only
         // into a destination that may carry a credential: HTTPS, or the run's
@@ -1156,6 +1245,12 @@ export class IsolateExecutor implements SyncExecutor {
           net.spends.add(key);
           net.log('info', `credential ${spend.placeholder.slice(-12)} spent on ${url.hostname} in header ${spend.header}`);
         }
+      }
+      if (net.agentGateway) {
+        // The guest cannot escape capture with an absent/garbage credential or
+        // a competing API-key header. Reapply on redirects within the gateway.
+        for (const name of ['x-api-key', 'x-lobu-worker-token', 'proxy-authorization']) headers.delete(name);
+        headers.set('authorization', `Bearer ${net.agentGateway.credential}`);
       }
       let response: Response;
       try {

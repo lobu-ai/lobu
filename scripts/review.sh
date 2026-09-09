@@ -445,16 +445,21 @@ if [ -n "$CACHE_FILE" ]; then
   fi
 fi
 
-# True when the ci.yml workflow's latest run for the exact commit passed.
-# ci.yml triggers on pull_request events, so the run is found by head sha.
+# True when a completed ci.yml run for the exact commit passed.
+# ci.yml triggers on pull_request events, so runs are found by head sha.
+#
+# Asks across every run for the sha rather than the single newest one: a push
+# can dispatch two runs in the same second, the concurrency group cancels the
+# duplicate, and both then carry an identical `createdAt`. `--limit 1` orders
+# by that timestamp, so it returns the cancelled twin about half the time and
+# the gate rejects a commit whose CI is green. Any completed success for this
+# sha validated this exact tree, which is what the gate needs to establish.
 ci_run_green_for_head() {
   local sha="$1"
-  local run
-  run="$(gh run list --workflow=ci.yml --commit "$sha" --limit 1 \
-    --json status,conclusion --jq '.[0] // empty' 2>/dev/null)"
-  [ -n "$run" ] || return 1
-  [ "$(jq -r '.status' <<<"$run")" = "completed" ] || return 1
-  [ "$(jq -r '.conclusion' <<<"$run")" = "success" ]
+  gh run list --workflow=ci.yml --commit "$sha" --limit 20 \
+    --json status,conclusion \
+    --jq 'any(.[]; .status == "completed" and .conclusion == "success")' \
+    2>/dev/null | grep -qx true
 }
 
 # A fresh full review must reuse the exact committed tree that GitHub CI

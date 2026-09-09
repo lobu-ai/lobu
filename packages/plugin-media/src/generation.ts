@@ -1,16 +1,14 @@
-import { createLogger } from "@lobu/core";
 import {
   createGatewayClient,
   parseErrorBody,
   textResult,
+  toolLogger as logger,
   withErrorHandling,
   type GatewayParams,
   type TextResult,
 } from "@lobu/plugin-toolkit";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
-import { uploadGeneratedFile } from "./upload";
-
-const logger = createLogger("plugin-media");
+import { uploadGeneratedFile } from "./multipart";
 
 // ============================================================================
 // Shared driver: generate media → upload to the user
@@ -94,7 +92,7 @@ async function generateAndUploadMedia(
       return textResult(config.messages.genericFailure(errorMessage));
     }
 
-    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(await response.arrayBuffer());
     const mimeType =
       response.headers.get("Content-Type") || config.defaultMimeType;
     const provider = response.headers.get(config.providerHeader) || "unknown";
@@ -102,7 +100,7 @@ async function generateAndUploadMedia(
 
     const uploadError = await uploadGeneratedFile(
       gw,
-      buffer,
+      bytes,
       config.uploadFilename(ext),
       mimeType,
       config.uploadHeaders

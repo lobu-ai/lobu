@@ -13,23 +13,28 @@
  * the right adapter here.
  */
 
-/** Protocols we can route. Extend by adding a `SDK_COMPAT_PROTOCOLS` row. */
-export type SdkCompat =
-  | "openai"
-  | "openai-responses"
-  | "anthropic"
-  | "google"
-  | "bedrock"
-  | "mistral";
+/**
+ * Protocols we can route. Extend by adding a `SDK_COMPAT_PROTOCOLS` row.
+ *
+ * These are the wire formats a turn can speak DIRECTLY from the isolate, which
+ * is why the set is small: the guest has no Node bindings, so an adapter whose
+ * SDK needs Node crypto or http (AWS SigV4 signing, `@google/genai`,
+ * `@mistralai/mistralai`) cannot be bundled into it.
+ *
+ * That is not a ceiling on which vendors Lobu supports. A provider whose native
+ * protocol cannot run in the guest is reached by translating server-side and
+ * presenting an OpenAI-compatible endpoint to the turn — which is exactly what
+ * `BedrockOpenAIService` does for Amazon Bedrock, and how all 18
+ * OpenAI-compatible entries in `config/providers.json` work. Add a vendor
+ * there, not here.
+ */
+export type SdkCompat = "openai" | "openai-responses" | "anthropic";
 
-/** pi-ai API adapter names (mirrors pi-ai's `KnownApi`). */
+/** pi-ai API adapter names, narrowed to the ones a turn can speak. */
 export type PiAiApi =
   | "openai-completions"
   | "openai-responses"
-  | "anthropic-messages"
-  | "google-generative-ai"
-  | "bedrock-converse-stream"
-  | "mistral-conversations";
+  | "anthropic-messages";
 
 export interface SdkCompatProtocol {
   /** The pi-ai adapter that speaks this protocol. */
@@ -52,7 +57,10 @@ export interface SdkCompatProtocol {
 
 /**
  * The single source of truth mapping a `sdkCompat` to how it routes. Anything
- * NOT in this map is not-yet-routable (the create gate rejects it).
+ * NOT in this map is not routable, and the create gate rejects it — which is
+ * the point: a protocol listed here that no turn can execute would pass
+ * configuration and then fail at turn time, telling the user their model was
+ * not configured when the real problem is the protocol.
  */
 export const SDK_COMPAT_PROTOCOLS: Record<SdkCompat, SdkCompatProtocol> = {
   openai: {
@@ -71,21 +79,6 @@ export const SDK_COMPAT_PROTOCOLS: Record<SdkCompat, SdkCompatProtocol> = {
     // Anthropic rejects keys sent as Bearer (401) — they ride in x-api-key.
     apiKeyHeader: "x-api-key",
     label: "Anthropic Messages",
-  },
-  google: {
-    api: "google-generative-ai",
-    registryAlias: "google",
-    label: "Google Generative AI",
-  },
-  bedrock: {
-    api: "bedrock-converse-stream",
-    registryAlias: "bedrock",
-    label: "Amazon Bedrock",
-  },
-  mistral: {
-    api: "mistral-conversations",
-    registryAlias: "mistral",
-    label: "Mistral",
   },
 };
 
