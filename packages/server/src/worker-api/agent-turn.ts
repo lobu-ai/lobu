@@ -313,44 +313,76 @@ async function publishTurnToolEvents(
 		const envelope = row.action_input ?? {};
 		const reply = envelope.reply;
 		if (!reply) return false;
-		for (const event of events) {
-			await insertThreadResponseRow(
-				tx,
-				{
-					messageId: reply.message_id,
-					channelId: reply.channel_id,
-					conversationId: String(envelope.turn?.conversation_id ?? ""),
-					userId: reply.user_id,
-					teamId: reply.team_id ?? "api",
-					platform: reply.platform,
-					organizationId: row.organization_id,
-					platformMetadata: reply.platform_metadata,
-					customEvent: {
-						name: "tool_use",
-						data: {
-							toolCallId: event.tool_call_id,
-							name: event.name,
-							// `buildToolUseEventPayload`'s shape: the SPA reads the args here.
-							input: event.input ?? null,
-							isError: event.is_error,
-							// An error's summary is its message; a successful call's is the
-							// retrieval evidence the worker summarised from the unclipped
-							// result. The promptfoo provider reads `snippets` to build
-							// `metadata.retrievedContext`, so dropping it on success left
-							// every RAG assertion with nothing to assert against.
-							result_summary: event.is_error
-								? { error: event.output }
-								: event.result_summary,
-						},
-					},
-					timestamp: Date.now(),
-				},
-				row.organization_id
-			);
-		}
+		await insertTurnToolEventRows(tx, {
+			reply,
+			conversationId: String(envelope.turn?.conversation_id ?? ""),
+			organizationId: row.organization_id,
+			events,
+		});
 		return true;
 	});
 	if (emitted) await notifyThreadResponse();
+}
+
+/**
+ * Insert one `tool_use` row per trace, on a transaction the caller already
+ * owns.
+ *
+ * Shared by the heartbeat path above and the completion route, which is the
+ * only reason a trace is not lost when a turn's LAST tool finishes: the
+ * heartbeat publish is fenced on `runLeaseFence` (`status = 'running'`), and
+ * completion sets `status = 'completed'` in its own transaction, so a trace
+ * flushed on that final beat matches no row and disappears. A single-tool turn
+ * loses its only trace that way every time, not occasionally.
+ *
+ * One builder rather than two call sites writing the same object: the SPA, the
+ * menubar and the promptfoo provider all read this shape, and a second
+ * hand-written copy is how the two paths start disagreeing about it.
+ */
+async function insertTurnToolEventRows(
+	tx: DbClient,
+	args: {
+		reply: TurnReply;
+		conversationId: string;
+		organizationId: string | null;
+		events: readonly AgentTurnToolEvent[];
+	}
+): Promise<void> {
+	for (const event of args.events) {
+		await insertThreadResponseRow(
+			tx,
+			{
+				messageId: args.reply.message_id,
+				channelId: args.reply.channel_id,
+				conversationId: args.conversationId,
+				userId: args.reply.user_id,
+				teamId: args.reply.team_id ?? "api",
+				platform: args.reply.platform,
+				organizationId: args.organizationId,
+				platformMetadata: args.reply.platform_metadata,
+				customEvent: {
+					name: "tool_use",
+					data: {
+						toolCallId: event.tool_call_id,
+						name: event.name,
+						// `buildToolUseEventPayload`'s shape: the SPA reads the args here.
+						input: event.input ?? null,
+						isError: event.is_error,
+						// An error's summary is its message; a successful call's is the
+						// retrieval evidence the worker summarised from the unclipped
+						// result. The promptfoo provider reads `snippets` to build
+						// `metadata.retrievedContext`, so dropping it on success left
+						// every RAG assertion with nothing to assert against.
+						result_summary: event.is_error
+							? { error: event.output }
+							: event.result_summary,
+					},
+				},
+				timestamp: Date.now(),
+			},
+			args.organizationId
+		);
+	}
 }
 
 /**
@@ -527,6 +559,19 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       organizationId: run.organization_id, agentId: envelope.turn!.agent_id, conversationId,
       runId: body.run_id, sessionJsonl: stored,
     });
+    // Traces the worker could not get onto a beat, written on the SAME
+    // transaction as the answer and BEFORE it, so the client reads the tool
+    // rows ahead of the reply they explain. The heartbeat path cannot land
+    // these: it fences on `status = 'running'`, which this transaction has
+    // already changed.
+    if (body.turn_tool_events?.length) {
+      await insertTurnToolEventRows(tx, {
+        reply,
+        conversationId,
+        organizationId: run.organization_id,
+        events: body.turn_tool_events,
+      });
+    }
     await insertAgentTurnResponse(tx, run, {
       // `tools_used` is forwarded as sent, NOT defaulted to `[]`. Absent and
       // empty are different claims downstream: `requireTool` passes on absent

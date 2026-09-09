@@ -15,6 +15,7 @@ import {
   type AgentTurnToolEvent,
   type PollResponse,
   TURN_DELTA_MAX_CHARS,
+  TURN_TOOL_EVENT_QUEUE_MAX,
 } from '@lobu/core/contracts/worker/protocol';
 import { agentGuestBundle } from '../agent-turn/bundle.js';
 import type { HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
@@ -52,15 +53,6 @@ const TURN_DELTA_FLUSH_MS = 400;
  * on.
  */
 const TURN_DELTA_DRAIN_BATCHES = 4;
-
-/**
- * How many tool traces a turn will hold for the next beat.
- *
- * A tool trace is a view of the turn, not its answer, so a backlog is dropped
- * rather than grown: past this many the OLDEST go, because what a client wants
- * to see is what the agent is doing now.
- */
-const TURN_TOOL_EVENT_QUEUE_MAX = 20;
 
 function isAgentTurnPayload(value: unknown): value is AgentTurnPollPayload {
   return !!value && typeof value === 'object' && 'turn' in value;
@@ -119,6 +111,12 @@ export async function executeAgentTurnRun(
   let sending = false;
   // Tool traces waiting for the next beat, oldest first.
   let toolEvents: AgentTurnToolEvent[] = [];
+  // Traces handed to a beat that has not answered yet. A beat is fire-and-
+  // forget from the delta timer, so one can still be in flight when the turn
+  // completes; these come back rather than vanishing in that window.
+  let tracesInFlight: AgentTurnToolEvent[] = [];
+  /** The delta timer's most recent beat, awaited before the turn completes. */
+  let beatInFlight: Promise<void> = Promise.resolve();
   /** Arguments of the calls still running, by call id, for the trace their end produces. */
   const toolArgs = new Map<string, unknown>();
 
@@ -149,9 +147,14 @@ export async function executeAgentTurnRun(
     sending = true;
     const batch = inFlight;
     // Taken before the await so a trace arriving mid-flight queues for the
-    // next beat rather than being dropped by the reset below.
+    // next beat rather than being dropped by the reset below. Held in
+    // `tracesInFlight` rather than simply dropped: the completion below is what
+    // ends the run's `running` status, and a beat still in flight when that
+    // lands loses the server's lease fence. Returning them makes the trace the
+    // completion's to deliver instead of nobody's.
     const traces = toolEvents;
     toolEvents = [];
+    tracesInFlight = traces;
     try {
       const ack = await client.heartbeat(
         runId,
@@ -168,12 +171,24 @@ export async function executeAgentTurnRun(
       if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
       if (ack?.continue === false) stopTurn(ack.stop_reason);
       queueSteering(ack?.steer);
+      // The beat was answered, so its traces are the server's now.
+      tracesInFlight = [];
     } catch (err) {
-      // The batch stays in flight and is re-sent under the same sequence. The
-      // traces are not: they are a view of the turn, not its answer, and
-      // re-queueing them would grow without bound against a failing gateway.
+      // The batch stays in flight and is re-sent under the same sequence, and
+      // so do the traces — but only back onto the queue, never re-sent here.
+      // Whatever is still queued when the turn ends rides the completion,
+      // which is the one write that cannot lose the lease fence to itself.
       log.debug('[agent-turn] delta beat failed:', err);
     } finally {
+      // Anything this beat could not retire goes back to the front of the
+      // queue: it is older than whatever arrived while the beat was in flight.
+      if (tracesInFlight.length) {
+        toolEvents = [...tracesInFlight, ...toolEvents];
+        tracesInFlight = [];
+        if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) {
+          toolEvents = toolEvents.slice(-TURN_TOOL_EVENT_QUEUE_MAX);
+        }
+      }
       sending = false;
     }
   };
@@ -208,7 +223,11 @@ export async function executeAgentTurnRun(
   // a delta beat IS a liveness beat; this adds write load only while a turn is
   // actively streaming, and only on this lane.
   const deltaTimer = setInterval(() => {
-    void flushDelta();
+    // Tracked, not merely fired: the completion path awaits this so a beat
+    // holding traces cannot still be in flight when the run stops being
+    // `running` and the server's fence starts refusing them.
+    beatInFlight = flushDelta();
+    void beatInFlight;
   }, Math.min(TURN_DELTA_FLUSH_MS, cfg.heartbeatIntervalMs));
   // The connector-lane reaper writes a claimed run off once its heartbeat goes
   // stale, and a turn's wall clock is far longer than that threshold. Beat on
@@ -478,12 +497,30 @@ export async function executeAgentTurnRun(
     // so this is not correctness — it is the last span arriving as a delta
     // rather than as a jump at completion. Bounded so a turn cannot hang on a
     // queue the server keeps refusing.
+    // The delta timer beats fire-and-forget, so one can still be awaiting the
+    // server here. Stop the timer and let that beat settle BEFORE reading the
+    // queue: a trace it could not land comes back on its `finally`, and
+    // reading first would leave it owned by neither the beat nor the
+    // completion. This is the window that made the harness lose whichever of
+    // the two traced tools happened to finish nearest the answer.
+    clearInterval(deltaTimer);
+    clearInterval(heartbeat);
+    await beatInFlight;
     await drainDeltas();
+    // Whatever drainDeltas could not place rides the completion instead of
+    // being dropped. A turn's LAST tool call always lands here: its trace is
+    // queued after the final beat, and the server's heartbeat publish is
+    // fenced on the run still being `running`, which the completion below
+    // ends. Taken before the request so a trace cannot be sent twice.
+    const trailingTraces = [...tracesInFlight, ...toolEvents];
+    tracesInFlight = [];
+    toolEvents = [];
     const receipt = await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
       status: 'completed',
       text: result.turn.text,
+      ...(trailingTraces.length ? { turn_tool_events: trailingTraces } : {}),
       stop_reason: result.turn.stopReason,
       usage: result.turn.usage,
       session_jsonl: result.turn.sessionJsonl,

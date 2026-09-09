@@ -875,6 +875,62 @@ export const CompleteDeviceChatResponseSchema = Type.Object({
  * `session_jsonl` is Pi's native session state, to resume the next turn, and
  * the same body carries the reply.
  */
+/** What of a tool's output travels with its trace. */
+export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
+
+/**
+ * One finished tool call on an `agent_turn`, as the client should see it.
+ *
+ * The server renders this into the established `tool_use` custom event, so the
+ * SPA, promptfoo provider and menubar keep one tool-trace shape.
+ *
+ * Best-effort like the delta it rides with, and for the same reason: a tool
+ * trace is a VIEW of the turn, never the turn's answer, so a dropped one costs
+ * visibility and nothing else.
+ */
+export const TurnToolEventSchema = Type.Object({
+  tool_call_id: Type.String({ maxLength: 256 }),
+  name: Type.String({ maxLength: 256 }),
+  /**
+   * The call's arguments, as the model sent them. The SPA renders `input` as
+   * the tool row's args. Absent when the start of the call was not observed.
+   */
+  input: Type.Optional(Type.Unknown()),
+  is_error: Type.Boolean(),
+  output: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
+  /**
+   * Structured retrieval evidence, built by the worker from the UNCLIPPED
+   * result. `output` above is clipped for display and a truncated JSON body
+   * parses to nothing, so this cannot be re-derived server-side — the
+   * promptfoo provider's `retrievedContext` is only as complete as this field.
+   */
+  result_summary: Type.Optional(
+    Type.Object({
+      event_ids: Type.Optional(Type.Array(Type.Integer())),
+      snippets: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.Integer(),
+            text: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
+          }),
+          { maxItems: 16 }
+        )
+      ),
+    })
+  ),
+});
+
+/**
+ * How many finished tool traces a turn holds at once, on the worker's queue and
+ * as the bound on the completion body's trailing batch.
+ *
+ * One definition because it is now both: the worker drops the oldest past this
+ * cap, and the completion route rejects a body that exceeds it. A trace is a
+ * view of the turn, so a turn that spends its budget on tool calls sheds the
+ * oldest rather than growing an unbounded queue or an unbounded request.
+ */
+export const TURN_TOOL_EVENT_QUEUE_MAX = 20;
+
 /** Per-execution input bound shared by repeatable offers and committed receipts. */
 export const AGENT_TURN_INPUT_MAX = 32;
 
@@ -920,6 +976,22 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * (`chat-response-bridge`) already acts on it.
    */
   replied_in_band: Type.Optional(Type.Boolean()),
+  /**
+   * Tool traces that finished too late to ride a heartbeat, oldest first.
+   *
+   * The heartbeat publish is fenced on the run still being `running`, and THIS
+   * request is what makes it `completed`, so a trace flushed on the final beat
+   * matches no row and is dropped. A turn whose only tool call ends just before
+   * it answers loses its only trace that way every time, not occasionally.
+   *
+   * Delivered here instead of acknowledged on the beat: the completion route
+   * already holds the run lock with the reply envelope in scope, so a trace
+   * that arrives with the answer is written on the same transaction as the
+   * answer rather than racing it.
+   */
+  turn_tool_events: Type.Optional(
+    Type.Array(TurnToolEventSchema, { maxItems: TURN_TOOL_EVENT_QUEUE_MAX })
+  ),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   exit_reason: Type.Optional(WorkerExitReasonSchema),
 });
@@ -967,9 +1039,6 @@ export const PollAuthSignalResponseSchema = Type.Object({
  */
 export const TURN_DELTA_MAX_CHARS = 24_000;
 
-/** What of a tool's output travels with its trace. */
-export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
-
 /**
  * The isolate bridge's string cap for one agent turn.
  *
@@ -985,48 +1054,6 @@ export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
  * side left the other's assertion green.
  */
 export const AGENT_TURN_BRIDGE_BYTES = 32 * 1024 * 1024;
-
-/**
- * One finished tool call on an `agent_turn`, as the client should see it.
- *
- * The server renders this into the established `tool_use` custom event, so the
- * SPA, promptfoo provider and menubar keep one tool-trace shape.
- *
- * Best-effort like the delta it rides with, and for the same reason: a tool
- * trace is a VIEW of the turn, never the turn's answer, so a dropped one costs
- * visibility and nothing else.
- */
-export const TurnToolEventSchema = Type.Object({
-  tool_call_id: Type.String({ maxLength: 256 }),
-  name: Type.String({ maxLength: 256 }),
-  /**
-   * The call's arguments, as the model sent them. The SPA renders `input` as
-   * the tool row's args. Absent when the start of the call was not observed.
-   */
-  input: Type.Optional(Type.Unknown()),
-  is_error: Type.Boolean(),
-  output: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
-  /**
-   * Structured retrieval evidence, built by the worker from the UNCLIPPED
-   * result. `output` above is clipped for display and a truncated JSON body
-   * parses to nothing, so this cannot be re-derived server-side — the
-   * promptfoo provider's `retrievedContext` is only as complete as this field.
-   */
-  result_summary: Type.Optional(
-    Type.Object({
-      event_ids: Type.Optional(Type.Array(Type.Integer())),
-      snippets: Type.Optional(
-        Type.Array(
-          Type.Object({
-            id: Type.Integer(),
-            text: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
-          }),
-          { maxItems: 16 }
-        )
-      ),
-    })
-  ),
-});
 
 /**
  * `POST /api/workers/heartbeat`. `progress` is a coarse liveness counter, not an

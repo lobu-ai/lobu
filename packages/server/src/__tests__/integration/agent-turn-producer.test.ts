@@ -1872,6 +1872,36 @@ describe('agent turn producer', () => {
     }
   });
 
+  it('answers a cancellation without producing a turn to be blamed for', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const first = messageFor(org.id);
+    await enqueueMessage(first, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+    });
+    const before = (await agentTurnRuns()).length;
+
+    // A cancel is the one admitted message that becomes NO turn: it reports
+    // handled, and `enqueueAgentTurn` is never reached for it. That is what
+    // makes the consumer's ordering load-bearing — a liveness marker armed
+    // before this point would be a standing promise of a terminal event that
+    // nothing can ever discharge, and the deadline sweep would blame an
+    // unresponsive worker for a cancellation that worked. The consumer
+    // therefore answers the cancel first and returns; these two facts are what
+    // let it do that safely.
+    const cancel = await admittedMessage({ ...first, messageId: 'cancel-no-turn', messageText: '/cancel' });
+    expect(await cancelAgentTurn(cancel)).toBe(true);
+
+    // No new turn was admitted for the control message, so there is nothing a
+    // marker could be waiting on.
+    expect(await agentTurnRuns()).toHaveLength(before);
+    const [own] = (await sql`
+      SELECT count(*)::int AS n FROM runs
+      WHERE run_type = 'agent_turn' AND action_input->'reply'->>'message_id' = ${cancel.messageId}
+    `) as unknown as Array<{ n: number }>;
+    expect(own!.n).toBe(0);
+  });
+
   it('keeps cancellation within its organization, agent, conversation and posting user', async () => {
     const org = await createTestOrganization();
     const otherOrg = await createTestOrganization();
@@ -3386,6 +3416,66 @@ describe('agent turn completion', () => {
         data: { toolCallId: 'call-1', name: 'search_memory', input: { query: 'pricing' }, isError: false },
       },
     });
+  });
+
+  it('delivers a trace that arrives with the completion, not just on a beat', async () => {
+    const workerId = 'fleet-tool-trace-trailing';
+    const runId = await claimedTurnRun(workerId);
+
+    // A turn's LAST tool call finishes after its final heartbeat, so its trace
+    // has no beat left to ride. The heartbeat publish is fenced on the run
+    // still being `running` and completion is what ends that, so before this
+    // was carried on the completion body the trace was dropped every time —
+    // a single-tool turn traced nothing at all.
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      session_jsonl: nativeSession(),
+      text: 'Saved that for you.',
+      turn_tool_events: [
+        {
+          tool_call_id: 'call-save-1',
+          name: 'save_memory',
+          input: { title: 'release freeze' },
+          is_error: false,
+          output: 'saved',
+        },
+      ],
+    });
+    expect(response.status).toBe(200);
+
+    const rows = await threadResponses();
+    // The trace AND the answer, in that order: the tool row explains the reply,
+    // so a client reading them in id order sees the work before the conclusion.
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      customEvent: {
+        name: 'tool_use',
+        data: { toolCallId: 'call-save-1', name: 'save_memory', isError: false },
+      },
+    });
+    expect(rows[1]).toMatchObject({ finalText: 'Saved that for you.' });
+  });
+
+  it('completes without a trace batch when the turn called nothing', async () => {
+    const workerId = 'fleet-tool-trace-none';
+    const runId = await claimedTurnRun(workerId);
+
+    // The field is optional and absent here: a turn that called no tool must
+    // not manufacture an empty trace row beside its answer.
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      session_jsonl: nativeSession(),
+      text: 'No tools needed.',
+    });
+    expect(response.status).toBe(200);
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ finalText: 'No tools needed.' });
   });
 
   it('stamps repliedInBand so an in-band reply is not delivered twice', async () => {
