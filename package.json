@@ -53,5 +53,8 @@
   },
   "engines": {
     "node": ">=22 <25 || >=26"
+  },
+  "patchedDependencies": {
+    "postgres@3.4.9": "patches/postgres@3.4.9.patch"
   }
 }

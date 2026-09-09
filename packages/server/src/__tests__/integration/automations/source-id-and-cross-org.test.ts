@@ -312,7 +312,7 @@ describe("manage_automations source-id + cross-org guards", () => {
 				version_id: versionId,
 				entity_ids: [foreignEntityId],
 			})
-		).rejects.toThrow(new RegExp(String(foreignEntityId)));
+		).rejects.toThrow('This record was not found in this workspace, or you do not have access to it.');
 
 		// No automation leaked pointing at the foreign entity.
 		const leaked = await sql<{ id: number }[]>`
