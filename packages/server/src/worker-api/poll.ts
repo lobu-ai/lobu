@@ -79,6 +79,7 @@ import {
 import {
   browserActionContextFromMetadata,
   runScopedBrowserActionContext,
+  standaloneBrowserActionContext,
   trustedChromeActionInput,
 } from './browser-action-context';
 import { runLeaseFence } from '../runs/run-lease';
@@ -992,7 +993,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         chat_agent.name AS chat_agent_name,
         chat_agent.identity_md AS chat_agent_identity_md,
         chat_agent.soul_md AS chat_agent_soul_md,
-        chat_agent.user_md AS chat_agent_user_md
+        chat_agent.user_md AS chat_agent_user_md,
+        parent.activation_tab_id AS parent_activation_tab_id
       FROM runs r
       LEFT JOIN organization org ON org.id = r.organization_id
       LEFT JOIN feeds f ON f.id = r.feed_id
@@ -1022,6 +1024,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       LEFT JOIN agents chat_agent
         ON chat_agent.organization_id = r.organization_id
         AND chat_agent.id = r.action_input->>'agentId'
+      -- A page-activated parent already resolved WHICH user tab the human
+      -- opened. The extension's ownership guard cannot see that decision, so
+      -- carry it down to the child action; scoped to the same organization for
+      -- the same reason dispatch-chrome-action.ts scopes its own read.
+      LEFT JOIN runs parent
+        ON parent.id = r.parent_run_id
+        AND parent.organization_id = r.organization_id
       WHERE r.id = ${runId}
       LIMIT 1
     `;
@@ -1127,6 +1136,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     app_auth_profile_id: number | null;
     connection_config: Record<string, unknown> | null;
     connection_device_worker_id: string | null;
+    parent_activation_tab_id: number | string | null;
     connector_version_row_id: number | null;
     artifact_organization_id: string | null;
     artifact_row_count: number;
@@ -1758,8 +1768,25 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const actionInput = isChromeAction
     ? trustedChromeActionInput(
         selectedActionInput ?? {},
+        // Stored context first (a conversation/Automation/MCP container decided
+        // at dispatch), then the parent run for a connector child. An action
+        // with neither is standalone: group those together per
+        // organization+connection instead of minting a group per run, which
+        // turned ten SDK navigates into ten visible groups.
         browserActionContextFromMetadata(row.run_metadata) ??
-          runScopedBrowserActionContext(row.parent_run_id ?? row.run_id)
+          (row.parent_run_id != null
+            ? runScopedBrowserActionContext(row.parent_run_id)
+            : (standaloneBrowserActionContext(
+                row.organization_id,
+                row.connection_id,
+                row.run_id
+              ) ?? runScopedBrowserActionContext(row.run_id))),
+        // The extension's ownership guard has no way to know the human opened
+        // this exact tab, so the server hands down the tab it already resolved
+        // for the page-activated parent. Set here, never from action_input.
+        row.parent_activation_tab_id == null
+          ? null
+          : Number(row.parent_activation_tab_id)
       )
     : selectedActionInput;
 
