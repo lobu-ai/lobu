@@ -43,22 +43,22 @@ tool on every round. Anything else answers `ECHO[<user text>]`.
   workspace-attention block there. Fixed on the branch (strip the per-message
   field from the policy comparison). Scenario B is the regression check.
 - Agent memory recall is fenced to `events.metadata->>'agent_id' = <agent>`
-  (search.ts `agentIdScope`), but neither the model's `save_memory` call nor
-  `save_content.ts` stamps that scope, so an agent cannot recall what it just
-  saved through the tool. Pre-existing on main, NOT fixed. Scenario C stamps
-  the scope on the seeded row itself so the retrieval path can be exercised;
-  remove that `UPDATE events` once a save path stamps it.
+  (search.ts `agentIdScope`), and no save path stamped that scope, so an agent
+  could not recall what it had just saved through the tool. Pre-existing on
+  main; FIXED on the branch — `save_content.ts` now stamps the scope from the
+  bound tool context, which is what `ContentSearchFilters.agent_id` already
+  documented ("populated automatically by Lobu-owned save paths"). Scenario C
+  asserts both halves: the agent-saved row carries the scope, and a PAT-saved
+  row carries none.
 - Saved memory stays `indexing_status: pending` until the embed backfill cron
   (`*/5`) runs. The harness enqueues an `embed_backfill` run row directly.
 
 ## Open items for whoever picks this up
 
-1. Decide where `metadata.agent_id` gets stamped on saves (server save path
-   from `ctx.agentId`, or the MCP layer) and drop the harness stamp.
-2. The chat identity block (Slack/Telegram instruction providers) is only
+1. The chat identity block (Slack/Telegram instruction providers) is only
    covered by the fake-provider producer test; the `api` platform registers no
    provider, so this harness cannot see it. One live Slack turn on staging is
    still owed.
-3. Consider folding this into `scripts/sdk-e2e.sh` or CI once the runtime is
+2. Consider folding this into `scripts/sdk-e2e.sh` or CI once the runtime is
    stable; it is deliberately separate for now because it needs the built CLI
    dist and takes ~4 minutes.

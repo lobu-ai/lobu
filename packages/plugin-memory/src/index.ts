@@ -153,7 +153,6 @@ export function createMemoryPlugin(
           {
             content: combined.slice(0, 2_000),
             semantic_type: "observation",
-            metadata: { agent_id: context.agentId },
           },
           { timeoutMs: MEMORY_TOOL_TIMEOUT_MS }
         )

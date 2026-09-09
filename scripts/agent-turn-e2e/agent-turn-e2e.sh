@@ -195,13 +195,32 @@ send "$CONV_C" "[SAVE:release freeze|The release freeze holds until Friday; ask 
 settle "$CONV_C" 1 || bad "C: save turn did not settle"
 SAVED_ID="$(q "select id from events where title='release freeze' order by id desc limit 1")"
 note "C: agent-saved event id=$SAVED_ID metadata.agent_id=$(q "select metadata->>'agent_id' from events where id=${SAVED_ID:-0}") ; PAT-saved event metadata.agent_id=$(q "select coalesce(metadata->>'agent_id','<null>') from events where id=${EVENT_ID_C:-0}")"
+# The save path stamps the memory scope from the bound agent context, so the
+# row the agent saved is recallable BY that agent with no arrangement here.
+# Asserted rather than noted: the retrieval scenario below is only meaningful
+# if the row it retrieves actually carries the scope.
 if [ -n "$SAVED_ID" ]; then
-  # The agent's recall is fenced to memory carrying metadata.agent_id = <agent>
-  # (search.ts agentIdScope → content-search slot $11), but neither the model's
-  # save_memory call nor save_content.ts stamps that scope (row metadata is {}).
-  # Pre-existing on main, outside this PR: stamp the scope here so the retrieval
-  # path under test has something to retrieve, and report the gap separately.
-  q "update events set metadata = coalesce(metadata,'{}'::jsonb) || '{\"agent_id\":\"echo\"}'::jsonb where id=$SAVED_ID" >/dev/null
+  SAVED_SCOPE="$(q "select coalesce(metadata->>'agent_id','<null>') from events where id=$SAVED_ID")"
+  if [ "$SAVED_SCOPE" = "echo" ]; then
+    echo "✓ C: the agent-saved row carries metadata.agent_id=echo (stamped by save_content)"
+  else
+    echo "❌ C: the agent-saved row has metadata.agent_id=$SAVED_SCOPE, expected echo"
+    FAILS=$((FAILS+1))
+  fi
+  # The PAT save is the control: an unbound caller must stamp NOTHING, or the
+  # fix would have put every workspace write inside some agent's private scope.
+  PAT_SCOPE="$(q "select coalesce(metadata->>'agent_id','<null>') from events where id=${EVENT_ID_C:-0}")"
+  if [ "$PAT_SCOPE" = "<null>" ]; then
+    echo "✓ C: the PAT-saved row carries no agent scope (unbound caller stamps nothing)"
+  else
+    echo "❌ C: the PAT-saved row leaked an agent scope: $PAT_SCOPE"
+    FAILS=$((FAILS+1))
+  fi
+fi
+if [ -n "$SAVED_ID" ]; then
+  # No stamp needed here: `save_content.ts` sets `metadata.agent_id` from the
+  # bound tool context, so the row the agent just saved is already inside its
+  # own recall fence. The harness asserts that above rather than arranging it.
   q "insert into runs (organization_id, run_type, status, approval_status, action_input, created_at) values ('$ORG_ID_C','embed_backfill','pending','auto','{\"event_ids\":[$SAVED_ID]}'::jsonb, now())" >/dev/null
   for _ in $(seq 1 120); do st="$(q "select status from runs where run_type='embed_backfill' and organization_id='$ORG_ID_C' order by id desc limit 1")"; [ "$st" = "completed" ] && break; [ "$st" = "failed" ] && break; sleep 1; done
   note "C: embed_backfill for the agent-saved event: $st; embeddings: $(q "select count(*) from event_embeddings where event_id=$SAVED_ID")"
