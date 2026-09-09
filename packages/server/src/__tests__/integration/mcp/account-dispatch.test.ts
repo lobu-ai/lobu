@@ -3,7 +3,7 @@ import { initWorkspaceProvider } from '../../../workspace';
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import { type AuthContext, executeTool } from '../../../tools/execute';
-import { get, post } from '../../setup/test-helpers';
+import { get, post, mcpRequest } from '../../setup/test-helpers';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import { addUserToOrganization, createTestAccessToken, createTestSession, createTestOAuthClient, createTestOrganization, createTestUser, seedSystemEntityTypes } from '../../setup/test-fixtures';
 
@@ -73,6 +73,58 @@ describe('account MCP dispatch', () => {
     const [audit] = await getDb()`SELECT organization_id FROM events WHERE client_id=${auth.clientId} AND payload_data->>'tool_name'='query_sql' ORDER BY id DESC LIMIT 1`;
     expect(audit.organization_id).toBe(second.id);
     await expect(call('save_memory', { org_slug: second.slug, content: 'Denied target' }, { ...auth, grantedOrganizationIds: [first.id] })).rejects.toThrow(/not available/);
+  });
+
+  it('advertises required workspace targets only on account MCP and returns actionable errors', async () => {
+    const token = await createTestAccessToken(auth.userId!, null, auth.clientId!, {
+      grantedOrganizationIds: [first.id, second.id], scope: 'mcp:read mcp:write',
+    });
+    for (const orgSlug of [undefined, first.slug, undefined]) {
+      const listed = await mcpRequest('tools/list', {}, { token: token.token, orgSlug });
+      for (const [name, field] of [['save_memory', 'org_slug'], ['query_sql', 'org_slug'], ['get_approval', 'organization']]) {
+        const tool = listed.result.tools.find((item: any) => item.name === name);
+        expect(tool, name).toBeDefined();
+        // A required key absent from `properties` is an invalid schema hosts reject.
+        expect(tool.inputSchema.properties?.[field!], name).toBeDefined();
+        expect(tool.inputSchema.required?.includes(field) ?? false, name).toBe(!orgSlug);
+      }
+    }
+    const failed = await mcpRequest('tools/call', {
+      name: 'save_memory', arguments: { content: 'Synthetic untargeted note', semantic_type: 'note' },
+    }, { token: token.token });
+    expect(failed.result.isError).toBe(true);
+    expect(failed.result.content[0].text).toMatch(/workspace|org_slug/i);
+    expect(failed.result.structuredContent.error).toMatchObject({
+      code: 'VALIDATION', retryable: false, call_id: expect.any(String),
+    });
+    // An ungranted target is a denial, not malformed input: it must carry the
+    // same correlated taxonomy rather than the SDK's untranslated typed error.
+    const denied = await mcpRequest('tools/call', {
+      name: 'save_memory',
+      arguments: { org_slug: 'unavailable-synthetic-workspace', content: 'Synthetic untargeted note', semantic_type: 'note' },
+    }, { token: token.token });
+    expect(denied.result.isError).toBe(true);
+    expect(denied.result.structuredContent.error).toMatchObject({
+      code: 'PERMISSION', retryable: false, call_id: expect.any(String),
+    });
+  });
+
+  it('audits early missing, invalid, and unauthorized targets privately without saving content', async () => {
+    for (const args of [
+      { content: 'Synthetic rejected note', semantic_type: 'note' },
+      { org_slug: '', content: 'Synthetic rejected note', semantic_type: 'note' },
+      { org_slug: 'unavailable-synthetic-workspace', content: 'Synthetic rejected note', semantic_type: 'note' },
+    ]) {
+      const [before] = await getDb()`SELECT count(*)::int AS n FROM events WHERE client_id=${auth.clientId} AND origin_type='tool_invocation'`;
+      await expect(call('save_memory', args)).rejects.toThrow();
+      const [after] = await getDb()`SELECT count(*)::int AS n FROM events WHERE client_id=${auth.clientId} AND origin_type='tool_invocation'`;
+      expect(after.n).toBe(before.n + 1);
+      const [audit] = await getDb()`SELECT organization_id, created_by, payload_data FROM events WHERE client_id=${auth.clientId} AND origin_type='tool_invocation' ORDER BY id DESC LIMIT 1`;
+      expect(audit.organization_id).toBeNull();
+      expect(audit.created_by).toBe(auth.userId);
+      expect(audit.payload_data.success).toBe(false);
+      expect(JSON.stringify(audit.payload_data)).not.toContain('Synthetic rejected note');
+    }
   });
 
   it('opens actor history through the account HTTP route without inheriting a token workspace', async () => {

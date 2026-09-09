@@ -3,6 +3,7 @@ import {
   browserActionContextFromMetadata,
   deriveBrowserActionContext,
   deriveSdkBrowserActionContext,
+  runScopedBrowserActionContext,
   trustedChromeActionInput,
 } from '../../worker-api/browser-action-context';
 import type { ToolContext } from '../../tools/registry';
@@ -198,5 +199,54 @@ describe('SDK browser invocation', () => {
       ...original,
       title: expect.stringContaining('Lobu · Check notifications · '),
     });
+  });
+});
+
+// The extension normalizes titles outside this shape. Keep every fixed server
+// fallback within its pass-through contract; user-supplied subjects are
+// bounded by the extension.
+const EXTENSION_TITLE_PREFIX = 'Lobu · ';
+const EXTENSION_MAX_TITLE_POINTS = 64;
+
+describe('extension title pass-through contract', () => {
+  const titles = [
+    runScopedBrowserActionContext(Number.MAX_SAFE_INTEGER).title,
+    deriveSdkBrowserActionContext(
+      context({
+        sdkBrowserInvocation: { nonce: 'synthetic-default-title', title: '' },
+      })
+    )!.title,
+    deriveBrowserActionContext(
+      context({
+        actingAutomationId: Number.MAX_SAFE_INTEGER,
+        actingRunId: Number.MAX_SAFE_INTEGER,
+      })
+    )!.title,
+    deriveBrowserActionContext(
+      context({
+        sourceContext: {
+          platform: 'slack',
+          connectionId: 'conn_1',
+          channelId: 'chan_1',
+          conversationId: 'conv_1',
+        },
+      })
+    )!.title,
+    deriveBrowserActionContext(
+      context({
+        tokenType: 'oauth',
+        clientId: 'synthetic-client',
+        mcpSessionId: 'synthetic-session',
+      })
+    )!.title,
+  ];
+
+  it('keeps fixed server titles unchanged by the extension', () => {
+    for (const title of titles) {
+      expect(title).toStartWith(EXTENSION_TITLE_PREFIX);
+      expect([...title].length).toBeLessThanOrEqual(
+        EXTENSION_MAX_TITLE_POINTS
+      );
+    }
   });
 });

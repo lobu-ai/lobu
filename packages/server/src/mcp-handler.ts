@@ -389,6 +389,7 @@ function createServerForContext(
     const publicOnly = !!authCtx.organizationId && !effectiveCrossOrg && !authCtx.memberRole;
     const maxAccessLevel = resolveMaxAccessLevel(authCtx.memberRole, authCtx.scopes, effectiveCrossOrg);
     const allTools = getMcpTools({
+      requireWorkspaceTarget: !authCtx.organizationId,
       publicOnly,
       maxAccessLevel,
       adminScopeEligible: effectiveCrossOrg || isAdminOrOwnerRole(authCtx.memberRole),
@@ -908,7 +909,7 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
   const grantLine =
     `Granted workspaces: ${labels.join(', ')}. ` +
     (authCtx.directSearchFederation
-      ? 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace); direct writes and SQL require an explicit target.'
+      ? 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace). Pass org_slug to save_memory and query_sql, and organization to get_approval. Never infer a target from entity IDs or a previous call.'
       : 'This connection operates in its explicitly bound workspace.');
   return [base, grantLine].filter(Boolean).join('\n\n');
 }

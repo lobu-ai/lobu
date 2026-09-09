@@ -5,9 +5,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { resolveCrossOrgToolContext } from '../sandbox/client-sdk';
-import { verifiedAutomationSource } from '../automations/automation-source';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
+import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
+import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
 import { isToolError, retryWithBackoff, ToolError } from '@lobu/core';
@@ -210,7 +210,8 @@ export function checkToolAccess(
   if (!accountScope && !authCtx.organizationId) {
     throw new ToolUserError(
       'This connection has no workspace binding. Pass the tool’s explicit workspace target (for example org_slug), or run it through await client.org(target) in query_sdk/run_sdk.',
-      400
+      400,
+      'VALIDATION'
     );
   }
   if (accountScope && !authCtx.organizationId && (!authCtx.isAuthenticated || !authCtx.userId)) {
@@ -285,38 +286,6 @@ export async function executeTool(
   env: Env,
   authCtx: AuthContext
 ): Promise<unknown> {
-  const target = toolName === 'save_memory' || toolName === 'query_sql'
-    ? args.org_slug
-    : toolName === 'get_approval' ? args.organization : undefined;
-  if (target !== undefined) {
-    if (typeof target !== 'string' || !target.trim()) throw new ToolUserError('A workspace target is required.', 400);
-    const workspace = await resolveCrossOrgToolContext(target, toAccountToolContext(authCtx));
-    authCtx = { ...authCtx, organizationId: workspace.organizationId, memberRole: workspace.memberRole };
-  }
-  const requiredAccess = checkToolAccess(toolName, args, authCtx);
-  // SDK capture and eval finalization enforce their own per-method policy.
-  const captureAware = toolName === 'run_sdk' || toolName === 'query_sdk' ||
-    (toolName === 'manage_automations' && args.action === 'complete_window' &&
-      authCtx.captureIdentity?.automationRunId !== undefined);
-  if (authCtx.executionMode === 'capture' && requiredAccess !== 'read' && !captureAware) {
-    return captureEffect(authCtx.captureIdentity, `tools.${toolName}`, args);
-  }
-
-  // Promotions pause, enforced where config is actually mutated. `lobu apply`
-  // writes through these tools, so this is the chokepoint that binds every
-  // caller — including a CI job posting straight at the API with a PAT, which
-  // the CLI-side check never could. Read-tier calls and non-apply traffic pass
-  // through untouched, which also covers the org-agnostic tools below (they
-  // are read-tier by construction); see `assertDeploymentsNotPaused`.
-  await assertDeploymentsNotPaused({
-    organizationId: authCtx.organizationId,
-    applyId: authCtx.applyId ?? null,
-    rollbackOf: authCtx.rollbackOf ?? null,
-    isReadOnly: requiredAccess === 'read',
-  });
-
-  const tool = getTool(toolName)!;
-  const toolContext = toAccountToolContext(authCtx);
   const startTime = Date.now();
 
   // Per-invocation correlation id (lobu#2051 Item 2). Distinct from the
@@ -324,46 +293,105 @@ export async function executeTool(
   // single tool call so a failure can be traced across logs/audit/response.
   const callId = randomUUID();
 
-  // Attribute every audit row this handler writes to the Automation driving the
-  // call. Resolution mirrors the one gated writes already use
-  // (`manage_entity.ts`): the server-set reaction identity first, then the
-  // caller-declared `automation_source` for an agent or device running a
-  // window. Setting it once here rather than at each audit writer is what keeps
-  // provenance from drifting as writers are added.
-  // A declared source is caller input. Verify it against this org before it can
-  // reach `events.automation_id` — an unowned id would misattribute the audit
-  // row (and inherit that Automation's causal chain), and a nonexistent one
-  // would fail the FK and DROP the audit row entirely, since audit writes are
-  // fire-and-forget. Same rule `notify.ts` already applies to this field.
-  // Skipped whenever a trusted reaction identity is present, and skipped
-  // entirely when nothing was declared, so ordinary tool calls pay nothing.
-  const declaredSource =
-    toolContext.actingAutomationId != null || !toolContext.organizationId
-      ? null
-      : await verifiedAutomationSource(
-          declaredAutomationSource(args),
-          toolContext.organizationId
-        );
-  const runHandler = () =>
-    runWithActingAutomation(
-      {
-        automationId:
-          toolContext.actingAutomationId ?? declaredSource?.automationId,
-        // The run is the causal identity for both trusted reaction sessions and
-        // verified declarations from agent/device lanes.
-        runId: toolContext.actingRunId ?? declaredSource?.runId ?? null,
-      },
-      () =>
-        trackMCPToolCall(toolName, args, () =>
-          isAccountContentRead(toolName, authCtx)
-            ? getAccountContent(args, env, authCtx)
-            : tool.scope === 'account'
-            ? tool.handler(args, env, toolContext)
-            : tool.handler(args, env, requireWorkspaceContext(toolContext))
-        )
-    );
-
+  // Snapshot the caller's own context BEFORE any requested target is resolved,
+  // so a rejected invocation is audited against the workspace this connection
+  // was already bound to (null on bare account MCP) and never against the
+  // requested target, which may be unauthorized or nonexistent.
+  let toolContext: AccountToolContext = toAccountToolContext(authCtx);
   try {
+    const field = getTool(toolName)?.workspaceTarget;
+    const target = field ? args[field] : undefined;
+    if (target !== undefined) {
+      if (typeof target !== 'string' || !target.trim()) {
+        throw new ToolUserError(
+          `${field} must be a workspace slug or id.`,
+          400,
+          'VALIDATION'
+        );
+      }
+      const workspace = await resolveCrossOrgToolContext(
+        target,
+        toAccountToolContext(authCtx)
+      ).catch((error: unknown) => {
+        // Denial arrives as the SDK's typed error, which only the sandbox
+        // translates; at this plain tool boundary it would surface as an
+        // uncoded 400. Re-raise so REST and MCP agree on 403 plus a correlated
+        // code — the same translation `mcp_app.ts` documents for its own
+        // approval-workspace resolution.
+        if (error instanceof CrossOrgAccessDenied) {
+          throw new ToolUserError(error.message, 403, 'PERMISSION');
+        }
+        throw error;
+      });
+      authCtx = { ...authCtx, organizationId: workspace.organizationId, memberRole: workspace.memberRole };
+    }
+    const requiredAccess = checkToolAccess(toolName, args, authCtx);
+    toolContext = toAccountToolContext(authCtx);
+
+    // A capture run records the effect it WOULD have had instead of performing
+    // it. SDK capture and eval-window finalization enforce their own
+    // per-method policy, so they run for real; everything else that is not
+    // read-tier is recorded and returned here.
+    const captureAware = toolName === 'run_sdk' || toolName === 'query_sdk' ||
+      (toolName === 'manage_automations' && args.action === 'complete_window' &&
+        authCtx.captureIdentity?.automationRunId !== undefined);
+    if (authCtx.executionMode === 'capture' && requiredAccess !== 'read' && !captureAware) {
+      return captureEffect(authCtx.captureIdentity, `tools.${toolName}`, args);
+    }
+
+    // Promotions pause, enforced where config is actually mutated. `lobu apply`
+    // writes through these tools, so this is the chokepoint that binds every
+    // caller — including a CI job posting straight at the API with a PAT, which
+    // the CLI-side check never could. Read-tier calls and non-apply traffic pass
+    // through untouched, which also covers the org-agnostic tools below (they
+    // are read-tier by construction); see `assertDeploymentsNotPaused`.
+    await assertDeploymentsNotPaused({
+      organizationId: authCtx.organizationId,
+      applyId: authCtx.applyId ?? null,
+      rollbackOf: authCtx.rollbackOf ?? null,
+      isReadOnly: requiredAccess === 'read',
+    });
+
+    const tool = getTool(toolName)!;
+
+    // Attribute every audit row this handler writes to the Automation driving the
+    // call. Resolution mirrors the one gated writes already use
+    // (`manage_entity.ts`): the server-set reaction identity first, then the
+    // caller-declared `automation_source` for an agent or device running a
+    // window. Setting it once here rather than at each audit writer is what keeps
+    // provenance from drifting as writers are added.
+    // A declared source is caller input. Verify it against this org before it can
+    // reach `events.automation_id` — an unowned id would misattribute the audit
+    // row (and inherit that Automation's causal chain), and a nonexistent one
+    // would fail the FK and DROP the audit row entirely, since audit writes are
+    // fire-and-forget. Same rule `notify.ts` already applies to this field.
+    // Skipped whenever a trusted reaction identity is present, and skipped
+    // entirely when nothing was declared, so ordinary tool calls pay nothing.
+    const declaredSource =
+      toolContext.actingAutomationId != null || !toolContext.organizationId
+        ? null
+        : await verifiedAutomationSource(
+            declaredAutomationSource(args),
+            toolContext.organizationId
+          );
+    const runHandler = () =>
+      runWithActingAutomation(
+        {
+          automationId:
+            toolContext.actingAutomationId ?? declaredSource?.automationId,
+          // The run is the causal identity for both trusted reaction sessions and
+          // verified declarations from agent/device lanes.
+          runId: toolContext.actingRunId ?? declaredSource?.runId ?? null,
+        },
+        () =>
+          trackMCPToolCall(toolName, args, () =>
+            isAccountContentRead(toolName, authCtx)
+              ? getAccountContent(args, env, authCtx)
+              : tool.scope === 'account'
+              ? tool.handler(args, env, toolContext)
+              : tool.handler(args, env, requireWorkspaceContext(toolContext))
+          )
+      );
     // Auto-retry (lobu#2051 Item 2): only transient thrown ToolErrors, and only
     // for read/test tools on the allowlist. Mutations and run_sdk are never
     // retried here — re-running them could double-write. Resolved failures from
