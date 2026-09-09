@@ -1821,7 +1821,12 @@ describe("agent turn on the isolate lane", () => {
 
 		const save = memoryCalls.find((c) => c.tool === "save_memory");
 		expect(save).toBeDefined();
-		expect(save?.body).toMatchObject({ semantic_type: "observation", metadata: { agent_id: "agent-under-test" } });
+		// No `metadata.agent_id` argument: the memory scope is stamped SERVER-side
+		// from the bound tool context (`save_content.ts`), so the plugin no longer
+		// sends an identity claim the server would have to trust. This call rides
+		// the turn's own agent-bound token, which is what carries the scope.
+		expect(save?.body).toMatchObject({ semantic_type: "observation" });
+		expect((save?.body as { metadata?: unknown }).metadata).toBeUndefined();
 		const content = String(save?.body.content);
 		expect(content).toContain("User: what did we decide about pricing?");
 		expect(content).toContain("Assistant: Hello from the isolate");
