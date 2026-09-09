@@ -119,13 +119,6 @@ export class MessageConsumer {
   private queue: IMessageQueue;
   private deploymentManager: DeploymentManager;
   private isRunning = false;
-  /**
-   * Per-process deployment-creation lock. The embedded-only server
-   * has a single MessageConsumer instance per process, so an in-memory Set
-   * is sufficient for the "two consecutive messages for the same thread
-   * race to create the deployment" guard. The cross-pod guard is the PG
-   * advisory lock in DeploymentManager — this Set is pod-local only.
-   */
   private agentSettingsStore?: AgentSettingsStore;
   private agentTurnMcp?: AgentTurnDeps["mcp"];
   private agentTurnArtifacts?: AgentTurnDeps["artifacts"];
@@ -145,18 +138,16 @@ export class MessageConsumer {
   }
 
   /**
-   * The gateway's MCP surface for the isolate-lane shadow: which servers an
-   * agent has and what tools they publish. Same post-construction injection
-   * as the guardrails, for the same reason. Absent → shadow turns run with no
-   * tools.
+   * The gateway's MCP surface for the agent turn: which servers an agent has
+   * and what tools they publish. Same post-construction injection as the
+   * guardrails, for the same reason. Absent → a turn runs with no tools.
    */
   setAgentTurnMcp(mcp?: AgentTurnDeps["mcp"]): void {
     this.agentTurnMcp = mcp;
   }
 
   /**
-   * The artifact store the isolate-lane shadow resolves a turn's attachments
-   * out of. Same post-construction injection as the MCP surface. Absent → an
+   * The artifact store the agent turn resolves its attachments out of. Same post-construction injection as the MCP surface. Absent → an
    * image attachment travels as its name only.
    */
   setAgentTurnArtifacts(artifacts?: AgentTurnDeps["artifacts"]): void {

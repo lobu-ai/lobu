@@ -127,7 +127,7 @@ q "select to_char(created_at,'HH24:MI:SS.MS')||' created  '||coalesce(to_char(cl
 # Keys whose values differ between the two turns are exactly what blocks the steer offer.
 q "with t as (select id, (action_input->'turn') - 'message_id' - 'message_text' - 'message_images' - 'message_files' - 'session_jsonl' as turn, (action_input->'reply') - 'message_id' as reply from runs where run_type='agent_turn' and action_input->'turn'->>'conversation_id'='$CONV_B' order by id), a as (select * from t limit 1), b as (select * from t offset 1 limit 1) select string_agg(k, ', ') from (select k from a, b, jsonb_object_keys(a.turn || b.turn) k where a.turn->k is distinct from b.turn->k union all select 'reply.'||k from a, b, jsonb_object_keys(a.reply || b.reply) k where a.reply->k is distinct from b.reply->k) d" > "$RUN_DIR/b-policy-diff.txt"
 note "B: envelope keys that differ between the two turns (executionPolicy scope): $(cat "$RUN_DIR/b-policy-diff.txt")"
-q "select '#'||id||' ephemeral_context: '||coalesce(replace(action_input->'turn'->>'ephemeral_context', E'\n', ' | '),'<none>') from runs where run_type='agent_turn' and action_input->'turn'->>'conversation_id'='$CONV_B' order by id" | cut -c1-300 | sed 's/^/    /' 
+q "select '#'||id||' ephemeral_context: '||coalesce(replace(action_input->'turn'->>'ephemeral_context', E'\n', ' | '),'<none>') from runs where run_type='agent_turn' and action_input->'turn'->>'conversation_id'='$CONV_B' order by id" | cut -c1-300 | sed 's/^/    /'
 B_FINALS="$(finals "$CONV_B")"
 B_TURNS="$(turns "$CONV_B")"
 note "B: agent_turn runs (id status consumed_by error):"; echo "$B_TURNS" | sed 's/^/    /'
