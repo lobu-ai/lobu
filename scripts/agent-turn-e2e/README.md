@@ -55,10 +55,14 @@ tool on every round. Anything else answers `ECHO[<user text>]`.
 
 ## Open items for whoever picks this up
 
-1. The chat identity block (Slack/Telegram instruction providers) is only
-   covered by the fake-provider producer test; the `api` platform registers no
-   provider, so this harness cannot see it. One live Slack turn on staging is
-   still owed.
-2. Consider folding this into `scripts/sdk-e2e.sh` or CI once the runtime is
-   stable; it is deliberately separate for now because it needs the built CLI
-   dist and takes ~4 minutes.
+1. One live Slack turn on staging is still owed: the `api` platform registers
+   no instruction provider, so this harness structurally cannot see the chat
+   identity block. The two halves are pinned automatically instead — the
+   producer test asserts the composer's placement, and
+   `slack-instruction-provider.test.ts` asserts the real provider emits a
+   placeable block — but neither is a real Slack workspace.
+2. Kept as a manual gate on purpose, reachable as `make test-e2e-agent-turn`
+   (it builds the server and CLI dist first). Not folded into
+   `scripts/sdk-e2e.sh` or CI: ~4 minutes is past that job's budget, and every
+   scenario here also has unit/integration coverage, so this is the
+   real-route gate rather than the regression gate.
