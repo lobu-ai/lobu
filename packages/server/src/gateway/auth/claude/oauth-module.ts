@@ -136,16 +136,6 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     return envVars;
   }
 
-  getCliBackendConfig() {
-    return {
-      name: "claude-code",
-      command: "npx",
-      args: ["-y", "acpx@latest", "claude", "--print"],
-      modelArg: "--model",
-      sessionArg: "--session",
-    };
-  }
-
   async getModelOptions(
     agentId: string,
     userId: string

@@ -78,15 +78,6 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
     return `${header}.${payload}.placeholder`;
   }
 
-  getCliBackendConfig() {
-    return {
-      name: "codex",
-      command: "npx",
-      args: ["-y", "acpx@latest", "codex", "--quiet"],
-      modelArg: "--model",
-    };
-  }
-
   async getModelOptions(
     agentId: string,
     userId: string,

@@ -1,4 +1,4 @@
-import type { CliBackendConfig, ModelOption, SdkCompat } from "@lobu/core";
+import type { ModelOption, SdkCompat } from "@lobu/core";
 import { type ModuleInterface, moduleRegistry } from "@lobu/core";
 import type { ProviderCredentialContext } from "../embedded.js";
 
@@ -69,7 +69,6 @@ export interface ModelProviderModule extends OrchestratorModule {
   ): Record<string, string>;
   getApp?(): any;
   getModelOptions?(agentId: string, userId: string): Promise<ModelOption[]>;
-  getCliBackendConfig?(): CliBackendConfig | null;
   buildCredentialPlaceholder?(
     agentId: string,
     context?: ProviderCredentialContext

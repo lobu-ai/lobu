@@ -110,7 +110,6 @@ export type {
   AgentInlineGuardrail,
   AgentOptions,
   AuthProfile,
-  CliBackendConfig,
   ConversationMessage,
   DeclaredCredential,
   HistoryMessage,

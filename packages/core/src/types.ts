@@ -1,19 +1,6 @@
 import type { SecretRef } from "./secret-refs";
 
 /**
- * CLI backend configuration for pi-agent integration.
- * Providers can ship CLI tools that pi-agent invokes as backends.
- */
-export interface CliBackendConfig {
-  name: string; // "claude-code", "codex"
-  command: string; // "/usr/local/bin/claude"
-  args?: string[];
-  env?: Record<string, string>;
-  modelArg?: string; // "--model"
-  sessionArg?: string; // "--session"
-}
-
-/**
  * Unified authentication profile for any model provider.
  * Persisted per-(userId, agentId) by the gateway's UserAuthProfileStore;
  * also synthesized at read time from declared credentials and SDK-supplied

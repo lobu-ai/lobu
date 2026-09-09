@@ -115,12 +115,11 @@ export class WorkerGateway {
   }
 
   /**
-   * Wire the deployment manager's idle clock so worker responses keep a
-   * long-running worker alive in the idle reaper. Injected after construction
+   * Wire the deployment manager's idle clock. Injected after construction
    * because the gateway and the orchestrator (which owns the deployment
-   * manager) are built separately; the gateway runs without it (the tracker is
-   * optional) but then a worker active past WORKER_IDLE_CLEANUP_MINUTES with no
-   * new inbound message can be reaped mid-turn.
+   * manager) are built separately, and optional — the base manager's
+   * implementation is a no-op in the isolate lane, where a turn is claimed
+   * over HTTP and there is no worker process to keep alive or reap.
    */
   setDeploymentActivityTracker(tracker: DeploymentActivityTracker): void {
     this.deploymentActivityTracker = tracker;
@@ -330,16 +329,16 @@ export class WorkerGateway {
         },
       };
 
-      // Deployment idle clock (`EmbeddedWorkerEntry.lastActivity`) feeds the
-      // idle reaper (WORKER_IDLE_CLEANUP_MINUTES). Mid-turn liveness still
-      // needs refresh (status_update / deltas / terminal / delivery ACKs) so a
-      // long turn is not scaled to 0. Pure SSE heartbeat ACKs do NOT prove the
-      // worker is doing useful work — they fire forever on warm idle children
-      // and made idle cleanup a no-op (16× ~180MB children stuck forever, the
-      // dominant prod OOM cost). So a heartbeat-only ACK no longer refreshes the
-      // idle clock: WORKER_IDLE_CLEANUP_MINUTES is now the single dial that reaps
-      // warm idle children. Turn-liveness deadlines still extend via
-      // extendTurnDeadlines below, so a live-but-slow mid-turn worker is safe.
+      // Refresh the deployment idle clock, skipping pure heartbeat ACKs: they
+      // fire forever on a warm idle worker, so counting them as activity is
+      // what made idle cleanup a no-op under the subprocess lane (16× ~180MB
+      // children stuck forever, the dominant prod OOM cost).
+      //
+      // The isolate lane has no child to reap, so the tracker's default
+      // implementation is a no-op — this stays wired for the injected-tracker
+      // seam (`setDeploymentActivityTracker`) and to keep the skip rule with
+      // the ACK it describes. Mid-turn liveness does NOT depend on it:
+      // `extendTurnDeadlines` below is what keeps a live-but-slow turn safe.
       const isHeartbeatOnlyAck = !!(
         enrichedResponse.received && enrichedResponse.heartbeat
       );
@@ -842,15 +841,6 @@ export class WorkerGateway {
     defaultProvider?: string;
     defaultProviderSlug?: string;
     defaultModel?: string;
-    cliBackends?: Array<{
-      providerId: string;
-      name: string;
-      command: string;
-      args?: string[];
-      env?: Record<string, string>;
-      modelArg?: string;
-      sessionArg?: string;
-    }>;
     providerBaseUrlMappings?: Record<string, string>;
     configProviders?: Record<string, ConfigProviderMeta>;
     installedProviderRoutes?: Record<string, string>;
@@ -939,23 +929,6 @@ export class WorkerGateway {
       );
     }
 
-    // Build CLI backend configs
-    const cliBackends: Array<{
-      providerId: string;
-      name: string;
-      command: string;
-      args?: string[];
-      env?: Record<string, string>;
-      modelArg?: string;
-      sessionArg?: string;
-    }> = [];
-    for (const provider of effectiveProviders) {
-      const config = provider.getCliBackendConfig?.();
-      if (config) {
-        cliBackends.push({ providerId: provider.providerId, ...config });
-      }
-    }
-
     // Collect metadata from config-driven providers for worker model resolution
     const configProviders: Record<string, ConfigProviderMeta> = {};
     for (const provider of effectiveProviders) {
@@ -990,7 +963,6 @@ export class WorkerGateway {
       defaultProvider?: string;
       defaultProviderSlug?: string;
       defaultModel?: string;
-      cliBackends?: typeof cliBackends;
       providerBaseUrlMappings?: Record<string, string>;
       configProviders?: typeof configProviders;
       installedProviderRoutes?: Record<string, string>;
@@ -1022,10 +994,6 @@ export class WorkerGateway {
 
     if (Object.keys(providerBaseUrlMappings).length > 0) {
       result.providerBaseUrlMappings = providerBaseUrlMappings;
-    }
-
-    if (cliBackends.length > 0) {
-      result.cliBackends = cliBackends;
     }
 
     if (Object.keys(configProviders).length > 0) {

@@ -52,9 +52,8 @@ app:
   # Non-secret environment variables
   env:
     NODE_ENV: production
-    # Tags all Sentry events (server + forwarded to the worker subprocess) so a
-    # prod deploy can never report under environment=development. Worker spawn
-    # forwards this via assembleBaseEnv (base-deployment-manager.ts).
+    # Tags all Sentry events so a prod deploy can never report under
+    # environment=development.
     ENVIRONMENT: production
     # Hold teardown after SIGTERM so /health/ready returns 503 and kube-proxy
     # removes this pod from the Service endpoints before in-flight connections
