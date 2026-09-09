@@ -388,13 +388,16 @@ export async function runAgentTurn(
   // is a side prompt that must not carry it.
   let transientContext: string | undefined;
   /**
-   * Transient context per STEERED message, keyed by the message's own text.
+   * Transient context per MESSAGE, keyed by the message's own text — the turn
+   * opener included.
    *
-   * A steered follow-up brings its own block (the API's live attention digest,
-   * an automation's instructions), so the model must see that message's
-   * context beside that message — not the turn opener's. Populated as steering
-   * injects, and read on every model call, because which message is newest
-   * changes as more arrive.
+   * Every message owns its block and no message inherits another's. A steered
+   * follow-up brings its own (the API's live attention digest, an automation's
+   * instructions), and one that brings none must be answered with none: the
+   * context extension prepends to whichever user message is NEWEST, so a
+   * per-turn fallback would re-attach the opener's block to every later
+   * message — stale digest, wrong instructions, and a prompt-cache prefix that
+   * changes on each call.
    *
    * Keyed by TEXT, not object identity: pi rewrites messages on the way to the
    * provider (it stamps `cache_control`, among other things), so the object the
@@ -403,7 +406,7 @@ export async function runAgentTurn(
    * because it reads the persisted session branch, where the reference does
    * survive.
    */
-  const steeredContext = new Map<string, string>();
+  const messageContext = new Map<string, string>();
   const built = buildTools(
     input,
     credential,
@@ -414,13 +417,11 @@ export async function runAgentTurn(
   );
   const tools = built.tools;
   const session = createNativeSession(input, tools, (message) => {
-    // A steered message answers with its own context; anything else — the
-    // turn's opening message — gets the turn's. `transientContext` is
-    // consulted last so the flush suppression above still applies to the
-    // opener.
+    // The context of THIS message, or nothing. No per-turn fallback: the
+    // extension prepends to the newest user message, so falling back would
+    // hand a context-less follow-up the opener's block.
     const text = messageText(message);
-    const own = text ? steeredContext.get(text) : undefined;
-    return own ?? transientContext;
+    return text ? messageContext.get(text) : undefined;
   });
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
@@ -473,6 +474,9 @@ export async function runAgentTurn(
     ]
       .filter(Boolean)
       .join('\n\n');
+    // The opener owns its block the same way a steered message does, so the
+    // lookup needs no fallback and no later message can inherit it.
+    if (transientContext) messageContext.set(input.userMessage, transientContext);
 
     // The STREAM, not the answer: every delta of every assistant message this
     // turn, in order. It drives the live typing indicator and is the fallback
@@ -510,11 +514,11 @@ export async function runAgentTurn(
         // context beside the message it is answering now.
         const context = message.ephemeralContext?.trim();
         if (context) {
-          steeredContext.set(message.text, `Context for this message:\n${context}`);
+          messageContext.set(message.text, `Context for this message:\n${context}`);
         } else {
           // A follow-up carrying NO context must not inherit an earlier
           // identical message's block.
-          steeredContext.delete(message.text);
+          messageContext.delete(message.text);
         }
         agent.steer(nativeMessage);
       }
@@ -608,8 +612,12 @@ export async function runAgentTurn(
       const threshold = compaction.contextWindow - compaction.reserveTokens - flush.softThresholdTokens;
       if (projected >= threshold) {
         flushing = true;
+        // The flush is a SIDE prompt: it must not carry the turn's block. The
+        // map entry is what the lookup reads, so clearing the variable alone
+        // would leave the flush prompt receiving it.
         const mainContext = transientContext;
         transientContext = undefined;
+        messageContext.delete(input.userMessage);
         session.setAutoCompactionEnabled(false);
         try {
           await promptNativeSession(session, `${flush.systemPrompt}\n\n${flush.prompt}`);
@@ -627,6 +635,7 @@ export async function runAgentTurn(
         } finally {
           session.setAutoCompactionEnabled(compaction.enabled);
           transientContext = mainContext;
+          if (mainContext) messageContext.set(input.userMessage, mainContext);
           flushing = false;
         }
       }

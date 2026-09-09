@@ -1500,6 +1500,42 @@ describe("agent turn on the isolate lane", () => {
 		);
 		expect(steered).toBeDefined();
 		expect(JSON.stringify(steered)).not.toContain("FOLLOWER-CONTEXT-attention-run-2");
+
+		// And the OPENER's block does not ride along. The context extension
+		// prepends to whichever user message is newest, so a per-turn fallback
+		// would re-attach the opener's attention digest to every later message.
+		expect(withFollower).not.toContain("OPENER-CONTEXT-attention-run-1");
+	}, 120_000);
+
+	it("steers: a follow-up with no context of its own is answered with none", async () => {
+		hits = [];
+		toolScript = [{ id: "toolu_s3", name: "query_sdk", input: { code: "entities.count()" } }];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		let asked = 0;
+		await runTurn(
+			toolJob({ ephemeralContext: "OPENER-ONLY-attention-digest" }),
+			["127.0.0.1"],
+			{
+				// A bare follow-up: the caller attached no `ephemeralContext`.
+				takeSteering: () =>
+					asked++ === 0
+						? [{ runId: 2, messageId: "m-2", text: "also check companies" }]
+						: [],
+			},
+		);
+		expect(asked).toBeGreaterThan(0);
+		const requests = hits.filter((h) => h.url === "/v1/messages").map((h) => h.body);
+
+		// The opener still gets its own block — the fix must not withhold it.
+		expect(requests[0]).toContain("OPENER-ONLY-attention-digest");
+
+		// The follow-up gets nothing, because it brought nothing. Inheriting the
+		// opener's would mean a stale attention digest presented as current, and
+		// a prompt-cache prefix that changes on every call.
+		const withFollower = requests.find((body) => body.includes("also check companies"));
+		expect(withFollower).toBeDefined();
+		expect(withFollower).not.toContain("OPENER-ONLY-attention-digest");
 	}, 120_000);
 
 	it("runs bash in the remote runtime through the host when the conversation is sandbox-pinned", async () => {
