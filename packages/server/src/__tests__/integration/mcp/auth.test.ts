@@ -1974,7 +1974,7 @@ describe('MCP Authentication', () => {
       // what denies. A passing `success: false` alone would also match an
       // unrelated fault (bad agent id, missing device) and hide a regression.
       expect(denied.error?.message).toMatch(
-        /organization-level write access is required|requires admin or owner access/i
+        /permission to make changes in this workspace|requires admin or owner access/i
       );
 
       const rows = await getTestDb()`

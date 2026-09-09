@@ -531,6 +531,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "postgres@3.4.9": "patches/postgres@3.4.9.patch",
+  },
   "overrides": {
     "sharp": "^0.35.3",
   },
