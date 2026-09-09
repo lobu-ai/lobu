@@ -1450,6 +1450,43 @@ describe('agent turn producer', () => {
     expect((await runRow(follower.id)).status).toBe('pending');
   });
 
+  it('offers a follow-up whose transient context differs from the running turn', async () => {
+    // The API route attaches a workspace-attention block to a session's first
+    // turn, and that block changes as runs appear, so two messages sent within
+    // the first turn almost never carry the same one. It is per-message content
+    // the steer path drops anyway, not execution policy: the follow-up must
+    // still be offered.
+    const org = await createTestOrganization();
+    const first = { ...messageFor(org.id), ephemeralContext: '## Workspace attention (recent)\n- Run #1 [pending]' };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-transient-context', { agent_turn: true })).json();
+    await enqueueMessage({
+      ...first, messageId: 'context-follow-up', messageText: 'and this too',
+      ephemeralContext: '## Workspace attention (recent)\n- Run #1 [pending]\n- Run #2 [pending]',
+    }, deps);
+    const [owner, follower] = await agentTurnRuns();
+    expect(owner.action_input.turn.ephemeral_context).not.toBe(follower.action_input.turn.ephemeral_context);
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-transient-context' });
+    expect(await response.json()).toMatchObject({ continue: true, steer: [
+      { run_id: follower.id, message_id: 'context-follow-up', text: 'and this too' },
+    ] });
+  });
+
+  it('does not offer a follow-up admitted under a different model', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-policy-model', { agent_turn: true })).json();
+    await enqueueMessage({
+      ...first, messageId: 'other-model-follow-up', agentOptions: { model: 'claude/claude-sonnet-4-5' },
+    }, deps);
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-policy-model' });
+    expect(await response.json()).toEqual({ continue: true });
+    expect((await agentTurnRuns())[1]!.status).toBe('pending');
+  });
+
   it('does not offer an input whose signed credential belongs to another run', async () => {
     const org = await createTestOrganization();
     const first = messageFor(org.id);

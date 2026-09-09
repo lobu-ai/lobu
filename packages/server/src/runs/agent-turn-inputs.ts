@@ -95,7 +95,12 @@ function executionPolicy(run: NativeTurnRun) {
     || claims.runId !== Number(run.id) || claims.messageId !== input.turn.message_id
     || claims.deploymentName !== `agent-turn:${input.turn.message_id}`) return undefined;
   const { runId, messageId, deploymentName, timestamp, jti, traceId, ...scope } = claims;
-  const { message_id, message_text, message_images, message_files, session_jsonl, ...turn } = input.turn;
+  // Per-message payload is not policy. `ephemeral_context` is the transient
+  // block the guest shows the model beside one message (the API route's
+  // first-turn attention feed, an automation's instructions); a steer offer
+  // carries only the follow-up's text, so the block is dropped either way and
+  // must not decide whether the follow-up joins the running turn.
+  const { message_id, message_text, message_images, message_files, session_jsonl, ephemeral_context, ...turn } = input.turn;
   const { message_id: replyMessageId, ...reply } = input.reply;
   return { scope, turn, reply };
 }
