@@ -1002,6 +1002,95 @@ describe("executeAgentTurnRun streaming", () => {
   });
 
   /**
+   * The trace nobody owned. A beat is fired from the delta timer without being
+   * awaited, so one can still be in flight when the turn finishes. The server
+   * publishes traces only while the run is `running`, and the completion is
+   * what ends that — so a trace handed to a beat that had not answered yet was
+   * delivered by neither the beat nor the completion.
+   *
+   * Made deterministic by a heartbeat that does not answer until released:
+   * the trace is provably in flight at the moment the turn completes.
+   */
+  test("delivers a trace still in flight when the turn completes", async () => {
+    const reported: Reported = { calls: [] };
+    const beats: HeartbeatCall[] = [];
+    let releaseBeat: (() => void) | null = null;
+    const beatReached = new Promise<void>((resolve) => {
+      releaseBeat = resolve;
+    });
+    let held = false;
+
+    const client = {
+      id: WORKER_ID,
+      heartbeat: async (
+        _runId: number,
+        _progress?: unknown,
+        _agentSession?: unknown,
+        turnDelta?: { text: string; sequence: number },
+        toolEvents?: Array<{ tool_call_id: string; name: string; is_error: boolean; output: string }>
+      ) => {
+        beats.push({ turnDelta, toolEvents });
+        // EVERY beat carrying a trace fails, so a beat can never be the
+        // carrier. The trace reaches the gateway only if the failed beat
+        // returns it to the queue and the completion then takes it — which is
+        // precisely the retirement contract under test.
+        if (toolEvents?.length) {
+          if (!held) {
+            held = true;
+            await beatReached;
+          }
+          throw new Error("gateway did not take the beat");
+        }
+        return { continue: true };
+      },
+      completeAgentTurn: async (req: CompleteAgentTurnRequest) => {
+        reported.calls.push(req);
+        return { ok: true as const, status: req.status };
+      },
+    };
+
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        hooks?.onTurnEvent?.({
+          type: "tool_call_start",
+          toolCallId: "call-held",
+          name: "save_memory",
+          args: {},
+        });
+        hooks?.onTurnEvent?.({
+          type: "tool_call_end",
+          toolCallId: "call-held",
+          name: "save_memory",
+          isError: false,
+          output: "saved",
+        });
+        // Long enough for the delta timer to pick the trace up and block.
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        releaseBeat?.();
+        return {
+          mode: "agent_turn",
+          turn: { text: "done", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL },
+        };
+      },
+    };
+
+    await executeAgentTurnRun(client as never, turnJob(), {}, { ...cfgWith(executor), heartbeatIntervalMs: 10 });
+
+    // The trace SURVIVES the beat that could not take it. Which carrier
+    // delivers it is not the contract — a later beat may, or the completion —
+    // but it must reach the gateway, and before this it reached neither: the
+    // failed beat had already emptied the queue.
+    const onBeats = beats.flatMap((beat) => beat.toolEvents ?? []);
+    const onCompletion = reported.calls.flatMap((call) => call.turn_tool_events ?? []);
+    expect(held).toBe(true);
+    // No beat can have carried it: every trace-bearing beat threw.
+    expect(onCompletion.map((t) => t.tool_call_id)).toContain("call-held");
+    void onBeats;
+    // The turn still reports success; a trace is a view of it, never its answer.
+    expect(reported.calls.at(-1)).toMatchObject({ status: "completed" });
+  });
+
+  /**
    * The in-band reply. An agent that posts into the conversation it is
    * answering has already given the user the answer; the terminal reply would
    * be that same answer a second time, which is what `repliedInBand`
