@@ -565,6 +565,20 @@ export class MessageConsumer {
         return;
       }
 
+      // An explicit cancel is a control message: it stops the active turn
+      // instead of becoming one. Handled BEFORE the marker is armed, because
+      // it starts no turn and so nothing would ever discharge a marker armed
+      // for it — the sweep would blame an unresponsive worker for a
+      // cancellation that worked. It also needs none of the turn-only work
+      // below (model policy, grant reconciliation, run input), since no turn
+      // is being dispatched.
+      if (await cancelAgentTurn(data)) {
+        queueSpan?.setStatus({ code: SpanStatusCode.OK });
+        queueSpan?.end();
+        logger.info({ traceId, jobId }, "Cancellation applied to the active turn");
+        return;
+      }
+
       // Arm the turn-liveness marker BEFORE the message is deliverable to the
       // worker. The marker is the durable record that this turn owes the client
       // a terminal event; it is discharged on the worker's reply and otherwise
@@ -615,11 +629,10 @@ export class MessageConsumer {
       // surface: an unexpected failure THROWS into the queue's retry/fail
       // handling, and a misconfiguration the producer can name is returned so
       // the armed marker is discharged with that reason below.
-      // An explicit cancel is a control message: it stops the active turn
-      // instead of becoming one. Everything else is admitted as its own
-      // pending native run, including while another turn is active.
-      const handled = await cancelAgentTurn(data);
-      const unrunnable = handled ? undefined : await enqueueAgentTurn(data, {
+      // Every message that reaches here is admitted as its own pending native
+      // run, including while another turn is active; the one control message
+      // that is not a turn (an explicit cancel) returned above.
+      const unrunnable = await enqueueAgentTurn(data, {
         agentSettings: this.agentSettingsStore,
         catalog: this.deploymentManager.getProviderCatalogService?.(),
         mcp: this.agentTurnMcp,

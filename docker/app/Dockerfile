@@ -118,7 +118,11 @@ RUN cd packages/core && bunx tsc \
     && cd ../plugin-mcp && bunx tsc \
     && cd ../connector-sdk && bunx tsc \
     && cd ../embeddings && bunx tsc \
-    && cd ../connector-worker && bunx tsc \
+    `# connector-worker alone needs its full build, not tsc: the script also` \
+    `# runs build-guest-bundle, and build:server below copies that bundle out` \
+    `# of its dist. .dockerignore keeps dist out of the image, so tsc-only` \
+    `# left the copy with no source and failed the image build.` \
+    && cd ../connector-worker && bun run build \
     && cd ../pgvector-embedded && bunx tsc
 
 # Type check
