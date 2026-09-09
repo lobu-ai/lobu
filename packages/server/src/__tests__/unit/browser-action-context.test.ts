@@ -4,6 +4,7 @@ import {
   deriveBrowserActionContext,
   deriveSdkBrowserActionContext,
   runScopedBrowserActionContext,
+  standaloneBrowserActionContext,
   trustedChromeActionInput,
 } from '../../worker-api/browser-action-context';
 import type { ToolContext } from '../../tools/registry';
@@ -248,5 +249,43 @@ describe('extension title pass-through contract', () => {
         EXTENSION_MAX_TITLE_POINTS
       );
     }
+  });
+});
+
+describe('standaloneBrowserActionContext', () => {
+  it('shares one group across unrelated actions on the same browser connection', () => {
+    const first = standaloneBrowserActionContext('org_1', 432, 1001);
+    const second = standaloneBrowserActionContext('org_1', 432, 1002);
+    // Same visible container...
+    expect(first?.id).toBe(second?.id);
+    expect(first?.title).toBe('Lobu · Browser actions');
+    // ...but each run keeps its own flow lease, so neither owns the other's tab.
+    expect(first?.flow_id).toBe('1001');
+    expect(second?.flow_id).toBe('1002');
+  });
+
+  it('separates organizations and connections', () => {
+    const a = standaloneBrowserActionContext('org_1', 432, 1);
+    const b = standaloneBrowserActionContext('org_2', 432, 1);
+    const c = standaloneBrowserActionContext('org_1', 999, 1);
+    expect(new Set([a?.id, b?.id, c?.id]).size).toBe(3);
+  });
+
+  it('carries no raw identifier in the group key', () => {
+    const ctxId = standaloneBrowserActionContext('org_secret', 432, 1)?.id ?? '';
+    expect(ctxId).not.toContain('org_secret');
+    expect(ctxId).toMatch(/^run:standalone-[0-9a-f]{12}$/);
+  });
+
+  it('declines when provenance is missing, so the caller falls back to run scope', () => {
+    expect(standaloneBrowserActionContext(null, 432, 1)).toBeNull();
+    expect(standaloneBrowserActionContext('org_1', null, 1)).toBeNull();
+    expect(standaloneBrowserActionContext('org_1', 432, 0)).toBeNull();
+  });
+
+  it('stays inside the extension title contract', () => {
+    const title = standaloneBrowserActionContext('org_1', 432, 1)?.title ?? '';
+    expect(title.startsWith(EXTENSION_TITLE_PREFIX)).toBe(true);
+    expect([...title].length).toBeLessThanOrEqual(EXTENSION_MAX_TITLE_POINTS);
   });
 });

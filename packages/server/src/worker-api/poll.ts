@@ -79,6 +79,7 @@ import {
 import {
   browserActionContextFromMetadata,
   runScopedBrowserActionContext,
+  standaloneBrowserActionContext,
   trustedChromeActionInput,
 } from './browser-action-context';
 import { runLeaseFence } from '../runs/run-lease';
@@ -1758,8 +1759,19 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const actionInput = isChromeAction
     ? trustedChromeActionInput(
         selectedActionInput ?? {},
+        // Stored context first (a conversation/Automation/MCP container decided
+        // at dispatch), then the parent run for a connector child. An action
+        // with neither is standalone: group those together per
+        // organization+connection instead of minting a group per run, which
+        // turned ten SDK navigates into ten visible groups.
         browserActionContextFromMetadata(row.run_metadata) ??
-          runScopedBrowserActionContext(row.parent_run_id ?? row.run_id)
+          (row.parent_run_id != null
+            ? runScopedBrowserActionContext(row.parent_run_id)
+            : (standaloneBrowserActionContext(
+                row.organization_id,
+                row.connection_id,
+                row.run_id
+              ) ?? runScopedBrowserActionContext(row.run_id)))
       )
     : selectedActionInput;
 
