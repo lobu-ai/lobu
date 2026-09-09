@@ -23,7 +23,7 @@ export const SearchSchema = Type.Object({
   query: Type.Optional(
     Type.String({
       description:
-        "Search query (entity name). Required unless entity_id is provided.",
+        'Search saved memory by text or entity name. To open a known memory, event, or content ID, use query: "memory 1234" with include_content: true; do not pass that ID as entity_id. Required unless entity_id is provided.',
       minLength: 1,
     })
   ),
@@ -36,7 +36,7 @@ export const SearchSchema = Type.Object({
   entity_id: Type.Optional(
     Type.Number({
       description:
-        "Entity ID for direct lookup. Can be used instead of query for exact fetch.",
+        'Entity ID only, as returned in an entity result. Memory, event, and content IDs are different: use query: "memory 1234" with include_content: true to read those records.',
     })
   ),
   parent_id: Type.Optional(

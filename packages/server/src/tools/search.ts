@@ -1602,7 +1602,10 @@ async function searchWorkspaceImpl(
     return emptyResult({
       ...(title ? { title } : {}),
       entity_type: args.entity_type || null,
-      suggestion: `Entity with ID ${args.entity_id} not found`,
+      suggestion:
+        `Entity with ID ${args.entity_id} not found. entity_id only accepts entity IDs. ` +
+        `If this is a memory, event, or content ID, retry with query: "memory ${args.entity_id}", ` +
+        'include_content: true, and no entity_id, keeping the same workspace scope.',
     });
   }
 
