@@ -1,5 +1,5 @@
-// Scripted OpenAI-compatible mock for the agent-turn e2e. Behaviour is chosen per
-// request from markers in the LAST user message, so one server serves every
+// Scripted OpenAI-compatible mock for the agent-turn e2e. What it does is chosen
+// per request from markers in the LAST user message, so one server serves every
 // scenario:
 //   [DELAY:<ms>]                 hold the answer open for <ms> before the text
 //   [TOOL:search_memory q=<q>]   first round: call search_memory({query:q}); after
