@@ -26,7 +26,7 @@
 # Keyless: needs only a Postgres with pgvector. No provider key, no secrets.
 #
 # Usage: app-image-smoke.sh <image-ref>
-# Env:   DATABASE_URL  postgres with pgvector (required)
+# Env:   DATABASE_URL  disposable local lobu_app_smoke DB with pgvector (required)
 #        APP_PORT      host port to bind (default 8787)
 
 set -uo pipefail
@@ -37,6 +37,7 @@ APP_PORT="${APP_PORT:-8787}"
 
 BASE="http://127.0.0.1:${APP_PORT}"
 CID=""
+MCP_FIXTURE=$(mktemp) || exit 1
 PASS=0
 FAIL=0
 
@@ -45,6 +46,7 @@ ok()   { echo "  ok   — $*"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $*"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
+  rm -f "$MCP_FIXTURE"
   if [ -n "$CID" ]; then
     echo ""
     echo "---- container logs (tail) ----"
@@ -202,7 +204,7 @@ case "$mcp_code" in
   404)     bad "/mcp returned 404 — the MCP handler is not mounted" ;;
   000)     bad "/mcp did not respond (connection failed)" ;;
   5*)      bad "/mcp returned HTTP ${mcp_code}" ;;
-  *)       ok "/mcp responded (HTTP ${mcp_code})" ;;
+  *)       bad "/mcp unexpected HTTP ${mcp_code} — expected an auth challenge" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -220,6 +222,25 @@ if docker exec "$CID" lobu connector runtime-self-check --json >/tmp/app-image-s
 else
   bad "connector runtime self-check failed"
   tail -30 /tmp/app-image-selfcheck.json 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Authenticated MCP, end to end. The unauthenticated probe above only proves
+#    the route is mounted; this authenticates as a synthetic bare-account grant
+#    in the disposable database and fails promotion on a discovery, dispatch,
+#    audit, or widget regression. The wire smoke hands its real rejection and
+#    real served shell to the browser smoke through $MCP_FIXTURE.
+# ---------------------------------------------------------------------------
+note "authenticated MCP and rendered app"
+if node scripts/mcp-image-smoke.mjs "$BASE" "$MCP_FIXTURE"; then
+  ok "authenticated MCP discovery, dispatch, audit, and resources"
+  if node scripts/mcp-app-smoke.mjs "$BASE" "$MCP_FIXTURE"; then
+    ok "rendered MCP errors, deadlines, cancellation, and late recovery"
+  else
+    bad "rendered MCP App smoke failed"
+  fi
+else
+  bad "authenticated MCP smoke failed"
 fi
 
 echo ""

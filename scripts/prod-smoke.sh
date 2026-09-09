@@ -240,6 +240,18 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# 8. The delivered MCP widget, rendered against a synthetic host. Only its
+#    public shell and assets are fetched; every tool notification stays inside
+#    the local browser, so nothing is written to prod.
+# ---------------------------------------------------------------------------
+note "rendered MCP App"
+if node "$(dirname "$0")/mcp-app-smoke.mjs" "$BASE"; then
+  ok "MCP App failures are visible and late results recover without replay"
+else
+  bad "MCP App browser smoke failed"
+fi
+
 echo ""
 echo "  prod smoke: ${PASS} passed, ${FAIL} failed"
 if [ "$FAIL" -ne 0 ]; then
