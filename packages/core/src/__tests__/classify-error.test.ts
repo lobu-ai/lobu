@@ -227,4 +227,32 @@ describe("isolate host wall-clock timeout", () => {
       AgentErrorCode.SESSION_TIMEOUT
     );
   });
+
+  test("classifies a hostile-length message in linear time", () => {
+    // The unknown-model branch used a greedy `.*` between two literals, which
+    // backtracks polynomially: 16k repetitions of "model " took ~1s, and this
+    // text arrives from an upstream provider whose length is not ours to
+    // trust. Asserted as a budget rather than a ratio so it fails on the
+    // quadratic shape returning without pinning machine speed.
+    const hostile = "model ".repeat(16_000);
+    const started = performance.now();
+    expect(classifyErrorMessage(hostile)).not.toBe(
+      AgentErrorCode.PROVIDER_UNKNOWN_MODEL
+    );
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  test("still classifies the real unknown-model messages, quoted ids included", () => {
+    for (const message of [
+      "400 gpt-foo is not a valid model ID",
+      "unknown model: claude-x",
+      'Model "claude-opus-4-8" not found for provider claude',
+      // A quoted id containing a space must survive the bounded run.
+      'Model "some model name" not found for provider claude',
+    ]) {
+      expect(classifyErrorMessage(message), message).toBe(
+        AgentErrorCode.PROVIDER_UNKNOWN_MODEL
+      );
+    }
+  });
 });

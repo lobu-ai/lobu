@@ -124,7 +124,18 @@ export function classifyErrorMessage(
     return AgentErrorCode.PROVIDER_AUTH;
   // `worker.ts` throws "Model \"<id>\" not found for provider ..." and pi-ai /
   // upstream surface "<x> is not a valid model"/"unknown model"/"model ... not found".
-  if (/not a valid model|unknown model|model .* not found/i.test(message))
+  //
+  // The middle run is lazy and bounded rather than `.*`: a greedy `.*` between
+  // two literals backtracks polynomially, so a message of repeated "model "
+  // took ~1s at 16k repetitions (CodeQL `js/polynomial-redos`). Error text
+  // reaches here from an upstream provider, so its length is not ours to
+  // trust. Lazy stops at the first " not found" and the bound caps the walk;
+  // spaces stay allowed so a quoted multi-word id still classifies.
+  if (
+    /not a valid model|unknown model|model [^\n]{0,120}? not found/i.test(
+      message
+    )
+  )
     return AgentErrorCode.PROVIDER_UNKNOWN_MODEL;
   // model-resolver.ts / session-runner.ts throw this when a non-OpenAI
   // provider cannot be routed through the Lobu gateway proxy. This is usually a
