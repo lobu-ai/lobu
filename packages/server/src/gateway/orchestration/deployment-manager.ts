@@ -762,17 +762,6 @@ export class DeploymentManager {
       }
     }
 
-    // Nix config
-    if (messageData.nixConfig) {
-      const { flakeUrl, packages } = messageData.nixConfig;
-      if (flakeUrl) envVars.NIX_FLAKE_URL = flakeUrl;
-      if (packages && packages.length > 0)
-        envVars.NIX_PACKAGES = packages.join(",");
-      logger.debug(
-        `Nix config for ${deploymentName}: flakeUrl=${flakeUrl || "none"}, packages=${packages?.length || 0}`
-      );
-    }
-
     return envVars;
   }
 

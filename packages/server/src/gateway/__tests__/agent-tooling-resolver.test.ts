@@ -617,7 +617,7 @@ describe("deployment env assembly", () => {
     const env = await manager.buildEnv(buildPayload());
 
     expect(env.GH_TOKEN).toBe(MINTED_TOKEN);
-    expect(env.NIX_PACKAGES?.split(",")).toContain("gh");
+    expect(verifyWorkerToken(env.WORKER_TOKEN)?.nixPackages).toContain("gh");
     const proxyToken = decodeURIComponent(
       new URL(env.HTTP_PROXY ?? "").password
     );
@@ -639,10 +639,9 @@ describe("deployment env assembly", () => {
       buildPayload({ nixConfig: { packages: ["ripgrep"] } })
     );
 
-    expect(env.NIX_PACKAGES?.split(",").sort()).toEqual(["gh", "ripgrep"]);
-    // The same union must ride the SIGNED token, or a REMOTE runtime provisions
-    // nothing: NIX_PACKAGES only reaches the LOCAL nix-shell spawn. This claim
-    // is what makes the contributed `gh` portable across backends.
+    // The union rides the SIGNED token — the only thing a runtime provisions
+    // from. This claim is what makes the contributed `gh` portable across
+    // backends.
     expect(
       verifyWorkerToken(env.WORKER_TOKEN)?.nixPackages?.slice().sort()
     ).toEqual(["gh", "ripgrep"]);
@@ -694,7 +693,11 @@ describe("deployment env assembly", () => {
 
     // Cold: the manager resolves and folds the contribution itself.
     const coldEnv = await manager.buildEnv(buildPayload());
-    const coldPackages = (coldEnv.NIX_PACKAGES ?? "").split(",").sort();
+    const coldPackages = (
+      verifyWorkerToken(coldEnv.WORKER_TOKEN)?.nixPackages ?? []
+    )
+      .slice()
+      .sort();
     const coldGrants = await listAllowed();
 
     // Warm: the CONSUMER folds into the payload, then the reconcile runs.
@@ -711,11 +714,16 @@ describe("deployment env assembly", () => {
     // reconcile just revoked, hiding the divergence being tested.
     const warmGrants = await listAllowed();
     const warmEnv = await manager.buildEnv(warmPayload);
-    const warmPackages = (warmEnv.NIX_PACKAGES ?? "").split(",").sort();
+    const warmPackages = (
+      verifyWorkerToken(warmEnv.WORKER_TOKEN)?.nixPackages ?? []
+    )
+      .slice()
+      .sort();
 
     expect(coldPackages).toContain("gh");
-    // What the CONSUMER folded is what reaches the spawn: NIX_PACKAGES is read
-    // off the payload, so a package missing from the fold is missing from PATH.
+    // What the CONSUMER folded is what reaches the runtime: the signed
+    // nixPackages claim is built from the payload, so a package missing from
+    // the fold is missing from the sandbox's PATH.
     expect(contribution.packages).toContain("gh");
     expect(warmPackages).toEqual(coldPackages);
     // Identical sets, so grant rows do not flap revoke/re-grant per turn.
@@ -1324,6 +1332,6 @@ describe("deployment env assembly", () => {
     const env = await manager.buildEnv(buildPayload());
 
     expect(env.GH_TOKEN).toBeUndefined();
-    expect(env.NIX_PACKAGES).toBeUndefined();
+    expect(verifyWorkerToken(env.WORKER_TOKEN)?.nixPackages ?? []).toEqual([]);
   });
 });
