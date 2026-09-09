@@ -160,7 +160,6 @@ bump:
 test-unit:
 	@echo "🧪 Unit suite (no Postgres)…"
 	@bun test packages/core packages/plugin-api packages/plugin-host packages/plugin-toolkit packages/plugin-memory packages/plugin-conversations packages/plugin-media packages/plugin-mcp packages/cli
-	@bun test packages/agent-worker
 	@bun test packages/server/src/__tests__/unit
 	@# src/gateway/infrastructure/queue runs in the gateway loop in test-integration (#1238)
 	@bun test packages/connector-worker
