@@ -120,7 +120,7 @@ describe('MCP Authentication', () => {
 
       expect(response.status).toBe(401);
       expect(response.headers.get('WWW-Authenticate')).toBe(
-        'Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/mcp", scope="mcp:read mcp:write"'
+        'Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/mcp", scope="mcp:read mcp:write profile:read"'
       );
     });
 
@@ -536,7 +536,7 @@ describe('MCP Authentication', () => {
       });
       expect(response.status).toBe(401);
       expect(response.headers.get('WWW-Authenticate')).toBe(
-        `Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/mcp/${org2.slug}", scope="mcp:read mcp:write", error="invalid_token"`
+        `Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/mcp/${org2.slug}", scope="mcp:read mcp:write profile:read", error="invalid_token"`
       );
     });
 
@@ -1995,7 +1995,8 @@ describe('MCP Authentication', () => {
       const listed = await mcpListTools({ token, orgSlug: roleOrg.slug });
       const runSdk = listed.tools.find((tool: any) => tool.name === 'run_sdk');
       expect(runSdk?.securitySchemes).toEqual([
-        { type: 'oauth2', scopes: ['mcp:write', 'mcp:admin'] },
+        { type: 'oauth2', scopes: ['mcp:write', 'profile:read'] },
+        { type: 'oauth2', scopes: ['mcp:write', 'mcp:admin', 'profile:read'] },
       ]);
       expect(runSdk?._meta?.securitySchemes).toEqual(runSdk?.securitySchemes);
 
@@ -2028,7 +2029,7 @@ describe('MCP Authentication', () => {
         { path: 'connections.installConnector', access: 'admin', count: 1 },
       ]);
       expect(challenge).toContain('error="insufficient_scope"');
-      expect(challenge).toContain('scope="mcp:read mcp:write mcp:admin"');
+      expect(challenge).toContain('scope="mcp:read mcp:write mcp:admin profile:read"');
     });
 
     it('does not challenge when an owner catches a nested admin denial and run_sdk succeeds', async () => {
@@ -2109,7 +2110,7 @@ describe('MCP Authentication', () => {
       const listed = await mcpListTools({ token, orgSlug: roleOrg.slug });
       const runSdk = listed.tools.find((tool: any) => tool.name === 'run_sdk');
       expect(runSdk?.securitySchemes).toEqual([
-        { type: 'oauth2', scopes: ['mcp:write'] },
+        { type: 'oauth2', scopes: ['mcp:write', 'profile:read'] },
       ]);
 
       const discovery = await mcpToolsCall(
@@ -2206,7 +2207,9 @@ describe('MCP Authentication', () => {
       expect(toolNames).not.toContain('join_organization');
 
       const runSdk = (result.tools as any[]).find((tool) => tool.name === 'run_sdk');
-      expect(runSdk?.securitySchemes).toEqual([{ type: 'oauth2', scopes: ['mcp:write'] }]);
+      expect(runSdk?.securitySchemes).toEqual([
+        { type: 'oauth2', scopes: ['mcp:write', 'profile:read'] },
+      ]);
     });
 
     it('lists Automations through the consolidated internal admin tool', async () => {

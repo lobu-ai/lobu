@@ -87,6 +87,22 @@ export const AVAILABLE_PAT_SCOPES = [
  */
 export const CONNECTIONS_TOKEN_SCOPE = 'connections:token';
 
+/**
+ * The scopes an MCP host should ask for when it connects.
+ *
+ * A host may call /oauth/userinfo before it initializes MCP, so identity has
+ * to ride the connection request. Not every host builds that request from
+ * discovery — some ask only for what the resource states it needs — so
+ * `profile:read` is advertised on the bearer challenge and on published tool
+ * metadata too, not just in `scopes_supported`.
+ *
+ * This shapes the REQUEST only: consent and issuance still grant exactly the
+ * permissions that were explicitly requested, and no existing token is widened.
+ */
+export function getMcpConnectionScopes(scopes: readonly string[]): string[] {
+  return [...new Set([...scopes, 'profile:read'])];
+}
+
 /** Default scopes as a space-separated string (for OAuth params) */
 export const DEFAULT_SCOPES_STRING = DEFAULT_SCOPES.join(' ');
 

@@ -197,6 +197,15 @@ describe('search_memory > recall contract', () => {
     );
   });
 
+  it('explains how to retry a memory id mistakenly supplied as an entity id', async () => {
+    const result = await search({ entity_id: 2147483647 }, env, ctx);
+
+    expect(result.discovery_status).toBe('not_found');
+    expect(result.suggestion).toContain('entity_id only accepts entity IDs');
+    expect(result.suggestion).toContain('query: "memory 2147483647"');
+    expect(result.content ?? []).toHaveLength(0);
+  });
+
   // ── ORDERING GUARD (never-broken semantics, pinned) ──────────────────────
   it('sorts content by similarity DESC so content_limit truncates the WORST, not the best', async () => {
     const result = await search(

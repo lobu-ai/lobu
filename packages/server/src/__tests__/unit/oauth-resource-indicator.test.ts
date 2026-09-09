@@ -47,7 +47,7 @@ describe('MCP OAuth resource indicators', () => {
       'https://app.lobu.ai/.well-known/oauth-protected-resource/mcp/acme'
     );
     expect(buildMcpBearerChallenge(requestUrl, 'invalid_token')).toBe(
-      'Bearer resource_metadata="https://app.lobu.ai/.well-known/oauth-protected-resource/mcp/acme", scope="mcp:read mcp:write", error="invalid_token"'
+      'Bearer resource_metadata="https://app.lobu.ai/.well-known/oauth-protected-resource/mcp/acme", scope="mcp:read mcp:write profile:read", error="invalid_token"'
     );
   });
 
@@ -59,7 +59,7 @@ describe('MCP OAuth resource indicators', () => {
         scope: 'mcp:admin',
       })
     ).toBe(
-      'Bearer resource_metadata="https://app.lobu.ai/.well-known/oauth-protected-resource/mcp/acme", scope="mcp:admin", error="insufficient_scope", error_description="Expired \\"access\\" \\\\ token"'
+      'Bearer resource_metadata="https://app.lobu.ai/.well-known/oauth-protected-resource/mcp/acme", scope="mcp:admin profile:read", error="insufficient_scope", error_description="Expired \\"access\\" \\\\ token"'
     );
   });
 

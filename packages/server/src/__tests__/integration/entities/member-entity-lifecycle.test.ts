@@ -55,7 +55,7 @@ describe('$member entity lifecycle projections', () => {
     `;
 
     await updateMemberEntityStatus(organization.id, user.email, 'active');
-    await updateMemberEntityAccess(organization.id, user.email, { role: 'admin' });
+    await updateMemberEntityAccess(organization.id, user.id, { role: 'admin' });
 
     const updated = await memberRow(organization.id, user.email);
     expect(updated.metadata).toMatchObject({

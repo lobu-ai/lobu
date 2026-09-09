@@ -199,14 +199,14 @@ export async function updateMemberEntityStatus(
   });
 }
 
+/** Project role/status using the trusted authentication identity claim. */
 export async function updateMemberEntityAccess(
   organizationId: string,
-  email: string,
-  updates: { role?: string; status?: 'active' | 'invited' }
+  authUserId: string,
+  updates: { role?: string; status?: 'active' | 'invited' },
+  transaction?: DbClient,
 ): Promise<void> {
-  await ensureMemberEntityType(organizationId);
-  const { emailField } = await resolveMemberSchemaFields(organizationId);
-  const sql = getDb();
+  const sql = transaction ?? getDb();
   await withEntityWriteTransaction(sql, async (tx) => {
     const rows = await tx.unsafe<{ id: number; metadata: Record<string, unknown> | null }>(
       `SELECT e.id, e.metadata
@@ -216,12 +216,17 @@ export async function updateMemberEntityAccess(
          AND et.organization_id = $1
          AND et.deleted_at IS NULL
          AND e.organization_id = $1
-         AND e.metadata->>$2 = $3
+         AND EXISTS (
+           SELECT 1 FROM entity_identities ei WHERE ei.entity_id = e.id
+             AND ei.organization_id = e.organization_id AND ei.namespace = 'auth_user_id'
+             AND ei.source_connector = 'auth:signup' AND ei.deleted_at IS NULL
+             AND ei.identifier = $2
+         )
          AND e.deleted_at IS NULL
        ORDER BY e.id
        LIMIT 1
        FOR UPDATE OF e`,
-      [organizationId, emailField, email]
+      [organizationId, authUserId]
     );
     if (rows.length === 0) return;
 

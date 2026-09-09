@@ -7,10 +7,16 @@
  * lives in manage_operations next to `supersedeActionEvent`.
  */
 
+import { deriveToolActorSource } from '../../utils/apply-context';
 import {
 	RESERVED_COLUMN_NAMES,
 	validateEntityRowPatchGrantingApprovedFields,
 } from "../../authz/entity-row-validation";
+import { SCOPE_CHECK_NOT_APPLICABLE } from "../../auth/tool-access";
+import {
+	type EntityTransactionHookContext,
+	getEntityHooks,
+} from "../../utils/entity-hooks";
 import { createHash } from "node:crypto";
 import {
 	ApprovalAttribution,
@@ -1153,18 +1159,41 @@ export async function applyEntityFieldChangeProposal(
 		// the entity. The canonical event insert below takes the same FK lock, and
 		// this order avoids deadlocking with organization deletion's parent-first
 		// cascade.
-		const [scope] = await tx<{ organization_id: string }>`
-			SELECT organization_id FROM entities
-			WHERE id = ${proposal.entity_id} AND deleted_at IS NULL
+		const [scope] = await tx<{ organization_id: string; entity_type: string }>`
+			SELECT e.organization_id, et.slug AS entity_type FROM entities e JOIN entity_types et ON et.id = e.entity_type_id
+			WHERE e.id = ${proposal.entity_id} AND e.deleted_at IS NULL
 		`;
 		if (!scope) {
 			throw new ToolUserError(`Entity ${proposal.entity_id} not found`, 404);
 		}
+		const hooks = getEntityHooks(scope.entity_type);
+		// Applying a proposal is human-gated upstream (requireHumanApprovalContext),
+		// so the caller carries no MCP scope dimension — the same sentinel every
+		// session-authenticated path passes.
+		const hookContext: EntityTransactionHookContext = {
+			organizationId: scope.organization_id,
+			userId: approverUserId,
+			sql: tx,
+			scopes: SCOPE_CHECK_NOT_APPLICABLE,
+			actorSource: 'ui',
+		};
+		await hooks?.beforeUpdate?.(metadataFields, hookContext);
 		await tx`
 			SELECT 1 FROM organization
 			WHERE id = ${scope.organization_id}
 			FOR KEY SHARE
 		`;
+		// Only an afterUpdate hook needs the pre-image; entity types without one
+		// must not pay for a second lock on the row mergeEntityFields already locks.
+		const before = hooks?.afterUpdate
+			? (
+					await tx<{ metadata: Record<string, unknown> | null }>`
+						SELECT metadata FROM entities
+						WHERE id = ${proposal.entity_id}
+						FOR UPDATE
+					`
+				)[0]
+			: undefined;
 		const merge =
 			Object.keys(metadataFields).length > 0
 				? await mergeEntityFields({
@@ -1274,6 +1303,18 @@ export async function applyEntityFieldChangeProposal(
 			([field, value]) => ({ field, old: value.old, new: value.new }),
 		);
 		if (appliedChanges.length > 0) {
+			if (hooks?.afterUpdate && before) {
+				const [after] = await tx<{
+					metadata: Record<string, unknown> | null;
+				}>`
+					SELECT metadata FROM entities WHERE id = ${proposal.entity_id}
+				`;
+				await hooks.afterUpdate(
+					{ id: proposal.entity_id, metadata: before.metadata },
+					{ id: proposal.entity_id, metadata: after.metadata },
+					hookContext,
+				);
+			}
 			const [entity] = await tx<{ name: string }>`
 				SELECT name FROM entities
 				WHERE id = ${proposal.entity_id} AND deleted_at IS NULL
@@ -1410,6 +1451,8 @@ export async function applyEntityChangeProposal(
 				hookContext: {
 					organizationId: ctx.organizationId,
 					userId: ctx.userId,
+					scopes: ctx.scopes,
+					actorSource: deriveToolActorSource(ctx),
 					env,
 					deferAfterCommit: postCommitEffects
 						? (effect) => postCommitEffects.push(effect)
