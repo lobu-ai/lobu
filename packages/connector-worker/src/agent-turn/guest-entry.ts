@@ -26,19 +26,12 @@ import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
 import { enforceBashCommandPolicy } from '@lobu/core/tool-policy';
 import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
+import { MAX_TOOL_CALLS_PER_TURN } from './types.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 import {
   createWorkspace, INPUT_DIR, SKILLS_DIR,
   type AgentWorkspace, type WorkspaceSeedFile,
 } from './workspace.js';
-
-/**
- * A turn's tool-call budget. pi would otherwise loop for as long as the model
- * keeps calling tools and the wall clock allows; past this many calls the loop
- * refuses the next one with a reason the model can act on, so the turn ends
- * with an answer instead of a timeout.
- */
-const MAX_TOOL_CALLS_PER_TURN = 50;
 
 /** Third-party MCP server on the other side of the gateway: generous, never forever. */
 const TOOL_CALL_TIMEOUT_MS = 120_000;
@@ -422,6 +415,9 @@ export async function runAgentTurn(
       .filter(Boolean)
       .join('\n\n');
 
+    // The STREAM, not the answer: every delta of every assistant message this
+    // turn, in order. It drives the live typing indicator and is the fallback
+    // answer for a turn that never settles a message.
     let text = '';
     let stopReason: string | null = null;
     let usage: AgentTurnOutput['usage'] = null;
@@ -564,7 +560,18 @@ export async function runAgentTurn(
     if (ended) throw new Error(ended);
 
     return {
-      text,
+      // The answer is the LAST assistant message, not the accumulated stream:
+      // a model that narrates before a tool call ("Let me check...") would
+      // otherwise deliver that narration glued to its answer, and deltas
+      // replayed by a retry or compaction would appear twice. The retired lane
+      // shipped the summing version and had to fix it the same way (`finalText`
+      // authoritative, PR #1087) — this is the text a possibly-different
+      // replica delivers to the user and writes to history, so a garbled value
+      // corrupts the durable record, not just one render.
+      //
+      // Falls back to the stream when no assistant message settled: a turn
+      // aborted mid-answer still owes the user what it managed to say.
+      text: latestAssistantText(agent.state.messages) ?? text,
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),

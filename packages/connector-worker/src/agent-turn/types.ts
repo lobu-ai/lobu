@@ -183,6 +183,16 @@ export interface AgentTurnConversation {
   platform: string;
 }
 
+/**
+ * A turn's tool-call budget. pi would otherwise loop for as long as the model
+ * keeps calling tools and the wall clock allows; past this many calls the
+ * guard stops the turn so it ends with an answer instead of a timeout.
+ *
+ * Exported so a test can assert the boundary without restating the number —
+ * a duplicated literal would keep passing after the budget changed.
+ */
+export const MAX_TOOL_CALLS_PER_TURN = 50;
+
 /** Everything a single turn needs. */
 export interface AgentTurnInput {
   provider: AgentTurnProvider;

@@ -33,7 +33,7 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { agentGuestBundle } from "@lobu/connector-worker/agent-turn";
+import { agentGuestBundle, MAX_TOOL_CALLS_PER_TURN } from "@lobu/connector-worker/agent-turn";
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput } from "@lobu/connector-worker/agent-turn";
 import type { ExecutionHooks, ExecutorJob } from "@lobu/connector-worker/executor/interface";
 import { IsolateExecutor, type IsolateLogLevel } from "@lobu/connector-worker/executor/isolate";
@@ -162,6 +162,11 @@ function writeOpenAIResponsesStream(
 function writeAnthropicToolUse(
 	res: Parameters<Parameters<typeof createServer>[0]>[1],
 	call: { id: string; name: string; input: Record<string, unknown> },
+	/**
+	 * Text the model narrates BEFORE the tool call, in the same assistant
+	 * message. This is the shape that used to glue itself onto the answer.
+	 */
+	narration?: string,
 ): void {
 	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
 	const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -178,17 +183,24 @@ function writeAnthropicToolUse(
 			usage: { input_tokens: 5, output_tokens: 0 },
 		},
 	});
+	let index = 0;
+	if (narration) {
+		send("content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } });
+		send("content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: narration } });
+		send("content_block_stop", { type: "content_block_stop", index });
+		index += 1;
+	}
 	send("content_block_start", {
 		type: "content_block_start",
-		index: 0,
+		index,
 		content_block: { type: "tool_use", id: call.id, name: call.name, input: {} },
 	});
 	send("content_block_delta", {
 		type: "content_block_delta",
-		index: 0,
+		index,
 		delta: { type: "input_json_delta", partial_json: JSON.stringify(call.input) },
 	});
-	send("content_block_stop", { type: "content_block_stop", index: 0 });
+	send("content_block_stop", { type: "content_block_stop", index });
 	send("message_delta", {
 		type: "message_delta",
 		delta: { stop_reason: "tool_use", stop_sequence: null },
@@ -268,9 +280,13 @@ async function readUpload(
  * The tool calls the fake model makes, in order, one per provider round; the
  * round after the last one answers with text. The MCP scenario is the default.
  */
-let toolScript: Array<{ id: string; name: string; input: Record<string, unknown> }> = [
-	{ id: "toolu_01", name: "query_sdk", input: { code: "entities.count()" } },
-];
+let toolScript: Array<{
+	id: string;
+	name: string;
+	input: Record<string, unknown>;
+	/** Text narrated in the same assistant message as the call, if any. */
+	narration?: string;
+}> = [{ id: "toolu_01", name: "query_sdk", input: { code: "entities.count()" } }];
 
 /** How many tool results the transcript already carries. */
 function toolResultCount(messages: Array<{ role: string; content: unknown }>): number {
@@ -359,7 +375,7 @@ beforeAll(async () => {
 			const request = JSON.parse(body) as { tools?: unknown[]; messages: Array<{ role: string; content: unknown }> };
 			const next = Array.isArray(request.tools) && request.tools.length > 0 ? toolScript[toolResultCount(request.messages)] : undefined;
 			if (next) {
-				writeAnthropicToolUse(res, next);
+				writeAnthropicToolUse(res, next, next.narration);
 				return;
 			}
 			void writeAnthropicStream(res, ["Hello", " from", " the", " isolate"]);
@@ -648,6 +664,59 @@ describe("agent turn on the isolate lane", () => {
 		// hit above is the evidence it was spent there too.
 		const spends = run.logs.filter((l) => l.line.startsWith("credential ")).map((l) => l.line.replace(/^credential [0-9a-f]{12} /, ""));
 		expect(spends).toEqual(["spent on 127.0.0.1 in header x-api-key"]);
+	}, 120_000);
+
+	// The turn's answer is the model's LAST assistant message, not the sum of
+	// every delta it streamed. The retired lane shipped the summing version and
+	// had to fix it (`finalText` authoritative, PR #1087): the accumulator is
+	// the STREAM, and `finalText` is what a possibly-different replica delivers
+	// to the user and writes to history, so gluing narration onto the answer
+	// corrupts the durable record, not just one render.
+	it("answers with the final message only, not the narration glued to it", async () => {
+		hits = [];
+		toolScript = [
+			{
+				id: "toolu_01",
+				name: "query_sdk",
+				input: { code: "entities.count()" },
+				narration: "Let me check the deploy status.",
+			},
+		];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "3 entities" }] } };
+		armFirstDeltaGate();
+		const run = await runTurn(toolJob());
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.output.text).not.toContain("Let me check the deploy status");
+
+		// The narration still STREAMED — it is the live typing indicator, and
+		// dropping it from the stream would be a different regression.
+		const streamed = run.events
+			.filter((e): e is { type: "text_delta"; delta: string } => e.type === "text_delta")
+			.map((e) => e.delta)
+			.join("");
+		expect(streamed).toBe("Let me check the deploy status.Hello from the isolate");
+
+		// Both assistant messages survive in the transcript the next turn resumes
+		// from; only the ANSWER is narrowed.
+		expect(sessionMessages(run.output).map((m) => (m as { role: string }).role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+	}, 120_000);
+
+	// The fallback the retired lane's suite proved was needed: a turn whose only
+	// assistant text arrives as deltas with no separate final message must still
+	// answer with that text rather than an empty string.
+	it("answers from the stream when a turn produces one message and no tool call", async () => {
+		hits = [];
+		toolScript = [];
+		armFirstDeltaGate();
+		const run = await runTurn(turnJob());
+
+		expect(run.output.text).toBe("Hello from the isolate");
 	}, 120_000);
 
 	it("hands a refused tool call to the model as an error result and lets the turn finish", async () => {
@@ -1064,6 +1133,31 @@ describe("agent turn on the isolate lane", () => {
 		expect(run.output.toolsUsed).toEqual(["ask_user", "suggest_actions"]);
 	}, 120_000);
 
+	it("stops the turn when the tool-call budget is spent, not just refuses", async () => {
+		// The budget branch of the same guard `ask_user` exercises. It had no
+		// coverage, and a refusal-only guard let the model keep asking: every
+		// block came back as a tool error and produced another provider request.
+		hits = [];
+		toolReply = { status: 200, body: { content: [{ type: "text", text: "4" }] } };
+		// One more call than the budget allows. The constant is imported, not
+		// restated: a duplicated literal keeps passing after the budget changes.
+		toolScript = Array.from({ length: MAX_TOOL_CALLS_PER_TURN + 1 }, (_v, i) => ({
+			id: `toolu_bud${i}`,
+			name: "query_sdk",
+			input: { code: "entities.count()" },
+		}));
+		armFirstDeltaGate();
+		const run = await runTurn(toolJob());
+
+		// Exactly the allowed calls ran; the one past the ceiling was refused.
+		const ran = run.events.filter(
+			(e) => e.type === "tool_call_end" && !(e as { isError?: boolean }).isError,
+		);
+		expect(ran).toHaveLength(MAX_TOOL_CALLS_PER_TURN);
+		// And the guard STOPPED the turn rather than looping on refusals.
+		expect(run.output.stopReason).toBe("aborted");
+	}, 240_000);
+
 	it("reports every tool it called, so requireTool can actually enforce", async () => {
 		hits = [];
 		toolReply = { status: 200, body: { content: [{ type: "text", text: "4" }] } };
@@ -1399,7 +1493,11 @@ describe("agent turn on the isolate lane", () => {
 		});
 		expect(summaryFinished).toBe(true);
 		expect(sessionEntries(run.output).at(-1)).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
-		expect(run.output.text).toBe("main answermain answer");
+		// TWO model rounds answer here (the steered input queues a second), and
+		// the answer is the LAST message — not both concatenated. The doubled
+		// value this asserted before was the accumulator bug: the user was
+		// delivered, and history recorded, the same answer twice.
+		expect(run.output.text).toBe("main answer");
 		expect(run.output.consumedInputs).toHaveLength(1);
 		expect(run.output.consumedInputs[0].runId).toBe(7);
 		expect(sessionEntries(run.output).find((entry) => entry.id === run.output.consumedInputs[0].sessionEntryId))

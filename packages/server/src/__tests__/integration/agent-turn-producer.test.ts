@@ -2611,6 +2611,64 @@ describe('agent turn completion', () => {
   afterEach(() => {
   });
 
+  it('stamps the tool ledger onto the terminal reply the guardrail reads', async () => {
+    // The middle of the ledger chain: the guest produces `tools_used` and the
+    // `requireTool` guardrail consumes `payload.toolsUsed` off the
+    // thread_response row. This is the hop between them, which nothing covered
+    // — the guardrail passed on an absent ledger, so a break here was silent.
+    const workerId = 'fleet-ledger';
+    const runId = await claimedTurnRun(workerId);
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: workerId, status: 'completed',
+      text: 'the isolate answer', stop_reason: 'stop',
+      session_jsonl: nativeSession(), tools_used: ['query_sdk', 'suggest_actions'],
+      exit_reason: 'ok',
+    });
+    expect(response.status).toBe(200);
+    const [reply] = await getTestDb()`
+      SELECT action_input FROM runs
+      WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'
+    ` as unknown as Array<{ action_input: { toolsUsed?: string[] } }>;
+    expect(reply?.action_input.toolsUsed).toEqual(['query_sdk', 'suggest_actions']);
+  });
+
+  it('stamps an EMPTY ledger, which is what trips a missing required tool', async () => {
+    // `[]` and absent are different answers downstream: the guardrail passes on
+    // absent (it cannot prove a miss) and trips on empty. A turn that called
+    // nothing must therefore report `[]`, not omit the field.
+    const workerId = 'fleet-ledger-empty';
+    const runId = await claimedTurnRun(workerId);
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: workerId, status: 'completed',
+      text: 'answered without tools', stop_reason: 'stop',
+      session_jsonl: nativeSession(), tools_used: [], exit_reason: 'ok',
+    });
+    const [reply] = await getTestDb()`
+      SELECT action_input FROM runs
+      WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'
+    ` as unknown as Array<{ action_input: Record<string, unknown> }>;
+    expect(reply?.action_input.toolsUsed).toEqual([]);
+    expect(reply?.action_input).toHaveProperty('toolsUsed');
+  });
+
+  it('leaves toolsUsed ABSENT when a worker reports none, rather than inventing []', async () => {
+    // A completion with no ledger must not be recorded as "called nothing":
+    // that would trip `requireTool` on a turn we have no evidence about, and
+    // the follow-up bridge skips on absent precisely to avoid a duplicate card.
+    const workerId = 'fleet-ledger-none';
+    const runId = await claimedTurnRun(workerId);
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: workerId, status: 'completed',
+      text: 'from an older worker', stop_reason: 'stop',
+      session_jsonl: nativeSession(), exit_reason: 'ok',
+    });
+    const [reply] = await getTestDb()`
+      SELECT action_input FROM runs
+      WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'
+    ` as unknown as Array<{ action_input: Record<string, unknown> }>;
+    expect(reply?.action_input).not.toHaveProperty('toolsUsed');
+  });
+
   it('records the native session on the run row and is idempotent on a retry', async () => {
     const workerId = 'fleet-complete';
     const runId = await claimedTurnRun(workerId);
