@@ -3,6 +3,7 @@ import {
   browserActionContextFromMetadata,
   deriveBrowserActionContext,
   deriveSdkBrowserActionContext,
+  runScopedBrowserActionContext,
   trustedChromeActionInput,
 } from '../../worker-api/browser-action-context';
 import type { ToolContext } from '../../tools/registry';
@@ -201,19 +202,26 @@ describe('SDK browser invocation', () => {
   });
 });
 
-// The Chrome extension enforces its own prefix and 64-code-point bound on every
-// group title it writes (packages/owletto/apps/chrome/tab-groups.js titleFor).
-// A server title that trips either one silently renders differently from what
-// this file says, so lock the shared shape here rather than discovering it in a
-// browser. Mirrors the extension's rule; it is not imported (separate runtime).
-const EXTENSION_TITLE_PREFIX = 'Lobu';
+// The extension normalizes titles outside this shape. Keep every fixed server
+// fallback within its pass-through contract; user-supplied subjects are
+// bounded by the extension.
+const EXTENSION_TITLE_PREFIX = 'Lobu · ';
 const EXTENSION_MAX_TITLE_POINTS = 64;
 
-describe('titles survive the extension title contract', () => {
+describe('extension title pass-through contract', () => {
   const titles = [
+    runScopedBrowserActionContext(Number.MAX_SAFE_INTEGER).title,
+    deriveSdkBrowserActionContext(
+      context({
+        sdkBrowserInvocation: { nonce: 'synthetic-default-title', title: '' },
+      })
+    )!.title,
     deriveBrowserActionContext(
-      context({ actingAutomationId: 12, actingRunId: 4821 })
-    )?.title,
+      context({
+        actingAutomationId: Number.MAX_SAFE_INTEGER,
+        actingRunId: Number.MAX_SAFE_INTEGER,
+      })
+    )!.title,
     deriveBrowserActionContext(
       context({
         sourceContext: {
@@ -222,20 +230,21 @@ describe('titles survive the extension title contract', () => {
           channelId: 'chan_1',
           conversationId: 'conv_1',
         },
-      } as Partial<ToolContext>)
-    )?.title,
+      })
+    )!.title,
+    deriveBrowserActionContext(
+      context({
+        tokenType: 'oauth',
+        clientId: 'synthetic-client',
+        mcpSessionId: 'synthetic-session',
+      })
+    )!.title,
   ];
 
-  it('prefixes every derived title so the extension keeps it verbatim', () => {
+  it('keeps fixed server titles unchanged by the extension', () => {
     for (const title of titles) {
-      expect(title).toBeTruthy();
-      expect(title?.startsWith(EXTENSION_TITLE_PREFIX)).toBe(true);
-    }
-  });
-
-  it('keeps derived titles inside the extension code-point bound', () => {
-    for (const title of titles) {
-      expect([...(title ?? '')].length).toBeLessThanOrEqual(
+      expect(title).toStartWith(EXTENSION_TITLE_PREFIX);
+      expect([...title].length).toBeLessThanOrEqual(
         EXTENSION_MAX_TITLE_POINTS
       );
     }
