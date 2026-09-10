@@ -52,7 +52,7 @@
           "upstreamBaseUrl": "https://chatgpt.com/backend-api",
           "sdkCompat": "openai-codex",
           "apiKeyInstructions": "Sign in with ChatGPT Plus/Pro.",
-          "apiKeyPlaceholder": "",
+          "apiKeyPlaceholder": "Sign in with ChatGPT",
           "modalities": ["text"],
           "oauth": {
             "clientId": "app_EMoamEEZ73f0CkXaXp7hrann",
