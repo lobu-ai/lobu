@@ -13,6 +13,7 @@ const QUOTA_SIGNALS: readonly RegExp[] = [
 	/\binsufficient[_ ]quota\b/i,
 	/\byour credit balance is too low\b/i,
 	/\byou have no credits remaining\b/i,
+	/\bthis request requires more credits\b/i,
 	/["']type["']\s*:\s*["']rate_limit_error["']/i,
 	/\brate[ -]limit(?:ed| (?:exceeded|reached))\b/i,
 	/\btoo many requests\b/i,

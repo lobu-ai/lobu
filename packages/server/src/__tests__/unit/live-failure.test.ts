@@ -63,6 +63,10 @@ describe("isCapacityFailure", () => {
 			],
 			// The two underscored codes `classifyErrorMessage` does not reach, so
 			// `UNDERSCORED_QUOTA_CODES` cannot be dropped without a red test.
+			[
+				"OpenRouter insufficient reservation budget",
+				"402 This request requires more credits, or fewer max_tokens. You requested up to 1024 tokens, but can only afford 824.",
+			],
 			["OpenAI insufficient_quota", '{"code":"insufficient_quota"}'],
 			["rate_limit_error token", '{"type":"rate_limit_error"}'],
 			["plain rate limit prose", "rate limited, retry later"],
