@@ -899,7 +899,7 @@ export class SecretProxy {
     // Build headers, swapping placeholder secrets in auth headers
     const headers: Record<string, string> = {};
 
-    // Forward all original headers (except host/connection and inbound auth).
+    // Forward provider headers, excluding ingress routing and inbound auth.
     // We always set our own Authorization below, so the caller's Authorization
     // (which carries an opaque placeholder) must never reach the upstream.
     const skip = new Set([
@@ -920,9 +920,21 @@ export class SecretProxy {
       "authorization",
       "x-api-key",
       "x-lobu-worker-token",
+      // Ingress routing metadata (these, plus the `cf-*` / `x-forwarded-*`
+      // prefixes matched in `shouldSkipHeader`). They describe the hop INTO
+      // Lobu, not our request to the provider: ChatGPT answers an egress
+      // request that relays Cloudflare ingress metadata with an HTML 403,
+      // before it ever reaches the Codex API.
+      "forwarded",
+      "x-real-ip",
+      "true-client-ip",
+      "via",
+      "cdn-loop",
     ]);
+    const shouldSkipHeader = (name: string): boolean =>
+      skip.has(name) || name.startsWith("cf-") || name.startsWith("x-forwarded-");
     for (const [key, val] of Object.entries(c.req.header())) {
-      if (val && !skip.has(key.toLowerCase())) {
+      if (val && !shouldSkipHeader(key.toLowerCase())) {
         headers[key] = val;
       }
     }

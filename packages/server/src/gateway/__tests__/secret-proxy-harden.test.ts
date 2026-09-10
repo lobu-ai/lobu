@@ -12,6 +12,7 @@
  *  - ResolutionFailureLimiter throttles after repeated failures.
  *  - storeSecretMapping + PlaceholderCache TTL interaction.
  *  - Placeholder NOT swapped on ingress (real secret never reaches worker).
+ *  - Ingress routing headers (cf-*, x-forwarded-*, via, …) never reach the upstream.
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -779,5 +780,64 @@ describe("secret-proxy forward — header stripping (#1176)", () => {
     // Kept: regular request headers still reach the upstream.
     expect(forwarded?.["content-type"]).toBe("application/json");
     expect(forwarded?.["x-custom-header"]).toBe("kept");
+  });
+
+  // Ingress routing metadata describes the hop into Lobu. Relaying it upstream
+  // makes ChatGPT answer with an HTML 403 before the request reaches the Codex
+  // API, so every `cf-*` / `x-forwarded-*` / forwarding header is dropped while
+  // provider protocol headers survive untouched.
+  test("ingress routing headers are stripped; provider protocol headers survive", async () => {
+    const proxy = buildProxy(makeSecretStore({}));
+    const ingressHeaders = {
+      "CF-Connecting-IP": "192.0.2.10",
+      "cf-visitor": '{"scheme":"https"}',
+      "cf-ray": "synthetic-ray",
+      "cf-ipcountry": "XX",
+      "cf-worker": "edge.example.com",
+      "cdn-loop": "cloudflare; loops=1",
+      forwarded: "for=192.0.2.10;proto=https",
+      "x-forwarded-for": "192.0.2.10",
+      "x-forwarded-host": "gateway.example.com",
+      "x-forwarded-proto": "https",
+      "x-forwarded-port": "443",
+      "x-forwarded-server": "gateway-test",
+      "x-real-ip": "192.0.2.10",
+      "true-client-ip": "192.0.2.10",
+      via: "1.1 gateway.example.com",
+    };
+    const providerHeaders = {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      "openai-beta": "responses=experimental",
+      "anthropic-version": "2023-06-01",
+      "chatgpt-account-id": "synthetic-account",
+      "x-client-request-id": "synthetic-request",
+      session_id: "synthetic-session",
+    };
+
+    let forwarded: Record<string, string> | null = null;
+    await withFetch(async (_input, init) => {
+      forwarded = (init?.headers as Record<string, string>) ?? null;
+      return new Response("{}", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, async () => {
+      const res = await proxy.getApp().request("/v1/chat/completions", {
+        method: "POST",
+        headers: { ...ingressHeaders, ...providerHeaders },
+        body: "{}",
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(forwarded).not.toBeNull();
+    const keys = Object.keys(forwarded ?? {}).map((k) => k.toLowerCase());
+    for (const name of Object.keys(ingressHeaders)) {
+      expect(keys).not.toContain(name.toLowerCase());
+    }
+    for (const [name, value] of Object.entries(providerHeaders)) {
+      expect(forwarded?.[name]).toBe(value);
+    }
   });
 });
