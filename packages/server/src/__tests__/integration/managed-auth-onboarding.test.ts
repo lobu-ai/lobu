@@ -137,8 +137,8 @@ describe('managed-auth onboarding', () => {
 
   it('offers a configured bundled app before the catalog connector is installed', async () => {
     const org = await createTestOrganization({ slug: 'catalog-setup-test' });
-    await primeAppInstallationMethods([{ connectorKey: 'github' }]);
-    const method = getPrimedBundledMethod('github');
+    await primeAppInstallationMethods([{ connectorKey: 'github', provider: 'github' }]);
+    const method = getPrimedBundledMethod('github', 'github');
     expect(method).toBeTruthy();
     const keys = [method!.appIdKey!, method!.privateKeyKey!, method!.appSlugKey!];
     const previous = keys.map(key => process.env[key]);

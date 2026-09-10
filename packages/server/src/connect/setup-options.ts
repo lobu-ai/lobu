@@ -3,17 +3,21 @@ import { ConnectionSetupOptionsSchema } from '@lobu/core/contracts/tools/manage-
 import { Value } from '@sinclair/typebox/value';
 import { getDb } from '../db/client';
 import { getWorkspaceProvider } from '../workspace';
+import type { OrgInfo } from '../workspace/types';
 import { MANAGED_CHAT_PLATFORMS } from '../preview/managed-platforms';
 import { getPrimedBundledMethod, resolveAppInstallCredentials } from '../gateway/installation/app-install-credentials';
 import { isCloudMode } from '../utils/cloud-mode';
 import { resolveCloudOrigin } from './cloud-credential';
 import { normalizeConnectorAuthSchema, getAppInstallationAuthMethods, getOAuthAuthMethods } from '../utils/connector-auth';
 
+/** Mirrors `ConnectionSetupOptionsSchema`'s `maxItems`; over it the result fails contract validation. */
+const MAX_SETUP_OPTIONS = 100;
+
 /** Public offers only. No memberships, account grants, profile IDs or credentials. */
-export async function publicSetupOptions(connectorKey: string, origin: string): Promise<ConnectionSetupOptions> {
+export async function publicSetupOptions(connectorKey: string, origin: string, organizations?: readonly OrgInfo[]): Promise<ConnectionSetupOptions> {
   const options: ConnectionSetupOption[] = [];
-  const organizations = await getWorkspaceProvider().listOrganizations();
-  for (const org of organizations) {
+  const publicOrganizations = organizations ?? await getWorkspaceProvider().listOrganizations();
+  for (const org of publicOrganizations) {
     if (org.visibility !== 'public') continue;
     for (const offer of org.managed_auth?.connectors ?? []) {
       if (offer.connector_key !== connectorKey) continue;
@@ -44,7 +48,7 @@ export async function publicSetupOptions(connectorKey: string, origin: string): 
       instructions: 'Use your cloud workspace and cloud agent. Complete app installation, then bind the intended DM or channel with a Lobu link code. Cloud device execution still uses cloud memory.',
     });
   }
-  return { action: 'setup_options', connector_key: connectorKey, cloud_status: 'available', options: options.slice(0, 100) };
+  return { action: 'setup_options', connector_key: connectorKey, cloud_status: 'available', options: options.slice(0, MAX_SETUP_OPTIONS) };
 }
 
 /** A trusted operator-selected origin; never forward caller cookies or tokens. */
@@ -89,8 +93,10 @@ export async function localSetupOption(organizationId: string, connectorKey: str
   if (!rows[0]) return null;
   const schema = normalizeConnectorAuthSchema(rows[0].auth_schema);
   // Catalog entries can start installation before an org definition exists.
-  // Reuse the boot-primed declaration; an installed org schema remains authoritative.
-  const app = rows[0].installed_key ? getAppInstallationAuthMethods(schema)[0] : getPrimedBundledMethod(connectorKey);
+  // Webhook discovery primes the generic key; early gateway boot primes provider-specific
+  // keys for its built-in apps. An installed org schema remains authoritative.
+  const app = rows[0].installed_key ? getAppInstallationAuthMethods(schema)[0]
+    : getPrimedBundledMethod(connectorKey) ?? getPrimedBundledMethod(connectorKey, connectorKey);
   const oauth = getOAuthAuthMethods(schema)[0];
   if (!app && !oauth) return null;
   const setupUrl = new URL(`/${encodeURIComponent(rows[0].slug)}/connectors/${encodeURIComponent(connectorKey)}`, origin);
@@ -111,14 +117,19 @@ export async function localSetupOption(organizationId: string, connectorKey: str
 
 const DEFAULT_DEPS: SetupOptionsDeps = { cloudOrigin: resolveCloudOrigin, cloudMode: isCloudMode, publicOptions: publicSetupOptions, remoteOptions: fetchCloudSetupOptions, localOption: localSetupOption };
 
-export async function connectionSetupOptions(connectorKey: string, organizationId: string, origin: string, deps: SetupOptionsDeps = DEFAULT_DEPS): Promise<ConnectionSetupOptions> {
+export async function connectionSetupOptions(connectorKey: string, organizationId: string, origin: string, overrides: Partial<SetupOptionsDeps> = {}): Promise<ConnectionSetupOptions> {
+  const deps = { ...DEFAULT_DEPS, ...overrides };
   const local = await deps.localOption(organizationId, connectorKey, origin);
   let result: ConnectionSetupOptions = { action: 'setup_options', connector_key: connectorKey, cloud_status: 'not_configured', options: [] };
   try {
+    // In cloud mode this gateway IS the offer source, so it reads its own
+    // public offers instead of calling /api/connection-options on itself.
     const cloud = deps.cloudMode() ? origin : await deps.cloudOrigin();
-    if (cloud) result = new URL(cloud).origin === new URL(origin).origin || deps.cloudMode()
+    if (cloud) result = new URL(cloud).origin === new URL(origin).origin
       ? await deps.publicOptions(connectorKey, origin)
       : await deps.remoteOptions(connectorKey, cloud);
   } catch { result.cloud_status = 'unavailable'; }
-  return { ...result, options: [...result.options, ...(local ? [local] : [])] };
+  // The local option is this server's own route, so it survives the cap.
+  const offers = local ? result.options.slice(0, MAX_SETUP_OPTIONS - 1) : result.options;
+  return { ...result, options: [...offers, ...(local ? [local] : [])] };
 }

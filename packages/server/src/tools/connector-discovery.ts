@@ -19,6 +19,7 @@
 
 import { manageCatalog } from './admin/manage_catalog';
 import { manageConnections } from './admin/manage_connections';
+import { publicSetupOptions, type SetupOptionsDeps } from '../connect/setup-options';
 import { handleSetupOptions } from './admin/manage_connections/handlers/setup-options';
 import type { ConnectionSetupOptions } from '@lobu/core/contracts/tools/manage-connections';
 import type { Env } from '../index';
@@ -34,6 +35,7 @@ export interface ConnectorDiscoveryDeps {
   manageCatalog: typeof manageCatalog;
   manageConnections: typeof manageConnections;
   setupOptions: typeof handleSetupOptions;
+  listPublicOrganizations: () => Promise<OrgInfo[]>;
   listOrganizations: (userId: string) => Promise<OrgInfo[]>;
   listLiveGrantedOrganizations: (
     userId: string,
@@ -45,6 +47,7 @@ const DEFAULT_DEPS: ConnectorDiscoveryDeps = {
   manageCatalog,
   manageConnections,
   setupOptions: handleSetupOptions,
+  listPublicOrganizations: () => getWorkspaceProvider().listOrganizations(),
   listOrganizations: async (userId) =>
     getWorkspaceProvider().listOrganizations(undefined, userId),
   listLiveGrantedOrganizations: async (userId, grantedOrganizationIds) =>
@@ -214,6 +217,12 @@ export async function searchLiveConnectors(
         managedOffers.set(offer.connector_key, entries);
       }
     }
+    // Share public metadata within this request; never cache mutable offers across requests.
+    let publicOrganizations: Promise<OrgInfo[]> | undefined;
+    const setupDeps: Partial<SetupOptionsDeps> = {
+      publicOptions: async (key, origin) =>
+        publicSetupOptions(key, origin, await (publicOrganizations ??= deps.listPublicOrganizations())),
+    };
     const setupByKey = new Map<string, ConnectionSetupOptions>();
     const withManagedAuth = (connectorKey: string, line: string): string => {
       const setup = setupByKey.get(connectorKey);
@@ -299,7 +308,7 @@ export async function searchLiveConnectors(
           try {
             setupByKey.set(
               connector_key,
-              await deps.setupOptions({ connector_key }, workspaceCtx)
+              await deps.setupOptions({ connector_key }, workspaceCtx, setupDeps)
             );
           } catch {
             // Base discovery stays available when setup discovery fails.

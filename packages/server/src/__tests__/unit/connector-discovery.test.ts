@@ -83,6 +83,7 @@ function makeDeps(over?: {
 				cloud_status: "not_configured",
 				options: [],
 			},
+		listPublicOrganizations: async () => (over?.organizations ?? []) as never,
 		listOrganizations: async () => (over?.organizations ?? []) as never,
 		listLiveGrantedOrganizations: async () =>
 			(over?.liveGrantedOrganizationIds ?? []).map((id) => ({ id, slug: id, name: id, role: "member", personal: false })),
@@ -549,6 +550,33 @@ describe("searchLiveConnectors (search_sdk connector intent search)", () => {
 		expect(hits[0]).toMatch(/NOT currently installable/);
 		expect(hits[0]).toMatch(/no longer available/);
 		expect(hits[0]).not.toMatch(/installConnector/);
+	});
+
+	it("shares one public offer read per search and refreshes it on the next request", async () => {
+		let reads = 0;
+		const deps = makeDeps({
+			catalog: {
+				catalogs: {
+					connectors: {
+						entries: [
+							{ id: "demo.mail-a", name: "Demo Mail A", description: "mail" },
+							{ id: "demo.mail-b", name: "Demo Mail B", description: "mail" },
+						],
+					},
+				},
+			},
+		});
+		deps.listPublicOrganizations = async () => {
+			reads++;
+			return [];
+		};
+		deps.setupOptions = async ({ connector_key }, _ctx, setupDeps) =>
+			setupDeps!.publicOptions!(connector_key, "https://gateway.example");
+
+		expect(await searchLiveConnectors("demo.mail", env, ctx, deps)).toHaveLength(2);
+		expect(reads).toBe(1);
+		await searchLiveConnectors("demo.mail", env, ctx, deps);
+		expect(reads).toBe(2);
 	});
 
 	it("never leaks credentials or raw connector config", async () => {

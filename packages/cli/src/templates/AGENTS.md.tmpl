@@ -238,7 +238,8 @@ after the user approves provider-data access, use a server-side feed dry-run.
 Discover live capabilities before writing connector config. Call
 `client.connections.setupOptions({ connector_key })` in the selected runtime
 before requesting OAuth app credentials. It returns verified managed OAuth,
-hosted cloud chat, and local choices with their actual next steps.
+hosted cloud chat, and local choices with their actual next steps. Browser setup
+choices cover configured install flows; Telegram uses the link-code flow above.
 `cloud_status: "unavailable"` means discovery failed; retry before concluding
 that no managed option exists. Offers are not connected accounts. In an
 authenticated cloud context, use ClientSDK through Lobu MCP or

@@ -85,16 +85,21 @@ import {
 // Main Function (Action Router)
 // ============================================
 
-async function withSetupOptions(result: ManageConnectionsResult, connectorKey: string, ctx: ToolContext): Promise<ManageConnectionsResult> {
-  if (!('status' in result) || result.status !== 'setup_required') return result;
-  const setup_options = await handleSetupOptions({ connector_key: connectorKey }, ctx);
-  const offers = setup_options.options.filter(option => option.kind !== 'local');
-  const guidance = offers.length
-    ? 'Managed or hosted options are available. Present setup_options before asking the user for app credentials; hosted chat runs in cloud.'
-    : setup_options.cloud_status === 'unavailable'
-      ? 'Cloud setup discovery is unavailable. Retry connections.setupOptions before concluding no managed option exists.'
-      : '';
-  return { ...result, setup_options, instructions: `${guidance} ${result.instructions}`.trim() };
+export async function withSetupOptions(result: ManageConnectionsResult, connectorKey: string, ctx: ToolContext, setup = handleSetupOptions): Promise<ManageConnectionsResult> {
+	if (!('status' in result) || result.status !== 'setup_required') return result;
+	try {
+		const setup_options = await setup({ connector_key: connectorKey }, ctx);
+		const offers = setup_options.options.filter(option => option.kind !== 'local');
+		const guidance = offers.length
+			? 'Managed or hosted options are available. Present setup_options before asking the user for app credentials; hosted chat runs in cloud.'
+			: setup_options.cloud_status === 'unavailable'
+				? 'Cloud setup discovery is unavailable. Retry connections.setupOptions before concluding no managed option exists.'
+				: '';
+		return { ...result, setup_options, instructions: `${guidance} ${result.instructions}`.trim() };
+	} catch {
+		// Optional discovery must not replace an actionable setup continuation with an error.
+		return result;
+	}
 }
 
 const manageConnectionsTool = defineActionTool("manage_connections", {
@@ -105,7 +110,9 @@ const manageConnectionsTool = defineActionTool("manage_connections", {
 	list: action(ListAction, handleList),
 	get: action(GetAction, handleGet),
 	create: action(CreateAction, async (args, ctx) => withSetupOptions(await handleCreate(args, ctx), args.connector_key, ctx)),
-	setup_options: action(SetupOptionsAction, handleSetupOptions),
+	// Bound to two args: the router's third slot is `env`, not the handler's
+	// optional discovery deps (only in-process callers inject those).
+	setup_options: action(SetupOptionsAction, (args, ctx) => handleSetupOptions(args, ctx)),
 	connect: action(ConnectAction, async (args, ctx) => withSetupOptions(await handleConnect(args, ctx), args.connector_key, ctx)),
 	connect_managed: action(ConnectManagedAction, handleConnectManaged),
 	update: action(UpdateAction, handleUpdate),
