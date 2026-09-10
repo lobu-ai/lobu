@@ -1307,11 +1307,20 @@ export async function listNotifications(opts: {
 	clientIds?: string[];
 	mcpActivityId?: string | null;
 	/**
-	 * Return only notifications carrying a `browser_url` (a browser-handoff
-	 * draft staged in the user's browser). Used by the attention feed to keep
-	 * undismissed drafts visible regardless of the recent-activity window.
+	 * Return only notifications that may still need the reader: unread, a
+	 * browser-handoff draft, or an approval whose run is still pending. Used by
+	 * the attention feed to keep those reachable regardless of the
+	 * recent-activity window — without it, "Needs attention" is a filter over
+	 * the newest N activity cards, so anything that needs you but is older than
+	 * that window silently disappears while the unread badge keeps counting it.
+	 *
+	 * Deliberately wider than the final answer: `browser_url` and a pending
+	 * `approval_status` are both pre-filters for states this query cannot settle
+	 * (a draft's live state and an undecidable approval are computed in the
+	 * SELECT, which a WHERE cannot reference). The caller narrows to the real
+	 * attention set from the resolved card.
 	 */
-	browserUrlOnly?: boolean;
+	attentionOnly?: boolean;
 }): Promise<{
 	notifications: Record<string, unknown>[];
 	nextCursor: number | null;
@@ -1322,7 +1331,13 @@ export async function listNotifications(opts: {
 	const unreadOnly = opts.unreadOnly ?? false;
 	const clientIds = opts.clientIds?.length ? opts.clientIds : null;
 	const mcpActivityId = opts.mcpActivityId?.trim() || null;
-	const browserUrlOnly = opts.browserUrlOnly ?? false;
+	const attentionOnly = opts.attentionOnly ?? false;
+	// The attention read reorders rows (see ORDER BY), which would make a keyset
+	// cursor skip notifications. It is a single bounded read by contract; fail
+	// loudly rather than paginate an order the cursor does not match.
+	if (attentionOnly && cursor != null) {
+		throw new Error("listNotifications: attentionOnly cannot be paginated");
+	}
 
 	const rows = (await sql`
     SELECT
@@ -1479,7 +1494,15 @@ export async function listNotifications(opts: {
       AND t.user_id = ${opts.userId}
       AND (${cursor}::bigint IS NULL OR e.id < ${cursor})
       AND (${!unreadOnly} OR t.read_at IS NULL)
-      ${browserUrlOnly ? sql`AND t.browser_url IS NOT NULL` : sql``}
+      ${
+				attentionOnly
+					? sql`AND (
+        t.read_at IS NULL
+        OR t.browser_url IS NOT NULL
+        OR ar.approval_status = 'pending'
+      )`
+					: sql``
+			}
 			${clientIds
 				? sql`AND e.client_id = ANY(${pgTextArray(clientIds)}::text[])`
 				: sql``}
@@ -1493,7 +1516,26 @@ export async function listNotifications(opts: {
     -- consistent. delivered_at would tie-break for concurrent inserts but
     -- doesn't match the cursor — using it as the primary key risked
     -- skipping notifications when delivered_at and e.id disagreed.
-    ORDER BY e.id DESC
+    --
+    -- The attention read is the one un-paginated read (guarded above), so it
+    -- may put undecided items first: a live draft or a pending approval must
+    -- never be cut by this LIMIT in favour of a merely-unread card. Unread is
+    -- best-effort and takes the newest of whatever budget is left; an
+    -- undecided decision is a commitment. Keyset pagination is untouched
+    -- because this term only exists when there is no cursor.
+    --
+    -- COALESCE, not a bare comparison: the approval run is a LEFT JOIN, so on
+    -- a row without one the comparison is NULL, not false, and DESC sorts
+    -- NULLS FIRST — which put every ordinary notification AHEAD of the drafts
+    -- and pending approvals this term exists to rescue.
+    ${
+			attentionOnly
+				? sql`ORDER BY (
+						t.browser_url IS NOT NULL
+						OR COALESCE(ar.approval_status, '') = 'pending'
+					) DESC, e.id DESC`
+				: sql`ORDER BY e.id DESC`
+		}
     LIMIT ${limit + 1}
   `) as unknown as Array<{ id: number } & Record<string, unknown>>;
 

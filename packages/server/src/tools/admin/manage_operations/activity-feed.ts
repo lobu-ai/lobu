@@ -413,6 +413,28 @@ function collapseKeyForRun(row: {
 	return null;
 }
 
+/**
+ * Does this card still need the reader to do something?
+ *
+ * One definition, applied twice: here, to decide what gets pinned past the
+ * recent-activity window, and in Owletto's attention lens (`attention-inbox.tsx`,
+ * `cardNeedsAttention`) to decide what it renders. They must agree — a card the
+ * server pins but the client hides is an invisible slot, and a card the client
+ * wants but the server drops is the badge/lens mismatch this pin exists to fix.
+ *
+ * A browser-handoff draft qualifies only while it is still openable. `completed`
+ * (already activated) and `expired` (can never be activated) have nothing left
+ * to do; pinning those made month-old dead drafts outrank live work.
+ */
+function cardNeedsAttention(card: RawCard): boolean {
+	return (
+		Boolean(card.unread) ||
+		(card.interaction_type === "approval" &&
+			card.interaction_status === "pending") ||
+		card.browser_handoff?.state === "ready"
+	);
+}
+
 /** Adjacent collapse — same rules as Owletto client (oldest→newest input). */
 export function collapseAdjacentActivityCards(items: RawCard[]): RawCard[] {
 	if (items.length <= 1) return items;
@@ -615,30 +637,27 @@ export async function listOrgActivity(opts: {
 	const windowed = raw.slice(0, 60);
 	windowed.reverse();
 
-	// Browser-handoff drafts (a browser_url on the notification) must stay in
-	// the attention lens until the user hits Done, regardless of how many newer
-	// cards arrived. Fetch undismissed browser-handoff notifications — only when
-	// the kind filter permits notifications — merge them chronologically, and
-	// pin them so the cap below evicts non-handoff cards instead of the draft.
-	// Bounded, read-only, multi-replica safe.
+	// Anything that still needs the reader must stay reachable regardless of how
+	// many newer cards arrived. Without this the attention lens is a filter over
+	// the newest N activity cards, so an unread notification or an undecided
+	// approval older than the window vanishes from it while the unread badge
+	// keeps counting — the badge said 3 and the lens could show 1.
 	//
-	// Only a `ready` draft earns that pin. `completed` (already activated) and
-	// `expired` (can never be activated) have nothing left to do, and pinning
-	// them made a month-old dead draft outrank today's activity — every such
-	// draft permanently consumed one of the caller's `limit` slots. They still
-	// surface inside the ordinary window, where they read as history.
+	// Fetch the attention set — only when the kind filter permits notifications
+	// — merge it chronologically, and pin it so the cap below evicts settled
+	// cards instead. Bounded, read-only, multi-replica safe.
 	let collapsed: RawCard[];
-	const pinnedHandoffIds = new Set<number>();
+	const pinnedAttentionIds = new Set<number>();
 	if (
 		includeNotifications &&
 		opts.userId &&
 		(!kindFilter || kindFilter.has("notification"))
 	) {
-		const { notifications: handoffNotifications } = await listNotifications({
+		const { notifications: attentionNotifications } = await listNotifications({
 			organizationId: opts.organizationId,
 			userId: opts.userId,
 			limit: 50,
-			browserUrlOnly: true,
+			attentionOnly: true,
 		});
 		const merged = [...windowed];
 		const present = new Set(
@@ -646,14 +665,16 @@ export async function listOrgActivity(opts: {
 				c.notification_id != null ? [Number(c.notification_id)] : [],
 			),
 		);
-		for (const n of handoffNotifications) {
+		for (const n of attentionNotifications) {
 			const card = buildNotificationCard(opts.ownerSlug, n);
 			if (!card || card.notification_id == null) continue;
-			if (card.browser_handoff?.state !== "ready") continue;
-			// Pin by id regardless of whether this handoff is already in the
-			// merge window: a draft inside the 60-card window but outside the
-			// final limit would otherwise be sliced away un-pinned.
-			pinnedHandoffIds.add(card.notification_id);
+			// The SQL pre-filter is deliberately wider than the answer; only the
+			// resolved card knows whether this still needs anyone.
+			if (!cardNeedsAttention(card)) continue;
+			// Pin by id regardless of whether this card is already in the merge
+			// window: an item inside the 60-card window but outside the final
+			// limit would otherwise be sliced away un-pinned.
+			pinnedAttentionIds.add(card.notification_id);
 			if (present.has(card.notification_id)) continue;
 			merged.push(card);
 			present.add(card.notification_id);
@@ -666,28 +687,28 @@ export async function listOrgActivity(opts: {
 			: windowed;
 	}
 
-	// Keep every pinned handoff card and fill the rest of the budget with the
-	// newest non-handoff cards, then project to the public ActivityCard shape
-	// (dropping the RawCard-only fields).
+	// Keep every pinned card and fill the rest of the budget with the newest
+	// settled cards, then project to the public ActivityCard shape (dropping the
+	// RawCard-only fields).
 	let items: ActivityCard[];
-	if (pinnedHandoffIds.size > 0) {
-		const handoffCards = collapsed
+	if (pinnedAttentionIds.size > 0) {
+		const attentionCards = collapsed
 			.filter(
 				(c) =>
 					c.notification_id != null &&
-					pinnedHandoffIds.has(c.notification_id),
+					pinnedAttentionIds.has(c.notification_id),
 			)
 			// collapsed is chronological (oldest first); keep only the newest
-			// `limit` pinned drafts so the response never exceeds the declared
-			// bound even when undismissed drafts outnumber it.
+			// `limit` pinned cards so the response never exceeds the declared
+			// bound even when the attention set outnumbers it.
 			.slice(-limit);
 		const otherCards = collapsed.filter(
 			(c) =>
 				c.notification_id == null ||
-				!pinnedHandoffIds.has(c.notification_id),
+				!pinnedAttentionIds.has(c.notification_id),
 		);
-		const fill = otherCards.slice(-Math.max(0, limit - handoffCards.length));
-		items = [...handoffCards, ...fill]
+		const fill = otherCards.slice(-Math.max(0, limit - attentionCards.length));
+		items = [...attentionCards, ...fill]
 			.sort((a, b) => a.atMs - b.atMs)
 			.map(({ collapseKey, itemsCollected, atMs, ...card }) => card);
 	} else {
