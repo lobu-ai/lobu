@@ -47,4 +47,20 @@ describe("conversation plugin", () => {
       ]);
     }
   });
+
+  test("describes suggestions as optional in both the tool and its argument", () => {
+    const tool = createConversationTools({ ...params, platform: "api" }).find(
+      (candidate) => candidate.name === "suggest_actions"
+    );
+    expect(tool?.description).toMatch(/optional/i);
+    const prompts = tool?.parameters.properties.prompts;
+    expect(prompts?.description).toMatch(/optional/i);
+    expect(prompts?.description).toMatch(/single/i);
+    // The old copy made a chipless reply a failure ("call this before finishing
+    // almost every reply — chips are how users navigate"), which is what
+    // produced padded suggestions on turns that needed none. Pin it out.
+    expect(JSON.stringify(tool)).not.toMatch(
+      /always call|every reply|chips are how|dead end|under your reply/i
+    );
+  });
 });

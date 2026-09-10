@@ -91,6 +91,38 @@ describe("suggest-followups guardrail", () => {
 });
 
 describe("generateSuggestFollowups", () => {
+  // The prompt used to demand "2-3 things" on every reply, so the model padded
+  // turns that needed nothing. It now instructs an empty set as the default,
+  // and an empty set must survive the parse/sanitize path as [] (the callers
+  // treat [] as "post no card").
+  test("instructs an empty default and returns [] for it", async () => {
+    let systemPrompt = "";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      systemPrompt = body.messages.find(
+        (message: { role: string }) => message.role === "system"
+      ).content;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"prompts":[]}' } }],
+        })
+      );
+    }) as unknown as typeof fetch;
+    restore = () => {
+      globalThis.fetch = original;
+    };
+
+    const out = await generateSuggestFollowups(REPLY, ORG, {
+      resolveTarget: target(),
+    });
+    expect(systemPrompt).toContain('{"prompts":[]}');
+    expect(systemPrompt).toMatch(/optional/i);
+    expect(systemPrompt).toMatch(/completed requests/i);
+    expect(systemPrompt).not.toMatch(/return 2-3 things/i);
+    expect(out).toEqual([]);
+  });
+
   test("parses well-formed prompts from the model", async () => {
     restore = stubFetch(
       JSON.stringify({

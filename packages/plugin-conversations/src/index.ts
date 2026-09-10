@@ -482,7 +482,7 @@ export function createConversationTools(
           }),
           {
             description:
-              "2-3 follow-up actions to offer the user. Call this before finishing almost every reply — chips are how users navigate. Non-blocking; the turn continues.",
+              "Follow-up actions to offer the user (1-4). Only useful, optional next steps; a single action is enough, so do not pad the list. Skip this tool when no suggestion is needed.",
           }
         ),
       }),
