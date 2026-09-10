@@ -450,9 +450,10 @@ describe("financial snapshot builder", () => {
 });
 
 describe("weekly net-worth reaction", () => {
-  test("reads both active sources, fetches security and FX quotes, and saves one versioned snapshot", async () => {
+  test("reads both active sources, fetches quotes under run-scoped keys, and saves one versioned snapshot per week", async () => {
     const queries: string[] = [];
     const operationInputs: Array<{
+      idempotency_key: string;
       input: { symbols: Array<Record<string, unknown>> };
     }> = [];
     const saved: Array<Record<string, unknown>> = [];
@@ -484,6 +485,7 @@ describe("weekly net-worth reaction", () => {
       },
       operations: {
         execute: async (input: {
+          idempotency_key: string;
           input: { symbols: Array<Record<string, unknown>> };
         }) => {
           operationInputs.push(input);
@@ -555,6 +557,24 @@ describe("weekly net-worth reaction", () => {
         net_worth_gbp: 1_400,
       },
     });
+    // An action idempotency key binds to the parent run that first used it, so
+    // a retry of this run must reuse its key while the next run in the same
+    // week must not. The snapshot event has no such binding and stays weekly.
+    await runNetWorthSnapshot(ctx, client);
+    await runNetWorthSnapshot(
+      { ...ctx, window: { ...ctx.window, run_id: ctx.window.run_id + 1 } },
+      client
+    );
+    expect(operationInputs.map((input) => input.idempotency_key)).toEqual([
+      "net-worth:v4:quotes:run:300:batch:1",
+      "net-worth:v4:quotes:run:300:batch:1",
+      "net-worth:v4:quotes:run:301:batch:1",
+    ]);
+    expect(saved.map((row) => row.idempotency_key)).toEqual([
+      "net-worth:v4:snapshot:week:2026-W33",
+      "net-worth:v4:snapshot:week:2026-W33",
+      "net-worth:v4:snapshot:week:2026-W33",
+    ]);
   });
 
   test("fails closed when quotes are needed but the market-quotes connection is absent", async () => {
