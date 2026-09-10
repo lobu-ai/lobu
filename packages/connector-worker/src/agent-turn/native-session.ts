@@ -164,6 +164,7 @@ export async function promptNativeSession(
   let continuationPending = false;
   let checking = false;
   let finished = false;
+  const autoCompactionEnabled = session.autoCompactionEnabled;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -191,7 +192,19 @@ export async function promptNativeSession(
     if (event.type === 'agent_start') { started++; continuationPending = false; }
   });
   const unsubscribeSession = session.subscribe((event) => {
-    if (event.type === 'agent_end') ended++;
+    if (event.type === 'agent_end') {
+      ended++;
+      const lastAssistant = event.messages.slice().reverse().find(message => message.role === 'assistant');
+      if (lastAssistant?.stopReason === 'stop' && !session.agent.hasQueuedMessages()) {
+        // Pi checks the same threshold before the next prompt. Persist this
+        // completed answer now instead of spending the isolate's remaining
+        // execution budget summarizing a conversation that may never resume.
+        // Errors keep compaction enabled so native overflow recovery can
+        // retry, and so does a queued round: `check` below still continues it
+        // in THIS turn, and it has to fit the window like any other.
+        session.setAutoCompactionEnabled(false);
+      }
+    }
     if (event.type === 'compaction_end') {
       continuationPending = event.willRetry || (!!event.result && session.agent.hasQueuedMessages());
     }
@@ -207,6 +220,9 @@ export async function promptNativeSession(
     if (timer !== undefined) clearTimeout(timer);
     unsubscribeAgent();
     unsubscribeSession();
+    // A session takes more than one prompt — the memory flush runs its own —
+    // so hand the compaction setting back exactly as it was found.
+    session.setAutoCompactionEnabled(autoCompactionEnabled);
   }
 }
 

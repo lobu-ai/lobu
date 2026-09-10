@@ -1653,18 +1653,24 @@ describe("agent turn on the isolate lane", () => {
 		expect(second?.body).toContain("Command exited with code 126");
 	}, 120_000);
 
-	it("compacts after answering when the context has outgrown the window, with pi's own prompts", async () => {
+	it("persists the answer before threshold compaction and compacts on the next restored turn", async () => {
 		hits = [];
 		toolScript = [];
 		armFirstDeltaGate();
-		// The fake model reports 11 in + 7 out = 18 tokens; a 20-token window with a
-		// 5-token reserve is therefore over the line the moment the turn ends.
+		// The fake model reports 11 in + 7 out = 18 tokens, so a 20-token window
+		// with a 5-token reserve is over the line the moment this turn answers —
+		// and the compaction that settles it belongs to the NEXT prompt, not to the
+		// turn whose answer is already owed to the user.
 		const run = await runTurn(
 			turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }),
 		);
 
 		expect(run.output.text).toBe("Hello from the isolate");
-		const entries = sessionEntries(run.output);
+		expect(sessionEntries(run.output).some((entry) => entry.type === "compaction")).toBe(false);
+		expect(hits.filter((h) => h.url === "/v1/messages")).toHaveLength(1);
+		const resumed = await runTurn(turnJob({ sessionJsonl: run.output.sessionJsonl, userMessage: "continue",
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		const entries = sessionEntries(resumed.output);
 		const compaction = entries.find((entry) => entry.type === "compaction");
 		expect(compaction).toBeDefined();
 		expect(compaction?.tokensBefore).toBe(18);
@@ -1672,22 +1678,28 @@ describe("agent turn on the isolate lane", () => {
 		// The summary came from the model, asked with pi's summarisation prompt on
 		// the same route and the same credential as the turn itself.
 		expect(compaction?.summary).toContain("Hello from the isolate");
+		// One answer, then one summary and the resumed prompt it made room for.
 		const providerCalls = hits.filter((h) => h.url === "/v1/messages");
-		expect(providerCalls.length).toBeGreaterThanOrEqual(2);
+		expect(providerCalls).toHaveLength(3);
 		const summarization = providerCalls.find((h) => h.body.includes("context summarization assistant"));
 		expect(summarization).toBeDefined();
 		expect(summarization?.body).toContain("<conversation>");
 		expect(summarization?.body).toContain("Do NOT continue the conversation");
-		// The turn's own answer was streamed; the summary was not.
+		// Each turn streamed its own answer and nothing else: the summary the
+		// second turn fetched before prompting never reached the user as text.
 		expect(run.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
+			"Hello from the isolate",
+		);
+		expect(resumed.events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta).join("")).toBe(
 			"Hello from the isolate",
 		);
 	}, 120_000);
 
-	it("waits for a delayed native summary before returning the snapshot", async () => {
+	it("waits for pre-prompt compaction and preserves every steered answer", async () => {
 		hits = [];
 		toolScript = [];
 		sawFirstDelta = Promise.resolve();
+		const seed = await runTurn(turnJob({ userMessage: "saved context ".repeat(100) }));
 		let summaryFinished = false;
 		providerScript = (body, res) => {
 			if (body.includes("context summarization assistant")) {
@@ -1699,11 +1711,11 @@ describe("agent turn on the isolate lane", () => {
 			else void writeAnthropicStream(res, ["main answer"]);
 		};
 		let offered = false;
-		const run = await runTurn(turnJob({ compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }), ['127.0.0.1'], {
+		const run = await runTurn(turnJob({ sessionJsonl: seed.output.sessionJsonl, compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }), ['127.0.0.1'], {
 			takeSteering: () => { if (offered) return []; offered = true; return [{ runId: 7, messageId: 'compacted-input', text: 'remember this input' }]; },
 		});
 		expect(summaryFinished).toBe(true);
-		expect(sessionEntries(run.output).at(-1)).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
+		expect(sessionEntries(run.output).find(entry => entry.type === "compaction")).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
 		// TWO user messages are answered here (the steered input queues a
 		// second round), and the host delivers `text` ONCE — to Slack at
 		// completion, and to history. Both answers have to be in it: taking the
@@ -1723,11 +1735,13 @@ describe("agent turn on the isolate lane", () => {
 		sawFirstDelta = Promise.resolve();
 		const first = await runTurn(turnJob({ userMessage: "original history ".repeat(100),
 			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
-		const original = sessionEntries(first.output);
-		expect(original.at(-1)?.type).toBe("compaction");
+		const compacted = await runTurn(turnJob({ sessionJsonl: first.output.sessionJsonl, userMessage: "continue once",
+			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 4 } }));
+		const original = sessionEntries(compacted.output);
+		expect(original.some(entry => entry.type === "compaction")).toBe(true);
 		const custom = { type: "custom", id: "synthetic-custom", parentId: original.at(-1)!.id,
 			timestamp: new Date(0).toISOString(), customType: "synthetic.state", data: { preserved: true } };
-		const snapshot = first.output.sessionJsonl + JSON.stringify(custom) + "\n";
+		const snapshot = compacted.output.sessionJsonl + JSON.stringify(custom) + "\n";
 		hits = [];
 		const second = await runTurn(turnJob({ sessionJsonl: snapshot, userMessage: "continue" }));
 		expect(sessionEntries(second.output).slice(0, original.length + 1)).toEqual([...original, custom]);
@@ -1862,7 +1876,7 @@ describe("agent turn on the isolate lane", () => {
 		expect(sessionMessages(run.output)[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "hi" }] });
 	}, 120_000);
 
-	it("captures the original exchange even when native compaction removes its user from model context", async () => {
+	it("captures the new exchange after compacting restored context", async () => {
 		hits = [];
 		toolScript = [];
 		memoryCalls = [];
@@ -1871,13 +1885,15 @@ describe("agent turn on the isolate lane", () => {
 			search_memory: { status: 200, body: { content: [] } },
 			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
 		};
+		const seed = await runTurn(turnJob({ userMessage: "earlier context ".repeat(100) }));
 		const run = await runTurn(turnJob({
+			sessionJsonl: seed.output.sessionJsonl,
 			userMessage: "Remember this original user request",
 			memory: { mcpId: "lobu", agentId: "agent-test" },
 			tools: { gatewayUrl: `http://127.0.0.1:${port}/lobu`, definitions: [] },
 			compaction: { enabled: true, contextWindow: 20, reserveTokens: 5, keepRecentTokens: 0 },
 		}));
-		expect(sessionEntries(run.output).at(-1)?.type).toBe("compaction");
+		expect(sessionEntries(run.output).some(entry => entry.type === "compaction")).toBe(true);
 		const captures = memoryCalls.filter((call) => call.tool === "save_memory");
 		expect(captures).toHaveLength(1);
 		expect(captures[0]?.body.content).toBe("User: Remember this original user request\nAssistant: Hello from the isolate");
