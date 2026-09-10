@@ -85,23 +85,27 @@ import {
 // Main Function (Action Router)
 // ============================================
 
-export async function withSetupOptions(result: ManageConnectionsResult, connectorKey: string, ctx: ToolContext, setup = handleSetupOptions): Promise<ManageConnectionsResult> {
-	if (!('status' in result) || result.status !== 'setup_required') return result;
+export async function withSetupOptions(
+	result: ManageConnectionsResult,
+	connectorKey: string,
+	ctx: ToolContext,
+	setup = handleSetupOptions
+): Promise<ManageConnectionsResult> {
+	if (!("status" in result) || result.status !== "setup_required") return result;
 	try {
 		const setup_options = await setup({ connector_key: connectorKey }, ctx);
-		const offers = setup_options.options.filter(option => option.kind !== 'local');
+		const offers = setup_options.options.filter((option) => option.kind !== "local");
 		const guidance = offers.length
-			? 'Managed or hosted options are available. Present setup_options before asking the user for app credentials; hosted chat runs in cloud.'
-			: setup_options.cloud_status === 'unavailable'
-				? 'Cloud setup discovery is unavailable. Retry connections.setupOptions before concluding no managed option exists.'
-				: '';
+			? "Managed or hosted options are available. Present setup_options before asking the user for app credentials; hosted chat runs in cloud."
+			: setup_options.cloud_status === "unavailable"
+				? "Cloud setup discovery is unavailable. Retry connections.setupOptions before concluding no managed option exists."
+				: "";
 		return { ...result, setup_options, instructions: `${guidance} ${result.instructions}`.trim() };
 	} catch {
 		// Optional discovery must not replace an actionable setup continuation with an error.
 		return result;
 	}
 }
-
 const manageConnectionsTool = defineActionTool("manage_connections", {
 	list_connector_groups: action(
 		ListConnectorGroupsAction,

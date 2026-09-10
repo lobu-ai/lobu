@@ -19,6 +19,7 @@
 
 import { manageCatalog } from './admin/manage_catalog';
 import { manageConnections } from './admin/manage_connections';
+import { resolveCloudOrigin } from '../connect/cloud-credential';
 import { publicSetupOptions, type SetupOptionsDeps } from '../connect/setup-options';
 import { handleSetupOptions } from './admin/manage_connections/handlers/setup-options';
 import type { ConnectionSetupOptions } from '@lobu/core/contracts/tools/manage-connections';
@@ -219,7 +220,9 @@ export async function searchLiveConnectors(
     }
     // Share public metadata within this request; never cache mutable offers across requests.
     let publicOrganizations: Promise<OrgInfo[]> | undefined;
+    let cloudOrigin: Promise<string | null> | undefined;
     const setupDeps: Partial<SetupOptionsDeps> = {
+      cloudOrigin: () => (cloudOrigin ??= resolveCloudOrigin()),
       publicOptions: async (key, origin) =>
         publicSetupOptions(key, origin, await (publicOrganizations ??= deps.listPublicOrganizations())),
     };

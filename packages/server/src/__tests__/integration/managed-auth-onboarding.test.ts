@@ -141,26 +141,59 @@ describe('managed-auth onboarding', () => {
     const method = getPrimedBundledMethod('github', 'github');
     expect(method).toBeTruthy();
     const keys = [method!.appIdKey!, method!.privateKeyKey!, method!.appSlugKey!];
-    const previous = keys.map(key => process.env[key]);
+    const previous = keys.map((key) => process.env[key]);
     try {
       for (const key of keys) process.env[key] = 'synthetic-app-value';
       expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toMatchObject({
-        kind: 'local', configured: true, url: 'https://gateway.example/lobu/github/app/install',
+        kind: 'local',
+        configured: true,
+        url: 'https://gateway.example/lobu/github/app/install',
       });
       delete process.env[keys[0]];
-      expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toMatchObject({ configured: false });
-      await createTestConnectorDefinition({ key: 'github', name: 'Org override', organization_id: org.id, auth_schema: { methods: [] } });
+      expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toMatchObject({
+        configured: false,
+      });
+      await createTestConnectorDefinition({
+        key: 'github',
+        name: 'Org override',
+        organization_id: org.id,
+        auth_schema: { methods: [] },
+      });
       expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toBeNull();
     } finally {
-      keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+      keys.forEach((key, i) => {
+        if (previous[i] === undefined) delete process.env[key];
+        else process.env[key] = previous[i];
+      });
     }
+  });
+
+  it('reports local OAuth readiness from active provider-wide app profiles', async () => {
+    const org = await seedManagedGoogleOrg();
+    expect(
+      await localSetupOption(org.id, 'google.calendar', 'https://gateway.example')
+    ).toMatchObject({
+      kind: 'local',
+      configured: true,
+      url: `https://gateway.example/${org.slug}/connectors/google.calendar`,
+    });
+    const sql = getTestDb();
+    await sql`UPDATE auth_profiles SET status = 'revoked' WHERE organization_id = ${org.id} AND provider = 'google'`;
+    expect(
+      await localSetupOption(org.id, 'google.calendar', 'https://gateway.example')
+    ).toMatchObject({ configured: false });
   });
 
   it('publishes only live public setup offers with no app secrets or private workspaces', async () => {
     const managed = await seedManagedGoogleOrg();
     const first = await publicSetupOptions('google.gmail', 'https://gateway.example');
     expect(first.options).toHaveLength(1);
-    expect(first.options[0]).toMatchObject({ kind: 'managed_oauth', configured: true, execution: 'local', managed_by_org: managed.slug });
+    expect(first.options[0]).toMatchObject({
+      kind: 'managed_oauth',
+      configured: true,
+      execution: 'local',
+      managed_by_org: managed.slug,
+    });
     expect(first.options[0].url).toContain('/connect/managed?');
     expect(JSON.stringify(first)).not.toContain('managed-client-secret');
     expect(JSON.stringify(first)).not.toContain('managed-client-id');
@@ -178,7 +211,9 @@ describe('managed-auth onboarding', () => {
 
   it('serves public setup metadata over HTTP without an account session', async () => {
     await seedManagedGoogleOrg();
-    const response = await setupRoutes.request('https://gateway.example/api/connection-options?connector_key=google.gmail');
+    const response = await setupRoutes.request(
+      'https://gateway.example/api/connection-options?connector_key=google.gmail'
+    );
     expect(response.status).toBe(200);
     expect((await response.json()).options[0].kind).toBe('managed_oauth');
     expect(response.headers.get('cache-control')).toBe('no-store');
