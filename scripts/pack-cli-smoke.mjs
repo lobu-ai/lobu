@@ -59,6 +59,12 @@ const lock = JSON.parse(
   readFileSync(join(destination, "package-lock.json"), "utf8")
 );
 for (const [path, pkg] of Object.entries(lock.packages)) {
+  assert.ok(
+    !/(?:^|\/)node_modules\/(?:@anthropic-ai\/claude-agent-sdk(?:-[^/]+)?|@openai\/codex(?:-[^/]+)?|@agentclientprotocol\/(?:claude-agent-acp|codex-acp))(?:\/|$)/.test(
+      path
+    ),
+    `${path} would install an agent engine; ACP adapters must ship as JavaScript bundles`
+  );
   if (/(?:^|\/)node_modules\/@lobu\/[^/]+$/.test(path)) {
     assert.ok(
       pkg.resolved?.startsWith("file:"),
