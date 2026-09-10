@@ -206,6 +206,7 @@ interface AutomationQueryRow {
   } | null;
   device_worker_id: string | null;
   agent_kind: string | null;
+  execution_config: AutomationMetadata['execution_config'];
   version: number;
   current_version_id: number | null;
   entity_ids: string | number[];
@@ -510,6 +511,7 @@ async function getAutomationImpl(
         i.delivery_target,
         i.device_worker_id,
         i.agent_kind,
+        i.execution_config,
         i.version,
         i.current_version_id,
         i.entity_ids,
@@ -767,6 +769,7 @@ async function getAutomationImpl(
       delivery_target: automationRow.delivery_target ?? null,
       device_worker_id: automationRow.device_worker_id ?? null,
       agent_kind: automationRow.agent_kind ?? null,
+      execution_config: automationRow.execution_config ?? null,
       version: pinnedVersion,
       sources: automationSources,
       prompt: version?.prompt as string | undefined,

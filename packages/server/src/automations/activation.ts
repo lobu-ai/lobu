@@ -2,6 +2,7 @@ import type { ConnectorTriggerSignal } from "@lobu/connector-sdk";
 import {
   resolvedEventExecution,
   type AutomationEventTrigger,
+  type AutomationExecutionConfig,
   type AutomationTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { DbClient } from "../db/client";
@@ -30,7 +31,7 @@ export interface MatchingAutomationActivation {
   deviceWorkerId: string | null;
   agentKind: string | null;
   model: string | null;
-  effort: string | null;
+  executionConfig: AutomationExecutionConfig | null;
   instructions: string;
   /**
    * The Automation's `min_cooldown_seconds`. Carried on the match so a caller can
@@ -145,7 +146,7 @@ export async function findMatchingAutomationActivations(
   const rows = await db`
 		SELECT w.id, w.organization_id, w.managed_agent_id, w.device_worker_id::text AS device_worker_id,
 		       w.agent_kind, w.triggers, w.execution_config->>'model' AS model,
-		       w.execution_config->>'effort' AS effort,
+		       w.execution_config,
 		       w.min_cooldown_seconds, v.prompt
 		FROM automations w
 		JOIN automation_versions v ON v.id = w.current_version_id
@@ -177,9 +178,10 @@ export async function findMatchingAutomationActivations(
       signal,
     );
     if (!trigger) continue;
-    // Executor resolution: an Automation has exactly one executor (agent or
-    // device pin). The create/update matrix guarantees automated Automations
-    // resolve; skip defensively if a legacy row slips through.
+    // Executor resolution decides PLACEMENT only — a device pin shadows the
+    // agent here, while `managed_agent_id` below still carries the Automation's
+    // conversation identity. The create/update matrix guarantees automated
+    // Automations resolve; skip defensively if a legacy row slips through.
     const executor = resolveAutomationExecutor({
       agentId: row.managed_agent_id as string | null,
       deviceWorkerId:
@@ -190,13 +192,14 @@ export async function findMatchingAutomationActivations(
     matches.push({
       automationId: Number(row.id),
       organizationId: String(row.organization_id),
-      agentId: typeof row.managed_agent_id === "string" ? row.managed_agent_id : null,
+      agentId:
+        typeof row.managed_agent_id === "string" ? row.managed_agent_id : null,
       deviceWorkerId:
         executor.kind === "device" ? executor.deviceWorkerId : null,
       agentKind:
         executor.kind === "device" ? executor.agentKind : null,
       model: typeof row.model === "string" ? row.model : null,
-      effort: typeof row.effort === "string" ? row.effort : null,
+      executionConfig: row.execution_config as AutomationExecutionConfig | null,
       instructions: typeof row.prompt === "string" ? row.prompt : "",
       minCooldownSeconds: Number(row.min_cooldown_seconds ?? 0),
       trigger,

@@ -1,6 +1,9 @@
 import { generateWorkerToken } from "@lobu/core";
-import { buildWorkerTokenClaims, type WorkerTokenClaimsArgs } from "../orchestration/worker-token-claims.js";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
+import {
+	buildWorkerTokenClaims,
+	type WorkerTokenClaimsArgs,
+} from "../orchestration/worker-token-claims.js";
 
 export interface RunWorkerAccess {
 	conversationId: string;

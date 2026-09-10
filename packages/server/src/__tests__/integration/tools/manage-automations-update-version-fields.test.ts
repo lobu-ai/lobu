@@ -157,6 +157,24 @@ describe("manage_automations update — version-owned fields are not silently dr
 		return { automationId: String(automation.id), triggers: automation.triggers };
 	}
 
+	it("returns saved execution settings in Automation detail and preserves an explicit clear", async () => {
+		const execution_config = { effort: "xhigh", timeout_seconds: 17 };
+		await executeTool("manage_automations", {
+			action: "update", automation_id: automationId, execution_config,
+		}, TEST_ENV, ownerCtx);
+		const detail = await executeTool("get_automation", {
+			automation_id: automationId,
+		}, TEST_ENV, ownerCtx) as { automation?: { execution_config?: unknown } };
+		expect(detail.automation?.execution_config).toEqual(execution_config);
+		await executeTool("manage_automations", {
+			action: "update", automation_id: automationId, execution_config: null,
+		}, TEST_ENV, ownerCtx);
+		const cleared = await executeTool("get_automation", {
+			automation_id: automationId,
+		}, TEST_ENV, ownerCtx) as { automation?: { execution_config?: unknown } };
+		expect(cleared.automation?.execution_config).toBeNull();
+	});
+
 	it("rejects `update` with name only (version-owned) — points to create_version", async () => {
 		await expect(
 			executeTool(

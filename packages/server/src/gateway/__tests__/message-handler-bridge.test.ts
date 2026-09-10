@@ -1921,7 +1921,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
       automations: [{
         automationId: 71, organizationId: "org-bound", agentId: "local-agent",
         deviceWorkerId: "device-test", agentKind: "codex", model: "test-local-model",
-        effort: "medium", instructions: "Run this chat", minCooldownSeconds: 0,
+        executionConfig: { effort: "medium" }, instructions: "Run this chat", minCooldownSeconds: 0,
         trigger: { kind: "event", connector_key: "slack", connection_id: 42,
           event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
           execution: "turn", output: "reply_to_source", active_run: "steer" },
@@ -1945,7 +1945,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
       automations: [{
         automationId: 71, organizationId: "org-bound", agentId: "local-agent",
         deviceWorkerId: "device-test", agentKind: "codex", model: null,
-        effort: "medium", instructions: "Run this chat", minCooldownSeconds: 0,
+        executionConfig: { effort: "medium" }, instructions: "Run this chat", minCooldownSeconds: 0,
         trigger: { kind: "event", connector_key: "slack", connection_id: 42,
           event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
           execution: "turn", output: "reply_to_source", active_run: "steer" },
@@ -1969,7 +1969,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
       automations: [{
         automationId: 71, organizationId: "org-bound", agentId: "local-agent",
         deviceWorkerId: "device-test", agentKind: null, model: null,
-        effort: null, instructions: "Run this chat", minCooldownSeconds: 0,
+        executionConfig: null, instructions: "Run this chat", minCooldownSeconds: 0,
         trigger: { kind: "event", connector_key: "slack", connection_id: 42,
           event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
           execution: "turn", output: "reply_to_source", active_run: "steer" },
@@ -1978,7 +1978,8 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     const thread = makeThread(undefined);
     await bridge.handleMessage(thread, makeMessage(), "mention");
     // The device claim filter matches on `executionTarget.agentKind`, so an
-    // enqueued run with a null kind would sit pending forever.
+    // enqueued run with a null kind is claimable by no device and only ends as
+    // the reaper's generic device-chat timeout.
     expect(enqueueMessage).not.toHaveBeenCalled();
     expect(thread.post).toHaveBeenCalledTimes(1);
     expect(String(thread.post.mock.calls[0]?.[0])).toContain("local agent CLI");

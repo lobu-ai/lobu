@@ -93,7 +93,7 @@ async function enqueueDeviceChat(args: {
 					organizationId: args.organizationId,
 					source: "direct-api",
 				},
-				agentOptions: { model: "test-local-model", effort: "xhigh" },
+				agentOptions: { model: "test-local-model", effort: "xhigh", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan", finalize_nudges: 2 },
 			})}
     )
     RETURNING id
@@ -231,7 +231,7 @@ describe("device chat execution lane", () => {
 		};
     expect(payload.chat).toMatchObject({
       agent_kind: "pi",
-      execution_config: { model: "test-local-model", effort: "xhigh" },
+      execution_config: { model: "test-local-model", effort: "xhigh", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" },
       message: "What is the latest on Atlas?",
       history: [{ role: "assistant", content: "Existing managed reply." }],
       agent: { identity_md: "A careful local agent" },

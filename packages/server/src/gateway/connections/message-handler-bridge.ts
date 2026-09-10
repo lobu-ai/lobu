@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { AutomationExecutionConfig } from "@lobu/core/contracts/tools/manage-automations";
 
 import {
   type DeviceExecutionTarget,
@@ -1301,7 +1302,7 @@ export class MessageHandlerBridge {
             agentId: candidate.agentId,
             organizationId: candidate.organizationId,
             model: candidate.model ?? undefined,
-            effort: candidate.effort ?? undefined,
+            executionConfig: candidate.executionConfig ?? undefined,
             devicePlacement: candidate.deviceWorkerId
               ? {
                   deviceWorkerId: candidate.deviceWorkerId,
@@ -1361,7 +1362,7 @@ export class MessageHandlerBridge {
         payloadTeamId:
           routing?.payloadTeamId ?? (isGroup ? channelId : platform),
         model: target.model,
-        effort: "effort" in target ? target.effort : undefined,
+        executionConfig: "executionConfig" in target ? target.executionConfig : undefined,
         devicePlacement:
           "devicePlacement" in target ? target.devicePlacement : undefined,
         conversationHistory: sharedHistory,
@@ -1446,13 +1447,14 @@ export class MessageHandlerBridge {
      * fall back to the agent, then org, default.
      */
     model?: string;
-    /** Reasoning effort for a device turn; the local CLI names its own scale. */
-    effort?: string;
+    /** Saved local CLI run settings for a device turn. */
+    executionConfig?: AutomationExecutionConfig;
     /**
      * Device the Automation pinned this turn to. `agentKind` is null when the
      * pin names no local CLI — such a turn is refused rather than enqueued,
-     * because the device claim filter matches runs on `agentKind` and would
-     * leave the run unclaimable forever.
+     * because the device claim filter matches runs on `agentKind`, so no device
+     * can claim it and the only outcome left is the reaper's generic
+     * "device did not pick up this message" timeout minutes later.
      */
     devicePlacement?: { deviceWorkerId: string; agentKind: string | null };
     ephemeralContext?: string;
@@ -1482,7 +1484,7 @@ export class MessageHandlerBridge {
       teamId,
       payloadTeamId,
       model,
-      effort,
+      executionConfig,
       devicePlacement,
       ephemeralContext,
       senderUsername,
@@ -1580,7 +1582,7 @@ export class MessageHandlerBridge {
         // No override means the local CLI's own default, never a cloud model.
         if (model) agentOptions.model = model;
         else delete agentOptions.model;
-        if (effort) agentOptions.effort = effort;
+        if (executionConfig) Object.assign(agentOptions, executionConfig);
       }
 
       // Local CLI authentication belongs to the selected device, so a device

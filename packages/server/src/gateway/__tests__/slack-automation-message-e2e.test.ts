@@ -274,7 +274,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     await sql`
       UPDATE automations
       SET device_worker_id = ${device.id}, agent_kind = 'codex',
-        execution_config = '{"model":"test-local-model","effort":"medium"}'::jsonb
+        execution_config = '{"model":"test-local-model","effort":"medium","timeout_seconds":17,"max_budget_usd":0.5,"permission_mode":"plan"}'::jsonb
       WHERE organization_id = 'org-slack-grid-e2e'
         AND managed_agent_id = 'agent-slack-grid-e2e'
     `;
@@ -295,7 +295,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         agentId: "agent-slack-grid-e2e",
         platform: "slack",
         executionTarget: { kind: "device", deviceWorkerId: device.id, agentKind: "codex" },
-        agentOptions: { model: "test-local-model", effort: "medium" },
+        agentOptions: { model: "test-local-model", effort: "medium", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" },
         platformMetadata: { connectionId: RUNTIME_CONNECTION_ID, responseChannel: `slack:${CHANNEL_ID}` },
       });
     });

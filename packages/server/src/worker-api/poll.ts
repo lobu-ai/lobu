@@ -1339,14 +1339,23 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       !Array.isArray(message.platformMetadata)
         ? (message.platformMetadata as Record<string, unknown>)
         : undefined;
-    // The local CLI's own model/effort names, carried verbatim from the enqueue
-    // (a device turn never resolves them against a cloud provider).
-    const executionConfig: { model?: string; effort?: string } = {
+    // Allow only local CLI settings, preserving the Automation's existing
+    // limits and permission mode. Server-only settings never reach the device.
+    const executionConfig = {
       ...(typeof agentOptions.model === 'string'
         ? { model: agentOptions.model }
         : {}),
       ...(typeof agentOptions.effort === 'string'
         ? { effort: agentOptions.effort }
+        : {}),
+      ...(typeof agentOptions.timeout_seconds === 'number'
+        ? { timeout_seconds: agentOptions.timeout_seconds }
+        : {}),
+      ...(typeof agentOptions.max_budget_usd === 'number'
+        ? { max_budget_usd: agentOptions.max_budget_usd }
+        : {}),
+      ...(typeof agentOptions.permission_mode === 'string'
+        ? { permission_mode: agentOptions.permission_mode }
         : {}),
     };
     const agentKind =

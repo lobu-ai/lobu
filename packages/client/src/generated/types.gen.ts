@@ -337,6 +337,10 @@ export type SaveMemoryData = {
        */
       run_id: number;
     };
+    /**
+     * Target workspace for a bare OAuth call. Required when the connection has no workspace binding.
+     */
+    org_slug?: string;
   };
   path: {
     /**
@@ -474,7 +478,7 @@ export type SearchSdkResponse = SearchSdkResponses[keyof SearchSdkResponses];
 export type QuerySdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
      */
     script: string;
     /**
@@ -482,7 +486,7 @@ export type QuerySdkData = {
      */
     timeout_ms?: number;
     /**
-     * Human-friendly heading for this result (e.g. "Companies missing a domain"). The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
+     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
      */
     title?: string;
   };
@@ -573,7 +577,7 @@ export type QuerySdkResponses = {
       /**
        * Access tier required by the proposed SDK method.
        */
-      required_access: "read" | "write" | "external" | "admin";
+      required_access: "read" | "write" | "admin";
       /**
        * Dry-run validates arguments but does not execute live authorization or approval policy.
        */
@@ -716,7 +720,7 @@ export type QuerySqlResponse = QuerySqlResponses[keyof QuerySqlResponses];
 export type RunSdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
      */
     script: string;
     /**
@@ -724,7 +728,7 @@ export type RunSdkData = {
      */
     timeout_ms?: number;
     /**
-     * Human-friendly heading for this result (e.g. "Companies missing a domain"). The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
+     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
      */
     title?: string;
     /**
@@ -819,7 +823,7 @@ export type RunSdkResponses = {
       /**
        * Access tier required by the proposed SDK method.
        */
-      required_access: "read" | "write" | "external" | "admin";
+      required_access: "read" | "write" | "admin";
       /**
        * Dry-run validates arguments but does not execute live authorization or approval policy.
        */
@@ -5567,6 +5571,38 @@ export type GetAutomationResponses = {
       } | null;
       device_worker_id?: string | null;
       agent_kind?: string | null;
+      execution_config?: {
+        /**
+         * Wall-clock cap in seconds for the device-worker CLI run (default 600).
+         */
+        timeout_seconds?: number;
+        /**
+         * Per-run dollar ceiling (claude only: --max-budget-usd). No-op on other CLIs.
+         */
+        max_budget_usd?: number;
+        /**
+         * Model override for this Automation. ONE field, two namespaces, resolved by where the Automation runs: a device-pinned Automation (device_worker_id set) passes this verbatim to the local CLI as --model, so it must name a provider that CLI has registered (e.g. 'opencode-go/deepseek-v4-flash'); a server-dispatched Automation resolves it against the org's model providers -- the built-in providers plus any you have registered under Providers (e.g. 'openai/gpt-4.1', 'deepseek/deepseek-v4-flash') -- or 'auto'. The two are NOT interchangeable — a CLI ref on the server lane fails at the provider, and a server ref on a device lane fails at the CLI.
+         */
+        model?: string;
+        /**
+         * Tool permission mode (claude only: --permission-mode).
+         */
+        permission_mode?:
+          | "acceptEdits"
+          | "auto"
+          | "bypassPermissions"
+          | "default"
+          | "dontAsk"
+          | "plan";
+        /**
+         * Reasoning effort accepted by the selected CLI and model.
+         */
+        effort?: string;
+        /**
+         * How many extra times to re-dispatch a server-side Automation run that finished WITHOUT calling complete_window before failing it. 0 disables; omitted = global default.
+         */
+        finalize_nudges?: number;
+      } | null;
       version: number;
       sources: Array<{
         name: string;
