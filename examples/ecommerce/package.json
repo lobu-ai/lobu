@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "devDependencies": {
-    "@lobu/cli": "^9.3.0",
-    "@lobu/connector-sdk": "^9.3.0"
+    "@lobu/cli": "^19.2.0",
+    "@lobu/connector-sdk": "^19.2.0"
   }
 }

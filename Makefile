@@ -170,6 +170,7 @@ test-unit:
 	@bun test examples/personal-agent
 	@bun test examples/brand-intelligence
 	@bun test examples/lobu-team
+	@bun test examples/ecommerce
 
 # Integration suite — vitest under Node + bun:test packages that need Postgres.
 # Requires DATABASE_URL pointing at a Postgres with pgvector installed.

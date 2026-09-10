@@ -10,6 +10,7 @@ import {
   secret,
   field,
 } from "@lobu/cli/config";
+import type EtsyConnector from "./etsy.connector.ts";
 import type StripeChargesConnector from "./stripe-charges.connector.ts";
 
 const customerActivityTrackerSkill = defineSkill({
@@ -127,6 +128,7 @@ export default defineConfig({
     connectorFromFile<typeof StripeChargesConnector>(
       "./stripe-charges.connector.ts"
     ),
+    connectorFromFile<typeof EtsyConnector>("./etsy.connector.ts"),
   ],
   org: "ecommerce",
   orgName: "Ecommerce",
