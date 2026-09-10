@@ -2411,6 +2411,10 @@ export type ManageConnectionsData = {
         entity_ids?: Array<number>;
       }
     | {
+        action: "setup_options";
+        connector_key: string;
+      }
+    | {
         /**
          * Recommended way to add a connection: creates the connection + auth link in one call. Returns a connect_url for the user; poll `get` until status='active'.
          */
@@ -2781,6 +2785,21 @@ export type ManageConnectionsResponses = {
    */
   200:
     | {
+        action: "setup_options";
+        connector_key: string;
+        cloud_status: "available" | "unavailable" | "not_configured";
+        options: Array<{
+          kind: "managed_oauth" | "hosted_chat" | "local";
+          label: string;
+          description: string;
+          execution: "local" | "cloud";
+          url?: string;
+          managed_by_org?: string;
+          configured: boolean;
+          instructions: string;
+        }>;
+      }
+    | {
         error: string;
         error_code?: "connector_setup_required";
         connector_key?: string;
@@ -2929,6 +2948,21 @@ export type ManageConnectionsResponses = {
     | {
         action: "connect" | "create";
         status: "setup_required";
+        setup_options?: {
+          action: "setup_options";
+          connector_key: string;
+          cloud_status: "available" | "unavailable" | "not_configured";
+          options: Array<{
+            kind: "managed_oauth" | "hosted_chat" | "local";
+            label: string;
+            description: string;
+            execution: "local" | "cloud";
+            url?: string;
+            managed_by_org?: string;
+            configured: boolean;
+            instructions: string;
+          }>;
+        };
         connector_key: string;
         /**
          * Which connection setup family this continuation belongs to. Drives the completion check.

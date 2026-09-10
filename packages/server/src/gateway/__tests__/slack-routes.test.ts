@@ -235,7 +235,9 @@ describe("slack OAuth install routes", () => {
     const body = await response.text();
     expect(response.status).toBe(503);
     expect(body).not.toContain("Sign in to an organization");
-    expect(body).toContain("not configured");
+    expect(body).toContain("Connection setup required");
+    expect(body).toContain("Return to Lobu");
+    expect(body).toContain("slack_not_configured");
   });
 
   test("GET /slack/oauth_callback (no state, marketplace) parks pending and redirects to claim", async () => {

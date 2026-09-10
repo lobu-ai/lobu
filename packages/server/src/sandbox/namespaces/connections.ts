@@ -8,6 +8,7 @@
  */
 
 import type {
+	ConnectionSetupOptionsInput,
 	ConnectionConnectInput,
 	ConnectionConnectManagedInput,
 	ConnectionCreateInput,
@@ -33,6 +34,7 @@ export interface ConnectionsNamespace {
 	list(input?: ConnectionListInput): Promise<unknown>;
 	get(connection_id: number): Promise<unknown>;
 	create(input: ConnectionCreateInput): Promise<unknown>;
+	setupOptions(input: ConnectionSetupOptionsInput): Promise<unknown>;
 	connect(input: ConnectionConnectInput): Promise<unknown>;
 	connectManaged(input: ConnectionConnectManagedInput): Promise<unknown>;
 	update(input: ConnectionUpdateInput): Promise<unknown>;
@@ -85,6 +87,7 @@ export function buildConnectionsNamespace(
 			}),
 		}),
 		create: method("create"),
+		setupOptions: method("setup_options", { publicMethod: "setupOptions" }),
 		connect: method("connect"),
 		connectManaged: method("connect_managed", {
 			publicMethod: "connectManaged",

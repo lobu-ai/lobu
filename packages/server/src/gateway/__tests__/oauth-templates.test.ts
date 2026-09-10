@@ -64,3 +64,30 @@ describe("OAuth template escaping", () => {
     expect(backslashHtml).not.toContain("Open Configuration");
   });
 });
+
+describe("OAuth setup recovery", () => {
+  test("renders a setup problem without telling users to retry authentication", () => {
+    const html = renderOAuthErrorPage("provider_not_configured", "Choose a connection option.", {
+      title: "Connection setup required",
+      actionUrl: "/workspace/connectors/example",
+      actionLabel: "Back to connection options",
+    });
+    expect(html).toContain("Connection setup required");
+    expect(html).toContain('href="/workspace/connectors/example"');
+    expect(html).not.toContain("Authentication Failed");
+    expect(html).not.toContain("try again");
+  });
+
+  test("escapes setup labels and rejects unsafe recovery URLs", () => {
+    const html = renderOAuthErrorPage("setup", "description", {
+      title: "<script>bad</script>",
+      actionUrl: "javascript:alert(1)",
+      actionLabel: "<img src=x onerror=alert(1)>",
+    });
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("<img");
+    // A rejected recovery URL must not leave the page with no way forward.
+    expect(html).toContain("Return to Lobu to check the connection");
+  });
+});

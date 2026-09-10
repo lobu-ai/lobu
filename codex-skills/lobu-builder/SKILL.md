@@ -70,3 +70,5 @@ If the repository already provides project-specific test scripts, use those.
 - Evals: https://lobu.ai/guides/evals/
 - Observability: https://lobu.ai/guides/observability/
 - Repository: https://github.com/lobu-ai/lobu
+
+Before requesting connector app credentials, discover `connections.setupOptions` with `search_sdk` and call it in the selected workspace. It returns verified managed OAuth, hosted cloud chat, and local setup choices. Follow the returned URL and instructions; an unavailable cloud lookup is not proof that no managed offer exists. On account-scoped MCP, select an authorized home workspace before calling `connections.connectManaged` against cloud; the provider org is its `managed_by_org` argument. Managed OAuth can support local execution. Hosted Slack chat targets a cloud agent and does not connect an independent embedded runtime.

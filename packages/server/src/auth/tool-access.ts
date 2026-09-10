@@ -193,7 +193,7 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 	get_automation: null,
 	manage_entity: new Set(["list", "get", "list_links"]),
 	manage_entity_schema: new Set(["list", "get", "audit", "list_rules"]),
-	manage_connections: new Set(["list", "list_connector_groups", "get"]),
+	manage_connections: new Set(["list", "list_connector_groups", "get", "setup_options"]),
 	manage_catalog: new Set(["list_catalog", "list_installed"]),
 	manage_feeds: new Set(["list_feeds", "read_feed", "read_feeds"]),
 	manage_auth_profiles: new Set(["list_auth_profiles", "get_auth_profile"]),

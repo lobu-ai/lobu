@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Env } from "../../index";
 import type { AccountToolContext, ToolContext } from "../../tools/registry";
+import type { ConnectionSetupOptions } from "@lobu/core/contracts/tools/manage-connections";
 import {
 	type ConnectorDiscoveryDeps,
 	searchLiveConnectors,
@@ -59,6 +60,10 @@ function makeDeps(over?: {
 	connectionsByKey?: Record<string, Array<{ status: string }>>;
 	organizations?: Array<Record<string, unknown>>;
 	liveGrantedOrganizationIds?: string[];
+	// Setup discovery reaches the configured cloud in production; the default
+	// stub returns "nothing offered here" so the base lifecycle assertions stay
+	// about the managed-offer path.
+	setupByKey?: Record<string, ConnectionSetupOptions>;
 }): ConnectorDiscoveryDeps {
 	return {
 		manageCatalog: (async (args: { action: string }) =>
@@ -71,6 +76,14 @@ function makeDeps(over?: {
 			const rows = args.status ? all.filter((c) => c.status === args.status) : all;
 			return { connections: rows };
 		}) as never,
+		setupOptions: async ({ connector_key }) =>
+			over?.setupByKey?.[connector_key] ?? {
+				action: "setup_options",
+				connector_key,
+				cloud_status: "not_configured",
+				options: [],
+			},
+		listPublicOrganizations: async () => (over?.organizations ?? []) as never,
 		listOrganizations: async () => (over?.organizations ?? []) as never,
 		listLiveGrantedOrganizations: async () =>
 			(over?.liveGrantedOrganizationIds ?? []).map((id) => ({ id, slug: id, name: id, role: "member", personal: false })),
@@ -298,6 +311,97 @@ describe("searchLiveConnectors (search_sdk connector intent search)", () => {
 		expect(hits[0]).toContain("connections.connectManaged");
 		expect(hits[0]).toContain("lobu init --from-org lobu-cloud");
 		expect(hits[0]).toContain("provider data stays local");
+		expect(hits[0].indexOf("connections.connectManaged")).toBeLessThan(hits[0].indexOf("connections.installConnector"));
+		expect(hits[0]).toContain("Alternative local setup");
+	});
+
+	it("leads with a discovered setup option and keeps the local route as the alternative", async () => {
+		const deps = makeDeps({
+			setupByKey: {
+				website: {
+					action: "setup_options",
+					connector_key: "website",
+					cloud_status: "available",
+					options: [
+						{
+							kind: "managed_oauth",
+							label: "Connect with Example Cloud",
+							description: "Use the managed app.",
+							execution: "local",
+							configured: true,
+							managed_by_org: "example-cloud",
+							url: "https://cloud.example/connect/managed?org=example-cloud",
+							instructions: "Authorize, then bootstrap locally.",
+						},
+						// A local option is the fallback the line itself already
+						// describes, so it must never be re-advertised as a choice.
+						{
+							kind: "local",
+							label: "Use your own app",
+							description: "Local setup",
+							execution: "local",
+							configured: false,
+							instructions: "Configure an app",
+						},
+					],
+				},
+			},
+		});
+
+		const hits = await searchLiveConnectors("website", env, ctx, deps);
+		expect(hits[0]).toContain("Connect with Example Cloud (managed_oauth, execution: local)");
+		expect(hits[0]).toContain("https://cloud.example/connect/managed?org=example-cloud");
+		expect(hits[0]).not.toContain("Use your own app");
+		expect(hits[0].indexOf("Connect with Example Cloud")).toBeLessThan(
+			hits[0].indexOf("Alternative local setup")
+		);
+	});
+
+	it("reports a setup-discovery outage without hiding a managed offer it already knows", async () => {
+		const deps = makeDeps({
+			catalog: {
+				catalogs: {
+					connectors: {
+						entries: [{ id: "google.gmail", name: "Gmail", description: "Google Mail" }],
+					},
+				},
+			},
+			setupByKey: {
+				"google.gmail": {
+					action: "setup_options",
+					connector_key: "google.gmail",
+					cloud_status: "unavailable",
+					options: [],
+				},
+			},
+			organizations: [
+				{
+					id: "lobu-cloud",
+					slug: "lobu-cloud",
+					name: "Lobu Cloud",
+					visibility: "public",
+					is_member: false,
+					managed_auth: {
+						join_required: true,
+						connect_method: "connections.connectManaged",
+						local_bootstrap_command: "lobu init --from-org lobu-cloud",
+						connectors: [
+							{
+								connector_key: "google.gmail",
+								provider: "google",
+								managed_by_org: "lobu-cloud",
+							},
+						],
+					},
+				},
+			],
+		});
+
+		const hits = await searchLiveConnectors("gmail", env, ctx, deps);
+		expect(hits[0]).toContain("Cloud setup discovery is unavailable");
+		expect(hits[0]).toContain("public org 'lobu-cloud'");
+		expect(hits[0]).toContain("connections.connectManaged");
+		expect(hits[0]).not.toContain("  ");
 	});
 
 	it("hides private managed-auth memberships outside the grant while retaining public offers", async () => {
@@ -446,6 +550,47 @@ describe("searchLiveConnectors (search_sdk connector intent search)", () => {
 		expect(hits[0]).toMatch(/NOT currently installable/);
 		expect(hits[0]).toMatch(/no longer available/);
 		expect(hits[0]).not.toMatch(/installConnector/);
+	});
+
+	it("only discovers setup for rendered rows, including unavailable catalog rows in the limit", async () => {
+		const entries = Array.from({ length: 10 }, (_, i) => ({ id: `demo.limit-${i}`, name: `Demo Limit ${i}`, detail: { installable: i !== 0 } }));
+		const deps = makeDeps({ catalog: { catalogs: { connectors: { entries } } } });
+		const calls: string[] = [];
+		deps.setupOptions = async ({ connector_key }) => {
+			calls.push(connector_key);
+			return { action: "setup_options", connector_key, cloud_status: "not_configured", options: [] };
+		};
+		const lines = await searchLiveConnectors("demo.limit", env, ctx, deps);
+		expect(lines).toHaveLength(8);
+		expect(lines[0]).toContain("NOT currently installable");
+		expect(calls).toEqual(entries.slice(1, 8).map(entry => entry.id));
+	});
+
+	it("shares one public offer read per search and refreshes it on the next request", async () => {
+		let reads = 0;
+		const deps = makeDeps({
+			catalog: {
+				catalogs: {
+					connectors: {
+						entries: [
+							{ id: "demo.mail-a", name: "Demo Mail A", description: "mail" },
+							{ id: "demo.mail-b", name: "Demo Mail B", description: "mail" },
+						],
+					},
+				},
+			},
+		});
+		deps.listPublicOrganizations = async () => {
+			reads++;
+			return [];
+		};
+		deps.setupOptions = async ({ connector_key }, _ctx, setupDeps) =>
+			setupDeps!.publicOptions!(connector_key, "https://gateway.example");
+
+		expect(await searchLiveConnectors("demo.mail", env, ctx, deps)).toHaveLength(2);
+		expect(reads).toBe(1);
+		await searchLiveConnectors("demo.mail", env, ctx, deps);
+		expect(reads).toBe(2);
 	});
 
 	it("never leaks credentials or raw connector config", async () => {
