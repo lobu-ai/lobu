@@ -102,9 +102,6 @@ export interface ExtensionDomScrapeResult<TItem> {
   landedUrl?: string;
   /** Tab the content-script scrape ran in. Useful for focusing an auth-wall tab. */
   tabId?: number;
-  /** Whether rows came from a user's already-open tab (true) or a run-scoped
-   * scratch tab the extension opened and closed (false). */
-  usedExistingTab: boolean;
 }
 
 function hostMatchesPattern(host: string, pattern: string): boolean {
@@ -151,11 +148,8 @@ function assertExpectedScrapeSite(
  * Scrapes default to a background, action-scoped tab that the extension closes
  * after harvesting. Set `persistent:true` only for a site with tab-bound state;
  * it selects that site's sticky anchor and serializes work on that anchor.
- *
- * Set `existingTabMatch` to prefer the user's ALREADY-OPEN tab whose URL
- * contains the substring. That tab is read in place — never created, navigated,
- * or closed. When no tab matches, the scrape falls back to a fresh scratch tab
- * unless `fallbackToScratch:false` makes it fail loudly instead.
+ * There is no way to target a user's own tab: the extension refuses any scrape
+ * against a tab it does not lease or hold as that site's anchor.
  */
 export async function extensionDomScrape<TItem>(opts: {
   dispatcher: ChromeActionDispatcher;
@@ -165,45 +159,16 @@ export async function extensionDomScrape<TItem>(opts: {
   allowedOrigins: string[];
   persistent?: boolean;
   focus?: boolean;
-  /** Prefer a user's already-open tab whose URL includes this substring. */
-  existingTabMatch?: string;
-  /** When existingTabMatch finds no open tab, fall back to the default scratch
-   * tab instead of failing (default true). */
-  fallbackToScratch?: boolean;
 }): Promise<ExtensionDomScrapeResult<TItem>> {
-  const wantsExistingTab =
-    typeof opts.existingTabMatch === 'string' && opts.existingTabMatch.length > 0;
-  const fallbackToScratch = opts.fallbackToScratch ?? true;
-  const dispatchScrape = (existing: boolean) =>
-    opts.dispatcher.dispatch<ExtensionScrapeObservation>('navigate', {
-      cs_scrape: true,
-      persistent: opts.persistent ?? false,
-      focus: opts.focus ?? false,
-      url: opts.url,
-      scrape_config: opts.config,
-      allowed_origins: opts.allowedOrigins,
-      ...(existing && wantsExistingTab
-        ? { existing_tab_match: opts.existingTabMatch }
-        : {}),
-    });
-
-  let usedExistingTab = false;
-  let observation = await dispatchScrape(wantsExistingTab);
-  let result = observation?.result;
-  // The extension reports a missing user tab via the error field — it is not a
-  // scrape failure. With a fallback, retry against a fresh scratch tab; without
-  // one, surface a distinct error instead of the generic "failed in the page".
-  if (wantsExistingTab && result?.error === 'no_matching_tab') {
-    if (!fallbackToScratch) {
-      throw new Error(
-        `cs_scrape: no open tab matches existing_tab_match "${opts.existingTabMatch}".`
-      );
-    }
-    observation = await dispatchScrape(false);
-    result = observation?.result;
-  } else if (wantsExistingTab) {
-    usedExistingTab = true;
-  }
+  const observation = await opts.dispatcher.dispatch<ExtensionScrapeObservation>('navigate', {
+    cs_scrape: true,
+    persistent: opts.persistent ?? false,
+    focus: opts.focus ?? false,
+    url: opts.url,
+    scrape_config: opts.config,
+    allowed_origins: opts.allowedOrigins,
+  });
+  const result = observation?.result;
 
   // Fail loudly on a broken scrape. A missing result (dispatch never produced
   // one) or an `error` field (the in-page script threw — e.g. CSP blocked
@@ -229,6 +194,5 @@ export async function extensionDomScrape<TItem>(opts: {
     host: result.host,
     landedUrl: result.landedUrl,
     tabId: observation.tab_id,
-    usedExistingTab,
   };
 }

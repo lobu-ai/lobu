@@ -196,6 +196,9 @@ export function connectorClaimLaneSql(
         -- base org scope. Page-activated work is handled by the fleet parent.
         OR (
           ${context.isUserScopedWorker}
+          -- Browser-local ids cannot move between eligible profiles. Existing
+          -- unpinned rows also stay unclaimable during the gateway upgrade.
+          AND NOT (${chromeNamespaceExecution})
           AND ${refs.connectionDeviceWorkerId} IS NULL
           AND (${refs.runTargetDeviceWorkerId ?? sql`NULL`}::uuid IS NULL)
           AND (

@@ -33,6 +33,7 @@ import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../config/intervals';
 import type { Env } from '../index';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import {
+  describeMissingBrowserExecutionPin,
   hashlessManifestArtifactMayBeClaimed,
   selectedConnectorVersionArtifactSql,
 } from '../utils/connector-execution-placement';
@@ -316,6 +317,8 @@ async function deviceManifestAdmissionError(
   connectorVersion: string,
   deviceWorkerId: string | null
 ): Promise<string | null> {
+  const pinError = describeMissingBrowserExecutionPin(connectorKey, deviceWorkerId);
+  if (pinError) return pinError;
   const [row] = await sql<{
     owner_user_id: string | null;
     manifest_hash: string | null;

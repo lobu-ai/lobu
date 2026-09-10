@@ -2380,7 +2380,7 @@ async function syncHomeFeedViaDomScrape(
 	checkpoint: XCheckpoint,
 ): Promise<SyncResult> {
 	const maxScrolls = readScrollBudget(config, { defaultMax: 10, cap: 30 });
-	const { items: rows, loggedIn, usedExistingTab } = await extensionDomScrape<HomeFeedRow>({
+	const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
 		dispatcher: requireExtensionDispatcher(ctx),
 		url: "https://x.com/home",
 		config: {
@@ -2389,7 +2389,6 @@ async function syncHomeFeedViaDomScrape(
 		},
 		parseRows: (raw) => raw as HomeFeedRow[],
 		allowedOrigins: X_ALLOWED_ORIGINS,
-		existingTabMatch: config.use_existing_tab === true ? "x.com/home" : undefined,
 	});
 
 	if (!loggedIn) {
@@ -2400,7 +2399,7 @@ async function syncHomeFeedViaDomScrape(
 
 	const tweets = buildHomeFeedTweets(rows);
 	return finalizeSyncResult(tweets, checkpoint, {
-		backend: usedExistingTab ? "extension-cs-scrape-existing-tab" : "extension-cs-scrape",
+		backend: "extension-cs-scrape",
 		items_scraped: rows.length,
 		scrolls_this_run: maxScrolls,
 		timeline: "home",
@@ -2487,12 +2486,6 @@ const homeFeedConfigSchema = {
 			maximum: 30,
 			description:
 				"Optional lower bound. When set below max_scrolls, each sync picks a uniform random scroll count in [min_scrolls, max_scrolls].",
-		},
-		use_existing_tab: {
-			type: "boolean",
-			default: false,
-			description:
-				"Scrape your already-open x.com tab instead of opening a throwaway window. The tab is read in place (never navigated or closed); when no matching tab is open, falls back to a throwaway tab. Note: this scrolls your real timeline.",
 		},
 	},
 };

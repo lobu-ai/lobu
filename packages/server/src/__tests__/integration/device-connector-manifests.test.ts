@@ -1853,7 +1853,7 @@ describe('device connector manifests', () => {
     expect((await readDefinition(orgId, CHROME_MANIFEST_KEY))?.version).toBe('2.0.0');
   });
 
-  it('uses only identical winning advertisers for multi-device pinning and unpinned claims', async () => {
+  it('preserves explicit winning-advertiser pins and refuses ambiguous unpinned claims', async () => {
     const { userId, orgId, workerId: workerA } = await seedDeviceOwner('chrome-extension');
     const sql = getTestDb();
     const chromeManifest = chromeConnectorManifest();
@@ -1942,8 +1942,14 @@ describe('device connector manifests', () => {
       [CHROME_MANIFEST_CAPABILITY]: true,
     });
     expect(advertiserPoll.status).toBe(200);
-    expect((await advertiserPoll.json()).run_id).toBe(Number(run.id));
+    expect((await advertiserPoll.json()).run_id).toBeUndefined();
     expect((await readChromeConnectorRows(orgId)).connections[0].device_worker_id).toBeNull();
+    await sql`UPDATE connections SET device_worker_id = ${deviceA.id}::uuid WHERE id = ${connectionId}`;
+    const pinnedPoll = await poll(workerA, [chromeManifest], 'chrome-extension', {
+      [CHROME_MANIFEST_CAPABILITY]: true,
+    });
+    expect(pinnedPoll.status).toBe(200);
+    expect((await pinnedPoll.json()).run_id).toBe(Number(run.id));
   });
 
   it('authorizes a retained v1 manifest only from its advertiser after v2 wins, including hashless attestation', async () => {
@@ -2008,13 +2014,17 @@ describe('device connector manifests', () => {
         AND connector_key = ${CHROME_MANIFEST_KEY}
         AND version = '1.0.0'
     `;
+    const [v1Device] = (await sql`
+      SELECT id FROM device_workers WHERE user_id = ${userId} AND worker_id = ${v1WorkerId}
+    `) as Array<{ id: string }>;
+    // A retained run keeps its exact device target even after a newer manifest wins.
     const [run] = (await sql`
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id, connector_key,
-        connector_version, approval_status, status, created_at
+        connector_version, approval_status, status, created_at, target_device_worker_id
       ) VALUES (
         ${orgId}, 'sync', ${messagesFeed!.id}, ${connectionId}, ${CHROME_MANIFEST_KEY},
-        '1.0.0', 'auto', 'pending', NOW()
+        '1.0.0', 'auto', 'pending', NOW(), ${v1Device.id}::uuid
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;

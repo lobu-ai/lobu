@@ -534,9 +534,19 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
   }
 
   it('device-mode (ephemeral browser/device) runs get a bounded expires_at', async () => {
-    const org = await createTestOrganization();
+    const { org, user } = await seedOwnerContext({ orgName: 'Pinned Expiry Fixture' });
+    const sql = getTestDb();
     await insertChromeConnector(org.id);
-    const connId = await insertChromeConnection(org.id);
+    const [device] = (await sql`
+      INSERT INTO device_workers (
+        user_id, worker_id, platform, capabilities, label, organization_id, last_seen_at
+      ) VALUES (
+        ${user.id}, 'synthetic-expiry-browser', 'chrome-extension',
+        ${sql.json(['browser.debugger'])}, 'Synthetic expiry browser', ${org.id}, NOW()
+      )
+      RETURNING id
+    `) as Array<{ id: string }>;
+    const connId = await insertChromeConnection(org.id, device.id);
 
     const createdBefore = Date.now();
     const claim = await createConnectorOperationRun({

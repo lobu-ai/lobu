@@ -188,7 +188,6 @@ describe('SDK browser invocation', () => {
       browser_context_id: browser.id,
       browser_context_title: browser.title,
       browser_flow_id: browser.flow_id,
-      holder_run_id: browser.flow_id,
     });
   });
 
@@ -243,15 +242,14 @@ describe('page-activation trust stamp', () => {
   });
 });
 
-// The extension normalizes titles outside this shape. Keep every fixed server
-// fallback within its pass-through contract; user-supplied subjects are
-// bounded by the extension.
+// The gateway is the only party that formats a context title; the extension
+// passes a supplied title through untouched and only bounds its length. So
+// every fixed server fallback must already carry the visible namespace and fit
+// inside the extension's code-point bound.
 //
-// Pinned as a LITERAL on purpose. This is the cross-side contract with
-// GROUP_TITLE_PREFIX in apps/chrome/tab-groups.js, so deriving it from the
-// server's own constant would make the assertion tautological and let a
-// one-sided rename pass. Changing the prefix must fail here until the
-// extension is changed to match.
+// Pinned as a LITERAL on purpose: deriving it from the server's own constant
+// would make the assertion tautological, and this prefix is what users see on
+// every Lobu group. Changing it must fail here rather than silently rebrand.
 const EXTENSION_TITLE_PREFIX = 'Lobu · ';
 const EXTENSION_MAX_TITLE_POINTS = 64;
 

@@ -198,7 +198,6 @@ export default class GlassdoorConnector extends ConnectorRuntime {
       allowedOrigins: GLASSDOOR_ALLOWED_ORIGINS,
       // Reviews render for signed-out visitors too, but a signed-in tab sees
       // the full list rather than the teaser, so prefer one the user has open.
-      existingTabMatch: "glassdoor.com/Reviews",
     });
 
     if (!loggedIn) {
