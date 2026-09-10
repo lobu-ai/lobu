@@ -196,7 +196,9 @@ describe('write surfaces credit a stamped acting Automation with no declaration'
       name: 'Ada',
     })) as { entity: { id: number } };
 
-    // Exactly what `reaction-executor.ts` builds: the stamped pair, no argument.
+    // The half of a reaction session these surfaces read: the stamped pair with
+    // no declaration. The full session `reaction-executor.ts` builds (no user,
+    // system scopes) runs end to end in `reaction-crash-safety`.
     const reaction = org.api.withAuth({
       actingAutomationId: org.automationId,
       actingRunId: org.runId,

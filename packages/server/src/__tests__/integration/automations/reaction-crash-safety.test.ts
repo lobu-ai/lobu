@@ -93,7 +93,7 @@ async function seedRunnableWindow(reactionScript: string) {
     WHERE id = ${queued.runId}
   `;
 
-	return { sql, workspace, api, automationId, runId: queued.runId };
+	return { sql, workspace, entity, api, automationId, runId: queued.runId };
 }
 
 /**
@@ -274,13 +274,14 @@ describe("automation reaction crash safety", () => {
 	 *
 	 * `automation-source-surface` proves the two write surfaces resolve without a
 	 * declaration, but it builds the acting session by hand. Only this path
-	 * proves the executor actually stamps what those surfaces now read — the
-	 * link that made `entity_id` 2-of-1143 rows in production.
+	 * proves the executor actually stamps what those surfaces now read — the link
+	 * whose absence left `entity_id` set on 2 of 1143 production rows.
 	 */
 	it("records the subject a real reaction acted on, end to end", async () => {
-		// The subject is resolved here and inlined, so the assertion depends only
-		// on the attribution chain and not on how `ctx.entities` is hydrated.
-		const seedSql = getTestDb();
+		// The subject is inlined into the script, so the assertion depends only on
+		// the attribution chain and not on how `ctx.entities` is hydrated. The
+		// entity only exists once the seed has run, hence the placeholder id the
+		// second `setReactionScript` replaces before the window completes.
 		const script = (entityId: number) =>
 			`export default async function reaction(ctx, client) {
         await client.entities.update({
@@ -288,15 +289,12 @@ describe("automation reaction crash safety", () => {
           metadata: { provisioning_status: 'provisioned' },
         });
       }`;
-		const { sql, automationId, runId, api } = await seedRunnableWindow(
+		const { sql, entity, automationId, runId, api } = await seedRunnableWindow(
 			script(0),
 		);
-		const [subject] = await seedSql<{ id: number }>`
-      SELECT id FROM entities WHERE name = 'Reaction Entity' ORDER BY id DESC LIMIT 1
-    `;
 		await api.automations.setReactionScript({
 			automation_id: String(automationId),
-			reaction_script: script(Number(subject.id)),
+			reaction_script: script(entity.id),
 		});
 
 		await completeWindow(api, automationId, runId, { summary: "Provisioned." });
@@ -325,13 +323,13 @@ describe("automation reaction crash safety", () => {
 			"script_execution",
 		]);
 		// The subject, which is the whole point of the row.
-		expect(Number(logged[0].entity_id)).toBe(Number(subject.id));
+		expect(Number(logged[0].entity_id)).toBe(entity.id);
 		expect(Number(logged[0].automation_id)).toBe(automationId);
 
 		// And the write itself landed on the entity, so the row is not crediting
 		// a mutation that silently did nothing.
 		const [updated] = await sql<{ metadata: Record<string, unknown> }>`
-      SELECT metadata FROM entities WHERE id = ${subject.id}
+      SELECT metadata FROM entities WHERE id = ${entity.id}
     `;
 		expect(updated.metadata).toMatchObject({ provisioning_status: "provisioned" });
 	});
