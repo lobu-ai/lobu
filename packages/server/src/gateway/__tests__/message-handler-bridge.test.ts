@@ -1914,6 +1914,76 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     };
   }
 
+  test("device chat bypasses cloud provider lookup and preserves its exact local model", async () => {
+    const providerCatalog = makeCatalogMock({ modules: [], allowedRefs: null });
+    const { bridge, enqueueMessage } = makePreviewHarness({
+      linkedAutomation: { agentId: "local-agent", organizationId: "org-bound" },
+      automations: [{
+        automationId: 71, organizationId: "org-bound", agentId: "local-agent",
+        deviceWorkerId: "device-test", agentKind: "codex", model: "test-local-model",
+        effort: "medium", instructions: "Run this chat", minCooldownSeconds: 0,
+        trigger: { kind: "event", connector_key: "slack", connection_id: 42,
+          event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
+          execution: "turn", output: "reply_to_source", active_run: "steer" },
+      }],
+      providerCatalog,
+    });
+    const thread = makeThread(undefined);
+    await bridge.handleMessage(thread, makeMessage(), "mention");
+    expect(providerCatalog.getModelPolicy).not.toHaveBeenCalled();
+    expect(enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(enqueueMessage.mock.calls[0]?.[0]).toMatchObject({
+      executionTarget: { kind: "device", deviceWorkerId: "device-test", agentKind: "codex" },
+      agentOptions: { model: "test-local-model", effort: "medium" },
+    });
+  });
+
+  test("device chat without a model uses the local CLI default", async () => {
+    const providerCatalog = makeCatalogMock({ modules: [], allowedRefs: null });
+    const { bridge, enqueueMessage } = makePreviewHarness({
+      linkedAutomation: { agentId: "local-agent", organizationId: "org-bound" },
+      automations: [{
+        automationId: 71, organizationId: "org-bound", agentId: "local-agent",
+        deviceWorkerId: "device-test", agentKind: "codex", model: null,
+        effort: "medium", instructions: "Run this chat", minCooldownSeconds: 0,
+        trigger: { kind: "event", connector_key: "slack", connection_id: 42,
+          event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
+          execution: "turn", output: "reply_to_source", active_run: "steer" },
+      }],
+      providerCatalog,
+    });
+    const thread = makeThread(undefined);
+    await bridge.handleMessage(thread, makeMessage(), "mention");
+    expect(providerCatalog.getModelPolicy).not.toHaveBeenCalled();
+    expect(enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(enqueueMessage.mock.calls[0]?.[0]).toMatchObject({
+      executionTarget: { kind: "device", deviceWorkerId: "device-test", agentKind: "codex" },
+      agentOptions: { effort: "medium" },
+    });
+    expect(enqueueMessage.mock.calls[0]?.[0].agentOptions).not.toHaveProperty("model");
+  });
+
+  test("a device pin naming no local CLI is refused instead of enqueued unclaimable", async () => {
+    const { bridge, enqueueMessage } = makePreviewHarness({
+      linkedAutomation: { agentId: "local-agent", organizationId: "org-bound" },
+      automations: [{
+        automationId: 71, organizationId: "org-bound", agentId: "local-agent",
+        deviceWorkerId: "device-test", agentKind: null, model: null,
+        effort: null, instructions: "Run this chat", minCooldownSeconds: 0,
+        trigger: { kind: "event", connector_key: "slack", connection_id: 42,
+          event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
+          execution: "turn", output: "reply_to_source", active_run: "steer" },
+      }],
+    });
+    const thread = makeThread(undefined);
+    await bridge.handleMessage(thread, makeMessage(), "mention");
+    // The device claim filter matches on `executionTarget.agentKind`, so an
+    // enqueued run with a null kind would sit pending forever.
+    expect(enqueueMessage).not.toHaveBeenCalled();
+    expect(thread.post).toHaveBeenCalledTimes(1);
+    expect(String(thread.post.mock.calls[0]?.[0])).toContain("local agent CLI");
+  });
+
   test("unroutable model provider posts a plain Slack text fallback and skips enqueue", async () => {
     // Empty allow-list (allow-all) but the provider module isn't present/routable.
     const providerCatalog = makeCatalogMock({ modules: [], allowedRefs: null });

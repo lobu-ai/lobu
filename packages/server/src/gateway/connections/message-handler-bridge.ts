@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  type DeviceExecutionTarget,
   createLogger,
   createRootSpan,
   generateTraceId,
@@ -1300,6 +1301,13 @@ export class MessageHandlerBridge {
             agentId: candidate.agentId,
             organizationId: candidate.organizationId,
             model: candidate.model ?? undefined,
+            effort: candidate.effort ?? undefined,
+            devicePlacement: candidate.deviceWorkerId
+              ? {
+                  deviceWorkerId: candidate.deviceWorkerId,
+                  agentKind: candidate.agentKind,
+                }
+              : undefined,
             automationId: candidate.automationId,
             minCooldownSeconds: candidate.minCooldownSeconds,
             instructions: candidate.instructions,
@@ -1353,6 +1361,9 @@ export class MessageHandlerBridge {
         payloadTeamId:
           routing?.payloadTeamId ?? (isGroup ? channelId : platform),
         model: target.model,
+        effort: "effort" in target ? target.effort : undefined,
+        devicePlacement:
+          "devicePlacement" in target ? target.devicePlacement : undefined,
         conversationHistory: sharedHistory,
         recordHistory: false,
         ephemeralContext:
@@ -1435,6 +1446,15 @@ export class MessageHandlerBridge {
      * fall back to the agent, then org, default.
      */
     model?: string;
+    /** Reasoning effort for a device turn; the local CLI names its own scale. */
+    effort?: string;
+    /**
+     * Device the Automation pinned this turn to. `agentKind` is null when the
+     * pin names no local CLI — such a turn is refused rather than enqueued,
+     * because the device claim filter matches runs on `agentKind` and would
+     * leave the run unclaimable forever.
+     */
+    devicePlacement?: { deviceWorkerId: string; agentKind: string | null };
     ephemeralContext?: string;
     senderUsername?: string;
     senderDisplayName?: string;
@@ -1462,6 +1482,8 @@ export class MessageHandlerBridge {
       teamId,
       payloadTeamId,
       model,
+      effort,
+      devicePlacement,
       ephemeralContext,
       senderUsername,
       senderDisplayName,
@@ -1477,6 +1499,28 @@ export class MessageHandlerBridge {
       throw new Error("organizationId is required for agent message routing");
     }
     const platform = this.connection.platform;
+    if (devicePlacement && !devicePlacement.agentKind) {
+      logger.warn(
+        {
+          agentId,
+          organizationId,
+          deviceWorkerId: devicePlacement.deviceWorkerId,
+        },
+        "Refusing a device-pinned chat turn: the pin names no local agent CLI"
+      );
+      await thread.post(
+        "Choose a local agent CLI for this device-pinned chat before running it."
+      );
+      return;
+    }
+    const executionTarget: DeviceExecutionTarget | undefined =
+      devicePlacement?.agentKind
+        ? {
+            kind: "device",
+            deviceWorkerId: devicePlacement.deviceWorkerId,
+            agentKind: devicePlacement.agentKind,
+          }
+        : undefined;
 
     const conversationState = this.conversationState();
     const conversationHistory =
@@ -1519,20 +1563,38 @@ export class MessageHandlerBridge {
       // and wins the layered fallback; otherwise the agent/org
       // default resolves inside resolveAgentOptions. organizationId lets the org
       // default tail fire on this path.
+      //
+      // A device turn opts out of that fallback entirely. Its model names a
+      // provider the local CLI registered, so the org's cloud default must
+      // never fill in for an absent one, and an unqualified CLI model id
+      // (no `<provider>/<model>` slash) would be dropped as malformed and
+      // replaced by that same cloud default.
       const agentOptions = await resolveAgentOptions(
         agentId,
-        model ? { model } : {},
+        executionTarget ? {} : model ? { model } : {},
         agentSettingsStore,
         organizationId
       );
 
-      const modelResolution = await validateMessageModelProvider({
-        services: this.services,
-        agentId,
-        organizationId,
-        userId,
-        modelRef: agentOptions.model,
-      });
+      if (executionTarget) {
+        // No override means the local CLI's own default, never a cloud model.
+        if (model) agentOptions.model = model;
+        else delete agentOptions.model;
+        if (effort) agentOptions.effort = effort;
+      }
+
+      // Local CLI authentication belongs to the selected device, so a device
+      // turn skips the cloud preflight: it has no provider to test against and
+      // must never be swapped onto a connected cloud model.
+      const modelResolution = executionTarget
+        ? ({ kind: "ok" } as const)
+        : await validateMessageModelProvider({
+            services: this.services,
+            agentId,
+            organizationId,
+            userId,
+            modelRef: agentOptions.model,
+          });
       if (modelResolution.kind === "error") {
         logger.warn(
           { traceId, agentId, organizationId, model: agentOptions.model },
@@ -1625,6 +1687,7 @@ export class MessageHandlerBridge {
           ...(typeof isDirect === "boolean" ? { isDirect } : {}),
         },
         agentOptions,
+        executionTarget,
       });
 
       const queueProducer = this.services.getQueueProducer();

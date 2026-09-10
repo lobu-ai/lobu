@@ -1327,6 +1327,28 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       !Array.isArray(message.executionTarget)
         ? (message.executionTarget as Record<string, unknown>)
         : null;
+    const agentOptions =
+      message?.agentOptions &&
+      typeof message.agentOptions === 'object' &&
+      !Array.isArray(message.agentOptions)
+        ? (message.agentOptions as Record<string, unknown>)
+        : {};
+    const platformMetadata =
+      message?.platformMetadata &&
+      typeof message.platformMetadata === 'object' &&
+      !Array.isArray(message.platformMetadata)
+        ? (message.platformMetadata as Record<string, unknown>)
+        : undefined;
+    // The local CLI's own model/effort names, carried verbatim from the enqueue
+    // (a device turn never resolves them against a cloud provider).
+    const executionConfig: { model?: string; effort?: string } = {
+      ...(typeof agentOptions.model === 'string'
+        ? { model: agentOptions.model }
+        : {}),
+      ...(typeof agentOptions.effort === 'string'
+        ? { effort: agentOptions.effort }
+        : {}),
+    };
     const agentKind =
       typeof target?.agentKind === 'string' ? target.agentKind.trim() : '';
     const conversationId =
@@ -1378,6 +1400,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         organizationId: row.organization_id,
         userId,
         channelId,
+        platform:
+          typeof message?.platform === 'string' ? message.platform : undefined,
+        teamId:
+          typeof message?.teamId === 'string' ? message.teamId : undefined,
+        platformMetadata,
       });
       agentSession = {
         conversation_id: access.conversationId,
@@ -1439,6 +1466,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       payload: {
         chat: {
           agent_kind: agentKind,
+          ...(Object.keys(executionConfig).length > 0
+            ? { execution_config: executionConfig }
+            : {}),
           message: messageText.slice(0, 32_000),
           ...(typeof message?.ephemeralContext === 'string' &&
           message.ephemeralContext.length > 0

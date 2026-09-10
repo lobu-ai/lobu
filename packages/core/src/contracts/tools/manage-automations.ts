@@ -339,12 +339,9 @@ export const AutomationExecutionConfigSchema = Type.Object(
       )
     ),
     effort: Type.Optional(
-      Type.Union(
-        [Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")],
-        {
-          description: "Reasoning effort (claude only: --effort).",
-        }
-      )
+      Type.String({
+        description: "Reasoning effort accepted by the selected CLI and model.",
+      })
     ),
     finalize_nudges: Type.Optional(
       Type.Integer({

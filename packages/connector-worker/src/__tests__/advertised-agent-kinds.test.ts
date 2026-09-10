@@ -9,7 +9,8 @@
  * found on PATH", which is the exact failure the gate exists to prevent.
  */
 
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -41,6 +42,28 @@ function binDirWith(names: string[]): string {
   }
   return dir;
 }
+
+describe("local agent binary selection", () => {
+  test("prefers the configured PATH over a conflicting fallback installation", () => {
+    const configured = binDirWith(["codex"]);
+    const previousPath = process.env.PATH;
+    const fallbackBinary = path.join(agentBinaries.searchDirs()[0], "codex");
+    const configuredBinary = path.join(configured, "codex");
+    const exists = spyOn(fs, "existsSync").mockImplementation((candidate) =>
+      candidate === fallbackBinary || candidate === configuredBinary
+    );
+    process.env.PATH = configured;
+    try {
+      expect(agentBinaries.locateBinary("codex")).toBe(configuredBinary);
+      process.env.PATH = "";
+      expect(agentBinaries.locateBinary("codex")).toBe(fallbackBinary);
+    } finally {
+      exists.mockRestore();
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+});
 
 describe("resolveRunnableAgentKinds", () => {
   test("reports only kinds whose binary resolves, in canonical AGENT_KINDS order", () => {

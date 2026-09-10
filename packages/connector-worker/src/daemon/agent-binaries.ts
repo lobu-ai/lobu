@@ -35,13 +35,13 @@ export function searchDirs(): string[] {
 
 /**
  * `dirs` overrides the discovery path. Production never passes it — the default
- * is the fixed prefixes plus `$PATH`, because a GUI-launched daemon inherits a
- * minimal `$PATH` that omits every one of them.
+ * respects `$PATH` first, with fixed prefixes as a fallback for GUI-launched
+ * daemons whose minimal `$PATH` omits user-installed CLIs.
  */
 export function locateBinary(name: string, dirs?: string[]): string | null {
   const search = dirs ?? [
-    ...searchDirs(),
     ...(process.env.PATH ?? '').split(':').filter(Boolean),
+    ...searchDirs(),
   ];
   for (const dir of search) {
     const candidate = path.join(dir, name);

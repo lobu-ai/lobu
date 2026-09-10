@@ -189,7 +189,7 @@ export const AutomationExecutionConfigSchema = Type.Object({
   model: Type.Optional(Type.String()),
   /** Tool permission mode (`--permission-mode`). */
   permission_mode: Type.Optional(Type.String()),
-  /** Reasoning effort: low|medium|high (`--effort` / `--variant` / `--thinking`). */
+  /** Reasoning effort accepted by the selected CLI and model. */
   effort: Type.Optional(Type.String()),
 });
 
@@ -271,6 +271,7 @@ export const DeviceChatHistoryMessageSchema = Type.Object({
 export const DeviceChatPollPayloadSchema = Type.Object({
   chat: Type.Object({
     agent_kind: Type.String({ minLength: 1, maxLength: 64 }),
+    execution_config: Type.Optional(AutomationExecutionConfigSchema),
     message: Type.String({ maxLength: 32_000 }),
     ephemeral_context: Type.Optional(Type.String({ maxLength: 2_048 })),
     history: Type.Array(DeviceChatHistoryMessageSchema, { maxItems: 12 }),

@@ -1,4 +1,5 @@
 import { generateWorkerToken } from "@lobu/core";
+import { buildWorkerTokenClaims, type WorkerTokenClaimsArgs } from "../orchestration/worker-token-claims.js";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
 
 export interface RunWorkerAccess {
@@ -20,6 +21,11 @@ function buildRunWorkerAccess(args: {
 	userId: string;
 	channelId: string;
 	source: string;
+	/** Origin platform of the turn. Absent for a run with no chat transport. */
+	platform?: string;
+	/** Worker routing key; the native team is lifted off `platformMetadata`. */
+	teamId?: string;
+	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
 }): RunWorkerAccess {
 	const issuedAt = Date.now();
 	return {
@@ -28,12 +34,21 @@ function buildRunWorkerAccess(args: {
 		token: generateWorkerToken(
 			args.agentId,
 			args.conversationId,
+			// `deploymentName`. It keys per-turn liveness markers and secret
+			// mappings, so it stays agent-scoped — a platform workspace id here
+			// would collapse every agent in that workspace onto one identity.
 			`api-${args.agentId.slice(0, 8)}`,
 			{
-				channelId: args.channelId,
-				agentId: args.agentId,
-				organizationId: args.organizationId,
-				platform: "api",
+				// One place for the routing claims, so this mint cannot diverge
+				// from the per-run and deployment mints (#1274).
+				...buildWorkerTokenClaims({
+					channelId: args.channelId,
+					agentId: args.agentId,
+					organizationId: args.organizationId,
+					platform: args.platform ?? "api",
+					teamId: args.teamId,
+					platformMetadata: args.platformMetadata,
+				}),
 				runId: args.runId,
 				source: args.source,
 				sessionKey: args.userId,
@@ -81,7 +96,15 @@ export function buildAutomationRunWorkerAccess(args: {
  */
 export const DEVICE_CHAT_RUN_SOURCE = "device-chat";
 
-/** Mint the same run-scoped agent identity for a device-placed chat turn. */
+/**
+ * Mint the same run-scoped agent identity for a device-placed chat turn.
+ *
+ * A device chat turn originates on a chat platform, so it also carries that
+ * turn's routing claims (platform, native team, connection, response thread).
+ * Without them the mint falls back to `platform: "api"` with no connection or
+ * thread, and a card the local CLI posts back is routed as an API interaction
+ * instead of reaching the chat thread the turn came from.
+ */
 export function buildDeviceChatRunWorkerAccess(args: {
 	agentId: string;
 	conversationId: string;
@@ -89,6 +112,9 @@ export function buildDeviceChatRunWorkerAccess(args: {
 	organizationId: string;
 	userId: string;
 	channelId: string;
+	platform?: string;
+	teamId?: string;
+	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
 }): RunWorkerAccess {
 	return buildRunWorkerAccess({ ...args, source: DEVICE_CHAT_RUN_SOURCE });
 }

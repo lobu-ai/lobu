@@ -20,12 +20,17 @@ import { matchingAutomationTriggers } from "./event-trigger";
 export interface MatchingAutomationActivation {
   automationId: number;
   organizationId: string;
-  /** Resolved executor agent — null when this trigger routes to a device. */
+  /**
+   * The Automation's managed agent. Retained even when `deviceWorkerId` places
+   * execution on a device — the agent still owns the conversation. Null only
+   * for a device-only Automation, which has no conversation identity.
+   */
   agentId: string | null;
 
   deviceWorkerId: string | null;
   agentKind: string | null;
   model: string | null;
+  effort: string | null;
   instructions: string;
   /**
    * The Automation's `min_cooldown_seconds`. Carried on the match so a caller can
@@ -37,8 +42,7 @@ export interface MatchingAutomationActivation {
   trigger: AutomationEventTrigger;
 }
 
-/** A reply target always carries a managed agent — device-routed matches are
- * demoted to the background lane in {@link planAutomationActivations}. */
+/** Live replies retain their agent identity regardless of execution placement. */
 export interface ChatReplyActivation extends MatchingAutomationActivation {
   agentId: string;
 }
@@ -74,9 +78,8 @@ export function planAutomationActivations(
   const replyTargets: ChatReplyActivation[] = [];
   const backgroundTargets: MatchingAutomationActivation[] = [];
   for (const match of matches) {
-    // Chat-turn replies need a managed agent on the server side — a trigger
-    // routed to a device (agentId null) cannot host a live turn, so it takes
-    // the durable background lane instead.
+    // Device placement changes the executor, not the conversation contract.
+    // Device-only Automations without an agent identity remain background work.
     if (
       match.agentId != null &&
       resolvedEventExecution(match.trigger) === "turn" &&
@@ -142,6 +145,7 @@ export async function findMatchingAutomationActivations(
   const rows = await db`
 		SELECT w.id, w.organization_id, w.managed_agent_id, w.device_worker_id::text AS device_worker_id,
 		       w.agent_kind, w.triggers, w.execution_config->>'model' AS model,
+		       w.execution_config->>'effort' AS effort,
 		       w.min_cooldown_seconds, v.prompt
 		FROM automations w
 		JOIN automation_versions v ON v.id = w.current_version_id
@@ -186,12 +190,13 @@ export async function findMatchingAutomationActivations(
     matches.push({
       automationId: Number(row.id),
       organizationId: String(row.organization_id),
-      agentId: executor.kind === "agent" ? executor.agentId : null,
+      agentId: typeof row.managed_agent_id === "string" ? row.managed_agent_id : null,
       deviceWorkerId:
         executor.kind === "device" ? executor.deviceWorkerId : null,
       agentKind:
         executor.kind === "device" ? executor.agentKind : null,
       model: typeof row.model === "string" ? row.model : null,
+      effort: typeof row.effort === "string" ? row.effort : null,
       instructions: typeof row.prompt === "string" ? row.prompt : "",
       minCooldownSeconds: Number(row.min_cooldown_seconds ?? 0),
       trigger,

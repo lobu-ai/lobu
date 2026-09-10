@@ -4992,9 +4992,9 @@ export type ManageAutomationsData = {
         | "dontAsk"
         | "plan";
       /**
-       * Reasoning effort (claude only: --effort).
+       * Reasoning effort accepted by the selected CLI and model.
        */
-      effort?: "low" | "medium" | "high";
+      effort?: string;
       /**
        * How many extra times to re-dispatch a server-side Automation run that finished WITHOUT calling complete_window before failing it. 0 disables; omitted = global default.
        */

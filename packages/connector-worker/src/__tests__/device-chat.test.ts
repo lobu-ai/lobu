@@ -42,6 +42,7 @@ function job(): PollResponse {
     payload: {
       chat: {
         agent_kind: "pi",
+        execution_config: { model: "test-local-model", effort: "xhigh" },
         message: "Summarize Atlas",
         history: [{ role: "assistant", content: "Atlas is active." }],
         agent: { id: "agent-1", name: "Researcher" },
@@ -119,6 +120,8 @@ describe("device chat executor", () => {
     expect(reports[0]?.output).toBe("Reply from the selected device");
     expect(reports[0]?.exit_reason).toBe("ok");
     const args = readFileSync(argsLog, "utf8");
+    expect(args).toContain("--thinking\nxhigh");
+    expect(args).toContain("test-local-model");
     expect(args).toContain("Summarize Atlas");
     expect(args).toContain("Assistant: Atlas is active.");
   });
