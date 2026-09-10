@@ -65,6 +65,7 @@ async function enqueueDeviceChat(args: {
 	message: string;
 	deviceWorkerId: string;
 	agentKind: string;
+	omitLocalConfig?: boolean;
 }): Promise<number> {
 	const sql = getTestDb();
 	const [run] = await sql<{ id: number }>`
@@ -93,7 +94,7 @@ async function enqueueDeviceChat(args: {
 					organizationId: args.organizationId,
 					source: "direct-api",
 				},
-				agentOptions: { model: "test-local-model", effort: "xhigh", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan", finalize_nudges: 2 },
+				agentOptions: args.omitLocalConfig ? { model: "openai/test-cloud-default" } : { model: "openai/test-cloud-default", deviceExecutionConfig: { model: "test-local-model", effort: "xhigh", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan", finalize_nudges: 2 } },
 			})}
     )
     RETURNING id
@@ -253,6 +254,7 @@ describe("device chat execution lane", () => {
 			userId,
 			conversationId,
 			messageId: "message-2",
+			omitLocalConfig: true,
 			message: "What did you just say?",
 			deviceWorkerId: selected.id,
 			agentKind: "pi",
@@ -332,6 +334,7 @@ describe("device chat execution lane", () => {
 
 		const secondJob = await poll(selected.token, "selected-device", ["pi"]);
 		expect(secondJob.run_id).toBe(secondRunId);
+		expect((secondJob.payload as { chat: unknown }).chat).not.toHaveProperty("execution_config");
     expect(
       (secondJob.payload as { chat: { history: unknown[] } }).chat.history,
     ).toEqual([

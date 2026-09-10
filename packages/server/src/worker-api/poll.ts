@@ -1333,6 +1333,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       !Array.isArray(message.agentOptions)
         ? (message.agentOptions as Record<string, unknown>)
         : {};
+    const localOptions =
+      agentOptions.deviceExecutionConfig &&
+      typeof agentOptions.deviceExecutionConfig === 'object' &&
+      !Array.isArray(agentOptions.deviceExecutionConfig)
+        ? (agentOptions.deviceExecutionConfig as Record<string, unknown>)
+        : {};
     const platformMetadata =
       message?.platformMetadata &&
       typeof message.platformMetadata === 'object' &&
@@ -1342,20 +1348,20 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     // Allow only local CLI settings, preserving the Automation's existing
     // limits and permission mode. Server-only settings never reach the device.
     const executionConfig = {
-      ...(typeof agentOptions.model === 'string'
-        ? { model: agentOptions.model }
+      ...(typeof localOptions.model === 'string'
+        ? { model: localOptions.model }
         : {}),
-      ...(typeof agentOptions.effort === 'string'
-        ? { effort: agentOptions.effort }
+      ...(typeof localOptions.effort === 'string'
+        ? { effort: localOptions.effort }
         : {}),
-      ...(typeof agentOptions.timeout_seconds === 'number'
-        ? { timeout_seconds: agentOptions.timeout_seconds }
+      ...(typeof localOptions.timeout_seconds === 'number'
+        ? { timeout_seconds: localOptions.timeout_seconds }
         : {}),
-      ...(typeof agentOptions.max_budget_usd === 'number'
-        ? { max_budget_usd: agentOptions.max_budget_usd }
+      ...(typeof localOptions.max_budget_usd === 'number'
+        ? { max_budget_usd: localOptions.max_budget_usd }
         : {}),
-      ...(typeof agentOptions.permission_mode === 'string'
-        ? { permission_mode: agentOptions.permission_mode }
+      ...(typeof localOptions.permission_mode === 'string'
+        ? { permission_mode: localOptions.permission_mode }
         : {}),
     };
     const agentKind =

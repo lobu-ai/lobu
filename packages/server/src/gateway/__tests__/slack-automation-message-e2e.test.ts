@@ -295,7 +295,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         agentId: "agent-slack-grid-e2e",
         platform: "slack",
         executionTarget: { kind: "device", deviceWorkerId: device.id, agentKind: "codex" },
-        agentOptions: { model: "test-local-model", effort: "medium", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" },
+        agentOptions: { model: "test-local-model", deviceExecutionConfig: { model: "test-local-model", effort: "medium", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" } },
         platformMetadata: { connectionId: RUNTIME_CONNECTION_ID, responseChannel: `slack:${CHANNEL_ID}` },
       });
     });

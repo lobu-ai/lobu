@@ -1934,7 +1934,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage).toHaveBeenCalledTimes(1);
     expect(enqueueMessage.mock.calls[0]?.[0]).toMatchObject({
       executionTarget: { kind: "device", deviceWorkerId: "device-test", agentKind: "codex" },
-      agentOptions: { model: "test-local-model", effort: "medium" },
+      agentOptions: { model: "test-local-model", deviceExecutionConfig: { model: "test-local-model", effort: "medium" } },
     });
   });
 
@@ -1958,7 +1958,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage).toHaveBeenCalledTimes(1);
     expect(enqueueMessage.mock.calls[0]?.[0]).toMatchObject({
       executionTarget: { kind: "device", deviceWorkerId: "device-test", agentKind: "codex" },
-      agentOptions: { effort: "medium" },
+      agentOptions: { deviceExecutionConfig: { effort: "medium" } },
     });
     expect(enqueueMessage.mock.calls[0]?.[0].agentOptions).not.toHaveProperty("model");
   });

@@ -1582,7 +1582,12 @@ export class MessageHandlerBridge {
         // No override means the local CLI's own default, never a cloud model.
         if (model) agentOptions.model = model;
         else delete agentOptions.model;
-        if (executionConfig) Object.assign(agentOptions, executionConfig);
+        // Only explicit local settings cross the device boundary. Other chat
+        // producers resolve cloud defaults into agentOptions.model.
+        agentOptions.deviceExecutionConfig = {
+          ...executionConfig,
+          ...(model ? { model } : {}),
+        };
       }
 
       // Local CLI authentication belongs to the selected device, so a device
