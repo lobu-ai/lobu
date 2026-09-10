@@ -230,7 +230,6 @@ export default class CapterraConnector extends ConnectorRuntime {
       config: REVIEW_SCRAPE_CONFIG,
       parseRows: (raw) => raw as CapterraRow[],
       allowedOrigins: CAPTERRA_ALLOWED_ORIGINS,
-      existingTabMatch: "capterra.com/p/",
     });
 
     const reviews = rows

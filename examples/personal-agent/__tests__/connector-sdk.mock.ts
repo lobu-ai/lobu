@@ -26,7 +26,6 @@ interface DomScrapeOpts {
   allowedOrigins: string[];
   persistent?: boolean;
   focus?: boolean;
-  existingTabMatch?: string;
 }
 
 // Faithful copies of the SDK's pure pagination generators (no browser stack).
@@ -178,9 +177,6 @@ export function connectorSdkMock() {
         url: opts.url,
         scrape_config: opts.config,
         allowed_origins: opts.allowedOrigins,
-        ...(opts.existingTabMatch
-          ? { existing_tab_match: opts.existingTabMatch }
-          : {}),
       });
       const result = observation?.result;
       const items = opts.parseRows(result?.rows ?? []);
