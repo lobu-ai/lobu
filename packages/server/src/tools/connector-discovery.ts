@@ -19,6 +19,8 @@
 
 import { manageCatalog } from './admin/manage_catalog';
 import { manageConnections } from './admin/manage_connections';
+import { handleSetupOptions } from './admin/manage_connections/handlers/setup-options';
+import type { ConnectionSetupOptions } from '@lobu/core/contracts/tools/manage-connections';
 import type { Env } from '../index';
 import type { AccountToolContext } from './registry';
 import { requireWorkspaceContext } from './access-control';
@@ -31,6 +33,7 @@ import { listLiveGrantedMemberWorkspaces } from '../auth/oauth/workspace-grants'
 export interface ConnectorDiscoveryDeps {
   manageCatalog: typeof manageCatalog;
   manageConnections: typeof manageConnections;
+  setupOptions: typeof handleSetupOptions;
   listOrganizations: (userId: string) => Promise<OrgInfo[]>;
   listLiveGrantedOrganizations: (
     userId: string,
@@ -41,6 +44,7 @@ export interface ConnectorDiscoveryDeps {
 const DEFAULT_DEPS: ConnectorDiscoveryDeps = {
   manageCatalog,
   manageConnections,
+  setupOptions: handleSetupOptions,
   listOrganizations: async (userId) =>
     getWorkspaceProvider().listOrganizations(undefined, userId),
   listLiveGrantedOrganizations: async (userId, grantedOrganizationIds) =>
@@ -58,6 +62,9 @@ function feedKeysOf(detail: unknown): string[] | undefined {
   const keys = Object.keys(feeds as Record<string, unknown>);
   return keys.length > 0 ? keys : undefined;
 }
+
+/** Connector lines this search returns, and the ceiling on per-line enrichment. */
+const MAX_LINES = 8;
 
 /**
  * Token-aware match: an agent rarely searches the bare connector name — it
@@ -207,15 +214,37 @@ export async function searchLiveConnectors(
         managedOffers.set(offer.connector_key, entries);
       }
     }
+    const setupByKey = new Map<string, ConnectionSetupOptions>();
     const withManagedAuth = (connectorKey: string, line: string): string => {
+      const setup = setupByKey.get(connectorKey);
+      const choices = (setup?.options ?? []).filter(
+        (option) => option.kind !== 'local' && !!option.url
+      );
+      if (choices.length) {
+        const options = choices.map(option => `${option.label} (${option.kind}, execution: ${option.execution}): ${option.description} Open ${option.url} for human setup. ${option.instructions}`).join(' ');
+        return bestStatusByKey.has(connectorKey)
+          ? `${line} Other setup options: ${options}`
+          : `${options} Alternative local setup: ${line}`;
+      }
+      // A discovery outage is not "no managed offer exists" — say so, but never
+      // INSTEAD of an offer already known from the visible organizations, which
+      // are read independently of cloud setup discovery.
+      const outage = setup?.cloud_status === 'unavailable'
+        ? 'Cloud setup discovery is unavailable; this does not mean no managed offer exists. Retry connections.setupOptions before requesting app credentials. '
+        : '';
       const offer = managedOffers.get(connectorKey)?.[0];
-      if (!offer) return line;
+      if (!offer) return outage ? `${line} ${outage}`.trimEnd() : line;
       const managedLifecycle = lifecycleForCaller(
         ['connections.connectManaged'],
         `Start it with run_sdk → client.${offer.connectMethod}({ managed_by_org: '${offer.organizationSlug}', connector_key: '${connectorKey}' }); after consent, \`${offer.localBootstrapCommand}\` generates the local managedBy config so provider data stays local.`,
         ctx
       );
-      return `${line} Managed OAuth is available from public org '${offer.organizationSlug}' (Lobu login and one-time provider consent required; ${offer.joinRequired ? 'membership is added automatically' : 'already joined'}). ${managedLifecycle}`;
+      const managed = `${outage}Managed OAuth is available from public org '${offer.organizationSlug}' (Lobu login and one-time provider consent required; ${offer.joinRequired ? 'membership is added automatically' : 'already joined'}). ${managedLifecycle}`;
+      // An existing connection needs use/repair guidance, never a recommendation
+      // to create another grant. For a new setup, show the managed route first.
+      return bestStatusByKey.has(connectorKey)
+        ? `${line} ${managed}`
+        : `${managed} Alternative local setup (if the user chooses their own app): ${line}`;
     };
 
     // Only the installed connectors that MATCH the query need a status — resolve
@@ -245,6 +274,37 @@ export async function searchLiveConnectors(
         const any = await listConnections(i.id);
         if (any.length > 0) bestStatusByKey.set(i.id, any[0].status);
       })
+    );
+    // Setup discovery is per connector and can reach the configured cloud, so
+    // prefetch ONLY the keys that actually render a line below — the matched
+    // installed connectors plus the matched catalog entries that are neither
+    // already installed nor uninstallable — capped at the same MAX_LINES this
+    // search returns. Enriching a line that gets sliced off buys nothing.
+    await Promise.all(
+      [
+        ...new Set([
+          ...matchedInstalled.map((i) => i.id),
+          ...catalog
+            .filter(
+              (c) =>
+                !installedIds.has(c.id) &&
+                c.detail?.installable !== false &&
+                matchesQueryTokens(q, c.id, c.name, c.description)
+            )
+            .map((c) => c.id),
+        ]),
+      ]
+        .slice(0, MAX_LINES)
+        .map(async (connector_key) => {
+          try {
+            setupByKey.set(
+              connector_key,
+              await deps.setupOptions({ connector_key }, workspaceCtx)
+            );
+          } catch {
+            // Base discovery stays available when setup discovery fails.
+          }
+        })
     );
     const USABLE = new Set(['active']);
     const bestStatus = (key: string): string | undefined => bestStatusByKey.get(key);
@@ -328,5 +388,5 @@ export async function searchLiveConnectors(
   } catch {
     return [];
   }
-  return lines.slice(0, 8);
+  return lines.slice(0, MAX_LINES);
 }

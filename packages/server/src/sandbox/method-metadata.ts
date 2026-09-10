@@ -770,9 +770,15 @@ export default async (_ctx, client) => {
   return client.feeds.trigger({ feed_id: feed.id });
 };`,
 	},
+	"connections.setupOptions": {
+    summary: "Discover verified managed OAuth, hosted cloud chat, and local setup before requesting app credentials. Read-only; returned options are not connected accounts. cloud_status unavailable means discovery failed, not that no offer exists. Open the returned URL for human consent and follow its local bootstrap instructions. On account-scoped MCP first select an authorized workspace with client.org.",
+    access: "read",
+    signature: "connections.setupOptions(input: { connector_key: string }): Promise<ConnectionSetupOptions>",
+    example: "await client.connections.setupOptions({ connector_key: 'google.gmail' });",
+  },
 	"connections.connectManaged": {
 		summary:
-			"Use a live managed OAuth offer from organizations.list. Validates the public provider, automatically joins the signed-in user to that org, and returns a consent URL. The cloud keeps only the caller-owned consent grant with zero feeds; after consent, `lobu init --from-org <managed_by_org>` generates the local `managedBy` connection config so data access runs locally.",
+			"Run against the cloud runtime with a live managed OAuth offer from organizations.list. On account-scoped /mcp, first select an authorized home workspace with const home = await client.org(homeSlug), then call home.connections.connectManaged. The public provider org belongs in managed_by_org; it does not need to be selectable by this MCP authorization. Validates the public provider, automatically joins the signed-in user to that org, and returns a consent URL. The cloud keeps only the caller-owned consent grant with zero feeds; after consent, `lobu init --from-org <managed_by_org>` generates the local `managedBy` connection config so data access runs locally.",
 		access: "write",
 		signature:
 			"connections.connectManaged(input: { managed_by_org: string; connector_key: string; display_name?: string; slug?: string; config?: object }): Promise<unknown>",

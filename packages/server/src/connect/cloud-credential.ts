@@ -232,3 +232,18 @@ export async function resolveCloudCredential(
 
 	return null;
 }
+
+/** Resolve discovery's cloud origin without reading or refreshing any credential. */
+export async function resolveCloudOrigin(): Promise<string | null> {
+  const envUrl = process.env.LOBU_CLOUD_URL?.trim();
+  if (envUrl) {
+    try {
+      const url = new URL(envUrl);
+      return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.origin : null;
+    } catch { return null; }
+  }
+  const origin = resolveContextBaseUrl(cloudContextName(undefined), await loadContextConfig(), !process.env.LOBU_CLOUD_CONTEXT?.trim());
+  if (!origin) return null;
+  const url = new URL(origin);
+  return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.origin : null;
+}

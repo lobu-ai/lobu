@@ -104,7 +104,10 @@ may use `secret(...)` refs resolved from `.env`.
 
 For `slack` and `telegram` you do not need a bot token to start: use
 `credentialMode: "hosted"` for the hosted Lobu bot. `lobu run` then prints a
-short-lived `/lobu link <code>` you redeem by DMing the bot. Use
+short-lived `/lobu link <code>` you redeem by DMing the bot. This requires a
+cloud login and the agent applied to that cloud workspace: the link targets
+the cloud agent, not the separate local agent. Hosted chat does not create a
+local Slack data connection or prove local Slack search works. Use
 `credentialMode: "byo"` when you run your own app:
 
 ```ts
@@ -232,27 +235,38 @@ is not a generic validation path: it supports only a device-bound
 profiles, validate the authored project and inspect catalog/connection metadata;
 after the user approves provider-data access, use a server-side feed dry-run.
 
-Discover live capabilities before writing connector config. In an authenticated
-cloud context, use ClientSDK through Lobu MCP or `lobu memory exec`. Call
-`client.organizations.list()` to find organizations that offer managed
-connections. If a matching live offer exists, explain it and, after the user
-consents, call `client.connections.connectManaged({ managed_by_org,
-connector_key })` before asking for OAuth client credentials. Complete the
-returned authorization, then, if this project was not already generated from
-that organization, run its `local_bootstrap_command` from the parent directory
-where the new project should be created; use `--here` only after entering an
-empty directory. Do not create a blank Lobu scaffold first or repeat the
-bootstrap when the connection already has `managedBy` config. Ask for
-bring-your-own OAuth credentials only when no suitable managed offer is live or
-the user explicitly prefers their own app. Public offer metadata may be
-discoverable before login, but connecting always requires the user to log in and
-consent; knowing their email does not grant access. In a headless session,
-confirm the address before running `lobu login --email <address>`: Lobu emails an
-approval link, and the approver must sign in with that same address.
-After a successful login, an empty membership list is a tenancy/discovery result,
-not proof that authentication failed. Discover public organizations with
-`client.organizations.list()` and explain the result. Never revoke or repeat
-login with `--force` unless the user separately approves that re-authentication.
+Discover live capabilities before writing connector config. Call
+`client.connections.setupOptions({ connector_key })` in the selected runtime
+before requesting OAuth app credentials. It returns verified managed OAuth,
+hosted cloud chat, and local choices with their actual next steps.
+`cloud_status: "unavailable"` means discovery failed; retry before concluding
+that no managed option exists. Offers are not connected accounts. In an
+authenticated cloud context, use ClientSDK through Lobu MCP or
+`lobu memory exec`. Call `client.organizations.list()` to find organizations
+that offer managed connections. On account-scoped `/mcp`, first select an
+authorized home workspace with `const home = await client.org(homeSlug)` and use
+that client for `home.connections.connectManaged`. The public provider
+organization belongs in `managed_by_org`; it need not be selectable by the
+current MCP authorization. Run this against the cloud context, not the embedded
+runtime. If a matching live offer exists, explain it and, after the user
+consents, call
+`client.connections.connectManaged({ managed_by_org, connector_key })`
+before asking for OAuth client credentials. Complete the returned authorization, then,
+if this project was not already generated from that organization, run its
+`local_bootstrap_command` from the parent directory where the new project should
+be created; use `--here` only after entering an empty directory. Do not create a
+blank Lobu scaffold first or repeat the bootstrap when the connection already
+has `managedBy` config. Ask for bring-your-own OAuth credentials only when no
+suitable managed offer is live or the user explicitly prefers their own app.
+Public offer metadata may be discoverable before login, but connecting always
+requires the user to log in and consent; knowing their email does not grant
+access. In a headless session, confirm the address before running
+`lobu login --email <address>`: Lobu emails an approval link, and the approver
+must sign in with that same address. After a successful login, an empty
+membership list is a tenancy/discovery result, not proof that authentication
+failed. Discover public organizations with `client.organizations.list()` and
+explain the result. Never revoke or repeat login with `--force` unless the user
+separately approves that re-authentication.
 
 Call `client.catalog.listInstalled({ kinds: ["connectors"] })`; if the connector
 is not installed, call `client.catalog.listCatalog({ kinds: ["connectors"] })`.

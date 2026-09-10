@@ -2069,9 +2069,12 @@ function mountOAuthCodeExchangeRoutes(
 			return c.html(
 				renderOAuthErrorPage(
 					`${provider}_not_configured`,
-					`${display} OAuth is not configured on this gateway. Set ${
-						method?.clientIdKey ?? "the app's client id env var"
-					} and try again.`,
+					`${display} installation is not available on this Lobu server. Return to connection setup to choose an available option, or ask the server administrator to configure an app.`,
+					{
+						title: "Connection setup required",
+						actionUrl: "/",
+						actionLabel: "Return to Lobu",
+					},
 				),
 				503,
 			);
