@@ -297,6 +297,7 @@ export async function executeAgentTurnRun(
             api: turn.provider.api,
             provider: turn.provider.provider,
             modelId: turn.provider.model_id,
+            ...(turn.provider.compat ? { compat: turn.provider.compat } : {}),
             baseUrl: turn.provider.base_url,
             ...(turn.provider.max_tokens !== undefined ? { maxTokens: turn.provider.max_tokens } : {}),
             ...(turn.provider.reasoning !== undefined ? { reasoning: turn.provider.reasoning } : {}),

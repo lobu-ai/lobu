@@ -636,6 +636,7 @@ export class UnifiedThreadResponseConsumer {
           customEventData = {
             type: "suggestion",
             prompts: current?.prompts ?? [],
+            turnMessageId: current?.turnMessageId ?? undefined,
           };
         } catch (err) {
           // The terminal completion remains the authoritative delivery path.

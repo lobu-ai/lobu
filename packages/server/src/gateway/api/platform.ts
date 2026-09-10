@@ -157,6 +157,7 @@ export class ApiPlatform implements PlatformAdapter {
       organizationId?: string;
       userId?: string;
       source?: string;
+      turnMessageId?: string;
     },
     name: string,
     data: Record<string, unknown>
@@ -178,7 +179,7 @@ export class ApiPlatform implements PlatformAdapter {
       ...(event.source
         ? { platformMetadata: { source: event.source } }
         : {}),
-      customEvent: { name, data, requireSseOwner: true },
+      customEvent: { name, data: { ...data, turnMessageId: event.turnMessageId }, requireSseOwner: true },
     };
     void queue
       .send("thread_response", payload, TERMINAL_DELIVERY_SEND_OPTS)

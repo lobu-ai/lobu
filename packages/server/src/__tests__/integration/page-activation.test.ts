@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { activateMatchingPage, replacePageActivations } from "../../../../owletto/apps/chrome/page-activation.js";
 import { Hono } from "hono";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
@@ -46,10 +48,10 @@ async function seed() {
 	`;
 	const workers = await sql<{ id: string; worker_id: string }>`
 		INSERT INTO device_workers (
-			user_id, worker_id, platform, capabilities, organization_id, last_seen_at
+			user_id, worker_id, platform, capabilities, organization_id, last_seen_at, app_version
 		) VALUES
-			(${user.id}, 'chrome-mini', 'chrome-extension', ${sql.json(["browser.debugger"])}, ${org.id}, NOW()),
-			(${user.id}, 'chrome-book', 'chrome-extension', ${sql.json(["browser.debugger"])}, ${org.id}, NOW())
+			(${user.id}, 'chrome-mini', 'chrome-extension', ${sql.json(["browser.debugger"])}, ${org.id}, NOW(), '0.6.1'),
+			(${user.id}, 'chrome-book', 'chrome-extension', ${sql.json(["browser.debugger"])}, ${org.id}, NOW(), '0.6.1')
 		RETURNING id, worker_id
 	`;
 	const [connection] = await sql<{ id: number }>`
@@ -66,21 +68,22 @@ async function seed() {
 		INSERT INTO runs (
 			organization_id, run_type, connection_id, connector_key, action_key,
 			action_input, approval_status, status, created_at, expires_at,
-			activation_kind, activation_target_urls, created_by_user_id
+			activation_kind, activation_target_urls, created_by_user_id, run_metadata
 		) VALUES (
 			${org.id}, 'action', ${connection.id}, 'x', 'prepare_reply',
 			${sql.json({ body: "draft" })}, 'auto', 'pending', NOW(), NOW() + interval '1 day',
-			'page_visit', ARRAY['https://x.com/ada/status/123']::text[], ${user.id}
+			'page_visit', ARRAY['https://x.com/ada/status/123']::text[], ${user.id}, ${sql.json({ page_activation_identity: 'exact' })}
 		)
 		RETURNING id
 	`;
 	return { user, org, workers, connection, run };
 }
 
-function appFor(userId: string, orgId: string) {
+function appFor(userId: string, orgId: string, boundWorkerId?: string) {
 	const app = new Hono<{ Bindings: Env }>();
 	app.use("*", async (c, next) => {
 		c.set("workerAuthMode", "user");
+		if (boundWorkerId) c.set("mcpAuthInfo", { workerId: boundWorkerId } as never);
 		c.set("workerUserId", userId);
 		c.set("workerOrgIds", [orgId]);
 		c.set("organizationId", orgId);
@@ -117,6 +120,78 @@ describe("page-activated operation runs", () => {
 	beforeEach(cleanupTestDatabase);
 	afterAll(cleanupTestDatabase);
 
+	it("runs the real Chrome activation entry through the server handler with exact query identity", async () => {
+		const seeded = await seed();
+		await sql`UPDATE runs SET activation_target_urls = ARRAY['https://example.test/item?id=111']::text[] WHERE id = ${seeded.run.id}`;
+		const app = appFor(seeded.user.id, seeded.org.id);
+		const local: Record<string, unknown> = {
+			"owletto.gatewayUrl": "https://gateway.example.test",
+			"owletto.workerId": "chrome-mini",
+			"owletto.accessToken": "synthetic-token",
+		};
+		const area = (store: Record<string, unknown>) => ({
+			get: async (keys: string | string[]) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(key => [key, store[key]])),
+			set: async (values: Record<string, unknown>) => { Object.assign(store, values); },
+		});
+		const chrome = {
+			storage: { local: area(local), session: area({}) },
+			action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {}, setTitle: async () => {} },
+			tabs: { query: async () => [], get: async (id: number) => ({ id, groupId: -1, windowId: 1 }) },
+			tabGroups: { query: async () => [] },
+		};
+		(globalThis as any).chrome = chrome;
+		let calls = 0;
+		try {
+			await replacePageActivations(chrome, [{ run_id: seeded.run.id, urls: ["https://example.test/item?id=111"] }]);
+			const fetchServer = async (_url: string, init: RequestInit) => { calls++; return app.request("/activate", init); };
+			expect(await activateMatchingPage(chrome, { id: 17, active: true, url: "https://example.test/item?id=222" }, fetchServer)).toBe(false);
+			expect(calls).toBe(0);
+			// Even an old client that mistakenly matches locally cannot unlock it.
+			expect(await (await request(app, "chrome-mini", seeded.run.id, "https://example.test/item?id=222")).json()).toEqual({ status: "unavailable" });
+			expect(await activateMatchingPage(chrome, { id: 17, active: true, url: "https://EXAMPLE.TEST:443/item?id=111" }, fetchServer)).toBe(true);
+			expect(calls).toBe(1);
+			const [activated] = await sql`SELECT run_metadata FROM runs WHERE id = ${seeded.run.id}`;
+			expect(activated.run_metadata.page_activation_url).toBe("https://example.test/item?id=111");
+		} finally { delete (globalThis as any).chrome; }
+	});
+
+	it.each(["expired", "wrong-org", "wrong-device", "old-extension", "unmarked", "invalid-url"])("keeps the %s activation guard closed", async (scenario) => {
+		const seeded = await seed();
+		if (scenario === "expired") await sql`UPDATE runs SET expires_at = NOW() - interval '1 second' WHERE id = ${seeded.run.id}`;
+		if (scenario === "unmarked") await sql`UPDATE runs SET run_metadata = NULL WHERE id = ${seeded.run.id}`;
+		if (scenario === "old-extension") await sql`UPDATE device_workers SET app_version = '0.6.0' WHERE id = ${seeded.workers[0].id}`;
+		const response = await request(appFor(seeded.user.id, scenario === "wrong-org" ? "synthetic-other-org" : seeded.org.id, scenario === "wrong-device" ? "synthetic-other-device" : undefined), "chrome-mini", seeded.run.id, scenario === "invalid-url" ? "file:///tmp/example" : "https://x.com/ada/status/123");
+		expect(await response.json()).not.toEqual({ status: "activated" });
+		const [row] = await sql`SELECT activated_at FROM runs WHERE id = ${seeded.run.id}`;
+		expect(row.activated_at).toBeNull();
+	});
+
+	it("retires lossy pending state repeat-safely and refuses recreation from its stripped target", async () => {
+		const seeded = await seed();
+		const created = await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id, type: "agent_message", title: "Synthetic draft", body: "Draft",
+			browserUrl: "https://x.com/ada/status/123", browserRunId: seeded.run.id,
+		});
+		await sql`UPDATE runs SET run_metadata = NULL WHERE id = ${seeded.run.id}`;
+		// Still pending, as an old replica would have written it mid-rollout: the
+		// card must already refuse to promise a page visit that cannot activate.
+		const beforeRetirement = await listNotifications({ organizationId: seeded.org.id, userId: seeded.user.id });
+		expect(beforeRetirement.notifications[0]?.browser_handoff).toMatchObject({
+			run_id: seeded.run.id, state: "expired",
+			error_message: "The original page target was lost. Create a new draft with its full URL.",
+		});
+		const migration = readFileSync(new URL("../../../../../db/migrations/20260910020000_retire_lossy_page_activations.sql", import.meta.url), "utf8").split("-- migrate:down")[0];
+		await sql.unsafe(migration);
+		const [first] = await sql`SELECT status, completed_at, expires_at, error_message FROM runs WHERE id = ${seeded.run.id}`;
+		await sql.unsafe(migration);
+		const [second] = await sql`SELECT status, completed_at, expires_at, error_message FROM runs WHERE id = ${seeded.run.id}`;
+		expect(second).toEqual(first);
+		expect(first.status).toBe("failed");
+		const response = await appFor(seeded.user.id, seeded.org.id).request(`/notifications/${created.eventId}/browser-handoff/recreate`, { method: "POST" });
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ error: expect.stringContaining("original page target was lost") });
+	});
+
 	it("atomically lets the first matching browser win across devices", async () => {
 		const seeded = await seed();
 		const app = appFor(seeded.user.id, seeded.org.id);
@@ -125,13 +200,13 @@ describe("page-activated operation runs", () => {
 				app,
 				"chrome-mini",
 				seeded.run.id,
-				"https://x.com/ada/status/123?ref=home",
+				"https://x.com/ada/status/123",
 			),
 			request(
 				app,
 				"chrome-book",
 				seeded.run.id,
-				"https://x.com/ada/status/123#reply",
+				"https://x.com/ada/status/123",
 			),
 		]);
 		const statuses = await Promise.all([a.json(), b.json()]);
@@ -180,17 +255,17 @@ describe("page-activated operation runs", () => {
 		`;
 		await sql`
 			INSERT INTO device_workers (
-				user_id, worker_id, platform, capabilities, organization_id, last_seen_at
+				user_id, worker_id, platform, capabilities, organization_id, last_seen_at, app_version
 			) VALUES (
 				${other.id}, 'chrome-other', 'chrome-extension',
-				${sql.json(["browser.debugger"])}, ${seeded.org.id}, NOW()
+				${sql.json(["browser.debugger"])}, ${seeded.org.id}, NOW(), '0.6.1'
 			)
 		`;
 		const poll = await post("/api/workers/poll", {
 			body: {
 				worker_id: "chrome-other",
 				platform: "chrome-extension",
-				app_version: "0.5.6",
+				app_version: "0.6.1",
 				capabilities: { "browser.debugger": true },
 			},
 		});
@@ -211,7 +286,7 @@ describe("page-activated operation runs", () => {
 			body: {
 				worker_id: "chrome-mini",
 				platform: "chrome-extension",
-				app_version: "0.5.6",
+				app_version: "0.6.1",
 				capabilities: { "browser.debugger": true },
 			},
 		});
@@ -244,7 +319,7 @@ describe("page-activated operation runs", () => {
 			body: {
 				worker_id: "chrome-mini",
 				platform: "chrome-extension",
-				app_version: "0.5.6",
+				app_version: "0.6.1",
 				capabilities: { "browser.debugger": true },
 			},
 		});
@@ -280,7 +355,7 @@ describe("page-activated operation runs", () => {
 		});
 	});
 
-	it("reuses the activated page without navigating the user-owned tab", async () => {
+	it("requires live Chrome verification and refuses navigation to a different target", async () => {
 		const seeded = await seed();
 		const mini = seeded.workers.find(
 			(worker) => worker.worker_id === "chrome-mini",
@@ -297,16 +372,11 @@ describe("page-activated operation runs", () => {
 			organizationId: seeded.org.id,
 			parentRunId: seeded.run.id,
 			actionKey: "navigate",
-			actionInput: { url: "https://x.com/ada/status/123?ref=timeline" },
+			actionInput: { url: "https://x.com/ada/status/123" },
 		});
-		expect(navigation).toEqual({
-			status: "completed",
-			output: {
-				tab_id: 23,
-				current_url: "https://x.com/ada/status/123",
-				user_owned: true,
-			},
-		});
+		// No online Chrome is seeded: the gateway must not manufacture success
+		// from the stored tab id without asking the extension about its live URL.
+		expect(navigation.status).toBe("failed");
 		const wrongPage = await dispatchChromeActionToExtension({
 			organizationId: seeded.org.id,
 			parentRunId: seeded.run.id,

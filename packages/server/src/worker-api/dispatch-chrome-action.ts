@@ -647,7 +647,7 @@ export async function dispatchChromeActionToExtension(params: {
     const parentRows = (await sql`
       SELECT created_by_user_id, automation_id,
              activated_by_device_worker_id, activation_tab_id,
-             activation_target_urls, run_metadata
+             activation_target_urls, run_metadata, activation_kind, status
       FROM runs
       WHERE id = ${parentRunId}
         AND organization_id = ${organizationId}
@@ -659,12 +659,20 @@ export async function dispatchChromeActionToExtension(params: {
       activation_tab_id: number | null;
       activation_target_urls: string | string[] | null;
       run_metadata: Record<string, unknown> | null;
+      activation_kind: string | null;
+      status: string;
     }>;
     if (parentRows.length === 0) {
       return {
         status: 'failed',
         error_message: `Parent run ${parentRunId} was not found in this organization.`,
       };
+    }
+    if (parentRows[0].activation_kind === 'page_visit' && (
+      parentRows[0].run_metadata?.page_activation_identity !== 'exact' ||
+      !['pending', 'running'].includes(parentRows[0].status)
+    )) {
+      return { status: 'failed', error_message: 'This page activation is no longer executable. Create a new draft with its full URL.' };
     }
     createdByUserId = parentRows[0].created_by_user_id;
     automationId =
@@ -716,14 +724,8 @@ export async function dispatchChromeActionToExtension(params: {
           'Activated browser operations may not navigate the user-owned tab away from its matching page.',
       };
     }
-    return {
-      status: 'completed',
-      output: {
-        tab_id: activationTabId,
-        current_url: requestedUrl,
-        user_owned: true,
-      },
-    };
+    // Chrome must verify the live URL before returning the user-owned tab.
+    // A stored activation is not evidence that this tab is still on that page.
   }
   // An interactive action may name the browser it wants to be seen in. That
   // beats the parent connection's scrape pin, which points at whichever machine
