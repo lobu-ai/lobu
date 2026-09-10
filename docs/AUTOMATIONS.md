@@ -54,9 +54,10 @@ Each Automation therefore carries one durable arrival mark,
 `automations.next_window_start`, and a run covers `[mark, now - settle)`. The
 mark advances only when a window completes, including a legitimate zero-source
 result; failed, timed-out, abandoned, and lease-expired attempts leave it where
-it is, so the same arrivals stay claimable. There is no backlog of periods to
-walk: one run covers a whole outage, however long, and the next one starts
-caught up.
+it is, so the same arrivals stay claimable. There is no backlog of calendar
+periods to walk: one window spans the uncompleted arrival range. Completing it
+still requires reading its governed inputs within the source and execution
+limits described below.
 
 The cadence still decides WHEN a run fires; it no longer shapes what the run
 covers. `settle` is `AUTOMATION_ARRIVAL_SETTLE_MS` (default 60s): `created_at` is
@@ -368,10 +369,77 @@ Do not model these as if Lobu already had a general workflow instance engine:
 - unbounded loops, recursion, parallel maps, or reusable subflows;
 - end-to-end exactly-once guarantees across third-party side effects.
 
-Those features need an explicit workflow-instance identity and step-state
-model. Adding them before a real use case would duplicate the existing run and
-event primitives; pretending event chaining already provides them would be
-equally misleading.
+Some use cases can be composed from entity state, declared outputs, connector
+actions, and scheduled reconciliation. That does not give a reaction a saved
+instruction pointer or make these workflow guarantees automatic. Add a new
+execution contract only when a concrete use case needs guarantees the existing
+primitives cannot provide.
+
+## Convergence: did this subject get handled?
+
+Use durable stage state to decide whether a subject needs more work. The audit
+records below help explain what happened, but a recorded attempt is not itself
+proof that a stage succeeded.
+
+**Declared outputs: `change_set` events.** A completed window with recorded
+entity changes writes one `change_set` event, idempotency-keyed
+`automation:{id}:run:{run}:change_set`. `metadata.changes` carries the per-entity
+array (`entityId`, `name`, `kind` of `created|updated|denied`). Its `entity_ids`
+can include an existing entity whose change was denied, so inspect each change's
+`kind` before treating it as an applied write. A denied create has no entity to
+link. These events are queryable audit evidence; they do not record the outcome
+of a later reaction or external connector action.
+
+For a bounded audit read, select the changes as well as the linked entities:
+
+```sql
+SELECT e.entity_ids, e.metadata, e.created_at
+FROM events e
+WHERE e.semantic_type = 'change_set' AND e.automation_id = $1
+ORDER BY e.created_at DESC, e.id DESC
+LIMIT 100
+```
+
+**Effects: `automation_reactions`.** Entity writes are not the whole story — a
+run that called a connector, sent a notification, or saved knowledge records a
+row per tool call (`reaction_type`, `tool_name`, `tool_args`, `tool_result`,
+`entity_id`, `source_run_id`). `entity_id` is populated by the surfaces that
+know their subject; `manage_operations`, `notify`, and the per-attempt
+`script_execution` wrapper record the call without one.
+
+Two things to know before relying on it:
+
+- It is not in `QUERYABLE_SCHEMA`, so it cannot be selected as an Automation SQL
+  source. Record the stage outcome in the subject's entity state or a declared
+  output when another Automation needs to reconcile it.
+- `manage_entity`, `save_memory`, and the script wrapper pass no `runId`, so
+  they take the fire-and-forget insert with no dedupe predicate. A retried
+  reaction task re-runs the script and can append another row for the same
+  subject, and a failed insert is logged rather than retried, so a row can be
+  missing too. Do not use this table as an exactly-once completion ledger. Where
+  a `tool_result` is recorded, inspect it for deferral or failure.
+
+**Attribution prefers the trusted session.** A reaction's session carries
+`ctx.actingAutomationId` / `ctx.actingRunId`, stamped by the reaction executor.
+`save_content` and `manage_entity` resolve credit through
+`resolveAutomationAttribution`, which prefers that stamped pair. Without it, a
+declared `automation_source` is accepted only when the Automation belongs to the
+organization and owns the declared Automation run. Resolve attribution even
+when no source argument was supplied: reactions normally declare nothing, so
+gating on that argument omits their effect records and subject attribution.
+
+**Long-running processes: reconcile durable state.** Model the subject as an
+entity, record each stage's outcome and due time durably, and let a scheduled
+Automation select due subjects that have not reached the next stage. Such a
+source must include still-pending subjects from earlier windows, not just newly
+arrived events. Keep the source bounded and make repeated external actions safe
+under the connector/provider's actual idempotency semantics.
+
+This composes with event-triggered stages without a suspended program. Timing
+is limited by the schedule and execution capacity; admission policies, failures,
+and auto-pause can delay progress. The arrival cursor preserves an uncompleted
+input range, but does not guarantee an arbitrary backlog fits one run. Changed
+definitions also require considering the durable state left by earlier stages.
 
 ## Implementation source map
 
@@ -389,6 +457,8 @@ map when changing the system:
 | Atomic output-to-task handoff | `packages/server/src/tools/admin/manage_automations/complete-window.ts` |
 | Exact governed input reads | `packages/server/src/tools/get_content/` |
 | Automation notification routing | `packages/server/src/automations/delivery-target.ts`, `packages/server/src/notifications/service.ts` |
+| Write attribution (stamped vs declared) | `packages/server/src/automations/automation-source.ts`, `packages/server/src/utils/acting-automation-context.ts` |
+| Per-subject convergence | `packages/server/src/tools/admin/manage_automations/complete-window.ts` (`change_set`), `packages/server/src/utils/automation-reactions.ts` |
 | Server/device dispatch | `packages/server/src/automations/automation.ts`, `packages/server/src/worker-api/poll.ts`, Owletto Mac `AutomationDispatcher.swift` |
 | Web authoring and projection | Owletto `automation-trigger-editor.tsx`, `lib/automations/model.ts` |
 | Generated public client | `packages/client/src/generated/` |

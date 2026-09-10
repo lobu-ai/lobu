@@ -82,6 +82,11 @@ export interface TestClientAuth {
   /** True when the MCP URL pinned an org slug (e.g. `/mcp/acme`). When the
    * direct-handler client is used, set this to mirror the wire intent. */
   scopedToOrg?: boolean;
+  /** Trusted acting-Automation identity, as the reaction executor stamps it
+   * (`automations/reaction-executor.ts`). Set these to exercise a reaction's
+   * own session, which carries no caller-declared `automation_source`. */
+  actingAutomationId?: number;
+  actingRunId?: number;
 }
 
 const DEFAULT_TEST_ENV: Env = {
@@ -229,6 +234,8 @@ export class TestApiClient {
       // Match production: only OAuth tokens issued without an org-pin can do
       // cross-org reads via `client.org()`.
       allowCrossOrg: tokenType === 'oauth' && !scopedToOrg,
+      actingAutomationId: auth.actingAutomationId ?? null,
+      actingRunId: auth.actingRunId ?? null,
     };
     return new TestApiClient({ ...DEFAULT_TEST_ENV, ...env }, ctx);
   }
@@ -257,6 +264,8 @@ export class TestApiClient {
       tokenType,
       scopedToOrg,
       allowCrossOrg: tokenType === 'oauth' && !scopedToOrg,
+      actingAutomationId: overrides.actingAutomationId ?? this.ctx.actingAutomationId ?? null,
+      actingRunId: overrides.actingRunId ?? this.ctx.actingRunId ?? null,
     };
     return new TestApiClient(this.env, ctx);
   }

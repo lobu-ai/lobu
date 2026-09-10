@@ -11,6 +11,7 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { compileEntityRule } from "../../../authz/entity-rule-executor";
 import type { Env } from "../../../index";
 import { applyEntityChangeProposal } from "../../../tools/admin/entity-field-approval";
@@ -633,6 +634,71 @@ describe("entity row validation at the physical writer", () => {
 			expect(proposal.operation).toBe("delete");
 			expect(proposal.reason).toEqual(expect.stringMatching(/second pair of eyes/));
 			expect(await readDeletedAt(doc.id)).toBeNull();
+		}, 60_000);
+
+		/**
+		 * The card records the VERIFIED Automation, never the declared one.
+		 *
+		 * The two halves of a declaration are verified TOGETHER — the Automation
+		 * must own the run — so a real Automation paired with a foreign run fails
+		 * verification whole. A fabricated Automation id cannot reach this branch
+		 * at all: `resolveActingPrincipal` turns it into an unresolved automation
+		 * principal and the mutation gate denies first (`entity-policy.ts`), which
+		 * is why this case declares a REAL Automation. Recording the declared id
+		 * here would credit a card, and its approval run, to an Automation that
+		 * never asked for either.
+		 */
+		it("credits no Automation when the declared delete source is unverified", async () => {
+			const sql = getTestDb();
+			const { org, user, doc } = await seedEscalatingDoc();
+			// `delete` defaults to `approval`, which defers through the GATE's own
+			// card — a different mint that already carried the verified id. Allow
+			// the delete so the gate passes and the ROW RULE is what escalates,
+			// which is the branch under test. The Automation below is seeded with
+			// no managed agent, so no owner policy folds in on top of this one.
+			await upsertEntityApprovalPolicy(org.id, {
+				resourceClass: "entity",
+				principalKind: "automation",
+				deleteMode: "auto",
+			});
+			const [automation] = await sql<{ id: number }[]>`
+				WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+				INSERT INTO automations (
+					id, automation_group_id, organization_id, managed_agent_id,
+					created_by, name, slug
+				)
+				SELECT id, id, ${org.id}, NULL, ${user.id},
+					'Unrelated Automation', 'unrelated-automation'
+				FROM next_id
+				RETURNING id
+			`;
+
+			const res = (await manageEntity(
+				{
+					action: "delete",
+					entity_id: doc.id,
+					// Real Automation, a run it does not own: the join in
+					// `verifiedAutomationSource` finds nothing and discards both halves.
+					automation_source: {
+						automation_id: Number(automation.id),
+						run_id: 987_654_321,
+					},
+				},
+				TEST_ENV,
+				ctxFor(org.id, { userId: user.id }),
+			)) as { approval_queued?: boolean; approval_run_id?: number };
+
+			expect(res.approval_queued).toBe(true);
+			const proposal = await readRunActionInput(
+				org.id,
+				res.approval_run_id ?? -1,
+			);
+			expect(proposal.automation_id).toBeNull();
+			const [run] = await sql<{ automation_id: number | null }[]>`
+				SELECT automation_id FROM runs
+				WHERE id = ${res.approval_run_id ?? -1} AND organization_id = ${org.id}
+			`;
+			expect(run.automation_id).toBeNull();
 		}, 60_000);
 
 		it("delays delete cleanup until the approval replay", async () => {

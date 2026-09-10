@@ -12,11 +12,12 @@
  * pairs the forged declaration with an owned one, so a change that disabled
  * reaction tracking outright cannot make these pass by writing nothing.
  *
- * Only the cross-org case is asserted here. A NONEXISTENT id is invisible at
- * this surface: the composite foreign key already rejected the insert and the
- * call site swallows the error, so the row count was zero before this change
- * too. Asserting it here would pass either way — `automation-source-attribution`
- * covers that case where the difference is actually observable.
+ * Of the unowned declarations, only the cross-org case is asserted here. A
+ * NONEXISTENT id is invisible at this surface: the composite foreign key
+ * already rejected the insert and the call site swallows the error, so the row
+ * count was zero before this change too. Asserting it here would pass either
+ * way — `automation-source-attribution` covers that case where the difference
+ * is actually observable.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -57,12 +58,15 @@ async function orgWithAutomationAndRun(name: string, slug: string) {
   };
 }
 
-async function reactionRows(organizationId: string) {
+/** Every reaction row this org recorded, with the subject it acted on. */
+async function subjectRows(organizationId: string) {
   const rows = await getTestDb()<{
     automation_id: number | string;
     source_run_id: number | string;
+    reaction_type: string;
+    entity_id: number | string | null;
   }>`
-    SELECT automation_id, source_run_id
+    SELECT automation_id, source_run_id, reaction_type, entity_id
     FROM automation_reactions
     WHERE organization_id = ${organizationId}
     ORDER BY id
@@ -70,7 +74,15 @@ async function reactionRows(organizationId: string) {
   return rows.map((row) => ({
     automation_id: Number(row.automation_id),
     run_id: Number(row.source_run_id),
+    reaction_type: row.reaction_type,
+    entity_id: row.entity_id === null ? null : Number(row.entity_id),
   }));
+}
+
+/** The credit alone, for cases where the subject is not what is under test. */
+async function reactionRows(organizationId: string) {
+  const rows = await subjectRows(organizationId);
+  return rows.map(({ automation_id, run_id }) => ({ automation_id, run_id }));
 }
 
 describe('write surfaces refuse an unowned automation_source', () => {
@@ -154,5 +166,80 @@ describe('write surfaces refuse an unowned automation_source', () => {
       { automation_id: attacker.automationId, run_id: attacker.runId },
     ]);
     await expect(reactionRows(victim.organizationId)).resolves.toEqual([]);
+  });
+});
+
+/**
+ * The trusted half of the rule, which the cross-org cases above cannot reach.
+ *
+ * `resolveAutomationAttribution` already prefers `ctx.actingAutomationId` over
+ * any declaration, but `manage_entity` and `save_content` only CALL it when the
+ * caller supplied `automation_source`. A reaction's own session carries the
+ * stamped id and no declaration, so both surfaces credited nobody and wrote no
+ * row at all — which is why `automation_reactions` cannot answer what a
+ * reaction acted on.
+ *
+ * `entity_id` is asserted, not just the credit: the subject is the whole point
+ * of the row. A fix that recorded attribution but dropped the entity would pass
+ * a credit-only assertion and still leave the table useless.
+ */
+describe('write surfaces credit a stamped acting Automation with no declaration', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  it('credits manage_entity and records the subject when a reaction declares nothing', async () => {
+    const org = await orgWithAutomationAndRun('Acting Entity', 'a-entity');
+    await org.api.entity_schema.createType({ slug: 'employee', name: 'Employee' });
+    const created = (await org.api.entities.create({
+      type: 'employee',
+      name: 'Ada',
+    })) as { entity: { id: number } };
+
+    // The half of a reaction session these surfaces read: the stamped pair with
+    // no declaration. The full session `reaction-executor.ts` builds (no user,
+    // system scopes) runs end to end in `reaction-crash-safety`.
+    const reaction = org.api.withAuth({
+      actingAutomationId: org.automationId,
+      actingRunId: org.runId,
+    });
+    await reaction.entities.manage({
+      action: 'update',
+      entity_id: created.entity.id,
+      metadata: { provisioning_status: 'provisioned' },
+    });
+
+    await expect(subjectRows(org.organizationId)).resolves.toEqual([
+      {
+        automation_id: org.automationId,
+        run_id: org.runId,
+        reaction_type: 'entity_updated',
+        entity_id: created.entity.id,
+      },
+    ]);
+  });
+
+  it('credits save_memory when a reaction declares nothing', async () => {
+    const org = await orgWithAutomationAndRun('Acting Save', 'a-save');
+    const reaction = org.api.withAuth({
+      actingAutomationId: org.automationId,
+      actingRunId: org.runId,
+    });
+
+    await reaction.knowledge.save({
+      semantic_type: 'note',
+      metadata: {},
+      title: 'Stamped credit',
+      content: 'Attributed from the acting session, not a declaration.',
+    });
+
+    await expect(subjectRows(org.organizationId)).resolves.toEqual([
+      {
+        automation_id: org.automationId,
+        run_id: org.runId,
+        reaction_type: 'content_saved',
+        entity_id: null,
+      },
+    ]);
   });
 });

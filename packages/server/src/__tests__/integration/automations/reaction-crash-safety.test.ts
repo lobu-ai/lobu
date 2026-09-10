@@ -93,7 +93,7 @@ async function seedRunnableWindow(reactionScript: string) {
     WHERE id = ${queued.runId}
   `;
 
-	return { sql, workspace, api, automationId, runId: queued.runId };
+	return { sql, workspace, entity, api, automationId, runId: queued.runId };
 }
 
 /**
@@ -250,14 +250,88 @@ describe("automation reaction crash safety", () => {
 		expect(seen.window_start).toBeTruthy();
 		expect(seen.window_end).toBeTruthy();
 
-		// The run is logged where get_automation already surfaces it.
+		// The run is logged where get_automation already surfaces it. TWO rows: the
+		// script wrapper, and the `knowledge.save` the script itself performed.
+		// That save declares no `automation_source` and is credited from the
+		// stamped acting session instead, so the write that actually touched the
+		// workspace is recorded rather than attributed to nobody.
 		const logged = await sql`
       SELECT reaction_type, tool_args
       FROM automation_reactions WHERE source_run_id = ${runId}
+      ORDER BY reaction_type
     `;
-		expect(logged.length).toBe(1);
-		expect(String(logged[0].reaction_type)).toBe("script_execution");
-		expect(logged[0].tool_args).toEqual({ attempt: 2 });
+		expect(logged.map((row) => String(row.reaction_type))).toEqual([
+			"content_saved",
+			"script_execution",
+		]);
+		expect(logged[1].tool_args).toEqual({ attempt: 2 });
+	});
+
+	/**
+	 * The end-to-end claim, through the REAL executor rather than a simulated
+	 * session: reaction-executor stamps `actingAutomationId`, the sandbox SDK
+	 * carries it, `manage_entity` resolves it, and the row names the subject.
+	 *
+	 * `automation-source-surface` proves the two write surfaces resolve without a
+	 * declaration, but it builds the acting session by hand. Only this path
+	 * proves the executor actually stamps what those surfaces now read — the link
+	 * whose absence left `entity_id` set on 2 of 1143 production rows.
+	 */
+	it("records the subject a real reaction acted on, end to end", async () => {
+		// The subject is inlined into the script, so the assertion depends only on
+		// the attribution chain and not on how `ctx.entities` is hydrated. The
+		// entity only exists once the seed has run, hence the placeholder id the
+		// second `setReactionScript` replaces before the window completes.
+		const script = (entityId: number) =>
+			`export default async function reaction(ctx, client) {
+        await client.entities.update({
+          entity_id: ${entityId},
+          metadata: { provisioning_status: 'provisioned' },
+        });
+      }`;
+		const { sql, entity, automationId, runId, api } = await seedRunnableWindow(
+			script(0),
+		);
+		await api.automations.setReactionScript({
+			automation_id: String(automationId),
+			reaction_script: script(entity.id),
+		});
+
+		await completeWindow(api, automationId, runId, { summary: "Provisioned." });
+		const [task] = await reactionTasks(sql, runId);
+		const payload = (task.action_input as { payload: AutomationReactionTaskPayload })
+			.payload;
+		const outcome = await runAutomationReactionTask(
+			payload,
+			{} as Env,
+			Number(task.id),
+			1,
+		);
+		expect(outcome.status).toBe("success");
+
+		const logged = await sql<{
+			reaction_type: string;
+			entity_id: number | string | null;
+			automation_id: number | string;
+		}>`
+      SELECT reaction_type, entity_id, automation_id
+      FROM automation_reactions WHERE source_run_id = ${runId}
+      ORDER BY reaction_type
+    `;
+		expect(logged.map((row) => String(row.reaction_type))).toEqual([
+			"entity_updated",
+			"script_execution",
+		]);
+		// The subject, which is the whole point of the row.
+		expect(Number(logged[0].entity_id)).toBe(entity.id);
+		expect(Number(logged[0].automation_id)).toBe(automationId);
+
+		// And the write itself landed on the entity, so the row is not crediting
+		// a mutation that silently did nothing.
+		const [updated] = await sql<{ metadata: Record<string, unknown> }>`
+      SELECT metadata FROM entities WHERE id = ${entity.id}
+    `;
+		expect(updated.metadata).toMatchObject({ provisioning_status: "provisioned" });
 	});
 
 	it("does not queue a second reaction when the completion is replayed", async () => {

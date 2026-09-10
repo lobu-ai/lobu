@@ -332,12 +332,17 @@ async function trackEntityReaction(
 	result: ManageEntityResult,
 	ctx: ToolContext,
 ): Promise<void> {
-	const reactionAttribution = args.automation_source
-		? await resolveAutomationAttribution(ctx, args.automation_source)
-		: null;
+	// Resolved unconditionally, like every other call site in this file: a
+	// reaction session stamps `ctx.actingAutomationId` and declares no
+	// `automation_source`, so gating on the declaration dropped its credit —
+	// and with it `entity_id`, the only per-subject signal this table carries.
+	const reactionAttribution = await resolveAutomationAttribution(
+		ctx,
+		args.automation_source,
+	);
 	// A reaction record is keyed by the producing run.
 	if (
-		reactionAttribution?.automationId == null ||
+		reactionAttribution.automationId == null ||
 		reactionAttribution.runId == null ||
 		!("action" in result)
 	) {
@@ -1752,8 +1757,11 @@ async function handleDelete(
 			entity_id: entityId,
 			force_delete_tree: force,
 			current,
-			automation_id:
-				ctx.actingAutomationId ?? args.automation_source?.automation_id ?? null,
+			// The VERIFIED id, not an inline merge of the declared one. `runId`
+			// below already comes from this resolution, so the raw merge could
+			// pair a verified run with a declared Automation that failed
+			// verification — a worse pairing than either half alone.
+			automation_id: deleteAttribution.automationId,
 			attribution,
 			reason: err.verdict.reason,
 		}, deleteAttribution.runId);
