@@ -23,6 +23,18 @@ export interface ProviderUpstreamConfig {
   apiKeyHeader?: "authorization" | "x-api-key";
 }
 
+/**
+ * What a provider's own catalog says about one model. Every field is optional:
+ * the module answers only what its catalog carries, and each is validated at
+ * the consumer before it can overwrite a registry value.
+ */
+export interface ProviderModelMetadata {
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  input?: ("text" | "image")[];
+}
+
 export interface ModelProviderModule extends OrchestratorModule {
   providerId: string;
   providerDisplayName: string;
@@ -69,6 +81,17 @@ export interface ModelProviderModule extends OrchestratorModule {
   ): Record<string, string>;
   getApp?(): any;
   getModelOptions?(agentId: string, userId: string): Promise<ModelOption[]>;
+  /**
+   * Gateway-only capability lookup, consulted ONLY for a model the bundled
+   * registry does not carry — a provider that shipped a new model since this
+   * release. Never on the happy path: a registry hit answers without leaving
+   * the process.
+   */
+  getModelMetadata?(
+    agentId: string,
+    modelId: string,
+    context: ProviderCredentialContext
+  ): Promise<ProviderModelMetadata | undefined>;
   buildCredentialPlaceholder?(
     agentId: string,
     context?: ProviderCredentialContext
