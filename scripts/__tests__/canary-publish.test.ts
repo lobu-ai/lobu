@@ -14,7 +14,7 @@ import { join } from "node:path";
 import {
   canaryVersion,
   prepareManifests,
-  promotionAllowed,
+  publicationAllowed,
 } from "../canary-publish.mjs";
 import { __testing } from "../publish-packages.mjs";
 
@@ -52,53 +52,65 @@ describe("npm canary publication", () => {
   });
 
   it("keeps prereleases away from latest even on a mistyped invocation", () => {
-    expect(
-      __testing.publishArgs(undefined, "canary-candidate", version)
-    ).toContain("canary-candidate");
+    expect(__testing.publishArgs(undefined, "canary", version)).toContain(
+      "canary"
+    );
     expect(() => __testing.publishArgs(undefined, "latest", version)).toThrow();
-    expect(() => __testing.publishArgs(undefined, "canary", version)).toThrow();
+    expect(() =>
+      __testing.publishArgs(undefined, "canary-candidate", version)
+    ).toThrow();
     expect(__testing.publishArgs(undefined, "latest", "19.2.0")).toContain(
       "latest"
     );
   });
 
-  it("only promotes first, same, or descendant commits", () => {
+  it("only publishes first, same, or descendant commits", () => {
     expect(
-      promotionAllowed(undefined, version, () => {
+      publicationAllowed(undefined, version, () => {
         throw new Error("unexpected");
       })
     ).toBe(true);
-    expect(promotionAllowed(version, version, () => false)).toBe(true);
+    expect(publicationAllowed(version, version, () => false)).toBe(true);
     const old = `19.2.0-canary.122.g${"b".repeat(40)}`;
     expect(
-      promotionAllowed(
+      publicationAllowed(
         old,
         version,
         (from, to) => from === "b".repeat(40) && to === sha
       )
     ).toBe(true);
-    expect(promotionAllowed(old, version, () => false)).toBe(false);
-    expect(() => promotionAllowed("19.2.0", version, () => true)).toThrow();
+    expect(publicationAllowed(old, version, () => false)).toBe(false);
+    expect(() => publicationAllowed("19.2.0", version, () => true)).toThrow();
   });
 
-  it("requires artifact smoke before advancing the opt-in tag", () => {
+  it("requires a main-only caller, OIDC and packed artifact smoke before publishing", () => {
     const workflow = Bun.YAML.parse(
       readFileSync(
         new URL("../../.github/workflows/publish-canary.yml", import.meta.url),
         "utf8"
       )
     ) as any;
-    expect(workflow.on.workflow_run.workflows).toEqual([
-      "Build and Push Images",
-    ]);
-    expect(workflow.jobs.promote.needs).toContain("smoke");
+    expect(Object.keys(workflow.on)).toEqual(["workflow_call"]);
+    expect(workflow.jobs.promote).toBeUndefined();
+    expect(workflow.jobs.publish.permissions["id-token"]).toBe("write");
+    const steps = workflow.jobs.publish.steps;
+    const publishIndex = steps.findIndex((step: any) =>
+      step.run?.includes("--tag=canary")
+    );
+    const packIndex = steps.findIndex((step: any) =>
+      step.run?.includes("pack-cli-smoke.mjs")
+    );
+    expect(packIndex).toBeGreaterThan(-1);
+    expect(publishIndex).toBeGreaterThan(packIndex);
+    expect(JSON.stringify(workflow)).not.toContain("NPM_TOKEN");
+    expect(JSON.stringify(workflow)).not.toContain("NODE_AUTH_TOKEN");
+    expect(JSON.stringify(workflow)).not.toContain("canary-candidate");
     expect(workflow.jobs.smoke.uses).toBe(
       "./.github/workflows/published-artifact-smoke.yml"
     );
     expect(workflow.jobs.smoke.with.version).toBe(
       "${{ needs.publish.outputs.version }}"
     );
-    expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
     // The required image-job list is copied from publish-packages.yml, whose
     // own test pins it to build-images.yml; keep the copy from drifting.
     const stable = Bun.YAML.parse(
@@ -110,6 +122,18 @@ describe("npm canary publication", () => {
         "utf8"
       )
     ) as any;
+    expect(Object.keys(stable.on)).toEqual(["workflow_dispatch"]);
+    expect(stable.on.workflow_dispatch.inputs.channel.default).toBe("stable");
+    expect(stable.jobs.canary.if).toBe("inputs.channel == 'canary'");
+    expect(stable.jobs.canary.uses).toBe(
+      "./.github/workflows/publish-canary.yml"
+    );
+    expect(stable.jobs.canary.permissions["id-token"]).toBe("write");
+    expect(stable.jobs.canary.concurrency).toEqual({
+      group: "npm-canary",
+      "cancel-in-progress": false,
+    });
+    expect(stable.jobs["attest-publish"].if).toBe("inputs.channel == 'stable'");
     expect(workflow.env.REQUIRED_IMAGE_JOBS).toBe(
       stable.env.REQUIRED_IMAGE_JOBS
     );
@@ -119,7 +143,7 @@ describe("npm canary publication", () => {
 // Run the actual command entry points in an isolated filesystem with a fake
 // registry. No network or publication credentials are used by these probes.
 describe("canary commands", () => {
-  it("prepares the full fleet, retries promotion and preserves latest", () => {
+  it("prepares the full fleet and performs read-only publication preflight", () => {
     withFixture((root, run, registry) => {
       const prepared = run("prepare");
       expect(prepared.status).toBe(0);
@@ -131,19 +155,62 @@ describe("canary commands", () => {
         ).toBe(version);
       }
       for (let attempt = 0; attempt < 2; attempt++)
-        expect(run("promote", version).status).toBe(0);
+        expect(run("check", version).status).toBe(0);
       for (const tags of Object.values(registry()) as any[]) {
-        expect(tags).toEqual({ latest: "19.2.0", canary: version });
+        expect(tags).toEqual({ latest: "19.2.0" });
       }
     });
   });
 
-  it("fails closed on registry failure or a missing package before moving tags", () => {
-    for (const fault of ["registry", "missing"]) {
-      withFixture((_root, run, registry) => {
-        expect(run("promote", version, fault).status).not.toBe(0);
-        for (const tags of Object.values(registry()) as any[])
-          expect(tags.canary).toBeUndefined();
+  it("stops canary publication at the first npm failure and keeps CLI last", () => {
+    expect(__testing.PACKAGES.at(-1)?.dir).toBe("packages/cli");
+    withFixture((root, run) => {
+      expect(run("prepare").status).toBe(0);
+      expect(run("publish", undefined, "blocked").status).not.toBe(0);
+      expect(readFileSync(`${root}/publish.log`, "utf8").trim()).toBe(
+        "@lobu/core"
+      );
+    });
+  });
+
+  it("retries a partial publish without republishing packages or changing latest", () => {
+    withFixture((root, run, registry) => {
+      expect(run("prepare").status).toBe(0);
+      expect(run("publish", undefined, "partial").status).not.toBe(0);
+      expect(registry()["@lobu/core"]).toEqual({
+        latest: "19.2.0",
+        canary: version,
+      });
+      expect(registry()["@lobu/cli"]).toEqual({ latest: "19.2.0" });
+      const retry = run("publish");
+      expect(retry.status, retry.stderr?.toString()).toBe(0);
+      for (const tags of Object.values(registry()))
+        expect(tags).toEqual({ latest: "19.2.0", canary: version });
+      const calls = readFileSync(`${root}/publish.log`, "utf8")
+        .trim()
+        .split("\n");
+      expect(calls.filter((name) => name === "@lobu/core")).toHaveLength(1);
+      expect(calls.at(-1)).toBe("@lobu/cli");
+    });
+  });
+
+  it("rejects an existing canary version whose tag is missing or unreadable", () => {
+    for (const fault of ["untagged", "tag-read"]) {
+      withFixture((_root, run) => {
+        expect(run("prepare").status).toBe(0);
+        const result = run("publish", undefined, fault);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr?.toString()).toContain(
+          "canary tag does not match"
+        );
+      });
+    }
+  });
+
+  it("fails closed on registry failure or an older candidate", () => {
+    for (const fault of ["registry", "older"]) {
+      withFixture((_root, run) => {
+        expect(run("check", version, fault).status).not.toBe(0);
       });
     }
   });
@@ -183,6 +250,11 @@ function withFixture(
           "utf8"
         )
       );
+      // The fixture materializes only the published packages, so a
+      // `workspace:*` devDependency on a private sibling has nothing to
+      // resolve against. Consumers never install devDependencies, so dropping
+      // them keeps the probe on the graph publication actually ships.
+      delete pkg.devDependencies;
       writeFileSync(`${root}/${dir}/package.json`, JSON.stringify(pkg));
       tags[pkg.name] = { latest: "19.2.0" };
     }
@@ -191,11 +263,13 @@ function withFixture(
       JSON.stringify({ version: "19.2.0" })
     );
     writeFileSync(`${root}/registry.json`, JSON.stringify(tags));
+    writeFileSync(`${root}/published.json`, "{}");
     writeFileSync(
       `${root}/bin/git`,
       `#!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args[0] === 'rev-parse') console.log('${sha}');
+if (args[0] === 'merge-base' && process.env.CANARY_TEST_FAULT === 'older' && args[2] !== '${sha}') process.exit(1);
+else if (args[0] === 'rev-parse') console.log('${sha}');
 else if (args[0] === 'show') console.log('123');
 else if (!['fetch', 'merge-base'].includes(args[0])) process.exit(2);
 `
@@ -205,16 +279,28 @@ else if (!['fetch', 'merge-base'].includes(args[0])) process.exit(2);
       `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-const tags = JSON.parse(fs.readFileSync('registry.json', 'utf8'));
-if (process.env.CANARY_TEST_FAULT === 'registry') process.exit(1);
-if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(tags[args[1]]));
+const tags = JSON.parse(fs.readFileSync('${root}/registry.json', 'utf8'));
+const published = JSON.parse(fs.readFileSync('${root}/published.json', 'utf8'));
+const fault = process.env.CANARY_TEST_FAULT;
+if (fault === 'registry') process.exit(1);
+if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(fault === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
 else if (args[0] === 'view' && args[2] === 'version') {
-  if (process.env.CANARY_TEST_FAULT === 'missing' && args[1].startsWith('@lobu/core@')) process.exit(1);
-  console.log(args[1].slice(args[1].lastIndexOf('@') + 1));
-} else if (args[0] === 'dist-tag' && args[1] === 'add') {
-  const at = args[2].lastIndexOf('@');
-  tags[args[2].slice(0, at)][args[3]] = args[2].slice(at + 1);
-  fs.writeFileSync('registry.json', JSON.stringify(tags));
+  const at = args[1].lastIndexOf('@');
+  const name = args[1].slice(0, at), requested = args[1].slice(at + 1);
+  if (published[name] === requested || (['untagged', 'tag-read'].includes(fault) && name === '@lobu/core')) console.log(requested);
+  else process.exit(1);
+} else if (args[0] === 'view' && args[2] === 'dist-tags.canary') {
+  if (fault === 'tag-read') process.exit(1);
+  if (tags[args[1]].canary) console.log(tags[args[1]].canary);
+}
+else if (args[0] === 'publish') {
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  fs.appendFileSync('${root}/publish.log', pkg.name + '\\n');
+  if (fault === 'blocked' || (fault === 'partial' && pkg.name === '@lobu/client')) { console.error('E404 Not Found - PUT'); process.exit(1); }
+  published[pkg.name] = pkg.version;
+  tags[pkg.name][args[args.indexOf('--tag') + 1]] = pkg.version;
+  fs.writeFileSync('${root}/published.json', JSON.stringify(published));
+  fs.writeFileSync('${root}/registry.json', JSON.stringify(tags));
 } else process.exit(2);
 `
     );
@@ -224,7 +310,14 @@ else if (args[0] === 'view' && args[2] === 'version') {
       (op, value, fault) =>
         spawnSync(
           "node",
-          ["scripts/canary-publish.mjs", op, ...(value ? [value] : [])],
+          op === "publish"
+            ? [
+                "scripts/publish-packages.mjs",
+                "--skip-bump",
+                "--skip-build",
+                "--tag=canary",
+              ]
+            : ["scripts/canary-publish.mjs", op, ...(value ? [value] : [])],
           {
             cwd: root,
             encoding: "utf8",
