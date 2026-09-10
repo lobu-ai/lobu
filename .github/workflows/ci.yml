@@ -132,8 +132,11 @@ jobs:
           # gated separately from the rest of the frontend job (which runs for any
           # `packages` change). `packages/owletto` is a submodule POINTER file, so
           # a pointer bump shows up as that exact path with nothing under it —
-          # it can move apps/chrome and must run the smoke conservatively.
-          if echo "$changed" | grep -E '^(packages/owletto$|\.github/workflows/ci\.yml$)' >/dev/null; then
+          # it can move apps/chrome and must run the smoke conservatively. The
+          # smoke drives the extension against a hand-written gateway fixture, so
+          # no `packages/server` change can affect it; what else can is how the
+          # smoke gets its Chromium and its submodule.
+          if echo "$changed" | grep -E '^(packages/owletto$|bun\.lock$|package\.json$|\.gitmodules$|\.github/actions/setup-submodule/|\.github/workflows/ci\.yml$)' >/dev/null; then
             echo "chromeExt=true" >> "$GITHUB_OUTPUT"
           else
             echo "chromeExt=false" >> "$GITHUB_OUTPUT"
@@ -647,18 +650,27 @@ jobs:
         # runner's google-chrome-stable cannot host extension service workers in
         # headless mode. --with-deps pulls the shared libs the Ubuntu image lacks.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        run: ../../node_modules/.bin/playwright install --with-deps chromium
-        working-directory: packages/owletto
+        run: node node_modules/playwright-vanilla/cli.js install --with-deps chromium
+
+      - name: Install window manager for Chrome lifecycle tests
+        if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb openbox xauth
 
       - name: Chrome extension smoke (real Chromium, --load-extension)
-        # Loads apps/chrome into headless Chromium against a loopback gateway
+        # Loads apps/chrome into headed Chromium against a loopback gateway
         # fixture: action dispatch, flow isolation, worker eviction/recovery, and
-        # tab-presence reaping. This is the only CI coverage that exercises the
-        # extension in a real browser instead of the hand-written chrome stub, so
-        # it catches what the unit suites structurally cannot. One probe
-        # (unfocused-window reaping) self-skips headless -- see the script.
+        # tab-presence reaping. Alongside gateway integration, this exercises
+        # the extension in a real browser and catches cases that the unit
+        # suites cannot simulate. Xvfb + Openbox
+        # give Chromium real window focus, so no reaper branch is skipped.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        run: node packages/owletto/scripts/chrome-reliability-smoke.mjs
+        run: |
+          xvfb-run -a sh -eu -c '
+            openbox > /tmp/chrome-smoke-openbox.log 2>&1 &
+            wm_pid=$!
+            trap "kill $wm_pid 2>/dev/null || true" EXIT
+            SMOKE_HEADED=1 node packages/owletto/scripts/chrome-reliability-smoke.mjs
+          '
 
       - name: MCP App failure smoke (built bundle in Chrome)
         if: steps.submodule.outputs.stubbed != 'true'
@@ -801,6 +813,12 @@ jobs:
         run: |
           PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres \
             -c "ALTER SYSTEM SET maintenance_work_mem='256MB'" -c "SELECT pg_reload_conf()"
+
+      # The gateway integration suite includes real extension profiles talking
+      # to the production HTTP handlers and Postgres. Vitest owns sharding, so
+      # provision the browser on every shard rather than guessing file placement.
+      - name: Install Chromium for gateway-extension integration
+        run: node node_modules/playwright-vanilla/cli.js install --with-deps chromium
 
       - name: server integration suite shard ${{ matrix.shard }}/3 (vitest under Node)
         working-directory: packages/server
