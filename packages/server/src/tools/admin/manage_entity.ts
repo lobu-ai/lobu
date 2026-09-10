@@ -1757,8 +1757,11 @@ async function handleDelete(
 			entity_id: entityId,
 			force_delete_tree: force,
 			current,
-			automation_id:
-				ctx.actingAutomationId ?? args.automation_source?.automation_id ?? null,
+			// The VERIFIED id, not an inline merge of the declared one. `runId`
+			// below already comes from this resolution, so the raw merge could
+			// pair a verified run with a declared Automation that failed
+			// verification — a worse pairing than either half alone.
+			automation_id: deleteAttribution.automationId,
 			attribution,
 			reason: err.verdict.reason,
 		}, deleteAttribution.runId);
