@@ -32,6 +32,11 @@ export function createNativeSession(
     api: input.provider.api,
     provider: input.provider.provider,
     baseUrl: input.provider.baseUrl,
+    // Upstream capabilities the gateway resolved for us. pi-ai would otherwise
+    // auto-detect them from `baseUrl`, which on this lane is always the secret
+    // proxy, so it can never see which provider it is really talking to. Set
+    // on the one model object both `Agent` and `AgentSession.compact` use.
+    ...(input.provider.compat ? { compat: input.provider.compat } : {}),
     // Registry facts, carried on the envelope because the guest has no
     // registry to ask. Hardcoding them here made the model lie about itself:
     // `claude-sonnet-4` reports `reasoning:true, maxTokens:64000` upstream and

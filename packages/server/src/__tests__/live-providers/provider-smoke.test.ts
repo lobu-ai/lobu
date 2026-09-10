@@ -202,8 +202,11 @@ function buildLiveModel(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 16_384,
-		// Match the worker's production payload guard. Gemini's OpenAI-compatible
-		// endpoint returns 400 for OpenAI's `store` field.
+		// Gemini's OpenAI-compatible endpoint returns 400 for OpenAI's `store`
+		// field. No completions entry in the catalog is api.openai.com either —
+		// official OpenAI is promoted to Responses above — so every provider
+		// this smoke reaches over completions is one production also withholds
+		// `store` from; see `resolveTurnCompat` in `agent-turn-producer.ts`.
 		...(api === "openai-completions"
 			? { compat: { supportsStore: false } }
 			: {}),
