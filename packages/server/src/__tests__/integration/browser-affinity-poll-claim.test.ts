@@ -135,12 +135,12 @@ async function seedPendingAction(opts: {
   return Number(row.id);
 }
 
-async function pollExtension(workerId: string) {
+async function pollExtension(workerId: string, version = '0.6.1') {
   return post('/api/workers/poll', {
     body: {
       worker_id: workerId,
       platform: 'chrome-extension',
-      app_version: '0.1.0',
+      app_version: version,
       label: 'Test Ext',
       capabilities: {
         'browser.tabs': true,
@@ -589,13 +589,13 @@ describe('browser-affinity poll claim', () => {
         organization_id, run_type, connection_id, connector_key, action_key,
         action_input, approval_status, status, created_at, expires_at,
         activation_kind, activation_target_urls, activated_at,
-        activated_by_device_worker_id, activation_tab_id, created_by_user_id
+        activated_by_device_worker_id, activation_tab_id, created_by_user_id, run_metadata
       ) VALUES (
         ${orgId}, 'action', ${connId}, 'chrome', 'prepare_reply',
         ${sql.json({ body: 'draft' })}, 'auto', 'running',
         current_timestamp, current_timestamp + interval '1 day',
-        'page_visit', ARRAY['https://x.example/status/1']::text[],
-        current_timestamp, ${deviceWorkerId}::uuid, 23, ${userId}
+        'page_visit', ARRAY['https://x.example/status/1', 'https://x.example/status/2']::text[],
+        current_timestamp, ${deviceWorkerId}::uuid, 23, ${userId}, ${sql.json({ page_activation_identity: 'exact', page_activation_url: 'https://x.example/status/1' })}
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
@@ -612,11 +612,14 @@ describe('browser-affinity poll claim', () => {
         tab_id: 23,
         expression: '1',
         activation_tab_id: 9999,
+        activation_target_urls: ['https://forged.example/'],
         browser_flow_id: 'forged-flow',
       },
       expiresAtAgoSeconds: -60,
     });
 
+    const oldClient = await pollExtension(workerId, '0.6.0');
+    expect((await oldClient.json()).run_id).toBeUndefined();
     const res = await pollExtension(workerId);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -627,6 +630,7 @@ describe('browser-affinity poll claim', () => {
     // The server's resolution reached the worker, so the guard can authorize
     // the one tab the human opened...
     expect(body.action_input?.activation_tab_id).toBe(23);
+    expect(body.action_input?.activation_target_urls).toEqual(['https://x.example/status/1']);
     // ...and neither forged field survived.
     expect(body.action_input?.browser_flow_id).not.toBe('forged-flow');
   });
