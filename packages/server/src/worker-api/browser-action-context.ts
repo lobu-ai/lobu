@@ -179,7 +179,8 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
 export function trustedChromeActionInput(
   input: Record<string, unknown>,
   context: BrowserActionContext,
-  activationTabId?: number | null
+  activationTabId?: number | null,
+  activationTargetUrls: string[] = []
 ): Record<string, unknown> {
   const trusted = { ...input };
   delete trusted.browser_context_id;
@@ -188,11 +189,12 @@ export function trustedChromeActionInput(
   delete trusted.holder_run_id;
   delete trusted.parent_run_id;
   // Always deleted, then re-added only from the server's own resolution below.
-  // A connector that names an activated tab itself must never be believed: this
-  // field is what lets the extension mutate a tab the USER owns, so a
-  // caller-supplied copy would be a way to launder any tab id into that
-  // authority.
+  // A connector that names an activated tab — or the pages that tab is allowed
+  // to be on — must never be believed: together these fields are what let the
+  // extension mutate a tab the USER owns, so a caller-supplied copy would be a
+  // way to launder any tab id, or any target URL, into that authority.
   delete trusted.activation_tab_id;
+  delete trusted.activation_target_urls;
   return {
     ...trusted,
     browser_context_id: context.id,
@@ -200,7 +202,7 @@ export function trustedChromeActionInput(
     browser_flow_id: context.flow_id,
     holder_run_id: context.flow_id,
     ...(Number.isInteger(activationTabId) && (activationTabId as number) > 0
-      ? { activation_tab_id: activationTabId as number }
+      ? { activation_tab_id: activationTabId as number, activation_target_urls: activationTargetUrls }
       : {}),
   };
 }

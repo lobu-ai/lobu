@@ -48,6 +48,7 @@ import { stableJson } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
+import { normalizePageActivationUrls } from './page-activation';
 import { AUTOMATION_RUN_TYPES_PG } from "./run-types.js";
 
 type AutomationDispatchSource = 'scheduled' | 'manual' | 'event';
@@ -1306,13 +1307,17 @@ export async function createConnectorOperationRun(params: {
       )
     : null;
 
+  const activationUrls = params.activation ? normalizePageActivationUrls(params.activation.urls) : [];
+  const runMetadata = params.activation
+    ? { ...params.runMetadata, page_activation_identity: 'exact' }
+    : params.runMetadata;
   const insertMetadata = params.sdkBrowserContext
     ? {
-        ...params.runMetadata,
+        ...runMetadata,
         browser_context:
           params.runMetadata?.browser_context ?? params.sdkBrowserContext,
       }
-    : params.runMetadata;
+    : runMetadata;
   const inserted = await sql<{
     id: number;
     status: string;
@@ -1347,7 +1352,7 @@ export async function createConnectorOperationRun(params: {
       ${inlineOwner === null ? null : sql`current_timestamp`},
       ${inlineOwner},
       ${params.activation?.kind ?? null},
-      ${params.activation ? pgTextArray(params.activation.urls) : null}::text[],
+      ${params.activation ? pgTextArray(activationUrls) : null}::text[],
       ${insertMetadata == null ? null : sql.json(insertMetadata)},
       ${targetDeviceWorkerId == null ? null : sql`${targetDeviceWorkerId}::uuid`},
       ${admissionError}, ${admissionError ? sql`current_timestamp` : null},
@@ -1409,7 +1414,7 @@ export async function createConnectorOperationRun(params: {
     const sameActivation =
       prior.activation_kind === (params.activation?.kind ?? null) &&
       stableJson(parsePgTextArray(prior.activation_target_urls)) ===
-        stableJson(params.activation?.urls ?? []);
+        stableJson(activationUrls);
     const priorAutomationId = prior.automation_id == null ? null : Number(prior.automation_id);
     const priorParentRunId =
       prior.parent_run_id == null ? null : Number(prior.parent_run_id);

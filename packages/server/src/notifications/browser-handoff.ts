@@ -22,6 +22,7 @@ type HandoffSource = {
 	approval_status: string;
 	activation_kind: string | null;
 	activation_target_urls: string | string[] | null;
+	run_metadata: Record<string, unknown> | null;
 	activated_at: Date | string | null;
 	expires_at: Date | string | null;
 };
@@ -51,6 +52,7 @@ async function loadHandoffSource(
 			r.approval_status,
 			r.activation_kind,
 			r.activation_target_urls,
+			r.run_metadata,
 			r.activated_at,
 			r.expires_at
 		FROM notification_targets t
@@ -80,6 +82,7 @@ async function loadHandoffSource(
 
 function isReady(source: HandoffSource): boolean {
 	return (
+		source.run_metadata?.page_activation_identity === "exact" &&
 		source.status === "pending" &&
 		source.approval_status === "auto" &&
 		source.activation_kind === "page_visit" &&
@@ -174,6 +177,9 @@ export async function recreateBrowserHandoff(
 			`This saved draft no longer matches the connector action: ${validationError}`,
 			409,
 		);
+	}
+	if (source.run_metadata?.page_activation_identity !== "exact") {
+		throw new ToolUserError("This draft's original page target was lost. Create a new draft with its full URL.", 409);
 	}
 	const activationUrls = parsePgTextArray(source.activation_target_urls);
 	if (activationUrls.length === 0) {
