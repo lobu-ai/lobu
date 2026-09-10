@@ -1548,10 +1548,8 @@ export type ManageEntityResponses = {
           is_symmetric: boolean;
           acl_managed: boolean;
           from_entity_name?: string;
-          from_entity_slug?: string;
           from_entity_type?: string;
           to_entity_name?: string;
-          to_entity_slug?: string;
           to_entity_type?: string;
           metadata?: {
             [key: string]: unknown;
@@ -1578,10 +1576,8 @@ export type ManageEntityResponses = {
           is_symmetric: boolean;
           acl_managed: boolean;
           from_entity_name?: string;
-          from_entity_slug?: string;
           from_entity_type?: string;
           to_entity_name?: string;
-          to_entity_slug?: string;
           to_entity_type?: string;
           metadata?: {
             [key: string]: unknown;
@@ -1613,10 +1609,8 @@ export type ManageEntityResponses = {
           is_symmetric: boolean;
           acl_managed: boolean;
           from_entity_name?: string;
-          from_entity_slug?: string;
           from_entity_type?: string;
           to_entity_name?: string;
-          to_entity_slug?: string;
           to_entity_type?: string;
           metadata?: {
             [key: string]: unknown;

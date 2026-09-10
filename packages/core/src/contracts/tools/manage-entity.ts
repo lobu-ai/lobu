@@ -431,10 +431,8 @@ export const RelationshipRowSchema = Type.Object({
   // the one shared RELATIONSHIP_SELECT, so no path needs to omit it.
   acl_managed: Type.Boolean(),
   from_entity_name: Type.Optional(Type.String()),
-  from_entity_slug: Type.Optional(Type.String()),
   from_entity_type: Type.Optional(Type.String()),
   to_entity_name: Type.Optional(Type.String()),
-  to_entity_slug: Type.Optional(Type.String()),
   to_entity_type: Type.Optional(Type.String()),
   metadata: Type.Optional(
     Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()])
