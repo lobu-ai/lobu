@@ -565,8 +565,35 @@ describe("publishing requires an attested release", () => {
         inputs: Record<string, { required?: boolean }>;
       }
     ).inputs;
-    expect(inputs.release_tag.required).toBe(true);
-    expect(inputs.image_run_id.required).toBe(true);
+    // Canary dispatches leave these empty; the stable job requires both
+    // before checkout or any release API calls.
+    expect(inputs.release_tag.required).toBe(false);
+    expect(inputs.image_run_id.required).toBe(false);
+    const gate = steps("publish-packages.yml", "attest-publish")[0].run!;
+    for (const [tag, run, status] of [
+      ["", "", 1],
+      ["lobu-v1.2.3", "", 1],
+      ["", "123", 1],
+      ["lobu-v1.2.3", "123", 0],
+    ] as const) {
+      const result = spawnSync("bash", ["-c", gate], {
+        env: {
+          ...process.env,
+          WORKFLOW_REF: "refs/heads/main",
+          RELEASE_TAG: tag,
+          IMAGE_RUN_ID: run,
+        },
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(status);
+    }
+    // build-images.yml dispatches this workflow with only release_tag and
+    // image_run_id, so any input it omits must stay optional or the dispatch
+    // is rejected outright and the release never reaches npm.
+    const dispatched = shell("build-images.yml", "trigger-package-publish");
+    for (const [name, spec] of Object.entries(inputs))
+      if (!dispatched.includes(`-f ${name}=`))
+        expect(spec.required).toBe(false);
     expect(Object.keys(inputs)).not.toContain("bump");
   });
 

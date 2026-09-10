@@ -1,6 +1,6 @@
 # Releasing
 
-The published packages ship as a synchronized release: `@lobu/core`, `@lobu/cli`, `@lobu/connector-sdk`, `@lobu/connector-worker`, `@lobu/worker`, `@lobu/embeddings`, `@lobu/client`, and `@lobu/promptfoo-provider`. (The previously published `lobu` unscoped package was retired when its commands moved into `@lobu/cli` as the `lobu memory` namespace.) [release-please](https://github.com/googleapis/release-please) reads conventional commits on `main` and drives versioning. Stable publication (`publish-packages.yml`) supports npm OIDC trusted publishing with `NPM_TOKEN` as a fallback; manual canary publication (`publish-canary.yml`) uses OIDC only. Each has its own trusted-publisher entry — see [Canary publication](#canary-publication).
+The published packages ship as a synchronized release: `@lobu/core`, `@lobu/cli`, `@lobu/connector-sdk`, `@lobu/connector-worker`, `@lobu/embeddings`, `@lobu/client`, and `@lobu/promptfoo-provider`. (The previously published `lobu` unscoped package was retired when its commands moved into `@lobu/cli` as the `lobu memory` namespace.) [release-please](https://github.com/googleapis/release-please) reads conventional commits on `main` and drives versioning. Both channels are dispatched from `publish-packages.yml`. Stable publication supports npm OIDC trusted publishing with `NPM_TOKEN` as a fallback; the canary channel calls the reusable `publish-canary.yml` and uses OIDC only. One trusted-publisher entry per package covers both — see [Canary publication](#canary-publication).
 
 ## Flow
 
@@ -14,21 +14,23 @@ Every provenance decision in that chain is one subcommand of `scripts/release-pr
 
 To force a specific version, land a commit on `main` whose body contains `Release-As: 7.2.0`; release-please then opens or updates the release PR for that version.
 
-Only stable `X.Y.Z` versions can be released. The attestation chain rejects anything else — `parseStableVersion` in `scripts/release-provenance.mjs` throws, so a prerelease `Release-As:` fails the release step with `invalid stable Lobu version` rather than shipping. Release a prerelease by publishing from a branch by hand instead.
+Only stable `X.Y.Z` versions can be released. The attestation chain rejects anything else — `parseStableVersion` in `scripts/release-provenance.mjs` throws, so a prerelease `Release-As:` fails the release step with `invalid stable Lobu version` rather than shipping. Use the manual canary channel below for a prerelease.
 
 ## Canary publication
 
-No canary is published automatically. A maintainer dispatches `publish-canary.yml` from `main`, and the run attests the dispatched commit before any repository code executes — a completed-success `build-images` push run for that exact SHA, every required image job green, an exact successful `ci.yml` run, and the SHA still reachable from `main` — then packs the candidate with `scripts/pack-cli-smoke.mjs` and drives the installed CLI before anything reaches the registry. `node scripts/canary-publish.mjs check <version>` then rejects a candidate that is not a descendant of the commit a package's current `canary` tag names, so a late dispatch cannot move `canary` backwards.
+No canary is published automatically. A maintainer dispatches **Publish Packages** (`publish-packages.yml`) from `main` with channel `canary` and leaves the stable-only inputs empty. That workflow calls `publish-canary.yml`, and the run attests the dispatched commit before any repository code executes — a completed-success `build-images` push run for that exact SHA, every required image job green, an exact successful `ci.yml` run, and the SHA still reachable from `main` — then packs the candidate with `scripts/pack-cli-smoke.mjs` and drives the installed CLI before anything reaches the registry. `node scripts/canary-publish.mjs check <version>` then rejects a candidate that is not a descendant of the commit a package's current `canary` tag names, so a late dispatch cannot move `canary` backwards.
 
 Publication itself is `npm publish --tag canary`: the tag moves as part of the publish because a separate `npm dist-tag add` cannot authenticate through OIDC. The four-environment `published-artifact-smoke` run is therefore a post-publication check, not a gate — a canary that fails it is already on the registry and needs `npm deprecate` plus a newer canary.
 
-Each published package needs a trusted publisher on npmjs.com naming repository `lobu-ai/lobu`, workflow file `publish-canary.yml`, environment `production`, with publishing allowed:
+The entry point stays the already trusted `publish-packages.yml`. npm's [trusted-publisher troubleshooting](https://docs.npmjs.com/trusted-publishers/) notes that with `workflow_call` the check may match the parent workflow rather than the file running `npm publish`, and asks for `id-token: write` at both levels — which the `canary` caller job and the reusable `publish` job both grant. So each package keeps its existing `lobu-ai/lobu` / `publish-packages.yml` / `production` trusted publisher with direct publishing allowed, and no second entry is needed. The canary publish step sets no `NODE_AUTH_TOKEN`, so npm authenticates through OIDC alone. Trusted publishing needs npm ≥ 11.5.1, supplied by `node-version: 24`.
+
+Dispatch a canary from the CLI with:
 
 ```bash
-npm trust github @lobu/<pkg> --repo lobu-ai/lobu --file publish-canary.yml --env production --allow-publish
+gh workflow run publish-packages.yml --repo lobu-ai/lobu --ref main -f channel=canary
 ```
 
-Add this connection alongside the existing stable publisher; do not replace it. [npm supports up to 10 trusted publishers per package](https://docs.npmjs.com/trusted-publishers/#managing-trusted-publisher-configurations), so both workflows can use OIDC. Trusted publishing needs npm ≥ 11.5.1, which the workflow gets from `node-version: 24`.
+Stable release dispatches keep the default `stable` channel and their existing release-tag and image-run attestation, which the canary channel skips.
 
 ## Commit prefixes → version bump
 
@@ -56,7 +58,7 @@ BREAKING CHANGE: RuntimeProviderCredentialResolver now returns
    ```
    (`extra-files[]` is also where the synchronized version is propagated to `charts/lobu/Chart.yaml` — both `$.version` and `$.appVersion` are bumped there on every release.)
 2. `scripts/publish-packages.mjs` — add to the `PACKAGES` array (use `transform: rewriteWorkspaceRefs` if it has `workspace:*` deps), keeping dependencies ahead of their dependents and `@lobu/cli` last.
-3. Bootstrap it on npm and register its canary trusted publisher before the next canary dispatch. Until the package exists, `canary-publish.mjs check` cannot read its dist-tags and the whole canary run fails closed.
+3. Bootstrap it on npm and register the shared `publish-packages.yml` trusted publisher before the next canary dispatch. Until the package exists, `canary-publish.mjs check` cannot read its dist-tags and the whole canary run fails closed.
 
 ## Recovery
 

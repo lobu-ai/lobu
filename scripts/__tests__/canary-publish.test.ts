@@ -83,14 +83,14 @@ describe("npm canary publication", () => {
     expect(() => publicationAllowed("19.2.0", version, () => true)).toThrow();
   });
 
-  it("requires a manual dispatch, OIDC and packed artifact smoke before publishing", () => {
+  it("requires a main-only caller, OIDC and packed artifact smoke before publishing", () => {
     const workflow = Bun.YAML.parse(
       readFileSync(
         new URL("../../.github/workflows/publish-canary.yml", import.meta.url),
         "utf8"
       )
     ) as any;
-    expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
+    expect(Object.keys(workflow.on)).toEqual(["workflow_call"]);
     expect(workflow.jobs.promote).toBeUndefined();
     expect(workflow.jobs.publish.permissions["id-token"]).toBe("write");
     const steps = workflow.jobs.publish.steps;
@@ -111,7 +111,6 @@ describe("npm canary publication", () => {
     expect(workflow.jobs.smoke.with.version).toBe(
       "${{ needs.publish.outputs.version }}"
     );
-    expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
     // The required image-job list is copied from publish-packages.yml, whose
     // own test pins it to build-images.yml; keep the copy from drifting.
     const stable = Bun.YAML.parse(
@@ -123,6 +122,18 @@ describe("npm canary publication", () => {
         "utf8"
       )
     ) as any;
+    expect(Object.keys(stable.on)).toEqual(["workflow_dispatch"]);
+    expect(stable.on.workflow_dispatch.inputs.channel.default).toBe("stable");
+    expect(stable.jobs.canary.if).toBe("inputs.channel == 'canary'");
+    expect(stable.jobs.canary.uses).toBe(
+      "./.github/workflows/publish-canary.yml"
+    );
+    expect(stable.jobs.canary.permissions["id-token"]).toBe("write");
+    expect(stable.jobs.canary.concurrency).toEqual({
+      group: "npm-canary",
+      "cancel-in-progress": false,
+    });
+    expect(stable.jobs["attest-publish"].if).toBe("inputs.channel == 'stable'");
     expect(workflow.env.REQUIRED_IMAGE_JOBS).toBe(
       stable.env.REQUIRED_IMAGE_JOBS
     );

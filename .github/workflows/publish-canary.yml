@@ -1,16 +1,11 @@
 name: Publish Canary
 
 on:
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
   actions: read
-
-# Serialize manual publications so an older run cannot move canary backwards.
-concurrency:
-  group: npm-canary
-  cancel-in-progress: false
 
 env:
   REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app app-image-smoke promote-images
@@ -23,12 +18,14 @@ jobs:
     outputs:
       sha: ${{ steps.producer.outputs.sha }}
     steps:
-      # Require main's workflow policy before checking out repository code.
-      - name: Require manual dispatch from main
+      # github.ref and github.sha are the CALLER's, so this pins the policy to
+      # the ref publish-packages.yml was dispatched from, before any repository
+      # code is checked out.
+      - name: Require a caller dispatched from main
         env:
           WORKFLOW_REF: ${{ github.ref }}
         run: |
-          [ "$WORKFLOW_REF" = refs/heads/main ] || { echo "::error::Run Publish Canary from main"; exit 1; }
+          [ "$WORKFLOW_REF" = refs/heads/main ] || { echo "::error::Run Publish Packages with channel=canary from main"; exit 1; }
 
       # Deliberately before any checkout: no repository code runs until the
       # dispatched commit is known to have a completed-success push build and
