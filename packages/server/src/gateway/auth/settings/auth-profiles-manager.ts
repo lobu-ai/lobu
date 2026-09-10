@@ -20,6 +20,19 @@ const logger = createLogger("auth-profiles-manager");
 
 const ANY_MODEL_SCOPE = "*";
 
+// Gateway-local provenance travels with the resolved object, never in JSON or
+// worker credentials. Refresh must target the persisted owner/bucket row, not
+// the synthetic principal that is executing the Automation.
+const PROFILE_SOURCE = Symbol("auth-profile-source");
+type ProfileSource = {
+  userId: string;
+  agentId: string;
+  organizationId?: string;
+};
+type SourcedAuthProfile = AuthProfile & {
+  [PROFILE_SOURCE]?: ProfileSource;
+};
+
 /** Refresh tokens that expire within this window from now. */
 const LAZY_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
@@ -98,8 +111,9 @@ interface AuthProfilesManagerOptions {
  *    surfaced via `DeclaredAgentRegistry`.
  *
  * Callers pass `ProviderCredentialContext.userId` when they have one
- * (worker proxy, OAuth route, agent-config route). When `userId` is
- * absent, only declared + runtime sources are consulted.
+ * (worker proxy, OAuth route, agent-config route). The agent-owner fallback
+ * is resolved from the agent's own metadata, independently of the (often
+ * synthetic) requesting principal.
  */
 export class AuthProfilesManager {
   private readonly ephemeralProfiles: EphemeralAuthProfileRegistry;
@@ -169,11 +183,26 @@ export class AuthProfilesManager {
    *
    * If LazyRefreshHooks aren't wired (boot order, tests), returns
    * `profile.credential` unchanged — periodic safety-net catches it later.
+   *
+   * Refresh targets the row the profile was READ from, not `ctx`. Under the
+   * agent-owner fallback `ctx` is the synthetic run principal, which owns no
+   * stored profile and so has nothing to refresh.
    */
   async ensureFreshCredential(
     profile: AuthProfile,
     ctx: { userId: string; agentId: string },
   ): Promise<string | undefined> {
+    const source = (profile as SourcedAuthProfile)[PROFILE_SOURCE];
+    // The refresh job rewrites the stored row and the re-read below resolves
+    // secret refs, both through the org-partitioned secret store. Callers hand
+    // us a profile after the org scope that produced it has unwound, so
+    // re-enter that partition instead of the caller's ambient scope.
+    if (source?.organizationId && tryGetOrgId() !== source.organizationId) {
+      return orgContext.run({ organizationId: source.organizationId }, () =>
+        this.ensureFreshCredential(profile, ctx)
+      );
+    }
+    const refreshContext = source ?? ctx;
     const credential = profile.credential;
     if (!credential) return credential;
     if (profile.authType !== "oauth") return credential;
@@ -188,10 +217,15 @@ export class AuthProfilesManager {
     if (expiresAt > now) {
       // Soon-expiring: fire async, return current credential.
       this.lazyRefreshHooks
-        .triggerAsync(ctx.userId, ctx.agentId)
+        .triggerAsync(refreshContext.userId, refreshContext.agentId)
         .catch((err) =>
           logger.warn(
-            { err, profileId: profile.id, userId: ctx.userId },
+            {
+              err,
+              profileId: profile.id,
+              userId: refreshContext.userId,
+              agentId: refreshContext.agentId,
+            },
             "[lazy-refresh] async trigger failed; periodic task will retry",
           ),
         );
@@ -200,17 +234,31 @@ export class AuthProfilesManager {
 
     // Already expired: inline refresh + re-read.
     try {
-      await this.lazyRefreshHooks.refreshNow(ctx.userId, ctx.agentId);
-      const refreshed = await this.getProviderProfiles(
-        ctx.agentId,
-        profile.provider,
-        ctx.userId,
+      await this.lazyRefreshHooks.refreshNow(
+        refreshContext.userId,
+        refreshContext.agentId
       );
-      const fresh = refreshed.find((p) => p.id === profile.id);
-      return fresh?.credential ?? credential;
+      const rows = source
+        ? await this.listStoredProfiles(source.userId, source.agentId)
+        : await this.getProviderProfiles(
+            ctx.agentId,
+            profile.provider,
+            ctx.userId
+          );
+      const row = rows.find((p) => p.id === profile.id);
+      if (!row) return credential;
+      // `listStoredProfiles` hands back stored rows; only the
+      // `getProviderProfiles` path has already resolved credential refs.
+      const fresh = source ? await this.resolveProfile(row) : row;
+      return fresh.credential ?? credential;
     } catch (err) {
       logger.error(
-        { err, profileId: profile.id, userId: ctx.userId },
+        {
+          err,
+          profileId: profile.id,
+          userId: refreshContext.userId,
+          agentId: refreshContext.agentId,
+        },
         "[lazy-refresh] inline refresh failed; returning stale credential",
       );
       return credential;
@@ -241,7 +289,11 @@ export class AuthProfilesManager {
     agentId: string
   ): Promise<string | undefined> {
     if (!this.agentOwnerResolver) return undefined;
-    const cached = this.agentOwnerCache.get(agentId);
+    // The resolver reads `agents` behind a cross-tenant guard that returns null
+    // without org context, so the answer is per (org, agent) — an agentId-only
+    // key would let one scope's miss serve another's hit for the TTL.
+    const cacheKey = JSON.stringify([tryGetOrgId(), agentId]);
+    const cached = this.agentOwnerCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.ownerUserId;
     let ownerUserId: string | undefined;
     try {
@@ -256,7 +308,7 @@ export class AuthProfilesManager {
       );
       return undefined;
     }
-    this.cacheSet(this.agentOwnerCache, agentId, {
+    this.cacheSet(this.agentOwnerCache, cacheKey, {
       ownerUserId,
       expiresAt: Date.now() + AuthProfilesManager.AGENT_OWNER_CACHE_TTL_MS,
     });
@@ -295,12 +347,34 @@ export class AuthProfilesManager {
   ): Promise<AuthProfile[]> {
     const ownerUserId = await this.resolveAgentOwnerUserId(agentId);
     if (!ownerUserId || ownerUserId === requestingUserId) return [];
-    const ownerProfiles = await this.userAuthProfiles.list(ownerUserId, agentId);
-    // Only API-key profiles fall back to the owner. OAuth/device-code profiles
-    // carry per-user refresh state (`ensureFreshCredential` keys refresh by the
-    // *requesting* userId, which here is the synthetic run user) — surfacing an
-    // owner OAuth token would attribute its refresh to the wrong user row.
-    return ownerProfiles.filter((profile) => profile.authType === "api-key");
+    const ownerProfiles = await this.listStoredProfiles(ownerUserId, agentId);
+    // The owner's org-bucket sign-in covers every agent in the org, so a run
+    // executing as a synthetic user reaches it through the owner too.
+    const organizationId = tryGetOrgId();
+    const bucketProfiles = organizationId
+      ? await this.listStoredProfiles(
+          ownerUserId,
+          orgBucketAgentId(organizationId)
+        )
+      : [];
+    return [...ownerProfiles, ...bucketProfiles];
+  }
+
+  /** Read one `(userId, agentId)` storage row set, stamping each profile with
+   *  the row it came from so a later refresh targets that row rather than the
+   *  principal that happened to request it. */
+  private async listStoredProfiles(
+    userId: string,
+    agentId: string
+  ): Promise<AuthProfile[]> {
+    const profiles = await this.userAuthProfiles.list(userId, agentId);
+    const organizationId = tryGetOrgId() ?? undefined;
+    return this.normalizeProfiles(profiles).map(
+      (profile): SourcedAuthProfile => ({
+        ...profile,
+        [PROFILE_SOURCE]: { userId, agentId, organizationId },
+      })
+    );
   }
 
   async listProfiles(agentId: string, userId?: string): Promise<AuthProfile[]> {
@@ -325,7 +399,7 @@ export class AuthProfilesManager {
     userId?: string
   ): Promise<AuthProfile[]> {
     const userProfiles = userId
-      ? await this.userAuthProfiles.list(userId, agentId)
+      ? await this.listStoredProfiles(userId, agentId)
       : [];
 
     // Org bucket: one subscription sign-in on the org inference-providers page
@@ -337,12 +411,12 @@ export class AuthProfilesManager {
     const orgId = tryGetOrgId();
     const orgBucketProfiles =
       userId && orgId
-        ? await this.userAuthProfiles.list(userId, orgBucketAgentId(orgId))
+        ? await this.listStoredProfiles(userId, orgBucketAgentId(orgId))
         : [];
 
     // Agent runs execute as a synthetic/platform user, not the operator who
     // connected the provider in the agent settings UI. Fall back to the agent
-    // owner's user-scoped profiles so a UI-connected API key actually resolves
+    // owner's user-scoped profiles so a UI-connected provider actually resolves
     // for chat/automation/Telegram runs. (`dedupeByScope` keeps the run user's
     // own profile when both exist.)
     const ownerProfiles = await this.listAgentOwnerProfiles(agentId, userId);
@@ -351,9 +425,9 @@ export class AuthProfilesManager {
     const declared = this.synthesizeDeclaredProfiles(agentId);
 
     const merged = this.dedupeByScope([
-      ...this.normalizeProfiles(userProfiles),
-      ...this.normalizeProfiles(orgBucketProfiles),
-      ...this.normalizeProfiles(ownerProfiles),
+      ...userProfiles,
+      ...orgBucketProfiles,
+      ...ownerProfiles,
       ...this.normalizeProfiles(ephemeral),
       ...declared,
     ]);
@@ -419,13 +493,36 @@ export class AuthProfilesManager {
       return runtimeProfile;
     }
 
-    const providerProfiles = await this.getProviderProfiles(
+    let providerProfiles = await this.getProviderProfiles(
       agentId,
       provider,
       context?.userId
     );
     if (providerProfiles.length === 0) {
       return null;
+    }
+
+    // A persisted OAuth profile that has already expired still has a refresh
+    // path; without this the filter below drops it and a scheduled run can
+    // never recover once its token lapses.
+    const expiredBefore = Date.now();
+    const expiredRefreshable = providerProfiles.filter(
+      (profile) =>
+        profile.authType === "oauth" &&
+        !!(profile as SourcedAuthProfile)[PROFILE_SOURCE] &&
+        !!profile.metadata?.expiresAt &&
+        profile.metadata.expiresAt <= expiredBefore
+    );
+    if (this.lazyRefreshHooks && expiredRefreshable.length > 0) {
+      for (const profile of expiredRefreshable) {
+        const source = (profile as SourcedAuthProfile)[PROFILE_SOURCE]!;
+        await this.ensureFreshCredential(profile, source);
+      }
+      providerProfiles = await this.getProviderProfiles(
+        agentId,
+        provider,
+        context?.userId
+      );
     }
 
     const now = Date.now();
