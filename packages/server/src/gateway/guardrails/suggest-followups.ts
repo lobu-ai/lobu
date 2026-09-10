@@ -3,8 +3,11 @@
  *
  * Not a safety trip: it never blocks a reply. When an agent enables it via
  * `guardrails: ["suggest-followups"]` and a turn ends without the agent calling
- * `suggest_actions`, the gateway derives 2–3 follow-up chips from the reply
- * and publishes them through the same persist + card path the tool uses.
+ * `suggest_actions`, the gateway may derive useful optional follow-up chips
+ * from the reply and post them as their own platform card. An empty set is the
+ * default: a complete answer needs no suggestions. Chat surfaces only — the
+ * API/web path deliberately skips enrichment (see unified-thread-consumer).
+ * Chat platforms retain the cards; the interaction bridge persists click routing.
  *
  * Ordering (critical): enrichment runs ONLY after blocking output guardrails
  * (`secret-scan`, `pii-scan`, …) have passed on the terminal text. The
@@ -68,8 +71,12 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const MIN_REPLY_CHARS = 40;
 
 const SYSTEM_PROMPT = [
-  "You write follow-up action chips for a chat UI.",
-  "Given an assistant's reply, return 2-3 things the USER would plausibly want next.",
+  "You decide whether an assistant's reply needs optional follow-up action chips.",
+  'Default to {"prompts":[]}. A complete answer does not need suggestions.',
+  "Only offer a concrete next step the reply itself leaves open and that would help the user proceed.",
+  "Return no suggestions for routine answers, acknowledgements, corrections, status updates, completed requests, or a reply that closes the topic.",
+  "Do not invent extra work or add a generic offer to explore further.",
+  "When useful next steps remain, return 1-3 distinct actions. A single useful action is enough; never pad the list.",
   "",
   'Each item is {"title","message"}:',
   '- "title": a short tappable label, at most 20 characters.',

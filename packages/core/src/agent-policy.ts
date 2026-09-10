@@ -71,7 +71,7 @@ export const CUSTOM_TOOL_METADATA: Record<string, CustomToolMetadata> = {
   },
   suggest_actions: {
     description:
-      'ALWAYS call this once before you finish replying, unless the user explicitly said they are done. Offer 2-4 follow-up actions as tappable chips under your reply. Each `message` is sent verbatim as the user\'s next turn, so write it in the user\'s voice ("Show me the diff", not "I can show you the diff"). This is non-blocking and is how users navigate — a reply without chips is a dead end. If the obvious next step is unclear, suggest ways to go deeper on what you just discussed.',
+      'Offer optional follow-up actions as tappable chips when the user asks for suggested next steps, or when a concrete choice would help them proceed. Default to a plain text reply: skip routine answers, acknowledgements, corrections, status updates, and requests you already completed, and respect an explicit ask for no suggestions or a closed topic. Do not invent extra work, repeat actions already offered, or defer work you should do now. One useful action is enough and 4 is the ceiling — never pad the list. Call at most once per turn. Each `message` is sent verbatim as the user\'s next turn, so write it in the user\'s voice ("Show me the diff", not "I can show you the diff"). This posts immediately, independently of the final reply, so each suggestion must make sense on its own. Non-blocking; finish your reply normally.',
   },
 };
 
