@@ -1206,6 +1206,53 @@ describe('agent turn producer', () => {
     await toolless();
   });
 
+  it('uses provider-owned metadata for a model missing from the bundled registry', async () => {
+    const org = await createTestOrganization();
+    const metadata = vi.fn(async () => ({ contextWindow: 272000, reasoning: true, input: ['text', 'image'] as ('text' | 'image')[] }));
+    const module = Object.assign(tokenEchoingModule(), { getModelMetadata: metadata });
+    const message = messageFor(org.id);
+    message.agentOptions = { model: 'claude/synthetic-new-model' };
+    await enqueueMessage(message, { agentSettings: settingsStore, catalog: catalogFor(module), gatewayUrl: GATEWAY_URL });
+    const [run] = await agentTurnRuns();
+    expect(run.action_input.turn.compaction.context_window).toBe(272000);
+    expect(run.action_input.turn.provider.reasoning).toBe(true);
+    expect(metadata).toHaveBeenCalledWith(AGENT_ID, 'synthetic-new-model', expect.objectContaining({ organizationId: org.id, userId: 'user-turn' }));
+  });
+
+  it.each(['failure', 'invalid'])('retains registry defaults when provider metadata is %s', async (mode) => {
+    const org = await createTestOrganization();
+    const module = Object.assign(tokenEchoingModule(), { getModelMetadata: async () => {
+      if (mode === 'failure') throw new Error('Synthetic catalog failure');
+      return { contextWindow: -1, maxTokens: Number.NaN, input: [] };
+    } });
+    const message = messageFor(org.id);
+    message.agentOptions = { model: 'claude/synthetic-new-model' };
+    await enqueueMessage(message, { agentSettings: settingsStore, catalog: catalogFor(module), gatewayUrl: GATEWAY_URL });
+    const [run] = await agentTurnRuns();
+    // The producer's own DEFAULT_CONTEXT_WINDOW, unchanged by the junk answer.
+    expect(run.action_input.turn.compaction.context_window).toBe(128000);
+    expect(run.action_input.turn.provider.max_tokens).toBeUndefined();
+    expect(run.action_input.turn.provider.reasoning).toBeUndefined();
+  });
+
+  it('never asks the provider about a model the registry already carries', async () => {
+    // The lookup is a live call to the provider's own catalog on the
+    // per-message admission path; a registry hit answers the same four fields
+    // without it.
+    const org = await createTestOrganization();
+    const metadata = vi.fn(async () => ({ contextWindow: 999 }));
+    const module = Object.assign(tokenEchoingModule(), { getModelMetadata: metadata });
+    const message = messageFor(org.id);
+    message.agentOptions = { model: 'claude/claude-sonnet-4-5-20250929' };
+    await enqueueMessage(message, { agentSettings: settingsStore, catalog: catalogFor(module), gatewayUrl: GATEWAY_URL });
+    const [run] = await agentTurnRuns();
+    expect(metadata).not.toHaveBeenCalled();
+    const registryModel = getModel('anthropic' as never, 'claude-sonnet-4-5-20250929' as never) as
+      | { contextWindow?: number }
+      | undefined;
+    expect(run.action_input.turn.compaction.context_window).toBe(registryModel?.contextWindow);
+  });
+
   it('passes native tool history and provider metadata to Pi without gateway rewriting', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
