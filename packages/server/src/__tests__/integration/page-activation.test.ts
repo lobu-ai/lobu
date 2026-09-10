@@ -603,6 +603,11 @@ describe("page-activated operation runs", () => {
 		// An older undismissed draft that predates 55 newer notifications: the
 		// recent-window slice would drop it, but the "stays until Done" contract
 		// must keep it in the lens regardless.
+		//
+		// Only while it is still openable. A draft with no linked run resolves
+		// `expired` — it can never be activated — and pinning THAT past the
+		// window permanently spent one of the caller's `limit` slots on a dead
+		// card. Both are seeded here so the two states cannot drift apart again.
 		await createNotificationForUsers([seeded.user.id], {
 			organizationId: seeded.org.id,
 			type: "agent_message",
@@ -610,9 +615,21 @@ describe("page-activated operation runs", () => {
 			body: "Draft: Hello",
 			resourceUrl: `/${seeded.org.slug}/memory?content_ids=1`,
 			browserUrl: "https://x.com/ada/status/123",
+			browserRunId: seeded.run.id,
 		});
 		const [draft] = await sql<{ id: number }>`
 			SELECT id FROM events ORDER BY id ASC LIMIT 1
+		`;
+		await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id,
+			type: "agent_message",
+			title: "Draft ready for Grace on X",
+			body: "Draft: Hi",
+			resourceUrl: `/${seeded.org.slug}/memory?content_ids=2`,
+			browserUrl: "https://x.com/grace/status/456",
+		});
+		const [deadDraft] = await sql<{ id: number }>`
+			SELECT id FROM events ORDER BY id DESC LIMIT 1
 		`;
 		for (let i = 0; i < 55; i++) {
 			await createNotificationForUsers([seeded.user.id], {
@@ -623,11 +640,11 @@ describe("page-activated operation runs", () => {
 				resourceUrl: `/${seeded.org.slug}/memory?content_ids=99`,
 			});
 		}
-		// Backdate the draft below the recent window (newest 50), still undismissed.
+		// Backdate both drafts below the recent window (newest 50), still undismissed.
 		await sql`
 			UPDATE events
 			SET created_at = created_at - interval '7 days'
-			WHERE id = ${draft.id}
+			WHERE id IN (${draft.id}, ${deadDraft.id})
 		`;
 		const activity = await listOrgActivity({
 			organizationId: seeded.org.id,
@@ -641,6 +658,13 @@ describe("page-activated operation runs", () => {
 				(item) => item.browser_url === "https://x.com/ada/status/123",
 			),
 		).toBe(true);
+		// The unlinkable draft resolves `expired`, so it falls out of the window
+		// like any other old card instead of holding a slot forever.
+		expect(
+			activity.items.some(
+				(item) => item.browser_url === "https://x.com/grace/status/456",
+			),
+		).toBe(false);
 		// Respects the declared limit even when the undismissed draft is pinned.
 		expect(activity.items.length).toBeLessThanOrEqual(50);
 		// Items stay in chronological order (oldest first).

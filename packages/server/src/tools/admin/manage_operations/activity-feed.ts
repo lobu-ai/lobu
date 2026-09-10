@@ -621,6 +621,12 @@ export async function listOrgActivity(opts: {
 	// the kind filter permits notifications — merge them chronologically, and
 	// pin them so the cap below evicts non-handoff cards instead of the draft.
 	// Bounded, read-only, multi-replica safe.
+	//
+	// Only a `ready` draft earns that pin. `completed` (already activated) and
+	// `expired` (can never be activated) have nothing left to do, and pinning
+	// them made a month-old dead draft outrank today's activity — every such
+	// draft permanently consumed one of the caller's `limit` slots. They still
+	// surface inside the ordinary window, where they read as history.
 	let collapsed: RawCard[];
 	const pinnedHandoffIds = new Set<number>();
 	if (
@@ -643,6 +649,7 @@ export async function listOrgActivity(opts: {
 		for (const n of handoffNotifications) {
 			const card = buildNotificationCard(opts.ownerSlug, n);
 			if (!card || card.notification_id == null) continue;
+			if (card.browser_handoff?.state !== "ready") continue;
 			// Pin by id regardless of whether this handoff is already in the
 			// merge window: a draft inside the 60-card window but outside the
 			// final limit would otherwise be sliced away un-pinned.
