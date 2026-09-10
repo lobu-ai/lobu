@@ -1182,23 +1182,6 @@ export const DispatchChromeActionResponseSchema = Type.Object({
   error_message: Type.Optional(Type.String()),
 });
 
-/**
- * Worker → gateway request to compose an imported read operation. The gateway
- * derives the connection from the claimed parent run, so a connector can only
- * read through the connection it is already executing for.
- */
-export const ReadConnectorOperationRequestSchema = Type.Object({
-  parent_run_id: Type.Integer(),
-  worker_id: Type.String(),
-  operation_key: Type.String(),
-  input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-});
-
-/** Gateway → worker output envelope of a composed imported read. */
-export const ReadConnectorOperationResponseSchema = Type.Object({
-  output: Type.Record(Type.String(), Type.Unknown()),
-});
-
 export type RunType = Static<typeof RunTypeSchema>;
 export type WorkerExitReason = Static<typeof WorkerExitReasonSchema>;
 export type WorkerExitDiagnostics = Static<typeof WorkerExitDiagnosticsSchema>;
@@ -1329,10 +1312,4 @@ export type DispatchChromeActionRequest = Static<
 >;
 export type DispatchChromeActionResponse = Static<
   typeof DispatchChromeActionResponseSchema
->;
-export type ReadConnectorOperationRequest = Static<
-  typeof ReadConnectorOperationRequestSchema
->;
-export type ReadConnectorOperationResponse = Static<
-  typeof ReadConnectorOperationResponseSchema
 >;

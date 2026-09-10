@@ -423,13 +423,6 @@ async function executeSyncRun(
             }
           }
         },
-        onReadOperation: (operation_key, input) =>
-          client.readOperation({
-            parent_run_id: run_id,
-            worker_id: client.id,
-            operation_key,
-            input,
-          }),
         onChromeDispatch: async (actionKey, actionInput) => {
           // Forward to the gateway's dispatch endpoint. The endpoint
           // resolves a paired chrome connection in the same org as run_id,
@@ -621,13 +614,6 @@ async function executeActionRun(
         credentials: credentials ?? null,
       },
       hooks: {
-        onReadOperation: (operation_key, input) =>
-          client.readOperation({
-            parent_run_id: run_id,
-            worker_id: client.id,
-            operation_key,
-            input,
-          }),
         onChromeDispatch: async (actionKey, actionInput) => {
           return client.dispatchChromeAction({
             parent_run_id: run_id,

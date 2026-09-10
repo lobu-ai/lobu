@@ -13,8 +13,6 @@ import { resolveExecutionAuth } from '../utils/execution-context';
 export interface ResolvedCredentials {
   accessToken: string;
   tokenType: string;
-  /** Host-only app/account values; never return through tool results. */
-  authValues?: Record<string, string>;
 }
 
 /**
@@ -70,7 +68,6 @@ export async function resolveCredentialsByConnectionId(
     return {
       accessToken: resolved.credentials.accessToken,
       tokenType: 'Bearer',
-      authValues: resolved.connectionCredentials,
     };
   }
 

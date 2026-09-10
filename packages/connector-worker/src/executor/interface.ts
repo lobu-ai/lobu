@@ -167,8 +167,6 @@ export type ExecutorResult =
     };
 
 export interface ExecutionHooks {
-  /** Host-bound imported read operation; the guest cannot select a connection. */
-  onReadOperation?: (operationKey: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
   /**
    * Stop the run from outside: the guest is terminated and `execute` rejects
    * with the abort as its error. An agent turn arms this when the gateway's
