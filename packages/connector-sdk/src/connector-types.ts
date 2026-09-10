@@ -68,6 +68,8 @@ export interface ConnectorDefinition {
   /** Optional OpenAPI operation source */
   openapiConfig?: {
     specUrl: string;
+    /** Host-rendered headers. {{KEY}} references the selected app/account credentials. */
+    credentialHeaders?: Record<string, string>;
     includeOperations?: string[];
     excludeOperations?: string[];
     includeTags?: string[];
@@ -875,6 +877,12 @@ export interface EventEnvelope {
 // Sync Context & Result
 // =============================================================================
 
+/** Connection-bound imported operations. The host owns credentials and policy. */
+export interface ConnectorOperations {
+  /** Executes an imported read operation; rejects writes, disabled operations and missing scopes. */
+  read(operationKey: string, input?: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+
 /**
  * Context passed to ConnectorRuntime.sync().
  *
@@ -883,6 +891,8 @@ export interface EventEnvelope {
  * - `F` — feed config shape (defaults to `Record<string, unknown>`)
  */
 export interface SyncContext<C = Record<string, unknown>, F = Record<string, unknown>> {
+  /** Available on hosted connector executions; direct callers may supply their own binding. */
+  operations?: ConnectorOperations;
   /** Feed key */
   feedKey: string;
   /**
@@ -1000,6 +1010,8 @@ export type FeedOperation = 'sync' | 'read';
  * returned to the caller without being persisted by this contract.
  */
 export interface FeedReadContext<F = Record<string, unknown>> {
+  /** Available on hosted connector executions; direct callers may supply their own binding. */
+  operations?: ConnectorOperations;
   feedId?: number;
   feedKey: string;
   query?: string;
@@ -1215,6 +1227,8 @@ export interface AuthResult {
  * Context passed to ConnectorRuntime.execute()
  */
 export interface ActionContext {
+  /** Available on hosted connector executions; direct callers may supply their own binding. */
+  operations?: ConnectorOperations;
   /** Action key to execute */
   actionKey: string;
   /** Action input parameters */

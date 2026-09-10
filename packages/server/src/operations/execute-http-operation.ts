@@ -23,6 +23,48 @@ export interface HttpOperationConnection {
 	connector_key: string;
 }
 
+/**
+ * Render the connector's credential header templates from resolved app/account
+ * credentials. `{{KEY}}` names a credential key, never a value, and a template
+ * that still has braces after substitution is a malformed reference. Headers
+ * that carry the gateway's own authorization are refused outright.
+ */
+function renderCredentialHeaders(
+	templates: Record<string, string>,
+	values: Record<string, string>,
+): Headers {
+	const headers = new Headers();
+	for (const [name, template] of Object.entries(templates)) {
+		if (
+			/^(host|authorization|cookie|content-length|transfer-encoding)$/i.test(
+				name,
+			)
+		) {
+			throw new Error(`Reserved credential header '${name}'`);
+		}
+		const value = template.replace(
+			/\{\{([A-Za-z0-9_]+)\}\}/g,
+			(_match, key: string) => {
+				if (!values[key]) {
+					throw new Error(`Required app credential '${key}' is unavailable`);
+				}
+				return values[key];
+			},
+		);
+		if (value.includes("{{") || value.includes("}}")) {
+			throw new Error(`Invalid credential header template for '${name}'`);
+		}
+		try {
+			headers.set(name, value);
+		} catch {
+			// Headers may echo an invalid value in its error. Never return a
+			// resolved app secret in a failed operation's persisted message.
+			throw new Error(`Invalid credential header '${name}'`);
+		}
+	}
+	return headers;
+}
+
 function buildResolvedUrl(
 	serverUrl: string,
 	pathTemplate: string,
@@ -151,6 +193,7 @@ export const __httpOperationTestOnly = {
 	fetchAuthenticatedHttpOperation,
 	MAX_HTTP_OPERATION_RESPONSE_BYTES,
 	readHttpOperationResponse,
+	renderCredentialHeaders,
 	requestAbortSignal,
 };
 
@@ -210,6 +253,14 @@ export async function executeHttpOperation(
 			"Authorization",
 			`${credentials.tokenType} ${credentials.accessToken}`,
 		);
+
+		// After the caller's headers: a credential header the gateway owns
+		// always wins over a value supplied with the operation input.
+		const credentialHeaders = renderCredentialHeaders(
+			operation.backend_config.credentialHeaders ?? {},
+			credentials.authValues ?? {},
+		);
+		credentialHeaders.forEach((value, key) => headers.set(key, value));
 
 		const body = actionInput.body;
 		let requestBody: string | undefined;

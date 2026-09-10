@@ -203,6 +203,36 @@ Declare `actions` with an `inputSchema`, `requiresApproval`, and annotations
 custom provider with `clientIdKey`/`clientSecretKey`), and `browser` (`cli`
 browser-auth or live `cdp`). Full schemas are in the SDK reference.
 
+### Compose imported OpenAPI reads
+
+A connector may declare `openapiConfig` alongside its feeds and local actions.
+Hosted sync, feed-read, and action handlers receive
+`ctx.operations.read(key, input)`. This invokes an imported HTTP read on the
+same connection, using normal operation input validation, OAuth scope checks,
+action-mode policy, and run history. The result is the operation output
+envelope (`{ body: ... }` for HTTP operations). Writes and local-action
+recursion are rejected. A required approval or missing permission fails the
+composed read; it never approves a run on the caller's behalf. The binding is
+optional on the SDK contract, so a direct invocation outside Lobu must supply
+its own or handle its absence.
+
+```ts
+const response = await ctx.operations!.read("listItems", {
+  query: { limit: 25 },
+});
+```
+
+`openapiConfig.credentialHeaders` maps request headers to templates referencing
+selected app/account credential keys, for example
+`{ "x-api-key": "{{API_KEY}}:{{API_SECRET}}" }`. Templates contain key names,
+never credential values. The gateway resolves them from the connection's app
+(or `env`) auth profile, overwrites any caller-supplied value for those
+headers, and hides them from the operation's input schema; a missing credential
+fails the request before it is sent, and `Authorization` stays gateway-owned.
+Imported OAuth scope requirements are read from the operation or inherited from
+the specification; alternative requirements are an OR, so only the scopes every
+alternative demands are enforced.
+
 ### Dependencies and environment
 
 - npm deps go in the project/package `package.json` and are bundled by esbuild;

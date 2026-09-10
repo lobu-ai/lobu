@@ -12,7 +12,7 @@ import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { resolveActingPrincipal, resolveWritePolicyDecision } from "../../../../authz/entity-policy";
-import { authzScopeFromToolContext } from "../../../../authz/scope";
+import { authzScopeFromToolContext, type AuthzScope } from "../../../../authz/scope";
 import { getDb } from "../../../../db/client";
 import type { Env } from "../../../../index";
 import {
@@ -236,6 +236,11 @@ async function executeLocalActionInline(
 				credentials,
 			},
 			hooks: {
+				onReadOperation: connectorOperationReader(
+					{ organizationId, principal: requesterUserId },
+					connection.id,
+					abortSignal,
+				),
 				// Let an inline connector action drive the paired Owletto Chrome
 				// extension (the Lobu Team Deliveroo connector scrapes restaurant
 				// search + menu pages this way). The connector calls
@@ -488,7 +493,9 @@ async function replayExistingOperationRun(
 export async function handleExecute(
 	args: Static<typeof ExecuteAction>,
 	ctx: ToolContext,
-	_env: Env,
+	_env: Env | undefined,
+	/** Set by connector composition: only an imported HTTP read may execute. */
+	constraints?: { importedReadOnly: boolean },
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
 	const browserContext = deriveBrowserActionContext(ctx);
@@ -545,6 +552,14 @@ export async function handleExecute(
 	}
 
 	const { connection, operation } = resolved;
+	if (
+		constraints?.importedReadOnly &&
+		(operation.backend !== "http_operation" || operation.kind !== "read")
+	) {
+		return {
+			error: "Connector composition only permits imported read operations",
+		};
+	}
 	if (connection.status !== "active") {
 		return { error: `Connection is ${connection.status}, must be active` };
 	}
@@ -600,6 +615,10 @@ export async function handleExecute(
 		return {
 			error: `Operation '${operation.operation_key}' is disabled on this connection.`,
 		};
+	}
+
+	if (constraints?.importedReadOnly && mode === "approval") {
+		return { error: `Imported read '${operation.operation_key}' requires approval; execute it directly through operations.execute.` };
 	}
 
 	// Org-level connector-action policy, from the SAME write-gate the entity and
@@ -1004,4 +1023,53 @@ export async function handleExecute(
 		status: "failed",
 		error_message: result.error_message,
 	};
+}
+
+/**
+ * `ctx.operations.read` for a running connector.
+ *
+ * The connection is bound by the host — the run's own connection — so a guest
+ * can name an operation but never the connection it runs against. Everything
+ * else is the ordinary `operations.execute` path: input validation, required
+ * OAuth scopes, per-connection action modes, and a run row per read.
+ *
+ * The synthetic context deliberately carries the run's creator as its
+ * principal, so connection visibility is decided exactly as it would be for
+ * that person calling `operations.execute`. The worker bridge resolves an
+ * active scheduled feed to its connection owner; headless action runs retain
+ * their stamped Automation for the existing author-visibility check. `tokenType: 'pat'` keeps approval human-only: a
+ * composed read that needs approval fails rather than self-approving.
+ */
+export function connectorOperationReader(scope: AuthzScope & { actingAutomationId?: number }, connectionId: number, signal?: AbortSignal) {
+  return async (operationKey: string, input: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    if (signal?.aborted) throw new Error('Connector execution canceled');
+    const result = await handleExecute(
+      { action: 'execute', connection_id: connectionId, operation_key: operationKey, input },
+      {
+        organizationId: scope.organizationId,
+        userId: scope.principal,
+        agentId: scope.agentId,
+        actingAutomationId: scope.actingAutomationId,
+        memberRole: null,
+        isAuthenticated: scope.principal !== null,
+        tokenType: 'pat',
+        scopedToOrg: true,
+        allowCrossOrg: false,
+        grantedOrganizationIds: null,
+        directSearchFederation: false,
+        abortSignal: signal,
+      },
+      undefined,
+      { importedReadOnly: true }
+    );
+    if (!('status' in result) || result.status !== 'completed') {
+      const reason =
+        ('error' in result && result.error) ||
+        ('error_message' in result && result.error_message) ||
+        ('status' in result ? `Imported read is ${result.status}` : 'Imported read did not complete');
+      throw new Error(String(reason));
+    }
+    const output = 'output' in result ? result.output : undefined;
+    return output && typeof output === 'object' ? (output as Record<string, unknown>) : {};
+  };
 }

@@ -61,6 +61,7 @@ function normalizeMcpConfig(
 
 type OpenApiConfig = {
 	specUrl: string;
+	credentialHeaders?: Record<string, string>;
 	includeOperations?: string[];
 	excludeOperations?: string[];
 	includeTags?: string[];
@@ -75,6 +76,7 @@ function normalizeOpenApiConfig(
 	if (!specUrl) return null;
 	return {
 		specUrl,
+		credentialHeaders: normalizeCredentialHeaders(raw.credentialHeaders),
 		includeOperations: Array.isArray(raw.includeOperations)
 			? raw.includeOperations.filter((v): v is string => typeof v === "string")
 			: undefined,
@@ -99,6 +101,26 @@ function normalizeAnnotations(raw: unknown): OperationAnnotations | undefined {
 	if (typeof obj.idempotentHint === "boolean")
 		annotations.idempotentHint = obj.idempotentHint;
 	return Object.keys(annotations).length > 0 ? annotations : undefined;
+}
+
+/**
+ * Header templates the gateway renders from resolved credentials. Values arrive
+ * from `connector_definitions.openapi_config` (JSONB), so anything that is not
+ * a non-empty string template is dropped here rather than at request time.
+ */
+function normalizeCredentialHeaders(
+	raw: unknown,
+): Record<string, string> | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const headers = Object.fromEntries(
+		Object.entries(raw as Record<string, unknown>).filter(
+			(entry): entry is [string, string] =>
+				entry[0].trim().length > 0 &&
+				typeof entry[1] === "string" &&
+				entry[1].length > 0,
+		),
+	);
+	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
 function normalizeRequiredScopes(raw: unknown): string[] | undefined {
@@ -192,13 +214,24 @@ function getOperationInputSchema(
 	pathParameters: unknown[],
 	operationParameters: unknown[],
 	requestBody: unknown,
+	/** Headers the gateway renders from credentials; callers never supply them. */
+	hostHeaders: Record<string, string> | undefined,
 ): Record<string, unknown> | undefined {
-	const mergedParameters = [...pathParameters, ...operationParameters]
+	const hostHeaderNames = new Set(
+		Object.keys(hostHeaders ?? {}).map((name) => name.toLowerCase()),
+	);
+	const parameterCandidates = [...pathParameters, ...operationParameters]
 		.map((param) => resolveRef(spec, param))
 		.filter(
 			(param): param is Record<string, unknown> =>
 				!!param && typeof param === "object",
 		);
+
+	// OpenAPI operation parameters replace inherited parameters with the same identity.
+	const mergedParameters = new Map<string, Record<string, unknown>>();
+	for (const parameter of parameterCandidates) {
+		mergedParameters.set(JSON.stringify([parameter.in, parameter.name]), parameter);
+	}
 
 	const pathProps: Record<string, unknown> = {};
 	const pathRequired: string[] = [];
@@ -207,7 +240,7 @@ function getOperationInputSchema(
 	const headerProps: Record<string, unknown> = {};
 	const headerRequired: string[] = [];
 
-	for (const param of mergedParameters) {
+	for (const param of mergedParameters.values()) {
 		const name = typeof param.name === "string" ? param.name : null;
 		const location = typeof param.in === "string" ? param.in : null;
 		if (!name || !location) continue;
@@ -224,6 +257,9 @@ function getOperationInputSchema(
 			queryProps[name] = finalSchema;
 			if (required) queryRequired.push(name);
 		} else if (location === "header") {
+			// The gateway overwrites these, so advertising them would make a
+			// required credential header unsatisfiable for the caller.
+			if (hostHeaderNames.has(name.toLowerCase())) continue;
 			headerProps[name] = finalSchema;
 			if (required) headerRequired.push(name);
 		}
@@ -238,9 +274,11 @@ function getOperationInputSchema(
 	}
 	if (Object.keys(queryProps).length > 0) {
 		properties.query = getSectionSchema(queryProps, queryRequired);
+		if (queryRequired.length > 0) requiredSections.push("query");
 	}
 	if (Object.keys(headerProps).length > 0) {
 		properties.headers = getSectionSchema(headerProps, headerRequired);
+		if (headerRequired.length > 0) requiredSections.push("headers");
 	}
 
 	const bodySchema = getJsonBodySchema(spec, requestBody);
@@ -307,8 +345,47 @@ async function fetchOpenApiSpec(
 	}
 }
 
+/**
+ * OAuth scopes an imported operation needs, from its own `security` or the
+ * spec-level default. A list of requirements is an OR the flat
+ * `required_scopes` contract cannot express, so only scopes EVERY alternative
+ * demands are reported: a connection authorized through one alternative must
+ * not be blocked by another alternative's scopes, and the provider still
+ * enforces the rest.
+ */
+function getOpenApiScopes(
+	spec: Record<string, unknown>,
+	operation: Record<string, unknown>,
+): string[] {
+	const requirements = operation.security ?? spec.security;
+	if (!Array.isArray(requirements) || requirements.length === 0) return [];
+	const schemes =
+		((spec.components as Record<string, unknown> | undefined)
+			?.securitySchemes as Record<string, unknown> | undefined) ?? {};
+	const alternatives = requirements.map((requirement) => {
+		const entries =
+			requirement && typeof requirement === "object"
+				? Object.entries(requirement as Record<string, unknown>)
+				: [];
+		return new Set(
+			entries.flatMap(([key, scopes]) => {
+				const scheme = resolveRef(spec, schemes[key]) as
+					| Record<string, unknown>
+					| undefined;
+				return scheme?.type === "oauth2" && Array.isArray(scopes)
+					? scopes.filter((scope): scope is string => typeof scope === "string")
+					: [];
+			}),
+		);
+	});
+	const [first, ...rest] = alternatives;
+	return [...first].filter((scope) => rest.every((other) => other.has(scope)));
+}
+
 export const __connectorOperationsTestOnly = {
 	fetchOpenApiSpec,
+	getOpenApiScopes,
+	getOperationInputSchema,
 	MAX_OPENAPI_SPEC_BYTES,
 };
 
@@ -388,6 +465,7 @@ async function getOpenApiOperations(
 							: undefined,
 				kind,
 				backend: "http_operation",
+				required_scopes: normalizeRequiredScopes(getOpenApiScopes(spec, opRecord)),
 				requires_approval: requiresApproval,
 				annotations:
 					kind === "read"
@@ -401,6 +479,7 @@ async function getOpenApiOperations(
 					pathParameters,
 					Array.isArray(opRecord.parameters) ? opRecord.parameters : [],
 					opRecord.requestBody,
+					config.credentialHeaders,
 				),
 				output_schema: getResponseSchema(spec, opRecord.responses),
 				backend_config: {
@@ -408,6 +487,7 @@ async function getOpenApiOperations(
 					method: method.toUpperCase(),
 					pathTemplate,
 					serverUrl,
+					credentialHeaders: config.credentialHeaders,
 				},
 			});
 		}

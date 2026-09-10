@@ -8,6 +8,7 @@
  * operations.execute.
  */
 
+import { connectorOperationReader } from '../tools/admin/manage_operations/handlers/execute';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import {
   classifyToolError,
@@ -470,6 +471,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const timeoutMs = remainingReadMs(p);
   const result = await executeCompiledConnector({
     compiledCode,
+    hooks: { onReadOperation: connectorOperationReader(p.scope, Number(feed.connection_id), p.signal) },
     job: {
       mode: 'read',
       feedId: feed.id,

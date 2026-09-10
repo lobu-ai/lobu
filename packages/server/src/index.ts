@@ -842,6 +842,11 @@ app.use("/api/workers/*", async (c, next) => {
 				// it claimed. Required for chrome-extension action tools to
 				// return their observation back to the gateway.
 				"/api/workers/complete-action",
+				// Imported reads composed by a connector mid-run. The handler
+				// resolves the connection from the run this worker claimed and
+				// authorizes it with authorizeRunForWorker, so it is scoped
+				// per-handler rather than by this door.
+				"/api/workers/read-operation",
 			]);
 			const requestPath = new URL(c.req.url).pathname;
 			const isAuthProfileSubpath = requestPath.startsWith(
@@ -947,7 +952,12 @@ import { dispatchChromeAction } from "./worker-api/dispatch-chrome-action";
 import { stampSlackIdentityForUser } from "./auth/subject-identities";
 import { collapseSessionCookies, resolveSession } from './auth/resolve-session';
 
+// Bridge that lets a connector compose an imported read on the connection its
+// claimed run already runs against. See read-operation.ts.
+import { readConnectorOperation } from "./worker-api/read-operation";
+
 app.post("/api/workers/dispatch-chrome-action", dispatchChromeAction);
+app.post("/api/workers/read-operation", readConnectorOperation);
 app.post("/api/workers/complete-embeddings", completeEmbeddings);
 app.post("/api/workers/me/runs/:runId/complete-automation", completeAutomationRun);
 app.post("/api/workers/me/runs/:runId/complete-chat", completeDeviceChatRun);
