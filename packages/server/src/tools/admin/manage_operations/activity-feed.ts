@@ -122,7 +122,7 @@ function isFailedStatus(status: string | null | undefined): boolean {
 
 /**
  * Build an attention card from a notification row (listNotifications shape).
- * Shared by the recent-window feed and the undismissed browser-handoff fetch.
+ * Shared by the recent-window feed and the attention fetch.
  * Returns null when the row has no usable id.
  */
 function buildNotificationCard(
@@ -421,6 +421,8 @@ function collapseKeyForRun(row: {
  * `cardNeedsAttention`) to decide what it renders. They must agree — a card the
  * server pins but the client hides is an invisible slot, and a card the client
  * wants but the server drops is the badge/lens mismatch this pin exists to fix.
+ * `listNotifications`'s `attentionOnly` predicate is the same rule expressed in
+ * SQL, so the LIMIT is spent on cards that survive this filter.
  *
  * A browser-handoff draft qualifies only while it is still openable. `completed`
  * (already activated) and `expired` (can never be activated) have nothing left

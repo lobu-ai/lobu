@@ -906,37 +906,52 @@ describe("page-activated operation runs", () => {
 		},
 	);
 
-	it("does not let settled drafts exhaust the attention query budget", async () => {
-		const seeded = await seed();
-		await createNotificationForUsers([seeded.user.id], {
-			organizationId: seeded.org.id,
-			type: "agent_message",
-			title: "Old unread notice",
-			body: "Still unread",
-		});
-		for (let i = 0; i < 55; i++) {
+	it.each(["missing run", "lost page identity"] as const)(
+		"does not let drafts with %s exhaust the attention query budget",
+		async (reason) => {
+			const seeded = await seed();
 			await createNotificationForUsers([seeded.user.id], {
 				organizationId: seeded.org.id,
 				type: "agent_message",
-				title: `Settled draft ${i}`,
-				body: "No linked run",
-				browserUrl: `https://example.test/draft/${i}`,
+				title: "Old unread notice",
+				body: "Still unread",
 			});
-		}
-		await sql`
-			UPDATE notification_targets SET read_at = now()
-			WHERE user_id = ${seeded.user.id} AND browser_url IS NOT NULL
-		`;
-		const activity = await listOrgActivity({
-			organizationId: seeded.org.id,
-			userId: seeded.user.id,
-			ownerSlug: seeded.org.slug,
-			includeRuns: false,
-			limit: 10,
-		});
-		expect(activity.items.length).toBeLessThanOrEqual(10);
-		expect(activity.items.some((item) => item.title === "Old unread notice" && item.unread)).toBe(true);
-	});
+			// Two ways a draft becomes unopenable, and both must be filtered in
+			// SQL: no linked run at all, and a linked run whose exact page target
+			// was never recorded (so page activation would reject it).
+			const lostIdentity = reason === "lost page identity";
+			if (lostIdentity) {
+				await sql`UPDATE runs SET run_metadata = '{}'::jsonb WHERE id = ${seeded.run.id}`;
+			}
+			for (let i = 0; i < 55; i++) {
+				await createNotificationForUsers([seeded.user.id], {
+					organizationId: seeded.org.id,
+					type: "agent_message",
+					title: `Settled draft ${i}`,
+					body: "Unavailable draft",
+					browserRunId: lostIdentity ? seeded.run.id : undefined,
+					browserUrl: `https://example.test/draft/${i}`,
+				});
+			}
+			await sql`
+				UPDATE notification_targets SET read_at = now()
+				WHERE user_id = ${seeded.user.id} AND browser_url IS NOT NULL
+			`;
+			const activity = await listOrgActivity({
+				organizationId: seeded.org.id,
+				userId: seeded.user.id,
+				ownerSlug: seeded.org.slug,
+				includeRuns: false,
+				limit: 10,
+			});
+			expect(activity.items.length).toBeLessThanOrEqual(10);
+			expect(
+				activity.items.some(
+					(item) => item.title === "Old unread notice" && item.unread,
+				),
+			).toBe(true);
+		},
+	);
 
 	it("holds the declared limit when the attention set alone fills it", async () => {
 		const seeded = await seed();

@@ -1334,6 +1334,7 @@ export async function listNotifications(opts: {
 		AND browser_run.activated_at IS NULL
 		AND browser_run.approval_status = 'auto'
 		AND browser_run.activation_kind = 'page_visit'
+		AND browser_run.run_metadata->>'page_activation_identity' = 'exact'
 		AND browser_run.expires_at > current_timestamp
 	) OR (
 		ar.approval_status = 'pending'
@@ -1537,9 +1538,12 @@ export async function listNotifications(opts: {
 
 	const hasMore = rows.length > limit;
 	const notifications = hasMore ? rows.slice(0, limit) : rows;
-	const nextCursor = hasMore
-		? (notifications[notifications.length - 1]?.id ?? null)
-		: null;
+	// No cursor for the attention read: handing one back would advertise a next
+	// page the guard above refuses to serve.
+	const nextCursor =
+		hasMore && !attentionOnly
+			? (notifications[notifications.length - 1]?.id ?? null)
+			: null;
 
 	return { notifications, nextCursor };
 }
