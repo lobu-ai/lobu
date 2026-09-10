@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  type AgentTurnPollPayload,
   type PollResponse,
   TURN_DELTA_MAX_CHARS,
 } from "@lobu/core/contracts/worker/protocol";
@@ -191,7 +192,9 @@ describe("executeAgentTurnRun", () => {
       },
     };
 
-    await executeAgentTurnRun(fakeClient(reported) as never, turnJob(), {}, cfgWith(executor));
+    const job = turnJob();
+    (job.payload as AgentTurnPollPayload).turn.effort = "medium";
+    await executeAgentTurnRun(fakeClient(reported) as never, job, {}, cfgWith(executor));
 
     expect(seen?.mode).toBe("agent_turn");
     if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
@@ -203,6 +206,7 @@ describe("executeAgentTurnRun", () => {
     });
     expect(seen.turn.sessionJsonl).toBe(SESSION_JSONL);
     expect(seen.turn.systemPrompt).toBe("be brief");
+    expect(seen.turn.effort).toBe("medium");
     expect(seen.turn.userMessage).toBe("hello");
     // A turn without tools reaches the guest without a manifest, not with an
     // empty one: the guest builds its tool list off the field's presence.

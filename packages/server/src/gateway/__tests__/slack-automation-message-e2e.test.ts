@@ -358,6 +358,9 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
 
   test("workspace-stamped channel and DM events persist, activate once, and reply", async () => {
     const sql = getDb();
+    await sql`UPDATE automations SET execution_config = '{"effort":"medium"}'::jsonb
+      WHERE organization_id = 'org-slack-grid-e2e'
+        AND triggers->0->'match'->>'channel_id' = ${CHANNEL_ID}`;
     const channelTs = "1787292000.000821";
     const channelPayload = slackEvent({
       eventId: "Ev_GRID_CHANNEL_20260821",
@@ -382,6 +385,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         agentId: "agent-slack-grid-e2e",
         organizationId: "org-slack-grid-e2e",
         messageText: "LOBU_SLACK_E2E_20260821 integration channel",
+        agentOptions: { effort: "medium" },
         platformMetadata: {
           automationId: expect.any(Number),
           teamId: WORKSPACE_TEAM_ID,

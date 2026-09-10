@@ -436,8 +436,8 @@ interface TurnProvider {
   contextWindow: number;
   /** pi-ai's `Model.maxTokens`: the output ceiling this model actually allows. */
   maxTokens: number | null;
-  /** pi-ai's `Model.reasoning`: whether the model supports extended thinking. */
-  reasoning: boolean;
+  /** Registry reasoning support; undefined means the model is unknown. */
+  reasoning: boolean | undefined;
 }
 
 /**
@@ -490,7 +490,9 @@ function resolveTurnCompat(
  * Unknown models keep the retired subprocess lane's rules: `["text","image"]`
  * (it built a dynamic entry declaring both), a finite default window, and no
  * output ceiling — the adapter's own default is a better answer than a number
- * invented here.
+ * invented here. Reasoning support is left undefined for the same reason: the
+ * registry has no answer, so the guest decides from the requested effort
+ * instead of being told `false` about a model that may well support it.
  */
 function resolveModelMetadata(
   registryProvider: string,
@@ -514,7 +516,7 @@ function resolveModelMetadata(
       typeof model?.maxTokens === "number" && model.maxTokens > 0
         ? model.maxTokens
         : null,
-    reasoning: model?.reasoning === true,
+    reasoning: model?.reasoning,
   };
 }
 
@@ -1044,11 +1046,21 @@ export async function enqueueAgentTurn(
           workingDirectory: "/workspace",
         })
       : "";
+    // Trimmed like the model ref above: an empty string is "unset", not a
+    // level to hand the guest.
+    const effortForTurn =
+      typeof data.agentOptions?.effort === "string"
+        ? data.agentOptions.effort.trim()
+        : "";
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
       conversation_id: data.conversationId,
       message_id: data.messageId,
       message_text: (data.messageText ?? "").slice(0, TURN_MESSAGE_CHARS),
+      // Reasoning effort, only when the caller configured one. Absent leaves
+      // the guest's thinking off, which is what every turn got before the
+      // field existed; the guest rejects a level the model cannot serve.
+      ...(effortForTurn ? { effort: effortForTurn } : {}),
       // Turn-scoped context both producers already populate and clamp to
       // 2 KiB. It reaches the model through the guest's transient channel, so
       // it is never persisted into the replayed user message.
@@ -1114,7 +1126,10 @@ export async function enqueueAgentTurn(
         // Omitted for an unknown model, so the guest falls back to the
         // adapter's own ceiling instead of a number invented on either side.
         ...(provider.maxTokens !== null ? { max_tokens: provider.maxTokens } : {}),
-        reasoning: provider.reasoning,
+        // Likewise omitted for an unknown model: the guest reads an absent
+        // value as "no registry answer" and lets an explicit effort decide,
+        // rather than asserting a capability nothing here knows.
+        ...(provider.reasoning !== undefined ? { reasoning: provider.reasoning } : {}),
         ...(provider.compat ? { compat: provider.compat } : {}),
       },
       ...(tools ? { tools } : {}),

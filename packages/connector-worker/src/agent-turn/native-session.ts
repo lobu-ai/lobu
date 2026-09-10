@@ -1,9 +1,9 @@
-import { Agent, type AgentTool } from '@mariozechner/pi-agent-core';
+import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { registerApiProvider, streamSimple, type Api, type Model } from '@mariozechner/pi-ai';
-import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
-import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
-import { streamOpenAICodexResponses } from '@mariozechner/pi-ai/openai-codex-responses';
-import { streamOpenAIResponses } from '@mariozechner/pi-ai/openai-responses';
+import { streamAnthropic, streamSimpleAnthropic } from '@mariozechner/pi-ai/anthropic';
+import { streamOpenAICompletions, streamSimpleOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
+import { streamOpenAICodexResponses, streamSimpleOpenAICodexResponses } from '@mariozechner/pi-ai/openai-codex-responses';
+import { streamOpenAIResponses, streamSimpleOpenAIResponses } from '@mariozechner/pi-ai/openai-responses';
 import { AgentSession, SessionManager, SettingsManager, convertToLlm, CURRENT_SESSION_VERSION, type ModelRegistry } from '@mariozechner/pi-coding-agent';
 import { createLobuResourceLoader, type TransientTurnContextLookup } from '@lobu/plugin-toolkit/pi-resources';
 import { SESSION_PATH, withSessionSnapshot } from './pi-session-fs.js';
@@ -15,6 +15,21 @@ export function createNativeSession(
   tools: AgentTool[],
   getTransientContext: TransientTurnContextLookup
 ): AgentSession {
+  // Exhaustive over Pi's `ThinkingLevel`, so a level added or renamed upstream
+  // fails the build here instead of silently 400ing at the provider.
+  const levels: Record<ThinkingLevel, true> = {
+    off: true, minimal: true, low: true, medium: true, high: true, xhigh: true,
+  };
+  const effort = input.effort?.trim() || 'off';
+  if (!Object.hasOwn(levels, effort)) {
+    throw new Error(`Unsupported cloud reasoning effort: ${effort}. Supported values: ${Object.keys(levels).join(', ')}.`);
+  }
+  // Rejecting is the honest answer: silently downgrading to 'off' would bill a
+  // configured reasoning turn as a plain one with no signal that it happened.
+  if (effort !== 'off' && input.provider.reasoning === false) {
+    throw new Error(`Model ${input.provider.modelId} does not support reasoning effort.`);
+  }
+  const thinkingLevel = effort as ThinkingLevel;
   const manager = SessionManager.inMemory('/workspace');
   if (input.sessionJsonl) {
     // Pi's file reader tolerates malformed lines for crash recovery. A gateway
@@ -43,7 +58,9 @@ export function createNativeSession(
     // `claude-sonnet-4` reports `reasoning:true, maxTokens:64000` upstream and
     // was described to the adapter as `false`/8192, capping every long answer
     // on this lane at an eighth of what the model allows.
-    reasoning: input.provider.reasoning ?? false,
+    // For a model absent from the registry, an explicit effort is the user's
+    // request to try reasoning; known non-reasoning models are rejected above.
+    reasoning: input.provider.reasoning ?? (thinkingLevel !== 'off'),
     input: input.provider.input ?? ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: input.compaction?.contextWindow ?? 200_000,
@@ -57,8 +74,14 @@ export function createNativeSession(
   // One registration per wire protocol. `openai-responses` is NOT a fallback
   // for completions: official OpenAI is promoted to Responses so reasoning
   // models can use tools, and the two speak different request shapes.
+  //
+  // `streamSimple` is the variant that reads `options.reasoning`, so it — not
+  // the plain `stream` fn, which takes the narrower `StreamOptions` — is what
+  // turns `thinkingLevel` into the provider's own effort field. Registering
+  // `stream` for both slots typechecks (a wider parameter is assignable) and
+  // silently drops every configured effort, so each slot takes its own fn.
   if (input.provider.api === 'anthropic-messages') {
-    registerApiProvider({ api: 'anthropic-messages', stream: streamAnthropic, streamSimple: streamAnthropic });
+    registerApiProvider({ api: 'anthropic-messages', stream: streamAnthropic, streamSimple: streamSimpleAnthropic });
   } else if (input.provider.api === 'openai-codex-responses') {
     // pi-ai extracts an account id before invoking fetch. This inert JWT is
     // only adapter input: the isolate host replaces Authorization with the
@@ -70,11 +93,13 @@ export function createNativeSession(
     const placeholder = `e30.${btoa(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'lobu-proxy' } }))}.placeholder`;
     const stream: typeof streamOpenAICodexResponses = (model, context, options) =>
       streamOpenAICodexResponses(model, context, { ...options, apiKey: placeholder, transport: 'sse' });
-    registerApiProvider({ api: 'openai-codex-responses', stream, streamSimple: stream });
+    const simple: typeof streamSimpleOpenAICodexResponses = (model, context, options) =>
+      streamSimpleOpenAICodexResponses(model, context, { ...options, apiKey: placeholder, transport: 'sse' });
+    registerApiProvider({ api: 'openai-codex-responses', stream, streamSimple: simple });
   } else if (input.provider.api === 'openai-responses') {
-    registerApiProvider({ api: 'openai-responses', stream: streamOpenAIResponses, streamSimple: streamOpenAIResponses });
+    registerApiProvider({ api: 'openai-responses', stream: streamOpenAIResponses, streamSimple: streamSimpleOpenAIResponses });
   } else {
-    registerApiProvider({ api: 'openai-completions', stream: streamOpenAICompletions, streamSimple: streamOpenAICompletions });
+    registerApiProvider({ api: 'openai-completions', stream: streamOpenAICompletions, streamSimple: streamSimpleOpenAICompletions });
   }
   const context = manager.buildSessionContext();
   if (context.model?.provider !== model.provider || context.model?.modelId !== model.id) {
@@ -94,15 +119,7 @@ export function createNativeSession(
   } as unknown as ModelRegistry;
   let session: AgentSession;
   const agent = new Agent({
-    // `thinkingLevel` stays off even for a reasoning-capable model, and that is
-    // now a choice rather than a side effect of the model metadata: Pi's own
-    // `Agent` default is also `'off'` (only `AgentSession` picks a level), and
-    // nothing in Lobu configures one per agent or per turn. Turning it on would
-    // be a new product decision and a spend change, not a restored regression —
-    // so it needs a configured level to read, not a default invented here. The
-    // model's `reasoning` flag is still carried honestly above, because that is
-    // what the adapter inspects to shape the request.
-    initialState: { model, messages: context.messages, thinkingLevel: 'off' },
+    initialState: { model, messages: context.messages, thinkingLevel },
     // Keep native custom/summary conversion. Pi stores an empty text block for
     // image-only prompts; omit it only on the wire, where OpenAI rejects it.
     convertToLlm: (messages) => convertToLlm(messages).map((message) =>

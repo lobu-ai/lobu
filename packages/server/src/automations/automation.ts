@@ -1261,25 +1261,32 @@ async function claimAutomationRun(
 }
 
 /**
- * Read an automation's optional per-automation model override from
- * `automations.execution_config.model` (a `provider/model` ref or "auto"). This is
- * the SAME field the device-worker lane already reads as the CLI `--model` flag
- * (AutomationExecutionConfigSchema.model), so the server-side dispatch lane and the
- * device lane share one storage location. Returns undefined when unset so the
- * caller falls through to the agent/org default.
+ * Read an automation's optional per-automation inference overrides from
+ * `automations.execution_config` (`model`, a `provider/model` ref or "auto",
+ * and `effort`, a reasoning level). These are the SAME fields the device-worker
+ * lane already reads as the CLI's `--model` / effort flags
+ * (AutomationExecutionConfigSchema), so the server-side dispatch lane and the
+ * device lane share one storage location.
+ *
+ * Each field is omitted when unset, so the caller falls through to the
+ * agent/org default for the model and leaves reasoning off for the effort.
  */
-async function getAutomationModelOverride(
+async function getAutomationInferenceOverrides(
 	sql: DbClient,
 	automationId: number
-): Promise<string | undefined> {
+): Promise<{ model?: string; effort?: string }> {
 	const rows = await sql`
-    SELECT execution_config->>'model' AS model
+    SELECT execution_config->>'model' AS model, execution_config->>'effort' AS effort
     FROM automations
     WHERE id = ${automationId}
     LIMIT 1
   `;
 	const model = rows[0]?.model as string | null | undefined;
-	return typeof model === "string" && model.trim() ? model.trim() : undefined;
+	const effort = rows[0]?.effort as string | null | undefined;
+	return {
+		...(typeof model === "string" && model.trim() ? { model: model.trim() } : {}),
+		...(typeof effort === "string" && effort.trim() ? { effort: effort.trim() } : {}),
+	};
 }
 
 export async function ensureAutomationAgentExists(
@@ -1425,11 +1432,13 @@ async function dispatchAutomationRun(
 		}
 	}
 
-	// Per-automation model override lives in automations.execution_config.model (a
-	// `provider/model` ref or "auto"). When set it rides the dispatch message so
-	// agent.ts reads it into baseOptions.model and it wins the layered fallback
-	// (automation → agent → org default); when absent the agent/org default resolves.
-	const automationModel = await getAutomationModelOverride(sql, run.automation_id);
+	// Per-automation inference overrides live in automations.execution_config
+	// (`model`: a `provider/model` ref or "auto"; `effort`: a reasoning level).
+	// When set they ride the dispatch message so agent.ts reads them into
+	// baseOptions and the model wins the layered fallback (automation → agent →
+	// org default); when absent the agent/org default resolves and the turn
+	// keeps reasoning off.
+	const inferenceOverrides = await getAutomationInferenceOverrides(sql, run.automation_id);
 	const automationInstructions = await getAutomationInstructions(
 		sql,
 		run.automation_id,
@@ -1503,7 +1512,7 @@ async function dispatchAutomationRun(
 			headers,
 			body: JSON.stringify({
 				messageId,
-				...(automationModel ? { model: automationModel } : {}),
+				...inferenceOverrides,
 				content: buildDispatchMessage({
 					automationId: run.automation_id,
 					runId: run.id,

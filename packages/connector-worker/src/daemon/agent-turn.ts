@@ -306,6 +306,7 @@ export async function executeAgentTurnRun(
             ...(turn.provider.input ? { input: turn.provider.input } : {}),
           },
           systemPrompt: turn.system_prompt,
+          ...(turn.effort ? { effort: turn.effort } : {}),
           sessionJsonl: turn.session_jsonl,
           userMessage: turn.message_text,
           ...(turn.ephemeral_context ? { ephemeralContext: turn.ephemeral_context } : {}),

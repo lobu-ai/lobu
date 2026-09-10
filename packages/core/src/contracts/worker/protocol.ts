@@ -433,6 +433,14 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       )
     ),
     system_prompt: Type.String(),
+    /**
+     * Explicit per-turn reasoning effort, resolved from the Automation's
+     * `execution_config.effort` or the send-message body. Absent leaves the
+     * guest's thinking off, which is what every turn on this lane got before
+     * the field existed; the guest rejects a level it does not know or that
+     * `provider.reasoning: false` says the model cannot serve.
+     */
+    effort: Type.Optional(Type.String()),
     /** Native Pi session JSONL, read after this conversation's claim is admitted. */
     session_jsonl: Type.String(),
     provider: Type.Object({
@@ -470,9 +478,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       /**
        * pi-ai's `Model.reasoning`: whether this model supports extended
        * thinking. The guest builds its `Model` from this envelope and has no
-       * registry to consult, so an absent value means "not reasoning-capable"
-       * — which is what every agent on this lane silently got before the
-       * field existed, registry-capable models included.
+       * registry to consult. Absent means the model is unknown: reasoning
+       * stays off unless the caller explicitly requests an effort level.
        */
       reasoning: Type.Optional(Type.Boolean()),
       /**

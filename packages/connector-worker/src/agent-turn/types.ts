@@ -210,6 +210,8 @@ export const MAX_TOOL_CALLS_PER_TURN = 50;
 /** Everything a single turn needs. */
 export interface AgentTurnInput {
   provider: AgentTurnProvider;
+  /** Pi `ThinkingLevel` for this turn. Absent leaves thinking off. */
+  effort?: string;
   systemPrompt: string;
   /** Native Pi session JSONL; empty for a new conversation. */
   sessionJsonl: string;

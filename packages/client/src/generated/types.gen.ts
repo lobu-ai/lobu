@@ -7183,6 +7183,10 @@ export type PostApiV1AgentsByAgentIdMessagesData = {
     message?: string;
     messageId?: string;
     /**
+     * Reasoning effort for this turn on the cloud lane (an Automation dispatches its `execution_config.effort` here). The runtime rejects a level the selected model cannot serve.
+     */
+    effort?: string;
+    /**
      * Optional per-message model override (a `provider/model` ref or "auto"). Wins over the agent/org default. Used by Automation dispatch.
      */
     model?: string;
