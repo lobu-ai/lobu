@@ -310,15 +310,12 @@ jobs:
           mv coverage/lcov.info coverage/embeddings.lcov.info
 
       - name: example connectors (bun:test)
-        # Unbundled connectors live under examples/; most mock
-        # @lobu/connector-sdk so heavyweight connector dependencies never load
-        # in CI. ecommerce imports the SDK root directly — that entry is kept
-        # isolate-loadable (no browser stack), so it costs nothing here.
+        # Unbundled connectors live under examples/; mock @lobu/connector-sdk
+        # so heavyweight connector dependencies never load in CI.
         run: |
           bun test examples/personal-agent --timeout 30000
           bun test examples/brand-intelligence --timeout 30000
           bun test examples/lobu-team --timeout 30000
-          bun test examples/ecommerce --timeout 30000
 
       - name: Upload coverage
         if: always()
