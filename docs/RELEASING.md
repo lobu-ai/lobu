@@ -76,7 +76,7 @@ BREAKING CHANGE: RuntimeProviderCredentialResolver now returns
   The workflow must be dispatched from `main` so it runs main's policy; the release tag is data, not the ref.
 - **`release-please.yml` skipped a push because `main` moved** — the attestation binds to one commit, so a merge landing mid-attestation aborts that run rather than releasing a commit it did not verify. The next push re-attests from scratch; nothing needs unsticking. To release without waiting, dispatch it manually from `main` with the exact producing run: `gh workflow run release-please.yml --ref main -f image_run_id=<build-images run id>`.
 
-`publish-packages.mjs` is idempotent (skips already-published packages), so re-running is safe.
+`publish-packages.mjs` skips already-published packages. A canary retry verifies that each skipped package already has the matching `canary` tag, which was set by its successful publish. If that tag is missing, different, or unreadable, the retry stops; retry after registry propagation, or publish from a newer main commit if the mismatch persists. OIDC cannot repair a tag separately.
 
 **Helm publish says the chart package is private** — GitHub does not expose a package-visibility update API. A package administrator must open the `charts/lobu` package settings once and change its visibility to **Public**. Organization owners have admin permission to organization packages. Re-run the failed Helm workflow afterward. The workflow verifies the live package visibility and fails closed; it never treats a private chart as a successful public release.
 
@@ -102,7 +102,7 @@ After a local publish, land a `chore(main): release lobu <version>` commit on `m
 ## Verify
 
 ```bash
-for pkg in @lobu/core @lobu/cli @lobu/connector-sdk @lobu/connector-worker @lobu/worker @lobu/embeddings @lobu/client @lobu/promptfoo-provider; do
+for pkg in @lobu/core @lobu/cli @lobu/connector-sdk @lobu/connector-worker @lobu/embeddings @lobu/client @lobu/promptfoo-provider; do
   npm view "$pkg" version
 done
 ```

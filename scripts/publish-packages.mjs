@@ -401,6 +401,25 @@ async function publishPackage({ dir, transform }, otp, tag) {
 
   const args = publishArgs(otp, tag, pkg.version);
   if (isVersionPublished(pkg.name, pkg.version)) {
+    if (tag === "canary") {
+      // A prior successful publish moved the tag with the version. Verify that
+      // before skipping: manually published or legacy candidates may exist
+      // under another tag, and OIDC cannot repair that with dist-tag add.
+      const currentTag = spawnSync(
+        "npm",
+        ["view", pkg.name, "dist-tags.canary"],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          encoding: "utf8",
+        }
+      );
+      if (currentTag.status !== 0 || currentTag.stdout.trim() !== pkg.version) {
+        throw new Error(
+          `${pkg.name}@${pkg.version} exists but its canary tag does not match or could not be read. ` +
+            "Retry after registry propagation; if it persists, publish a newer main commit. OIDC cannot repair tags separately."
+        );
+      }
+    }
     console.log(`  → ${pkg.name}@${pkg.version} already on npm, skipping`);
     return;
   }

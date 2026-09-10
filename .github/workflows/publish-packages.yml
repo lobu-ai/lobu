@@ -22,7 +22,7 @@ on:
         required: false
         type: string
       provenance:
-        description: "Attach npm provenance"
+        description: "Stable only: attach npm provenance"
         required: false
         default: false
         type: boolean

@@ -173,6 +173,40 @@ describe("canary commands", () => {
     });
   });
 
+  it("retries a partial publish without republishing packages or changing latest", () => {
+    withFixture((root, run, registry) => {
+      expect(run("prepare").status).toBe(0);
+      expect(run("publish", undefined, "partial").status).not.toBe(0);
+      expect(registry()["@lobu/core"]).toEqual({
+        latest: "19.2.0",
+        canary: version,
+      });
+      expect(registry()["@lobu/cli"]).toEqual({ latest: "19.2.0" });
+      const retry = run("publish");
+      expect(retry.status, retry.stderr?.toString()).toBe(0);
+      for (const tags of Object.values(registry()))
+        expect(tags).toEqual({ latest: "19.2.0", canary: version });
+      const calls = readFileSync(`${root}/publish.log`, "utf8")
+        .trim()
+        .split("\n");
+      expect(calls.filter((name) => name === "@lobu/core")).toHaveLength(1);
+      expect(calls.at(-1)).toBe("@lobu/cli");
+    });
+  });
+
+  it("rejects an existing canary version whose tag is missing or unreadable", () => {
+    for (const fault of ["untagged", "tag-read"]) {
+      withFixture((_root, run) => {
+        expect(run("prepare").status).toBe(0);
+        const result = run("publish", undefined, fault);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr?.toString()).toContain(
+          "canary tag does not match"
+        );
+      });
+    }
+  });
+
   it("fails closed on registry failure or an older candidate", () => {
     for (const fault of ["registry", "older"]) {
       withFixture((_root, run) => {
@@ -216,6 +250,11 @@ function withFixture(
           "utf8"
         )
       );
+      // The fixture materializes only the published packages, so a
+      // `workspace:*` devDependency on a private sibling has nothing to
+      // resolve against. Consumers never install devDependencies, so dropping
+      // them keeps the probe on the graph publication actually ships.
+      delete pkg.devDependencies;
       writeFileSync(`${root}/${dir}/package.json`, JSON.stringify(pkg));
       tags[pkg.name] = { latest: "19.2.0" };
     }
@@ -224,6 +263,7 @@ function withFixture(
       JSON.stringify({ version: "19.2.0" })
     );
     writeFileSync(`${root}/registry.json`, JSON.stringify(tags));
+    writeFileSync(`${root}/published.json`, "{}");
     writeFileSync(
       `${root}/bin/git`,
       `#!/usr/bin/env node
@@ -240,13 +280,27 @@ else if (!['fetch', 'merge-base'].includes(args[0])) process.exit(2);
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 const tags = JSON.parse(fs.readFileSync('${root}/registry.json', 'utf8'));
-if (process.env.CANARY_TEST_FAULT === 'registry') process.exit(1);
-if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(process.env.CANARY_TEST_FAULT === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
-else if (args[0] === 'view' && args[2] === 'version') process.exit(1);
+const published = JSON.parse(fs.readFileSync('${root}/published.json', 'utf8'));
+const fault = process.env.CANARY_TEST_FAULT;
+if (fault === 'registry') process.exit(1);
+if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(fault === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
+else if (args[0] === 'view' && args[2] === 'version') {
+  const at = args[1].lastIndexOf('@');
+  const name = args[1].slice(0, at), requested = args[1].slice(at + 1);
+  if (published[name] === requested || (['untagged', 'tag-read'].includes(fault) && name === '@lobu/core')) console.log(requested);
+  else process.exit(1);
+} else if (args[0] === 'view' && args[2] === 'dist-tags.canary') {
+  if (fault === 'tag-read') process.exit(1);
+  if (tags[args[1]].canary) console.log(tags[args[1]].canary);
+}
 else if (args[0] === 'publish') {
   const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
   fs.appendFileSync('${root}/publish.log', pkg.name + '\\n');
-  if (process.env.CANARY_TEST_FAULT === 'blocked') { console.error('E404 Not Found - PUT'); process.exit(1); }
+  if (fault === 'blocked' || (fault === 'partial' && pkg.name === '@lobu/client')) { console.error('E404 Not Found - PUT'); process.exit(1); }
+  published[pkg.name] = pkg.version;
+  tags[pkg.name][args[args.indexOf('--tag') + 1]] = pkg.version;
+  fs.writeFileSync('${root}/published.json', JSON.stringify(published));
+  fs.writeFileSync('${root}/registry.json', JSON.stringify(tags));
 } else process.exit(2);
 `
     );
