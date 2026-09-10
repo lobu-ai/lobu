@@ -267,6 +267,75 @@ describe("automation reaction crash safety", () => {
 		expect(logged[1].tool_args).toEqual({ attempt: 2 });
 	});
 
+	/**
+	 * The end-to-end claim, through the REAL executor rather than a simulated
+	 * session: reaction-executor stamps `actingAutomationId`, the sandbox SDK
+	 * carries it, `manage_entity` resolves it, and the row names the subject.
+	 *
+	 * `automation-source-surface` proves the two write surfaces resolve without a
+	 * declaration, but it builds the acting session by hand. Only this path
+	 * proves the executor actually stamps what those surfaces now read — the
+	 * link that made `entity_id` 2-of-1143 rows in production.
+	 */
+	it("records the subject a real reaction acted on, end to end", async () => {
+		// The subject is resolved here and inlined, so the assertion depends only
+		// on the attribution chain and not on how `ctx.entities` is hydrated.
+		const seedSql = getTestDb();
+		const script = (entityId: number) =>
+			`export default async function reaction(ctx, client) {
+        await client.entities.update({
+          entity_id: ${entityId},
+          metadata: { provisioning_status: 'provisioned' },
+        });
+      }`;
+		const { sql, automationId, runId, api } = await seedRunnableWindow(
+			script(0),
+		);
+		const [subject] = await seedSql<{ id: number }>`
+      SELECT id FROM entities WHERE name = 'Reaction Entity' ORDER BY id DESC LIMIT 1
+    `;
+		await api.automations.setReactionScript({
+			automation_id: String(automationId),
+			reaction_script: script(Number(subject.id)),
+		});
+
+		await completeWindow(api, automationId, runId, { summary: "Provisioned." });
+		const [task] = await reactionTasks(sql, runId);
+		const payload = (task.action_input as { payload: AutomationReactionTaskPayload })
+			.payload;
+		const outcome = await runAutomationReactionTask(
+			payload,
+			{} as Env,
+			Number(task.id),
+			1,
+		);
+		expect(outcome.status).toBe("success");
+
+		const logged = await sql<{
+			reaction_type: string;
+			entity_id: number | string | null;
+			automation_id: number | string;
+		}>`
+      SELECT reaction_type, entity_id, automation_id
+      FROM automation_reactions WHERE source_run_id = ${runId}
+      ORDER BY reaction_type
+    `;
+		expect(logged.map((row) => String(row.reaction_type))).toEqual([
+			"entity_updated",
+			"script_execution",
+		]);
+		// The subject, which is the whole point of the row.
+		expect(Number(logged[0].entity_id)).toBe(Number(subject.id));
+		expect(Number(logged[0].automation_id)).toBe(automationId);
+
+		// And the write itself landed on the entity, so the row is not crediting
+		// a mutation that silently did nothing.
+		const [updated] = await sql<{ metadata: Record<string, unknown> }>`
+      SELECT metadata FROM entities WHERE id = ${subject.id}
+    `;
+		expect(updated.metadata).toMatchObject({ provisioning_status: "provisioned" });
+	});
+
 	it("does not queue a second reaction when the completion is replayed", async () => {
 		const { sql, automationId, runId, api } = await seedRunnableWindow(
 			"export default async function reaction() { return; }",

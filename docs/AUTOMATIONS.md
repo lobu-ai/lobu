@@ -373,6 +373,64 @@ model. Adding them before a real use case would duplicate the existing run and
 event primitives; pretending event chaining already provides them would be
 equally misleading.
 
+## Convergence: did this subject get handled?
+
+The sections above describe what STARTS a run and what a completed run persists.
+This one answers the question that follows in production — "has this Automation
+acted on this subject yet, and did it work" — because the answer is not obvious
+and the wrong table is the tempting one.
+
+**Declared outputs: `change_set` events.** Every completed window whose outputs
+touched entities writes one `change_set` event, idempotency-keyed
+`automation:{id}:run:{run}:change_set`. It links every entity the run created or
+updated through `entity_ids`, and `metadata.changes` carries the per-entity
+array (`entityId`, `name`, `kind` of `created|updated|denied`). `events` is a
+queryable source, so an Automation can already ask which subjects a process has
+touched and when, with no new surface:
+
+```sql
+SELECT e.entity_ids, e.created_at
+FROM events e
+WHERE e.semantic_type = 'change_set' AND e.automation_id = $1
+```
+
+**Effects: `automation_reactions`.** Entity writes are not the whole story — a
+run that called a connector, sent a notification, or saved knowledge records a
+row per tool call (`reaction_type`, `tool_name`, `tool_args`, `tool_result`,
+`entity_id`, `source_run_id`). `entity_id` is populated by the surfaces that
+know their subject; `manage_operations` and `notify` record the call without one.
+
+Two things to know before relying on it:
+
+- It is NOT in `QUERYABLE_SCHEMA`, so an Automation cannot read it yet. Until it
+  is, per-subject convergence is answerable from `change_set` events but not
+  from the effect log.
+- The direct-write surfaces pass no `runId`, so they take the fire-and-forget
+  insert with no dedupe predicate. A retried reaction task re-runs the script
+  and appends another row for the same subject. Latest-row queries are fine;
+  exact counts are not.
+
+**Attribution is stamped, never declared.** A reaction's session carries
+`ctx.actingAutomationId` / `ctx.actingRunId`, stamped by the reaction executor.
+Every write surface resolves credit through `resolveAutomationAttribution`,
+which prefers that stamped pair and credits nobody for a declared
+`automation_source` naming another organization's Automation. A surface must
+resolve UNCONDITIONALLY: a reaction declares nothing, so gating the call on the
+declaration silently records the write against no Automation — and drops
+`entity_id` with it. `save_content` and `manage_entity` did exactly that, which
+is why `entity_id` was populated on 0.17% of production rows.
+
+**Long-running processes: sweep, do not sleep.** Lobu has no workflow instance,
+so a process that spans days is not a suspended program — it is durable state
+plus a schedule that reconciles it. Model the subject as an entity, record each
+stage's outcome durably, and let a scheduled Automation select the subjects that
+have not reached the next stage yet. This is more robust than a parked timer,
+not a workaround for lacking one: the arrival mark means one run covers an
+outage of any length, there are no orphaned timers to leak, and editing the
+Automation changes the next sweep instead of stranding in-flight instances. The
+primitives it needs — a stable entity key, a durable per-stage record, and an
+idempotency key on the external call — all exist today.
+
 ## Implementation source map
 
 The earlier model was hard to audit because no document connected these
@@ -389,6 +447,8 @@ map when changing the system:
 | Atomic output-to-task handoff | `packages/server/src/tools/admin/manage_automations/complete-window.ts` |
 | Exact governed input reads | `packages/server/src/tools/get_content/` |
 | Automation notification routing | `packages/server/src/automations/delivery-target.ts`, `packages/server/src/notifications/service.ts` |
+| Write attribution (stamped vs declared) | `packages/server/src/automations/automation-source.ts`, `packages/server/src/utils/acting-automation-context.ts` |
+| Per-subject convergence | `manage_automations/complete-window.ts` (`change_set`), `packages/server/src/utils/automation-reactions.ts` |
 | Server/device dispatch | `packages/server/src/automations/automation.ts`, `packages/server/src/worker-api/poll.ts`, Owletto Mac `AutomationDispatcher.swift` |
 | Web authoring and projection | Owletto `automation-trigger-editor.tsx`, `lib/automations/model.ts` |
 | Generated public client | `packages/client/src/generated/` |
