@@ -1552,6 +1552,14 @@ export class MessageHandlerBridge {
         agentSettingsStore,
         organizationId
       );
+      // Cloud only. A device turn already carries the whole executionConfig —
+      // effort included — inside `deviceExecutionConfig` below, and its CLI
+      // reads it from there; a second copy at the top level would be a
+      // duplicate the device lane never consults.
+      const effort = executionConfig?.effort;
+      if (!executionTarget && typeof effort === "string" && effort.trim()) {
+        agentOptions.effort = effort.trim();
+      }
 
       if (executionTarget) {
         // No override means the local CLI's own default, never a cloud model.

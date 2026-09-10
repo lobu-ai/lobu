@@ -65,7 +65,7 @@ export function assertValidExecutionConfig(value: unknown, caller: ExecutionConf
  * Reject a model ref that names a provider this org has not registered.
  *
  * `execution_config.model` is ONE stored field with TWO resolution namespaces
- * (see `getAutomationModelOverride` in automations/automation.ts). A
+ * (see `getAutomationInferenceOverrides` in automations/automation.ts). A
  * device-pinned Automation passes the ref verbatim to a local CLI as `--model`,
  * so it must name a provider THAT CLI has registered; a server-dispatched one
  * resolves it against the org's model providers — registry modules with a

@@ -1,10 +1,11 @@
 /**
  * `execution_config.model` is ONE stored field with TWO resolution namespaces
- * (see the comment on `getAutomationModelOverride`): a device-pinned Automation
- * hands the ref verbatim to a local CLI as `--model`, while a server-dispatched
- * one resolves it against the org's model providers. Nothing checked which
- * lane a ref belonged to, so both directions failed silently at run time. In
- * prod on 2026-08-19 both happened within eight minutes:
+ * (see the comment on `getAutomationInferenceOverrides`): a device-pinned
+ * Automation hands the ref verbatim to a local CLI as `--model`, while a
+ * server-dispatched one resolves it against the org's model providers.
+ * Nothing checked which lane a ref belonged to, so both directions failed
+ * silently at run time. In prod on 2026-08-19 both happened within eight
+ * minutes:
  *
  *   15:01  #71 (device)  opencode: ProviderModelNotFoundError deepseek/deepseek-v4-flash
  *   15:09  #5  (server)  OpenRouter 400: opencode-go/deepseek-v4-flash is not a valid model ID

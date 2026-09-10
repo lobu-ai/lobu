@@ -2903,12 +2903,16 @@ describe('agent turn producer', () => {
     expect(turn.provider.reasoning).toBe(true);
   });
 
-  it("omits the output ceiling for a model the registry does not carry", async () => {
-    // `claude-opus-4-8` is not in pi-ai's registry, so there is no ceiling to
-    // state — and an absent field is how the envelope says "let the adapter
-    // apply its own default" instead of inventing a number on either side.
+  it("preserves explicit effort without inventing capabilities for an unknown model", async () => {
+    // `claude-opus-4-8` is not in pi-ai's registry, so there is no ceiling and
+    // no reasoning flag to state — and an absent field is how the envelope says
+    // "let the adapter decide" instead of inventing an answer on either side.
+    // Claiming `reasoning: false` here would make the guest reject the effort
+    // the caller configured, for a model that very likely supports it.
     const org = await createTestOrganization();
-    await enqueueMessage(messageFor(org.id), {
+    const message = messageFor(org.id);
+    message.agentOptions = { ...message.agentOptions, effort: 'medium' };
+    await enqueueMessage(message, {
       agentSettings: settingsStore,
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
@@ -2916,11 +2920,12 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const turn = (run?.action_input as {
-      turn: { provider: { model_id: string; reasoning?: boolean; max_tokens?: number } };
+      turn: { effort?: string; provider: { model_id: string; reasoning?: boolean; max_tokens?: number } };
     }).turn;
     expect(turn.provider.model_id).toBe('claude-opus-4-8');
     expect(turn.provider.max_tokens).toBeUndefined();
-    expect(turn.provider.reasoning).toBe(false);
+    expect(turn.provider.reasoning).toBeUndefined();
+    expect(turn.effort).toBe('medium');
   });
 
   it('carries ephemeralContext on the turn-scoped channel, NOT the durable message', async () => {

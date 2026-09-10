@@ -196,6 +196,12 @@ const SendMessageRequestSchema = Type.Object(
       Type.String({ description: "Message content (alias for content)" }),
     ),
     messageId: Type.Optional(Type.String()),
+    effort: Type.Optional(
+      Type.String({
+        description:
+          "Reasoning effort for this turn on the cloud lane (an Automation dispatches its `execution_config.effort` here). The runtime rejects a level the selected model cannot serve.",
+      }),
+    ),
     model: Type.Optional(
       Type.String({
         description:
@@ -1457,6 +1463,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         message: formData.get("message") as string | null,
         messageId: formData.get("messageId") as string | null,
         model: formData.get("model") as string | null,
+        effort: formData.get("effort") as string | null,
         platform: formData.get("platform") as string | null,
       };
 
@@ -1710,9 +1717,15 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         typeof body.model === "string" && body.model.trim()
           ? body.model.trim()
           : undefined;
+      // Same trim rule as the model override: an empty string is "unset".
+      const automationEffort =
+        typeof body.effort === "string" && body.effort.trim()
+          ? body.effort.trim()
+          : undefined;
       const baseOptions: Record<string, any> = {
         provider: session.provider || "claude",
         model: automationModel ?? session.model,
+        ...(automationEffort ? { effort: automationEffort } : {}),
         nixConfig: session.nixConfig,
       };
       const agentOptions = await resolveAgentOptions(
