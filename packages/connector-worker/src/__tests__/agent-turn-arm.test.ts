@@ -213,6 +213,30 @@ describe("executeAgentTurnRun", () => {
     expect(seen.credentials?.accessToken).toBe("lobu_secret_placeholder");
   });
 
+  // The guest cannot re-derive this: pi-ai infers upstream capabilities from
+  // `baseUrl`, which on this lane is the proxy. The gateway resolved them, so
+  // the arm has to carry them across unchanged.
+  test("carries the gateway's provider compat through to the guest", async () => {
+    const job = turnJob();
+    const turn = (job.payload as { turn: { provider: Record<string, unknown> } }).turn;
+    turn.provider.compat = { supportsStore: false };
+    let seen: ExecutorJob | undefined;
+    const executor: SyncExecutor = {
+      execute: async (_code, input) => {
+        seen = input;
+        return {
+          mode: "agent_turn",
+          turn: { text: "", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL },
+        };
+      },
+    };
+
+    await executeAgentTurnRun(fakeClient({ calls: [] }) as never, job, {}, cfgWith(executor));
+
+    if (seen?.mode !== "agent_turn") throw new Error("expected an agent_turn job");
+    expect(seen.turn.provider.compat).toEqual({ supportsStore: false });
+  });
+
   test("hands the guest the tool manifest in the guest's own shape", async () => {
     const reported: Reported = { calls: [] };
     let seen: ExecutorJob | undefined;

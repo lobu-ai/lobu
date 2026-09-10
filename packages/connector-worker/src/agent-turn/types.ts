@@ -11,6 +11,8 @@ export interface AgentTurnProvider {
   /** Provider slug pi-ai reports on the model (`anthropic`, `openai`, ...). */
   provider: string;
   modelId: string;
+  /** Resolved upstream capabilities; the proxy URL cannot identify the provider. */
+  compat?: { supportsStore?: boolean };
   /**
    * The gateway's agent-scoped secret-proxy URL. The guest never learns a real
    * provider key: the proxy swaps the credential it sends for the real key.
