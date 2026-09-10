@@ -22,6 +22,7 @@ import { listOperations } from "../../../../operations/connector-operations";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { AvailableOperation, OperationDescriptor } from "../../../../operations/types";
 import {
+	describeMissingBrowserExecutionPin,
 	hashlessManifestArtifactMayBeClaimed,
 	isChromeNamespaceConnectorKey,
 } from "../../../../utils/connector-execution-placement";
@@ -106,6 +107,10 @@ function executionTargetFromRow(
 			executable: false,
 			reason: `Connection status is ${row.status}.`,
 		};
+	}
+	const pinError = describeMissingBrowserExecutionPin(row.connector_key, row.device_worker_id);
+	if (pinError) {
+		return { ...base, status: "setup_required", executable: false, reason: pinError };
 	}
 	if (row.device_worker_id && !row.device_online) {
 		// Fleet readiness cannot override an execution pin: dispatch remains

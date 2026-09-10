@@ -40,7 +40,7 @@ import { getDb, pgTextArray } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { classifyRunOutcome } from '../runs/run-outcome';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
-import { hashlessManifestArtifactMayBeClaimed } from '../utils/connector-execution-placement';
+import { describeMissingBrowserExecutionPin, hashlessManifestArtifactMayBeClaimed } from '../utils/connector-execution-placement';
 import { DEVICE_ONLINE_WINDOW_SECONDS, describeDeviceLastSeen } from '../utils/device-liveness';
 import logger from '../utils/logger';
 import {
@@ -241,6 +241,8 @@ export function normalizeDeviceFeedReadOutput(output: unknown): DeviceFeedReadRe
 async function describeUnservableDevice(
   p: DeviceFeedReadParams
 ): Promise<string | null> {
+  const pinError = describeMissingBrowserExecutionPin(p.connectorKey, p.deviceWorkerId);
+  if (pinError) return pinError;
   const sql = getDb();
   const readinessIndex = await loadDeviceConnectorReadiness({
     sql,

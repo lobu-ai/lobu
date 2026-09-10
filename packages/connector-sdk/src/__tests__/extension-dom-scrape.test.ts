@@ -156,35 +156,7 @@ describe('extensionDomScrape', () => {
     ).rejects.toThrow(/landedUrl reported evil\.example\.net/);
   });
 
-  test('passes existing_tab_match and reports usedExistingTab when set', async () => {
-    const { dispatcher, log } = makeDispatcher({
-      tab_id: 9,
-      cs_scrape: true,
-      existing_tab: true,
-      result: {
-        loggedIn: true,
-        host: 'www.example.com',
-        rows: [{ id: 'open-tab-row' }],
-      },
-    });
-
-    const res = await extensionDomScrape<{ id?: string }>({
-      dispatcher,
-      url: 'https://www.example.com/feed/',
-      config: {},
-      parseRows: (rows) => rows as { id?: string }[],
-      allowedOrigins: ['example.com'],
-      existingTabMatch: 'example.com/feed',
-    });
-
-    expect(log).toHaveLength(1);
-    expect(log[0].input.existing_tab_match).toBe('example.com/feed');
-    expect(log[0].input.persistent).toBe(false);
-    expect(res.usedExistingTab).toBe(true);
-    expect(res.items).toEqual([{ id: 'open-tab-row' }]);
-  });
-
-  test('omits existing_tab_match and reports usedExistingTab false by default', async () => {
+  test('always dispatches a single owned-tab scrape', async () => {
     const { dispatcher, log } = makeDispatcher({
       tab_id: 10,
       cs_scrape: true,
@@ -201,49 +173,14 @@ describe('extensionDomScrape', () => {
 
     expect(log).toHaveLength(1);
     expect(log[0].input.existing_tab_match).toBeUndefined();
-    expect(res.usedExistingTab).toBe(false);
+    expect(log[0].input.persistent).toBe(false);
+    expect(res.items).toEqual([{ id: 'scratch-row' }]);
   });
 
-  test('falls back to a scratch tab on no_matching_tab when fallbackToScratch is default', async () => {
-    const observations = [
-      {
-        cs_scrape: true,
-        result: { error: 'no_matching_tab', match: 'example.com/feed' },
-      },
-      {
-        tab_id: 11,
-        cs_scrape: true,
-        result: { loggedIn: true, rows: [{ id: 'fallback-row' }] },
-      },
-    ];
-    const log: DispatchLog[] = [];
-    const dispatcher: ChromeActionDispatcher = {
-      dispatch: async (action: string, input: Record<string, unknown>) => {
-        log.push({ action, input });
-        return observations.shift() as never;
-      },
-    };
-
-    const res = await extensionDomScrape<{ id?: string }>({
-      dispatcher,
-      url: 'https://www.example.com/feed/',
-      config: {},
-      parseRows: (rows) => rows as { id?: string }[],
-      allowedOrigins: ['example.com'],
-      existingTabMatch: 'example.com/feed',
-    });
-
-    expect(log).toHaveLength(2);
-    expect(log[0].input.existing_tab_match).toBe('example.com/feed');
-    expect(log[1].input.existing_tab_match).toBeUndefined();
-    expect(res.usedExistingTab).toBe(false);
-    expect(res.items).toEqual([{ id: 'fallback-row' }]);
-  });
-
-  test('fails loudly on no_matching_tab when fallbackToScratch is false', async () => {
+  test('surfaces a scrape error without retrying a second tab source', async () => {
     const { dispatcher, log } = makeDispatcher({
       cs_scrape: true,
-      result: { error: 'no_matching_tab', match: 'example.com/feed' },
+      result: { error: 'injection failed' },
     });
 
     await expect(
@@ -253,10 +190,8 @@ describe('extensionDomScrape', () => {
         config: {},
         parseRows: (rows) => rows,
         allowedOrigins: ['example.com'],
-        existingTabMatch: 'example.com/feed',
-        fallbackToScratch: false,
       })
-    ).rejects.toThrow(/no open tab matches existing_tab_match/);
+    ).rejects.toThrow('injection failed');
     expect(log).toHaveLength(1);
   });
 });

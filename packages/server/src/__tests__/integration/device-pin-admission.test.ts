@@ -166,6 +166,35 @@ describe('manifest-backed device pin admission', () => {
     await cleanupTestDatabase();
   });
 
+  it('rejects unpinned browser operations despite two eligible browsers', async () => {
+    const fixture = await seedFixture();
+    await seedDevice(fixture.user.id, fixture.org.id, fixture.advertised);
+    const sql = getTestDb();
+    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${fixture.connection.id}`;
+    const available = await readiness(fixture.connection.id, fixture.ctx);
+    expect(available.executable).toBe(false);
+    expect(available.execution_targets[0].reason).toMatch(/paired.*device/i);
+    const result = await queueOperation(fixture);
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toMatch(/paired.*device/i);
+    const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${fixture.connection.id}`;
+    await expect(createSyncRun(Number(feed.id), {} as Env)).rejects.toThrow(/paired.*device/i);
+  });
+
+  it('neither browser claims an unpinned run queued before the upgrade', async () => {
+    const fixture = await seedFixture();
+    const secondDevice = await seedDevice(fixture.user.id, fixture.org.id, fixture.advertised);
+    const queued = await queueOperation(fixture);
+    expect(queued.status).toBe('pending');
+    const sql = getTestDb();
+    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${fixture.connection.id}`;
+    await sql`UPDATE runs SET target_device_worker_id = NULL WHERE id = ${queued.runId}`;
+    expect((await pollDevice(fixture.device, fixture.advertised)).run_id).not.toBe(queued.runId);
+    expect((await pollDevice(secondDevice, fixture.advertised)).run_id).not.toBe(queued.runId);
+    const [run] = await sql`SELECT status, claimed_by FROM runs WHERE id = ${queued.runId}`;
+    expect(run).toEqual({ status: 'pending', claimed_by: null });
+  });
+
   it.each([
     ['different version', manifest('0.9.0')],
     ['different hash at the same version', manifest('1.0.0', 'Other implementation')],
@@ -211,7 +240,9 @@ describe('manifest-backed device pin admission', () => {
     expect((await queueOperation(fixture)).status).toBe('failed');
     expect((await readiness(fixture.connection.id, fixture.ctx)).executable).toBe(false);
     const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${fixture.connection.id}`;
-    await expect(createSyncRun(Number(feed.id), {} as Env)).rejects.toThrow(/manifest/i);
+    await expect(createSyncRun(Number(feed.id), {} as Env)).rejects.toThrow(
+      pinned ? /manifest/i : /paired.*device/i
+    );
   });
 
   it('returns the admission failure through operations.execute without waiting for a worker', async () => {

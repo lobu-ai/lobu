@@ -1766,13 +1766,13 @@ describe("XConnector home_feed", () => {
 		expect(props.min_scrolls?.type).toBe("integer");
 	});
 
-	test("home_feed configSchema accepts use_existing_tab", () => {
+	test("home_feed no longer offers unattended user-tab mutation", () => {
 		const props = new XConnector().definition.feeds.home_feed.configSchema
 			.properties as Record<string, { type?: string }>;
-		expect(props.use_existing_tab?.type).toBe("boolean");
+		expect(props.use_existing_tab).toBeUndefined();
 	});
 
-	test("use_existing_tab passes existing_tab_match and reports the existing-tab backend", async () => {
+	test("old feed config cannot re-enable unattended user-tab mutation", async () => {
 		const calls: Array<{ action: string; input: Record<string, unknown> }> = [];
 		const dispatcher = {
 			dispatch: async (action: string, input: Record<string, unknown>) => {
@@ -1780,7 +1780,6 @@ describe("XConnector home_feed", () => {
 				return {
 					tab_id: 1,
 					cs_scrape: true,
-					existing_tab: true,
 					result: {
 						loggedIn: true,
 						rows: [
@@ -1805,9 +1804,9 @@ describe("XConnector home_feed", () => {
 		});
 
 		expect(calls).toHaveLength(1);
-		expect(calls[0].input.existing_tab_match).toBe("x.com/home");
+		expect(calls[0].input.existing_tab_match).toBeUndefined();
 		expect(res.events).toHaveLength(1);
-		expect(res.metadata.backend).toBe("extension-cs-scrape-existing-tab");
+		expect(res.metadata.backend).toBe("extension-cs-scrape");
 	});
 
 	test("without use_existing_tab no existing_tab_match is sent and backend stays extension-cs-scrape", async () => {
