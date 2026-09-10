@@ -34,11 +34,17 @@ describe("isCapacityFailure", () => {
 				"429 Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-07-10 04:32:47",
 			],
 			["429 quoted inside a log line", "x chat returned 429: slow down"],
-			["SDK 429 without quota prose", '429 {"error":{"message":"Too many concurrent requests"}}'],
+			[
+				"SDK 429 without quota prose",
+				'429 {"error":{"message":"Too many concurrent requests"}}',
+			],
 			// The rest carry no 429 in HTTP-status position, keeping each semantic
 			// signal independently covered.
 			["bare RESOURCE_EXHAUSTED status", '{"status":"RESOURCE_EXHAUSTED"}'],
-			["weekly limit prose with no status", '{"message":"Weekly/Monthly Limit Exhausted"}'],
+			[
+				"weekly limit prose with no status",
+				'{"message":"Weekly/Monthly Limit Exhausted"}',
+			],
 			[
 				"Google metric exhaustion without a status line",
 				"Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0",
@@ -55,9 +61,11 @@ describe("isCapacityFailure", () => {
 				"OpenAI exhausted credits",
 				"You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.",
 			],
+			// The two underscored codes `classifyErrorMessage` does not reach, so
+			// `UNDERSCORED_QUOTA_CODES` cannot be dropped without a red test.
 			["OpenAI insufficient_quota", '{"code":"insufficient_quota"}'],
-			["plain rate limit prose", "rate limited, retry later"],
 			["rate_limit_error token", '{"type":"rate_limit_error"}'],
+			["plain rate limit prose", "rate limited, retry later"],
 			["too many requests prose", "Too Many Requests"],
 		];
 		for (const [label, message] of quota) {
@@ -92,6 +100,10 @@ describe("isCapacityFailure", () => {
 			["429 as a vendor error code", '400 {"vendor_code":1429}'],
 			["429 in a structured provider code", '400 {"error":{"code":429}}'],
 			["rate_limit in an invalid parameter name", "400 invalid rate_limit option"],
+			["camel-case rateLimit parameter", "400 invalid rateLimit option"],
+			["hyphenated rate-limit parameter", "400 invalid rate-limit option"],
+			["rate-limit documentation URL", "404 model not found; see https://example.test/docs/rate-limits"],
+			["error type used as an invalid parameter", "400 invalid rate_limit_error option"],
 		];
 		for (const [label, message] of notQuota) {
 			test(label, () => {
@@ -114,7 +126,9 @@ describe("completeWithLiveRetry", () => {
 		errorMessage,
 	});
 	/** Records the backoffs so the schedule itself is asserted, not just the count. */
-	function harness(outcomes: Array<{ stopReason: string; errorMessage?: string }>) {
+	function harness(
+		outcomes: Array<{ stopReason: string; errorMessage?: string }>,
+	) {
 		const slept: number[] = [];
 		let calls = 0;
 		const attempt = async () => {

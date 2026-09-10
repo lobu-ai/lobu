@@ -1,5 +1,9 @@
 /**
  * Semantic capacity markers independent of HTTP status.
+ *
+ * Deliberately stricter than core's remediation classifier: a rate-limit docs
+ * URL or invalid parameter name must not suppress an integration assertion.
+ * Core selects advice for an already-failed turn; this predicate skips checks.
  */
 const QUOTA_SIGNALS: readonly RegExp[] = [
 	/\bRESOURCE_EXHAUSTED\b/,
@@ -42,7 +46,6 @@ export function isCapacityFailure(message: string | undefined | null): boolean {
 
 interface LiveOutcome {
 	stopReason?: string;
-	errorMessage?: string;
 }
 
 /**

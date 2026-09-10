@@ -11,7 +11,10 @@ name: Live Providers
 #     with NO secrets, every time.
 #   - keyed:   production-adapter streaming + tool-call round-trip. The required
 #     readiness tier fails closed when a credential is missing; extra provider
-#     secrets remain optional coverage.
+#     secrets remain optional coverage. Each turn is retried, and a failure the
+#     retries cannot clear that classifies as provider quota is logged as a
+#     CAPACITY-SKIP rather than asserted — so a green keyed tier can mean one
+#     required provider was quota-blocked. It stays red when quota hid them all.
 
 on:
   schedule:
@@ -31,7 +34,10 @@ permissions:
 jobs:
   live-providers:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Every keyed turn now retries up to 3 times behind a 60s per-attempt
+    # timeout, so one hung provider can burn ~3min per turn instead of ~1min.
+    # A job-timeout kill reports nothing at all, which is worse than a red turn.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,9 +62,12 @@ jobs:
         run: make test-providers-live
         env:
           REQUIRED_LIVE_PROVIDERS: claude,openai,gemini,openrouter
+          # Anthropic deliberately gets no OAuth passthrough: `resolveCredential`
+          # prefers an OAuth token over ANTHROPIC_API_KEY, and subscription OAuth
+          # is refused for API inference with a 403
+          # `oauth_not_allowed_for_organization`, which would fail the required
+          # claude tier on auth instead of exercising the contract.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_OAUTH_TOKEN }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
