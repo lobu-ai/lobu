@@ -72,8 +72,12 @@ function defaultWorkerId(): string {
   return `${MAC_DEVICE_PLATFORM}:${shortHostname}`;
 }
 
-function packagedAcpAdapterArgs(agentKind: 'claude-code' | 'codex'): string[] {
-  const args = [INTERNAL_ACP_ADAPTER_ARG, agentKind];
+/**
+ * Argv for re-entering this daemon's own entrypoint. A compiled artifact is its
+ * own interpreter, so the internal argument stands alone; running from source
+ * needs the script path back in front of it.
+ */
+export function packagedDaemonArgs(...args: string[]): string[] {
   return process.argv[1] && /\.[cm]?[jt]s$/.test(process.argv[1])
     ? [process.argv[1], ...args]
     : args;
@@ -309,7 +313,7 @@ export function createMacDeviceDaemon(
   if (codexPath) {
     acpAdapters.codex = {
       command: process.execPath,
-      args: packagedAcpAdapterArgs('codex'),
+      args: packagedDaemonArgs(INTERNAL_ACP_ADAPTER_ARG, 'codex'),
       env: { CODEX_PATH: codexPath },
       defaultMode: 'agent',
       effortConfigId: 'reasoning_effort',
@@ -318,7 +322,7 @@ export function createMacDeviceDaemon(
   if (claudePath) {
     acpAdapters['claude-code'] = {
       command: process.execPath,
-      args: packagedAcpAdapterArgs('claude-code'),
+      args: packagedDaemonArgs(INTERNAL_ACP_ADAPTER_ARG, 'claude-code'),
       env: {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         CLAUDE_CODE_EXECUTABLE: claudePath,

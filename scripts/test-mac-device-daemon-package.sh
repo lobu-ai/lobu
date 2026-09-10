@@ -75,6 +75,10 @@ codesign --force --options runtime --sign - \
 HARDENED_JSON="$(run_clean "$ROOT/scripts/verify-mac-device-daemon.sh" ./lobu-device-daemon)"
 [[ "$HARDENED_JSON" == "$VERSION_JSON" ]]
 
+# Run a real poll/CLI/completion cycle through the copied, hardened artifact.
+# Metadata-only checks cannot detect an invalid self-exec supervisor command.
+node "$ROOT/scripts/test-mac-device-daemon-chat.mjs" "$CLEAN/lobu-device-daemon"
+
 echo "Mac device-daemon package smoke passed"
 echo "$VERSION_JSON"
 stat -f 'artifact_bytes=%z' "$CLEAN/lobu-device-daemon"
