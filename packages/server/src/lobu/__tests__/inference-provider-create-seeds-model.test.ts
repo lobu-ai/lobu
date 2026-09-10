@@ -15,6 +15,7 @@ import {
 	moduleRegistry,
 } from "@lobu/core";
 import { ApiKeyProviderModule } from "../../gateway/auth/api-key-provider-module.js";
+import { ChatGPTOAuthModule } from "../../gateway/auth/chatgpt/chatgpt-oauth-module.js";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
@@ -118,6 +119,7 @@ function registerCatalogModules(): void {
 			authProfilesManager: { getBestProfile: async () => null } as never,
 		}) as unknown as ModuleInterface,
 	);
+	moduleRegistry.register(new ChatGPTOAuthModule({} as never) as unknown as ModuleInterface);
 	moduleRegistry.register({
 		name: "claude-provider",
 		isEnabled: () => true,
@@ -125,6 +127,7 @@ function registerCatalogModules(): void {
 		providerDisplayName: "Claude",
 		providerIconUrl: "",
 		authType: "oauth",
+		supportedAuthTypes: ["oauth", "api-key"],
 		sdkCompat: "anthropic",
 		hasSystemKey: () => false,
 		getSecretEnvVarNames: () => [],
@@ -168,6 +171,13 @@ describe("POST /inference-providers seeds a routable text model", () => {
 	});
 
 	afterEach(() => restoreModules());
+
+	test("Codex runtime support does not allow subscription credentials through API-key creation", async () => {
+		const res = await createProvider({ slug: "chatgpt", kind: "chatgpt", apiKey: "synthetic-not-a-subscription" });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "Provider 'chatgpt' can't be added with an API key — it signs in instead." });
+		expect(await readCapabilities("chatgpt")).toBeUndefined();
+	});
 
 	test("a catalog provider created with NO capabilities gets the catalog default model", async () => {
 		const res = await createProvider({

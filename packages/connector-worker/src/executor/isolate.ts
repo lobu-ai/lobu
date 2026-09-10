@@ -417,6 +417,8 @@ function agentInferencePath(api: AgentTurnInput['provider']['api']): string {
       return '/chat/completions';
     case 'openai-responses':
       return '/responses';
+    case 'openai-codex-responses':
+      return '/codex/responses';
   }
 }
 

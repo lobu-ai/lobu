@@ -100,6 +100,7 @@ describe('native capture over HTTP and Postgres', () => {
     app.route('/lobu', provider.getApp());
     app.post('/upstream/v1/messages', (c) => { upstream(c.req.path); return c.json({ content: [] }); });
     app.post('/upstream/responses', (c) => { upstream(c.req.path); return c.json({ output: [] }); });
+    app.post('/upstream/codex/responses', (c) => { upstream(c.req.path); return c.json({ output: [] }); });
     server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
     if (!server.listening) await new Promise<void>((resolve) => server.once('listening', resolve));
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -299,22 +300,22 @@ describe('native capture over HTTP and Postgres', () => {
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
-  it('admits the OpenAI Responses path during capture', async () => {
+  it.each([['openai-responses', '/responses'], ['openai-codex-responses', '/codex/responses']])('admits the %s path during capture', async (api, suffix) => {
     const sql = getTestDb();
     const [row] = await sql`SELECT action_input->'turn'->'provider' AS provider FROM runs WHERE id = ${runId}`;
     const path = new URL(row.provider.base_url).pathname;
     await sql`
       UPDATE runs
-      SET action_input = jsonb_set(action_input, '{turn,provider,api}', '"openai-responses"')
+      SET action_input = jsonb_set(action_input, '{turn,provider,api}', to_jsonb(${api}::text))
       WHERE id = ${runId}
     `;
     upstream.mockClear();
     try {
       const denied = await request(path + '/v1/messages', {}, '', { authorization: `Bearer ${token}` });
       expect(denied.status).toBe(403);
-      const response = await request(path + '/responses', {}, '', { authorization: `Bearer ${token}` });
+      const response = await request(path + suffix, {}, '', { authorization: `Bearer ${token}` });
       expect(response.status, await response.clone().text()).toBe(200);
-      expect(upstream).toHaveBeenCalledWith('/upstream/responses');
+      expect(upstream).toHaveBeenCalledWith('/upstream' + suffix);
     } finally {
       await sql`
         UPDATE runs

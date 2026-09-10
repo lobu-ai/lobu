@@ -432,6 +432,7 @@ export const AgentTurnPollPayloadSchema = Type.Object({
         // `provider-catalog.ts`. pi-ai implements it on the same `openai` SDK
         // as completions, so it is isolate-compatible for the same reason.
         Type.Literal("openai-responses"),
+        Type.Literal("openai-codex-responses"),
       ]),
       provider: Type.String({ minLength: 1 }),
       model_id: Type.String({ minLength: 1 }),

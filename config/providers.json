@@ -50,8 +50,9 @@
           "iconUrl": "https://www.google.com/s2/favicons?domain=chatgpt.com&sz=128",
           "envVarName": "OPENAI_API_KEY",
           "upstreamBaseUrl": "https://chatgpt.com/backend-api",
-          "apiKeyInstructions": "Sign in with ChatGPT Plus/Pro, or paste an OpenAI API key",
-          "apiKeyPlaceholder": "sk-...",
+          "sdkCompat": "openai-codex",
+          "apiKeyInstructions": "Sign in with ChatGPT Plus/Pro.",
+          "apiKeyPlaceholder": "",
           "modalities": ["text"],
           "oauth": {
             "clientId": "app_EMoamEEZ73f0CkXaXp7hrann",

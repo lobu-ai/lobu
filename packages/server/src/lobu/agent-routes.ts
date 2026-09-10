@@ -953,10 +953,11 @@ routes.post("/inference-providers", async (c) => {
 	const capErr = validateCapabilitiesMap(body.capabilities);
 	if (capErr) return c.json({ error: capErr }, 400);
 
-	// Known catalog kinds must use a routable wire protocol. Unknown kinds pass
-	// because custom endpoints are synthesized as OpenAI-compatible providers.
-	// Read the default from configs because the catalog contains only provider
-	// modules registered in this process.
+	// Known catalog kinds must accept API keys AND speak a routable wire
+	// protocol — a subscription kind can speak one and still have nothing an API
+	// key may reach. Unknown kinds pass because custom endpoints are synthesized
+	// as OpenAI-compatible providers. Read the default from configs because the
+	// catalog contains only provider modules registered in this process.
 	let catalogDefaultModel: string | undefined;
 	// The upstream this `kind` already resolves to. An alias row (slug !== kind)
 	// with no base_url of its own is synthesized against it, so its presence is
@@ -967,7 +968,11 @@ routes.post("/inference-providers", async (c) => {
 		const configs = await registry.getProviderConfigs();
 		const catalog = buildProviderCatalog(configs);
 		const entry = catalog.find((e) => e.slug === kind);
-		if (entry && !isSdkCompat(entry.sdkCompat)) {
+		if (
+			entry &&
+			(!entry.supportedAuthTypes.includes("api-key") ||
+				!isSdkCompat(entry.sdkCompat))
+		) {
 			return c.json(
 				{
 					error: `Provider '${kind}' can't be added with an API key — it signs in instead.`,
@@ -977,19 +982,22 @@ routes.post("/inference-providers", async (c) => {
 		}
 		catalogDefaultModel = configs[kind]?.defaultModel ?? undefined;
 		// The EXACT expression `getModelPolicy` evaluates — argless
-		// `buildProviderCatalog()`, then the same `sdkCompat` gate. These two must
-		// agree: a text model is what `promoteOldestRunnableProvider` keys on, so
-		// a row seeded as routable and then dropped at routing becomes the org
-		// DEFAULT and breaks every allow-all agent in the org.
+		// `buildProviderCatalog()`, then the same auth-method and `sdkCompat`
+		// gates. These two must agree: a text model is what
+		// `promoteOldestRunnableProvider` keys on, so a row seeded as routable and
+		// then dropped at routing becomes the org DEFAULT and breaks every
+		// allow-all agent in the org.
 		//
 		// `configs[kind].upstreamBaseUrl` looks equivalent and is not. It gives
 		// `claude` a URL, but claude registers as an OAuth module rather than an
 		// ApiKeyProviderModule, so the catalog reports "" and synthesis refuses
 		// it — trusting providers.json would seed exactly that unroutable row.
 		const catalogEntry = buildProviderCatalog().find((e) => e.slug === kind);
-		catalogBaseUrl = isSdkCompat(catalogEntry?.sdkCompat ?? null)
-			? catalogEntry?.baseUrl || undefined
-			: undefined;
+		catalogBaseUrl =
+			catalogEntry?.supportedAuthTypes.includes("api-key") &&
+			isSdkCompat(catalogEntry.sdkCompat)
+				? catalogEntry.baseUrl || undefined
+				: undefined;
 	} catch (err) {
 		// Fail open on catalog-load errors: don't block creation on a metadata
 		// read. The synthesize path still gates routing downstream.
