@@ -1306,12 +1306,8 @@ export async function listNotifications(opts: {
 	unreadOnly?: boolean;
 	clientIds?: string[];
 	mcpActivityId?: string | null;
-	/**
-	 * Return only notifications carrying a `browser_url` (a browser-handoff
-	 * draft staged in the user's browser). Used by the attention feed to keep
-	 * undismissed drafts visible regardless of the recent-activity window.
-	 */
-	browserUrlOnly?: boolean;
+	/** Return unread notifications and actionable decisions beyond the recent window. */
+	attentionOnly?: boolean;
 }): Promise<{
 	notifications: Record<string, unknown>[];
 	nextCursor: number | null;
@@ -1322,7 +1318,28 @@ export async function listNotifications(opts: {
 	const unreadOnly = opts.unreadOnly ?? false;
 	const clientIds = opts.clientIds?.length ? opts.clientIds : null;
 	const mcpActivityId = opts.mcpActivityId?.trim() || null;
-	const browserUrlOnly = opts.browserUrlOnly ?? false;
+	const attentionOnly = opts.attentionOnly ?? false;
+	// The attention read reorders rows (see ORDER BY), which would make a keyset
+	// cursor skip notifications. It is a single bounded read by contract; fail
+	// loudly rather than paginate an order the cursor does not match.
+	if (attentionOnly && cursor != null) {
+		throw new Error("listNotifications: attentionOnly cannot be paginated");
+	}
+
+	// Use the same actionable states as the returned card, before LIMIT. Dead
+	// drafts and unreachable approvals must not consume the attention budget.
+	const pendingDecision = sql`COALESCE((
+		t.browser_url IS NOT NULL
+		AND browser_run.status = 'pending'
+		AND browser_run.activated_at IS NULL
+		AND browser_run.approval_status = 'auto'
+		AND browser_run.activation_kind = 'page_visit'
+		AND browser_run.run_metadata->>'page_activation_identity' = 'exact'
+		AND browser_run.expires_at > current_timestamp
+	) OR (
+		ar.approval_status = 'pending'
+		AND (pe.connection_id IS NULL OR pc.id IS NOT NULL)
+	), false)`;
 
 	const rows = (await sql`
     SELECT
@@ -1490,7 +1507,13 @@ export async function listNotifications(opts: {
       AND t.user_id = ${opts.userId}
       AND (${cursor}::bigint IS NULL OR e.id < ${cursor})
       AND (${!unreadOnly} OR t.read_at IS NULL)
-      ${browserUrlOnly ? sql`AND t.browser_url IS NOT NULL` : sql``}
+      ${
+				attentionOnly
+					? sql`AND (
+        t.read_at IS NULL OR ${pendingDecision}
+      )`
+					: sql``
+			}
 			${clientIds
 				? sql`AND e.client_id = ANY(${pgTextArray(clientIds)}::text[])`
 				: sql``}
@@ -1504,15 +1527,23 @@ export async function listNotifications(opts: {
     -- consistent. delivered_at would tie-break for concurrent inserts but
     -- doesn't match the cursor — using it as the primary key risked
     -- skipping notifications when delivered_at and e.id disagreed.
-    ORDER BY e.id DESC
+    -- Attention has no cursor and gives pending decisions the first slots.
+    ${
+			attentionOnly
+				? sql`ORDER BY ${pendingDecision} DESC, e.id DESC`
+				: sql`ORDER BY e.id DESC`
+		}
     LIMIT ${limit + 1}
   `) as unknown as Array<{ id: number } & Record<string, unknown>>;
 
 	const hasMore = rows.length > limit;
 	const notifications = hasMore ? rows.slice(0, limit) : rows;
-	const nextCursor = hasMore
-		? (notifications[notifications.length - 1]?.id ?? null)
-		: null;
+	// No cursor for the attention read: handing one back would advertise a next
+	// page the guard above refuses to serve.
+	const nextCursor =
+		hasMore && !attentionOnly
+			? (notifications[notifications.length - 1]?.id ?? null)
+			: null;
 
 	return { notifications, nextCursor };
 }
