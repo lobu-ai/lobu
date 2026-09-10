@@ -37,7 +37,16 @@ import {
 /** Third-party MCP server on the other side of the gateway: generous, never forever. */
 const TOOL_CALL_TIMEOUT_MS = 120_000;
 
-/** What of a tool's output the host sees in the event stream. */
+/**
+ * What of a tool's output the host sees in the event stream.
+ *
+ * Mirrors `TURN_TOOL_OUTPUT_MAX_CHARS`, the wire contract's `maxLength` on the
+ * same field, rather than importing it: the protocol module pulls TypeBox in,
+ * and the guest bundle takes only the pure `@lobu/core` modules. The mirror is
+ * held by the tool-output test, which drives a result of exactly this length
+ * and one past it through the real schemas — a change to either number on its
+ * own turns it red.
+ */
 const TOOL_EVENT_OUTPUT_CHARS = 2_000;
 
 /** The MCP proxy's REST reply for a tool call. */
@@ -229,8 +238,18 @@ function messageText(message: unknown): string | undefined {
     .join('');
 }
 
+/**
+ * Clip a tool result down to what the trace carries, MARKER INCLUDED.
+ *
+ * The `…` counts against the cap, so the slice reserves its one character.
+ * Appending it to a full-width slice overshoots by one, and the overshoot is
+ * not cosmetic: the heartbeat route drops a body that fails the schema, taking
+ * the turn's text delta with it, and the completion route answers 400 — which
+ * the arm reports as a FAILED turn, discarding an answer the model already
+ * produced if the oversized trace rides its completion.
+ */
 function clip(text: string): string {
-  return text.length > TOOL_EVENT_OUTPUT_CHARS ? `${text.slice(0, TOOL_EVENT_OUTPUT_CHARS)}…` : text;
+  return text.length > TOOL_EVENT_OUTPUT_CHARS ? `${text.slice(0, TOOL_EVENT_OUTPUT_CHARS - 1)}…` : text;
 }
 
 /**

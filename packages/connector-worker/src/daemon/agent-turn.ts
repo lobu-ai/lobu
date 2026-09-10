@@ -510,10 +510,10 @@ export async function executeAgentTurnRun(
     await beatInFlight;
     await drainDeltas();
     // Whatever drainDeltas could not place rides the completion instead of
-    // being dropped. A turn's LAST tool call always lands here: its trace is
-    // queued after the final beat, and the server's heartbeat publish is
-    // fenced on the run still being `running`, which the completion below
-    // ends. Taken before the request so a trace cannot be sent twice.
+    // being dropped. A trace can remain when no text delta triggered a drain
+    // or its beat could not deliver. Heartbeat publishing requires the run
+    // to remain `running`, which completion ends, so take these before the
+    // request rather than relying on a later beat.
     const trailingTraces = [...tracesInFlight, ...toolEvents];
     tracesInFlight = [];
     toolEvents = [];
