@@ -1338,7 +1338,11 @@ export default async function runNetWorthSnapshot(
         connection_id: quoteConnectionId,
         operation_key: "quote",
         input: { symbols: batch },
-        idempotency_key: `${IDEMPOTENCY_PREFIX}:quotes:week:${week}:batch:${index + 1}`,
+        // An action idempotency key binds to the parent run that first used
+        // it, so a week-scoped key 409s on the next run in the same week.
+        // Only retries of THIS run reuse the key; weekly deduplication stays
+        // on the snapshot event's own key below.
+        idempotency_key: `${IDEMPOTENCY_PREFIX}:quotes:run:${ctx.window.run_id}:batch:${index + 1}`,
         automation_source: {
           automation_id: ctx.automation.id,
           run_id: ctx.window.run_id,
