@@ -1,19 +1,15 @@
 name: Publish Canary
 
 on:
-  workflow_run:
-    workflows: ["Build and Push Images"]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
 
-# Keep publish, smoke and promotion serialized. Superseded pending runs can be
-# coalesced by GitHub; a running candidate always finishes without cancellation.
+# Serialize manual publications so an older run cannot move canary backwards.
 concurrency:
-  group: ${{ github.event.workflow_run.event == 'push' && 'npm-canary' || format('npm-canary-ignored-{0}', github.run_id) }}
+  group: npm-canary
   cancel-in-progress: false
 
 env:
@@ -24,35 +20,34 @@ jobs:
     name: Attest main image and CI runs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # `types: [completed]` also fires for failure and cancellation, and
-    # `branches: [main]` admits a manual Build Images dispatch as readily as a
-    # push. Both would start this job and then hard-fail the API checks below,
-    # so screen them out here. The producer's conclusion and event are re-read
-    # from the API regardless: this is noise control, not the gate.
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
     outputs:
       sha: ${{ steps.producer.outputs.sha }}
     steps:
+      # Require main's workflow policy before checking out repository code.
+      - name: Require manual dispatch from main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          [ "$WORKFLOW_REF" = refs/heads/main ] || { echo "::error::Run Publish Canary from main"; exit 1; }
+
       # Deliberately before any checkout: no repository code runs until the
-      # producing run is known to be a completed-success push to a commit
-      # that is still reachable from main.
+      # dispatched commit is known to have a completed-success push build and
+      # to still be reachable from main.
       - name: Attest the producing Build Images run
         id: producer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_IMAGE_RUN_ID: ${{ github.event.workflow_run.id }}
+          DISPATCH_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          image_run_id="$EVENT_IMAGE_RUN_ID"
-          [ -n "$image_run_id" ] || { echo "::error::image_run_id is required"; exit 1; }
-
           build_workflow_id=$(gh api "repos/${REPOSITORY}/actions/workflows/build-images.yml" --jq '.id')
+          image_run_id=$(gh api "repos/${REPOSITORY}/actions/workflows/build-images.yml/runs?head_sha=${DISPATCH_SHA}&event=push&branch=main&status=success&per_page=100" --jq '.workflow_runs[0].id // empty')
+          [ -n "$image_run_id" ] || { echo "::error::No successful main image build for this dispatch commit; retry after it passes"; exit 1; }
           build_run=$(gh api "repos/${REPOSITORY}/actions/runs/${image_run_id}")
           workflow_id=$(jq -r '.workflow_id' <<<"$build_run")
           sha=$(jq -r '.head_sha' <<<"$build_run")
+          [ "$sha" = "$DISPATCH_SHA" ] || { echo "::error::Image run does not match dispatch commit"; exit 1; }
           head_repo=$(jq -r '.head_repository.full_name // empty' <<<"$build_run")
           event=$(jq -r '.event' <<<"$build_run")
           branch=$(jq -r '.head_branch // empty' <<<"$build_run")
@@ -63,11 +58,11 @@ jobs:
           [ "$event" = push ] && [ "$branch" = main ] || { echo "::error::Build Images run must be a main push"; exit 1; }
           [ "$status" = completed ] && [ "$conclusion" = success ] || { echo "::error::Build Images run is not completed-success"; exit 1; }
 
-          # Reachability, not tip-ness. A release commit's own image build
-          # routinely finishes after later commits have landed; demanding the
-          # tip threw that run away and left the version unreleased with every
-          # run green. A commit still reachable from main got there through
-          # branch protection, which is the property the checkout below needs.
+          # Reachability, not tip-ness: main can move between this dispatch
+          # and the checkout below, and demanding the tip would throw away a
+          # run that is still perfectly good. A commit reachable from main got
+          # there through branch protection, which is the property the
+          # checkout below needs.
           current_sha=$(gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
           compare_status=$(gh api "repos/${REPOSITORY}/compare/${sha}...${current_sha}" --jq '.status')
           [ "$compare_status" = ahead ] || [ "$compare_status" = identical ] || { echo "::error::attested SHA ${sha} is not reachable from main (${compare_status})"; exit 1; }
@@ -130,14 +125,18 @@ jobs:
   publish:
     needs: attest
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: production
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.attest.outputs.sha }}
+          fetch-depth: 0
       - uses: ./.github/actions/setup-submodule
         with:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
@@ -158,10 +157,22 @@ jobs:
         run: |
           bun run build:packages
           bun run build:lobu
-      - name: Publish candidate without moving stable or canary
+      - name: Smoke the packed CLI before publication
+        run: |
+          node scripts/pack-cli-smoke.mjs "$RUNNER_TEMP/canary-smoke"
+          cd "$RUNNER_TEMP/canary-smoke"
+          node node_modules/@lobu/cli/bin/lobu.js --version
+          node node_modules/@lobu/cli/bin/lobu.js connector runtime-self-check --json
+      - name: Require forward-only canary publication
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: node scripts/publish-packages.mjs --skip-bump --skip-build --tag=canary-candidate
+          CANARY_VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/canary-publish.mjs check "$CANARY_VERSION"
+      # npm trusted publishing authenticates npm publish through OIDC.
+      # Separate dist-tag mutations do not support this authentication.
+      - name: Publish canary with npm trusted publishing
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
+        run: node scripts/publish-packages.mjs --skip-bump --skip-build --tag=canary
 
   smoke:
     needs: publish
@@ -169,23 +180,3 @@ jobs:
     secrets: inherit
     with:
       version: ${{ needs.publish.outputs.version }}
-
-  promote:
-    needs: [attest, publish, smoke]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    environment: production
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.attest.outputs.sha }}
-          fetch-depth: 0
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-      - name: Advance canary after the exact artifact passes
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          CANARY_VERSION: ${{ needs.publish.outputs.version }}
-        run: node scripts/canary-publish.mjs promote "$CANARY_VERSION"

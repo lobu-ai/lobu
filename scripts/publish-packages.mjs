@@ -50,8 +50,9 @@ const PACKAGES = [
   // blocked-dependency skip below relies on a dependency always being attempted
   // before its dependents. A guard test asserts this ordering holds.
   { dir: "packages/connector-worker", transform: rewriteWorkspaceRefs },
-  { dir: "packages/cli", transform: rewriteWorkspaceRefs },
   { dir: "packages/promptfoo-provider", transform: rewriteWorkspaceRefs },
+  // Advance the CLI entry point only after every sibling package succeeds.
+  { dir: "packages/cli", transform: rewriteWorkspaceRefs },
 ];
 
 // Published package names that don't use the @lobu/ scope. The unscoped
@@ -378,14 +379,12 @@ function isVersionPublished(name, version) {
 }
 
 function publishArgs(otp, tag, version) {
-  if (tag !== "latest" && tag !== "canary-candidate") {
-    throw new Error(
-      "Publish only to latest or canary-candidate; promotion owns canary"
-    );
+  if (tag !== "latest" && tag !== "canary") {
+    throw new Error("Publish only to latest or canary");
   }
   if (
     (tag === "latest" && version.includes("-")) ||
-    (tag === "canary-candidate" && !version.includes("-canary."))
+    (tag === "canary" && !version.includes("-canary."))
   ) {
     throw new Error(`Version ${version} cannot publish under ${tag}`);
   }
@@ -503,6 +502,8 @@ async function main() {
     try {
       await publishPackage(pkg, otp, tag);
     } catch (error) {
+      // Direct canary publication must stop before advancing any later tag.
+      if (tag === "canary") throw error;
       if (error instanceof FirstPublishBlockedError) {
         blocked.push(error);
         unavailableNames.add(error.pkgName);
