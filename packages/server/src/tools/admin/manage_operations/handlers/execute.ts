@@ -24,6 +24,7 @@ import { resolveActionOrigin } from "../../../../notifications/action-origin";
 import { notifyActionApprovalNeeded } from "../../../../notifications/triggers";
 import { resolveApprovalChatOrigin } from "../../approval-delivery";
 import { resolveActionMode } from "../../../../operations/action-modes";
+import { connectorOperationReader } from "../../../../operations/connector-operation-reader";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import { LOST_LEASE_MESSAGE, runLeaseFence } from "../../../../runs/run-lease";
 import { executeHttpOperation } from "../../../../operations/execute-http-operation";
@@ -236,6 +237,11 @@ async function executeLocalActionInline(
 				credentials,
 			},
 			hooks: {
+				onReadOperation: connectorOperationReader(
+					{ organizationId, principal: requesterUserId },
+					connection.id,
+					abortSignal,
+				),
 				// Let an inline connector action drive the paired Owletto Chrome
 				// extension (the Lobu Team Deliveroo connector scrapes restaurant
 				// search + menu pages this way). The connector calls
@@ -489,6 +495,8 @@ export async function handleExecute(
 	args: Static<typeof ExecuteAction>,
 	ctx: ToolContext,
 	_env: Env,
+	/** Set by connector composition: only an imported HTTP read may execute. */
+	constraints?: { importedReadOnly: boolean },
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
 	const browserContext = deriveBrowserActionContext(ctx);
@@ -545,6 +553,14 @@ export async function handleExecute(
 	}
 
 	const { connection, operation } = resolved;
+	if (
+		constraints?.importedReadOnly &&
+		(operation.backend !== "http_operation" || operation.kind !== "read")
+	) {
+		return {
+			error: "Connector composition only permits imported read operations",
+		};
+	}
 	if (connection.status !== "active") {
 		return { error: `Connection is ${connection.status}, must be active` };
 	}
@@ -600,6 +616,10 @@ export async function handleExecute(
 		return {
 			error: `Operation '${operation.operation_key}' is disabled on this connection.`,
 		};
+	}
+
+	if (constraints?.importedReadOnly && mode === "approval") {
+		return { error: `Imported read '${operation.operation_key}' requires approval; execute it directly through operations.execute.` };
 	}
 
 	// Org-level connector-action policy, from the SAME write-gate the entity and

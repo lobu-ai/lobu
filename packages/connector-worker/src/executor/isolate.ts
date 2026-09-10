@@ -237,6 +237,12 @@ const GUEST_RUNNER = String.raw`
     await H.async('updateCheckpoint', JSON.stringify(checkpoint === undefined ? null : checkpoint));
   }
 
+  var operations = {
+    read: function (key, input) {
+      return H.async('readOperation', key, JSON.stringify(input === undefined ? {} : input)).then(function (json) { return JSON.parse(json); });
+    }
+  };
+
   async function executeConnectorRuntime(instance) {
     if (job.mode === 'authenticate') {
       var authController = new AbortController();
@@ -258,6 +264,7 @@ const GUEST_RUNNER = String.raw`
 
     if (job.mode === 'action') {
       var actionResult = await instance.execute({
+        operations: operations,
         actionKey: job.actionKey,
         input: job.actionInput,
         sessionState: withDispatcher(job.sessionState),
@@ -296,6 +303,7 @@ const GUEST_RUNNER = String.raw`
 
     if (job.mode === 'read') {
       var readResult = await instance.read({
+        operations: operations,
         feedId: job.feedId === null ? undefined : job.feedId, feedKey: job.feedKey, query: job.query, cursor: job.cursor,
         config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState,
         limit: job.limit, offset: job.offset, sort: job.sort
@@ -307,6 +315,7 @@ const GUEST_RUNNER = String.raw`
     }
 
     var syncResult = await instance.sync({
+      operations: operations,
       feedKey: job.feedKey,
       feedId: job.feedId,
       config: mergedConfig,
@@ -801,6 +810,13 @@ export class IsolateExecutor implements SyncExecutor {
         },
       },
       async: {
+        readOperation: async (key: unknown, json: unknown) => {
+          if (!hooks?.onReadOperation) throw new Error('Imported operations are unavailable in this execution context');
+          if (typeof key !== 'string' || !key.trim()) throw new Error('Operation key is required');
+          const input = parseGuestJson(json, 'readOperation');
+          if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Operation input must be an object');
+          return JSON.stringify(await hooks.onReadOperation(key, input as Record<string, unknown>));
+        },
         sleep: (ms: unknown) => {
           const delay = typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? Math.min(ms, 2_147_483_647) : 0;
           return new Promise<void>((resolve) => {

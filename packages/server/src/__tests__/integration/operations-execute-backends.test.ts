@@ -1,9 +1,14 @@
+import { WorkerClient } from "@lobu/connector-worker/daemon";
+import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
 import { MCP_PROTOCOL_VERSION, REDACTED_SENTINEL } from "@lobu/core";
+import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
+import { connectorOperationReader } from "../../operations/connector-operation-reader";
 import { createAutomationRun } from "../../runs/queue-service";
 import { BROWSER_GROUP_TITLE_PREFIX } from "../../worker-api/browser-action-context";
+import { readConnectorOperation } from "../../worker-api/read-operation";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import { runSdkScript } from "../../tools/sdk_run";
 import type { ToolContext } from "../../tools/registry";
@@ -44,10 +49,12 @@ describe("operations.execute backend lifecycle", () => {
 	let mcpConnectionId: number;
 	let secondMcpConnectionId: number;
 	let httpConnectionId: number;
+	let workerApp: Hono<{ Bindings: Env }> | undefined;
 	let automationId: number;
 	let sourceRunId: number;
 	let failedTransportCallCount = 0;
 	let failDiscoveryConnectionId: number | null = null;
+	let lastListItemsHeaders: Headers | null = null;
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
@@ -165,8 +172,11 @@ describe("operations.execute backend lifecycle", () => {
 		await sql`
 			UPDATE connector_definitions
 			SET openapi_config = ${sql.json({
-				specUrl: "https://api.example.test/openapi.json",
+				// Suite-specific URL: connector-operations caches specs by URL in
+				// a module-level map, and vitest shares that module across files.
+				specUrl: "https://api.example.test/openapi-execute-backends.json",
 				serverUrl: "https://api.example.test",
+				credentialHeaders: { "x-api-key": "{{API_KEY}}" },
 			})}
 			WHERE organization_id = ${orgId} AND key = ${HTTP}
 		`;
@@ -237,16 +247,35 @@ describe("operations.execute backend lifecycle", () => {
 			`;
 		}
 
+		const httpAppProfile = await createAuthProfile({
+			organizationId: orgId,
+			connectorKey: HTTP,
+			displayName: "HTTP app keys",
+			profileKind: "env",
+			authData: { API_KEY: "synthetic-app-key" },
+			status: "active",
+			createdBy: userId,
+		});
+		await sql`
+			UPDATE connections
+			SET app_auth_profile_id = ${httpAppProfile.id}
+			WHERE id = ${httpConnectionId}
+		`;
+
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
-				if (url === "https://api.example.test/openapi.json") {
+				if (url === "https://worker.example.test/api/workers/read-operation" && workerApp) {
+					return workerApp.request("http://localhost/", init);
+				}
+				if (url === "https://api.example.test/openapi-execute-backends.json") {
 					return jsonResponse({
 						openapi: "3.0.0",
 						servers: [{ url: "https://api.example.test" }],
 						paths: {
 							"/items": {
+								get: { operationId: "list_items" },
 								post: {
 									operationId: "create_item",
 									requestBody: {
@@ -277,6 +306,10 @@ describe("operations.execute backend lifecycle", () => {
 					});
 				}
 				if (url === "https://api.example.test/items") {
+					if (init?.method === "GET") {
+						lastListItemsHeaders = new Headers(init?.headers);
+						return jsonResponse({ items: [{ id: "synthetic-item" }] });
+					}
 					const body = JSON.parse(String(init?.body)) as { value?: string };
 					if (body.value === "nul-success") {
 						return new Response('{"nul\\u0000key":"value\\u0000with-nul"}', {
@@ -1120,6 +1153,133 @@ describe("operations.execute backend lifecycle", () => {
 		// A transport exception is ambiguous: the upstream may have executed the
 		// destructive action before the response was lost. Never retry it here.
 		expect(failedTransportCallCount).toBe(1);
+	});
+
+	it("binds worker composition to its live parent claim", async () => {
+		const sql = getTestDb();
+		const [parent] = await sql`
+			INSERT INTO runs (
+			  organization_id, connection_id, run_type, status,
+			  claimed_by, created_by_user_id
+			) VALUES (
+			  ${orgId}, ${httpConnectionId}, 'sync', 'running',
+			  'synthetic-worker', ${userId}
+			) RETURNING id
+		`;
+		const app = new Hono<{ Bindings: Env }>();
+		app.use("*", async (c, next) => {
+			c.set("workerAuthMode", "user");
+			c.set("workerUserId", userId);
+			c.set("workerOrgIds", [orgId]);
+			await next();
+		});
+		app.post("/", readConnectorOperation);
+		const request = (workerId: string, operationKey = "list_items") =>
+			app.request("http://localhost/", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					parent_run_id: Number(parent.id),
+					worker_id: workerId,
+					operation_key: operationKey,
+					input: {},
+				}),
+			});
+
+		// Another worker guessing this run id cannot read through its connection.
+		expect((await request("wrong-worker")).status).toBe(403);
+		const claimed = await request("synthetic-worker");
+		expect(claimed.status).toBe(200);
+		expect(await claimed.json()).toEqual({
+			output: { body: { items: [{ id: "synthetic-item" }] } },
+		});
+		expect((await request("synthetic-worker", "create_item")).status).toBe(422);
+
+		// Scheduled syncs have no requesting user. Their existing active feed
+		// authorizes reads on its own private connection only.
+		const [feed] = await sql`
+			INSERT INTO feeds (organization_id, connection_id, feed_key, status)
+			VALUES (${orgId}, ${httpConnectionId}, 'synthetic-composed-read', 'active')
+			RETURNING id
+		`;
+		await sql`UPDATE runs SET created_by_user_id = NULL, feed_id = ${feed.id} WHERE id = ${parent.id}`;
+		expect((await request("synthetic-worker")).status).toBe(200);
+		// Exercise one call across the real isolate, worker client, route,
+		// policy/database lifecycle and imported HTTP executor.
+		workerApp = app;
+		const client = new WorkerClient({
+			apiUrl: "https://worker.example.test", workerId: "synthetic-worker", capabilities: {},
+		});
+		try {
+			const output = await executeCompiledConnector({
+				compiledCode: `class Connector { async sync() {} async execute() {} async read(ctx) { return { rows: [(await ctx.operations.read('list_items')).body] }; } } module.exports = { Connector };`,
+				job: { mode: "read", feedKey: "items", config: {}, credentials: null, sessionState: null, env: {} },
+				hooks: { onReadOperation: (operation_key, input) => client.readOperation({
+					parent_run_id: Number(parent.id), worker_id: client.id, operation_key, input,
+				}) },
+			});
+			expect(JSON.stringify(output)).toContain('"id":"synthetic-item"');
+		} finally {
+			workerApp = undefined;
+		}
+		await sql`UPDATE feeds SET status = 'paused' WHERE id = ${feed.id}`;
+		expect((await request("synthetic-worker")).status).toBe(422);
+		await sql`UPDATE feeds SET status = 'active' WHERE id = ${feed.id}`;
+		await sql`UPDATE runs SET run_type = 'action' WHERE id = ${parent.id}`;
+		expect((await request("synthetic-worker")).status).toBe(422);
+
+		await sql`UPDATE runs SET automation_id = ${automationId} WHERE id = ${parent.id}`;
+		expect((await request("synthetic-worker")).status).toBe(200);
+
+		// The claim is the authorization: it dies with the run.
+		await sql`UPDATE runs SET status = 'completed' WHERE id = ${parent.id}`;
+		expect((await request("synthetic-worker")).status).toBe(409);
+	});
+
+	it("composes an imported read through normal execution and refuses writes or other connections", async () => {
+		lastListItemsHeaders = null;
+		const read = connectorOperationReader(
+			{ organizationId: orgId, principal: userId },
+			httpConnectionId,
+		);
+		expect(await read("list_items", {})).toEqual({
+			body: { items: [{ id: "synthetic-item" }] },
+		});
+		// The gateway rendered the connector's credential header from the app
+		// profile; the connector never saw the value.
+		expect(lastListItemsHeaders?.get("x-api-key")).toBe("synthetic-app-key");
+		await expect(
+			read("create_item", { body: { value: "must-not-write" } }),
+		).rejects.toThrow("only permits imported read");
+		await expect(
+			connectorOperationReader(
+				{ organizationId: "synthetic-other-org", principal: userId },
+				httpConnectionId,
+			)("list_items", {}),
+		).rejects.toThrow("not found or not visible");
+		await expect(
+			connectorOperationReader(
+				{ organizationId: orgId, principal: null },
+				httpConnectionId,
+			)("list_items", {}),
+		).rejects.toThrow("not found or not visible");
+	});
+
+	it("refuses gated composed reads without leaving an orphan approval", async () => {
+		const sql = getTestDb();
+		const [connection] = await sql`SELECT config FROM connections WHERE id = ${httpConnectionId}`;
+		const read = connectorOperationReader({ organizationId: orgId, principal: userId }, httpConnectionId);
+		const before = await sql`SELECT id FROM runs WHERE connection_id = ${httpConnectionId}`;
+		try {
+			for (const mode of ["approval", "disabled"]) {
+				await sql`UPDATE connections SET config = ${sql.json({ ...connection.config, action_modes: { list_items: mode } })} WHERE id = ${httpConnectionId}`;
+				await expect(read("list_items", {})).rejects.toThrow(mode === "approval" ? "requires approval" : "disabled");
+			}
+			const after = await sql`SELECT id FROM runs WHERE connection_id = ${httpConnectionId}`;
+			expect(after).toEqual(before);
+		} finally {
+			await sql`UPDATE connections SET config = ${sql.json(connection.config)} WHERE id = ${httpConnectionId}`;
+		}
 	});
 
 	it("discovers and executes an OpenAPI HTTP operation", async () => {

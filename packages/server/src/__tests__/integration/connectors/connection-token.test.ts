@@ -646,6 +646,9 @@ describe("managed connector — local resolver (env LOBU_CLOUD_PAT fallback)", (
 		).resolves.toEqual({
 			accessToken: REFRESHED.access_token,
 			tokenType: "Bearer",
+			// A managed connection has no app/account credential values to render
+			// connector credential headers from.
+			authValues: {},
 		});
 	});
 
