@@ -165,7 +165,6 @@ export default class TrustpilotConnector extends ConnectorRuntime {
       config: REVIEW_SCRAPE_CONFIG,
       parseRows: (raw) => raw as TrustpilotRow[],
       allowedOrigins: TRUSTPILOT_ALLOWED_ORIGINS,
-      existingTabMatch: "trustpilot.com/review/",
     });
 
     // Reviews with meaningful content (more than 10 chars).

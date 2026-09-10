@@ -1797,7 +1797,7 @@ describe("LinkedInConnector home_feed", () => {
     expect(calls[0].action).toBe("navigate");
     expect(calls[0].input.cs_scrape).toBe(true);
     expect(calls[0].input.persistent).toBe(true);
-    expect(calls[0].input.existing_tab_match).toBe("linkedin.com/feed/");
+    expect(calls[0].input.existing_tab_match).toBeUndefined();
     expect(calls[0].input.focus).toBe(false);
     expect(calls[0].input.url).toBe("https://www.linkedin.com/feed/");
     expect(

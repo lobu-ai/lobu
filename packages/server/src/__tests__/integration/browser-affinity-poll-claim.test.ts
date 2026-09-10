@@ -548,8 +548,8 @@ describe('browser-affinity poll claim', () => {
       browser_context_id: 'conversation:abc123def456',
       browser_context_title: 'Owletto · Conversation abc123def456',
       browser_flow_id: 'conversation:abc123def456',
-      holder_run_id: 'conversation:abc123def456',
     });
+    expect(body.action_input).not.toHaveProperty('holder_run_id');
     expect(body).not.toHaveProperty('run_metadata');
   });
 
@@ -752,6 +752,8 @@ describe('browser-affinity poll claim', () => {
     expect(first.input.browser_flow_id).toBe(String(first.runId));
     expect(second.input.browser_flow_id).toBe(String(second.runId));
     expect(first.input.browser_flow_id).not.toBe(second.input.browser_flow_id);
-    expect(first.input.holder_run_id).toBe(String(first.runId));
+    // Authorization is the flow lease alone. The gateway sends no holder
+    // mirror, so nothing but browser_flow_id can vouch for a tab.
+    expect(first.input).not.toHaveProperty('holder_run_id');
   });
 });

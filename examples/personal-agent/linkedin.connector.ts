@@ -3565,7 +3565,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
           post_identity: decodeHomeFeedPostIdentity(row.post_identity),
         })),
       allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
-      existingTabMatch: "linkedin.com/feed/",
       persistent: true,
     });
 
@@ -3576,7 +3575,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     }
     if (rows.length === 0) {
       throw new Error(
-        "LinkedIn is logged in, but the home feed produced no post rows. Keep a signed-in linkedin.com/feed/ tab open on the paired browser and retry."
+        "LinkedIn is logged in, but the home feed produced no post rows. Confirm that the paired browser is signed into LinkedIn and retry."
       );
     }
 
@@ -3600,7 +3599,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     const events = buildHomeFeedEvents(resolvedRows, new Date());
     if (events.length === 0) {
       throw new Error(
-        "LinkedIn is logged in and returned feed rows, but no row combined usable content with a durable identity. Keep a signed-in linkedin.com/feed/ tab open on the paired browser and retry."
+        "LinkedIn is logged in and returned feed rows, but no row combined usable content with a durable identity. Confirm that the paired browser is signed into LinkedIn and retry."
       );
     }
 

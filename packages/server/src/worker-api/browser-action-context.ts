@@ -2,14 +2,7 @@ import { createHash } from 'node:crypto';
 import { currentMcpActivityAttribution, normalizeMcpConversationTitle } from '../lobu/stores/mcp-client-conversations';
 import type { ToolContext } from '../tools/registry';
 
-/**
- * The one place the server spells the group-title namespace. The extension
- * enforces the identical prefix in titleFor (apps/chrome/tab-groups.js) before
- * storing any title, and there is deliberately no migration on either side: a
- * change here without the matching change there would re-prefix every
- * server-sent title. The contract test pins the separator form as a LITERAL so
- * a one-sided rename fails loudly instead of silently stacking prefixes.
- */
+/** The gateway formats context titles. The extension preserves supplied labels. */
 export const BROWSER_GROUP_TITLE_PREFIX = 'Lobu';
 const TITLE_HEAD = `${BROWSER_GROUP_TITLE_PREFIX} · `;
 
@@ -200,7 +193,6 @@ export function trustedChromeActionInput(
     browser_context_id: context.id,
     browser_context_title: context.title,
     browser_flow_id: context.flow_id,
-    holder_run_id: context.flow_id,
     ...(Number.isInteger(activationTabId) && (activationTabId as number) > 0
       ? { activation_tab_id: activationTabId as number, activation_target_urls: activationTargetUrls }
       : {}),

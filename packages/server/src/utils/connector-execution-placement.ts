@@ -24,6 +24,16 @@ export function isChromeNamespaceConnectorKey(connectorKey: string): boolean {
   return connectorKey === 'chrome' || connectorKey.startsWith('chrome.');
 }
 
+/** Browser tab ids and profile state belong to one paired device. */
+export function describeMissingBrowserExecutionPin(
+  connectorKey: string,
+  deviceWorkerId: string | null | undefined
+): string | null {
+  return isChromeNamespaceConnectorKey(connectorKey) && !deviceWorkerId
+    ? 'This browser connection is not paired to a specific device. Select a paired browser connection before running browser operations.'
+    : null;
+}
+
 /**
  * A Chrome pin on any other connector delegates browser access to the
  * extension; it does not host the parent run.
