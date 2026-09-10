@@ -71,8 +71,10 @@ const TURN_TIMEOUT_QUEUE = "internal:turn_timeout";
  *  so the UnifiedThreadResponseConsumer wakes immediately on an emitted error. */
 const THREAD_RESPONSE_CHANNEL = "runs_lobu:thread_response";
 
-// Default turn deadline and sweep cadence live in config/intervals.ts
+// The execution deadline and sweep cadence live in config/intervals.ts
 // (`turnDefaultDeadlineMs` / `turnLivenessSweepIntervalMs`), env-overridable.
+// A turn that has not started yet carries the worker-claim horizon on top —
+// see {@link admissionDeadlineMs}.
 
 /** Routing needed to build the terminal `thread_response{error}` for a turn,
  *  stored as the marker's `action_input`. */
@@ -137,6 +139,29 @@ function turnMarkerKey(deploymentName: string, messageId: string): string {
 }
 
 /**
+ * Marker deadline for a turn that has not started executing yet: the reaper's
+ * claim horizon plus one execution window.
+ *
+ * Arming happens BEFORE admission, and a run still waiting for a worker slot
+ * has nothing that could heartbeat it — so on the bare execution deadline a
+ * turn queued behind a busy worker was failed as WORKER_UNRESPONSIVE before any
+ * worker had looked at it. That wait is already bounded elsewhere:
+ * `sweepStaleAgentTurnRuns` terminalizes a claim-eligible `agent_turn` still
+ * `pending` after `runsReaperStaleAfterSeconds` as WORKER_STARTUP_FAILED, and
+ * that delivery discharges this marker. So the marker only has to outlast that
+ * claim horizon by one execution window to stay the backstop instead of the
+ * first thing to fire — and the client gets the precise "never started" code
+ * rather than the generic unresponsive-worker one. Once the worker heartbeats,
+ * {@link extendTurnDeadlines} drops the marker to the shorter execution
+ * deadline.
+ */
+function admissionDeadlineMs(): number {
+  return (
+    intervals.runsReaperStaleAfterSeconds * 1000 + intervals.turnDefaultDeadlineMs
+  );
+}
+
+/**
  * Arm the turn-liveness marker at dispatch. Idempotent per (deployment,
  * messageId) via the partial-unique `idempotency_key`, so a re-dispatched
  * message doesn't double-arm.
@@ -151,13 +176,36 @@ function turnMarkerKey(deploymentName: string, messageId: string): string {
 export async function armTurnTimeout(
   queue: IMessageQueue,
   routing: TurnRouting,
-  deadlineMs: number = intervals.turnDefaultDeadlineMs
+  deadlineMs: number = admissionDeadlineMs()
 ): Promise<void> {
   await queue.createQueue(TURN_TIMEOUT_QUEUE);
   await queue.send(TURN_TIMEOUT_QUEUE, routing, {
     delayMs: deadlineMs,
     singletonKey: turnMarkerKey(routing.deploymentName, routing.messageId),
   });
+}
+
+/**
+ * Restart a released follower's admission clock, in the same transaction as the
+ * queue handoff that made it claimable (`releaseNextAgentTurn`).
+ *
+ * A queued follower shares its deployment with the owner blocking it, so every
+ * owner heartbeat collapsed its marker to the execution deadline. That is
+ * harmless while the owner keeps beating, but it leaves the follower only that
+ * window to be claimed once the owner is gone — and a blocked follower is not
+ * claim-eligible, so `sweepStaleAgentTurnRuns` never covered it either.
+ */
+export async function resetTurnAdmissionDeadline(
+  sql: DbClient,
+  deploymentName: string,
+  messageId: string
+): Promise<void> {
+  const deadlineSec = Math.ceil(admissionDeadlineMs() / 1000);
+  await sql`UPDATE public.runs
+    SET run_at = now() + (${deadlineSec}::int * interval '1 second')
+    WHERE idempotency_key = ${turnMarkerKey(deploymentName, messageId)}
+      AND status = 'pending' AND run_type = 'internal'
+      AND queue_name = ${TURN_TIMEOUT_QUEUE}`;
 }
 
 /**
@@ -229,7 +277,8 @@ export async function extendTurnDeadlines(
  * `Retry-After`) and a later attempt on the same turn may well succeed. Failing
  * the turn here would kill turns that were about to work. Instead we only
  * withdraw the *extension* — the turn keeps whatever deadline it already had
- * (at most `turnDefaultDeadlineMs` from the last extension), which normally
+ * (at most `turnDefaultDeadlineMs` from its last extension, or the longer
+ * arming deadline when no extension has landed yet), which normally
  * outlasts the SDK's short `Retry-After` backoff. If a retry succeeds the
  * worker resumes real progress and {@link clearTurnProviderFailed} re-arms
  * extension; if none does, the marker lapses and `sweepExpiredTurns` emits a

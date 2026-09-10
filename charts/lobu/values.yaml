@@ -200,6 +200,11 @@ worker:
 
   env:
     POLL_INTERVAL_MS: "10000"
+    # Let independent agent turns and connector reads overlap: the poll loop
+    # defaults to ONE slot, so a long Automation holds up every other run on
+    # the fleet worker until it finishes. Two leaves headroom for the Node
+    # host beyond the two 512MB isolate heaps, even at the 2Gi request floor.
+    WORKER_MAX_CONCURRENT_JOBS: "2"
     # Tag Sentry events from the worker/embeddings deployment as production.
     ENVIRONMENT: production
 

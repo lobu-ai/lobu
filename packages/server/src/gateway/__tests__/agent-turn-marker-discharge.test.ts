@@ -2,14 +2,16 @@
  * The turn-liveness marker's two obligations on the isolate lane.
  *
  * `MessageConsumer` arms one marker per dispatched turn — the client's only
- * promise of a terminal event — with a fixed `TURN_DEFAULT_DEADLINE_MS` (60s)
- * deadline, and `sweepExpiredTurns` turns a lapsed marker into a terminal
- * WORKER_UNRESPONSIVE. Two things therefore have to happen, and the
- * subprocess lane did both from `/worker/response`, a route this lane never
- * calls:
+ * promise of a terminal event — covering the worker-claim horizon plus one
+ * `TURN_DEFAULT_DEADLINE_MS` (60s) execution window, and `sweepExpiredTurns`
+ * turns a lapsed marker into a terminal WORKER_UNRESPONSIVE. The first
+ * heartbeat extension drops it to that 60s execution deadline. Two things
+ * therefore have to happen, and the subprocess lane did both from
+ * `/worker/response`, a route this lane never calls:
  *
  *  1. WHILE the turn runs, each heartbeat pushes the deadline forward.
- *     Without it any turn over 60s was failed mid-flight while working.
+ *     Without it a turn outliving its marker's deadline was failed mid-flight
+ *     while working.
  *  2. AT terminal delivery, the marker is retired in the reply's own
  *     transaction. Without it heartbeats stop, the deadline lapses, and the
  *     sweep publishes a second, contradictory error to a user who already
@@ -27,11 +29,13 @@ import { getDb } from "../../db/client.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import {
   armTurnTimeout,
+  extendTurnDeadlines,
   sweepExpiredTurns,
 } from "../orchestration/turn-liveness.js";
 import {
   extendHeartbeatedTurnMarker,
   insertAgentTurnResponse,
+  releaseNextAgentTurn,
 } from "../../runs/agent-turn-inputs.js";
 import { generateDeploymentName } from "../orchestration/deployment-identity.js";
 import {
@@ -102,6 +106,47 @@ beforeEach(async () => {
 });
 
 describe("isolate-lane heartbeat vs the turn-liveness marker", () => {
+  test("a released follower gets a fresh admission window after owner heartbeats", async () => {
+    const conversationId = "conv-follower";
+    const messageId = "m-follower";
+    const deploymentName = generateDeploymentName(identity(conversationId));
+    await armTurnTimeout(queue, {
+      messageId,
+      channelId: CHANNEL,
+      conversationId,
+      userId: USER,
+      platform: "api",
+      deploymentName,
+      organizationId: ORG,
+    });
+
+    // The follower's own run row, blocked behind the owner it shares a
+    // conversation — and therefore a deployment — with.
+    await getDb()`
+      INSERT INTO public.runs (organization_id, run_type, status, action_input)
+      VALUES (${ORG}, 'agent_turn', 'pending',
+        ${getDb().json(nativeRun(conversationId, messageId).action_input as never)})`;
+
+    // Every owner heartbeat extends the WHOLE deployment, so it also collapses
+    // the queued follower's marker to the 60s execution deadline.
+    await extendTurnDeadlines(deploymentName);
+
+    await getDb().begin(async (tx) => {
+      await releaseNextAgentTurn(
+        tx as never,
+        nativeRun(conversationId, "m-owner") as never,
+      );
+    });
+
+    // 90s later the follower still has not been claimed: inside the admission
+    // window the release restored, outside the execution deadline it had.
+    await getDb()`
+      UPDATE public.runs SET run_at = run_at - interval '90 seconds'
+      WHERE run_type = 'internal' AND queue_name = 'internal:turn_timeout'`;
+    expect(await sweepExpiredTurns()).toBe(0);
+    expect(await armedMarkers()).toBe(1);
+  });
+
   test("a heartbeating long turn keeps its marker alive past the deadline", async () => {
     const conversationId = "conv-long";
     const messageId = "m-long";

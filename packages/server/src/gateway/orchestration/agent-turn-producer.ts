@@ -118,7 +118,7 @@ const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
  *
  * This lane is the only execution path, and `handleMessage` arms the
  * turn-liveness marker BEFORE enqueueing, so a bare `return` here leaves the
- * client waiting out `TURN_DEFAULT_DEADLINE_MS` for a generic
+ * client waiting out that marker's whole deadline for a generic
  * `WORKER_UNRESPONSIVE`. That names the wrong cause and offers no fix. The
  * producer therefore reports the reason and the caller — which owns the marker
  * it armed — discharges it into a terminal error carrying that reason's own

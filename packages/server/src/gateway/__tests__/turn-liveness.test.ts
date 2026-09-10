@@ -181,6 +181,30 @@ async function durableInput(
 }
 
 describe("turn-liveness", () => {
+  test("a queued turn remains live throughout worker admission, then uses the heartbeat deadline", async () => {
+    await armTurnTimeout(queue, routing("dep-queued", "m-queued"));
+    // A busy worker may claim later than the 60s execution deadline and still
+    // be inside the 120s claim horizon the reaper grants a pending
+    // agent_turn — and nothing can heartbeat a turn that is not claimed yet,
+    // so the marker must survive this age on the arming deadline alone.
+    await getDb()`
+      UPDATE public.runs SET run_at = run_at - interval '90 seconds'
+      WHERE queue_name = ${TURN_TIMEOUT_QUEUE}
+    `;
+    expect(await sweepExpiredTurns()).toBe(0);
+    expect(await markerCount("dep-queued")).toBe(1);
+
+    // The first worker-driven signal collapses the marker to the execution
+    // deadline, so the same 90s of silence now lapses it — exactly once.
+    await extendTurnDeadlines("dep-queued");
+    await getDb()`
+      UPDATE public.runs SET run_at = run_at - interval '90 seconds'
+      WHERE queue_name = ${TURN_TIMEOUT_QUEUE}
+    `;
+    expect(await sweepExpiredTurns()).toBe(1);
+    expect(await sweepExpiredTurns()).toBe(0);
+  });
+
   test("durable inputs replay while live and complete atomically with the terminal reply", async () => {
     await armTurnTimeout(queue, routing("dep-durable", "m-durable"));
     const { organizationId, storedPayload } = await durableInput(

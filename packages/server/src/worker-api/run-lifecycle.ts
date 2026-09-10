@@ -326,7 +326,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// TURN marker too, not just `runs.last_heartbeat_at`. There are two
 		// independent deadlines: the run reaper reads the heartbeat column, while
 		// the marker carries its own `run_at`. Refreshing only the column let any
-		// turn longer than TURN_DEFAULT_DEADLINE_MS (60s) collect a spurious
+		// turn outliving that marker's deadline collect a spurious
 		// WORKER_UNRESPONSIVE mid-flight, while it was still working. The
 		// subprocess lane extended the marker from `/worker/response`, a route the
 		// isolate lane does not use. `extendTurnDeadlines` never throws and skips a
