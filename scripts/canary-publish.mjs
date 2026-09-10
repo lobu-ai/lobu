@@ -37,7 +37,7 @@ export function prepareManifests(manifests, version) {
   });
 }
 
-export function promotionAllowed(current, candidate, isAncestor) {
+export function publicationAllowed(current, candidate, isAncestor) {
   const sha = CANARY.exec(candidate)?.[1];
   if (!sha) throw new Error("Invalid candidate version");
   if (current === undefined || current === candidate) return true;
@@ -72,9 +72,9 @@ function main() {
     console.log(candidate);
     return;
   }
-  if (operation !== "promote" || !CANARY.test(version ?? "")) {
+  if (operation !== "check" || !CANARY.test(version ?? "")) {
     throw new Error(
-      "Usage: canary-publish.mjs prepare | promote <exact-version>"
+      "Usage: canary-publish.mjs prepare | check <exact-version>"
     );
   }
   const sha = CANARY.exec(version)[1];
@@ -88,34 +88,22 @@ function main() {
   };
   command("git", ["fetch", "origin", "main"]);
   if (!isAncestor(sha, "origin/main")) throw new Error("Candidate left main");
-  // Validate the entire fleet before changing any tag. npm has no atomic
-  // multi-package tag update; exact internal versions keep installs coherent.
-  // CLI is last so its opt-in entry point advances only after its dependencies.
-  const names = manifests
-    .map((pkg) => pkg.name)
-    .sort((a, b) =>
-      a === "@lobu/cli" ? 1 : b === "@lobu/cli" ? -1 : a.localeCompare(b)
-    );
+  // Validate every current tag before npm publish can advance any of them.
+  // This check is read-only: OIDC supports publication, not dist-tag updates.
+  const names = manifests.map((pkg) => pkg.name);
   for (const name of names) {
     const tags = JSON.parse(
       command("npm", ["view", name, "dist-tags", "--json"])
     );
     if (!tags || typeof tags !== "object" || Array.isArray(tags))
       throw new Error("Invalid registry tags");
-    if (!promotionAllowed(tags.canary, version, isAncestor)) {
-      console.log(
-        `Skipping older candidate ${version}; ${name} already has ${tags.canary}`
+    if (!publicationAllowed(tags.canary, version, isAncestor)) {
+      throw new Error(
+        `${name} canary ${tags.canary} is not an ancestor of ${version}`
       );
-      return;
     }
-    const published = command("npm", ["view", `${name}@${version}`, "version"]);
-    if (published !== version)
-      throw new Error(`Missing candidate ${name}@${version}`);
   }
-  for (const name of names) {
-    command("npm", ["dist-tag", "add", `${name}@${version}`, "canary"]);
-  }
-  console.log(`Promoted ${version}: bunx @lobu/cli@canary --help`);
+  console.log(`Canary publication allowed: ${version}`);
 }
 
 if (

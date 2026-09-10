@@ -281,7 +281,7 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     // — there is nothing for an API key to reach. Routing must refuse such a
     // row, because the create route already does ("it signs in instead"), and
     // the two disagreeing is what promotes an unroutable row to org default.
-    registerFakeModule("chatgpt", "device-code");
+    registerFakeModule("chatgpt", "openai-codex");
     const catalog = makeCatalog({
       models: ["my-chatgpt/gpt-5"],
       orgRows: [

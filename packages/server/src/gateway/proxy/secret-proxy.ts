@@ -6,6 +6,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
 import { resolveUrlInvariant } from "../auth/inference-invariant.js";
+import { extractJwtAccountId } from "../auth/oauth/client.js";
 import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import type { ProviderCredentialContext } from "../embedded.js";
 import type { ProviderUpstreamConfig } from "../modules/module-system.js";
@@ -44,6 +45,8 @@ function captureInferencePath(api: AgentTurnInput["provider"]["api"]): string {
       return "/chat/completions";
     case "openai-responses":
       return "/responses";
+    case "openai-codex-responses":
+      return "/codex/responses";
   }
 }
 
@@ -721,6 +724,7 @@ export class SecretProxy {
       const suffix = provider?.api === "anthropic-messages"
         || provider?.api === "openai-completions"
         || provider?.api === "openai-responses"
+        || provider?.api === "openai-codex-responses"
         ? captureInferencePath(provider.api)
         : null;
       const expected = suffix && typeof provider?.base_url === "string"
@@ -895,7 +899,7 @@ export class SecretProxy {
     // Build headers, swapping placeholder secrets in auth headers
     const headers: Record<string, string> = {};
 
-    // Forward all original headers (except host/connection and inbound auth).
+    // Forward provider headers, excluding ingress routing and inbound auth.
     // We always set our own Authorization below, so the caller's Authorization
     // (which carries an opaque placeholder) must never reach the upstream.
     const skip = new Set([
@@ -916,9 +920,21 @@ export class SecretProxy {
       "authorization",
       "x-api-key",
       "x-lobu-worker-token",
+      // Ingress routing metadata (these, plus the `cf-*` / `x-forwarded-*`
+      // prefixes matched in `shouldSkipHeader`). They describe the hop INTO
+      // Lobu, not our request to the provider: ChatGPT answers an egress
+      // request that relays Cloudflare ingress metadata with an HTML 403,
+      // before it ever reaches the Codex API.
+      "forwarded",
+      "x-real-ip",
+      "true-client-ip",
+      "via",
+      "cdn-loop",
     ]);
+    const shouldSkipHeader = (name: string): boolean =>
+      skip.has(name) || name.startsWith("cf-") || name.startsWith("x-forwarded-");
     for (const [key, val] of Object.entries(c.req.header())) {
-      if (val && !skip.has(key.toLowerCase())) {
+      if (val && !shouldSkipHeader(key.toLowerCase())) {
         headers[key] = val;
       }
     }
@@ -998,6 +1014,31 @@ export class SecretProxy {
             resolvedCredential.value,
             resolvedCredential.kind
           );
+          if (providerId === "chatgpt") {
+            // Codex binds requests to the stored OAuth account, never a guest
+            // header or the adapter's non-secret account placeholder.
+            const accountId = extractJwtAccountId(
+              resolvedCredential.value,
+              "https://api.openai.com/auth"
+            );
+            // Same envelope as the no-credentials refusal below: pi-ai reads
+            // `error.message` off the body, so a bare string would surface to
+            // the user as raw JSON.
+            if (!accountId) {
+              return c.json(
+                {
+                  error: {
+                    message:
+                      "The stored ChatGPT credential carries no account identity. Sign in again to reconnect the subscription.",
+                    type: "authentication_error",
+                    code: "no_account_identity",
+                  },
+                },
+                401
+              );
+            }
+            headers["chatgpt-account-id"] = accountId;
+          }
         } else {
           logger.warn(
             `No auth profile, org-shared key, or system key for agent ${urlAgentId}, provider ${providerId}`

@@ -2,6 +2,7 @@ import { Agent, type AgentTool } from '@mariozechner/pi-agent-core';
 import { registerApiProvider, streamSimple, type Api, type Model } from '@mariozechner/pi-ai';
 import { streamAnthropic } from '@mariozechner/pi-ai/anthropic';
 import { streamOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
+import { streamOpenAICodexResponses } from '@mariozechner/pi-ai/openai-codex-responses';
 import { streamOpenAIResponses } from '@mariozechner/pi-ai/openai-responses';
 import { AgentSession, SessionManager, SettingsManager, convertToLlm, CURRENT_SESSION_VERSION, type ModelRegistry } from '@mariozechner/pi-coding-agent';
 import { createLobuResourceLoader, type TransientTurnContextLookup } from '@lobu/plugin-toolkit/pi-resources';
@@ -58,6 +59,18 @@ export function createNativeSession(
   // models can use tools, and the two speak different request shapes.
   if (input.provider.api === 'anthropic-messages') {
     registerApiProvider({ api: 'anthropic-messages', stream: streamAnthropic, streamSimple: streamAnthropic });
+  } else if (input.provider.api === 'openai-codex-responses') {
+    // pi-ai extracts an account id before invoking fetch. This inert JWT is
+    // only adapter input: the isolate host replaces Authorization with the
+    // signed turn token, and the gateway derives the real account from OAuth.
+    // `transport` is pinned, not preferred: the adapter's default ("auto")
+    // dials the upstream over a WebSocket, which the guest has no constructor
+    // for, and each failed dial appends a `provider_transport_failure`
+    // diagnostic to the assistant message before it falls back to SSE.
+    const placeholder = `e30.${btoa(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'lobu-proxy' } }))}.placeholder`;
+    const stream: typeof streamOpenAICodexResponses = (model, context, options) =>
+      streamOpenAICodexResponses(model, context, { ...options, apiKey: placeholder, transport: 'sse' });
+    registerApiProvider({ api: 'openai-codex-responses', stream, streamSimple: stream });
   } else if (input.provider.api === 'openai-responses') {
     registerApiProvider({ api: 'openai-responses', stream: streamOpenAIResponses, streamSimple: streamOpenAIResponses });
   } else {

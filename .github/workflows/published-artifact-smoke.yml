@@ -15,9 +15,12 @@ name: Published-artifact smoke
 # scripts/sdk-e2e/, so no secret is required and the run is reproducible.
 
 on:
-  # Called by publish-packages.yml after npm accepts the new version. Keeping
-  # this in the same workflow makes the four-environment artifact matrix a
-  # required part of the publication run instead of a best-effort follow-up.
+  # Called by publish-packages.yml and publish-canary.yml after npm accepts the
+  # new version. Keeping this in the same workflow makes the four-environment
+  # artifact matrix a required part of the publication run instead of a
+  # best-effort follow-up. It does not gate the canary dist-tag: `npm publish
+  # --tag canary` moves that tag at publication because a separate
+  # `npm dist-tag add` cannot authenticate through OIDC.
   workflow_call:
     inputs:
       version:

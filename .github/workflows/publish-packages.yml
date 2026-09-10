@@ -3,16 +3,26 @@ name: Publish Packages
 on:
   workflow_dispatch:
     inputs:
+      # Not `required: true`: build-images.yml's trigger-package-publish
+      # dispatches this workflow with only the two stable inputs, and a
+      # required input the dispatcher never sends is a 422 that strands the
+      # release off npm. The default carries the stable path instead.
+      channel:
+        description: "Publication channel (canary needs no release inputs)"
+        type: choice
+        options: [stable, canary]
+        default: stable
+        required: false
       release_tag:
-        description: "Exact published lobu-vSemVer release tag"
-        required: true
+        description: "Stable only: exact published lobu-vSemVer release tag"
+        required: false
         type: string
       image_run_id:
-        description: "Exact Build and Push Images release run"
-        required: true
+        description: "Stable only: exact Build and Push Images release run"
+        required: false
         type: string
       provenance:
-        description: "Attach npm provenance"
+        description: "Stable only: attach npm provenance"
         required: false
         default: false
         type: boolean
@@ -25,7 +35,23 @@ env:
   REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app app-image-smoke promote-images
 
 jobs:
+  # npm validates the caller identity for reusable workflows. Keep canaries
+  # behind the existing publish-packages.yml trusted publisher.
+  canary:
+    if: inputs.channel == 'canary'
+    # Hold the lock across attestation, publication and the registry smoke.
+    concurrency:
+      group: npm-canary
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    uses: ./.github/workflows/publish-canary.yml
+    secrets: inherit
+
   attest-publish:
+    if: inputs.channel == 'stable'
     name: Attest release, image, and CI provenance
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -49,9 +75,12 @@ jobs:
       - name: Verify current-main workflow policy
         env:
           WORKFLOW_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          IMAGE_RUN_ID: ${{ inputs.image_run_id }}
         run: |
           set -euo pipefail
           [ "$WORKFLOW_REF" = refs/heads/main ] || { echo "::error::publish policy must run from current main"; exit 1; }
+          [ -n "$RELEASE_TAG" ] && [ -n "$IMAGE_RUN_ID" ] || { echo "::error::Stable publication requires release_tag and image_run_id"; exit 1; }
 
       - name: Check out current main
         uses: actions/checkout@v7

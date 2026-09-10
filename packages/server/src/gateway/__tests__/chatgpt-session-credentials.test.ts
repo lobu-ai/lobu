@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
-import type { BaseProviderModule } from "../auth/base-provider-module.js";
 import { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import { WorkerGateway } from "../worker-dispatch/worker-gateway.js";
 
@@ -42,23 +41,12 @@ afterEach(() => {
 });
 
 describe("ChatGPT subscription credentials", () => {
-  test("org-bucket account reaches the placeholder without exposing its credential", async () => {
-    const module: BaseProviderModule = new ChatGPTOAuthModule(makeManager());
-    const placeholder = await module.buildCredentialPlaceholder(AGENT, {
-      organizationId: ORG, userId: USER,
-    });
-    expect(placeholder).not.toBe(STORED_CREDENTIAL);
-    expect(placeholder.split(".")).toHaveLength(3);
-    expect(JSON.parse(Buffer.from(placeholder.split(".")[1]!, "base64url").toString()))
-      .toEqual({ "https://api.openai.com/auth": { chatgpt_account_id: ACCOUNT } });
-  });
-
-  test("another user cannot borrow the agent owner's subscription", async () => {
-    const module: BaseProviderModule = new ChatGPTOAuthModule(makeManager());
+  test("admits the Codex protocol with the signed turn credential", async () => {
+    const module = new ChatGPTOAuthModule(makeManager());
+    expect(module.sdkCompat).toBe("openai-codex");
     expect(await module.buildCredentialPlaceholder(AGENT, {
-      organizationId: ORG, userId: "unlinked-user",
-    })).toBe("lobu-proxy");
-    expect(await module.buildCredentialPlaceholder(AGENT)).toBe("lobu-proxy");
+      organizationId: ORG, userId: USER, workerToken: "synthetic-signed-turn",
+    })).toBe("synthetic-signed-turn");
   });
 
   test("model listing retains the requesting user", async () => {
@@ -165,11 +153,11 @@ describe("ChatGPT subscription credentials", () => {
           | Record<string, string>
           | undefined;
         expect(placeholders).toBeDefined();
-        // Proxied providers receive the worker token; ChatGPT does not, so its
-        // subscription cannot be spent by anything holding that token.
+        // All proxied providers receive only the signed token. The gateway
+        // resolves the subscription under its verified org/agent/user scope.
         expect(placeholders?.openai).toBe(workerToken);
         expect(placeholders?.deepseek).toBe(workerToken);
-        expect(placeholders?.chatgpt).not.toBe(workerToken);
+        expect(placeholders?.chatgpt).toBe(workerToken);
       } finally {
         gateway.shutdown();
       }

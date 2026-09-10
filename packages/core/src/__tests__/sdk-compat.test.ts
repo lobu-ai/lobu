@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Value } from "@sinclair/typebox/value";
+import { AgentTurnPollPayloadSchema } from "../contracts/worker/protocol";
 import {
   isSdkCompat,
   resolveSdkCompat,
@@ -50,16 +52,11 @@ describe("sdk-compat registry", () => {
   });
 
   test("every routable protocol is one a turn envelope can carry", () => {
-    // The isolate lane admits exactly these three adapters (`LANE_APIS` in the
-    // agent-turn producer). A row whose `api` is not among them cannot run, so
-    // this is the invariant that keeps the table honest as it grows.
-    const laneAdapters = new Set([
-      "openai-completions",
-      "openai-responses",
-      "anthropic-messages",
-    ]);
+    const apiSchema =
+      AgentTurnPollPayloadSchema.properties.turn.properties.provider.properties
+        .api;
     for (const [key, p] of Object.entries(SDK_COMPAT_PROTOCOLS)) {
-      expect(laneAdapters.has(p.api), `${key} -> ${p.api}`).toBe(true);
+      expect(Value.Check(apiSchema, p.api), `${key} -> ${p.api}`).toBe(true);
     }
   });
 
