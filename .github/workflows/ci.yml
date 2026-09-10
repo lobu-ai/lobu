@@ -1705,7 +1705,7 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only "$BASE_SHA"...HEAD)
-          if echo "$changed" | grep -E '^(packages/owletto($|/)|packages/cli/|packages/connector-worker/|packages/core/|packages/device-connectors/|config/macos/lobu-auth\.entitlements$|scripts/(build-mac-auth-cli|build-mac-device-daemon|test-mac-device-daemon-package|check-mac-device-daemon-graph|verify-mac-device-daemon|with-owletto-mac-daemon)\.|package\.json$|bun\.lock$|\.github/workflows/mac-release\.yml$|\.github/workflows/ci\.yml$|\.github/actions/setup-submodule(/|$)|\.gitmodules$)' >/dev/null; then
+          if echo "$changed" | grep -E '^(packages/owletto($|/)|packages/cli/|packages/connector-worker/|packages/core/|packages/device-connectors/|config/macos/lobu-auth\.entitlements$|scripts/(build-mac-auth-cli|build-mac-device-daemon|test-mac-device-daemon-package|test-mac-device-daemon-chat|check-mac-device-daemon-graph|verify-mac-device-daemon|with-owletto-mac-daemon)\.|package\.json$|bun\.lock$|\.github/workflows/mac-release\.yml$|\.github/workflows/ci\.yml$|\.github/actions/setup-submodule(/|$)|\.gitmodules$)' >/dev/null; then
             echo "mac=true" >> "$GITHUB_OUTPUT"
           else
             echo "mac=false" >> "$GITHUB_OUTPUT"
