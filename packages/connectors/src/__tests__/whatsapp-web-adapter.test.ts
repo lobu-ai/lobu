@@ -275,6 +275,125 @@ describe("whatsAppWebAdapterProgram send_message", () => {
   });
 });
 
+describe("whatsAppWebAdapterProgram connection readiness", () => {
+  function install(socketModules: Record<string, unknown>) {
+    let now = 1_000;
+    const modules: Record<string, unknown> = {
+      WAWebCollections: { Chat: { _models: [{}] }, Msg: { _models: [] } },
+      WAWebUserPrefsMeUser: {
+        getMaybeMePnUser: () => ({ _serialized: "self@c.us" }),
+      },
+      WAWebChatLoadMessages: { loadEarlierMsgs: async () => undefined },
+      ...socketModules,
+    };
+    const globals: Record<string, any> = {};
+    new Function(
+      "globalThis",
+      "window",
+      "document",
+      "Date",
+      `(${whatsAppWebAdapterProgram.toString()})();`,
+    )(
+      globals,
+      { require: (name: string) => modules[name] ?? null },
+      { querySelector: () => null },
+      { now: () => now },
+    );
+    const invoke = (op = "probe") =>
+      globals.__owlettoWhatsAppAdapterV1.invoke({
+        op,
+        adapter_version: WHATSAPP_ADAPTER_VERSION,
+        backfill_disabled: true,
+      });
+    return {
+      invoke,
+      settle: async () => {
+        await invoke();
+        now += 501;
+        return invoke();
+      },
+    };
+  }
+
+  it("rejects a disconnected live stream even when the account is connected", async () => {
+    const page = install({
+      WAWebSocketModel: {
+        Socket: {
+          state: "CONNECTED",
+          stream: "DISCONNECTED",
+          hasSynced: true,
+        },
+      },
+    });
+    expect(await page.settle()).toMatchObject({
+      ok: false,
+      error: { state: "not_ready", reason: "stream_disconnected" },
+    });
+    expect(await page.invoke("collect")).toMatchObject({
+      ok: false,
+      error: { reason: "stream_disconnected" },
+    });
+  });
+
+  it("accepts a connected current socket after the stores settle", async () => {
+    const page = install({
+      WAWebSocketModel: {
+        Socket: {
+          state: "CONNECTED",
+          stream: "CONNECTED",
+          hasSynced: true,
+        },
+      },
+    });
+    expect(await page.settle()).toMatchObject({ ok: true });
+  });
+
+  it("does not claim readiness when connection modules disappear", async () => {
+    expect(await install({}).settle()).toMatchObject({
+      ok: false,
+      error: {
+        state: "capability_unavailable",
+        reason: "connection_state_unavailable",
+      },
+    });
+  });
+
+  it("retains readable legacy connection state", async () => {
+    expect(
+      await install({
+        WAWebSocketState: { getSocketState: () => "CONNECTED" },
+      }).settle(),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("rejects unsynced or unpaired current sockets", async () => {
+    expect(
+      await install({
+        WAWebSocketModel: {
+          Socket: {
+            state: "CONNECTED",
+            stream: "CONNECTED",
+            hasSynced: false,
+          },
+        },
+      }).settle(),
+    ).toMatchObject({
+      ok: false,
+      error: { reason: "initial_sync_incomplete" },
+    });
+    expect(
+      await install({
+        WAWebSocketModel: {
+          Socket: {
+            state: "UNPAIRED",
+            stream: "DISCONNECTED",
+          },
+        },
+      }).settle(),
+    ).toMatchObject({ ok: false, error: { state: "logged_out" } });
+  });
+});
+
 /**
  * Media download, against the module shapes the LIVE build exposes
  * (captured 2026-09-02 on a paired Chrome).
@@ -692,6 +811,7 @@ describe("whatsAppWebAdapterProgram collect scaling", () => {
         Chat: { _models: [chatModel] },
         Contact: { _models: contacts },
       },
+      WAWebSocketModel: { Socket: { state: "CONNECTED", stream: "CONNECTED", hasSynced: true } },
       // `collect` is capability-gated on the history loader, and readiness
       // needs an authenticated self identity.
       WAWebChatLoadMessages: { loadEarlierMsgs: async () => undefined },

@@ -83,6 +83,10 @@ function makeDispatcher(
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
       if (action !== "evaluate") return {};
       const expression = String(input.expression ?? "");
+      if (expression.includes("location.reload()")) {
+        installed = false;
+        return { value: true };
+      }
       // Installation probe.
       if (expression.includes("a.version ===")) return { value: installed };
       const match = expression.match(/a\.invoke\((\{[\s\S]*\})\);/);
@@ -535,6 +539,67 @@ describe("sync over the generic chrome bridge", () => {
     ]);
   });
 
+  it("reloads a disconnected persistent source once before collecting", async () => {
+    const { dispatcher, calls, adapterOps } = makeDispatcher({
+      probe: () =>
+        calls.some((call) =>
+          String(call.input.expression).includes("location.reload()"),
+        )
+          ? READY
+          : {
+              ok: false,
+              error: { state: "not_ready", reason: "stream_disconnected" },
+            },
+      collect: {
+        ok: true,
+        messages: [message("reconnected")],
+        history_pages: [],
+      },
+    });
+    const realNow = Date.now;
+    let ticks = 0;
+    Date.now = () => realNow() + ticks++ * 40_000;
+    try {
+      const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+      expect(result.events.map((event) => event.origin_id)).toEqual([
+        "reconnected",
+      ]);
+      expect(
+        calls.filter((call) =>
+          String(call.input.expression).includes("location.reload()"),
+        ),
+      ).toHaveLength(1);
+      expect(adapterOps.at(-1)).toBe("collect");
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("does not repeatedly reload or collect if reconnection fails", async () => {
+    const { dispatcher, calls, adapterOps } = makeDispatcher({
+      probe: {
+        ok: false,
+        error: { state: "not_ready", reason: "stream_disconnected" },
+      },
+    });
+    const realNow = Date.now;
+    let ticks = 0;
+    Date.now = () => realNow() + ticks++ * 40_000;
+    try {
+      await expect(
+        messagesFeed().sync(syncCtx(null, dispatcher)),
+      ).rejects.toThrow("stream_disconnected");
+      expect(
+        calls.filter((call) =>
+          String(call.input.expression).includes("location.reload()"),
+        ),
+      ).toHaveLength(1);
+      expect(adapterOps).not.toContain("collect");
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   it("marks persistent store hydration as a transient dependency failure", async () => {
     const realNow = Date.now;
     let calls = 0;
@@ -690,7 +755,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   it("bumps the WhatsApp connector version for readiness semantics", () => {
-    expect(connector.definition.version).toBe("1.0.1");
+    expect(connector.definition.version).toBe("1.0.2");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {

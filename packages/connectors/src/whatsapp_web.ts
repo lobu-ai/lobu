@@ -362,6 +362,7 @@ async function readyWhatsAppTab(
   const tabId = await openWhatsAppTab(dispatcher);
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown = null;
+  let reloaded = false;
   do {
     try {
       await ensureAdapter(dispatcher, tabId);
@@ -369,6 +370,23 @@ async function readyWhatsAppTab(
       return tabId;
     } catch (error) {
       lastError = error;
+      // A persistent scrape-owned tab can keep its cached stores after its
+      // stream stalls, so nothing recovers on its own. Reload it once, inside
+      // the existing readiness deadline, deferred inside the page so navigation
+      // lets the expression return before navigation starts.
+      if (
+        !reloaded &&
+        error instanceof WhatsAppAdapterError &&
+        error.message === "WhatsApp Web not_ready: stream_disconnected"
+      ) {
+        reloaded = true;
+        await dispatcher.dispatch("evaluate", {
+          tab_id: tabId,
+          expression:
+            "(() => { setTimeout(() => location.reload(), 100); return true; })()",
+          await_promise: false,
+        });
+      }
       if (LOGGED_OUT_PATTERN.test(String(error))) {
         throw new Error(
           "WhatsApp Web is not signed in on the paired Chrome. Open https://web.whatsapp.com and scan the QR from WhatsApp → Settings → Linked Devices, then retry."
@@ -628,7 +646,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.1",
+    version: "1.0.2",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
