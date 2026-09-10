@@ -332,12 +332,17 @@ async function trackEntityReaction(
 	result: ManageEntityResult,
 	ctx: ToolContext,
 ): Promise<void> {
-	const reactionAttribution = args.automation_source
-		? await resolveAutomationAttribution(ctx, args.automation_source)
-		: null;
+	// Resolved unconditionally, like every other call site in this file: a
+	// reaction session stamps `ctx.actingAutomationId` and declares no
+	// `automation_source`, so gating on the declaration dropped its credit —
+	// and with it `entity_id`, the only per-subject signal this table carries.
+	const reactionAttribution = await resolveAutomationAttribution(
+		ctx,
+		args.automation_source,
+	);
 	// A reaction record is keyed by the producing run.
 	if (
-		reactionAttribution?.automationId == null ||
+		reactionAttribution.automationId == null ||
 		reactionAttribution.runId == null ||
 		!("action" in result)
 	) {

@@ -680,14 +680,15 @@ async function saveContentImpl(
     inserted ? 'Content saved via save_memory' : 'Content save replay returned existing event'
   );
 
-  // Track automation reaction if attribution source is provided.
-  // The declared source is caller input: resolve it through the shared rule so a
-  // reaction session's own identity wins and an id belonging to another
-  // organization credits nobody.
-  const reactionAttribution =
-    inserted && args.automation_source
-      ? await resolveAutomationAttribution(ctx, args.automation_source)
-      : null;
+  // Track the automation reaction. The declared source is caller input; the
+  // shared rule prefers a reaction session's own stamped identity over it and
+  // credits nobody for an id belonging to another organization. Resolve it
+  // whenever a row was inserted, not only when a source was declared: a
+  // reaction carries the stamped pair and declares nothing, so gating on the
+  // declaration left its write recorded against no Automation at all.
+  const reactionAttribution = inserted
+    ? await resolveAutomationAttribution(ctx, args.automation_source)
+    : null;
   if (reactionAttribution?.automationId != null && reactionAttribution.runId != null) {
     await trackAutomationReaction({
       organizationId: ctx.organizationId,

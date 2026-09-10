@@ -250,14 +250,21 @@ describe("automation reaction crash safety", () => {
 		expect(seen.window_start).toBeTruthy();
 		expect(seen.window_end).toBeTruthy();
 
-		// The run is logged where get_automation already surfaces it.
+		// The run is logged where get_automation already surfaces it. TWO rows: the
+		// script wrapper, and the `knowledge.save` the script itself performed.
+		// That save declares no `automation_source` and is credited from the
+		// stamped acting session instead, so the write that actually touched the
+		// workspace is recorded rather than attributed to nobody.
 		const logged = await sql`
       SELECT reaction_type, tool_args
       FROM automation_reactions WHERE source_run_id = ${runId}
+      ORDER BY reaction_type
     `;
-		expect(logged.length).toBe(1);
-		expect(String(logged[0].reaction_type)).toBe("script_execution");
-		expect(logged[0].tool_args).toEqual({ attempt: 2 });
+		expect(logged.map((row) => String(row.reaction_type))).toEqual([
+			"content_saved",
+			"script_execution",
+		]);
+		expect(logged[1].tool_args).toEqual({ attempt: 2 });
 	});
 
 	it("does not queue a second reaction when the completion is replayed", async () => {
