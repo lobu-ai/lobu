@@ -552,6 +552,20 @@ describe("searchLiveConnectors (search_sdk connector intent search)", () => {
 		expect(hits[0]).not.toMatch(/installConnector/);
 	});
 
+	it("only discovers setup for rendered rows, including unavailable catalog rows in the limit", async () => {
+		const entries = Array.from({ length: 10 }, (_, i) => ({ id: `demo.limit-${i}`, name: `Demo Limit ${i}`, detail: { installable: i !== 0 } }));
+		const deps = makeDeps({ catalog: { catalogs: { connectors: { entries } } } });
+		const calls: string[] = [];
+		deps.setupOptions = async ({ connector_key }) => {
+			calls.push(connector_key);
+			return { action: "setup_options", connector_key, cloud_status: "not_configured", options: [] };
+		};
+		const lines = await searchLiveConnectors("demo.limit", env, ctx, deps);
+		expect(lines).toHaveLength(8);
+		expect(lines[0]).toContain("NOT currently installable");
+		expect(calls).toEqual(entries.slice(1, 8).map(entry => entry.id));
+	});
+
 	it("shares one public offer read per search and refreshes it on the next request", async () => {
 		let reads = 0;
 		const deps = makeDeps({

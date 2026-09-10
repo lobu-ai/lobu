@@ -4,7 +4,7 @@ import { Value } from '@sinclair/typebox/value';
 import { getDb } from '../db/client';
 import { getWorkspaceProvider } from '../workspace';
 import type { OrgInfo } from '../workspace/types';
-import { MANAGED_CHAT_PLATFORMS } from '../preview/managed-platforms';
+import { MANAGED_CHAT_PLATFORMS_SET } from '../preview/managed-platforms';
 import { getPrimedBundledMethod, resolveAppInstallCredentials } from '../gateway/installation/app-install-credentials';
 import { isCloudMode } from '../utils/cloud-mode';
 import { resolveCloudOrigin } from './cloud-credential';
@@ -34,12 +34,10 @@ export async function publicSetupOptions(connectorKey: string, origin: string, o
   }
   // Hosted chat is connector-owned capability; readiness comes from the declared
   // app credentials, not the presence of a Slack-shaped URL in the client.
-  for (const platform of MANAGED_CHAT_PLATFORMS) {
-    if (connectorKey !== platform) continue;
-    const method = getPrimedBundledMethod(platform, platform);
-    if (!method) continue;
-    const creds = resolveAppInstallCredentials(method);
-    if (!creds.clientId || !creds.clientSecret || method.installShape !== 'oauth-code-exchange') continue;
+  const method = MANAGED_CHAT_PLATFORMS_SET.has(connectorKey)
+    ? getPrimedBundledMethod(connectorKey, connectorKey) : null;
+  const creds = method ? resolveAppInstallCredentials(method) : null;
+  if (method?.installShape === 'oauth-code-exchange' && creds?.clientId && creds.clientSecret) {
     options.push({
       kind: 'hosted_chat', label: 'Use the hosted Lobu app',
       description: 'Chat with an agent in Lobu Cloud. This does not connect an independent local runtime or sync its messages locally.',

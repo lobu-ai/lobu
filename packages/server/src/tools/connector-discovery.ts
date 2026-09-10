@@ -264,7 +264,10 @@ export async function searchLiveConnectors(
     // a page of newer revoked ones.
     const matchedInstalled = installed.filter((i) =>
       matchesQueryTokens(q, i.id, i.name, i.detail?.description)
-    );
+    ).slice(0, MAX_LINES);
+    const matchedCatalog = catalog.filter((c) =>
+      !installedIds.has(c.id) && matchesQueryTokens(q, c.id, c.name, c.description)
+    ).slice(0, MAX_LINES - matchedInstalled.length);
     const listConnections = async (connectorKey: string, status?: string) => {
       const res = (await manageConnections(
         { action: 'list', connector_key: connectorKey, ...(status ? { status } : {}), limit: 1 } as never,
@@ -284,26 +287,14 @@ export async function searchLiveConnectors(
         if (any.length > 0) bestStatusByKey.set(i.id, any[0].status);
       })
     );
-    // Setup discovery is per connector and can reach the configured cloud, so
-    // prefetch ONLY the keys that actually render a line below — the matched
-    // installed connectors plus the matched catalog entries that are neither
-    // already installed nor uninstallable — capped at the same MAX_LINES this
-    // search returns. Enriching a line that gets sliced off buys nothing.
+    // Use the same bounded rows for rendering and setup discovery. Unavailable
+    // catalog entries consume a display slot but need no setup request.
+    const setupKeys = new Set([
+      ...matchedInstalled.map(i => i.id),
+      ...matchedCatalog.filter(c => c.detail?.installable !== false).map(c => c.id),
+    ]);
     await Promise.all(
-      [
-        ...new Set([
-          ...matchedInstalled.map((i) => i.id),
-          ...catalog
-            .filter(
-              (c) =>
-                !installedIds.has(c.id) &&
-                c.detail?.installable !== false &&
-                matchesQueryTokens(q, c.id, c.name, c.description)
-            )
-            .map((c) => c.id),
-        ]),
-      ]
-        .slice(0, MAX_LINES)
+      [...setupKeys]
         .map(async (connector_key) => {
           try {
             setupByKey.set(
@@ -371,9 +362,7 @@ export async function searchLiveConnectors(
         ));
       }
     }
-    for (const c of catalog) {
-      if (installedIds.has(c.id)) continue; // installed line already covers it
-      if (!matchesQueryTokens(q, c.id, c.name, c.description)) continue;
+    for (const c of matchedCatalog) {
       // A catalog entry can be non-installable (e.g. a stale/unavailable
       // connector). installConnector on it is guaranteed to fail, so surface the
       // reason instead of the install lifecycle.
