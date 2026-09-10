@@ -62,6 +62,11 @@ The same MCP endpoint works with **Claude Code, Codex, OpenCode, Antigravity, Ch
 
 Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/) · [Grok](https://lobu.ai/connect-from/grok/)
 
+To test changes merged to `main`, run `bunx @lobu/cli@canary --help`. The
+`canary` tag advances after CI, image checks, and installation smoke tests in
+four Linux environments pass. Use `@latest` for stable releases. Canary versions
+include the full commit SHA so you can pin a preview when reproducing a bug.
+
 ### Recall what the company knows
 
 Ask from Claude Code, Codex, or ChatGPT:
