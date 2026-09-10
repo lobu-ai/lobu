@@ -38,18 +38,23 @@ function silenceTerminal(): void {
   process.stderr.write = sink;
 }
 
+let sentMessageId = "synthetic-platform-message";
+
 function createSseResponse(
   events: Array<{ event: string; data: Record<string, unknown> }>
 ): Response {
   const encoder = new TextEncoder();
-  const payload = events
-    .map(
-      ({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-    )
-    .join("");
   return new Response(
     new ReadableStream({
-      start(controller) {
+      async start(controller) {
+        // Subscription starts first; delivery follows the POST in this fixture.
+        await Promise.resolve();
+        const payload = events
+          .map(
+            ({ event, data }) =>
+              `event: ${event}\ndata: ${JSON.stringify({ messageId: sentMessageId, turnMessageId: sentMessageId, ...data })}\n\n`
+          )
+          .join("");
         controller.enqueue(encoder.encode(payload));
         controller.close();
       },
@@ -66,6 +71,8 @@ afterEach(() => {
   else process.env.LOBU_API_TOKEN = originalToken;
   if (originalOrg === undefined) delete process.env.LOBU_ORG;
   else process.env.LOBU_ORG = originalOrg;
+  sentMessageId = "synthetic-platform-message";
+  process.exitCode = 0;
   mock.restore();
 });
 
@@ -143,6 +150,7 @@ describe("chatCommand — x-lobu-org header threading", () => {
           init?.method === "POST"
         ) {
           headerSeen.messages = orgHeader;
+          sentMessageId = JSON.parse(String(init?.body)).messageId;
           return Response.json({ success: true });
         }
         throw new Error(`Unexpected fetch: ${url}`);
@@ -194,6 +202,7 @@ describe("chatCommand — x-lobu-org header threading", () => {
           url === "http://gateway.test/lobu/api/v1/agents/session-1/messages" &&
           init?.method === "POST"
         ) {
+          sentMessageId = JSON.parse(String(init?.body)).messageId;
           return Response.json({ success: true });
         }
         throw new Error(`Unexpected fetch: ${url}`);

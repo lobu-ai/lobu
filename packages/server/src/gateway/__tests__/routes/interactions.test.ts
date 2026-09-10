@@ -24,6 +24,7 @@ describe("interaction routes", () => {
       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     workerToken = generateWorkerToken("user-1", "conv-1", "deploy-1", {
+      messageId: "synthetic-request",
       channelId: "chan-1",
       teamId: "team-1",
     });
@@ -84,6 +85,7 @@ describe("interaction routes", () => {
       expect(body.id).toBe("interaction-123");
       expect(body.status).toBe("posted");
       expect(mockInteractionService.postQuestion).toHaveBeenCalledTimes(1);
+      expect(mockInteractionService.postQuestion.mock.calls[0].at(-1)).toBe("synthetic-request");
     });
 
     test("posts link button and returns id", async () => {
@@ -105,6 +107,7 @@ describe("interaction routes", () => {
       expect(body.id).toBe("link-123");
       expect(body.status).toBe("posted");
       expect(mockInteractionService.postLinkButton).toHaveBeenCalledTimes(1);
+      expect(mockInteractionService.postLinkButton.mock.calls[0].at(-1)).toBe("synthetic-request");
     });
 
     test("returns 500 on service error", async () => {

@@ -20,19 +20,23 @@ const originalConsoleError = console.error;
 const originalToken = process.env.LOBU_API_TOKEN;
 const exampleDir = join(import.meta.dir, "../../../../examples/market");
 
+let sentMessageId = "synthetic-platform-message";
+
 function createSseResponse(
   events: Array<{ event: string; data: Record<string, unknown> }>
 ): Response {
   const encoder = new TextEncoder();
-  const payload = events
-    .map(
-      ({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-    )
-    .join("");
-
   return new Response(
     new ReadableStream({
-      start(controller) {
+      async start(controller) {
+        // Subscription starts first; delivery follows the POST in this fixture.
+        await Promise.resolve();
+        const payload = events
+          .map(
+            ({ event, data }) =>
+              `event: ${event}\ndata: ${JSON.stringify({ messageId: sentMessageId, turnMessageId: sentMessageId, ...data })}\n\n`
+          )
+          .join("");
         controller.enqueue(encoder.encode(payload));
         controller.close();
       },
@@ -80,6 +84,8 @@ afterEach(() => {
   } else {
     process.env.LOBU_API_TOKEN = originalToken;
   }
+  sentMessageId = "synthetic-platform-message";
+  process.exitCode = 0;
   mock.restore();
 });
 
@@ -159,6 +165,7 @@ describe("chatCommand example integration", () => {
           url === "http://gateway.test/lobu/api/v1/agents/session-1/messages" &&
           init?.method === "POST"
         ) {
+          sentMessageId = JSON.parse(String(init?.body)).messageId;
           return Response.json({ success: true });
         }
 
@@ -230,6 +237,7 @@ describe("chatCommand example integration", () => {
         ) {
           return Response.json({
             success: true,
+            messageId: "synthetic-platform-message",
             eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
@@ -295,6 +303,7 @@ describe("chatCommand example integration", () => {
         ) {
           return Response.json({
             success: true,
+            messageId: "synthetic-platform-message",
             eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
@@ -348,6 +357,7 @@ describe("chatCommand example integration", () => {
         ) {
           return Response.json({
             success: true,
+            messageId: "synthetic-platform-message",
             eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
@@ -399,6 +409,7 @@ describe("chatCommand example integration", () => {
           messageBodies.push(body);
           return Response.json({
             success: true,
+            messageId: "synthetic-platform-message",
             eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
