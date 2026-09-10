@@ -25,9 +25,9 @@ import {
 import {
   isOrgBucketAgentId,
   orgBucketAgentId,
+  REFRESHABLE_AUTH_TYPES,
   UserAuthProfileStore,
 } from "../auth/settings/user-auth-profile-store.js";
-import { REFRESHABLE_AUTH_TYPES } from "../proxy/token-refresh-job.js";
 import {
   ensureDbForGatewayTests,
   ensureEncryptionKey,

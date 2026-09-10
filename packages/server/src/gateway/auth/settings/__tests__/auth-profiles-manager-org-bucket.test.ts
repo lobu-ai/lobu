@@ -74,7 +74,7 @@ function makeManager(opts: {
       }),
     } as never,
     secretStore: secretStore as never,
-    // No owner fallback for OAuth (owner-fallback is api-key-only by design).
+    // This fixture tests requesting-user precedence without an owner fallback.
     agentOwnerResolver: async () => undefined,
     agentOrgResolver: async () => ORG_ID,
   });

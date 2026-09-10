@@ -3,18 +3,14 @@ import { type DbClient, getDb } from "../../db/client.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import type { OAuthCredentials } from "../auth/oauth/credentials.js";
 import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
-import { isOrgBucketAgentId } from "../auth/settings/user-auth-profile-store.js";
+import {
+  isOrgBucketAgentId,
+  REFRESHABLE_AUTH_TYPES,
+} from "../auth/settings/user-auth-profile-store.js";
 
 const logger = createLogger("token-refresh-job");
 
 const EXPIRY_BUFFER_MS = 5 * 60 * 1000; // Refresh tokens expiring within 5 minutes
-
-// Profile auth types that carry a refresh token we can rotate. "oauth" =
-// Claude (authorization-code), "device-code" = ChatGPT/Codex. Exported so the
-// refresh-eligibility regression test can assert BOTH literals are still
-// selected after the OAuth-flow consolidation — a silent rename here breaks
-// refresh for already-signed-in users ~1h later, invisibly.
-export const REFRESHABLE_AUTH_TYPES = new Set(["oauth", "device-code"]);
 
 /**
  * Anything that can swap a refresh token for fresh credentials. Both the
@@ -144,7 +140,7 @@ export class TokenRefreshJob {
 
   private async doRefresh(userId: string, agentId: string): Promise<void> {
     for (const { providerId, refresher } of this.refreshableProviders) {
-      const profiles = await this.authProfilesManager.getProviderProfiles(
+      const profiles = await this.authProfilesManager.getStoredProviderProfiles(
         agentId,
         providerId,
         userId
@@ -201,7 +197,7 @@ export class TokenRefreshJob {
 
       // Re-read under the lock — another replica may have rotated this profile
       // while we waited to acquire it.
-      const profiles = await this.authProfilesManager.getProviderProfiles(
+      const profiles = await this.authProfilesManager.getStoredProviderProfiles(
         agentId,
         providerId,
         userId

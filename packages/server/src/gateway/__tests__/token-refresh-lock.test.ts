@@ -68,10 +68,9 @@ function makeManager(opts: {
   const upserts: unknown[] = [];
   return {
     upserts,
-    getProviderProfilesCount: () => getCount,
     manager: {
       getUserAuthProfileStore: () => ({}),
-      async getProviderProfiles() {
+      async getStoredProviderProfiles() {
         const idx = Math.min(getCount, opts.profileSequence.length - 1);
         getCount += 1;
         return opts.profileSequence[idx];
@@ -118,7 +117,7 @@ describe("TokenRefreshJob advisory lock (F5)", () => {
     const expiring = Date.now() + 60_000; // pre-check (outside lock) sees expiring
     const rotated = Date.now() + 3600_000; // in-lock re-read sees future expiry
     const { manager, upserts } = makeManager({
-      // 1st getProviderProfiles (pre-check) → expiring; 2nd (inside lock) → rotated.
+      // 1st getStoredProviderProfiles (pre-check) → expiring; 2nd (inside lock) → rotated.
       profileSequence: [[makeProfile(expiring)], [makeProfile(rotated)]],
     });
 
