@@ -54,12 +54,6 @@ export interface ExecutorClient {
    */
   dispatchChromeAction(req: DispatchChromeActionRequest): Promise<Record<string, unknown>>;
   /**
-   * Compose an imported read operation on the connection that owns the run
-   * this worker currently holds. The gateway picks the connection from that
-   * claim, so the guest can never aim a read at another connection.
-   */
-  readOperation(req: ReadConnectorOperationRequest): Promise<Record<string, unknown>>;
-  /**
    * Post a device-side automation exit report and read the server's decision.
    * `status: "resume"` means the run is still claimed and the caller should
    * re-spawn with the returned nudge.
@@ -120,8 +114,6 @@ export type {
   PollAuthSignalRequest,
   PollAuthSignalResponse,
   PollResponse,
-  ReadConnectorOperationRequest,
-  ReadConnectorOperationResponse,
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
 import type {
@@ -144,8 +136,6 @@ import type {
   PollAuthSignalRequest,
   PollAuthSignalResponse,
   PollResponse,
-  ReadConnectorOperationRequest,
-  ReadConnectorOperationResponse,
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
 import type { AgentKind } from "@lobu/core/contracts/worker/device-automation";
@@ -544,18 +534,6 @@ export class WorkerClient implements ExecutorClient {
       result.error_message ??
         `Chrome action '${req.action_key}' ${result.status === 'timeout' ? 'timed out' : 'failed'}`
     );
-  }
-
-  /**
-   * Compose an imported read on the connection that owns this worker's claimed
-   * run. Throws with the gateway's message when the read is refused.
-   */
-  async readOperation(req: ReadConnectorOperationRequest): Promise<Record<string, unknown>> {
-    const result = await this.requestJson<ReadConnectorOperationResponse>(
-      '/api/workers/read-operation',
-      req
-    );
-    return result.output;
   }
 
   /**

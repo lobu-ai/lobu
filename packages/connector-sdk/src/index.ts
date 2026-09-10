@@ -77,7 +77,6 @@ export type {
   ConnectorAuthSchema,
   ConnectorDefinition,
   ConnectorInstallationContext,
-  ConnectorOperations,
   ConnectorRuntimeInfo,
   ConnectorWebhookSchema,
   ContentItem,

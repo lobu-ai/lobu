@@ -46,8 +46,6 @@ interface HttpOperationBackendConfig {
   method: string;
   pathTemplate: string;
   serverUrl: string;
-  /** Header templates the gateway renders from resolved credentials. */
-  credentialHeaders?: Record<string, string>;
 }
 
 export type OperationBackendConfig =

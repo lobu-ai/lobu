@@ -75,7 +75,6 @@ interface ConnectorSpec {
   mcpConfig?: { upstreamUrl: string };      // Proxy an upstream MCP server
   openapiConfig?: {                         // Generate actions from an OpenAPI spec
     specUrl: string;
-    credentialHeaders?: Record<string, string>; // Host-rendered headers, e.g. { 'x-api-key': '{{API_KEY}}' }
     includeOperations?: string[];
     excludeOperations?: string[];
     includeTags?: string[];
@@ -283,7 +282,6 @@ and returns a `SyncResult`.
 
 ```typescript
 interface SyncContext {
-  operations?: ConnectorOperations;         // Compose imported OpenAPI reads (hosted runs only)
   feedKey: string;                          // Which feed to sync
   feedId?: number;                          // Stable configured feed-instance ID
   config: Record<string, unknown>;          // Feed + connector config merged
@@ -351,7 +349,6 @@ to read.
 
 ```typescript
 interface FeedReadContext {
-  operations?: ConnectorOperations;        // Compose imported OpenAPI reads (hosted runs only)
   feedId?: number;
   feedKey: string;
   query?: string;
