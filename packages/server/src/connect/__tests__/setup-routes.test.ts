@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 import { createSetupRoutes, type SetupRouteDeps } from '../setup-routes';
 import { sessionCookieName } from '../../auth/session-cookie-scope';
 

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 import { connectionSetupOptions, fetchCloudSetupOptions, type SetupOptionsDeps } from '../setup-options';
 import type { ConnectionSetupOption, ConnectionSetupOptions } from '@lobu/core/contracts/tools/manage-connections';
 

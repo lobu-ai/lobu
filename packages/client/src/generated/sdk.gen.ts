@@ -177,7 +177,7 @@ export type Options<
 /**
  * Search local saved workspace memory: entities, facts, decisions, preferences, observations, notes, and authorized channel transcripts
  *
- * Search local saved workspace memory: entities, facts, decisions, preferences, observations, notes, and authorized channel transcripts.
+ * Search local saved workspace memory: entities, facts, decisions, preferences, observations, notes, and authorized channel transcripts. To open a known memory, event, or content ID, pass query: "memory 1234" and include_content: true. entity_id is only for entity records, never memory IDs.
  */
 export const searchMemory = <ThrowOnError extends boolean = false>(
   options: Options<SearchMemoryData, ThrowOnError>,
@@ -240,7 +240,7 @@ export const searchSdk = <ThrowOnError extends boolean = false>(
 /**
  * Run capability-scoped, read-only TypeScript through the Lobu SDK
  *
- * Run capability-scoped, read-only TypeScript through the Lobu SDK. Query entities, relationships, feeds, operations, metrics, and authorized connected-source data; write, administrative, and external-action methods are rejected by the sandbox.
+ * Run capability-scoped, read-only TypeScript through the Lobu SDK. On bare OAuth /mcp, select a workspace with await client.org(target) before workspace methods.
  */
 export const querySdk = <ThrowOnError extends boolean = false>(
   options: Options<QuerySdkData, ThrowOnError>,
@@ -280,9 +280,9 @@ export const querySql = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Execute a capability-scoped Lobu SDK script against the current workspace
+ * Execute a capability-scoped Lobu SDK script
  *
- * Execute a capability-scoped Lobu SDK script against the current workspace.
+ * Execute a capability-scoped Lobu SDK script. On bare OAuth /mcp, select workspace operations with await client.org(target); account discovery and conversation titles require no target.
  */
 export const runSdk = <ThrowOnError extends boolean = false>(
   options: Options<RunSdkData, ThrowOnError>,
