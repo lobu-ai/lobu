@@ -259,7 +259,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     await queue?.stop();
   });
 
-  test("a device-pinned channel preserves a chat turn and its local model settings", async () => {
+  test.each(["codex", null])("a device-pinned channel preserves its supported dispatch for CLI %p", async (agentKind) => {
     const sql = getDb();
     const owner = await createTestUser({});
     await addUserToOrganization(owner.id, "org-slack-grid-e2e", "owner");
@@ -273,7 +273,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     if (!device) throw new Error("Device fixture missing");
     await sql`
       UPDATE automations
-      SET device_worker_id = ${device.id}, agent_kind = 'codex',
+      SET device_worker_id = ${device.id}, agent_kind = ${agentKind},
         execution_config = '{"model":"test-local-model","effort":"medium","timeout_seconds":17,"max_budget_usd":0.5,"permission_mode":"plan"}'::jsonb
       WHERE organization_id = 'org-slack-grid-e2e'
         AND managed_agent_id = 'agent-slack-grid-e2e'
@@ -287,6 +287,15 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       eventType: "app_mention",
     })));
     expect(response.status).toBe(200);
+    if (agentKind === null) {
+      await waitFor(async () => {
+        const background = await sql`SELECT id FROM runs WHERE run_type = 'automation'`;
+        expect(background).toHaveLength(1);
+      });
+      const messages = await sql`SELECT id FROM runs WHERE queue_name = 'messages'`;
+      expect(messages).toHaveLength(0);
+      return;
+    }
     await waitFor(async () => {
       const rows = await sql`SELECT run_type, action_input FROM runs WHERE queue_name = 'messages'`;
       expect(rows).toHaveLength(1);

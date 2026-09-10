@@ -224,6 +224,7 @@ describe("device chat execution lane", () => {
 		const payload = job.payload as {
 			chat: {
 				agent_kind: string;
+				execution_config: unknown;
 				message: string;
 				history: unknown[];
 				agent: { identity_md?: string };
@@ -232,10 +233,19 @@ describe("device chat execution lane", () => {
 		};
     expect(payload.chat).toMatchObject({
       agent_kind: "pi",
-      execution_config: { model: "test-local-model", effort: "xhigh", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" },
       message: "What is the latest on Atlas?",
       history: [{ role: "assistant", content: "Existing managed reply." }],
       agent: { identity_md: "A careful local agent" },
+		});
+		// Exact, not a partial match: the enqueued `deviceExecutionConfig` also
+		// carried the server-only `finalize_nudges`, and the point of the wire
+		// contract filter is that it never reaches the local CLI.
+		expect(payload.chat.execution_config).toEqual({
+			model: "test-local-model",
+			effort: "xhigh",
+			timeout_seconds: 17,
+			max_budget_usd: 0.5,
+			permission_mode: "plan",
 		});
 		expect(payload.context.agent_session.conversation_id).toBe(conversationId);
 		expect(

@@ -13,6 +13,8 @@ import {
 } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import {
+  AutomationExecutionConfigSchema,
+  DEVICE_CHAT_MAX_CONTEXT_LENGTH,
   PollRequestSchema,
   defaultBackendCapacity,
   type PollRequest,
@@ -1345,25 +1347,21 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       !Array.isArray(message.platformMetadata)
         ? (message.platformMetadata as Record<string, unknown>)
         : undefined;
-    // Allow only local CLI settings, preserving the Automation's existing
-    // limits and permission mode. Server-only settings never reach the device.
-    const executionConfig = {
-      ...(typeof localOptions.model === 'string'
-        ? { model: localOptions.model }
-        : {}),
-      ...(typeof localOptions.effort === 'string'
-        ? { effort: localOptions.effort }
-        : {}),
-      ...(typeof localOptions.timeout_seconds === 'number'
-        ? { timeout_seconds: localOptions.timeout_seconds }
-        : {}),
-      ...(typeof localOptions.max_budget_usd === 'number'
-        ? { max_budget_usd: localOptions.max_budget_usd }
-        : {}),
-      ...(typeof localOptions.permission_mode === 'string'
-        ? { permission_mode: localOptions.permission_mode }
-        : {}),
-    };
+    // The device wire contract IS the allowlist: `Value.Clean` drops every key
+    // the CLI envelope does not declare (the server-only `finalize_nudges`, a
+    // future server-side setting), so this cannot drift from the schema. A
+    // surviving key with the wrong type fails the check and the whole config is
+    // withheld rather than shipped malformed.
+    const candidateConfig = Value.Clean(
+      AutomationExecutionConfigSchema,
+      structuredClone(localOptions),
+    );
+    const executionConfig = Value.Check(
+      AutomationExecutionConfigSchema,
+      candidateConfig,
+    )
+      ? candidateConfig
+      : {};
     const agentKind =
       typeof target?.agentKind === 'string' ? target.agentKind.trim() : '';
     const conversationId =
@@ -1487,7 +1485,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           message: messageText.slice(0, 32_000),
           ...(typeof message?.ephemeralContext === 'string' &&
           message.ephemeralContext.length > 0
-            ? { ephemeral_context: message.ephemeralContext.slice(0, 2_048) }
+            ? {
+                ephemeral_context: message.ephemeralContext.slice(
+                  0,
+                  DEVICE_CHAT_MAX_CONTEXT_LENGTH,
+                ),
+              }
             : {}),
           history,
           agent: {

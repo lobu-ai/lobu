@@ -1963,26 +1963,26 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage.mock.calls[0]?.[0].agentOptions).not.toHaveProperty("model");
   });
 
-  test("a device pin naming no local CLI is refused instead of enqueued unclaimable", async () => {
-    const { bridge, enqueueMessage } = makePreviewHarness({
-      linkedAutomation: { agentId: "local-agent", organizationId: "org-bound" },
-      automations: [{
-        automationId: 71, organizationId: "org-bound", agentId: "local-agent",
-        deviceWorkerId: "device-test", agentKind: null, model: null,
-        executionConfig: null, instructions: "Run this chat", minCooldownSeconds: 0,
-        trigger: { kind: "event", connector_key: "slack", connection_id: 42,
-          event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
-          execution: "turn", output: "reply_to_source", active_run: "steer" },
-      }],
-    });
-    const thread = makeThread(undefined);
-    await bridge.handleMessage(thread, makeMessage(), "mention");
-    // The device claim filter matches on `executionTarget.agentKind`, so an
-    // enqueued run with a null kind is claimable by no device and only ends as
-    // the reaper's generic device-chat timeout.
-    expect(enqueueMessage).not.toHaveBeenCalled();
-    expect(thread.post).toHaveBeenCalledTimes(1);
-    expect(String(thread.post.mock.calls[0]?.[0])).toContain("local agent CLI");
+  // Two independent reasons a device pin stays off the live chat lane: a null
+  // `agentKind` no device can claim, and instructions longer than the device
+  // chat envelope's 2 KiB `ephemeral_context` (2,400 chars here) which the poll
+  // route would silently truncate.
+  test.each([null, "codex"])("a device pin with a default CLI or oversized instructions keeps background dispatch (%p)", (agentKind) => {
+    const automation: MatchingAutomationActivation = {
+      automationId: 71, organizationId: "org-bound", agentId: "local-agent",
+      deviceWorkerId: "device-test", agentKind, model: null,
+      executionConfig: null, instructions: agentKind ? "Keep every instruction. ".repeat(100) : "Run this chat",
+      minCooldownSeconds: 0,
+      trigger: { kind: "event", connector_key: "slack", connection_id: 42,
+        event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
+        execution: "turn", output: "reply_to_source", active_run: "steer" },
+    };
+    const plan = planAutomationActivations({
+      connector_key: "slack", connection_id: 42, event_type: "message.created",
+      delivery_id: "synthetic-delivery", label: "Synthetic message", input_text: "Run this",
+    }, [automation]);
+    expect(plan.replyTargets).toEqual([]);
+    expect(plan.backgroundTargets).toEqual([automation]);
   });
 
   test("unroutable model provider posts a plain Slack text fallback and skips enqueue", async () => {

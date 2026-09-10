@@ -267,13 +267,24 @@ export const DeviceChatHistoryMessageSchema = Type.Object({
   content: Type.String({ maxLength: 16_000 }),
 });
 
+/**
+ * Cap on the device chat envelope's `ephemeral_context`. Exported because the
+ * producer must agree with it BEFORE enqueueing: the server-side planner keeps
+ * an Automation whose composed instructions exceed this bound on the durable
+ * background lane rather than shipping a device turn the poll route would
+ * silently truncate.
+ */
+export const DEVICE_CHAT_MAX_CONTEXT_LENGTH = 2_048;
+
 /** Device-local chat execution metadata. Conversation ownership stays with `agent.id`. */
 export const DeviceChatPollPayloadSchema = Type.Object({
   chat: Type.Object({
     agent_kind: Type.String({ minLength: 1, maxLength: 64 }),
     execution_config: Type.Optional(AutomationExecutionConfigSchema),
     message: Type.String({ maxLength: 32_000 }),
-    ephemeral_context: Type.Optional(Type.String({ maxLength: 2_048 })),
+    ephemeral_context: Type.Optional(
+      Type.String({ maxLength: DEVICE_CHAT_MAX_CONTEXT_LENGTH })
+    ),
     history: Type.Array(DeviceChatHistoryMessageSchema, { maxItems: 12 }),
     agent: Type.Object({
       id: Type.String({ minLength: 1 }),
