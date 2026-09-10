@@ -15,6 +15,7 @@ import { activatePageRun } from "../../worker-api/page-activation";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	createTestConnectorDefinition,
+	createTestEvent,
 	createTestOrganization,
 	createTestUser,
 } from "../setup/test-fixtures";
@@ -778,6 +779,134 @@ describe("page-activated operation runs", () => {
 		expect(
 			activity.items.some((item) => item.notification_id === settledOld.id),
 		).toBe(false);
+	});
+
+	it.each(["draft", "approval"] as const)(
+		"keeps a pending %s ahead of newer unread cards at a smaller response limit",
+		async (kind) => {
+			const seeded = await seed();
+			let proposalId: number | undefined;
+			if (kind === "approval") {
+				await sql`UPDATE runs SET approval_status = 'pending' WHERE id = ${seeded.run.id}`;
+				const proposal = await createTestEvent({
+					organization_id: seeded.org.id,
+					title: "Review proposal",
+					content: "Synthetic proposal",
+					semantic_type: "operation",
+				});
+				proposalId = proposal.id;
+				await sql`
+					UPDATE events SET run_id = ${seeded.run.id}, interaction_type = 'approval'
+					WHERE id = ${proposalId}
+				`;
+			}
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: kind === "draft" ? "agent_message" : "action_approval_needed",
+				title: "Pending decision",
+				body: "Review this decision",
+				browserUrl: kind === "draft" ? "https://x.com/ada/status/123" : undefined,
+				browserRunId: kind === "draft" ? seeded.run.id : undefined,
+				resourceType: kind === "approval" ? "event" : undefined,
+				resourceId: proposalId == null ? undefined : String(proposalId),
+			});
+			await sql`
+				UPDATE notification_targets SET read_at = now() WHERE user_id = ${seeded.user.id}
+			`;
+			for (let i = 0; i < 15; i++) {
+				await createNotificationForUsers([seeded.user.id], {
+					organizationId: seeded.org.id,
+					type: "agent_message",
+					title: `Unread notice ${i}`,
+					body: "Unread history",
+				});
+			}
+			const activity = await listOrgActivity({
+				organizationId: seeded.org.id,
+				userId: seeded.user.id,
+				ownerSlug: seeded.org.slug,
+				includeRuns: false,
+				limit: 10,
+			});
+			expect(activity.items).toHaveLength(10);
+			const decision = activity.items.find((item) => item.title === "Pending decision");
+			expect(decision).toBeDefined();
+			if (kind === "draft") expect(decision?.browser_handoff?.state).toBe("ready");
+			else expect(decision?.interaction_status).toBe("pending");
+		},
+	);
+
+	it("does not let settled drafts exhaust the attention query budget", async () => {
+		const seeded = await seed();
+		await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id,
+			type: "agent_message",
+			title: "Old unread notice",
+			body: "Still unread",
+		});
+		for (let i = 0; i < 55; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Settled draft ${i}`,
+				body: "No linked run",
+				browserUrl: `https://example.test/draft/${i}`,
+			});
+		}
+		await sql`
+			UPDATE notification_targets SET read_at = now()
+			WHERE user_id = ${seeded.user.id} AND browser_url IS NOT NULL
+		`;
+		const activity = await listOrgActivity({
+			organizationId: seeded.org.id,
+			userId: seeded.user.id,
+			ownerSlug: seeded.org.slug,
+			includeRuns: false,
+			limit: 10,
+		});
+		expect(activity.items.length).toBeLessThanOrEqual(10);
+		expect(activity.items.some((item) => item.title === "Old unread notice" && item.unread)).toBe(true);
+	});
+
+	it("holds the declared limit when the attention set alone fills it", async () => {
+		const seeded = await seed();
+		// The pinned cards can exhaust the budget on their own, and the filler
+		// slice has to notice: `slice(-0)` is `slice(0)` — the WHOLE array — so a
+		// spent budget used to append every settled card on top of the cap.
+		for (let i = 0; i < 12; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Unread ${i}`,
+				body: "needs you",
+				resourceUrl: `/${seeded.org.slug}/memory?content_ids=1`,
+			});
+		}
+		for (let i = 0; i < 8; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Settled ${i}`,
+				body: "history",
+				resourceUrl: `/${seeded.org.slug}/memory?content_ids=99`,
+			});
+		}
+		// Read only the second batch, leaving 12 pinned unread cards against a
+		// limit of 10 and 8 settled cards competing for a budget of zero.
+		await sql`
+			UPDATE notification_targets SET read_at = now()
+			WHERE user_id = ${seeded.user.id}
+			  AND event_id IN (SELECT id FROM events ORDER BY id DESC LIMIT 8)
+		`;
+		const activity = await listOrgActivity({
+			organizationId: seeded.org.id,
+			userId: seeded.user.id,
+			ownerSlug: seeded.org.slug,
+			includeRuns: false,
+			limit: 10,
+		});
+		expect(activity.items.length).toBe(10);
+		expect(activity.items.every((item) => item.unread)).toBe(true);
 	});
 
 	it("excludes browser-handoff drafts when the kind filter omits notifications", async () => {

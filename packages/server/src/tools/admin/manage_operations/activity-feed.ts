@@ -427,8 +427,11 @@ function collapseKeyForRun(row: {
  * to do; pinning those made month-old dead drafts outrank live work.
  */
 function cardNeedsAttention(card: RawCard): boolean {
+	return Boolean(card.unread) || cardHasPendingDecision(card);
+}
+
+function cardHasPendingDecision(card: RawCard): boolean {
 	return (
-		Boolean(card.unread) ||
 		(card.interaction_type === "approval" &&
 			card.interaction_status === "pending") ||
 		card.browser_handoff?.state === "ready"
@@ -668,8 +671,7 @@ export async function listOrgActivity(opts: {
 		for (const n of attentionNotifications) {
 			const card = buildNotificationCard(opts.ownerSlug, n);
 			if (!card || card.notification_id == null) continue;
-			// The SQL pre-filter is deliberately wider than the answer; only the
-			// resolved card knows whether this still needs anyone.
+			// Keep the pinned set aligned with the client-visible card state.
 			if (!cardNeedsAttention(card)) continue;
 			// Pin by id regardless of whether this card is already in the merge
 			// window: an item inside the 60-card window but outside the final
@@ -698,16 +700,20 @@ export async function listOrgActivity(opts: {
 					c.notification_id != null &&
 					pinnedAttentionIds.has(c.notification_id),
 			)
-			// collapsed is chronological (oldest first); keep only the newest
-			// `limit` pinned cards so the response never exceeds the declared
-			// bound even when the attention set outnumbers it.
+			// Preserve SQL's decision-first priority even when the caller asks
+			// for fewer cards than the attention query's budget.
+			.sort((a, b) =>
+				Number(cardHasPendingDecision(a)) - Number(cardHasPendingDecision(b)) ||
+				a.atMs - b.atMs,
+			)
 			.slice(-limit);
 		const otherCards = collapsed.filter(
 			(c) =>
 				c.notification_id == null ||
 				!pinnedAttentionIds.has(c.notification_id),
 		);
-		const fill = otherCards.slice(-Math.max(0, limit - attentionCards.length));
+		const fillCount = Math.max(0, limit - attentionCards.length);
+		const fill = fillCount > 0 ? otherCards.slice(-fillCount) : [];
 		items = [...attentionCards, ...fill]
 			.sort((a, b) => a.atMs - b.atMs)
 			.map(({ collapseKey, itemsCollected, atMs, ...card }) => card);
@@ -749,7 +755,7 @@ export function formatActivityAttentionBlock(
 	maxLines = 10,
 ): string {
 	if (items.length === 0) return "";
-	const lines: string[] = ["## Workspace attention (recent)"];
+	const lines: string[] = ["## Workspace attention"];
 	const slice = items.slice(-maxLines);
 	for (const it of slice) {
 		const status = it.status ? ` [${it.status}]` : "";
