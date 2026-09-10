@@ -54,7 +54,13 @@ function renderCredentialHeaders(
 		if (value.includes("{{") || value.includes("}}")) {
 			throw new Error(`Invalid credential header template for '${name}'`);
 		}
-		headers.set(name, value);
+		try {
+			headers.set(name, value);
+		} catch {
+			// Headers may echo an invalid value in its error. Never return a
+			// resolved app secret in a failed operation's persisted message.
+			throw new Error(`Invalid credential header '${name}'`);
+		}
 	}
 	return headers;
 }

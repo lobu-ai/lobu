@@ -45,12 +45,14 @@ function settleApprovalResult<T>(ctx: ToolContext, result: T): T {
 	return result;
 }
 
+// Read imported bindings when dispatched, not while the tool registry loads.
+// The composition entry point may be imported before the registry.
 const manageOperationsTool = defineActionTool("manage_operations", {
-	list_available: action(ListAvailableAction, handleListAvailable),
-	execute: action(ExecuteAction, handleExecute),
-	list_runs: action(ListRunsAction, handleListRuns),
-	get_run: action(GetRunAction, handleGetRun),
-	list_activity: action(ListActivityAction, handleListActivity),
+	list_available: action(ListAvailableAction, (args, ctx) => handleListAvailable(args, ctx)),
+	execute: action(ExecuteAction, (args, ctx, env) => handleExecute(args, ctx, env)),
+	list_runs: action(ListRunsAction, (args, ctx) => handleListRuns(args, ctx)),
+	get_run: action(GetRunAction, (args, ctx) => handleGetRun(args, ctx)),
+	list_activity: action(ListActivityAction, (args, ctx) => handleListActivity(args, ctx)),
 	approve: action(ApproveAction, async (args, ctx, env) =>
 		settleApprovalResult(ctx, await handleApprove(args, ctx, env)),
 	),

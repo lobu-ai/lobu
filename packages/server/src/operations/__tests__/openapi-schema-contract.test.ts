@@ -81,6 +81,11 @@ describe('OpenAPI scope requirements', () => {
 });
 
 describe('host credential header templates', () => {
+  test('does not echo invalid credential values in an error', () => {
+    expect(() => http.renderCredentialHeaders(
+      { 'x-api-key': '{{KEY}}' }, { KEY: 'synthetic-secret\r\ninvalid' },
+    )).toThrow("Invalid credential header 'x-api-key'");
+  });
   test('combines selected credentials and refuses missing values or reserved headers', () => {
     expect(
       http

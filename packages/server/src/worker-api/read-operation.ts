@@ -15,7 +15,7 @@ import type { ReadConnectorOperationRequest } from '@lobu/core/contracts/worker/
 import type { Context } from 'hono';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
-import { connectorOperationReader } from '../operations/connector-operation-reader';
+import { connectorOperationReader } from '../tools/admin/manage_operations/handlers/execute';
 import { authorizeRunForWorker } from './shared';
 
 export async function readConnectorOperation(c: Context<{ Bindings: Env }>): Promise<Response> {
@@ -42,7 +42,7 @@ export async function readConnectorOperation(c: Context<{ Bindings: Env }>): Pro
     FROM runs r
     JOIN connections con ON con.id = r.connection_id AND con.organization_id = r.organization_id
     LEFT JOIN feeds f ON f.id = r.feed_id AND f.connection_id = r.connection_id
-      AND f.organization_id = r.organization_id AND f.status = 'active'
+      AND f.organization_id = r.organization_id AND f.status = 'active' AND f.deleted_at IS NULL
     WHERE r.id = ${body.parent_run_id} AND r.status = 'running'
       AND r.claimed_by = ${body.worker_id} AND r.run_type IN ('sync', 'action')
       AND con.deleted_at IS NULL

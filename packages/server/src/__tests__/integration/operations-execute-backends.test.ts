@@ -1,3 +1,5 @@
+// Exercise composition-first loading as well as normal tool-registry dispatch.
+import { connectorOperationReader } from "../../tools/admin/manage_operations/handlers/execute";
 import { WorkerClient } from "@lobu/connector-worker/daemon";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
@@ -5,7 +7,6 @@ import { MCP_PROTOCOL_VERSION, REDACTED_SENTINEL } from "@lobu/core";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
-import { connectorOperationReader } from "../../operations/connector-operation-reader";
 import { createAutomationRun } from "../../runs/queue-service";
 import { BROWSER_GROUP_TITLE_PREFIX } from "../../worker-api/browser-action-context";
 import { readConnectorOperation } from "../../worker-api/read-operation";

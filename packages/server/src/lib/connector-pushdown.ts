@@ -8,7 +8,7 @@
  * operations.execute.
  */
 
-import { connectorOperationReader } from '../operations/connector-operation-reader';
+import { connectorOperationReader } from '../tools/admin/manage_operations/handlers/execute';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import {
   classifyToolError,
