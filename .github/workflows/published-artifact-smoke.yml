@@ -121,7 +121,7 @@ jobs:
           for file in /tmp/lobu-artifact-smoke*/version.txt; do
             [ -f "$file" ] || continue
             version=$(cat "$file")
-            if echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            if echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+\.g[0-9a-f]{40})?$'; then
               echo "version=$version" >> "$GITHUB_OUTPUT"
               break
             fi

@@ -1,0 +1,76 @@
+name: Slack QA token liveness
+
+# Answers one question: do the stored Slack QA credentials still authenticate?
+#
+# The QA_SLACK_* secrets were added in April 2026 and no workflow consumed
+# them, so nothing noticed when they expired — the failure only surfaced when
+# somebody tried to run the smoke by hand and got invalid_auth /
+# account_inactive back. A credential nobody exercises is a credential nobody
+# can trust.
+#
+# Deliberately NOT the smoke itself. scripts/test-bot.sh posts a real message
+# and waits for the agent's reply; it exits 1 the same way whether the bot
+# regressed or the sender token died, and it cannot run on a schedule without
+# writing into a Slack channel every day. This calls auth.test only: no
+# message, no thread, no write anywhere. That is what makes it cron-safe.
+#
+# Not a required check and not a release gate — a dead QA token says nothing
+# about whether the code under review is correct. It is an alarm, so keep it
+# off the branch-protection list.
+
+on:
+  # Daily canary. A Slack token is revoked, an app is uninstalled, a workspace
+  # member is deactivated — none of which involve us pushing anything, and all
+  # of which silently disarm the smoke until someone needs it in a hurry.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  # No pull_request trigger on purpose. This repo is public, and GitHub does
+  # not expose secrets to a workflow run from a fork — every fork PR would get
+  # an empty environment, report every credential missing, and fail. Dispatch
+  # covers the "I just changed the smoke, does it still work" case.
+
+permissions:
+  contents: read
+
+jobs:
+  liveness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Shallow checkout, no submodule, no bun, no install: the script is bash
+      # plus curl and jq, both present on the runner image.
+      - uses: actions/checkout@v7
+
+      - name: Probe Slack QA credentials
+        env:
+          QA_SLACK_USER_TOKEN: ${{ secrets.QA_SLACK_USER_TOKEN }}
+          QA_SLACK_BOT_TOKEN: ${{ secrets.QA_SLACK_BOT_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          QA_SLACK_TARGET_USER_ID: ${{ secrets.QA_SLACK_TARGET_USER_ID }}
+          QA_SLACK_CHANNEL: ${{ secrets.QA_SLACK_CHANNEL }}
+        run: scripts/slack-qa-token-liveness.sh
+
+      # Same devops channel build-images' notify-failure and the Flux
+      # notification-controller post to, so credential rot lands where the
+      # rest of the operational noise already goes. Skipped when the webhook
+      # is unset, and it runs only after the probe already failed, so it
+      # cannot change the job's verdict either way.
+      #
+      # Scheduled runs only: a manual dispatch already has someone watching it,
+      # and they do not need to be paged about the run they just started.
+      - name: Post failure to Slack devops
+        if: failure() && github.event_name == 'schedule'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_DEPLOY_WEBHOOK_URL not set; skipping notification."
+            exit 0
+          fi
+          payload=$(jq -nc --arg text \
+            ":key: Slack QA credential check failed — the exact-response smoke cannot run. The run names which credential is dead, or reports Slack unreachable. <${RUN_URL}|run>" \
+            '{text: $text}')
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"

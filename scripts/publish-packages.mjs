@@ -377,18 +377,30 @@ function isVersionPublished(name, version) {
   return result.status === 0 && result.stdout.trim() === version;
 }
 
-function publishArgs(otp) {
-  const args = ["publish", "--access", "public"];
+function publishArgs(otp, tag, version) {
+  if (tag !== "latest" && tag !== "canary-candidate") {
+    throw new Error(
+      "Publish only to latest or canary-candidate; promotion owns canary"
+    );
+  }
+  if (
+    (tag === "latest" && version.includes("-")) ||
+    (tag === "canary-candidate" && !version.includes("-canary."))
+  ) {
+    throw new Error(`Version ${version} cannot publish under ${tag}`);
+  }
+  const args = ["publish", "--access", "public", "--tag", tag];
   if (otp) args.push(`--otp=${otp}`);
   return args;
 }
 
-async function publishPackage({ dir, transform }, otp) {
+async function publishPackage({ dir, transform }, otp, tag) {
   const absDir = path.join(REPO_ROOT, dir);
   const pkgPath = path.join(absDir, "package.json");
   const originalText = await readFile(pkgPath, "utf8");
   const pkg = JSON.parse(originalText);
 
+  const args = publishArgs(otp, tag, pkg.version);
   if (isVersionPublished(pkg.name, pkg.version)) {
     console.log(`  → ${pkg.name}@${pkg.version} already on npm, skipping`);
     return;
@@ -407,7 +419,7 @@ async function publishPackage({ dir, transform }, otp) {
     }
 
     console.log(`  → publishing ${pkg.name}@${pkg.version}`);
-    runPublish(pkg.name, dir, publishArgs(otp), { cwd: absDir });
+    runPublish(pkg.name, dir, args, { cwd: absDir });
   } finally {
     if (mutated) {
       await writeFile(pkgPath, originalText, "utf8");
@@ -419,10 +431,17 @@ function parseArgs(argv) {
   // Positional bump: patch | minor | major | <explicit-version> | skip
   // Flags: --otp=<code>, --skip-build, --skip-bump
   const positional = [];
-  const flags = { otp: process.env.NPM_OTP, skipBuild: false, skipBump: false };
+  const flags = {
+    otp: process.env.NPM_OTP,
+    skipBuild: false,
+    skipBump: false,
+    tag: "latest",
+  };
   for (const arg of argv) {
     if (arg.startsWith("--otp=")) {
       flags.otp = arg.slice("--otp=".length);
+    } else if (arg.startsWith("--tag=")) {
+      flags.tag = arg.slice("--tag=".length);
     } else if (arg === "--skip-build") {
       flags.skipBuild = true;
     } else if (arg === "--skip-bump") {
@@ -435,7 +454,9 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  const { bump, otp, skipBuild, skipBump } = parseArgs(process.argv.slice(2));
+  const { bump, otp, skipBuild, skipBump, tag } = parseArgs(
+    process.argv.slice(2)
+  );
 
   if (skipBump) {
     console.log("\n[1/4] Skipping version bump (--skip-bump)");
@@ -480,7 +501,7 @@ async function main() {
       continue;
     }
     try {
-      await publishPackage(pkg, otp);
+      await publishPackage(pkg, otp, tag);
     } catch (error) {
       if (error instanceof FirstPublishBlockedError) {
         blocked.push(error);
@@ -562,11 +583,12 @@ if (
   });
 }
 
-export { rewriteWorkspaceRefs };
+export { PACKAGES, rewriteWorkspaceRefs };
 
 /** Internals exposed for the guard tests; not part of any published surface. */
 export const __testing = {
   PACKAGES,
+  publishArgs,
   lobuRuntimeDeps,
   markUnavailablePackage,
   packageNameFor,

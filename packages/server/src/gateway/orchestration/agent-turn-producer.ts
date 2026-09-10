@@ -420,6 +420,7 @@ interface TurnProvider {
   api: LaneApi;
   provider: string;
   providerSlug: string;
+  compat?: { supportsStore?: boolean };
   modelId: string;
   baseUrl: string;
   credential: string;
@@ -439,6 +440,36 @@ interface TurnProvider {
  * finite context window.
  */
 const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+/**
+ * The OpenAI-completions capabilities pi-ai cannot work out for itself.
+ *
+ * pi-ai auto-detects them from the model's `baseUrl`, and on this lane that
+ * URL is always Lobu's secret proxy — every upstream wears the same hostname,
+ * so detection sees nothing. The gateway resolves them here instead, while the
+ * real upstream is still in hand, and carries the answer on the envelope.
+ *
+ * Only `store` so far, because "OpenAI-compatible" names a wire format and not
+ * OpenAI's optional storage flag: Gemini's OpenAI endpoint 400s the whole
+ * request on the unknown field. Anything but api.openai.com fails closed, and
+ * pi-ai sends `store: false` when support is declared, so preserve the
+ * explicit opt-out for OpenAI rather than disabling the field universally.
+ */
+function resolveTurnCompat(
+  api: LaneApi,
+  upstreamBaseUrl: string | undefined
+): Pick<TurnProvider, "compat"> {
+  if (api !== "openai-completions") return {};
+  let supportsStore = false;
+  try {
+    const upstream = new URL(upstreamBaseUrl ?? "");
+    supportsStore =
+      upstream.protocol === "https:" && upstream.hostname === "api.openai.com";
+  } catch {
+    // A provider with no parseable upstream declares no capability.
+  }
+  return { compat: { supportsStore } };
+}
 
 /**
  * What pi-ai's own model registry says about this model: modalities, context
@@ -625,6 +656,10 @@ async function resolveTurnProvider(
     credential,
     host,
     ...resolveModelMetadata(protocol.registryAlias, modelId),
+    ...resolveTurnCompat(
+      protocol.api,
+      module.getUpstreamConfig?.()?.upstreamBaseUrl
+    ),
   };
 }
 
@@ -1075,6 +1110,7 @@ export async function enqueueAgentTurn(
         // adapter's own ceiling instead of a number invented on either side.
         ...(provider.maxTokens !== null ? { max_tokens: provider.maxTokens } : {}),
         reasoning: provider.reasoning,
+        ...(provider.compat ? { compat: provider.compat } : {}),
       },
       ...(tools ? { tools } : {}),
       // The memory hooks, when the agent has the server they call. They are

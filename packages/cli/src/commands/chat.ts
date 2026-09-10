@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -255,12 +256,14 @@ async function sendViaPlatform(
   const result = (await res.json()) as {
     success: boolean;
     agentId?: string;
-    messageId?: string;
+    messageId: string;
     eventsUrl?: string;
     queued?: boolean;
   };
 
   if (result.eventsUrl) {
+    if (!result.messageId)
+      throw new Error("Message response omitted its message ID");
     const sseUrl = result.eventsUrl.startsWith("http")
       ? result.eventsUrl
       : `${gatewayUrl}${result.eventsUrl}`;
@@ -367,31 +370,39 @@ async function sendViaApi(
   const sseUrl = `${base}/events`;
   const messagesUrl = `${base}/messages`;
 
+  const messageId = randomUUID();
   const sseController = new AbortController();
+  // Observe the stream immediately so an SSE failure during POST cannot become
+  // an unhandled rejection. Every send outcome releases the subscription.
   const streaming = streamResponse(sseUrl, session.token, sseController, {
+    expectedMessageId: messageId,
     autoApprove: opts.autoApprove,
     json: opts.json,
     org: opts.org,
-  });
+  }).then(
+    () => ({ error: undefined }),
+    (error: unknown) => ({ error })
+  );
 
-  const msgRes = await fetch(messagesUrl, {
-    method: "POST",
-    headers: agentApiHeaders(session.token, opts.org, {
-      "Content-Type": "application/json",
-    }),
-    body: JSON.stringify({ content: opts.message }),
-  });
+  try {
+    const msgRes = await fetch(messagesUrl, {
+      method: "POST",
+      headers: agentApiHeaders(session.token, opts.org, {
+        "Content-Type": "application/json",
+      }),
+      body: JSON.stringify({ content: opts.message, messageId }),
+    });
 
-  if (!msgRes.ok) {
+    if (!msgRes.ok) {
+      const body = await msgRes.text().catch(() => "");
+      throw new Error(`Failed to send message (${msgRes.status}): ${body}`);
+    }
+    const result = await streaming;
+    if (result.error) throw result.error;
+  } finally {
     sseController.abort();
-    const body = await msgRes.text().catch(() => "");
-    console.error(
-      chalk.red(`\n  Failed to send message (${msgRes.status}): ${body}\n`)
-    );
-    process.exit(1);
+    await streaming;
   }
-
-  await streaming;
 
   if (opts.contextName && session.threadId) {
     await setLastThread(opts.contextName, session.agentId, session.threadId);
@@ -432,7 +443,7 @@ async function writeStderr(text: string): Promise<void> {
 }
 
 interface StreamOptions {
-  expectedMessageId?: string;
+  expectedMessageId: string;
   autoApprove?: boolean;
   json?: boolean;
   org?: string;
@@ -457,7 +468,7 @@ async function streamResponse(
   sseUrl: string,
   token: string,
   controller: AbortController,
-  options: StreamOptions = {}
+  options: StreamOptions
 ): Promise<void> {
   // How long the AGENT may go quiet, not the socket.
   //
@@ -541,6 +552,7 @@ async function streamResponse(
     let currentEvent = "";
     let sawFileUploadedEvent = false;
     let sawSandboxLink = false;
+    let outputText = "";
 
     while (true) {
       const { done, value } = await waitForStream(reader.read());
@@ -561,26 +573,40 @@ async function streamResponse(
       for (const line of lines) {
         if (line.startsWith("event: ")) {
           currentEvent = line.slice(7).trim();
-          noteAgentActivity(currentEvent);
         } else if (line.startsWith("data: ") && currentEvent) {
           const data = parseJSON(line.slice(6));
           if (!data) continue;
-          if (
-            options.expectedMessageId &&
-            currentEvent !== "connected" &&
-            currentEvent !== "ping" &&
-            typeof data.messageId === "string" &&
-            data.messageId !== options.expectedMessageId
-          ) {
+          const transportEvent =
+            currentEvent === "connected" || currentEvent === "ping";
+          const interactionEvent = [
+            "tool-approval",
+            "question",
+            "link-button",
+            "suggestion",
+          ].includes(currentEvent);
+          const matches = interactionEvent
+            ? data.turnMessageId === options.expectedMessageId
+            : data.messageId === options.expectedMessageId ||
+              ((currentEvent === "complete" ||
+                currentEvent === "error" ||
+                currentEvent === "ephemeral") &&
+                Array.isArray(data.processedMessageIds) &&
+                data.processedMessageIds.includes(options.expectedMessageId));
+          if (!transportEvent && !matches) {
             currentEvent = "";
             continue;
           }
+          if (matches) noteAgentActivity(currentEvent);
 
           if (options.json) {
             await writeStdout(
               `${JSON.stringify({ event: currentEvent, ...data })}\n`
             );
-            if (currentEvent === "complete" || currentEvent === "error") {
+            if (
+              currentEvent === "complete" ||
+              currentEvent === "error" ||
+              currentEvent === "ephemeral"
+            ) {
               if (currentEvent === "error") process.exitCode = 1;
               controller.abort();
               return;
@@ -595,6 +621,7 @@ async function streamResponse(
                 if (data.content.includes("sandbox:/")) {
                   sawSandboxLink = true;
                 }
+                outputText += data.content;
                 await writeStdout(data.content);
               }
               break;
@@ -699,6 +726,14 @@ async function streamResponse(
               );
               break;
             case "complete":
+              // Batch members may have no matching deltas. The terminal reply
+              // is authoritative and also repairs a missed suffix on reconnect.
+              if (
+                typeof data.finalText === "string" &&
+                data.finalText.startsWith(outputText)
+              ) {
+                await writeStdout(data.finalText.slice(outputText.length));
+              }
               await writeStdout("\n");
               if (sawSandboxLink && !sawFileUploadedEvent) {
                 await writeStderr(

@@ -54,6 +54,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HARNESS="$REPO_ROOT/scripts/sdk-e2e"
 # shellcheck source=scripts/lib/process-cleanup.sh
 . "$REPO_ROOT/scripts/lib/process-cleanup.sh"
+# shellcheck source=scripts/lib/guest-bundle-expectation.sh
+. "$REPO_ROOT/scripts/lib/guest-bundle-expectation.sh"
 LOBU_VERSION="${1:-${LOBU_VERSION:-latest}}"
 GW_PORT="${GW_PORT:-8799}"
 MOCK_PORT="${MOCK_PORT:-11439}"
@@ -74,9 +76,12 @@ WORK="${SMOKE_WORK:-/tmp/lobu-artifact-smoke}"
 rm -rf "$WORK"; mkdir -p "$WORK"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 
-PASSES=0; FAILS=0
+PASSES=0; FAILS=0; SKIPS=0
 pass() { echo "  [OK]   $*"; PASSES=$((PASSES + 1)); }
 fail() { echo "  [FAIL] $*" >&2; FAILS=$((FAILS + 1)); }
+# A guarantee this published version was never supposed to offer. Reported so
+# it cannot hide, counted separately so it cannot red main.
+skip() { echo "  [SKIP] $*"; SKIPS=$((SKIPS + 1)); }
 note() { echo ""; echo "== $* =="; }
 
 MOCK_PID=""
@@ -168,12 +173,27 @@ fi
 # isolate. `@lobu/worker` used to ship the equivalent for the managed
 # subprocess; that package is no longer published, and a turn now evaluates
 # this bundle in-isolate.
-GUEST_BUNDLE="$INSTALL_DIR/node_modules/@lobu/connector-worker/dist/agent-turn/guest.bundle.js"
-if [ -f "$GUEST_BUNDLE" ]; then
-  pass "isolate guest bundle present ($(wc -c < "$GUEST_BUNDLE" | tr -d ' ') bytes)"
-else
-  fail "no guest bundle at $GUEST_BUNDLE — the agent turn cannot work"
-fi
+# Whether this artifact OWES us the bundle is derived from the artifact, not
+# pinned to a version — see scripts/lib/guest-bundle-expectation.sh.
+GUEST_DIST_DIR="$INSTALL_DIR/node_modules/@lobu/connector-worker/dist"
+GUEST_BUNDLE="$GUEST_DIST_DIR/agent-turn/guest.bundle.js"
+case "$(lobu_guest_bundle_verdict "$GUEST_DIST_DIR")" in
+  present)
+    pass "isolate guest bundle present ($(wc -c < "$GUEST_BUNDLE" | tr -d ' ') bytes)"
+    ;;
+  missing)
+    fail "guest bundle builder shipped without its output at $GUEST_BUNDLE — the publish ran tsc but not the bundle step, so the agent turn cannot work"
+    ;;
+  layout-moved)
+    fail "@lobu/connector-worker ships dist but no dist/agent-turn — the packaged layout moved, so no version of this check can hold"
+    ;;
+  no-dist)
+    fail "@lobu/connector-worker has no dist at all in $GUEST_DIST_DIR"
+    ;;
+  not-shipped)
+    skip "isolate guest bundle: published $RESOLVED predates the isolate agent-turn bundle (no builder in dist); its turn runs the subprocess lane, which the real-turn assertion in section 4 covers"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 2. Deterministic provider, so a real turn needs no key.
@@ -270,7 +290,7 @@ else
   fi
   tail -40 "$RUN_LOG" >&2
   echo ""
-  echo "  smoke summary: $PASSES passed, $FAILS failed"
+  echo "  smoke summary: $PASSES passed, $FAILS failed, $SKIPS skipped"
   echo "RESULT: published-artifact smoke FAILED (boot)"
   exit 1
 fi
@@ -360,7 +380,7 @@ fi
 
 echo ""
 echo "================================================================"
-echo "  smoke summary: $PASSES passed, $FAILS failed"
+echo "  smoke summary: $PASSES passed, $FAILS failed, $SKIPS skipped"
 echo "================================================================"
 if [ "$FAILS" -gt 0 ]; then
   echo "RESULT: published-artifact smoke FAILED"; exit 1

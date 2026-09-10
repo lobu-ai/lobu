@@ -1,0 +1,191 @@
+name: Publish Canary
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Images"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+# Keep publish, smoke and promotion serialized. Superseded pending runs can be
+# coalesced by GitHub; a running candidate always finishes without cancellation.
+concurrency:
+  group: ${{ github.event.workflow_run.event == 'push' && 'npm-canary' || format('npm-canary-ignored-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+env:
+  REQUIRED_IMAGE_JOBS: generate-tag connector-parity-smoke build-worker build-embeddings-service build-app app-image-smoke promote-images
+
+jobs:
+  attest:
+    name: Attest main image and CI runs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # `types: [completed]` also fires for failure and cancellation, and
+    # `branches: [main]` admits a manual Build Images dispatch as readily as a
+    # push. Both would start this job and then hard-fail the API checks below,
+    # so screen them out here. The producer's conclusion and event are re-read
+    # from the API regardless: this is noise control, not the gate.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    outputs:
+      sha: ${{ steps.producer.outputs.sha }}
+    steps:
+      # Deliberately before any checkout: no repository code runs until the
+      # producing run is known to be a completed-success push to a commit
+      # that is still reachable from main.
+      - name: Attest the producing Build Images run
+        id: producer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_IMAGE_RUN_ID: ${{ github.event.workflow_run.id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image_run_id="$EVENT_IMAGE_RUN_ID"
+          [ -n "$image_run_id" ] || { echo "::error::image_run_id is required"; exit 1; }
+
+          build_workflow_id=$(gh api "repos/${REPOSITORY}/actions/workflows/build-images.yml" --jq '.id')
+          build_run=$(gh api "repos/${REPOSITORY}/actions/runs/${image_run_id}")
+          workflow_id=$(jq -r '.workflow_id' <<<"$build_run")
+          sha=$(jq -r '.head_sha' <<<"$build_run")
+          head_repo=$(jq -r '.head_repository.full_name // empty' <<<"$build_run")
+          event=$(jq -r '.event' <<<"$build_run")
+          branch=$(jq -r '.head_branch // empty' <<<"$build_run")
+          status=$(jq -r '.status' <<<"$build_run")
+          conclusion=$(jq -r '.conclusion // empty' <<<"$build_run")
+          [ "$workflow_id" = "$build_workflow_id" ] || { echo "::error::wrong Build Images workflow"; exit 1; }
+          [ "$head_repo" = "$REPOSITORY" ] || { echo "::error::Build Images run repository mismatch"; exit 1; }
+          [ "$event" = push ] && [ "$branch" = main ] || { echo "::error::Build Images run must be a main push"; exit 1; }
+          [ "$status" = completed ] && [ "$conclusion" = success ] || { echo "::error::Build Images run is not completed-success"; exit 1; }
+
+          # Reachability, not tip-ness. A release commit's own image build
+          # routinely finishes after later commits have landed; demanding the
+          # tip threw that run away and left the version unreleased with every
+          # run green. A commit still reachable from main got there through
+          # branch protection, which is the property the checkout below needs.
+          current_sha=$(gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
+          compare_status=$(gh api "repos/${REPOSITORY}/compare/${sha}...${current_sha}" --jq '.status')
+          [ "$compare_status" = ahead ] || [ "$compare_status" = identical ] || { echo "::error::attested SHA ${sha} is not reachable from main (${compare_status})"; exit 1; }
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "image_run_id=$image_run_id" >> "$GITHUB_OUTPUT"
+
+      # Pinned to the SHA the step above proved is reachable from main, so the
+      # policy helper cannot come from a ref that never merged.
+      - name: Check out the attested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.producer.outputs.sha }}
+          fetch-depth: 2
+
+      - name: Attest required image jobs and the exact CI run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          ATTESTED_SHA: ${{ steps.producer.outputs.sha }}
+          IMAGE_RUN_ID: ${{ steps.producer.outputs.image_run_id }}
+        run: |
+          set -euo pipefail
+          # Piped, never --argjson: a paginated API payload passed as a command
+          # argument dies with "jq: Argument list too long" once it outgrows
+          # ARG_MAX on the runner, and macOS tolerates a payload Linux rejects,
+          # so it cannot be caught locally.
+          gh api --paginate --slurp "repos/${REPOSITORY}/actions/runs/${IMAGE_RUN_ID}/jobs?filter=all&per_page=100" \
+            | jq --arg required "$REQUIRED_IMAGE_JOBS" \
+              '{pages: ., required: ($required | split(" "))}' \
+            | node scripts/release-provenance.mjs attest-jobs >/dev/null
+
+          ci_workflow_id=$(gh api "repos/${REPOSITORY}/actions/workflows/ci.yml" --jq '.id' | tr -d '\n')
+          ci_run_id=""
+          for _ in $(seq 1 20); do
+            # Re-checked every iteration so the bounded wait still bails out
+            # early: a commit force-pushed off main stops being reachable.
+            current_sha=$(gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
+            compare_status=$(gh api "repos/${REPOSITORY}/compare/${ATTESTED_SHA}...${current_sha}" --jq '.status')
+            [ "$compare_status" = ahead ] || [ "$compare_status" = identical ] || { echo "::error::attested SHA left main while waiting for exact CI (${compare_status})"; exit 1; }
+            # Piped, never --argjson, for the same reason as the jobs read
+            # above: a run list is one argv entry, and Linux caps that at
+            # 128KB. Folding it into the existing `|| selection=""` also means
+            # a transient API blip now costs one more turn of this bounded
+            # wait instead of killing the release outright.
+            selection=$(gh api "repos/${REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${ATTESTED_SHA}&event=push&branch=main&status=completed&per_page=100" \
+              | jq --argjson workflow_id "$ci_workflow_id" --arg repo "$REPOSITORY" --arg sha "$ATTESTED_SHA" \
+                '{runs: [.workflow_runs[] | . + {repo: .repository.full_name}],
+                  expected: {workflow_id: $workflow_id, repo: $repo, event: "push", head_branch: "main", head_sha: $sha, status: "completed", conclusion: "success"}}' \
+              | node scripts/release-provenance.mjs select-run) || selection=""
+            if [ -n "$selection" ]; then
+              ci_run_id=$(jq -r '.id' <<<"$selection")
+              break
+            fi
+            sleep 20
+          done
+          [ -n "$ci_run_id" ] || { echo "::error::exact successful CI push/main run was not observed within the bounded wait"; exit 1; }
+          echo "attested CI run for ${ATTESTED_SHA}: ${ci_run_id}"
+
+  publish:
+    needs: attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.attest.outputs.sha }}
+      - uses: ./.github/actions/setup-submodule
+        with:
+          deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - run: bun install --frozen-lockfile
+      - name: Prepare exact commit versions
+        id: version
+        run: |
+          version=$(node scripts/canary-publish.mjs prepare)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build packages
+        run: |
+          bun run build:packages
+          bun run build:lobu
+      - name: Publish candidate without moving stable or canary
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-packages.mjs --skip-bump --skip-build --tag=canary-candidate
+
+  smoke:
+    needs: publish
+    uses: ./.github/workflows/published-artifact-smoke.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.publish.outputs.version }}
+
+  promote:
+    needs: [attest, publish, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.attest.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Advance canary after the exact artifact passes
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CANARY_VERSION: ${{ needs.publish.outputs.version }}
+        run: node scripts/canary-publish.mjs promote "$CANARY_VERSION"

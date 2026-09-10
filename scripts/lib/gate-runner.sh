@@ -177,6 +177,7 @@ gate_format_lint() {
   bash scripts/lib/__tests__/review-skip.test.sh || return 1
   bash scripts/lib/__tests__/review-cache.test.sh || return 1
   bash scripts/lib/__tests__/process-cleanup.test.sh || return 1
+  bash scripts/lib/__tests__/guest-bundle-expectation.test.sh || return 1
   sh scripts/lib/__tests__/kubeconfig-preflight.test.sh || return 1
   cmp -s .github/actions/setup-submodule/action.yml .depot/actions/setup-submodule/action.yml || return 1
   bash scripts/lib/__tests__/remote-ci.test.sh || return 1

@@ -62,10 +62,15 @@ export function assertRoutableInteraction(
   }
 }
 
+interface PostedInteraction extends BaseMessage {
+  /** Request that produced this card; distinct from the interaction's own id. */
+  turnMessageId?: string;
+}
+
 /**
  * Payload emitted on "question:created" — platform renderers listen for this.
  */
-export interface PostedQuestion extends BaseMessage {
+export interface PostedQuestion extends PostedInteraction {
   userId: string;
   platform: string;
   question: string;
@@ -82,7 +87,7 @@ export interface PostedQuestion extends BaseMessage {
  * and a full `message` (what actually gets sent) rather than a single string —
  * the label is a summary, not the payload.
  */
-export interface PostedSuggestion extends BaseMessage {
+export interface PostedSuggestion extends PostedInteraction {
   organizationId: string;
   userId: string;
   platform: string;
@@ -97,7 +102,7 @@ export interface PostedSuggestion extends BaseMessage {
  * renderer will skip the card-body text entirely rather than duplicate the
  * button's own label.
  */
-export interface PostedLinkButton extends BaseMessage {
+export interface PostedLinkButton extends PostedInteraction {
   userId: string;
   platform: string;
   url: string;
@@ -109,7 +114,7 @@ export interface PostedLinkButton extends BaseMessage {
 /**
  * Payload emitted on "tool:approval-needed" — platform renderers listen for this.
  */
-export interface PostedToolApproval extends BaseMessage {
+export interface PostedToolApproval extends PostedInteraction {
   agentId: string;
   userId: string;
   platform: string;
@@ -129,7 +134,7 @@ export interface PostedToolApproval extends BaseMessage {
  * approve/reject). Only the API platform renders it — the chat-platform bridge
  * intentionally does not subscribe (it would mis-handle this as an MCP grant).
  */
-export interface PostedDurableApproval extends BaseMessage {
+export interface PostedDurableApproval extends PostedInteraction {
   userId: string;
   platform: string;
   /** Pending run id; the SPA card's Approve/Reject target. */
@@ -185,7 +190,8 @@ export class InteractionService extends EventEmitter {
     platform: string,
     question: string,
     options: string[],
-    source?: string
+    source?: string,
+    turnMessageId?: string
   ): Promise<PostedQuestion> {
     assertRoutableInteraction(connectionId, platform, "question");
     if (this.beforeCreateHook) {
@@ -203,6 +209,7 @@ export class InteractionService extends EventEmitter {
       question,
       options,
       source,
+      turnMessageId,
     };
 
     logger.info(
@@ -231,7 +238,8 @@ export class InteractionService extends EventEmitter {
     connectionId: string | undefined,
     platform: string,
     prompts: Array<{ title: string; message: string }>,
-    source?: string
+    source?: string,
+    turnMessageId?: string
   ): Promise<PostedSuggestion> {
     assertRoutableInteraction(connectionId, platform, "suggestion");
     if (this.beforeCreateHook) {
@@ -254,6 +262,7 @@ export class InteractionService extends EventEmitter {
       platform,
       prompts,
       source,
+      turnMessageId,
     };
 
     logger.info(
@@ -285,7 +294,8 @@ export class InteractionService extends EventEmitter {
     toolName: string,
     args: Record<string, unknown>,
     grantPattern: string,
-    source?: string
+    source?: string,
+    turnMessageId?: string
   ): Promise<PostedToolApproval> {
     assertRoutableInteraction(connectionId, platform, "tool approval");
     if (this.beforeCreateHook) {
@@ -306,6 +316,7 @@ export class InteractionService extends EventEmitter {
       args,
       grantPattern,
       source,
+      turnMessageId,
     };
 
     logger.info(
@@ -337,7 +348,8 @@ export class InteractionService extends EventEmitter {
     source?: string,
     fields: Record<string, unknown> | null = null,
     attribution: ApprovalAttribution | null = null,
-    resourceKind: InteractionResourceKind | null = null
+    resourceKind: InteractionResourceKind | null = null,
+    turnMessageId?: string
   ): Promise<PostedDurableApproval> {
     assertRoutableInteraction(connectionId, platform, "approval card");
     if (this.beforeCreateHook) {
@@ -360,6 +372,7 @@ export class InteractionService extends EventEmitter {
       attribution,
       resourceKind,
       source,
+      turnMessageId,
     };
 
     logger.info(
@@ -385,7 +398,8 @@ export class InteractionService extends EventEmitter {
     label: string,
     linkType: "settings" | "install" | "oauth",
     body?: string,
-    source?: string
+    source?: string,
+    turnMessageId?: string
   ): Promise<PostedLinkButton> {
     assertRoutableInteraction(connectionId, platform, "link button");
     assertSafeLinkButtonUrl(url);
@@ -406,6 +420,7 @@ export class InteractionService extends EventEmitter {
       body,
       linkType,
       source,
+      turnMessageId,
     };
 
     logger.info(

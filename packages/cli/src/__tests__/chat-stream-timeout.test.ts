@@ -68,8 +68,10 @@ function sseResponse(
   );
 }
 
+let sentMessageId: string;
+
 function sse(event: string, data: Record<string, unknown>): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  return `event: ${event}\ndata: ${JSON.stringify({ messageId: sentMessageId, ...data })}\n\n`;
 }
 
 function installFetch(sseFor: (signal?: AbortSignal | null) => Response): void {
@@ -80,9 +82,11 @@ function installFetch(sseFor: (signal?: AbortSignal | null) => Response): void {
         return Response.json({ agentId: "session-1", token: "session-token" });
       }
       if (url.endsWith("/session-1/events") && !init?.method) {
+        await Promise.resolve();
         return sseFor(init?.signal);
       }
       if (url.endsWith("/session-1/messages") && init?.method === "POST") {
+        sentMessageId = JSON.parse(String(init.body)).messageId;
         return Response.json({ success: true });
       }
       throw new Error(`Unexpected fetch: ${url}`);

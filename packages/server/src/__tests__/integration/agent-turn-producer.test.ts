@@ -335,6 +335,77 @@ describe('agent turn producer', () => {
     }
   });
 
+  it('executes a compatible-provider tool round trip through worker HTTP and an isolate', async () => {
+    const requests: Array<Record<string, any>> = [];
+    const serverErrors: string[] = [];
+    const server = createServer(async (req, res) => {
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/compatible/')) {
+          requests.push(body);
+          // Gemini rejects even store:false. This stub enforces that wire
+          // contract while the real producer, daemon and Pi guest execute.
+          if (Object.hasOwn(body, 'store')) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: "Unknown name 'store'" } }));
+            return;
+          }
+          const toolCall = requests.length === 1;
+          const delta = toolCall
+            ? { role: 'assistant', tool_calls: [{ index: 0, id: 'synthetic-write', type: 'function',
+                function: { name: 'write', arguments: JSON.stringify({ file_path: 'probe.txt', content: 'compatibility verified' }) } }] }
+            : { role: 'assistant', content: 'Compatibility verified.' };
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(`data: ${JSON.stringify({ id: 'synthetic-completion', object: 'chat.completion.chunk', created: 1,
+            model: 'compatible-model', choices: [{ index: 0, delta, finish_reason: toolCall ? 'tool_calls' : 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
+        const response = await post(path, { body, headers: { authorization: req.headers.authorization ?? '' },
+          env: { WORKER_API_TOKEN: 'synthetic-compat-fleet' } });
+        res.writeHead(response.status, { 'content-type': 'application/json' });
+        res.end(await response.text());
+      } catch (error) {
+        serverErrors.push(String(error));
+        res.writeHead(500).end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const org = await createTestOrganization();
+      const message = messageFor(org.id);
+      message.agentOptions!.model = 'compatible/compatible-model';
+      await enqueueMessage(message, {
+        agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`,
+        catalog: catalogFor(claudeModule({ providerId: 'compatible', sdkCompat: 'openai',
+          getUpstreamConfig: () => ({ slug: 'compatible', upstreamBaseUrl: 'https://compatible.example.test/v1' }),
+          getProxyBaseUrlMappings: () => ({ OPENAI_BASE_URL: `${origin}/lobu/api/proxy/compatible/a/turn-agent` }),
+        })),
+      });
+      const [run] = await agentTurnRuns();
+      const client = new WorkerClient({ apiUrl: origin, workerId: 'synthetic-compat-worker',
+        authToken: 'synthetic-compat-fleet', capabilities: { agent_turn: true } });
+      const job = await client.poll();
+      expect(job.run_id).toBe(Number(run.id));
+      const result = await executeRun(client, job, {}, {
+        executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }), timeoutMs: 20_000,
+      });
+      expect(serverErrors).toEqual([]);
+      expect(result.error).toBeUndefined();
+      expect(requests).toHaveLength(2);
+      expect(requests.every((request) => !Object.hasOwn(request, 'store'))).toBe(true);
+      expect(requests[1].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true);
+      expect((await runRow(Number(run.id))).status).toBe('completed');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 30_000);
+
   it('executes write/edit over worker HTTP with admitted history', async () => {
     const calls = [
       { name: 'write', input: { file_path: 'a.txt', content: '\ufeffbefore\r\n' } },
@@ -2490,6 +2561,29 @@ describe('agent turn producer', () => {
     // an empty message with a lone CTA button. Assert the text, not just the
     // code, because the code alone looks right while showing the user nothing.
     expect(AGENT_ERRORS[AgentErrorCode.NO_MODEL_CONFIGURED].message).toBeTruthy();
+  });
+
+  it.each([
+    ['https://generativelanguage.googleapis.com/v1beta/openai', false],
+    ['https://compatible.example.test/v1', false],
+    ['https://api.openai.com.evil.example/v1', false],
+    ['http://api.openai.com/v1', false],
+    ['https://api.openai.com/v1', true],
+  ])('carries storage capability from upstream %s through the proxy', async (upstreamBaseUrl, supportsStore) => {
+    const org = await createTestOrganization();
+    await enqueueMessage(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule({
+        sdkCompat: 'openai',
+        getUpstreamConfig: () => ({ slug: 'compatible', upstreamBaseUrl }),
+      })),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    expect(run.action_input.turn.provider).toMatchObject({
+      api: 'openai-completions', compat: { supportsStore },
+    });
+    expect(run.action_input.turn.provider.base_url).toContain('gateway.test.invalid');
   });
 
   it('routes every fetch-native protocol, including OpenAI Responses', async () => {

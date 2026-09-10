@@ -100,6 +100,7 @@ export class McpProxy {
 		connectionId: string | undefined,
 		platform: string | undefined,
 		source: string | undefined,
+		turnMessageId: string | undefined,
 	) => Promise<void>;
 
 	constructor(
@@ -680,6 +681,7 @@ export class McpProxy {
 			tokenData.connectionId,
 			tokenData.platform,
 			tokenData.source,
+			tokenData.messageId,
 		).catch((err) =>
 			logger.error(
 				{ requestId, error: String(err) },

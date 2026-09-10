@@ -435,6 +435,17 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       ]),
       provider: Type.String({ minLength: 1 }),
       model_id: Type.String({ minLength: 1 }),
+      /**
+       * Upstream capabilities pi-ai would otherwise auto-detect from a model's
+       * base URL. It cannot here: `base_url` below is the secret proxy, so
+       * every provider wears the same hostname. The gateway resolves them
+       * while it still holds the real upstream; absent leaves pi-ai to guess.
+       */
+      compat: Type.Optional(
+        Type.Object({
+          supportsStore: Type.Optional(Type.Boolean()),
+        })
+      ),
       /** The gateway's agent-scoped secret-proxy base URL. */
       base_url: Type.String({ minLength: 1 }),
       /**

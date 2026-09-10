@@ -210,6 +210,7 @@ export class ApiResponseRenderer implements ResponseRenderer {
       error: errorText,
       errorCode: code,
       errorContext: payload.errorContext,
+      processedMessageIds: payload.processedMessageIds,
       messageId: payload.messageId,
       timestamp: payload.timestamp || Date.now(),
     };
@@ -289,6 +290,7 @@ export class ApiResponseRenderer implements ResponseRenderer {
       type: "ephemeral",
       content: payload.content,
       messageId: payload.messageId,
+      processedMessageIds: payload.processedMessageIds,
       timestamp: payload.timestamp || Date.now(),
     });
   }

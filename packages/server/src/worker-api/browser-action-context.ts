@@ -2,6 +2,17 @@ import { createHash } from 'node:crypto';
 import { currentMcpActivityAttribution, normalizeMcpConversationTitle } from '../lobu/stores/mcp-client-conversations';
 import type { ToolContext } from '../tools/registry';
 
+/**
+ * The one place the server spells the group-title namespace. The extension
+ * enforces the identical prefix in titleFor (apps/chrome/tab-groups.js) before
+ * storing any title, and there is deliberately no migration on either side: a
+ * change here without the matching change there would re-prefix every
+ * server-sent title. The contract test pins the separator form as a LITERAL so
+ * a one-sided rename fails loudly instead of silently stacking prefixes.
+ */
+export const BROWSER_GROUP_TITLE_PREFIX = 'Lobu';
+const TITLE_HEAD = `${BROWSER_GROUP_TITLE_PREFIX} · `;
+
 export type BrowserActionContext = {
   id: string;
   title: string;
@@ -26,7 +37,7 @@ export function runScopedBrowserActionContext(runIdValue: unknown): BrowserActio
   if (runId == null) throw new Error('Browser action context requires a positive run id.');
   return {
     id: `run:${runId}`,
-    title: `Lobu · Browser task · ${runId}`,
+    title: `${TITLE_HEAD}Browser task · ${runId}`,
     flow_id: String(runId),
     kind: 'run',
   };
@@ -54,7 +65,7 @@ export function standaloneBrowserActionContext(
   const digest = shortDigest([organizationId, String(connectionId)]);
   return {
     id: `run:standalone-${digest}`,
-    title: 'Lobu · Browser actions',
+    title: `${TITLE_HEAD}Browser actions`,
     // The flow stays per-run: shared group, unshared ownership.
     flow_id: String(runId),
     kind: 'run',
@@ -98,7 +109,7 @@ export function browserActionContextFromMetadata(
 
 function browserTitle(ctx: ToolContext, fallback: string, suffix: string): string {
   const subject = normalizeMcpConversationTitle(ctx.sdkBrowserInvocation?.title ?? '');
-  return `Lobu · ${subject || fallback} · ${suffix}`;
+  return `${TITLE_HEAD}${subject || fallback} · ${suffix}`;
 }
 
 export function deriveSdkBrowserActionContext(ctx: ToolContext): BrowserActionContext | null {
