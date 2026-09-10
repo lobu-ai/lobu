@@ -843,6 +843,7 @@ export class CoreServices {
 			connectionId,
 			platform,
 			source,
+			turnMessageId,
 		) => {
 			await this.interactionService?.postToolApproval(
 				requestId,
@@ -858,6 +859,7 @@ export class CoreServices {
 				args,
 				grantPattern,
 				source,
+				turnMessageId,
 			);
 		};
 		logger.debug("MCP proxy initialized");

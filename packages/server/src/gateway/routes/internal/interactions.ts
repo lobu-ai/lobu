@@ -50,6 +50,7 @@ export function createInteractionRoutes(
           // it from the SSE-owner gate — a headless turn has no browser SSE on
           // any pod, so an owner-gated card would dead-letter.
           source,
+          messageId,
         } = worker;
         const body = await c.req.json();
         const interactionType =
@@ -80,7 +81,8 @@ export function createInteractionRoutes(
             body.label,
             body.linkType || "oauth",
             typeof body.body === "string" ? body.body : undefined,
-            source
+            source,
+            messageId
           );
           return c.json({ id: posted.id, status: "posted" });
         }
@@ -110,7 +112,8 @@ export function createInteractionRoutes(
             isApprovalAttribution(body.attribution) ? body.attribution : null,
             isInteractionResourceKind(body.resourceKind)
               ? body.resourceKind
-              : null
+              : null,
+            messageId
           );
           // The live approval card is a one-shot SSE push, and the transcript
           // doesn't carry interaction parts — so on reload the card is lost.
@@ -139,7 +142,8 @@ export function createInteractionRoutes(
           platform || "unknown",
           body.question,
           body.options || [],
-          source
+          source,
+          messageId
         );
 
         return c.json({ id: posted.id, status: "posted" });
@@ -241,7 +245,8 @@ export function createInteractionRoutes(
         connectionId,
         platform || "unknown",
         prompts,
-        source
+        source,
+        messageId
       );
 
       return c.json({ success: true, prompts: prompts.length, id: posted.id });

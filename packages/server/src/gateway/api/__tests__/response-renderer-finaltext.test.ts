@@ -200,3 +200,15 @@ describe("ApiResponseRenderer.handleError targeting context", () => {
     expect(broadcasts).toEqual([]);
   });
 });
+
+test("errors preserve every processed request ID for batched CLI requests", async () => {
+  const { renderer, broadcasts } = makeRenderer();
+  await renderer.handleError(basePayload({ error: "synthetic failure", processedMessageIds: ["m1", "m2"] }), "session-key");
+  expect(broadcasts.find(b => b.event === "error")?.data.processedMessageIds).toEqual(["m1", "m2"]);
+});
+
+test("ephemeral terminal forwards available batch membership", async () => {
+  const { renderer, broadcasts } = makeRenderer();
+  await renderer.handleEphemeral(basePayload({ content: "synthetic notice", processedMessageIds: ["m1", "m2"] }));
+  expect(broadcasts.find(b => b.event === "ephemeral")?.data.processedMessageIds).toEqual(["m1", "m2"]);
+});

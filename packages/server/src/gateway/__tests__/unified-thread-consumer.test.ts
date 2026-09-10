@@ -264,6 +264,7 @@ describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
     );
     expect(suggestionBroadcast?.[2]).toMatchObject({
       prompts: [{ title: "New", message: "Use the newer turn" }],
+      turnMessageId: "m-new",
     });
     // The card carries prompts only, exactly like the terminal `complete`
     // embed and history replay. A stale enqueued id must not ride along.
