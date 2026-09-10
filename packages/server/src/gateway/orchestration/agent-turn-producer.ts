@@ -82,6 +82,10 @@ const logger = createLogger("agent-turn-producer");
  * use tools, so omitting it here left every official-OpenAI agent unable to
  * run at all.
  *
+ * `openai-codex-responses` (the ChatGPT subscription protocol) is fetch-native
+ * too, but only over SSE — the worker pins that transport because the guest
+ * has no WebSocket (`native-session.ts`).
+ *
  * Typed as the envelope's own `api` union so the set and the wire contract
  * cannot drift: adding an adapter here without widening the schema is a
  * compile error, not a run that fails validation on the worker.
@@ -91,6 +95,7 @@ const LANE_APIS = new Set<string>([
   "anthropic-messages",
   "openai-completions",
   "openai-responses",
+  "openai-codex-responses",
 ] satisfies LaneApi[]);
 
 const TURN_MESSAGE_CHARS = 32_000;

@@ -621,9 +621,10 @@ export class CoreServices {
 		);
 		logger.debug("Token refresh job constructed");
 
-		// Runtime modules with provider-specific credential injection (Anthropic
-		// headers, Codex account placeholders). OAuth *endpoints* still come from
-		// providers.json via the registry above.
+		// Runtime modules with provider-specific credential surfaces (Anthropic
+		// headers; the Codex wire protocol and model listing — ChatGPT's account
+		// binding is applied at egress by the secret proxy). OAuth *endpoints*
+		// still come from providers.json via the registry above.
 		this.oauthStateStore = createOAuthStateStore("claude");
 		const claudeOAuthModule = new ClaudeOAuthModule(
 			this.authProfilesManager,

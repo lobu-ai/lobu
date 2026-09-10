@@ -21,7 +21,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { SdkCompat } from "@lobu/core";
+import type { PiAiApi, SdkCompat } from "@lobu/core";
 import {
 	completeSimple,
 	type Context,
@@ -32,10 +32,7 @@ import {
 	isCapacityFailure,
 	quotaHidKeyedTier,
 } from "./live-failure.js";
-import {
-	type ProviderApi,
-	resolveProviderApi,
-} from "./provider-protocol.js";
+import { resolveProviderApi } from "./provider-protocol.js";
 
 const thisDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(thisDir, "../../../../..");
@@ -269,7 +266,7 @@ function toolContext(): Context {
 	};
 }
 
-function forceWeatherTool(api: ProviderApi, payload: unknown): unknown {
+function forceWeatherTool(api: PiAiApi, payload: unknown): unknown {
 	if (typeof payload !== "object" || payload === null) return payload;
 	const body = payload as Record<string, unknown>;
 	if (api === "anthropic-messages") {

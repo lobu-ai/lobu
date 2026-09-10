@@ -20,6 +20,7 @@ import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload,
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
+import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurn,
   cancelAgentTurn,
@@ -335,7 +336,7 @@ describe('agent turn producer', () => {
     }
   });
 
-  it('executes a compatible-provider tool round trip through worker HTTP and an isolate', async () => {
+  it.each(['compatible', 'codex'])('executes a %s tool round trip through worker HTTP and an isolate', async (protocol) => {
     const requests: Array<Record<string, any>> = [];
     const serverErrors: string[] = [];
     const server = createServer(async (req, res) => {
@@ -344,8 +345,32 @@ describe('agent turn producer', () => {
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         const path = new URL(req.url!, 'http://localhost').pathname;
-        if (path.startsWith('/lobu/api/proxy/compatible/')) {
+        if (path.startsWith('/lobu/api/proxy/compatible/') || path.startsWith('/lobu/api/proxy/openai-codex/')) {
           requests.push(body);
+          if (protocol === 'codex') {
+            expect(path.endsWith('/codex/responses')).toBe(true);
+            expect(verifyWorkerToken(req.headers.authorization!.slice(7)).agentId).toBe(AGENT_ID);
+            expect(req.headers['chatgpt-account-id']).toBe('lobu-proxy');
+            expect(body.store).toBe(false);
+            expect(body.model).toBe('gpt-5.6-luna');
+            const tool = requests.length === 1;
+            const item = tool
+              ? { type: 'function_call', id: 'fc_probe', call_id: 'call_probe', name: 'write', arguments: JSON.stringify({ file_path: 'probe.txt', content: 'codex verified' }), status: 'completed' }
+              : { type: 'message', id: 'msg_probe', role: 'assistant', content: [{ type: 'output_text', text: 'Codex verified.', annotations: [] }], status: 'completed' };
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            const send = (event: Record<string, unknown>) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+            send({ type: 'response.created', response: { id: 'resp_probe', status: 'in_progress' } });
+            send({ type: 'response.output_item.added', item: { ...item, arguments: '', content: [], status: 'in_progress' } });
+            if (tool) send({ type: 'response.function_call_arguments.delta', delta: item.arguments });
+            else {
+              send({ type: 'response.content_part.added', part: { type: 'output_text', text: '', annotations: [] } });
+              send({ type: 'response.output_text.delta', delta: 'Codex verified.' });
+            }
+            send({ type: 'response.output_item.done', item });
+            send({ type: 'response.completed', response: { id: 'resp_probe', status: 'completed', output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+            res.end();
+            return;
+          }
           // Gemini rejects even store:false. This stub enforces that wire
           // contract while the real producer, daemon and Pi guest execute.
           if (Object.hasOwn(body, 'store')) {
@@ -378,10 +403,10 @@ describe('agent turn producer', () => {
       const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       const org = await createTestOrganization();
       const message = messageFor(org.id);
-      message.agentOptions!.model = 'compatible/compatible-model';
+      message.agentOptions!.model = protocol === 'codex' ? 'chatgpt/gpt-5.6-luna' : 'compatible/compatible-model';
       await enqueueMessage(message, {
         agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`,
-        catalog: catalogFor(claudeModule({ providerId: 'compatible', sdkCompat: 'openai',
+        catalog: catalogFor(protocol === 'codex' ? new ChatGPTOAuthModule({} as never) : claudeModule({ providerId: 'compatible', sdkCompat: 'openai',
           getUpstreamConfig: () => ({ slug: 'compatible', upstreamBaseUrl: 'https://compatible.example.test/v1' }),
           getProxyBaseUrlMappings: () => ({ OPENAI_BASE_URL: `${origin}/lobu/api/proxy/compatible/a/turn-agent` }),
         })),
@@ -397,8 +422,12 @@ describe('agent turn producer', () => {
       expect(serverErrors).toEqual([]);
       expect(result.error).toBeUndefined();
       expect(requests).toHaveLength(2);
-      expect(requests.every((request) => !Object.hasOwn(request, 'store'))).toBe(true);
-      expect(requests[1].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true);
+      if (protocol === 'codex') {
+        expect(requests[1].input.some((item: { type: string }) => item.type === 'function_call_output')).toBe(true);
+      } else {
+        expect(requests.every((request) => !Object.hasOwn(request, 'store'))).toBe(true);
+        expect(requests[1].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true);
+      }
       expect((await runRow(Number(run.id))).status).toBe('completed');
     } finally {
       server.closeAllConnections();
@@ -2596,7 +2625,7 @@ describe('agent turn producer', () => {
     // package as completions, so it is isolate-compatible for the same
     // reason; the omission was the bug, not the promotion.
     const org = await createTestOrganization();
-    for (const sdkCompat of ['anthropic', 'openai', 'openai-responses'] as const) {
+    for (const sdkCompat of ['anthropic', 'openai', 'openai-responses', 'openai-codex'] as const) {
       expect(
         await enqueueMessage(messageFor(org.id), {
           agentSettings: settingsStore,
@@ -2606,7 +2635,7 @@ describe('agent turn producer', () => {
       ).toBeUndefined();
     }
     // One admitted run per protocol — none silently dropped.
-    expect(await agentTurnRuns()).toHaveLength(3);
+    expect(await agentTurnRuns()).toHaveLength(4);
   });
 
   it("delivers the named misconfiguration to the client, not a deadline timeout", async () => {

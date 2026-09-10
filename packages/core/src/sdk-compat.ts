@@ -28,12 +28,17 @@
  * OpenAI-compatible entries in `config/providers.json` work. Add a vendor
  * there, not here.
  */
-export type SdkCompat = "openai" | "openai-responses" | "anthropic";
+export type SdkCompat =
+  | "openai"
+  | "openai-responses"
+  | "openai-codex"
+  | "anthropic";
 
 /** pi-ai API adapter names, narrowed to the ones a turn can speak. */
 export type PiAiApi =
   | "openai-completions"
   | "openai-responses"
+  | "openai-codex-responses"
   | "anthropic-messages";
 
 export interface SdkCompatProtocol {
@@ -72,6 +77,11 @@ export const SDK_COMPAT_PROTOCOLS: Record<SdkCompat, SdkCompatProtocol> = {
     api: "openai-responses",
     registryAlias: "openai",
     label: "OpenAI Responses",
+  },
+  "openai-codex": {
+    api: "openai-codex-responses",
+    registryAlias: "openai-codex",
+    label: "OpenAI Codex Responses",
   },
   anthropic: {
     api: "anthropic-messages",

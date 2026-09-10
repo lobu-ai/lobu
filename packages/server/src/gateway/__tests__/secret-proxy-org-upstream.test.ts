@@ -43,6 +43,43 @@ describe("SecretProxy — org custom-upstream slug routing (URL invariant)", () 
     };
   });
 
+  test.each([true, false])("Codex account header comes only from the stored credential (identity=%s)", async (hasIdentity) => {
+    inferenceConfig = { custom: false };
+    const credential = `e30.${Buffer.from(JSON.stringify(hasIdentity
+      ? { "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" } }
+      : {})).toString("base64url")}.synthetic`;
+    const proxy = new SecretProxy({ defaultUpstreamUrl: "https://default.example.com" }, { get: async () => null });
+    proxy.registerUpstream({ slug: "openai-codex", upstreamBaseUrl: "https://chatgpt.com/backend-api" }, "chatgpt");
+    proxy.setAuthProfilesManager({
+      getBestProfile: async () => ({ credential, authType: "oauth" }),
+      ensureFreshCredential: async () => credential,
+    } as never);
+    proxy.setAgentOrgResolver(async () => "org-1");
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; headers: Headers }> = [];
+    globalThis.fetch = (async (url, init) => {
+      requests.push({ url: String(url), headers: new Headers(init?.headers) });
+      return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+    try {
+      const res = await proxy.getApp().request("/api/proxy/openai-codex/a/agent-1/codex/responses", {
+        method: "POST", headers: { authorization: "Bearer worker-token-test", "content-type": "application/json",
+          "ChatGPT-Account-Id": "attacker-account" }, body: JSON.stringify({ model: "gpt-5.6-luna", stream: true }),
+      });
+      expect(res.status).toBe(hasIdentity ? 200 : 401);
+      expect(requests).toHaveLength(hasIdentity ? 1 : 0);
+      if (!hasIdentity) {
+        // pi-ai reads `error.message`; a bare string reaches the user as JSON.
+        expect((await res.json()).error.message).toContain("account identity");
+      }
+      if (hasIdentity) {
+        expect(requests[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+        expect(requests[0]!.headers.get("authorization")).toBe(`Bearer ${credential}`);
+        expect(requests[0]!.headers.get("chatgpt-account-id")).toBe("synthetic-account");
+      }
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   test("registered org slug routes to the row base_url with the org key", async () => {
     const proxy = new SecretProxy(
       { defaultUpstreamUrl: "https://default.example.com" },

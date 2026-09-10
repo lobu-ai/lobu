@@ -4,8 +4,6 @@ import {
 	resolveSdkCompat,
 } from "@lobu/core";
 
-export type ProviderApi = PiAiApi | "openai-codex-responses";
-
 export interface ProtocolProviderEntry {
 	upstreamBaseUrl: string;
 	sdkCompat?: SdkCompat;
@@ -15,13 +13,12 @@ export interface ProtocolProviderEntry {
 export function resolveProviderApi(
 	id: string,
 	provider: ProtocolProviderEntry,
-): ProviderApi | null {
-	if (id === "chatgpt") return "openai-codex-responses";
+): PiAiApi | null {
 	if (id === "openai") return "openai-responses";
 	return resolveSdkCompat(provider.sdkCompat)?.api ?? null;
 }
 
-export function providerCompletionPath(api: ProviderApi): string {
+export function providerCompletionPath(api: PiAiApi): string {
 	switch (api) {
 		case "anthropic-messages":
 			return "/v1/messages";

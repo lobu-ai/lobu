@@ -69,8 +69,10 @@ export interface ProviderCatalogEntry {
   supportedAuthTypes: ProviderAuthType[];
   /**
    * Wire protocol the provider speaks. "openai" for the config-driven OpenAI-
-   * compatible providers; null when unknown/not-yet-routable (the OAuth
-   * providers — their real protocol is wired in a later phase).
+   * compatible providers; the subscription providers declare their own
+   * ("anthropic" for Claude, "openai-codex" for ChatGPT). null when the
+   * protocol is unknown. Speaking a routable protocol says nothing about how
+   * the provider authenticates — `supportedAuthTypes` is that answer.
    */
   sdkCompat: string | null;
   /** Upstream base URL pre-fill ("" when the module doesn't expose one). */
@@ -426,8 +428,8 @@ export class ProviderCatalogService {
       catalogByKind = new Map();
       for (const entry of buildProviderCatalog()) {
         // Only offer a fallback upstream for a kind an API key can actually
-        // reach. A kind with no usable `sdkCompat` (chatgpt) has a real
-        // `baseUrl` that answers to a signed-in session, not a Bearer key.
+        // reach. A subscription-only kind may speak a supported protocol but
+        // its upstream still requires a signed-in session, not an API key.
         // Carry the protocol either way — the synthesizer needs it — but never
         // the URL.
         const sdkCompat = isSdkCompat(entry.sdkCompat)
@@ -435,7 +437,7 @@ export class ProviderCatalogService {
           : undefined;
         catalogByKind.set(entry.slug, {
           sdkCompat,
-          baseUrl: sdkCompat ? entry.baseUrl || undefined : undefined,
+          baseUrl: sdkCompat && entry.supportedAuthTypes.includes("api-key") ? entry.baseUrl || undefined : undefined,
         });
       }
     }
