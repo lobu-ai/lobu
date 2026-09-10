@@ -5030,9 +5030,9 @@ export type ManageAutomationsData = {
         | "dontAsk"
         | "plan";
       /**
-       * Reasoning effort (claude only: --effort).
+       * Reasoning effort accepted by the selected CLI and model.
        */
-      effort?: "low" | "medium" | "high";
+      effort?: string;
       /**
        * How many extra times to re-dispatch a server-side Automation run that finished WITHOUT calling complete_window before failing it. 0 disables; omitted = global default.
        */
@@ -5605,6 +5605,38 @@ export type GetAutomationResponses = {
       } | null;
       device_worker_id?: string | null;
       agent_kind?: string | null;
+      execution_config?: {
+        /**
+         * Wall-clock cap in seconds for the device-worker CLI run (default 600).
+         */
+        timeout_seconds?: number;
+        /**
+         * Per-run dollar ceiling (claude only: --max-budget-usd). No-op on other CLIs.
+         */
+        max_budget_usd?: number;
+        /**
+         * Model override for this Automation. ONE field, two namespaces, resolved by where the Automation runs: a device-pinned Automation (device_worker_id set) passes this verbatim to the local CLI as --model, so it must name a provider that CLI has registered (e.g. 'opencode-go/deepseek-v4-flash'); a server-dispatched Automation resolves it against the org's model providers -- the built-in providers plus any you have registered under Providers (e.g. 'openai/gpt-4.1', 'deepseek/deepseek-v4-flash') -- or 'auto'. The two are NOT interchangeable — a CLI ref on the server lane fails at the provider, and a server ref on a device lane fails at the CLI.
+         */
+        model?: string;
+        /**
+         * Tool permission mode (claude only: --permission-mode).
+         */
+        permission_mode?:
+          | "acceptEdits"
+          | "auto"
+          | "bypassPermissions"
+          | "default"
+          | "dontAsk"
+          | "plan";
+        /**
+         * Reasoning effort accepted by the selected CLI and model.
+         */
+        effort?: string;
+        /**
+         * How many extra times to re-dispatch a server-side Automation run that finished WITHOUT calling complete_window before failing it. 0 disables; omitted = global default.
+         */
+        finalize_nudges?: number;
+      } | null;
       version: number;
       sources: Array<{
         name: string;

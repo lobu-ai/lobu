@@ -259,6 +259,59 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     await queue?.stop();
   });
 
+  test.each(["codex", null])("a device-pinned channel preserves its supported dispatch for CLI %p", async (agentKind) => {
+    const sql = getDb();
+    const owner = await createTestUser({});
+    await addUserToOrganization(owner.id, "org-slack-grid-e2e", "owner");
+    const [device] = await sql<{ id: string }[]>`
+      INSERT INTO device_workers (user_id, worker_id, platform, organization_id, agent_kinds, capabilities)
+      SELECT ${owner.id}, 'slack-device-test-worker', 'headless', organization_id,
+        '{codex}'::text[], '["automations.execute"]'::jsonb
+      FROM agents WHERE id = 'agent-slack-grid-e2e' AND organization_id = 'org-slack-grid-e2e'
+      RETURNING id
+    `;
+    if (!device) throw new Error("Device fixture missing");
+    await sql`
+      UPDATE automations
+      SET device_worker_id = ${device.id}, agent_kind = ${agentKind},
+        execution_config = '{"model":"test-local-model","effort":"medium","timeout_seconds":17,"max_budget_usd":0.5,"permission_mode":"plan"}'::jsonb
+      WHERE organization_id = 'org-slack-grid-e2e'
+        AND managed_agent_id = 'agent-slack-grid-e2e'
+    `;
+    const response = await chat.webhooks.slack(signedEventRequest(slackEvent({
+      eventId: "Ev_DEVICE_CHAT_TEST",
+      channel: CHANNEL_ID,
+      ts: "1787292000.101010",
+      text: `<@${BOT_USER_ID}> Run the disposable poll test`,
+      user: "U_BURAK",
+      eventType: "app_mention",
+    })));
+    expect(response.status).toBe(200);
+    if (agentKind === null) {
+      await waitFor(async () => {
+        const background = await sql`SELECT id FROM runs WHERE run_type = 'automation'`;
+        expect(background).toHaveLength(1);
+      });
+      const messages = await sql`SELECT id FROM runs WHERE queue_name = 'messages'`;
+      expect(messages).toHaveLength(0);
+      return;
+    }
+    await waitFor(async () => {
+      const rows = await sql`SELECT run_type, action_input FROM runs WHERE queue_name = 'messages'`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.run_type).toBe("chat_message");
+      expect(rows[0]?.action_input).toMatchObject({
+        agentId: "agent-slack-grid-e2e",
+        platform: "slack",
+        executionTarget: { kind: "device", deviceWorkerId: device.id, agentKind: "codex" },
+        agentOptions: { model: "test-local-model", deviceExecutionConfig: { model: "test-local-model", effort: "medium", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" } },
+        platformMetadata: { connectionId: RUNTIME_CONNECTION_ID, responseChannel: `slack:${CHANNEL_ID}` },
+      });
+    });
+    const background = await sql`SELECT id FROM runs WHERE run_type = 'automation'`;
+    expect(background).toHaveLength(0);
+  });
+
   test("first-contact message.im posts a setup notice without a DM Automation", async () => {
     const sql = getDb();
     const dmTs = "1787292001.000821";

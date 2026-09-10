@@ -66,9 +66,7 @@ export async function executeDeviceChatRun(
     const result = await runCli(
       spec,
       buildDeviceChatPrompt(payload),
-      // Chat turns carry no per-run CLI overrides: placement (device + agent
-      // kind) is the only thing the composer picks.
-      undefined,
+      payload.chat.execution_config,
       resolveDeviceAgentRunAccess(
         payload.context.agent_session,
         client.mcpWiring,

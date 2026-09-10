@@ -69,6 +69,8 @@ export interface AgentSpec {
   headlessArgs: string[];
   modelFlag: string | null;
   effortFlag: string | null;
+  /** Config override key when effort is passed as a TOML key/value argument. */
+  effortConfigKey?: string;
   permissionModeFlag: string | null;
   /** Per-run dollar ceiling (Claude Code only today). */
   budgetFlag: string | null;
@@ -156,7 +158,8 @@ export const DEVICE_AGENT_SPECS: readonly AgentSpec[] = [
       "sandbox_workspace_write.network_access=true",
     ],
     modelFlag: "-m",
-    effortFlag: null,
+    effortFlag: "-c",
+    effortConfigKey: "model_reasoning_effort",
     permissionModeFlag: null,
     budgetFlag: null,
     timeoutFlag: null,

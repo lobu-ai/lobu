@@ -65,6 +65,7 @@ async function enqueueDeviceChat(args: {
 	message: string;
 	deviceWorkerId: string;
 	agentKind: string;
+	omitLocalConfig?: boolean;
 }): Promise<number> {
 	const sql = getTestDb();
 	const [run] = await sql<{ id: number }>`
@@ -93,7 +94,7 @@ async function enqueueDeviceChat(args: {
 					organizationId: args.organizationId,
 					source: "direct-api",
 				},
-				agentOptions: {},
+				agentOptions: args.omitLocalConfig ? { model: "openai/test-cloud-default" } : { model: "openai/test-cloud-default", deviceExecutionConfig: { model: "test-local-model", effort: "xhigh", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan", finalize_nudges: 2 } },
 			})}
     )
     RETURNING id
@@ -223,6 +224,7 @@ describe("device chat execution lane", () => {
 		const payload = job.payload as {
 			chat: {
 				agent_kind: string;
+				execution_config: unknown;
 				message: string;
 				history: unknown[];
 				agent: { identity_md?: string };
@@ -234,6 +236,16 @@ describe("device chat execution lane", () => {
       message: "What is the latest on Atlas?",
       history: [{ role: "assistant", content: "Existing managed reply." }],
       agent: { identity_md: "A careful local agent" },
+		});
+		// Exact, not a partial match: the enqueued `deviceExecutionConfig` also
+		// carried the server-only `finalize_nudges`, and the point of the wire
+		// contract filter is that it never reaches the local CLI.
+		expect(payload.chat.execution_config).toEqual({
+			model: "test-local-model",
+			effort: "xhigh",
+			timeout_seconds: 17,
+			max_budget_usd: 0.5,
+			permission_mode: "plan",
 		});
 		expect(payload.context.agent_session.conversation_id).toBe(conversationId);
 		expect(
@@ -252,6 +264,7 @@ describe("device chat execution lane", () => {
 			userId,
 			conversationId,
 			messageId: "message-2",
+			omitLocalConfig: true,
 			message: "What did you just say?",
 			deviceWorkerId: selected.id,
 			agentKind: "pi",
@@ -331,6 +344,7 @@ describe("device chat execution lane", () => {
 
 		const secondJob = await poll(selected.token, "selected-device", ["pi"]);
 		expect(secondJob.run_id).toBe(secondRunId);
+		expect((secondJob.payload as { chat: unknown }).chat).not.toHaveProperty("execution_config");
     expect(
       (secondJob.payload as { chat: { history: unknown[] } }).chat.history,
     ).toEqual([

@@ -352,6 +352,13 @@ describe('buildArguments (ported AgentSpec table)', () => {
     expect(args).toContain('read,bash,edit,write');
   });
 
+  test('codex: forwards model and arbitrary effort as a config override', () => {
+    const args = buildArguments(codex, 'the prompt', { model: 'test-model', effort: 'xhigh' }, [], 600);
+    expect(args).toContain('test-model');
+    expect(args).toContain('model_reasoning_effort="xhigh"');
+    expect(args[args.indexOf('model_reasoning_effort="xhigh"') - 1]).toBe('-c');
+  });
+
   test('codex: positional after `exec` subcommand', () => {
     const args = buildArguments(codex, 'the prompt', undefined, [], 600);
     expect(args[0]).toBe('exec');

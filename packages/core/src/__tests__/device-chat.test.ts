@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Value } from "@sinclair/typebox/value";
+import { AutomationExecutionConfigSchema } from "../contracts/tools/manage-automations.js";
 import { buildDeviceChatPrompt } from "../contracts/worker/device-chat.js";
 import {
   DeviceChatPollPayloadSchema,
@@ -38,6 +39,21 @@ function payload(): DeviceChatPollPayload {
 }
 
 describe("device chat contract", () => {
+  test("Automation settings and device chat accept harness-defined effort strings", () => {
+    for (const effort of ["medium", "xhigh", "custom-provider-mode"]) {
+      const execution_config = { model: "test-model", effort };
+      const envelope = payload();
+      envelope.chat.execution_config = execution_config;
+      expect(
+        Value.Check(AutomationExecutionConfigSchema, execution_config)
+      ).toBe(true);
+      expect(Value.Check(DeviceChatPollPayloadSchema, envelope)).toBe(true);
+    }
+    expect(Value.Check(AutomationExecutionConfigSchema, { effort: 3 })).toBe(
+      false
+    );
+  });
+
   test("the strict poll payload accepts the bounded device envelope", () => {
     expect(Value.Check(DeviceChatPollPayloadSchema, payload())).toBe(true);
   });

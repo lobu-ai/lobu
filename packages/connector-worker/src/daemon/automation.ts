@@ -326,7 +326,12 @@ export function buildArguments(
       args.push(spec.permissionModeFlag, config.permission_mode);
     }
     if (config.effort && config.effort !== '' && spec.effortFlag) {
-      args.push(spec.effortFlag, config.effort);
+      args.push(
+        spec.effortFlag,
+        spec.effortConfigKey
+          ? `${spec.effortConfigKey}=${JSON.stringify(config.effort)}`
+          : config.effort,
+      );
     }
   }
   args.push(...spec.trailingArgs);

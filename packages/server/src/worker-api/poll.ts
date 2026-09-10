@@ -13,6 +13,8 @@ import {
 } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import {
+  AutomationExecutionConfigSchema,
+  DEVICE_CHAT_MAX_CONTEXT_LENGTH,
   PollRequestSchema,
   defaultBackendCapacity,
   type PollRequest,
@@ -1327,6 +1329,39 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       !Array.isArray(message.executionTarget)
         ? (message.executionTarget as Record<string, unknown>)
         : null;
+    const agentOptions =
+      message?.agentOptions &&
+      typeof message.agentOptions === 'object' &&
+      !Array.isArray(message.agentOptions)
+        ? (message.agentOptions as Record<string, unknown>)
+        : {};
+    const localOptions =
+      agentOptions.deviceExecutionConfig &&
+      typeof agentOptions.deviceExecutionConfig === 'object' &&
+      !Array.isArray(agentOptions.deviceExecutionConfig)
+        ? (agentOptions.deviceExecutionConfig as Record<string, unknown>)
+        : {};
+    const platformMetadata =
+      message?.platformMetadata &&
+      typeof message.platformMetadata === 'object' &&
+      !Array.isArray(message.platformMetadata)
+        ? (message.platformMetadata as Record<string, unknown>)
+        : undefined;
+    // The device wire contract IS the allowlist: `Value.Clean` drops every key
+    // the CLI envelope does not declare (the server-only `finalize_nudges`, a
+    // future server-side setting), so this cannot drift from the schema. A
+    // surviving key with the wrong type fails the check and the whole config is
+    // withheld rather than shipped malformed.
+    const candidateConfig = Value.Clean(
+      AutomationExecutionConfigSchema,
+      structuredClone(localOptions),
+    );
+    const executionConfig = Value.Check(
+      AutomationExecutionConfigSchema,
+      candidateConfig,
+    )
+      ? candidateConfig
+      : {};
     const agentKind =
       typeof target?.agentKind === 'string' ? target.agentKind.trim() : '';
     const conversationId =
@@ -1378,6 +1413,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         organizationId: row.organization_id,
         userId,
         channelId,
+        platform:
+          typeof message?.platform === 'string' ? message.platform : undefined,
+        teamId:
+          typeof message?.teamId === 'string' ? message.teamId : undefined,
+        platformMetadata,
       });
       agentSession = {
         conversation_id: access.conversationId,
@@ -1439,10 +1479,18 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       payload: {
         chat: {
           agent_kind: agentKind,
+          ...(Object.keys(executionConfig).length > 0
+            ? { execution_config: executionConfig }
+            : {}),
           message: messageText.slice(0, 32_000),
           ...(typeof message?.ephemeralContext === 'string' &&
           message.ephemeralContext.length > 0
-            ? { ephemeral_context: message.ephemeralContext.slice(0, 2_048) }
+            ? {
+                ephemeral_context: message.ephemeralContext.slice(
+                  0,
+                  DEVICE_CHAT_MAX_CONTEXT_LENGTH,
+                ),
+              }
             : {}),
           history,
           agent: {
