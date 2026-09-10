@@ -3,14 +3,20 @@
 import packageJson from '../package.json' with { type: 'json' };
 import type { AgentKind } from '@lobu/core/contracts/worker/device-automation';
 import {
+  configureCliSupervisorCommand,
+  runPackagedCliSupervisor,
+} from './daemon/automation-process.js';
+import {
   INTERNAL_ACP_ADAPTER_ARG,
   macDeviceDaemonMetadata,
+  packagedDaemonArgs,
   runMacDeviceDaemon,
   validateMacDeviceDaemonOptions,
 } from './daemon/mac-device-daemon.js';
 import { NATIVE_BRIDGE_PROTOCOL } from './daemon/native-bridge/protocol.js';
 
 const VERSION = packageJson.version;
+const INTERNAL_CLI_SUPERVISOR_ARG = '--internal-cli-supervisor';
 
 function printHelp(): void {
   process.stdout.write(`lobu-device-daemon ${VERSION}
@@ -151,6 +157,10 @@ async function main(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  if (process.argv[2] === INTERNAL_CLI_SUPERVISOR_ARG) {
+    runPackagedCliSupervisor(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === INTERNAL_ACP_ADAPTER_ARG) {
     // Dynamic on purpose, and not for bundle size — `bun build --compile` links
     // this module into the artifact either way. The adapter is a side-effectful
@@ -175,6 +185,7 @@ async function start(): Promise<void> {
     }
     throw new Error(`unknown internal ACP adapter '${agentKind ?? ''}'`);
   }
+  configureCliSupervisorCommand(process.execPath, packagedDaemonArgs(INTERNAL_CLI_SUPERVISOR_ARG));
   await main();
 }
 

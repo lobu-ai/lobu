@@ -19,13 +19,14 @@ const PROCESS_REAP_GRACE_MS = 5000;
  * descendants still receive the group signal, while the supervisor remains the
  * ownership anchor until the daemon releases or SIGKILLs it.
  *
- * POSIX caller contract: serialize and spawn this closure-free function with
- * `detached: true`, making the supervisor the session/process-group leader
- * whose pgid equals its pid. Its parent-loss path uses that invariant for safe
- * negative-pid group signals.
+ * POSIX caller contract: run this in a process of its own, spawned with
+ * `detached: true`, so the supervisor is the session/process-group leader whose
+ * pgid equals its pid. Its parent-loss path uses that invariant for safe
+ * negative-pid group signals. Keep the body closure-free: one launch mechanism
+ * serializes it through `toString()`.
  */
-function runCliSupervisor(spawnChild: typeof spawn, treeTermGraceMs: number): void {
-  const [binary, ...args] = process.argv.slice(1);
+function runCliSupervisor(spawnChild: typeof spawn, treeTermGraceMs: number, argv: string[]): void {
+  const [binary, ...args] = argv;
   let targetFinished = false;
   let parentLost = false;
   let target: ChildProcess | undefined;
@@ -145,7 +146,24 @@ function runCliSupervisor(spawnChild: typeof spawn, treeTermGraceMs: number): vo
   });
 }
 
-export const CLI_SUPERVISOR_SOURCE = `(${runCliSupervisor.toString()})(require('node:child_process').spawn, ${TREE_TERM_GRACE_MS});`;
+export const CLI_SUPERVISOR_SOURCE = `(${runCliSupervisor.toString()})(require('node:child_process').spawn, ${TREE_TERM_GRACE_MS}, process.argv.slice(1));`;
+
+// `-e CLI_SUPERVISOR_SOURCE` needs a runtime that evaluates source from the
+// command line, which every host running this package from source or a Node
+// bundle has. A `bun build --compile` artifact cannot re-enter itself that way,
+// so its entrypoint registers a self-exec command instead: the same supervisor,
+// reached through the executable's own internal argument. Set once at startup,
+// before any job is admitted, and process-local by construction.
+let supervisorCommand: { command: string; prefix: readonly string[] } | undefined;
+
+export function configureCliSupervisorCommand(command: string, prefix: readonly string[]): void {
+  supervisorCommand = { command, prefix: [...prefix] };
+}
+
+/** Entrypoint-side landing for the self-exec command above. */
+export function runPackagedCliSupervisor(argv: string[]): void {
+  runCliSupervisor(spawn, TREE_TERM_GRACE_MS, argv);
+}
 
 export type TargetExitStage =
   | 'target_exit'
@@ -367,8 +385,8 @@ export function spawnSupervisedCli(
   options: { stdin?: 'ignore' | 'pipe'; cwd?: string } = {}
 ): SupervisedCli {
   const supervisor = spawn(
-    process.execPath,
-    ['-e', CLI_SUPERVISOR_SOURCE, '--', binary, ...args],
+    supervisorCommand?.command ?? process.execPath,
+    [...(supervisorCommand?.prefix ?? ['-e', CLI_SUPERVISOR_SOURCE, '--']), binary, ...args],
     {
       detached: SUPPORTS_PROCESS_GROUPS,
       env,
