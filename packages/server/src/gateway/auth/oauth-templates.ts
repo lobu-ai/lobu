@@ -119,68 +119,43 @@ export function renderOAuthSuccessPage(
 
 export function renderOAuthErrorPage(
   error: string,
-  description?: string
+  description?: string,
+  options?: { title: string; actionUrl?: string; actionLabel?: string }
 ): string {
   const safeError = escapeHtml(error);
+  const safeTitle = escapeHtml(options?.title ?? "Authentication Failed");
   const safeDescription = escapeHtml(
     description || "An error occurred during authentication"
   );
+  const actionUrl = options?.actionUrl && isSafeHttpHref(options.actionUrl)
+    ? escapeHtml(options.actionUrl) : "";
+  const actionLabel = escapeHtml(options?.actionLabel ?? "Return to Lobu");
 
-  return `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Authentication Failed</title>
-        <style>
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-          }
-          .container {
-            background: white;
-            padding: 3rem;
-            border-radius: 12px;
-            text-align: center;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 400px;
-          }
-          .error-icon {
-            font-size: 4rem;
-            margin-bottom: 1rem;
-          }
-          h1 {
-            color: #2d3748;
-            margin: 0 0 1rem 0;
-          }
-          p {
-            color: #718096;
-            line-height: 1.6;
-          }
-          .error-code {
-            background: #f7fafc;
-            padding: 0.5rem;
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 0.875rem;
-            color: #e53e3e;
-            margin-top: 1rem;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="error-icon">❌</div>
-          <h1>Authentication Failed</h1>
-          <p>${safeDescription}</p>
-          <div class="error-code">${safeError}</div>
-          <p style="margin-top: 2rem;">Please close this window and try again.</p>
-        </div>
-      </body>
-    </html>
-  `;
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${safeTitle}</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0; padding: 24px; min-height: 100vh; box-sizing: border-box;
+        display: grid; place-items: center; background: #fafafa; color: #171717; }
+      main { width: 100%; max-width: 440px; }
+      h1 { font-size: 24px; font-weight: 600; }
+      p { line-height: 1.6; color: #525252; }
+      a { display: inline-block; margin: 12px 0; color: inherit;
+        padding: 10px 16px; border: 1px solid #d4d4d4; border-radius: 6px; }
+      details { margin-top: 24px; color: #737373; font-size: 13px; }
+      code { display: block; margin-top: 8px; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${safeTitle}</h1>
+      <p>${safeDescription}</p>
+      ${actionUrl ? `<a href="${actionUrl}">${actionLabel}</a>` : "<p>Return to Lobu to check the connection and start authorization again.</p>"}
+      <details><summary>Technical details</summary><code>${safeError}</code></details>
+    </main>
+  </body>
+</html>`;
 }

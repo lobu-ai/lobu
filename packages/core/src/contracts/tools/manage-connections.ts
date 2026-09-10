@@ -442,6 +442,50 @@ export const RollbackConnectorVersionAction = Type.Object({
   }),
 });
 
+/** Public setup choices; these are offers, never connected accounts or credentials. */
+export const ConnectionSetupOptionSchema = Type.Object(
+  {
+    kind: Type.Union([
+      Type.Literal("managed_oauth"),
+      Type.Literal("hosted_chat"),
+      Type.Literal("local"),
+    ]),
+    label: Type.String(),
+    description: Type.String(),
+    execution: Type.Union([Type.Literal("local"), Type.Literal("cloud")]),
+    url: Type.Optional(Type.String()),
+    managed_by_org: Type.Optional(Type.String()),
+    configured: Type.Boolean(),
+    instructions: Type.String(),
+  },
+  { additionalProperties: false }
+);
+export type ConnectionSetupOption = Static<typeof ConnectionSetupOptionSchema>;
+export const ConnectionSetupOptionsSchema = Type.Object(
+  {
+    action: Type.Literal("setup_options"),
+    connector_key: Type.String(),
+    cloud_status: Type.Union([
+      Type.Literal("available"),
+      Type.Literal("unavailable"),
+      Type.Literal("not_configured"),
+    ]),
+    options: Type.Array(ConnectionSetupOptionSchema, { maxItems: 100 }),
+  },
+  { additionalProperties: false }
+);
+export type ConnectionSetupOptions = Static<
+  typeof ConnectionSetupOptionsSchema
+>;
+export const SetupOptionsAction = Type.Object({
+  action: Type.Literal("setup_options"),
+  connector_key: Type.String({ minLength: 1, maxLength: 200 }),
+});
+export type ConnectionSetupOptionsInput = Omit<
+  Static<typeof SetupOptionsAction>,
+  "action"
+>;
+
 export const ConnectAction = Type.Object({
   action: Type.Literal("connect", {
     description:
@@ -613,6 +657,7 @@ const ConnectorGroupSchema = Type.Object({
 });
 
 export const ManageConnectionsResultSchema = Type.Union([
+  ConnectionSetupOptionsSchema,
   Type.Object({
     error: Type.String(),
     error_code: Type.Optional(Type.Literal("connector_setup_required")),
@@ -741,6 +786,7 @@ export const ManageConnectionsResultSchema = Type.Union([
   Type.Object({
     action: Type.Union([Type.Literal("connect"), Type.Literal("create")]),
     status: Type.Literal("setup_required"),
+    setup_options: Type.Optional(ConnectionSetupOptionsSchema),
     connector_key: Type.String(),
     setup_family: ConnectSetupFamily,
     next_action: ConnectSetupNextAction,
@@ -1002,6 +1048,7 @@ export type ConnectionsArgs =
   | Static<typeof ListAction>
   | Static<typeof GetAction>
   | Static<typeof CreateAction>
+  | Static<typeof SetupOptionsAction>
   | Static<typeof ConnectAction>
   | Static<typeof ConnectManagedAction>
   | Static<typeof UpdateAction>

@@ -30,6 +30,7 @@ import {
 	refreshOAuthToken,
 	writeContextCredential,
 } from "@lobu/core";
+import { safeParseUrl } from "../auth/base-url";
 import logger from "../utils/logger";
 
 /**
@@ -231,4 +232,24 @@ export async function resolveCloudCredential(
 	}
 
 	return null;
+}
+
+/** Discovery fetches this origin unauthenticated, so reject non-HTTP schemes and embedded userinfo. */
+function discoveryOrigin(value: string | null | undefined): string | null {
+	const url = safeParseUrl(value);
+	if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) return null;
+	return url.username || url.password ? null : url.origin;
+}
+
+/** Resolve discovery's cloud origin without reading or refreshing any credential. */
+export async function resolveCloudOrigin(): Promise<string | null> {
+	const envUrl = process.env.LOBU_CLOUD_URL?.trim();
+	if (envUrl) return discoveryOrigin(envUrl);
+	return discoveryOrigin(
+		resolveContextBaseUrl(
+			cloudContextName(undefined),
+			await loadContextConfig(),
+			!process.env.LOBU_CLOUD_CONTEXT?.trim(),
+		),
+	);
 }

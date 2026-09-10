@@ -337,6 +337,10 @@ export type SaveMemoryData = {
        */
       run_id: number;
     };
+    /**
+     * Target workspace for a bare OAuth call. Required when the connection has no workspace binding.
+     */
+    org_slug?: string;
   };
   path: {
     /**
@@ -474,7 +478,7 @@ export type SearchSdkResponse = SearchSdkResponses[keyof SearchSdkResponses];
 export type QuerySdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
      */
     script: string;
     /**
@@ -482,7 +486,7 @@ export type QuerySdkData = {
      */
     timeout_ms?: number;
     /**
-     * Human-friendly heading for this result (e.g. "Companies missing a domain"). The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
+     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
      */
     title?: string;
   };
@@ -573,7 +577,7 @@ export type QuerySdkResponses = {
       /**
        * Access tier required by the proposed SDK method.
        */
-      required_access: "read" | "write" | "external" | "admin";
+      required_access: "read" | "write" | "admin";
       /**
        * Dry-run validates arguments but does not execute live authorization or approval policy.
        */
@@ -716,7 +720,7 @@ export type QuerySqlResponse = QuerySqlResponses[keyof QuerySqlResponses];
 export type RunSdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
      */
     script: string;
     /**
@@ -724,7 +728,7 @@ export type RunSdkData = {
      */
     timeout_ms?: number;
     /**
-     * Human-friendly heading for this result (e.g. "Companies missing a domain"). The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
+     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
      */
     title?: string;
     /**
@@ -819,7 +823,7 @@ export type RunSdkResponses = {
       /**
        * Access tier required by the proposed SDK method.
        */
-      required_access: "read" | "write" | "external" | "admin";
+      required_access: "read" | "write" | "admin";
       /**
        * Dry-run validates arguments but does not execute live authorization or approval policy.
        */
@@ -2407,6 +2411,10 @@ export type ManageConnectionsData = {
         entity_ids?: Array<number>;
       }
     | {
+        action: "setup_options";
+        connector_key: string;
+      }
+    | {
         /**
          * Recommended way to add a connection: creates the connection + auth link in one call. Returns a connect_url for the user; poll `get` until status='active'.
          */
@@ -2777,6 +2785,21 @@ export type ManageConnectionsResponses = {
    */
   200:
     | {
+        action: "setup_options";
+        connector_key: string;
+        cloud_status: "available" | "unavailable" | "not_configured";
+        options: Array<{
+          kind: "managed_oauth" | "hosted_chat" | "local";
+          label: string;
+          description: string;
+          execution: "local" | "cloud";
+          url?: string;
+          managed_by_org?: string;
+          configured: boolean;
+          instructions: string;
+        }>;
+      }
+    | {
         error: string;
         error_code?: "connector_setup_required";
         connector_key?: string;
@@ -2925,6 +2948,21 @@ export type ManageConnectionsResponses = {
     | {
         action: "connect" | "create";
         status: "setup_required";
+        setup_options?: {
+          action: "setup_options";
+          connector_key: string;
+          cloud_status: "available" | "unavailable" | "not_configured";
+          options: Array<{
+            kind: "managed_oauth" | "hosted_chat" | "local";
+            label: string;
+            description: string;
+            execution: "local" | "cloud";
+            url?: string;
+            managed_by_org?: string;
+            configured: boolean;
+            instructions: string;
+          }>;
+        };
         connector_key: string;
         /**
          * Which connection setup family this continuation belongs to. Drives the completion check.

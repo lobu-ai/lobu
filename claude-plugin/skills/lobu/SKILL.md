@@ -28,3 +28,5 @@ When the right tool or SDK method is unclear:
 If Lobu authentication is required, let the host complete OAuth in the user's browser. Do not install the Lobu CLI just to use the hosted MCP server. The CLI is for connecting clients or developing and running Lobu projects locally.
 
 Local Automation delivery is a separate opt-in setup and is not enabled by installing Lobu here.
+
+Before requesting connector app credentials, discover `connections.setupOptions` with `search_sdk` and call it in the selected workspace. It returns verified managed OAuth, hosted cloud chat, and local setup choices. Follow the returned URL and instructions; an unavailable cloud lookup is not proof that no managed offer exists. On account-scoped MCP, select an authorized home workspace before calling `connections.connectManaged` against cloud; the provider org is its `managed_by_org` argument. Managed OAuth can support local execution. Hosted Slack chat targets a cloud agent and does not connect an independent embedded runtime.

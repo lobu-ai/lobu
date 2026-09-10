@@ -40,6 +40,7 @@ import {
 } from "./authz/write-action-manifest";
 import { globalCatalogRoutes, orgInstalledRoutes } from "./catalog/routes";
 import { connectionTokenRoutes } from "./connect/connection-token-route";
+import { setupRoutes } from "./connect/setup-routes";
 import { connectRoutes } from "./connect/routes";
 import {
 	restGetAuthProfileForRun,
@@ -636,6 +637,15 @@ app.route("/api", credentialRoutes);
 app.route("/", oauthRoutes);
 // Serve OAuth discovery relative to MCP path (Gemini CLI fetches /.well-known/* relative to transport URL)
 app.route("/mcp", oauthRoutes);
+
+/**
+ * Connection setup discovery + the managed-app browser handoff. Public
+ * metadata on GET; consent is an explicit same-origin POST with a session.
+ *
+ * MUST stay mounted BEFORE connectRoutes: `/connect/:token` there would
+ * otherwise swallow `/connect/managed` as a connect-link token.
+ */
+app.route("/", setupRoutes);
 
 /**
  * Connect Link routes (unauthenticated, token-gated)
