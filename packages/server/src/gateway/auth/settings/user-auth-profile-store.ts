@@ -29,6 +29,20 @@ export function isOrgBucketAgentId(agentId: string): boolean {
   return agentId.startsWith(ORG_BUCKET_AGENT_PREFIX);
 }
 
+/**
+ * Profile auth types that carry a refresh token we can rotate. "oauth" =
+ * Claude (authorization-code), "device-code" = ChatGPT/Codex; "api-key" is the
+ * only non-member. Lives here rather than beside the refresh job because both
+ * the job and `AuthProfilesManager`'s at-use-time lazy refresh gate on it — a
+ * second copy of these literals would break refresh for already-signed-in
+ * users ~1h later, invisibly. The refresh-eligibility regression test asserts
+ * both literals are still selected after the OAuth-flow consolidation.
+ */
+export const REFRESHABLE_AUTH_TYPES: ReadonlySet<string> = new Set([
+  "oauth",
+  "device-code",
+]);
+
 function buildSecretName(
   userId: string,
   agentId: string,

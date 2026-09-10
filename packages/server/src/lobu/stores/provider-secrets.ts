@@ -317,11 +317,10 @@ async function lockInferenceProviderDefaults(
  *     credentials live in per-user `auth_profiles` and are fetched by
  *     `getBestProfile(agentId, providerId, …, context)`; `oauth://` joins to no
  *     `agent_secrets` row, so `readOrgSharedProviderApiKey` returns null for
- *     them. A headless Automation run carries a synthetic user id with no
- *     profile, so inheriting an OAuth row as the ORG default hands every agent
- *     in the org a model it cannot authenticate — worse than having no default,
- *     because it fails at egress instead of falling back. (The gateway
- *     transport already refuses these; this keeps the run path honest too.)
+ *     them. Runs can resolve the requesting user's or agent owner's profile,
+ *     including that owner's org bucket, but agents owned by other members
+ *     need their own sign-in. An ORG default must be usable regardless of
+ *     which member owns an agent, so personal subscriptions remain ineligible.
  *
  * {@link setInferenceProviderDefault} rejects these for the SAME reason, so an
  * explicit choice cannot reach a state automatic promotion refuses to create.
@@ -814,7 +813,7 @@ function modelRefFromDefaultRow(row: OrgDefaultModelRow | null): string | null {
  * happen under the org lock:
  *   - no flagged default at all ⇒ promote the oldest runnable provider;
  *   - a flagged default that is NOT eligible — no `capabilities.text.model`,
- *     or an `oauth://` ref whose credential only one user can read ⇒ demote it,
+ *     or an `oauth://` ref backed by a personal subscription ⇒ demote it,
  *     then promote an eligible one. Leaving it would keep returning null while
  *     the UI showed a default, which is the confusing half of the bug. The
  *     OAuth case also repairs rows written before that rule existed.
@@ -865,11 +864,10 @@ export async function getOrgDefaultModel(
  *    report success for a selection that silently reverts on the very next
  *    read — the API must not claim to have stored something it will undo.
  *
- *  - an `oauth://` row. Its credential lives in ONE user's `auth_profiles` and
- *    is fetched with `getProviderProfiles(agentId, provider, context.userId)`,
- *    so no other member of the org — and no headless Automation run, which
- *    carries a synthetic user id — can read it. An ORG-WIDE default backed by
- *    one person's token hands everyone else a model they cannot authenticate.
+ *  - an `oauth://` row. Its credential belongs to a user. Inference can resolve
+ *    that user's profile directly or through an agent-owner fallback, but
+ *    agents owned by other members still need their own sign-in. An ORG-WIDE
+ *    default backed by one person's token cannot guarantee that coverage.
  *    Being a deliberate choice does not help: the chooser is not the only one
  *    who has to run on it. Same reason automatic promotion skips these (see
  *    {@link promoteOldestRunnableProvider}); the two paths must agree, or a

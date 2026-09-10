@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { ProviderConfigEntry, ProvidersConfigFile } from "@lobu/core";
-import { REFRESHABLE_AUTH_TYPES } from "../../../proxy/token-refresh-job.js";
+import { REFRESHABLE_AUTH_TYPES } from "../../settings/user-auth-profile-store.js";
 import { buildOAuthRefreshers } from "../client.js";
 import { grantStrategyFor } from "../grant-strategy.js";
 import {
