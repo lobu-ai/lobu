@@ -5,7 +5,8 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { publicSetupOptions } from '../../connect/setup-options';
+import { localSetupOption, publicSetupOptions } from '../../connect/setup-options';
+import { primeAppInstallationMethods, getPrimedBundledMethod } from '../../gateway/installation/app-install-credentials';
 import { setupRoutes } from '../../connect/setup-routes';
 import { createAuthProfile } from '../../utils/auth-profiles';
 import { initWorkspaceProvider } from '../../workspace';
@@ -132,6 +133,27 @@ describe('managed-auth onboarding', () => {
 
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it('offers a configured bundled app before the catalog connector is installed', async () => {
+    const org = await createTestOrganization({ slug: 'catalog-setup-test' });
+    await primeAppInstallationMethods([{ connectorKey: 'github' }]);
+    const method = getPrimedBundledMethod('github');
+    expect(method).toBeTruthy();
+    const keys = [method!.appIdKey!, method!.privateKeyKey!, method!.appSlugKey!];
+    const previous = keys.map(key => process.env[key]);
+    try {
+      for (const key of keys) process.env[key] = 'synthetic-app-value';
+      expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toMatchObject({
+        kind: 'local', configured: true, url: 'https://gateway.example/lobu/github/app/install',
+      });
+      delete process.env[keys[0]];
+      expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toMatchObject({ configured: false });
+      await createTestConnectorDefinition({ key: 'github', name: 'Org override', organization_id: org.id, auth_schema: { methods: [] } });
+      expect(await localSetupOption(org.id, 'github', 'https://gateway.example')).toBeNull();
+    } finally {
+      keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+    }
   });
 
   it('publishes only live public setup offers with no app secrets or private workspaces', async () => {

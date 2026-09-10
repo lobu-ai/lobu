@@ -83,12 +83,14 @@ export interface SetupOptionsDeps {
   localOption(organizationId: string, connectorKey: string, origin: string): Promise<ConnectionSetupOption | null>;
 }
 
-async function localSetupOption(organizationId: string, connectorKey: string, origin: string): Promise<ConnectionSetupOption | null> {
+export async function localSetupOption(organizationId: string, connectorKey: string, origin: string): Promise<ConnectionSetupOption | null> {
   const sql = getDb();
-  const rows = await sql`SELECT d.auth_schema, o.slug FROM connector_definitions d JOIN "organization" o ON o.id = d.organization_id WHERE d.organization_id = ${organizationId} AND d.key = ${connectorKey} AND d.status = 'active' LIMIT 1`;
+  const rows = await sql`SELECT d.key AS installed_key, d.auth_schema, o.slug FROM "organization" o LEFT JOIN connector_definitions d ON d.organization_id = o.id AND d.key = ${connectorKey} AND d.status = 'active' WHERE o.id = ${organizationId} LIMIT 1`;
   if (!rows[0]) return null;
   const schema = normalizeConnectorAuthSchema(rows[0].auth_schema);
-  const app = getAppInstallationAuthMethods(schema)[0];
+  // Catalog entries can start installation before an org definition exists.
+  // Reuse the boot-primed declaration; an installed org schema remains authoritative.
+  const app = rows[0].installed_key ? getAppInstallationAuthMethods(schema)[0] : getPrimedBundledMethod(connectorKey);
   const oauth = getOAuthAuthMethods(schema)[0];
   if (!app && !oauth) return null;
   const setupUrl = new URL(`/${encodeURIComponent(rows[0].slug)}/connectors/${encodeURIComponent(connectorKey)}`, origin);
