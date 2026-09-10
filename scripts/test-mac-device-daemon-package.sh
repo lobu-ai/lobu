@@ -40,6 +40,18 @@ VERSION_JSON="$(run_clean "$ROOT/scripts/verify-mac-device-daemon.sh" ./lobu-dev
 
 run_clean ./lobu-device-daemon --help | grep -q 'Usage:'
 
+# The compiled artifact must contain both adapters even without node_modules,
+# and must never fall back to an installed/bundled engine when no path is given.
+for agent in codex claude-code; do
+  if run_clean ./lobu-device-daemon --internal-acp-adapter "$agent" > /dev/null 2>"$WORK/missing-agent.err"; then
+    echo "error: $agent adapter accepted a missing external executable" >&2
+    exit 1
+  fi
+  grep -q 'must identify an installed' "$WORK/missing-agent.err"
+done
+run_clean env CODEX_PATH=/synthetic/codex ./lobu-device-daemon --internal-acp-adapter codex --version | grep -q '@agentclientprotocol/codex-acp'
+run_clean env CLAUDE_CODE_EXECUTABLE=/synthetic/claude ./lobu-device-daemon --internal-acp-adapter claude-code --version | grep -q '^[0-9]'
+
 if run_clean ./lobu-device-daemon >/dev/null 2>"$WORK/missing-config.err"; then
   echo "error: missing launch configuration unexpectedly succeeded" >&2
   exit 1

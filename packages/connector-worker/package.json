@@ -62,7 +62,7 @@
     "!**/*.map"
   ],
   "scripts": {
-    "build": "tsc && node dist/agent-turn/build-guest-bundle.js",
+    "build": "tsc && node dist/agent-turn/build-guest-bundle.js && node scripts/build-acp-adapters.mjs",
     "dev": "tsx watch --tsconfig tsconfig.json src/bin.ts",
     "start": "node dist/bin.js",
     "daemon": "tsx --tsconfig tsconfig.json src/bin.ts daemon",
@@ -72,8 +72,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.70.0",
-    "@agentclientprotocol/codex-acp": "1.6.2",
     "@agentclientprotocol/sdk": "1.4.0",
     "@lobu/connector-sdk": "workspace:*",
     "@lobu/core": "workspace:*",
@@ -91,6 +89,8 @@
     "undici": "7.29.0"
   },
   "devDependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.70.0",
+    "@agentclientprotocol/codex-acp": "1.6.2",
     "@lobu/plugin-api": "workspace:*",
     "@lobu/plugin-conversations": "workspace:*",
     "@lobu/plugin-host": "workspace:*",
