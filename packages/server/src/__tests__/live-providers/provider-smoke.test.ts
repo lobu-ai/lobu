@@ -9,9 +9,12 @@
  * worker turns are.
  *
  * REQUIRED_LIVE_PROVIDERS is a comma-separated readiness tier. Every listed
- * provider must have a dedicated credential, answer a text turn, and return a
- * forced tool call. Other configured credentials receive text coverage and a
- * best-effort tool probe without becoming release blockers.
+ * provider must have a dedicated credential and is asked for a text turn and
+ * forced tool call. A contract failure fails the tier. A failure the retries
+ * could not clear and `isCapacityFailure` reads as quota logs a CAPACITY-SKIP
+ * warning and leaves that turn unasserted; it fails the tier only when quota
+ * hid EVERY required provider. Other configured credentials receive text
+ * coverage and a best-effort tool probe without becoming release blockers.
  */
 
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -24,6 +27,11 @@ import {
 	type Context,
 	type Model,
 } from "@mariozechner/pi-ai";
+import {
+	completeWithLiveRetry,
+	isCapacityFailure,
+	quotaHidKeyedTier,
+} from "./live-failure.js";
 import {
 	type ProviderApi,
 	resolveProviderApi,
@@ -66,7 +74,19 @@ const FALLBACK_MODELS: Record<string, string> = {
 };
 
 const TIMEOUT_MS = 60_000;
-setDefaultTimeout(120_000);
+const LIVE_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 1_500;
+
+/**
+ * Cover every per-attempt timeout plus the complete linear backoff schedule
+ * (`backoffMs * 1 … backoffMs * (attempts - 1)`), then leave headroom for the
+ * SDK's own request setup. A file-level `setDefaultTimeout` overrides the CLI
+ * `--timeout` the Makefile target passes, so this is the timeout that applies.
+ */
+const RETRY_SCHEDULE_MS =
+	LIVE_ATTEMPTS * TIMEOUT_MS +
+	RETRY_BACKOFF_MS * (((LIVE_ATTEMPTS - 1) * LIVE_ATTEMPTS) / 2);
+setDefaultTimeout(RETRY_SCHEDULE_MS + 30_000);
 
 function firstEnv(names: string[]): string | undefined {
 	for (const name of names) {
@@ -267,6 +287,30 @@ function forceWeatherTool(api: ProviderApi, payload: unknown): unknown {
 	return { ...body, tool_choice: { type: "function", name: "get_weather" } };
 }
 
+const capacitySkippedRequired = new Set<string>();
+const contractReachedRequired = new Set<string>();
+
+async function completeWithRetry(
+	args: Parameters<typeof completeWithProductionAdapter>[0],
+) {
+	return completeWithLiveRetry(() => completeWithProductionAdapter(args), {
+		attempts: LIVE_ATTEMPTS,
+		backoffMs: RETRY_BACKOFF_MS,
+	});
+}
+
+function skipIfAtCapacity(id: string, errorMessage?: string): boolean {
+	if (!isCapacityFailure(errorMessage)) {
+		if (requiredIds.has(id)) contractReachedRequired.add(id);
+		return false;
+	}
+	if (requiredIds.has(id)) capacitySkippedRequired.add(id);
+	console.warn(
+		`[live-providers] ${id} CAPACITY-SKIP — provider quota/rate limit, contract not exercised: ${errorMessage}`,
+	);
+	return true;
+}
+
 async function completeWithProductionAdapter(args: {
 	id: string;
 	provider: ProviderEntry;
@@ -336,13 +380,14 @@ for (const { id, provider } of flattened) {
 
 		test("answers a streamed production-adapter turn", async () => {
 			expect(modelId, `${id} has no configured live model`).toBeDefined();
-			const response = await completeWithProductionAdapter({
+			const response = await completeWithRetry({
 				id,
 				provider,
 				credential: credential!,
 				modelId: modelId!,
 				context: textContext(),
 			});
+			if (skipIfAtCapacity(id, response.errorMessage)) return;
 			expect(
 				response.stopReason,
 				`${id} turn failed: ${response.errorMessage ?? "unknown provider error"}`,
@@ -357,7 +402,7 @@ for (const { id, provider } of flattened) {
 
 		test("returns a parsed streamed tool call", async () => {
 			expect(modelId, `${id} has no configured live model`).toBeDefined();
-			const response = await completeWithProductionAdapter({
+			const response = await completeWithRetry({
 				id,
 				provider,
 				credential: credential!,
@@ -365,6 +410,7 @@ for (const { id, provider } of flattened) {
 				context: toolContext(),
 				forceTool: required,
 			});
+			if (skipIfAtCapacity(id, response.errorMessage)) return;
 			const toolCall = response.content.find(
 				(block) => block.type === "toolCall",
 			);
@@ -385,3 +431,18 @@ for (const { id, provider } of flattened) {
 		});
 	});
 }
+
+/** Fail if quota prevented every required provider from completing any turn. */
+describe("keyed tier coverage", () => {
+	const anyRequiredExercisable = activeIds.some((id) => requiredIds.has(id));
+
+	test.skipIf(!anyRequiredExercisable)(
+		"at least one required provider reached its contract assertions",
+		() => {
+			expect(
+				quotaHidKeyedTier(capacitySkippedRequired, contractReachedRequired),
+				`every required provider was capacity-skipped (${[...capacitySkippedRequired].join(", ")}) — the keyed tier proved nothing this run`,
+			).toBe(false);
+		},
+	);
+});
