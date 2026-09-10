@@ -35,9 +35,12 @@ jobs:
   live-providers:
     runs-on: ubuntu-24.04
     # Every keyed turn now retries up to 3 times behind a 60s per-attempt
-    # timeout, so one hung provider can burn ~3min per turn instead of ~1min.
-    # A job-timeout kill reports nothing at all, which is worse than a red turn.
-    timeout-minutes: 30
+    # timeout, so its own test ceiling is ~3.6min instead of ~1min. The suite
+    # is serial, so the pathological run is (keyed providers x 2 turns x
+    # 3.6min) plus the keyless tier — already past 25min at the handful of
+    # provider credentials configured here. A job-timeout kill reports nothing
+    # at all, which is worse than a red turn, so keep headroom above that.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:

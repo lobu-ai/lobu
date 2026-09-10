@@ -34,6 +34,9 @@ describe("isCapacityFailure", () => {
 				"429 Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-07-10 04:32:47",
 			],
 			["429 quoted inside a log line", "x chat returned 429: slow down"],
+			["429 after a failure prefix", "openrouter request failed: 429"],
+			["429 in a status-code line", "provider error, status code: 429"],
+			["429 named as an HTTP status", "upstream responded HTTP 429"],
 			[
 				"SDK 429 without quota prose",
 				'429 {"error":{"message":"Too many concurrent requests"}}',
@@ -61,8 +64,11 @@ describe("isCapacityFailure", () => {
 				"OpenAI exhausted credits",
 				"You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.",
 			],
-			// The two underscored codes `classifyErrorMessage` does not reach, so
-			// `UNDERSCORED_QUOTA_CODES` cannot be dropped without a red test.
+			// The three shapes `classifyErrorMessage` (packages/core) leaves
+			// UNCLASSIFIED: its balance alternatives want "insufficient quota" with
+			// a space rather than the underscored code and cover no "requires more
+			// credits" wording, and `rate[-\s]?limit` never spans `rate_limit_error`.
+			// So `QUOTA_SIGNALS` cannot be dropped without a red test.
 			[
 				"OpenRouter insufficient reservation budget",
 				"402 This request requires more credits, or fewer max_tokens. You requested up to 1024 tokens, but can only afford 824.",
@@ -86,6 +92,7 @@ describe("isCapacityFailure", () => {
 			["400 invalid request", '400 {"error":{"code":"invalid_request_error"}}'],
 			["401 bad credential", "401 Incorrect API key provided: sk-not-a***robe"],
 			["500 upstream error", "500 internal server error"],
+			["invalid batch size", "400 unsupported parameter: too many requests in batch"],
 			["unparseable provider error", "unknown provider error"],
 		];
 		for (const [label, message] of breaks) {
