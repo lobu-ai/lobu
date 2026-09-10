@@ -38,6 +38,9 @@ const config: KnipConfig = {
         // Build step run from the package `build` script after tsc; it writes
         // the prebuilt guest bundle the published package ships.
         "src/agent-turn/build-guest-bundle.ts",
+        // Build step run from the package `build` script after tsc; it bundles
+        // the ACP adapters the published package ships without their engines.
+        "scripts/build-acp-adapters.mjs",
         "src/**/*.test.ts",
       ],
       ignoreDependencies: [

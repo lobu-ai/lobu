@@ -160,12 +160,17 @@ async function start(): Promise<void> {
     // exists solely to be that server, may evaluate it.
     const agentKind = process.argv[3];
     if (agentKind === 'codex') {
-      // @ts-expect-error codex-acp is an executable-only package with no declarations.
-      await import('@agentclientprotocol/codex-acp');
+      if (!process.env.CODEX_PATH) {
+        throw new Error('CODEX_PATH must identify an installed Codex executable');
+      }
+      await import('./daemon/acp-adapters/codex.js');
       return;
     }
     if (agentKind === 'claude-code') {
-      await import('@agentclientprotocol/claude-agent-acp/dist/index.js');
+      if (!process.env.CLAUDE_CODE_EXECUTABLE) {
+        throw new Error('CLAUDE_CODE_EXECUTABLE must identify an installed Claude executable');
+      }
+      await import('./daemon/acp-adapters/claude.js');
       return;
     }
     throw new Error(`unknown internal ACP adapter '${agentKind ?? ''}'`);

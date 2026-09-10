@@ -17,6 +17,7 @@ import { activatePageRun } from "../../worker-api/page-activation";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	createTestConnectorDefinition,
+	createTestEvent,
 	createTestOrganization,
 	createTestUser,
 } from "../setup/test-fixtures";
@@ -673,6 +674,11 @@ describe("page-activated operation runs", () => {
 		// An older undismissed draft that predates 55 newer notifications: the
 		// recent-window slice would drop it, but the "stays until Done" contract
 		// must keep it in the lens regardless.
+		//
+		// Only while it is still openable. A draft with no linked run resolves
+		// `expired` — it can never be activated — and pinning THAT past the
+		// window permanently spent one of the caller's `limit` slots on a dead
+		// card. Both are seeded here so the two states cannot drift apart again.
 		await createNotificationForUsers([seeded.user.id], {
 			organizationId: seeded.org.id,
 			type: "agent_message",
@@ -680,9 +686,28 @@ describe("page-activated operation runs", () => {
 			body: "Draft: Hello",
 			resourceUrl: `/${seeded.org.slug}/memory?content_ids=1`,
 			browserUrl: "https://x.com/ada/status/123",
+			browserRunId: seeded.run.id,
 		});
 		const [draft] = await sql<{ id: number }>`
 			SELECT id FROM events ORDER BY id ASC LIMIT 1
+		`;
+		await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id,
+			type: "agent_message",
+			title: "Draft ready for Grace on X",
+			body: "Draft: Hi",
+			resourceUrl: `/${seeded.org.slug}/memory?content_ids=2`,
+			browserUrl: "https://x.com/grace/status/456",
+		});
+		const [deadDraft] = await sql<{ id: number }>`
+			SELECT id FROM events ORDER BY id DESC LIMIT 1
+		`;
+		// Read, so the ONLY thing that could still pin it is its handoff state.
+		// Left unread it would qualify as an ordinary unread card and the
+		// expired/ready distinction under test would never be exercised.
+		await sql`
+			UPDATE notification_targets SET read_at = now()
+			WHERE user_id = ${seeded.user.id} AND event_id = ${deadDraft.id}
 		`;
 		for (let i = 0; i < 55; i++) {
 			await createNotificationForUsers([seeded.user.id], {
@@ -693,11 +718,11 @@ describe("page-activated operation runs", () => {
 				resourceUrl: `/${seeded.org.slug}/memory?content_ids=99`,
 			});
 		}
-		// Backdate the draft below the recent window (newest 50), still undismissed.
+		// Backdate both drafts below the recent window (newest 50), still undismissed.
 		await sql`
 			UPDATE events
 			SET created_at = created_at - interval '7 days'
-			WHERE id = ${draft.id}
+			WHERE id IN (${draft.id}, ${deadDraft.id})
 		`;
 		const activity = await listOrgActivity({
 			organizationId: seeded.org.id,
@@ -711,6 +736,14 @@ describe("page-activated operation runs", () => {
 				(item) => item.browser_url === "https://x.com/ada/status/123",
 			),
 		).toBe(true);
+		// The unlinkable draft resolves `expired`, so — already read — it falls
+		// out of the window like any other settled card instead of holding a
+		// slot forever.
+		expect(
+			activity.items.some(
+				(item) => item.browser_url === "https://x.com/grace/status/456",
+			),
+		).toBe(false);
 		// Respects the declared limit even when the undismissed draft is pinned.
 		expect(activity.items.length).toBeLessThanOrEqual(50);
 		// Items stay in chronological order (oldest first).
@@ -722,6 +755,243 @@ describe("page-activated operation runs", () => {
 			expect(item).not.toHaveProperty("collapseKey");
 			expect(item).not.toHaveProperty("itemsCollected");
 		}
+	});
+
+	it("keeps an unread notification beyond the recent-window cap", async () => {
+		const seeded = await seed();
+		// The general contract the draft pin is one case of: anything that still
+		// needs the reader stays reachable no matter how much newer activity
+		// arrived. Before this, "Needs attention" was a filter over the newest N
+		// activity cards, so an unread notification older than the window
+		// vanished from the lens while the unread badge kept counting it.
+		await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id,
+			type: "action_approval_needed",
+			title: "Action \"manage_entity_schema\" needs approval",
+			body: "Still undecided",
+			resourceUrl: `/${seeded.org.slug}/memory?content_ids=1`,
+		});
+		const [unreadOld] = await sql<{ id: number }>`
+			SELECT id FROM events ORDER BY id DESC LIMIT 1
+		`;
+		for (let i = 0; i < 55; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Newer notification ${i}`,
+				body: "noise",
+				resourceUrl: `/${seeded.org.slug}/memory?content_ids=99`,
+			});
+		}
+		// Read every newer card, and backdate the unread one below the window.
+		await sql`
+			UPDATE notification_targets SET read_at = now()
+			WHERE user_id = ${seeded.user.id} AND event_id <> ${unreadOld.id}
+		`;
+		await sql`
+			UPDATE events SET created_at = created_at - interval '18 days'
+			WHERE id = ${unreadOld.id}
+		`;
+		const activity = await listOrgActivity({
+			organizationId: seeded.org.id,
+			userId: seeded.user.id,
+			ownerSlug: seeded.org.slug,
+			includeRuns: false,
+			limit: 10,
+		});
+		expect(activity.items.length).toBeLessThanOrEqual(10);
+		expect(
+			activity.items.some(
+				(item) => item.notification_id === unreadOld.id && item.unread,
+			),
+		).toBe(true);
+	});
+
+	it("does not pin a settled notification past the window", async () => {
+		const seeded = await seed();
+		// The other half: a read notification with no undecided interaction is
+		// history. Pinning it would spend one of the caller's `limit` slots
+		// forever, which is what dead drafts used to do.
+		await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id,
+			type: "agent_message",
+			title: "Old settled message",
+			body: "nothing to do",
+			resourceUrl: `/${seeded.org.slug}/memory?content_ids=1`,
+		});
+		const [settledOld] = await sql<{ id: number }>`
+			SELECT id FROM events ORDER BY id DESC LIMIT 1
+		`;
+		for (let i = 0; i < 55; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Newer notification ${i}`,
+				body: "noise",
+				resourceUrl: `/${seeded.org.slug}/memory?content_ids=99`,
+			});
+		}
+		await sql`
+			UPDATE notification_targets SET read_at = now()
+			WHERE user_id = ${seeded.user.id}
+		`;
+		await sql`
+			UPDATE events SET created_at = created_at - interval '18 days'
+			WHERE id = ${settledOld.id}
+		`;
+		const activity = await listOrgActivity({
+			organizationId: seeded.org.id,
+			userId: seeded.user.id,
+			ownerSlug: seeded.org.slug,
+			includeRuns: false,
+			limit: 10,
+		});
+		expect(
+			activity.items.some((item) => item.notification_id === settledOld.id),
+		).toBe(false);
+	});
+
+	it.each(["draft", "approval"] as const)(
+		"keeps a pending %s ahead of newer unread cards at a smaller response limit",
+		async (kind) => {
+			const seeded = await seed();
+			let proposalId: number | undefined;
+			if (kind === "approval") {
+				await sql`UPDATE runs SET approval_status = 'pending' WHERE id = ${seeded.run.id}`;
+				const proposal = await createTestEvent({
+					organization_id: seeded.org.id,
+					title: "Review proposal",
+					content: "Synthetic proposal",
+					semantic_type: "operation",
+				});
+				proposalId = proposal.id;
+				await sql`
+					UPDATE events SET run_id = ${seeded.run.id}, interaction_type = 'approval'
+					WHERE id = ${proposalId}
+				`;
+			}
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: kind === "draft" ? "agent_message" : "action_approval_needed",
+				title: "Pending decision",
+				body: "Review this decision",
+				browserUrl: kind === "draft" ? "https://x.com/ada/status/123" : undefined,
+				browserRunId: kind === "draft" ? seeded.run.id : undefined,
+				resourceType: kind === "approval" ? "event" : undefined,
+				resourceId: proposalId == null ? undefined : String(proposalId),
+			});
+			await sql`
+				UPDATE notification_targets SET read_at = now() WHERE user_id = ${seeded.user.id}
+			`;
+			for (let i = 0; i < 15; i++) {
+				await createNotificationForUsers([seeded.user.id], {
+					organizationId: seeded.org.id,
+					type: "agent_message",
+					title: `Unread notice ${i}`,
+					body: "Unread history",
+				});
+			}
+			const activity = await listOrgActivity({
+				organizationId: seeded.org.id,
+				userId: seeded.user.id,
+				ownerSlug: seeded.org.slug,
+				includeRuns: false,
+				limit: 10,
+			});
+			expect(activity.items).toHaveLength(10);
+			const decision = activity.items.find((item) => item.title === "Pending decision");
+			expect(decision).toBeDefined();
+			if (kind === "draft") expect(decision?.browser_handoff?.state).toBe("ready");
+			else expect(decision?.interaction_status).toBe("pending");
+		},
+	);
+
+	it.each(["missing run", "lost page identity"] as const)(
+		"does not let drafts with %s exhaust the attention query budget",
+		async (reason) => {
+			const seeded = await seed();
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: "Old unread notice",
+				body: "Still unread",
+			});
+			// Two ways a draft becomes unopenable, and both must be filtered in
+			// SQL: no linked run at all, and a linked run whose exact page target
+			// was never recorded (so page activation would reject it).
+			const lostIdentity = reason === "lost page identity";
+			if (lostIdentity) {
+				await sql`UPDATE runs SET run_metadata = '{}'::jsonb WHERE id = ${seeded.run.id}`;
+			}
+			for (let i = 0; i < 55; i++) {
+				await createNotificationForUsers([seeded.user.id], {
+					organizationId: seeded.org.id,
+					type: "agent_message",
+					title: `Settled draft ${i}`,
+					body: "Unavailable draft",
+					browserRunId: lostIdentity ? seeded.run.id : undefined,
+					browserUrl: `https://example.test/draft/${i}`,
+				});
+			}
+			await sql`
+				UPDATE notification_targets SET read_at = now()
+				WHERE user_id = ${seeded.user.id} AND browser_url IS NOT NULL
+			`;
+			const activity = await listOrgActivity({
+				organizationId: seeded.org.id,
+				userId: seeded.user.id,
+				ownerSlug: seeded.org.slug,
+				includeRuns: false,
+				limit: 10,
+			});
+			expect(activity.items.length).toBeLessThanOrEqual(10);
+			expect(
+				activity.items.some(
+					(item) => item.title === "Old unread notice" && item.unread,
+				),
+			).toBe(true);
+		},
+	);
+
+	it("holds the declared limit when the attention set alone fills it", async () => {
+		const seeded = await seed();
+		// The pinned cards can exhaust the budget on their own, and the filler
+		// slice has to notice: `slice(-0)` is `slice(0)` — the WHOLE array — so a
+		// spent budget used to append every settled card on top of the cap.
+		for (let i = 0; i < 12; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Unread ${i}`,
+				body: "needs you",
+				resourceUrl: `/${seeded.org.slug}/memory?content_ids=1`,
+			});
+		}
+		for (let i = 0; i < 8; i++) {
+			await createNotificationForUsers([seeded.user.id], {
+				organizationId: seeded.org.id,
+				type: "agent_message",
+				title: `Settled ${i}`,
+				body: "history",
+				resourceUrl: `/${seeded.org.slug}/memory?content_ids=99`,
+			});
+		}
+		// Read only the second batch, leaving 12 pinned unread cards against a
+		// limit of 10 and 8 settled cards competing for a budget of zero.
+		await sql`
+			UPDATE notification_targets SET read_at = now()
+			WHERE user_id = ${seeded.user.id}
+			  AND event_id IN (SELECT id FROM events ORDER BY id DESC LIMIT 8)
+		`;
+		const activity = await listOrgActivity({
+			organizationId: seeded.org.id,
+			userId: seeded.user.id,
+			ownerSlug: seeded.org.slug,
+			includeRuns: false,
+			limit: 10,
+		});
+		expect(activity.items.length).toBe(10);
+		expect(activity.items.every((item) => item.unread)).toBe(true);
 	});
 
 	it("excludes browser-handoff drafts when the kind filter omits notifications", async () => {
