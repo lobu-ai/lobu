@@ -57,7 +57,12 @@ export const intervals = {
    *  120s leaves room for the 30s worker heartbeat to miss ~3 ticks before
    *  the reaper writes the row off — a real worker stutter (GC pause, network
    *  blip) gets a grace window, but a crashed worker frees the feed within
-   *  a couple of minutes instead of five. */
+   *  a couple of minutes instead of five.
+   *
+   *  Doubles as the `agent_turn` CLAIM horizon (`sweepStaleAgentTurnRuns`): a
+   *  claim-eligible turn still pending this long never started, so lowering
+   *  this also shortens the pre-admission window `armTurnTimeout` grants a
+   *  queued turn. */
   get runsReaperStaleAfterSeconds(): number {
     return parseEnvInt('RUNS_REAPER_STALE_AFTER_SECONDS', 120);
   },
@@ -100,11 +105,13 @@ export const intervals = {
     return parseEnvInt('WORKER_KILL_TIMEOUT_MS', 5_000);
   },
 
-  /** Default turn-liveness deadline. Comfortably exceeds the worker's 20s
-   *  status_update interval so a live worker (which extends the deadline on
-   *  every status_update — plus on the 30s SSE-ping ACK and delivery receipts)
-   *  is never falsely failed; a silent/dead worker lapses within this window of
-   *  its last worker-driven signal. */
+  /** Turn-liveness deadline while the turn EXECUTES. Comfortably exceeds the
+   *  worker's 20s status_update interval so a live worker (which extends the
+   *  deadline on every status_update — plus on the 30s SSE-ping ACK and
+   *  delivery receipts) is never falsely failed; a silent/dead worker lapses
+   *  within this window of its last worker-driven signal. `armTurnTimeout`
+   *  adds `runsReaperStaleAfterSeconds` on top, because a turn still waiting
+   *  for a worker slot has nothing that could signal liveness yet. */
   get turnDefaultDeadlineMs(): number {
     return parseEnvInt('TURN_DEFAULT_DEADLINE_MS', 60_000);
   },

@@ -4,7 +4,7 @@ import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
 import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
-import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow } from '../gateway/orchestration/turn-liveness';
+import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow, resetTurnAdmissionDeadline } from '../gateway/orchestration/turn-liveness';
 import { generateDeploymentName } from '../gateway/orchestration/deployment-identity';
 
 export interface NativeTurnRun {
@@ -69,13 +69,20 @@ export function agentTurnClaimEligible(sql: DbClient) {
 
 /** Called only under the conversation lock, after the owning terminal transition. */
 export async function releaseNextAgentTurn(sql: DbClient, run: NativeTurnRun) {
-  await sql`UPDATE runs SET run_at = now() WHERE id = (
+  const [next] = await sql<NativeTurnRun>`UPDATE runs SET run_at = now() WHERE id = (
     SELECT id FROM runs WHERE run_type = 'agent_turn' AND status = 'pending'
       AND organization_id = ${run.organization_id}
       AND action_input->'turn'->>'agent_id' = ${run.action_input?.turn?.agent_id ?? null}
       AND action_input->'turn'->>'conversation_id' = ${run.action_input?.turn?.conversation_id ?? null}
     ORDER BY id LIMIT 1
-  )`;
+  ) RETURNING id, organization_id, action_input`;
+  // The follower becomes claimable from now, so its liveness marker — which the
+  // owner's heartbeats collapsed to the execution deadline — needs its
+  // admission window back, in this transaction.
+  const deployment = next && turnMarkerDeployment(next);
+  if (deployment && next.action_input?.turn?.message_id) {
+    await resetTurnAdmissionDeadline(sql, deployment, next.action_input.turn.message_id);
+  }
 }
 
 export function nativeSessionBase(snapshot: string): NativeTurnRun['run_metadata'] {
@@ -159,9 +166,10 @@ export async function pendingAgentTurnInputs(sql: DbClient, owner: NativeTurnRun
 
 /**
  * Derive the turn-liveness marker's deployment name from a native turn's
- * envelope. Single source for the two sites that need it — the terminal
- * discharge and the heartbeat extension — so neither can drift from the
- * arming site in `MessageConsumer`.
+ * envelope. Single source for the sites that need it — the terminal discharge,
+ * the heartbeat extension, and the queue handoff that re-arms the next turn's
+ * admission window — so none can drift from the arming site in
+ * `MessageConsumer`.
  */
 function turnMarkerDeployment(run: NativeTurnRun): string | null {
   const envelope = run.action_input;
@@ -182,7 +190,7 @@ function turnMarkerDeployment(run: NativeTurnRun): string | null {
  *
  * The isolate lane's heartbeat refreshes `runs.last_heartbeat_at`, which the
  * run reaper reads — but the marker carries its OWN `run_at`, and without this
- * a turn running longer than `TURN_DEFAULT_DEADLINE_MS` collects a spurious
+ * a turn running longer than that marker's deadline collects a spurious
  * terminal error while it is still working. Never throws: a heartbeat ACK must
  * not fail on a liveness bookkeeping error.
  */
