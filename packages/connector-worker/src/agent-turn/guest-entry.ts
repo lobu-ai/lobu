@@ -246,8 +246,7 @@ function messageText(message: unknown): string | undefined {
  * not cosmetic: the heartbeat route drops a body that fails the schema, taking
  * the turn's text delta with it, and the completion route answers 400 — which
  * the arm reports as a FAILED turn, discarding an answer the model already
- * produced. A turn whose last tool call returns a long result hits that path
- * every time.
+ * produced if the oversized trace rides its completion.
  */
 function clip(text: string): string {
   return text.length > TOOL_EVENT_OUTPUT_CHARS ? `${text.slice(0, TOOL_EVENT_OUTPUT_CHARS - 1)}…` : text;
