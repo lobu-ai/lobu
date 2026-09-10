@@ -46,6 +46,7 @@ import {
   notifyThreadResponse,
 } from '../gateway/orchestration/turn-liveness';
 import type { Env } from '../index';
+import { supportsExactPageActivation } from '../runs/page-activation';
 import { claimPendingAutomationRun } from '../runs/queue-service';
 import { parseAutomationSkillSnapshots } from '../automations/skill-snapshots';
 import {
@@ -700,7 +701,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   }
 
   const pageActivations =
-    isUserScopedWorker && effectivePlatform === 'chrome-extension'
+    isUserScopedWorker && effectivePlatform === 'chrome-extension' && supportsExactPageActivation(app_version)
       ? (
           await sql<{ run_id: number; urls: string | string[] }>`
           SELECT id AS run_id, activation_target_urls AS urls
@@ -711,6 +712,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             AND status = 'pending'
             AND approval_status = 'auto'
             AND activation_kind = 'page_visit'
+            AND run_metadata->>'page_activation_identity' = 'exact'
             AND activated_at IS NULL
             AND expires_at > current_timestamp
           ORDER BY expires_at, id
@@ -720,7 +722,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           run_id: Number(row.run_id),
           urls: parsePgTextArray(row.urls),
         }))
-      : undefined;
+      : // An extension that cannot verify the exact target itself gets an
+        // empty list rather than no field: that is what makes it drop the
+        // hints it already cached from a lossily-normalized target.
+        effectivePlatform === 'chrome-extension'
+        ? []
+        : undefined;
   const pollMetadata =
     pageActivations === undefined ? {} : { page_activations: pageActivations };
 
@@ -765,7 +772,23 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           })}
         ) run_cv ON true
         WHERE r.status = 'pending'
-          AND (r.activation_kind IS NULL OR r.activated_at IS NOT NULL)
+          AND (r.activation_kind IS NULL OR (
+            r.activated_at IS NOT NULL AND r.run_metadata->>'page_activation_identity' = 'exact'
+          ))
+          -- A child of a page-activated parent runs on the tab the human opened,
+          -- so it is claimable only while that exact-identity parent is running,
+          -- and never by an extension too old to verify the target URL itself.
+          AND NOT EXISTS (
+            SELECT 1 FROM runs activation_parent
+            WHERE activation_parent.id = r.parent_run_id
+              AND activation_parent.organization_id = r.organization_id
+              AND activation_parent.activation_kind = 'page_visit'
+              AND (
+                activation_parent.run_metadata->>'page_activation_identity' IS DISTINCT FROM 'exact'
+                OR activation_parent.status <> 'running'
+                OR ${effectivePlatform === 'chrome-extension' && !supportsExactPageActivation(app_version)}
+              )
+          )
           AND (
             r.run_type <> 'action'
             OR r.expires_at IS NULL
@@ -1031,7 +1054,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         chat_agent.identity_md AS chat_agent_identity_md,
         chat_agent.soul_md AS chat_agent_soul_md,
         chat_agent.user_md AS chat_agent_user_md,
-        parent.activation_tab_id AS parent_activation_tab_id
+        parent.activation_tab_id AS parent_activation_tab_id,
+        parent.run_metadata->>'page_activation_url' AS parent_activation_url
       FROM runs r
       LEFT JOIN organization org ON org.id = r.organization_id
       LEFT JOIN feeds f ON f.id = r.feed_id
@@ -1206,6 +1230,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     connection_config: Record<string, unknown> | null;
     connection_device_worker_id: string | null;
     parent_activation_tab_id: number | string | null;
+    parent_activation_url: string | null;
     connector_version_row_id: number | null;
     artifact_organization_id: string | null;
     artifact_row_count: number;
@@ -1853,11 +1878,15 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                 row.run_id
               ) ?? runScopedBrowserActionContext(row.run_id))),
         // The extension's ownership guard has no way to know the human opened
-        // this exact tab, so the server hands down the tab it already resolved
-        // for the page-activated parent. Set here, never from action_input.
+        // this exact tab, nor which pages it was opened for, so the server
+        // hands down the tab and the exact URL that won activation. The
+        // original list can allow several pages; that is not permission to
+        // follow a later navigation to another one. The extension re-checks the
+        // live URL against them. Set here, never from action_input.
         row.parent_activation_tab_id == null
           ? null
-          : Number(row.parent_activation_tab_id)
+          : Number(row.parent_activation_tab_id),
+        row.parent_activation_url ? [row.parent_activation_url] : []
       )
     : selectedActionInput;
 

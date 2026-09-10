@@ -1379,6 +1379,17 @@ export async function listNotifications(opts: {
             'expires_at', browser_run.expires_at,
             'error_message', NULL
           )
+        -- A target stored without exact query/fragment identity can never be
+        -- activated again (worker-api/page-activation.ts rejects it), so the
+        -- card must explain the lost target instead of promising a page visit.
+        WHEN browser_run.activation_kind = 'page_visit'
+          AND browser_run.run_metadata->>'page_activation_identity' IS DISTINCT FROM 'exact' THEN
+          jsonb_build_object(
+            'run_id', browser_run.id,
+            'state', 'expired',
+            'expires_at', browser_run.expires_at,
+            'error_message', 'The original page target was lost. Create a new draft with its full URL.'
+          )
         WHEN browser_run.status = 'pending'
           AND browser_run.approval_status = 'auto'
           AND browser_run.activation_kind = 'page_visit'
