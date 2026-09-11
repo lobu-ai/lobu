@@ -5055,6 +5055,16 @@ export type ManageAutomationsData = {
     model_config?: unknown;
     execution_config?: null | {
       /**
+       * Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.
+       */
+      executor?: {
+        kind: "script";
+        source: string;
+        params?: {
+          [key: string]: unknown;
+        };
+      };
+      /**
        * Wall-clock cap in seconds for the device-worker CLI run (default 600).
        */
       timeout_seconds?: number;
@@ -5656,6 +5666,16 @@ export type GetAutomationResponses = {
       device_worker_id?: string | null;
       agent_kind?: string | null;
       execution_config?: {
+        /**
+         * Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.
+         */
+        executor?: {
+          kind: "script";
+          source: string;
+          params?: {
+            [key: string]: unknown;
+          };
+        };
         /**
          * Wall-clock cap in seconds for the device-worker CLI run (default 600).
          */
