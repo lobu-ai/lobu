@@ -518,18 +518,24 @@ export async function resolveOAuthProfileApp(params: {
   }
   let app = boundId ? await getAuthProfileById(ctx.organizationId, boundId) : selected;
   if (!app && !boundId) {
-    const apps = await sql`
-      SELECT id, connector_key, is_default_for_connector FROM auth_profiles
+    const apps = await sql<AuthProfileRow>`
+      SELECT * FROM auth_profiles
       WHERE organization_id = ${ctx.organizationId}
         AND profile_kind = 'oauth_app' AND status = 'active' AND LOWER(provider) = ${method.provider.toLowerCase()}
     `;
-    const primary = apps.find(row => row.is_default_for_connector && row.connector_key === connectorKey)
-      ?? (apps.length === 1 ? apps[0] : undefined)
-      ?? (params.allowManagedApp ? await getPrimaryAuthProfileForKind({ organizationId: ctx.organizationId, connectorKey, profileKind: 'oauth_app', provider: method.provider }) : undefined);
-    if (!primary && apps.length > 1) {
+    const workspaceDefault = apps.find(row => row.is_default_for_connector && row.connector_key === connectorKey);
+    app = workspaceDefault ?? (apps.length === 1 ? apps[0]! : null);
+    if (!app && params.allowManagedApp) {
+      app = await getPrimaryAuthProfileForKind({
+        organizationId: ctx.organizationId,
+        connectorKey,
+        profileKind: 'oauth_app',
+        provider: method.provider,
+      });
+    }
+    if (!app && apps.length > 1) {
       return { error: 'Multiple OAuth apps are available. Choose app_auth_profile_slug explicitly or ask an administrator to set the workspace default.' };
     }
-    if (primary) app = await getAuthProfileById(ctx.organizationId, Number(primary.id));
   }
   if (boundId || app) {
     if (!app || app.profile_kind !== 'oauth_app' || app.status !== 'active' ||

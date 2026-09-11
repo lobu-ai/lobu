@@ -1178,10 +1178,10 @@ async function fetchAppAuthProfileId(
 }
 
 /**
- * Resolve OAuth client ID/secret from, in order:
- * 1. Selected OAuth app auth profile
- * 2. Primary org-level OAuth app auth profile for the connector/provider
- * 3. Deployment env vars (`${PROVIDER}_CLIENT_ID/_SECRET`) — the SAME fallback
+ * A selected OAuth app must still be available; never substitute another app
+ * for the app that issued a grant. With no selected app, resolve from:
+ * 1. Primary org-level OAuth app auth profile for the connector/provider
+ * 2. Deployment env vars (`${PROVIDER}_CLIENT_ID/_SECRET`) — the SAME fallback
  *    global login uses (`auth/config.ts resolveLoginProviderCredentials`), so an
  *    org can connect a connector whose app creds are env-configured with no
  *    hand-created `oauth_app` profile. APP-level only; the per-user account
@@ -1198,11 +1198,11 @@ async function resolveOAuthClientCredentials(
   const appProfile = appAuthProfileId
     ? await getAuthProfileById(organizationId, appAuthProfileId)
     : await getPrimaryAuthProfileForKind({
-      organizationId,
-      connectorKey,
-      profileKind: 'oauth_app',
-      provider,
-    });
+        organizationId,
+        connectorKey,
+        profileKind: 'oauth_app',
+        provider,
+      });
   if (appAuthProfileId && (!appProfile || appProfile.profile_kind !== 'oauth_app' ||
       appProfile.status !== 'active' ||
       appProfile.provider?.toLowerCase() !== provider.toLowerCase())) {

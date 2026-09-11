@@ -2440,6 +2440,10 @@ export type ManageConnectionsData = {
          */
         app_auth_profile_slug?: string;
         /**
+         * Optional OAuth scopes to request when authorizing the account, in addition to required scopes.
+         */
+        requested_scopes?: Array<string>;
+        /**
          * Connection config
          */
         config?: {
@@ -2566,6 +2570,10 @@ export type ManageConnectionsData = {
          * Connection ID whose OAuth-account or interactive auth profile should be reauthenticated.
          */
         connection_id: number;
+        /**
+         * Additional OAuth permissions to request. Existing grants remain usable until consent succeeds.
+         */
+        requested_scopes?: Array<string>;
       }
     | {
         /**
@@ -3900,6 +3908,10 @@ export type ManageAuthProfilesData = {
           [key: string]: unknown;
         };
         /**
+         * OAuth app for account authorization. Members use the workspace default. Existing account grants cannot switch apps.
+         */
+        app_auth_profile_slug?: string;
+        /**
          * Optional OAuth scopes selected in addition to the connector required scopes.
          */
         requested_scopes?: Array<string>;
@@ -3924,6 +3936,10 @@ export type ManageAuthProfilesData = {
         auth_data?: {
           [key: string]: unknown;
         };
+        /**
+         * OAuth app for account authorization. Members use the workspace default. Existing account grants cannot switch apps.
+         */
+        app_auth_profile_slug?: string;
         /**
          * Optional OAuth scopes selected in addition to the connector required scopes.
          */

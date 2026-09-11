@@ -379,7 +379,9 @@ async function handleConnectImpl(
       return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
     }
     const app = authSelection.appAuthProfile;
-    if (!app || app.status !== 'active' || (!authSelection.authProfile && !acceptsManagedApp && (!app.is_default_for_connector || app.connector_key !== args.connector_key))) {
+    const appIsWorkspaceDefault = app?.is_default_for_connector && app.connector_key === args.connector_key;
+    const needsWorkspaceDefault = !authSelection.authProfile && !acceptsManagedApp;
+    if (!app || app.status !== 'active' || (needsWorkspaceDefault && !appIsWorkspaceDefault)) {
       const setup = buildOAuthAppProfileSetupError({ connectorKey: args.connector_key, method: authSelection.oauthMethod!, setupUrl });
       return oauthAppSetupContinuation({ action: 'connect', connectorKey: args.connector_key,
         setup: { ...setup, error: 'Ask an administrator to configure and set the workspace-default OAuth app at setup_url. Then resume this call to authorize your own account.' }, resumeCall });

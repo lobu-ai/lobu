@@ -806,7 +806,7 @@ export default async (_ctx, client) => {
 			"Recover an existing connection using its bound OAuth app. Pass requested_scopes for additional permissions; existing grants remain usable until successful consent. Return the exact connect_url to the user with the requested permissions, then refresh operations.listAvailable. Interactive pairing returns auth_run_id.",
 		access: "write",
 		signature:
-			"connections.reauthenticate(connection_id: number, options?: { requested_scopes?: string[] }): Promise<unknown>",
+			"connections.reauthenticate(connection_id: number, options?: { requested_scopes?: string[] }): Promise<unknown> // or connections.reauthenticate({ connection_id }, options)",
 		example: "await client.connections.reauthenticate(42);",
 	},
 	"connections.test": {
