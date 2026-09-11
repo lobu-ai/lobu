@@ -273,19 +273,29 @@ async function handleConnectImpl(
       return { error: 'A pending account connection uses a different OAuth app. Finish or cancel that setup before choosing another app.', setup_url: setupUrl };
     }
     if (args.requested_scopes) {
-      const pendingProvider = String(pending.auth_config.provider ?? '').toLowerCase();
-      const method = getOAuthMethods(connector.auth_schema).find(
-        method => method.provider.toLowerCase() === pendingProvider
-      );
-      if (method) {
+      const requestedScopes = args.requested_scopes;
+      await sql.begin(async (tx) => {
+        // Serialize scope retries against OAuth initialization and other retries.
+        // The discovery snapshot may predate the saved PKCE verifier or scopes.
+        const [current] = await tx`SELECT auth_config FROM connect_tokens
+          WHERE token = ${pending.token} AND organization_id = ${organizationId}
+          FOR UPDATE`;
+        if (!current) return;
+        const authConfig = current.auth_config as Record<string, unknown>;
+        const pendingProvider = String(authConfig.provider ?? '').toLowerCase();
+        const method = getOAuthMethods(connector.auth_schema).find(
+          method => method.provider.toLowerCase() === pendingProvider
+        );
+        if (!method) return;
         const scopes = resolveRequestedOAuthScopes(method, [
-          ...(Array.isArray(pending.auth_config.requestedScopes) ? pending.auth_config.requestedScopes : []),
-          ...args.requested_scopes,
+          ...(Array.isArray(authConfig.requestedScopes) ? authConfig.requestedScopes : []),
+          ...requestedScopes,
         ]);
-        pending.auth_config = { ...pending.auth_config, scopes, requestedScopes: scopes };
-        await sql`UPDATE connect_tokens SET auth_config = ${sql.json(pending.auth_config)}
+        pending.auth_config = { ...authConfig, scopes, requestedScopes: scopes };
+        await tx`UPDATE connect_tokens
+          SET auth_config = COALESCE(auth_config, '{}'::jsonb) || ${tx.json({ scopes, requestedScopes: scopes })}::jsonb
           WHERE token = ${pending.token} AND status = 'pending'`;
-      }
+      });
     }
     if (pending.token_status !== 'pending' || new Date(pending.expires_at).getTime() <= Date.now()) {
       const { pkceCodeVerifier: _verifier, redirectUri: _redirect, ...authConfig } = pending.auth_config;

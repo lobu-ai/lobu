@@ -7,6 +7,7 @@ import { manageConnections } from '../../../tools/admin/manage_connections';
 import { createAuthProfile, updateAuthProfile } from '../../../utils/auth-profiles';
 import { expireStaleConnectTokens } from '../../../utils/connect-tokens';
 import { syncOAuthConnectionsForAuthProfile } from '../../../utils/oauth-connection-state';
+import { generateCodeChallenge } from '../../../utils/pkce';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { addUserToOrganization, createTestConnection, createTestConnectorDefinition, createTestUser, seedOwnerContext } from '../../setup/test-fixtures';
@@ -93,6 +94,92 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
       expect(response.status).toBe(302);
       expect(new URL(response.headers.get('location')!).searchParams.get('code_challenge')).toBe(challenge);
     }
+  });
+
+  it('preserves an open PKCE flow and cumulative scopes when pending setup is retried concurrently', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE connector_definitions SET auth_schema = jsonb_set(auth_schema, '{methods,0,usePkce}', 'true') WHERE organization_id = ${s.org.id} AND key = ${KEY}`;
+    const user = await createTestUser({ name: 'Synthetic concurrent consent owner' });
+    await addUserToOrganization(user.id, s.org.id, 'owner');
+    const client = buildConnectionsNamespace({ ...s.ctx, userId: user.id }, {} as Env);
+    const args = { connector_key: KEY, app_auth_profile_slug: s.app.slug };
+    const initial = await client.connect(args) as { connection_id: number; connect_url: string };
+    const path = new URL(initial.connect_url).pathname.replace('/lobu/connect', '');
+    const token = path.split('/')[1];
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => { ready = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const holder = sql.begin(async (tx: typeof sql) => {
+      await tx`SELECT token FROM connect_tokens WHERE token = ${token} FOR UPDATE`;
+      ready();
+      await gate;
+    });
+    const waitForBlocked = async (count: number) => {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const rows = await sql`SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'
+            AND query ILIKE '%connect_tokens%'`;
+        if (rows.length >= count) return;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      throw new Error(`Expected ${count} blocked connect-token queries`);
+    };
+    await held;
+    const opening = connectRoutes.request(path, {}, {} as Env);
+    const retries: Array<Promise<unknown>> = [];
+    try {
+      // Queue /oauth/start first. The retries read the pre-initialization
+      // snapshot before start saves its verifier on the held token row.
+      await waitForBlocked(1);
+      retries.push(client.connect({ ...args, requested_scopes: [OLD] }));
+      await waitForBlocked(2);
+      retries.push(client.connect({ ...args, requested_scopes: [EXTRA] }));
+      await waitForBlocked(3);
+    } finally {
+      release();
+      await Promise.allSettled([holder, opening, ...retries]);
+    }
+    const response = await opening;
+    expect(response.status).toBe(302);
+    for (const retry of retries) expect(await retry).toMatchObject({ connection_id: initial.connection_id });
+    const [saved] = await sql`SELECT auth_config FROM connect_tokens WHERE token = ${token}`;
+    expect(saved.auth_config.pkceCodeVerifier).toEqual(expect.any(String));
+    expect(saved.auth_config.redirectUri).toBeTruthy();
+    expect(saved.auth_config.appAuthProfileId).toBe(s.app.id);
+    expect(saved.auth_config.requestedScopes).toEqual(expect.arrayContaining([BASE, OLD, EXTRA]));
+    expect(saved.auth_config.scopes).toEqual(saved.auth_config.requestedScopes);
+    const authorization = new URL(response.headers.get('location')!);
+    const authorizedScopes = authorization.searchParams.get('scope')!.split(' ');
+    expect(authorizedScopes).toEqual([BASE]);
+    const challenge = authorization.searchParams.get('code_challenge');
+    expect(generateCodeChallenge(saved.auth_config.pkceCodeVerifier)).toBe(challenge);
+    const reopened = await connectRoutes.request(path, {}, {} as Env);
+    expect(reopened.status).toBe(302);
+    const nextAuthorization = new URL(reopened.headers.get('location')!);
+    expect(nextAuthorization.searchParams.get('scope')?.split(' ').sort()).toEqual([BASE, OLD, EXTRA].sort());
+    expect(nextAuthorization.searchParams.get('code_challenge')).toBe(challenge);
+    let exchanged = false;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') {
+        exchanged = true;
+        const verifier = new URLSearchParams(String(init?.body)).get('code_verifier');
+        if (!verifier || generateCodeChallenge(verifier) !== challenge) return Response.json({ error: 'invalid_grant' }, { status: 400 });
+        return Response.json({ access_token: 'synthetic-concurrent-token', scope: authorizedScopes.join(' ') });
+      }
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-concurrent-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const callback = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-concurrent-code`, {}, {} as Env);
+    expect(exchanged).toBe(true);
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get('location')).not.toContain('auth_result=failed');
+    const connected = await state(initial.connection_id);
+    expect(connected.connection.status).toBe('active');
+    expect(connected.connection.auth_data.granted_scopes).toEqual(authorizedScopes);
+    expect(connected.connection.auth_data.requested_scopes).toEqual(saved.auth_config.requestedScopes);
   });
 
   it('does not rebind a legacy grant through connection update', async () => {
