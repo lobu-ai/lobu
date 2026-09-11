@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build the version-pinned auth helper embedded in Owletto.app.
+# Build the version-pinned auth helper embedded in Lobu.app.
 #
 # Usage:
-#   scripts/build-mac-auth-cli.sh /path/to/Owletto.app/Contents/Resources/lobu-cli/bin/lobu
+#   scripts/build-mac-auth-cli.sh /path/to/Lobu.app/Contents/Resources/lobu-cli/bin/lobu
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

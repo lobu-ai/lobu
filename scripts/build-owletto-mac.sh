@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build Owletto.app with the same Developer ID identity as mac-release CI.
+# Build Lobu.app with the same Developer ID identity as mac-release CI.
 # TCC grants (Screen Recording, Accessibility, etc.) then match the notarized
 # release — unlike a default Xcode Debug build (Apple Development cert).
 #
 # Usage:
-#   make owletto-mac                  # build → /tmp/owletto-build/.../Owletto.app
-#   make owletto-mac INSTALL=1        # also replace /Applications/Owletto.app
+#   make owletto-mac                  # build → /tmp/owletto-build/.../Lobu.app
+#   make owletto-mac INSTALL=1        # also replace /Applications/Lobu.app
 #   make owletto-mac INSTALL=1 OPEN=1 # install and launch
 #   VERSION=14.8.1-dev make owletto-mac   # stamp a specific version
 set -euo pipefail
@@ -42,12 +42,12 @@ No Developer ID Application cert in your login keychain.
   • Keychain Access → import the Developer ID .p12 (same cert as CI), or
   • Download it from developer.apple.com (team $TEAM_ID), or
   • For prod E2E only: install the release DMG instead of building locally
-    https://github.com/lobu-ai/lobu/releases/latest/download/Owletto.dmg
+    https://github.com/lobu-ai/lobu/releases/latest/download/Lobu.dmg
 EOF
 )"
 fi
 
-echo ">> Building Owletto (Release, $SIGN_ID, version $VERSION)..."
+echo ">> Building Lobu (Release, $SIGN_ID, version $VERSION)..."
 (
   cd "$MAC"
   "$ROOT/scripts/with-owletto-mac-daemon.sh" \
@@ -62,7 +62,7 @@ echo ">> Building Owletto (Release, $SIGN_ID, version $VERSION)..."
     build
 )
 
-APP="$DERIVED/Build/Products/Release/Owletto.app"
+APP="$DERIVED/Build/Products/Release/Lobu.app"
 [ -d "$APP" ] || die "build succeeded but $APP is missing"
 AUTH_CLI="$APP/Contents/Resources/lobu-cli/bin/lobu"
 "$ROOT/scripts/build-mac-auth-cli.sh" "$AUTH_CLI"
@@ -105,17 +105,17 @@ codesign --verify --deep --strict "$APP"
 echo ">> Built: $APP"
 
 if [ "${INSTALL:-}" = "1" ]; then
-  echo ">> Installing to /Applications/Owletto.app (quit Owletto first if it's running)"
-  osascript -e 'tell application "Owletto" to quit' 2>/dev/null || true
+  echo ">> Installing to /Applications/Lobu.app (quit Lobu first if it's running)"
+  osascript -e 'tell application "Lobu" to quit' 2>/dev/null || true
   sleep 1
-  rm -rf /Applications/Owletto.app
-  cp -R "$APP" /Applications/Owletto.app
-  echo ">> Installed: /Applications/Owletto.app"
+  rm -rf /Applications/Lobu.app
+  cp -R "$APP" /Applications/Lobu.app
+  echo ">> Installed: /Applications/Lobu.app"
 fi
 
 if [ "${OPEN:-}" = "1" ]; then
   if [ "${INSTALL:-}" = "1" ]; then
-    open /Applications/Owletto.app
+    open /Applications/Lobu.app
   else
     open "$APP"
   fi
