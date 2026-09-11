@@ -9,6 +9,7 @@
 import { randomBytes } from 'node:crypto';
 import { getDb, pgTextArray } from '../db/client';
 import logger from './logger';
+import { lockOAuthAppBinding } from './oauth-connection-state';
 
 /**
  * Stamped on a connection whose connect token lapsed unused. `connections.connect`
@@ -63,19 +64,28 @@ export async function createConnectToken(
   const ttlSeconds = params.ttlSeconds ?? 3600; // 1 hour default
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
 
-  const rows = await sql`
+  const rows = await sql.begin(async (tx) => {
+    if (params.authType === 'oauth' && params.authProfileId) {
+      const selectedAppId = params.authConfig?.appAuthProfileId;
+      if (!(await lockOAuthAppBinding(tx, params.organizationId, params.authProfileId,
+        typeof selectedAppId === 'number' ? selectedAppId : null, true))) {
+        throw new Error('This account is already bound to a different OAuth app. Use a separate account profile for another app.');
+      }
+    }
+    return tx`
     INSERT INTO connect_tokens (
       token, connection_id, auth_profile_id, organization_id, connector_key,
       auth_type, auth_config, created_by, expires_at
     ) VALUES (
       ${token}, ${params.connectionId ?? null}, ${params.authProfileId ?? null},
       ${params.organizationId}, ${params.connectorKey},
-      ${params.authType}, ${params.authConfig ? sql.json(params.authConfig) : null},
+      ${params.authType}, ${params.authConfig ? tx.json(params.authConfig) : null},
       ${params.createdBy ?? null},
       ${expiresAt}
     )
     RETURNING *
-  `;
+    `;
+  });
 
   logger.info(
     {

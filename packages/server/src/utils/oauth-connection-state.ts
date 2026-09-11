@@ -1,4 +1,4 @@
-import { getDb } from '../db/client';
+import { getDb, type DbClient } from '../db/client';
 import { getAuthProfileById, updateAuthProfile } from './auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from './connector-auth';
 import {
@@ -13,6 +13,43 @@ import {
 
 export const OAUTH_SCOPE_PAUSE_LAST_ERROR =
   'Required OAuth scopes are missing; reconnect the connection to grant access.';
+
+/** Serialize consent against the account's existing app binding, before writing credentials. */
+export async function lockOAuthAppBinding(
+  tx: DbClient,
+  organizationId: string,
+  authProfileId: number,
+  appAuthProfileId: number | null,
+  reservePending = false,
+): Promise<boolean> {
+  const [profile] = await tx`
+    SELECT auth_data, account_id FROM auth_profiles
+    WHERE organization_id = ${organizationId} AND id = ${authProfileId}
+      AND profile_kind = 'oauth_account'
+    FOR UPDATE
+  `;
+  if (!profile) return false;
+  const stored = profile.auth_data?.app_auth_profile_id;
+  if (typeof stored === 'number' && stored !== appAuthProfileId) return false;
+  const conflicts = await tx`
+    SELECT 1 FROM connections
+    WHERE organization_id = ${organizationId} AND auth_profile_id = ${authProfileId}
+      AND deleted_at IS NULL AND app_auth_profile_id IS NOT NULL
+      AND app_auth_profile_id IS DISTINCT FROM ${appAuthProfileId}::bigint
+    LIMIT 1
+  `;
+  if (conflicts.length > 0) return false;
+  // Reserve the selected app on a pending account, so same-apply connection
+  // creation and repeated consent links use it. Usable grants stay untouched.
+  if (reservePending && !profile.account_id && appAuthProfileId !== null) {
+    await tx`
+      UPDATE auth_profiles
+      SET auth_data = COALESCE(auth_data, '{}'::jsonb) || ${tx.json({ app_auth_profile_id: appAuthProfileId })}::jsonb
+      WHERE organization_id = ${organizationId} AND id = ${authProfileId}
+    `;
+  }
+  return true;
+}
 
 export async function syncOAuthConnectionsForAuthProfile(
   organizationId: string,

@@ -148,20 +148,9 @@ export function getOAuthCredentialKeys(method: OAuthAuthMethod): {
 }
 
 /**
- * Resolve the OAuth **app** (client) credentials for a connector, mirroring the
- * exact fallback GLOBAL LOGIN uses (`auth/config.ts`
- * `resolveLoginProviderCredentials`): an explicit `oauth_app` auth profile's
- * `auth_data` wins, otherwise fall back to `process.env[clientIdKey]` /
- * `process.env[clientSecretKey]` (keys default to `${PROVIDER}_CLIENT_ID/_SECRET`
- * via {@link getOAuthCredentialKeys}).
- *
- * This is the single source of truth for "does this connector have OAuth APP
- * credentials" across the connect-create gate (manage_connections) and the
- * `/connect/:token/oauth/start` redirect (connect/routes.ts) — neither has to
- * re-derive keys or duplicate the env fallback. It resolves ONLY the
- * application-level client id/secret; the per-user ACCOUNT token (oauth_account
- * profile, obtained via the real Authorize redirect) is unaffected and still
- * required by callers.
+ * A selected app is authoritative: filling missing fields from deployment
+ * credentials could substitute another client or pair one app's ID with
+ * another app's secret. Use environment credentials only without an app profile.
  */
 export function resolveOAuthAppClientCredentials(params: {
   appProfileAuthData: unknown;
@@ -179,9 +168,12 @@ export function resolveOAuthAppClientCredentials(params: {
       ? params.clientSecretKey
       : `${providerUpper}_CLIENT_SECRET`;
 
-  const authValues = normalizeAuthValues(params.appProfileAuthData ?? {});
-  const clientId = authValues[clientIdKey] || process.env[clientIdKey] || null;
-  const clientSecret = authValues[clientSecretKey] || process.env[clientSecretKey] || null;
+  const authValues = normalizeAuthValues(params.appProfileAuthData ?? {
+    [clientIdKey]: process.env[clientIdKey],
+    [clientSecretKey]: process.env[clientSecretKey],
+  });
+  const clientId = authValues[clientIdKey] || null;
+  const clientSecret = authValues[clientSecretKey] || null;
   return { clientId, clientSecret };
 }
 
@@ -815,6 +807,8 @@ export async function resolveConnectionAuthSelection(params: {
   appAuthProfileSlug?: string | null;
   deviceWorkerId?: string | null;
   oauthAccountCreatedBy?: string | null;
+  /** Updates retaining no account must not select an unrelated primary profile. */
+  autoSelectAuthProfile?: boolean;
 }): Promise<AuthSelectionResult> {
   const { organizationId, connectorKey } = params;
   const oauthMethod = getOAuthMethods(params.authSchema)[0] ?? null;
@@ -845,10 +839,10 @@ export async function resolveConnectionAuthSelection(params: {
       slug: params.authProfileSlug,
       connectorKey,
     })) ??
-    (preferredMethodType === 'env_keys' && envMethod
+    (params.autoSelectAuthProfile !== false && preferredMethodType === 'env_keys' && envMethod
       ? await getPrimaryAuthProfileForKind({ organizationId, connectorKey, profileKind: 'env' })
       : null) ??
-    (preferredMethodType === 'browser' && browserMethod
+    (params.autoSelectAuthProfile !== false && preferredMethodType === 'browser' && browserMethod
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,
@@ -856,7 +850,7 @@ export async function resolveConnectionAuthSelection(params: {
           deviceWorkerId: params.deviceWorkerId ?? null,
         })
       : null) ??
-    (preferredMethodType === 'oauth' && oauthMethod
+    (params.autoSelectAuthProfile !== false && preferredMethodType === 'oauth' && oauthMethod
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,

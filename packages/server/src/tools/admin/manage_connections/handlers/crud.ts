@@ -1634,12 +1634,15 @@ export async function handleUpdate(
     nextDeviceWorkerId = binding.deviceWorkerId;
   }
 
+  const currentAuthProfile = await getAuthProfileById(organizationId, existing.auth_profile_id);
+  const currentAppAuthProfile = await getAuthProfileById(organizationId, existing.app_auth_profile_id);
   const authSelection = await resolveConnectionAuthSelection({
     organizationId,
     connectorKey: existing.connector_key,
     authSchema: existing.auth_schema,
-    authProfileSlug: args.auth_profile_slug,
-    appAuthProfileSlug: args.app_auth_profile_slug,
+    autoSelectAuthProfile: hasAuthProfileArg,
+    authProfileSlug: hasAuthProfileArg ? args.auth_profile_slug : currentAuthProfile?.slug,
+    appAuthProfileSlug: hasAppAuthProfileArg ? args.app_auth_profile_slug : currentAppAuthProfile?.slug,
     deviceWorkerId: nextDeviceWorkerId,
   });
 
@@ -1694,15 +1697,6 @@ export async function handleUpdate(
       };
     }
   }
-
-	const currentAuthProfile = await getAuthProfileById(
-		organizationId,
-		existing.auth_profile_id,
-	);
-  const currentAppAuthProfile = await getAuthProfileById(
-    organizationId,
-		existing.app_auth_profile_id,
-  );
 
   const nextAuthProfileId = hasAuthProfileArg
     ? (authSelection.authProfile?.id ?? null)

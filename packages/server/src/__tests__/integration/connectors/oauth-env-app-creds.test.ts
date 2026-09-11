@@ -1,12 +1,12 @@
 /**
- * Connector OAuth-connect APP credentials must fall back to deployment env vars
+ * Without an app profile, connector OAuth-connect credentials fall back to deployment env vars
  * (`${PROVIDER}_CLIENT_ID/_SECRET`) — the SAME fallback global LOGIN uses
  * (`auth/config.ts resolveLoginProviderCredentials`). An org should be able to
  * connect a connector whose OAuth app creds are env-configured with NO
  * hand-created `oauth_app` profile and NO secret entry.
  *
  * Critical distinction this guards:
- *  - the APP profile (client id/secret) falls back to env, but
+ *  - missing APP configuration falls back to env; an explicit profile is authoritative,
  *  - the per-user ACCOUNT token (oauth_account) + the Authorize redirect are
  *    STILL required — the connection lands `pending_auth`, never silently
  *    `active`.
@@ -154,6 +154,21 @@ describe('resolveOAuthAppClientCredentials — env fallback (pure)', () => {
     });
 
     expect(resolved.clientId).toBeNull();
+    expect(resolved.clientSecret).toBeNull();
+  });
+
+  it.each([{}, { [CLIENT_ID_KEY]: 'profile-client-id' }])('does not fill an incomplete selected app from deployment credentials: %j', (authData) => {
+    process.env[CLIENT_ID_KEY] = 'env-client-id';
+    process.env[CLIENT_SECRET_KEY] = 'env-client-secret';
+
+    const resolved = resolveOAuthAppClientCredentials({
+      appProfileAuthData: authData,
+      provider: 'demoenv',
+      clientIdKey: CLIENT_ID_KEY,
+      clientSecretKey: CLIENT_SECRET_KEY,
+    });
+
+    expect(resolved.clientId).toBe(CLIENT_ID_KEY in authData ? 'profile-client-id' : null);
     expect(resolved.clientSecret).toBeNull();
   });
 });

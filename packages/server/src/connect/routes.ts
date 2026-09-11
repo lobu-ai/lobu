@@ -35,7 +35,7 @@ import {
 } from '../utils/auth-credential-secrets';
 import { type ConnectTokenRow, resolveConnectToken } from '../utils/connect-tokens';
 import logger from '../utils/logger';
-import { syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
+import { lockOAuthAppBinding, syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
 import {
   isPersonalCredentialKind,
   resolveOAuthAppClientCredentials,
@@ -612,7 +612,7 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
   const redirectUri = `${baseUrl}/connect/oauth/callback`;
   // Reusing a pending URL must send the challenge for the verifier saved on
   // that token; generating a new unsaved verifier makes the callback fail.
-  const pkceCodeVerifier = authConfig.usePkce
+  let pkceCodeVerifier = authConfig.usePkce
     ? authConfig.pkceCodeVerifier ?? buildPkceVerifier()
     : undefined;
 
@@ -623,18 +623,25 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
     (!!appAuthProfileId && authConfig.appAuthProfileId !== appAuthProfileId);
 
   if (needsUpdate) {
-    const effectiveAuthConfig = {
-      ...authConfig,
+    const configPatch = {
       ...(appAuthProfileId ? { appAuthProfileId } : {}),
       redirectUri,
-      ...(pkceCodeVerifier ? { pkceCodeVerifier } : {}),
     };
     const sql = getDb();
-    await sql`
+    // Concurrent opens must use the first saved verifier, including across
+    // replicas. Patch only initialization fields so scope edits are retained.
+    const [stored] = await sql`
       UPDATE connect_tokens
-      SET auth_config = ${sql.json(effectiveAuthConfig)}
-      WHERE token = ${token}
+      SET auth_config = COALESCE(auth_config, '{}'::jsonb)
+        || ${sql.json(configPatch)}::jsonb
+        || ${pkceCodeVerifier
+          ? sql`jsonb_build_object('pkceCodeVerifier', COALESCE(auth_config->>'pkceCodeVerifier', ${pkceCodeVerifier}::text))`
+          : sql`'{}'::jsonb`}
+      WHERE token = ${token} AND status = 'pending' AND expires_at > NOW()
+      RETURNING auth_config
     `;
+    if (!stored) return c.json({ error: 'Invalid or expired connect token' }, 404);
+    if (pkceCodeVerifier) pkceCodeVerifier = stored.auth_config.pkceCodeVerifier;
   }
 
   const authUrl = buildAuthorizationUrl({
@@ -730,7 +737,7 @@ async function handleOAuthCallback(
   }
 
   const sql = getDb();
-  const { clientId, clientSecret } = await resolveOAuthCredentialsForToken(tokenRow, authConfig);
+  const { clientId, clientSecret, appAuthProfileId } = await resolveOAuthCredentialsForToken(tokenRow, authConfig);
 
   if (!clientId) {
     return c.json({ error: 'OAuth client credentials not found' }, 500);
@@ -812,7 +819,28 @@ async function handleOAuthCallback(
 
   let resolvedAuthProfileId = tokenRow.auth_profile_id;
 
-  await sql.begin(async (tx) => {
+  const committed = await sql.begin(async (tx) => {
+    // Recheck the token and its target before replacing any credentials.
+    // Old links must not overwrite a newer app binding.
+    const pending = await tx`
+      SELECT 1 FROM connect_tokens WHERE token = ${token}
+        AND status = 'pending' AND expires_at > NOW() FOR UPDATE
+    `;
+    if (pending.length !== 1) return false;
+    if (tokenRow.auth_profile_id) {
+      if (!(await lockOAuthAppBinding(tx, tokenRow.organization_id,
+        tokenRow.auth_profile_id, appAuthProfileId ?? null))) return false;
+    }
+    if (tokenRow.connection_id) {
+      const [target] = await tx`
+        SELECT app_auth_profile_id, auth_profile_id, account_id FROM connections
+        WHERE id = ${tokenRow.connection_id} AND organization_id = ${tokenRow.organization_id}
+          AND deleted_at IS NULL FOR UPDATE
+      `;
+      if (!target || target.auth_profile_id !== tokenRow.auth_profile_id ||
+          (!tokenRow.auth_profile_id && target.account_id) ||
+          (target.app_auth_profile_id && target.app_auth_profile_id !== appAuthProfileId)) return false;
+    }
     const tokenTarget = tokenRow.connection_id ?? tokenRow.auth_profile_id ?? tokenRow.id;
     const generatedAccountId = `connect_${tokenTarget}_${Date.now()}`;
     const expiresAt = tokens.expiresIn
@@ -895,8 +923,8 @@ async function handleOAuthCallback(
                   ...existingAuthData,
                   // The grant records the app that issued it; a later reconnect
                   // reuses that app rather than silently swapping clients.
-                  ...(authConfig.appAuthProfileId
-                    ? { app_auth_profile_id: authConfig.appAuthProfileId }
+                  ...(appAuthProfileId
+                    ? { app_auth_profile_id: appAuthProfileId }
                     : {}),
                 },
                 {
@@ -937,8 +965,8 @@ async function handleOAuthCallback(
             'active',
             ${tx.json(
               mergeOAuthScopeAuthData(
-                authConfig.appAuthProfileId
-                  ? { app_auth_profile_id: authConfig.appAuthProfileId }
+                appAuthProfileId
+                  ? { app_auth_profile_id: appAuthProfileId }
                   : {},
                 {
                   requestedScopes: authConfig.requestedScopes ?? authConfig.scopes,
@@ -1034,7 +1062,10 @@ async function handleOAuthCallback(
     `;
 
     resolvedAuthProfileId = authProfileId;
+    return true;
   });
+
+  if (!committed) return c.redirect(await oauthResultUrl(tokenRow, baseUrl, 'failed'));
 
   if (resolvedAuthProfileId) {
     await syncOAuthConnectionsForAuthProfile(tokenRow.organization_id, resolvedAuthProfileId);
