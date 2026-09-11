@@ -1656,8 +1656,12 @@ export async function handleUpdate(
       error: `App auth profile '${args.app_auth_profile_slug}' not found for this connector`,
     };
   }
+  // Unhealthy retained credentials must not block name or policy edits.
+  // Only a new binding needs to satisfy the selection status requirements.
   if (
+    hasAuthProfileArg &&
     authSelection.authProfile &&
+    authSelection.authProfile.id !== existing.auth_profile_id &&
 		authSelection.authProfile.profile_kind !== "browser_session" &&
 		authSelection.authProfile.status !== "active" &&
 		authSelection.authProfile.status !== "pending_auth"
@@ -1667,7 +1671,9 @@ export async function handleUpdate(
     };
   }
 	if (
+    hasAppAuthProfileArg &&
 		authSelection.appAuthProfile &&
+    authSelection.appAuthProfile.id !== existing.app_auth_profile_id &&
 		authSelection.appAuthProfile.status !== "active"
 	) {
     return {
@@ -2077,8 +2083,9 @@ export async function handleUpdate(
     status: string;
   };
 
-  // Keep the internal stream in sync with connection ownership/status.
-  await sql`
+  // OAuth metadata edits must preserve operator-paused feeds.
+  if (effectiveSelectedAuthProfile?.profile_kind !== "oauth_account" || effectiveStatus !== null) {
+    await sql`
     UPDATE feeds
     SET status = ${mapConnectionStatusToFeedStatus(updatedConnection.status)},
         next_run_at = CASE
@@ -2089,6 +2096,7 @@ export async function handleUpdate(
         updated_at = NOW()
     WHERE connection_id = ${updatedConnection.id}
   `;
+  }
 
 	const effectiveAuth = hasAuthProfileArg
 		? authSelection.authProfile
@@ -2097,7 +2105,13 @@ export async function handleUpdate(
     ? authSelection.appAuthProfile
     : currentAppAuthProfile;
 
-	if (effectiveAuth?.profile_kind === "oauth_account") {
+  // Stored scopes are not fresh consent: retaining a failed account must not
+  // mark it active again just because its name or policy was edited.
+  if (
+    effectiveAuth?.profile_kind === "oauth_account" &&
+    (nextAuthProfileId !== existing.auth_profile_id || args.status !== undefined) &&
+    (effectiveAuth.status === "active" || effectiveAuth.status === "pending_auth")
+  ) {
     await syncOAuthConnectionsForAuthProfile(organizationId, effectiveAuth.id);
   }
 

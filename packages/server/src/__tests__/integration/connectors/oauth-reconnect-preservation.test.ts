@@ -133,6 +133,49 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     }
   });
 
+  it.each([
+    ['account', 'active'], ['account', 'pending_auth'], ['app', 'active'], ['app', 'pending_auth'],
+    ['account', 'revoked'], ['account', 'error'], ['app', 'revoked'], ['app', 'error'],
+  ] as const)('allows unrelated edits and unchanged profile round-trips with an %s in %s state', async (kind, status) => {
+    const s = await seed();
+    const sql = getTestDb();
+    const profile = kind === 'account' ? s.profile : s.app;
+    await sql`UPDATE auth_profiles SET status = ${status} WHERE id = ${profile.id}`;
+    await sql`UPDATE connections SET status = ${status} WHERE id = ${s.connection.id}`;
+    const before = await state(s.connection.id);
+    await s.client.update({ connection_id: s.connection.id, display_name: 'Renamed synthetic account' });
+    expect(await state(s.connection.id)).toEqual(before);
+    const humanClient = buildConnectionsNamespace({ ...s.ctx, tokenType: 'session' }, {} as Env);
+    await humanClient.update({ connection_id: s.connection.id, config: { action_modes: { inspect: 'approval' } } });
+    expect(await state(s.connection.id)).toEqual(before);
+    await s.client.update({ connection_id: s.connection.id,
+      auth_profile_slug: s.profile.slug, app_auth_profile_slug: s.app.slug });
+    expect(await state(s.connection.id)).toEqual(before);
+    const [row] = await sql`SELECT display_name, config, auth_profile_id, app_auth_profile_id FROM connections WHERE id = ${s.connection.id}`;
+    expect(row).toMatchObject({ display_name: 'Renamed synthetic account',
+      config: { action_modes: { inspect: 'approval' } }, auth_profile_id: s.profile.id, app_auth_profile_id: s.app.id });
+    expect((await sql`SELECT status FROM auth_profiles WHERE id = ${profile.id}`)[0].status).toBe(status);
+  });
+
+  it.each([
+    ['account', 'revoked'], ['account', 'error'], ['app', 'revoked'], ['app', 'error'], ['app', 'pending_auth'],
+  ] as const)('still rejects selecting a new %s in %s state', async (kind, status) => {
+    const s = await seed();
+    if (kind === 'account') {
+      const profile = await createAuthProfile({ organizationId: s.org.id, connectorKey: KEY,
+        displayName: 'Unusable synthetic account', profileKind: 'oauth_account', provider: 'synthetic',
+        authData: { app_auth_profile_id: s.app.id }, status, createdBy: s.user.id });
+      await expect(s.client.update({ connection_id: s.connection.id, auth_profile_slug: profile.slug })).rejects.toThrow('must be active or pending_auth');
+    } else {
+      const sql = getTestDb();
+      await sql`UPDATE auth_profiles SET status = ${status} WHERE id = ${s.otherApp.id}`;
+      const pending = await createTestConnection({ organization_id: s.org.id, connector_key: KEY,
+        created_by: s.user.id, visibility: 'private', createDefaultFeed: false });
+      await sql`UPDATE connections SET auth_profile_id = NULL, account_id = NULL, app_auth_profile_id = ${s.app.id} WHERE id = ${pending.id}`;
+      await expect(s.client.update({ connection_id: pending.id, app_auth_profile_slug: s.otherApp.slug })).rejects.toThrow('must be active');
+    }
+  });
+
   it('retains the selected app when attaching a pending account before consent', async () => {
     const s = await seed();
     const created = await manageAuthProfiles({ action: 'create_auth_profile', connector_key: KEY,
