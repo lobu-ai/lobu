@@ -11,10 +11,10 @@
  *
  *  - A misconfiguration the producer can NAME (no resolved model, no provider
  *    that owns it, no provider that routes on this lane, no public gateway
- *    URL, or missing Automation tools) is RETURNED as a `TurnFailure`. The caller discharges the
- *    turn-liveness marker it armed with that reason, so the user reads the
- *    real cause and its remediation instead of waiting out the deadline for a
- *    generic "worker unresponsive".
+ *    URL, or unusable Automation tools) is RETURNED as a `TurnFailure`. The
+ *    caller discharges the turn-liveness marker it armed with that reason, so
+ *    the user reads the real cause and its remediation instead of waiting out
+ *    the deadline for a generic "worker unresponsive".
  *  - Anything unexpected THROWS, so the queue's own retry/fail handling sees
  *    it rather than a message disappearing without a reply.
  *
@@ -163,8 +163,8 @@ type BuiltinTool = NonNullable<TurnTools["builtin"]>[number];
  * not silently reach an agent until it is added here too.
  *
  * `lobu-media`'s tools are named separately in `MEDIA_TOOLS` below, and
- * `lobu-memory` publishes no tools at all — its recall and capture are hooks,
- * carried on the envelope's `memory` field rather than in any tool list.
+ * `@lobu/plugin-memory` publishes no model-callable tools — its recall and
+ * capture are hooks carried on the envelope's `memory` field instead.
  */
 const GATEWAY_TOOLS = [
   "list_conversations",
@@ -873,9 +873,9 @@ export async function cancelAgentTurn(data: MessagePayload): Promise<boolean> {
  * Produce the `agent_turn` run for this message.
  *
  * Returns `undefined` when the turn was produced, or when nothing is owed a
- * reply. Returns an `AgentErrorCode` when the agent is misconfigured and
- * cannot run, so the caller can tell the user why. Throws on anything
- * unexpected — see the module header.
+ * reply. Returns a `TurnFailure` when the agent is misconfigured and cannot
+ * run, so the caller can tell the user why. Throws on anything unexpected —
+ * see the module header.
  */
 export async function enqueueAgentTurn(
   data: MessagePayload,

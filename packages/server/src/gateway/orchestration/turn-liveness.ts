@@ -664,16 +664,15 @@ export async function insertThreadResponseRow(
  *  always carries an explicit value (defaults to "api") — gateway routing and
  *  platform isolation require it; never emit `platform: undefined`.
  *
- *  Carries the `AgentErrorCode` so the gateway renderers present it through the
- *  shared `renderAgentError` catalog like any other agent error. `error` is the
- *  catalog's own fallback text for that code (for any consumer that reads
- *  `error` instead of rendering from the code). Configuration checks may supply
- *  a precise error when no catalog code describes their failure. */
+ *  An `AgentErrorCode` is rendered through the shared catalog and carries the
+ *  catalog's fallback text for consumers that read `error` directly. A named
+ *  configuration failure instead carries precise prose when no catalog code
+ *  describes it. */
 export type TurnFailure = AgentErrorCode | { error: string };
 
 function buildTerminalErrorPayload(
   routing: TurnRouting,
-  code: TurnFailure
+  failure: TurnFailure
 ) {
   return {
     messageId: routing.messageId,
@@ -685,9 +684,9 @@ function buildTerminalErrorPayload(
     platformMetadata: routing.platformMetadata,
     // Catalog failures keep their remediation CTA; admission checks can name
     // the exact missing configuration without inventing a timeout code.
-    ...(typeof code === "string"
-      ? { error: AGENT_ERRORS[code].message ?? "The agent didn't finish responding.", errorCode: code }
-      : { error: code.error }),
+    ...(typeof failure === "string"
+      ? { error: AGENT_ERRORS[failure].message ?? "The agent didn't finish responding.", errorCode: failure }
+      : { error: failure.error }),
     processedMessageIds: [routing.messageId],
     timestamp: Date.now(),
   };
@@ -697,11 +696,11 @@ function buildTerminalErrorPayload(
 async function enqueueTerminalError(
   tx: DbClient,
   routing: TurnRouting,
-  code: TurnFailure
+  failure: TurnFailure
 ): Promise<void> {
   await insertThreadResponseRow(
     tx,
-    buildTerminalErrorPayload(routing, code),
+    buildTerminalErrorPayload(routing, failure),
     routing.organizationId ?? null
   );
   await completeAgentRunInputs(
@@ -732,7 +731,7 @@ async function enqueueTerminalError(
 export async function failTurnIfPending(
   deploymentName: string,
   messageId: string,
-  code: TurnFailure
+  failure: TurnFailure
 ): Promise<boolean> {
   const key = turnMarkerKey(deploymentName, messageId);
   const sql = getDb();
@@ -746,7 +745,7 @@ export async function failTurnIfPending(
     `;
     const routing = rows[0] ? asTurnRouting(rows[0].action_input) : null;
     if (!routing) return false;
-    await enqueueTerminalError(tx, routing, code);
+    await enqueueTerminalError(tx, routing, failure);
     return true;
   });
   if (emitted) await notifyThreadResponse();

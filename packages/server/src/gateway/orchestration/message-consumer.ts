@@ -647,12 +647,12 @@ export class MessageConsumer {
         instructions: this.agentTurnInstructions,
       });
 
-      // The agent cannot run at all — no model, no provider that routes, or no
-      // public gateway URL. The marker armed above is the client's only
-      // promise of a terminal event, and nothing else will discharge it, so
-      // waiting would spend the full deadline and then blame an unresponsive
-      // worker. Discharge it now with the reason the producer identified,
-      // which carries its own remediation CTA.
+      // The agent cannot run at all — no model, no provider that routes, no
+      // public gateway URL, or unusable required Automation tools. The marker
+      // armed above is the client's only promise of a terminal event, and
+      // nothing else will discharge it, so waiting would spend the full
+      // deadline and then blame an unresponsive worker. Discharge it now with
+      // the catalog code or precise remediation the producer identified.
       if (unrunnable) {
         await failTurnIfPending(deploymentName, data.messageId, unrunnable);
       }

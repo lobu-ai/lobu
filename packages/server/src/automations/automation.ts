@@ -410,8 +410,8 @@ async function markAutomationRunFailedIdempotent(
     `;
 		if (!failed) return;
 		// Same gate as the twin in run-completion.ts. The dispatch lane claims
-		// both run types, so every failure here — session-create, embedded Lobu
-		// unavailable, preflight, message POST — can be an eval. An eval clones
+		// both run types, so every failure here — session creation, embedded Lobu
+		// unavailable, or message POST — can be an eval. An eval clones
 		// `dispatch_source` verbatim, so ungated it would advance the live cron
 		// cursor of the Automation it is only replaying, or park it entirely when
 		// the schedule does not parse.
@@ -1350,7 +1350,6 @@ async function dispatchAutomationRun(
 		);
 		return "failed";
 	}
-
 
 	// Per-automation inference overrides live in automations.execution_config
 	// (`model`: a `provider/model` ref or "auto"; `effort`: a reasoning level).

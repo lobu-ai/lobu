@@ -157,8 +157,8 @@ async function admittedMessage(message: MessagePayload): Promise<MessagePayload>
 
 /**
  * The producer receives an already admitted queue message in production.
- * Returns the producer's outcome: an `AgentErrorCode` when the agent cannot
- * run, `undefined` when the turn was produced or nothing is owed a reply.
+ * Returns the producer's outcome: a `TurnFailure` when the agent cannot run,
+ * `undefined` when the turn was produced or nothing is owed a reply.
  */
 async function enqueueMessage(message: MessagePayload, deps: Parameters<typeof enqueueAgentTurn>[1]) {
   return await enqueueAgentTurn(await admittedMessage(message), deps);
@@ -1007,8 +1007,8 @@ describe('agent turn producer', () => {
           description: 'Write data',
           input_schema: { type: 'object', properties: { code: { type: 'string' } } },
         },
-        // No description and no schema published: the same defaults the
-        // subprocess lane's plugin fills in.
+        // No description and no schema published: the same defaults
+        // `@lobu/plugin-mcp` fills in.
         {
           mcp_id: 'lobu-memory',
           name: 'query_sql',
@@ -1023,9 +1023,6 @@ describe('agent turn producer', () => {
     )).toBe(true);
   });
 
-  // The policy is the agent's own (`buildToolPolicy`, shared with the
-  // subprocess lane); applying it to MCP tools is this lane's own stricter
-  // choice — the subprocess lane registers its MCP tools unfiltered.
   async function automationMessage(execution: 'window' | 'turn' = 'window') {
     const sql = getTestDb();
     const org = await createTestOrganization();
