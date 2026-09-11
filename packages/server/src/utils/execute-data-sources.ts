@@ -71,7 +71,7 @@ export interface DataSourceContext {
 /** Operations that bypass READ ONLY transactions or have side-effects. */
 const FORBIDDEN_OPS = /\b(COPY|IMPORT|PRAGMA|CALL)\b/i;
 const FORBIDDEN_QUERY_FUNCTIONS = new Set(['set_config']);
-const MAX_ROWS = 1000;
+export const MAX_DATA_SOURCE_ROWS = 1000;
 const QUERY_TIMEOUT_MS = 5000;
 
 type SqlNode = ast.Expression;
@@ -1041,6 +1041,8 @@ export async function executeDataSources(
     ) => string | { sql: string; params: unknown[] };
     /** Fail the whole read when any source fails instead of treating it as empty. */
     throwOnError?: boolean;
+    /** Retain one overflow row so a caller can detect incomplete source results. */
+    includeOverflowRow?: boolean;
     /** At save time, require unknown table refs to resolve to local or public entity types. */
     validateEntitySlugs?: boolean;
     /** Exclude workspace-identity audit rows from the events/event_classifications CTEs. */
@@ -1137,7 +1139,8 @@ export async function executeDataSources(
           return tx.unsafe(scopedQuery, params);
         });
 
-        results[name] = Array.isArray(rows) ? rows.slice(0, MAX_ROWS) : [];
+        const rowLimit = MAX_DATA_SOURCE_ROWS + (options?.includeOverflowRow ? 1 : 0);
+        results[name] = Array.isArray(rows) ? rows.slice(0, rowLimit) : [];
       } catch (err) {
 		if (options?.throwOnError) {
 			throw new Error(`Data source '${name}' failed: ${getErrorMessage(err)}`);
