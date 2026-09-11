@@ -145,6 +145,8 @@ interface SdkCallTraceEntry {
 interface RunScriptResult {
 	success: boolean;
 	returnValue?: unknown;
+	/** Whether the invoked handler explicitly returned a value (including null). */
+	didReturnValue?: boolean;
 	/** UTF-8-safe head of the serialized return value when it exceeded `outputBytes`. */
 	returnValuePreview?: string;
 	/** Present with `returnValuePreview`: original JSON and preview-string byte sizes. */
@@ -826,6 +828,7 @@ function guestRunner(errorTokenReader: string): string {
     return JSON.stringify({
       __lobu_script_result: 1,
       ok: true,
+	  has_value: __result !== undefined,
       value: __result === undefined ? null : __result,
     });
   } catch (error) {
@@ -1546,6 +1549,9 @@ export async function runScript(
 
 		return {
 			success: true,
+			...(!options.extractExport
+				? { didReturnValue: parsedResult.has_value === true }
+				: {}),
 			...(returnValuePreview !== undefined
 				? { returnValuePreview, returnTruncated }
 				: { returnValue }),

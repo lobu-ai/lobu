@@ -373,6 +373,41 @@ describe("loadDesiredStateFromConfig", () => {
     expect(state.automations[0]?.prompt).toBe("");
   });
 
+  test("rejects a malformed script executor with actionable guidance", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "badscript-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: null
+      })] });
+    `
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /scriptFromFile/
+    );
+  });
+
+  test("rejects non-object script executor params", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "badscriptparams-"));
+    writeFileSync(join(dir, "job.ts"), "export default async () => {};\n");
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: scriptFromFile("./job.ts", [])
+      })] });
+    `
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /params must be an object, not an array/
+    );
+  });
+
   test("loads an automation reaction script (raw source) referenced by path", async () => {
     dir = mkdtempSync(join(import.meta.dir, "reaction-"));
     mkdirSync(join(dir, "reactions"));

@@ -45,6 +45,7 @@ async function loadTriggerExecution(
 ): Promise<{
   execution: AutomationTriggerExecution;
   shouldDispatch: boolean;
+  requiresGateway: boolean;
 }> {
   const [run] = await sql<{
     approved_input: unknown;
@@ -112,7 +113,11 @@ async function loadTriggerExecution(
   }
 
   if (run.status === "pending") {
-    return { execution: persistedExecution, shouldDispatch: true };
+    return {
+      execution: persistedExecution,
+      shouldDispatch: true,
+      requiresGateway: executor?.kind === "agent" && payload.executor == null,
+    };
   }
   if (run.status !== "claimed" && run.status !== "running") {
     throw new ToolUserError(
@@ -149,6 +154,7 @@ async function loadTriggerExecution(
           },
         },
         shouldDispatch: false,
+        requiresGateway: false,
       };
     }
     return {
@@ -158,21 +164,28 @@ async function loadTriggerExecution(
         next_action: { kind: "handled_elsewhere" },
       },
       shouldDispatch: false,
+      requiresGateway: false,
     };
   }
 
+  const nativeScriptClaim =
+    payload.executor?.kind === "script" && claimedBy === "automation-script";
   const nativeManagedClaim =
     executor?.kind === "agent" &&
     (claimedBy === "lobu-dispatcher" || claimedBy === `lobu:${executor.agentId}`);
   const nativeDeviceClaim =
     executor?.kind === "device" && claimedBy === run.device_claimed_by;
-  if (!nativeManagedClaim && !nativeDeviceClaim) {
+  if (!nativeScriptClaim && !nativeManagedClaim && !nativeDeviceClaim) {
     throw new ToolUserError(
       `Automation run ${runId} has no recognized active claimant.`,
       409,
     );
   }
-  return { execution: persistedExecution, shouldDispatch: false };
+  return {
+    execution: persistedExecution,
+    shouldDispatch: false,
+    requiresGateway: false,
+  };
 }
 
 // ============================================
@@ -211,7 +224,7 @@ export async function handleTrigger(
     );
     if (
       loaded.shouldDispatch &&
-      loaded.execution.lane === "managed_agent" &&
+      loaded.requiresGateway &&
       !isLobuGatewayRunning()
     ) {
       throw new Error("Embedded Lobu is not available.");

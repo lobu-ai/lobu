@@ -37,7 +37,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** A model declaration owns only the model key, preserving other execution options. */
+/** Apply declared model/executor fields while preserving unmanaged execution options. */
 export function automationExecutionConfig(
   model: string | null | undefined,
   remote?: Record<string, unknown> | null,

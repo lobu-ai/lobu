@@ -1,10 +1,10 @@
-import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 /**
  * Version management action handlers for manage_automations:
  *   create_version, upgrade, get_versions, get_version_details
  */
 
 import { getDb, parsePgNumberArray } from '../../../db/client';
+import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { ToolUserError } from '../../../utils/errors';
 import { recordToolConfigChange } from '../helpers/config-audit';
 import { nextRunAt } from '../../../utils/cron';

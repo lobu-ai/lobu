@@ -83,6 +83,25 @@ describe("sandbox runtime", () => {
     expect(result.sdkCalls).toBe(0);
   });
 
+  it("distinguishes a missing return from an explicit null", async () => {
+    const stubSdk = { log: () => undefined } as unknown as ClientSDK;
+    const [missing, explicitNull] = await Promise.all([
+      runScript({ source: "export default async () => {};", sdk: stubSdk }),
+      runScript({ source: "export default async () => null;", sdk: stubSdk }),
+    ]);
+
+    expect(missing).toMatchObject({
+      success: true,
+      returnValue: null,
+      didReturnValue: false,
+    });
+    expect(explicitNull).toMatchObject({
+      success: true,
+      returnValue: null,
+      didReturnValue: true,
+    });
+  });
+
   it("returns structured result shape", async () => {
     const stubSdk = { log: () => undefined } as unknown as ClientSDK;
     const result = await runScript({

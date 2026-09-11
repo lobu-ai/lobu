@@ -1,4 +1,3 @@
-import { enqueueAutomationScript, reconcileAutomationScriptRuns } from './script-enqueue';
 import { randomUUID } from "node:crypto";
 import {
 	resolveAutomationExecutor,
@@ -40,6 +39,10 @@ import {
 	advanceAutomationSchedule,
 	advanceAutomationScheduleAfterSuccessfulWindow,
 } from "./schedule-cursor";
+import {
+	enqueueAutomationScript,
+	reconcileAutomationScriptRuns,
+} from "./script-enqueue";
 import { recordScheduledExecutionFailure } from "./scheduled-failure-policy";
 import {
 	resolveAutomationRunsByMessageIds,

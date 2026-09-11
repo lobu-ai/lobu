@@ -1,6 +1,3 @@
-import { runAutomationScriptTask } from '../automations/script-task';
-import type { AutomationScriptTaskPayload } from '../automations/script-enqueue';
-import { AUTOMATION_SCRIPT_TASK } from './task-definitions';
 /**
  * TaskScheduler boot + periodic platform-internal jobs.
  *
@@ -24,6 +21,8 @@ import { runAutomationTick } from '../automations/automation';
 import { runAutomationAutoPauseNotificationSweep } from '../automations/auto-pause-notifications';
 import type { AutomationReactionTaskPayload } from '../automations/reaction-enqueue';
 import { runAutomationReactionTask } from '../automations/reaction-task';
+import type { AutomationScriptTaskPayload } from '../automations/script-enqueue';
+import { runAutomationScriptTask } from '../automations/script-task';
 import { checkStalledExecutions } from './check-stalled-executions';
 import { runConnectorHealthCheck } from '../connectors/connector-health';
 import { retryPendingFeedAutoPausedSignals } from '../automations/platform-events';
@@ -38,6 +37,7 @@ import {
 import { TaskScheduler } from './task-scheduler';
 import {
   AUTOMATION_REACTION_TASK,
+  AUTOMATION_SCRIPT_TASK,
   NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
   WORKSPACE_EVENT_ACTIVATION_TASK,
@@ -479,16 +479,18 @@ function registerMaintenanceTasks(
     );
   });
 
+  // Executor scripts own the parent Automation run, so the child task carries
+  // the durable handoff that resumes it after a scheduler restart.
+  scheduler.register(AUTOMATION_SCRIPT_TASK, async (ctx) => {
+    await runAutomationScriptTask(ctx.payload as AutomationScriptTaskPayload, env, ctx.taskRunId, ctx.attempt);
+  });
+
   // The Automation reaction script. Queued inside `complete_window`'s window
   // transaction, so the handoff survives a crash that would previously have
   // lost the reaction outright. The handler throws only on a TRANSIENT script
   // failure — that is what asks this scheduler for another attempt; a
   // deterministic failure settles the task and is recorded on
   // `automation_reactions` instead of re-burning the 60s executor budget.
-  scheduler.register(AUTOMATION_SCRIPT_TASK, async (ctx) => {
-    await runAutomationScriptTask(ctx.payload as AutomationScriptTaskPayload, env, ctx.taskRunId, ctx.attempt);
-  });
-
   scheduler.register(AUTOMATION_REACTION_TASK, async (ctx) => {
     const outcome = await runAutomationReactionTask(
       ctx.payload as AutomationReactionTaskPayload,
