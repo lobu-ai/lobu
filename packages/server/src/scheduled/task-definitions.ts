@@ -13,8 +13,11 @@ export const NOTIFICATION_DELIVERY_TASK = 'deliver-notification';
 export const NOTIFICATION_DELIVERY_TASK_QUEUE =
   `task:${NOTIFICATION_DELIVERY_TASK}`;
 export const AUTOMATION_REACTION_TASK = 'automation-reaction';
+export const AUTOMATION_SCRIPT_TASK = 'automation-script';
 export const AUTOMATION_REACTION_TASK_QUEUE =
   `task:${AUTOMATION_REACTION_TASK}`;
+export const AUTOMATION_SCRIPT_TASK_QUEUE =
+  `task:${AUTOMATION_SCRIPT_TASK}`;
 
 /**
  * New task handlers that can be enqueued before every old pod has drained need
@@ -26,6 +29,9 @@ export function taskQueueName(name: string): string {
   if (name === NOTIFICATION_DELIVERY_TASK) {
     return NOTIFICATION_DELIVERY_TASK_QUEUE;
   }
+  if (name === AUTOMATION_SCRIPT_TASK) {
+    return AUTOMATION_SCRIPT_TASK_QUEUE;
+  }
   return name === AUTOMATION_REACTION_TASK
     ? AUTOMATION_REACTION_TASK_QUEUE
     : 'task';
@@ -36,6 +42,7 @@ export function isTransactionalTaskName(name: string): boolean {
     name === WORKSPACE_EVENT_ACTIVATION_TASK ||
     name === INTERACTIVE_EVENT_CARD_REFRESH_TASK ||
     name === AUTOMATION_REACTION_TASK ||
-    name === NOTIFICATION_DELIVERY_TASK
+    name === NOTIFICATION_DELIVERY_TASK ||
+    name === AUTOMATION_SCRIPT_TASK
   );
 }

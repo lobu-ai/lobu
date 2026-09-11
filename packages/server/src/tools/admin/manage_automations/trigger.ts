@@ -282,7 +282,7 @@ export async function handleSetReactionScript(
     // the current version) and reject the clear if it would leave any
     // assignment invalid.
     const groupState = await sql`
-      SELECT w.id, w.triggers, cv.prompt, cv.skills
+      SELECT w.id, w.triggers, cv.prompt, cv.skills, w.execution_config->'executor'->>'source' AS executor_source
       FROM automations w
       LEFT JOIN automation_versions cv ON cv.id = w.current_version_id
       WHERE w.automation_group_id = ${groupId}
@@ -293,7 +293,8 @@ export async function handleSetReactionScript(
           (assignment.triggers ?? []) as AutomationTrigger[],
           assignment.prompt as string | null | undefined,
           (assignment.skills ?? null) as Array<{ name: string; content: string }> | null,
-          null
+          null,
+          assignment.executor_source as string | null,
         );
       } catch (err) {
         if (err instanceof ToolUserError) {

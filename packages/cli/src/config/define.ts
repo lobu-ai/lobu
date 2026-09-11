@@ -20,6 +20,7 @@ import type {
   EventSet,
   Measure,
   ReactionClient,
+  AutomationScriptContext,
   ReactionContext,
   Segment,
 } from "@lobu/connector-sdk";
@@ -596,6 +597,25 @@ export type ReactionHandler = (
   params?: Record<string, unknown>
 ) => Promise<unknown>;
 
+export type AutomationScriptHandler = (
+  ctx: AutomationScriptContext,
+  client: ReactionClient,
+  params?: Record<string, unknown>
+) => Promise<unknown>;
+
+export interface ScriptSource {
+  readonly kind: "scriptSource";
+  path: string;
+  params?: Record<string, unknown>;
+}
+
+/** Execute a local TypeScript job directly, with the owning agent's SDK permissions. */
+export function scriptFromFile<
+  _Handler extends AutomationScriptHandler = AutomationScriptHandler,
+>(path: string, params?: Record<string, unknown>): ScriptSource {
+  return { kind: "scriptSource", path, ...(params ? { params } : {}) };
+}
+
 /**
  * A local reaction source file to compile + run in a sandboxed isolate when the
  * Automation fires. Built with {@link reactionFromFile} and set on
@@ -675,6 +695,8 @@ export interface Automation {
   slug: string;
   /** Owning agent (handle or id). Every Automation belongs to exactly one agent. */
   agent: Agent | string;
+  /** Script job or agent execution. Omitted preserves the stored executor; "agent" clears a script executor. */
+  executor?: ScriptSource | "agent";
   name?: string;
   description?: string;
   /**

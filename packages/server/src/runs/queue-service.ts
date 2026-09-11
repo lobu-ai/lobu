@@ -15,6 +15,7 @@ import {
   resolvedEventExecution,
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
+  type AutomationScriptExecutor,
 } from '@lobu/core/contracts/tools/manage-automations';
 import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
 import {
@@ -61,6 +62,8 @@ export type AutomationActivationSignal =
   | WorkspaceEventTriggerSignal;
 
 export interface AutomationRunPayload {
+  /** Execution code is pinned with the run, never reloaded from a live Automation on retry. */
+  executor?: AutomationScriptExecutor;
   automation_id: number;
   /**
    * The managed agent executing this run. Absent for device-executed runs
@@ -668,16 +671,17 @@ async function createAutomationRunWithClient(
   // Snapshot the version and, for a scheduler observation made before this
   // transaction, lock and verify the arrival mark. Without the fence another
   // replica can complete that window after fingerprinting but before this
-  // INSERT, allowing the old range to be materialized again.
+  // INSERT, allowing the old range to be materialized again. The executor is
+  // pinned with the run alongside the version, never reloaded mid-run.
   const versionRows = params.expectedWindowStart
-    ? await sql<{ current_version_id: unknown; next_window_start: string | Date | null }>`
-        SELECT current_version_id, next_window_start
+    ? await sql<{ current_version_id: unknown; next_window_start: string | Date | null; executor: unknown }>`
+        SELECT current_version_id, next_window_start, execution_config->'executor' AS executor
         FROM automations
         WHERE id = ${params.automationId}
         FOR UPDATE
       `
-    : await sql<{ current_version_id: unknown; next_window_start: string | Date | null }>`
-        SELECT current_version_id, next_window_start
+    : await sql<{ current_version_id: unknown; next_window_start: string | Date | null; executor: unknown }>`
+        SELECT current_version_id, next_window_start, execution_config->'executor' AS executor
         FROM automations
         WHERE id = ${params.automationId}
         LIMIT 1
@@ -718,6 +722,7 @@ async function createAutomationRunWithClient(
     window_end: params.windowEnd,
     dispatch_source: params.dispatchSource,
     version_id: snapshotVersionId,
+    ...(versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
     device_worker_id: normalizedDeviceWorkerId,
     agent_kind: normalizedAgentKind,
     source_fingerprint: params.sourceFingerprint,
@@ -1044,7 +1049,7 @@ export async function createAutomationEventRun(
     }
 
     const versionRows = await tx`
-      SELECT current_version_id
+      SELECT current_version_id, execution_config->'executor' AS executor
       FROM automations
       WHERE id = ${params.automationId}
       LIMIT 1
@@ -1059,6 +1064,7 @@ export async function createAutomationEventRun(
       window_end: signalWindowEnd,
       dispatch_source: 'event',
       version_id: versionId,
+      ...(versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
       device_worker_id: params.deviceWorkerId ?? null,
       agent_kind: params.agentKind ?? null,
       trigger_signal: params.signal,

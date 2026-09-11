@@ -48,3 +48,10 @@ export interface ReactionContext {
   /** Stable workspace slug for relative app permalinks. */
   organization_slug: string;
 }
+
+/** Context of a script executing the Automation itself, before completion. */
+export interface AutomationScriptContext extends Omit<ReactionContext, 'extracted_data' | 'window'> {
+  window: Omit<ReactionContext['window'], 'content_analyzed'>;
+  /** Durable event activations, frozen when the run is claimed. Empty for schedules/manual runs. */
+  trigger_signals: unknown[];
+}

@@ -17,10 +17,12 @@ import {
   createClassifiersForAutomation,
   enableClassifiersOnEntity,
 } from '../../../automations/classifier-extraction';
+import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { assertDeviceWorkerAccess } from '../automation-device-access';
 import {
   assertServerLaneModelResolves,
   assertValidExecutionConfig,
+  automationScriptExecutor,
 } from '../automation-execution-config';
 import { assertEntityIdsInOrg, getNextNumericId, requireExists } from '../helpers/db-helpers';
 import type { ToolContext } from '../../registry';
@@ -263,7 +265,8 @@ export async function handleCreate(
       )
     : null;
   const skills = args.skills ?? [];
-  assertAutomationInstructions(triggerWrite.triggers, args.prompt, skills, args.reaction_script);
+  await assertAutomationScriptExecutor({ executionConfig: args.execution_config, ...executorDefaults, triggers: triggerWrite.triggers, skills, outputs });
+  assertAutomationInstructions(triggerWrite.triggers, args.prompt, skills, args.reaction_script, automationScriptExecutor(args.execution_config)?.source);
   assertPromptSkillTokensPinned(args.prompt, skills);
   // v1 constraint: skill bodies resolve against ONE agent library at save
   // time — the Automation-level default executor when it is an agent.
@@ -512,7 +515,7 @@ export async function handleUpdate(
   const currentRows = await sql`
     SELECT w.organization_id, w.managed_agent_id, w.schedule, w.timezone, w.triggers,
            w.device_worker_id::text AS device_worker_id, w.agent_kind,
-           w.delivery_target, w.reaction_script,
+           w.delivery_target, w.reaction_script, w.execution_config,
            cv.prompt AS current_prompt, cv.skills AS current_skills,
            cv.outputs AS current_outputs
     FROM automations w
@@ -530,6 +533,7 @@ export async function handleUpdate(
     triggers: ManageAutomationsArgs['triggers'];
     delivery_target: ManageAutomationsArgs['delivery_target'];
     reaction_script: string | null;
+    execution_config: unknown;
     current_prompt: string | null;
     current_skills: Array<{ name: string; content: string }> | null;
     current_outputs: Record<string, unknown> | null;
@@ -552,6 +556,7 @@ export async function handleUpdate(
         : currentRow.device_worker_id != null,
     applyId: ctx.applyId,
   });
+  const effectiveExecutionConfig = args.execution_config !== undefined ? args.execution_config : currentRow.execution_config;
   const triggerWrite = resolveAutomationTriggerWrite({
     triggers: args.triggers,
     currentTriggers: currentRow.triggers ?? [],
@@ -576,7 +581,8 @@ export async function handleUpdate(
       triggerWrite.triggers,
       currentRow.current_prompt,
       currentRow.current_skills,
-      currentRow.reaction_script
+      currentRow.reaction_script,
+      automationScriptExecutor(effectiveExecutionConfig)?.source,
     );
   }
 
@@ -603,6 +609,17 @@ export async function handleUpdate(
     effectiveDefaults,
     ctx
   );
+
+  await assertAutomationScriptExecutor({
+    executionConfig: effectiveExecutionConfig, ...effectiveDefaults,
+    triggers: triggerWrite.triggers,
+    skills: currentRow.current_skills, outputs: currentRow.current_outputs,
+    validateSource: args.execution_config !== undefined,
+  });
+  // Clearing a sole script executor must not leave an instruction-free job.
+  if (args.execution_config !== undefined) {
+    assertAutomationInstructions(triggerWrite.triggers, currentRow.current_prompt, currentRow.current_skills, currentRow.reaction_script, automationScriptExecutor(effectiveExecutionConfig)?.source);
+  }
 
   let normalizedDeliveryTarget = args.delivery_target ?? null;
   if (args.delivery_target) {
@@ -1006,12 +1023,16 @@ export async function handleCreateFromVersion(
           (Array.isArray(cloneTriggers) ? cloneTriggers : []) as AutomationTrigger[],
           version.prompt as string | null | undefined,
           version.skills as Array<{ name: string; content: string }> | null,
-          version.reaction_script as string | null | undefined
+          version.reaction_script as string | null | undefined,
+          automationScriptExecutor(version.execution_config)?.source,
         );
         assertAutomationOutputsUseWindowExecution(
           (Array.isArray(cloneTriggers) ? cloneTriggers : []) as AutomationTrigger[],
           clonedOutputs
         );
+        await assertAutomationScriptExecutor({ executionConfig: version.execution_config, ...cloneDefaults,
+          triggers: cloneTriggers as AutomationTrigger[], skills: version.skills as unknown[] | null,
+          outputs: clonedOutputs, validateSource: false });
         // `tags` is a text[] column read under fetch_types:false, so postgres.js
         // hands back a raw array literal string (e.g. "{}" or "{system:chat-link}"),
         // not a JS array. Parse it before filtering.

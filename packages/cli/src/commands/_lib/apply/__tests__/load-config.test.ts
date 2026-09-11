@@ -353,6 +353,26 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
+  test("loads a script executor without importing or executing the job", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "script-"));
+    const source =
+      'throw new Error("must not execute at apply time"); export default async () => ({ ok: true });';
+    writeFileSync(join(dir, "job.ts"), source);
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: scriptFromFile("./job.ts")
+      })] });
+    `
+    );
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.automations[0]?.executor).toEqual({ kind: "script", source });
+    expect(state.automations[0]?.prompt).toBe("");
+  });
+
   test("loads an automation reaction script (raw source) referenced by path", async () => {
     dir = mkdtempSync(join(import.meta.dir, "reaction-"));
     mkdirSync(join(dir, "reactions"));

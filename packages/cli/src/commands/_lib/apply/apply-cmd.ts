@@ -960,8 +960,8 @@ export async function executePlan(
           tags: w.tags,
           agent_kind: w.agentKind,
           execution_config:
-            w.model !== undefined
-              ? automationExecutionConfig(w.model)
+            w.model !== undefined || w.executor !== undefined
+              ? automationExecutionConfig(w.model, undefined, w.executor)
               : undefined,
           outputs: w.outputs,
           classifiers: w.classifiers,
@@ -1029,7 +1029,8 @@ export async function executePlan(
               ? {
                   execution_config: automationExecutionConfig(
                     w.model,
-                    remote?.execution_config
+                    remote?.execution_config,
+                    w.executor
                   ),
                 }
               : {}),
