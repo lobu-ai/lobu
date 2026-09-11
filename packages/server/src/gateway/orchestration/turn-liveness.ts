@@ -667,11 +667,13 @@ export async function insertThreadResponseRow(
  *  Carries the `AgentErrorCode` so the gateway renderers present it through the
  *  shared `renderAgentError` catalog like any other agent error. `error` is the
  *  catalog's own fallback text for that code (for any consumer that reads
- *  `error` instead of rendering from the code) — NOT a caller-supplied string,
- *  so there is exactly one place this prose lives: AGENT_ERRORS. */
+ *  `error` instead of rendering from the code). Configuration checks may supply
+ *  a precise error when no catalog code describes their failure. */
+export type TurnFailure = AgentErrorCode | { error: string };
+
 function buildTerminalErrorPayload(
   routing: TurnRouting,
-  code: AgentErrorCode
+  code: TurnFailure
 ) {
   return {
     messageId: routing.messageId,
@@ -681,10 +683,11 @@ function buildTerminalErrorPayload(
     teamId: routing.platform ?? "api",
     platform: routing.platform ?? "api",
     platformMetadata: routing.platformMetadata,
-    // Sweep/dispatch codes are always worker-family, which carry catalog text
-    // (there's no provider message to relay when the worker never replied).
-    error: AGENT_ERRORS[code].message ?? "The agent didn't finish responding.",
-    errorCode: code,
+    // Catalog failures keep their remediation CTA; admission checks can name
+    // the exact missing configuration without inventing a timeout code.
+    ...(typeof code === "string"
+      ? { error: AGENT_ERRORS[code].message ?? "The agent didn't finish responding.", errorCode: code }
+      : { error: code.error }),
     processedMessageIds: [routing.messageId],
     timestamp: Date.now(),
   };
@@ -694,7 +697,7 @@ function buildTerminalErrorPayload(
 async function enqueueTerminalError(
   tx: DbClient,
   routing: TurnRouting,
-  code: AgentErrorCode
+  code: TurnFailure
 ): Promise<void> {
   await insertThreadResponseRow(
     tx,
@@ -729,7 +732,7 @@ async function enqueueTerminalError(
 export async function failTurnIfPending(
   deploymentName: string,
   messageId: string,
-  code: AgentErrorCode
+  code: TurnFailure
 ): Promise<boolean> {
   const key = turnMarkerKey(deploymentName, messageId);
   const sql = getDb();

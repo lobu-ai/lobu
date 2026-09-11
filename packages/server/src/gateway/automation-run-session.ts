@@ -58,13 +58,21 @@ export async function resolveAutomationRunSkills(
 	args: Parameters<AutomationRunSkillResolver>[0],
 	db: DbClient = getDb(),
 ): Promise<AutomationSkillSnapshot[]> {
+	return (await resolveAutomationRunContext(args, db)).skills;
+}
+
+/** The pinned instructions and completion requirement of the same durable run. */
+export async function resolveAutomationRunContext(
+	args: Parameters<AutomationRunSkillResolver>[0],
+	db: DbClient = getDb(),
+): Promise<{ skills: AutomationSkillSnapshot[]; requiresWindowCompletion: boolean }> {
 	const intent = parseAutomationRunConversationId(args.conversationId);
 	if (!intent || !args.organizationId || !args.agentId) {
 		throw new Error("Automation run token is missing its pinned-skill scope");
 	}
 
 	const rows = await db`
-		SELECT version.skills
+		SELECT version.skills, automation_run.approved_input->>'trigger_execution' AS trigger_execution
 		FROM runs automation_run
 		JOIN automations automation
 		  ON automation.id = automation_run.automation_id
@@ -85,7 +93,10 @@ export async function resolveAutomationRunSkills(
 	if (rows.length !== 1) {
 		throw new Error("Automation run's pinned version was not found");
 	}
-	return parseAutomationSkillSnapshots(rows[0]?.skills);
+	return {
+		skills: parseAutomationSkillSnapshots(rows[0]?.skills),
+		requiresWindowCompletion: rows[0]?.trigger_execution !== "turn",
+	};
 }
 
 export function formatAutomationRunSkillInstructions(

@@ -11,7 +11,7 @@
  *
  *  - A misconfiguration the producer can NAME (no resolved model, no provider
  *    that owns it, no provider that routes on this lane, no public gateway
- *    URL) is RETURNED as an `AgentErrorCode`. The caller discharges the
+ *    URL, or missing Automation tools) is RETURNED as a `TurnFailure`. The caller discharges the
  *    turn-liveness marker it armed with that reason, so the user reads the
  *    real cause and its remediation instead of waiting out the deadline for a
  *    generic "worker unresponsive".
@@ -52,7 +52,7 @@ import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
-import { resolveAutomationRunSkills } from "../automation-run-session.js";
+import { resolveAutomationRunContext } from "../automation-run-session.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
@@ -64,7 +64,7 @@ import {
   type AgentTurnArtifactReader,
   resolveTurnAttachments,
 } from "./agent-turn-attachments.js";
-import { notifyThreadResponse } from "./turn-liveness.js";
+import { notifyThreadResponse, type TurnFailure } from "./turn-liveness.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-producer");
@@ -127,7 +127,7 @@ const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
  * `undefined` means no turn is owed a reply at all (an explicit cancel, or a
  * message carrying neither text nor a resolvable attachment).
  */
-export type TurnUnrunnable = AgentErrorCode;
+export type TurnUnrunnable = TurnFailure;
 
 /**
  * Where an agent turn's reply is delivered. This rides `action_input` beside
@@ -207,6 +207,8 @@ const MEDIA_TOOLS = ["upload_file", "generate_image", "generate_audio"] as const
  * integration, they are two more calls on the route the turn already uses.
  */
 const MEMORY_MCP_ID = "lobu";
+const AUTOMATION_MEMORY_MCP_ID = "lobu-memory";
+const AUTOMATION_REQUIRED_TOOLS = ["query_sdk", "run_sdk"] as const;
 
 export interface AgentTurnDeps {
   /** Reads the agent's identity/soul/user layers. Absent → no turn. */
@@ -772,20 +774,23 @@ async function resolveTurnTools(
   instructions: string[];
   /** Whether the agent actually has the memory MCP server mounted. */
   hasMemoryServer: boolean;
+  failedServers: string[];
 }> {
   const tokenData = verifyWorkerToken(args.workerToken);
   if (!tokenData) throw new Error("the turn's own worker token does not verify");
   const servers = await mcp.configService.getMcpStatus(args.agentId, args.organizationId);
   const definitions: TurnTools["definitions"] = [];
   const instructions: string[] = [];
+  const failedServers: string[] = [];
   const listed = await Promise.allSettled(
     servers.map(async (server) => ({
       mcpId: server.id,
-      ...(await mcp.proxy.fetchToolsForMcp(server.id, args.agentId, tokenData, args.workerToken)),
+      ...(await mcp.proxy.fetchToolsForMcp(server.id, args.agentId, tokenData, args.workerToken, { surfaceErrors: true })),
     }))
   );
-  for (const outcome of listed) {
+  for (const [index, outcome] of listed.entries()) {
     if (outcome.status === "rejected") {
+      failedServers.push(servers[index]!.id);
       logger.warn(
         { agentId: args.agentId, err: getErrorMessage(outcome.reason) },
         "Agent turn: an MCP server did not list its tools; the turn runs without them"
@@ -808,6 +813,7 @@ async function resolveTurnTools(
   return {
     tools: definitions.length > 0 ? { gateway_url: args.gatewayUrl, definitions } : undefined,
     instructions,
+    failedServers,
     // Read off the SERVER list, not the tool list: the memory hooks call
     // `search_memory`/`save_memory` directly, and those two are routinely
     // filtered out of the model's own manifest by the tool policy without the
@@ -992,6 +998,22 @@ export async function enqueueAgentTurn(
     let hasMemoryServer = false;
     let mcpInstructions: string[] = [];
     const policy = turnToolPolicy(data.agentOptions);
+    // Resolve the durable correlation once: turn triggers have no completion
+    // handshake, while windows must be able to read and complete their bounds.
+    const automationContext = parseAutomationRunConversationId(data.conversationId)
+      ? await resolveAutomationRunContext({
+          conversationId: data.conversationId,
+          organizationId: data.organizationId,
+          agentId: data.agentId,
+        })
+      : null;
+    if (automationContext?.requiresWindowCompletion) {
+      const excluded = AUTOMATION_REQUIRED_TOOLS.filter((name) => !isToolAllowedByPolicy(name, policy));
+      if (excluded.length > 0) {
+        return { error: `Automation tool policy excludes ${excluded.join(", ")}. Allow these tools in the agent's tool policy; pre-approval does not grant tool eligibility.` };
+      }
+    }
+    let failedServers: string[] = [];
     if (!deps.mcp) {
       logger.info(
         { agentId: data.agentId },
@@ -1008,6 +1030,19 @@ export async function enqueueAgentTurn(
       tools = resolved.tools;
       mcpInstructions = resolved.instructions;
       hasMemoryServer = resolved.hasMemoryServer;
+      failedServers = resolved.failedServers;
+    }
+
+    if (automationContext?.requiresWindowCompletion) {
+      if (failedServers.includes(AUTOMATION_MEMORY_MCP_ID)) {
+        return { error: "Automation tool discovery failed for lobu-memory. Check its connection and authentication before retrying." };
+      }
+      const available = new Set(tools?.definitions
+        .filter((tool) => tool.mcp_id === AUTOMATION_MEMORY_MCP_ID).map((tool) => tool.name));
+      const missing = AUTOMATION_REQUIRED_TOOLS.filter((name) => !available.has(name));
+      if (missing.length > 0) {
+        return { error: `Automation required tools are unavailable from lobu-memory: ${missing.join(", ")}. Restore the memory tool mount before retrying.` };
+      }
     }
 
     // The workspace tools the policy admits. `bash` carries its prefix policy
@@ -1065,19 +1100,12 @@ export async function enqueueAgentTurn(
     // library here would let a skill edited after approval change what a
     // frozen Automation does, and would pull unrelated live skills into the
     // run — the fixed job text alone does not freeze the skill library.
-    // `resolveAutomationRunSkills` scopes its query by org + agent + automation
+    // `resolveAutomationRunContext` scopes its query by org + agent + automation
     // + run (all derived from the canonical conversation id) and throws on a
     // missing version, so a pinned run fails rather than silently falling back
     // to live skills.
-    const pinnedSkills = parseAutomationRunConversationId(data.conversationId)
-      ? await resolveAutomationRunSkills({
-          conversationId: data.conversationId,
-          organizationId: data.organizationId,
-          agentId: data.agentId,
-        })
-      : null;
     const skills = (
-      pinnedSkills ??
+      automationContext?.skills ??
       (settings?.skillsConfig?.skills ?? [])
         .filter((skill) => skill.enabled && skill.content)
         .map((skill) => ({ name: skill.name, content: skill.content! }))
