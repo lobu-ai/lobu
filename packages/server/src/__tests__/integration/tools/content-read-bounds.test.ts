@@ -14,7 +14,6 @@ import {
   createTestAgent,
   createTestConnection,
   createTestEntity,
-  createTestEvent,
   createTestOrganization,
   createTestUser,
   ownerToolContext,
@@ -41,6 +40,8 @@ describe('agent-facing content read bounds', () => {
   let feedId: number;
   let hugeEventId: number;
   let hugeText: string;
+  let exactInputId: number;
+  const exactInputText = 'Complete exact input.'.repeat(6_000);
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -109,15 +110,21 @@ describe('agent-facing content read bounds', () => {
       RETURNING id
     `;
     hugeEventId = Number(inserted.id);
-    await createTestEvent({
-      organization_id: org.id,
-      entity_id: entityId,
-      connection_id: connection.id,
-      feed_id: feedId,
-      feed_key: 'default',
-      content: 'small companion',
-      occurred_at: new Date(),
-    });
+    const [exactInput] = await db<{ id: number | string }[]>`
+      INSERT INTO events (
+        organization_id, entity_ids, connection_id, feed_id, feed_key,
+        origin_id, payload_type, payload_text, payload_data, attachments,
+        occurred_at, semantic_type, connector_key, created_at
+      ) VALUES (
+        ${org.id}, ARRAY[${entityId}]::bigint[], ${connection.id}, ${feedId}, 'default',
+        'content-bounds-exact', 'text', ${exactInputText},
+        ${db.json({ body: 'p'.repeat(32 * 1024) })},
+        ${db.json([{ text: 't'.repeat(32 * 1024) }])},
+        NOW(), 'content', 'test.connector', NOW()
+      )
+      RETURNING id
+    `;
+    exactInputId = Number(exactInput.id);
   }, 120_000);
 
   afterAll(async () => {
@@ -289,17 +296,28 @@ describe('agent-facing content read bounds', () => {
     expect(customContentHuge?.payload_truncated).toBe(true);
     expect(customResult.total_count_chars).toBeGreaterThanOrEqual(LARGE_EVENT_CHARS);
 
-    const exact = (await owner.knowledge.read({
+    // Required exact inputs cannot be paged or silently shortened. Standalone
+    // exact-id reads remain full fidelity; an oversized Automation envelope
+    // must fail explicitly instead of overflowing the SDK transport.
+    await expect(owner.knowledge.read({
       automation_id: Number(created.automation_id),
       content_ids: [hugeEventId],
       since: 'today',
       until: 'today',
       limit: 50,
+    })).rejects.toThrow(/Automation knowledge response cannot fit its byte budget/);
+
+    const exact = (await owner.knowledge.read({
+      automation_id: Number(created.automation_id),
+      content_ids: [exactInputId],
+      since: 'today',
+      until: 'today',
+      limit: 50,
     })) as { sources: Record<string, Array<Record<string, unknown>>> };
     const exactTrigger = exact.sources.__event_inputs.find(
-      (row) => Number(row.id) === hugeEventId
+      (row) => Number(row.id) === exactInputId
     );
-    expect(exactTrigger?.payload_text).toBe(hugeText);
+    expect(exactTrigger?.payload_text).toBe(exactInputText);
     expect(exactTrigger?.payload_truncated).not.toBe(true);
     expect(exactTrigger?.payload_data).toEqual({ body: 'p'.repeat(32 * 1024) });
     expect(exactTrigger?.attachments).toEqual([{ text: 't'.repeat(32 * 1024) }]);
