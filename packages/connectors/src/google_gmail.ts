@@ -34,9 +34,11 @@ interface GmailMessage {
 }
 
 interface GmailMessagePayload {
-  headers: GmailHeader[];
+  /** Present on the top-level payload; nested MIME parts may omit it. */
+  headers?: GmailHeader[];
   mimeType: string;
-  body?: { data?: string; size?: number };
+  filename?: string;
+  body?: { data?: string; size?: number; attachmentId?: string };
   parts?: GmailMessagePayload[];
 }
 
@@ -419,15 +421,21 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const before = Math.ceil(Date.parse(windowStart) / 1000);
     const query = pending?.query ?? `after:${after} before:${before} (${scope})`;
     let pageToken = pending?.page_token;
+    // A stored cursor outlives the run that issued it and Gmail may retire it.
+    // Rejecting it forever would wedge the feed behind a checkpoint only a human
+    // could clear, so the first request of the run — the only one using a cursor
+    // from a previous run — may fall back to re-walking the same window from its
+    // first page. `origin_id` makes that replay a supersede, not a duplicate.
+    let staleCursorRecoverable = pageToken !== undefined;
     const http = this.createClient(token);
     const events: EventEnvelope[] = [];
-    // Bounds the threads FETCHED per run (each is an API call), independent of
-    // how many survive the person filter — a narrow feed must not scan the whole
-    // window just because most threads are rejected. It also sizes each list
-    // page, so a page can never push the run past the cap.
+    // Bounds the threads FETCHED per run (each costs at least one API call),
+    // independent of how many survive the person filter — a narrow feed must not
+    // scan the whole window just because most threads are rejected. It also sizes
+    // each list page, so a page can never push the run past the cap.
     let inspected = 0;
 
-    do {
+    for (;;) {
       const params = new URLSearchParams({
         q: query,
         maxResults: String(Math.min(100, maxResults - inspected)),
@@ -435,8 +443,17 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       if (pageToken) params.set('pageToken', pageToken);
       const listResponse = await http.raw(`${this.BASE_URL}/threads?${params.toString()}`);
       if (!listResponse.ok) {
-        throw new Error(`Gmail threads.list error (${listResponse.status}): ${await listResponse.text()}`);
+        const detail = await listResponse.text();
+        // Gmail answers a retired pageToken with 400; 404 covers the same
+        // condition. Anything else (auth, quota, outage) must still fail the run.
+        if (staleCursorRecoverable && (listResponse.status === 400 || listResponse.status === 404)) {
+          staleCursorRecoverable = false;
+          pageToken = undefined;
+          continue;
+        }
+        throw new Error(`Gmail threads.list error (${listResponse.status}): ${detail}`);
       }
+      staleCursorRecoverable = false;
       const listData = (await listResponse.json()) as GmailThreadListResponse;
       const threads = listData.threads ?? [];
       for (const threadStub of threads) {
@@ -459,22 +476,21 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           if (Number.isNaN(occurredAt.getTime())) throw new Error('Gmail returned an invalid message date');
           const attribution = this.resolvePersonAttribution(messages, humanSendersOnly);
           if (humanSendersOnly && !attribution.personRelevant) continue;
+          const messageTexts: string[] = [];
+          for (const message of messages) {
+            const body = await this.extractBody(message.payload, http, message.id) || message.snippet || '';
+            messageTexts.push([
+              `Message: ${message.id}`,
+              `From: ${this.getHeader(message, 'From') || 'Unknown'}`,
+              `To: ${this.getHeader(message, 'To') || ''}`,
+              `Date: ${this.getHeader(message, 'Date') || new Date(Number(message.internalDate)).toISOString()}`,
+              '', body,
+            ].join('\n'));
+          }
           events.push({
             origin_id: thread.id,
             title: this.getHeader(firstMessage, 'Subject') || '(no subject)',
-            payload_text: messages
-              .map((message) => {
-                const body = this.extractBody(message.payload) || message.snippet || '';
-                return [
-                  `Message: ${message.id}`,
-                  `From: ${this.getHeader(message, 'From') || 'Unknown'}`,
-                  `To: ${this.getHeader(message, 'To') || ''}`,
-                  `Date: ${this.getHeader(message, 'Date') || new Date(Number(message.internalDate)).toISOString()}`,
-                  '',
-                  body,
-                ].join('\n');
-              })
-              .join('\n\n---\n\n'),
+            payload_text: messageTexts.join('\n\n---\n\n'),
             author_name: attribution.from,
             source_url: `https://mail.google.com/mail/u/0/#inbox/${thread.id}`,
             occurred_at: occurredAt,
@@ -500,7 +516,8 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       // An empty page with a cursor is still incomplete. Persist its cursor
       // rather than advance the window or spin on empty provider responses.
       if (threads.length === 0) break;
-    } while (pageToken && inspected < maxResults);
+      if (!pageToken || inspected >= maxResults) break;
+    }
 
     events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
     // A part-walked window keeps the previous `last_sync_at`: it may not advance
@@ -902,13 +919,16 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         ? this.getHeader(thread.messages[0], 'Subject') || '(no subject)'
         : '(no subject)';
 
-    const messages = thread.messages.map((msg) => ({
-      id: msg.id,
-      from: this.getHeader(msg, 'From') || 'Unknown',
-      date: this.getHeader(msg, 'Date') || '',
-      snippet: msg.snippet,
-      body: this.extractBody(msg.payload),
-    }));
+    const messages = [];
+    for (const msg of thread.messages) {
+      messages.push({
+        id: msg.id,
+        from: this.getHeader(msg, 'From') || 'Unknown',
+        date: this.getHeader(msg, 'Date') || '',
+        snippet: msg.snippet,
+        body: await this.extractBody(msg.payload, http, msg.id),
+      });
+    }
 
     return {
       success: true,
@@ -1062,7 +1082,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   }
 
   private getHeader(message: GmailMessage, name: string): string | undefined {
-    const header = message.payload.headers.find((h) => h.name.toLowerCase() === name.toLowerCase());
+    const header = message.payload.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase());
     return header?.value;
   }
 
@@ -1088,34 +1108,35 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     return { name: trimmed, email: null };
   }
 
-  private extractBody(payload: GmailMessagePayload): string {
-    // Try to get body from payload.body.data directly
-    if (payload.body?.data) {
-      return this.base64UrlDecode(payload.body.data);
+  private async extractBody(
+    payload: GmailMessagePayload,
+    http: HttpClient,
+    messageId: string
+  ): Promise<string> {
+    const textParts: GmailMessagePayload[] = [];
+    const visit = (part: GmailMessagePayload) => {
+      // Text files attached to a message are not its body. Descend through
+      // MIME containers, choosing plain text over the equivalent HTML part.
+      const disposition = part.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')?.value;
+      if (part.filename || /^attachment(?:;|$)/i.test(disposition ?? '')) return;
+      if (part.mimeType === 'text/plain' || part.mimeType === 'text/html') textParts.push(part);
+      for (const child of part.parts ?? []) visit(child);
+    };
+    visit(payload);
+    const part = textParts.find((item) => item.mimeType === 'text/plain') ?? textParts[0];
+    if (!part) return '';
+    if (part.body?.data) return this.base64UrlDecode(part.body.data);
+    const attachmentId = part.body?.attachmentId;
+    if (attachmentId) {
+      // Gmail may externalize the body itself, even under format=full. A
+      // failed fetch must not silently replace that body with its snippet.
+      const response = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`);
+      if (!response.ok) throw new Error(`Gmail message body error (${response.status}): ${await response.text()}`);
+      const body = (await response.json()) as { data?: string };
+      if (typeof body.data !== 'string') throw new Error('Gmail returned a message body without data');
+      return this.base64UrlDecode(body.data);
     }
-
-    // Search through parts for text/plain or text/html
-    if (payload.parts) {
-      for (const part of payload.parts) {
-        if (part.mimeType === 'text/plain' && part.body?.data) {
-          return this.base64UrlDecode(part.body.data);
-        }
-      }
-      // Fallback to text/html if no plain text
-      for (const part of payload.parts) {
-        if (part.mimeType === 'text/html' && part.body?.data) {
-          return this.base64UrlDecode(part.body.data);
-        }
-      }
-      // Recurse into nested parts (e.g. multipart/alternative inside multipart/mixed)
-      for (const part of payload.parts) {
-        if (part.parts) {
-          const nested = this.extractBody(part);
-          if (nested) return nested;
-        }
-      }
-    }
-
+    if (part.body?.size) throw new Error('Gmail returned a nonempty message body without data');
     return '';
   }
 

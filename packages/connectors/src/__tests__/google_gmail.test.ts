@@ -764,6 +764,54 @@ describe('complete Gmail sync input', () => {
     await expect(connector.sync(context())).rejects.toThrow(/Gmail returned/);
   });
 
+  test('restarts the window when Gmail retires the stored page token', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({
+      raw: async (url: string) => {
+        urls.push(url);
+        const u = new URL(url);
+        const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1];
+        if (id) return { ok: true, status: 200, json: async () => toThreadResponse({ id, messages: [{ id: `m-${id}` }] }) };
+        if (u.searchParams.get('pageToken') === 'retired') {
+          return { ok: false, status: 400, text: async () => 'Invalid pageToken' };
+        }
+        return { ok: true, status: 200, json: async () => ({ threads: [{ id: 'first-page' }] }) };
+      },
+    });
+    const result = await connector.sync(
+      context({
+        schema_version: 2,
+        scope: JSON.stringify(['label:INBOX', false]),
+        pending: { query: 'after:1 before:2 (label:INBOX)', started_at: '2026-07-02T00:00:00Z', page_token: 'retired' },
+      })
+    );
+    // Same window, first page — not a fresh window, and not a wedged run.
+    const lists = urls.filter((url) => !url.includes('/threads/'));
+    expect(lists).toHaveLength(2);
+    expect(new URL(lists[1]).searchParams.get('pageToken')).toBeNull();
+    expect(new URL(lists[1]).searchParams.get('q')).toBe('after:1 before:2 (label:INBOX)');
+    expect(result.events.map((event) => event.origin_id)).toEqual(['first-page']);
+    expect(result.checkpoint.last_sync_at).toBe('2026-07-02T00:00:00Z');
+    expect(result.checkpoint.pending).toBeUndefined();
+  });
+
+  test('propagates a non-cursor list failure instead of restarting the window', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({
+      raw: async () => ({ ok: false, status: 429, text: async () => 'rate limited' }),
+    });
+    await expect(
+      connector.sync(
+        context({
+          schema_version: 2,
+          scope: JSON.stringify(['label:INBOX', false]),
+          pending: { query: 'after:1 before:2 (label:INBOX)', started_at: '2026-07-02T00:00:00Z', page_token: 'live' },
+        })
+      )
+    ).rejects.toThrow(/429/);
+  });
+
   test('does not checkpoint past a failed thread fetch', async () => {
     const connector = new GmailConnector();
     connector.createClient = () => ({ raw: async (url: string) =>
@@ -772,5 +820,85 @@ describe('complete Gmail sync input', () => {
         : { ok: true, json: async () => ({ threads: [{ id: 'retry-me' }] }) },
     });
     await expect(connector.sync(context())).rejects.toThrow(/503/);
+  });
+});
+
+describe('Gmail externally stored message bodies', () => {
+  const BODY = 'Full body: please sign the agreement.';
+  const syncContext = {
+    feedKey: 'threads',
+    config: {},
+    checkpoint: {},
+    credentials: { accessToken: 'synthetic-token' },
+  };
+
+  function setup(attachmentStatus = 200) {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({
+      raw: async (url: string) => {
+        urls.push(url);
+        const attachment = url.includes('/attachments/');
+        return {
+          ok: !attachment || attachmentStatus === 200,
+          status: attachment ? attachmentStatus : 200,
+          text: async () => 'body fetch failed',
+          json: async () => {
+            if (attachment) return { data: Buffer.from(BODY).toString('base64url') };
+            if (!url.includes('/threads/')) return { threads: [{ id: 'thread-body' }] };
+            return {
+              id: 'thread-body',
+              messages: [
+                {
+                  id: 'message-body',
+                  internalDate: '1783558800000',
+                  snippet: 'Short preview',
+                  payload: {
+                    mimeType: 'multipart/mixed',
+                    headers: [],
+                    parts: [
+                      // An attached text file sits beside the body in the same
+                      // container and must not be mistaken for it.
+                      { mimeType: 'text/plain', filename: 'notes.txt', body: { attachmentId: 'excluded-file' } },
+                      {
+                        mimeType: 'multipart/alternative',
+                        parts: [{ mimeType: 'text/plain', body: { attachmentId: 'body-ref', size: 43 } }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          },
+        };
+      },
+    });
+    return { connector, urls };
+  }
+
+  test.each(['sync', 'get_thread'])(
+    '%s retrieves the text body reference without treating an attached file as the body',
+    async (mode) => {
+      const { connector, urls } = setup();
+      const body =
+        mode === 'sync'
+          ? (await connector.sync(syncContext)).events[0].payload_text
+          : (
+              await connector.execute({
+                actionKey: 'get_thread',
+                input: { thread_id: 'thread-body' },
+                credentials: { accessToken: 'synthetic-token' },
+              })
+            ).output.messages[0].body;
+      expect(body).toContain(BODY);
+      expect(urls.filter((url) => url.includes('/attachments/'))).toEqual([
+        'https://www.googleapis.com/gmail/v1/users/me/messages/message-body/attachments/body-ref',
+      ]);
+    }
+  );
+
+  test('a failed external body fetch cannot advance the sync checkpoint', async () => {
+    const { connector } = setup(503);
+    await expect(connector.sync(syncContext)).rejects.toThrow(/503/);
   });
 });
