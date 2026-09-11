@@ -35,7 +35,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 10;
+  const ADAPTER_VERSION = 11;
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",
@@ -447,33 +447,54 @@ export function whatsAppWebAdapterProgram() {
         reason: "authenticated_self_identity_unavailable",
       };
     }
-    const connection = requireFirst([
-      "WAWebSocketState",
-      "WAWebConn",
-      "WAWebConnectionState",
-    ]);
+    // Verified on WhatsApp Web (2026-09-10): Socket.state was CONNECTED while
+    // Socket.stream was DISCONNECTED, then both were CONNECTED after reload.
+    // Current WhatsApp exposes account and transport state separately. An
+    // authenticated account can retain hydrated stores while its stream is
+    // disconnected; those cached messages are not a successful live sync.
+    const socket = requireFirst(["WAWebSocketModel"])?.Socket;
+    const connection =
+      socket ??
+      requireFirst(["WAWebSocketState", "WAWebConn", "WAWebConnectionState"]);
     const connectionState = String(
       connection?.getSocketState?.() ??
         connection?.state ??
         connection?.socketState ??
         ""
     ).toLowerCase();
-    if (/disconnected|unpaired|conflict|timeout/.test(connectionState)) {
+    if (!connectionState) {
+      return {
+        ready: false,
+        state: "capability_unavailable",
+        reason: "connection_state_unavailable",
+      };
+    }
+    if (!/^(connected|open|ready|syncing)$/.test(connectionState)) {
       return {
         ready: false,
         state: "not_ready",
         reason: `connection_${connectionState}`,
       };
     }
-    if (
-      connectionState &&
-      !/^(connected|open|ready|syncing)$/.test(connectionState)
-    ) {
-      return {
-        ready: false,
-        state: "not_ready",
-        reason: `connection_${connectionState}`,
-      };
+    if (socket) {
+      const stream = String(socket.stream ?? "").toLowerCase();
+      if (!stream) {
+        return {
+          ready: false,
+          state: "capability_unavailable",
+          reason: "stream_state_unavailable",
+        };
+      }
+      if (!/^(connected|open|ready)$/.test(stream)) {
+        return { ready: false, state: "not_ready", reason: `stream_${stream}` };
+      }
+      if (socket.hasSynced === false) {
+        return {
+          ready: false,
+          state: "hydrating",
+          reason: "initial_sync_incomplete",
+        };
+      }
     }
     const offlineDelivery = requireFirst([
       "WAWebOfflineDelivery",

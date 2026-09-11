@@ -76,6 +76,15 @@ function fakeHttp(pages: CalPage[]) {
   };
 }
 
+/**
+ * Checkpoint scope for the default config, spelled out on the wire rather than
+ * imported so a change to either the version or the tuple shape shows up here
+ * as the checkpoint invalidation it is.
+ */
+const SCOPE = JSON.stringify([2, 'primary', 30]);
+
+const originId = (event: { origin_id: string }) => event.origin_id;
+
 function calEvent(id: string, startIso: string) {
   return {
     id,
@@ -111,25 +120,179 @@ describe('GoogleCalendarConnector full sync', () => {
     expect(calls).toEqual([null, 'p2']);
   });
 
-  test('keeps paginating past max_results to reach the trailing sync token, but stops appending', async () => {
+  test.each(['events', 'changes'])(
+    'resumes a capped %s bootstrap without dropping unread events',
+    async (feedKey) => {
+      const connector = new GoogleCalendarConnector();
+      const { client, calls, urls } = fakeHttp([
+        // Page 1 overshoots the cap of 1 — both of its events must still land,
+        // because the cursor moves past them either way.
+        {
+          items: [
+            calEvent('a1', '2026-01-01T10:00:00Z'),
+            calEvent('a2', '2026-01-01T11:00:00Z'),
+          ],
+          nextPageToken: 'p2',
+        },
+        { items: [calEvent('b', '2026-01-02T10:00:00Z')], nextSyncToken: 'SYNC2' },
+      ]);
+      connector.client = () => client;
+      const ctx = {
+        feedKey,
+        config: { calendar_id: 'primary', max_results: 1 },
+        credentials: { accessToken: 'tok' },
+      };
+
+      // The cap stops the run after page 1, but page 1 is stored whole and its
+      // continuation is parked rather than discarded.
+      const first = await connector.sync({ ...ctx, checkpoint: {} });
+      expect(first.events.map(originId).sort()).toEqual(['a1', 'a2']);
+      expect(calls).toEqual([null]);
+      expect(first.checkpoint.sync_token).toBeUndefined();
+      expect(first.checkpoint.last_sync_at).toBeUndefined();
+      expect(first.checkpoint.pending.page_token).toBe('p2');
+
+      const second = await connector.sync({ ...ctx, checkpoint: first.checkpoint });
+      expect(second.events.map(originId)).toEqual(['b']);
+      expect(second.checkpoint.sync_token).toBe('SYNC2');
+      expect(second.checkpoint.pending).toBeUndefined();
+      expect(calls).toEqual([null, 'p2']);
+      // The resumed page must be requested against the window that minted it.
+      expect(new URL(urls[0]).searchParams.get('timeMin')).toBe(
+        new URL(urls[1]).searchParams.get('timeMin')
+      );
+    }
+  );
+
+  test('replays a legacy checkpoint once, because its window may be truncated', async () => {
     const connector = new GoogleCalendarConnector();
-    const { client } = fakeHttp([
-      { items: [calEvent('a', '2026-01-01T10:00:00Z')], nextPageToken: 'p2' },
-      { items: [calEvent('b', '2026-01-02T10:00:00Z')], nextSyncToken: 'SYNC2' },
+    const { client, urls } = fakeHttp([
+      { items: [calEvent('recovered', '2026-01-01T10:00:00Z')], nextSyncToken: 'COMPLETE' },
     ]);
     connector.client = () => client;
 
     const result = await connector.sync({
-      feedKey: 'events',
-      config: { calendar_id: 'primary', max_results: 1 }, // cap at 1 stored event
+      feedKey: 'changes',
+      config: {},
+      credentials: { accessToken: 'tok' },
+      checkpoint: { sync_token: 'LEGACY' },
+    });
+
+    expect(new URL(urls[0]).searchParams.has('syncToken')).toBe(false);
+    expect(result.events).toHaveLength(1);
+    // Rescoped, so the replay happens exactly once.
+    expect(result.checkpoint.scope).toBe(SCOPE);
+  });
+
+  test('parks an empty page that still carries a continuation', async () => {
+    const connector = new GoogleCalendarConnector();
+    const { client } = fakeHttp([{ items: [], nextPageToken: 'p2' }]);
+    connector.client = () => client;
+
+    const result = await connector.sync({
+      feedKey: 'changes',
+      config: {},
       credentials: { accessToken: 'tok' },
       checkpoint: {},
     });
 
-    // Only 1 event stored (cap), but the second page was still fetched so the
-    // trailing sync token is captured.
-    expect(result.events).toHaveLength(1);
-    expect(result.checkpoint.sync_token).toBe('SYNC2');
+    expect(result.checkpoint.pending.page_token).toBe('p2');
+    expect(result.checkpoint.last_sync_at).toBeUndefined();
+  });
+
+  test('rejects a self-referential bootstrap cursor instead of looping', async () => {
+    const connector = new GoogleCalendarConnector();
+    const { client } = fakeHttp([{ items: [], nextPageToken: 'loop' }]);
+    connector.client = () => client;
+
+    await expect(
+      connector.sync({
+        feedKey: 'changes',
+        config: {},
+        credentials: { accessToken: 'tok' },
+        checkpoint: {
+          scope: SCOPE,
+          pending: {
+            params: 'maxResults=250&singleEvents=true&showDeleted=true',
+            page_token: 'loop',
+          },
+        },
+      })
+    ).rejects.toThrow(/repeated page token/);
+  });
+
+  test('changing calendars discards the old cursors and reboots the lookback', async () => {
+    const connector = new GoogleCalendarConnector();
+    const { client, urls } = fakeHttp([
+      { items: [calEvent('other', '2026-01-01T10:00:00Z')], nextSyncToken: 'NEW' },
+    ]);
+    connector.client = () => client;
+
+    await connector.sync({
+      feedKey: 'changes',
+      config: { calendar_id: 'secondary' },
+      credentials: { accessToken: 'tok' },
+      checkpoint: {
+        scope: SCOPE,
+        sync_token: 'WRONG',
+        pending: { params: 'maxResults=250', page_token: 'WRONG' },
+      },
+    });
+
+    const url = new URL(urls[0]);
+    expect(url.pathname).toContain('/secondary/events');
+    expect(url.searchParams.has('syncToken')).toBe(false);
+    expect(url.searchParams.has('pageToken')).toBe(false);
+    expect(url.searchParams.has('timeMin')).toBe(true);
+  });
+
+  test('a later-page provider failure fails the run instead of checkpointing it', async () => {
+    const connector = new GoogleCalendarConnector();
+    const { client } = fakeHttp([
+      { items: [calEvent('a', '2026-01-01T10:00:00Z')], nextPageToken: 'p2' },
+      { status: 503 },
+    ]);
+    connector.client = () => client;
+
+    // Throwing leaves the stored checkpoint untouched, so `p2` is retried whole
+    // rather than being recorded as reached.
+    await expect(
+      connector.sync({
+        feedKey: 'changes',
+        config: {},
+        credentials: { accessToken: 'tok' },
+        checkpoint: {},
+      })
+    ).rejects.toThrow(/503/);
+  });
+
+  test('incremental paging keeps its page size and fails closed at the safety bound', async () => {
+    const connector = new GoogleCalendarConnector();
+    const { client, urls } = fakeHttp(
+      Array.from({ length: 200 }, (_, i) => ({
+        items: [calEvent(String(i), '2026-01-01T10:00:00Z')],
+        nextPageToken: `page-${i + 1}`,
+      }))
+    );
+    connector.client = () => client;
+
+    // An incremental cursor only advances on the last page, so running out of
+    // pages has to fail rather than persist a partial batch.
+    await expect(
+      connector.sync({
+        feedKey: 'events',
+        config: { max_results: 2 },
+        credentials: { accessToken: 'tok' },
+        checkpoint: { scope: SCOPE, sync_token: 'CURRENT' },
+      })
+    ).rejects.toThrow(/page bound/);
+
+    expect(urls).toHaveLength(200);
+    // `max_results` caps the bootstrap only; it never shrinks the page size and
+    // with it the number of changes the bound can carry.
+    expect(new Set(urls.map((url) => new URL(url).searchParams.get('maxResults')))).toEqual(
+      new Set(['250'])
+    );
   });
 });
 
@@ -244,7 +407,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
-      checkpoint: { sync_token: 'POISONED' },
+      checkpoint: { scope: SCOPE, sync_token: 'POISONED' },
     });
 
     // The poisoned token was tried once...
@@ -279,7 +442,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
         feedKey: 'events',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },
-        checkpoint: { sync_token: 'POISONED' },
+        checkpoint: { scope: SCOPE, sync_token: 'POISONED' },
       })
     ).rejects.toThrow(/insufficient authentication scopes/);
   });
@@ -297,7 +460,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
         feedKey: 'events',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },
-        checkpoint: { sync_token: 'GOOD' },
+        checkpoint: { scope: SCOPE, sync_token: 'GOOD' },
       })
     ).rejects.toThrow(/Daily Limit Exceeded/);
 
@@ -341,7 +504,7 @@ describe('GoogleCalendarConnector incremental sync', () => {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
-      checkpoint: { sync_token: 'STALE' },
+      checkpoint: { scope: SCOPE, sync_token: 'STALE' },
     });
 
     // Incremental attempt used the stale token; full sync recovered events + a
@@ -355,7 +518,7 @@ describe('GoogleCalendarConnector incremental sync', () => {
 describe('GoogleCalendarConnector source-readable events feed', () => {
   test('events supports sync and read while changes supports sync only', () => {
     const connector = new GoogleCalendarConnector();
-    expect(connector.definition.version).toBe('1.1.1');
+    expect(connector.definition.version).toBe('1.1.2');
     expect(typeof connector.definition.feeds.events.sync).toBe('function');
     expect(typeof connector.definition.feeds.events.read).toBe('function');
     expect(typeof connector.definition.feeds.changes.sync).toBe('function');
@@ -492,7 +655,7 @@ describe('GoogleCalendarConnector durable changes feed', () => {
       feedKey: 'changes',
       config: { calendar_id: 'primary', max_results: 1 },
       credentials: { accessToken: 'tok' },
-      checkpoint: { sync_token: 'OLD' },
+      checkpoint: { scope: SCOPE, sync_token: 'OLD' },
     });
 
     expect(
@@ -542,7 +705,7 @@ describe('GoogleCalendarConnector durable changes feed', () => {
         feedKey: 'changes',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },
-        checkpoint: { sync_token: 'OLD' },
+        checkpoint: { scope: SCOPE, sync_token: 'OLD' },
       })
     ).rejects.toThrow(/sync token/i);
   });

@@ -16,6 +16,7 @@ beforeAll(async () => {
 
 interface FakeMessage {
   id: string;
+  body?: string;
   labelIds?: string[];
   from?: string;
   to?: string;
@@ -31,7 +32,7 @@ interface FakeThread {
 }
 
 /**
- * Fake Gmail HTTP client: serves threads.list (one page) and threads/<id>
+ * Fake Gmail HTTP client: serves paginated threads.list and threads/<id>
  * lookups from the given fixtures. Header values come from the per-message
  * `from`/`date` fields; snippets are constant. `failThreadIds` respond 404.
  */
@@ -56,7 +57,14 @@ function fakeHttp(
       }
       const body = threadMatch
         ? toThreadResponse(byId.get(threadMatch[1]))
-        : { threads: threads.map((t) => ({ id: t.id, historyId: '1', snippet: 's' })) };
+        : (() => {
+            const start = Number(u.searchParams.get('pageToken') ?? 0);
+            const limit = Number(u.searchParams.get('maxResults') ?? 100);
+            return {
+              threads: threads.slice(start, start + limit).map((t) => ({ id: t.id, historyId: '1', snippet: 's' })),
+              ...(start + limit < threads.length ? { nextPageToken: String(start + limit) } : {}),
+            };
+          })();
       return {
         ok: true,
         status: 200,
@@ -80,6 +88,7 @@ function toThreadResponse(thread: FakeThread | undefined) {
       internalDate: String(Date.parse(m.date ?? '2026-07-01T10:00:00Z')),
       payload: {
         mimeType: 'text/plain',
+        ...(m.body ? { body: { data: Buffer.from(m.body).toString('base64url') } } : {}),
         headers: [
           { name: 'Subject', value: `subject ${thread.id}` },
           { name: 'From', value: m.from ?? 'Some One <someone@example.com>' },
@@ -150,9 +159,7 @@ test('person-building sync requests its label union and attribution headers', as
 
   expect(new URL(urls[0]).searchParams.get('q')).toContain('{label:INBOX label:SENT}');
   const threadUrl = urls.find((url) => url.includes('/threads/t-human')) ?? '';
-  for (const header of ['To', 'Cc', 'List-Id', 'Precedence']) {
-    expect(threadUrl).toContain(`metadataHeaders=${header}`);
-  }
+  expect(new URL(threadUrl).searchParams.get('format')).toBe('full');
 });
 
 describe('Gmail replied signal (promote-on-interaction)', () => {
@@ -204,7 +211,7 @@ describe('Gmail replied signal (promote-on-interaction)', () => {
 
 describe('Gmail person attribution rule', () => {
   test('bumps the connector version for the changed sync contract', () => {
-    expect(new GmailConnector().definition.version).toBe('1.0.4');
+    expect(new GmailConnector().definition.version).toBe('1.0.5');
   });
 
   test('autoCreate is gated on person_relevant, with a legacy replied rule for pre-refresh payloads', () => {
@@ -640,4 +647,465 @@ describe('Gmail write scope', () => {
       expect(actions[key].key).toBe(key);
     }
   });
+});
+
+describe('complete Gmail sync input', () => {
+  const context = (checkpoint: Record<string, unknown> = {}, config: Record<string, unknown> = {}) => ({
+    feedKey: 'threads', credentials: { accessToken: 'synthetic-token' }, checkpoint, config,
+  });
+
+  test('stores full text of every reply and dates the thread by its newest message', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => fakeHttp([{ id: 'thread-full', messages: [
+      { id: 'first', date: '2026-07-01T10:00:00Z', body: 'Original request with details past the snippet.' },
+      { id: 'reply', date: '2026-07-02T11:00:00Z', body: 'The work is complete. Teşekkürler.' },
+    ] }], (url) => urls.push(url));
+    const result = await connector.sync(context());
+    expect(result.events[0].payload_text).toContain('Original request with details past the snippet.');
+    expect(result.events[0].payload_text).toContain('The work is complete. Teşekkürler.');
+    expect(result.events[0].occurred_at.toISOString()).toBe('2026-07-02T11:00:00.000Z');
+    expect(new URL(urls[1]).searchParams.get('format')).toBe('full');
+    expect(result.events[0].origin_id).toBe('thread-full');
+  });
+
+  test('honors the already-declared search scope instead of silently using INBOX', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => fakeHttp([], (url) => urls.push(url));
+    await connector.sync(context({}, { query: '-in:spam -in:trash', labels: ['INBOX', 'SENT'] }));
+    const query = new URL(urls[0]).searchParams.get('q');
+    expect(query).toContain('-in:spam -in:trash');
+    expect(query).not.toContain('label:INBOX');
+  });
+
+  test('resumes the next page without advancing past unprocessed mail', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      const u = new URL(url);
+      const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1];
+      return { ok: true, status: 200, json: async () => id
+        ? toThreadResponse({ id, messages: [{ id: 'm-' + id, body: id }] })
+        : u.searchParams.get('pageToken') === 'page-two'
+          ? { threads: [{ id: 'older' }] }
+          : { threads: [{ id: 'newer' }], nextPageToken: 'page-two' },
+      };
+    } });
+    const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
+    const first = await connector.sync(context(prior, { max_results: 1 }));
+    expect(first.checkpoint.last_sync_at).toBeUndefined();
+    expect(first.checkpoint.pending.page_token).toBe('page-two');
+    // A different lookback must not re-cut a window that is mid-walk: the stored
+    // page token only means anything against the query it was issued for.
+    const second = await connector.sync(context(first.checkpoint, { max_results: 1, lookback_days: 1 }));
+    expect(first.events.map((event) => event.origin_id)).toEqual(['newer']);
+    expect(second.events.map((event) => event.origin_id)).toEqual(['older']);
+    const lists = urls.filter((url) => !new URL(url).pathname.match(/\/threads\//)).map((url) => new URL(url));
+    expect(lists[1].searchParams.get('pageToken')).toBe('page-two');
+    expect(lists[1].searchParams.get('q')).toBe(lists[0].searchParams.get('q'));
+    expect(new Date(second.checkpoint.last_sync_at).getTime()).toBeGreaterThan(Date.parse(prior.last_sync_at));
+  });
+
+  test('keeps an empty page with a continuation token pending', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async () => ({
+      ok: true, json: async () => ({ threads: [], nextPageToken: 'continue-empty' }),
+    }) });
+    const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
+    const result = await connector.sync(context(prior));
+    expect(result.events).toEqual([]);
+    expect(result.checkpoint.last_sync_at).toBeUndefined();
+    expect(result.checkpoint.pending.page_token).toBe('continue-empty');
+  });
+
+  test('rejects a repeated token instead of recording a completed window', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async () => ({
+      ok: true, json: async () => ({ threads: [], nextPageToken: 'same' }),
+    }) });
+    await expect(connector.sync(context({ schema_version: 2, scope: JSON.stringify(['label:INBOX', false]), pending: {
+      query: 'after:1 before:2 (label:INBOX)',
+      started_at: '2026-07-02T00:00:00Z', page_token: 'same',
+    } }))).rejects.toThrow('repeated page token');
+  });
+
+  test('revisits the lookback when replacing snippet checkpoints or widening the filter', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => fakeHttp([], (url) => urls.push(url));
+    const old = { last_sync_at: new Date(Date.now() - 60_000).toISOString() };
+    const first = await connector.sync(context(old, { lookback_days: 30 }));
+    const after = Number(new URL(urls[0]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
+    expect(after).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
+    expect(first.checkpoint.schema_version).toBe(2);
+    await connector.sync(context(first.checkpoint, { query: '-in:spam -in:trash', lookback_days: 30 }));
+    const widenedAfter = Number(new URL(urls[1]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
+    expect(widenedAfter).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
+  });
+
+  test('preserves a long body including actions beyond an arbitrary preview cap', async () => {
+    const connector = new GmailConnector();
+    const body = 'x'.repeat(200_000) + ' Please submit the signed agreement.';
+    connector.createClient = () => fakeHttp([{ id: 'thread-long', messages: [{ id: 'long', body }] }]);
+    const result = await connector.sync(context());
+    expect(result.events[0].payload_text).toContain(body);
+  });
+
+  test.each(['empty', 'undated'])('does not advance past malformed %s thread data', async (kind) => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: true, status: 200, json: async () => url.includes('/threads/')
+        ? kind === 'empty' ? { id: kind, messages: [] }
+          : toThreadResponse({ id: kind, messages: [{ id: 'm', date: 'invalid-date' }] })
+        : { threads: [{ id: kind }] },
+    }) });
+    await expect(connector.sync(context())).rejects.toThrow(/Gmail returned/);
+  });
+
+  test('restarts the window when Gmail retires the stored page token', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({
+      raw: async (url: string) => {
+        urls.push(url);
+        const u = new URL(url);
+        const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1];
+        if (id) return { ok: true, status: 200, json: async () => toThreadResponse({ id, messages: [{ id: `m-${id}` }] }) };
+        if (u.searchParams.get('pageToken') === 'retired') {
+          return { ok: false, status: 400, text: async () => 'Invalid pageToken' };
+        }
+        return { ok: true, status: 200, json: async () => ({ threads: [{ id: 'first-page' }] }) };
+      },
+    });
+    const result = await connector.sync(
+      context({
+        schema_version: 2,
+        scope: JSON.stringify(['label:INBOX', false]),
+        pending: { query: 'after:1 before:2 (label:INBOX)', started_at: '2026-07-02T00:00:00Z', page_token: 'retired' },
+      })
+    );
+    // Same window, first page — not a fresh window, and not a wedged run.
+    const lists = urls.filter((url) => !url.includes('/threads/'));
+    expect(lists).toHaveLength(2);
+    expect(new URL(lists[1]).searchParams.get('pageToken')).toBeNull();
+    expect(new URL(lists[1]).searchParams.get('q')).toBe('after:1 before:2 (label:INBOX)');
+    expect(result.events.map((event) => event.origin_id)).toEqual(['first-page']);
+    expect(result.checkpoint.last_sync_at).toBe('2026-07-02T00:00:00Z');
+    expect(result.checkpoint.pending).toBeUndefined();
+  });
+
+  test('propagates a non-cursor list failure instead of restarting the window', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({
+      raw: async () => ({ ok: false, status: 429, text: async () => 'rate limited' }),
+    });
+    await expect(
+      connector.sync(
+        context({
+          schema_version: 2,
+          scope: JSON.stringify(['label:INBOX', false]),
+          pending: { query: 'after:1 before:2 (label:INBOX)', started_at: '2026-07-02T00:00:00Z', page_token: 'live' },
+        })
+      )
+    ).rejects.toThrow(/429/);
+  });
+
+  test('does not checkpoint past a failed thread fetch', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async (url: string) =>
+      url.includes('/threads/')
+        ? { ok: false, status: 503, text: async () => 'provider unavailable' }
+        : { ok: true, json: async () => ({ threads: [{ id: 'retry-me' }] }) },
+    });
+    await expect(connector.sync(context())).rejects.toThrow(/503/);
+  });
+});
+
+describe('Gmail externally stored message bodies', () => {
+  const BODY = 'Full body: please sign the agreement.';
+  const syncContext = {
+    feedKey: 'threads',
+    config: {},
+    checkpoint: {},
+    credentials: { accessToken: 'synthetic-token' },
+  };
+
+  function setup(attachmentStatus = 200) {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({
+      raw: async (url: string) => {
+        urls.push(url);
+        const attachment = url.includes('/attachments/');
+        return {
+          ok: !attachment || attachmentStatus === 200,
+          status: attachment ? attachmentStatus : 200,
+          text: async () => 'body fetch failed',
+          json: async () => {
+            if (attachment) return { data: Buffer.from(BODY).toString('base64url') };
+            if (!url.includes('/threads/')) return { threads: [{ id: 'thread-body' }] };
+            return {
+              id: 'thread-body',
+              messages: [
+                {
+                  id: 'message-body',
+                  internalDate: '1783558800000',
+                  snippet: 'Short preview',
+                  payload: {
+                    mimeType: 'multipart/mixed',
+                    headers: [],
+                    parts: [
+                      // An attached text file sits beside the body in the same
+                      // container and must not be mistaken for it.
+                      { mimeType: 'text/plain', filename: 'notes.txt', body: { attachmentId: 'excluded-file' } },
+                      {
+                        mimeType: 'multipart/alternative',
+                        parts: [{ mimeType: 'text/plain', body: { attachmentId: 'body-ref', size: 43 } }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          },
+        };
+      },
+    });
+    return { connector, urls };
+  }
+
+  test.each(['sync', 'get_thread'])(
+    '%s retrieves the text body reference without treating an attached file as the body',
+    async (mode) => {
+      const { connector, urls } = setup();
+      const body =
+        mode === 'sync'
+          ? (await connector.sync(syncContext)).events[0].payload_text
+          : (
+              await connector.execute({
+                actionKey: 'get_thread',
+                input: { thread_id: 'thread-body' },
+                credentials: { accessToken: 'synthetic-token' },
+              })
+            ).output.messages[0].body;
+      expect(body).toContain(BODY);
+      expect(urls.filter((url) => url.includes('/attachments/'))).toEqual([
+        'https://www.googleapis.com/gmail/v1/users/me/messages/message-body/attachments/body-ref',
+      ]);
+    }
+  );
+
+  test('a failed external body fetch cannot advance the sync checkpoint', async () => {
+    const { connector } = setup(503);
+    await expect(connector.sync(syncContext)).rejects.toThrow(/503/);
+  });
+});
+
+describe('Gmail empty MIME alternatives', () => {
+  const html = '<p>Please confirm the delivery date.</p>';
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+
+  function setup(plainBody: Record<string, unknown>, attachmentStatus = 200) {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'alternatives', messages: [{ id: 'message' }] });
+    const payload = {
+      ...thread.messages[0].payload,
+      mimeType: 'multipart/alternative',
+      parts: [
+        { mimeType: 'text/plain', body: plainBody },
+        { mimeType: 'text/html', body: { data: Buffer.from(html).toString('base64url') } },
+      ],
+    };
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: !url.includes('/attachments/') || attachmentStatus === 200,
+      status: attachmentStatus,
+      text: async () => 'body unavailable',
+      json: async () => url.includes('/attachments/') ? { data: '' }
+        : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        : { threads: [{ id: 'alternatives' }] },
+    }) });
+    return connector;
+  }
+
+  for (const mode of ['sync', 'get_thread']) {
+    test.each([
+      ['empty inline', { data: '', size: 0 }],
+      ['absent', {}],
+      ['whitespace', { data: Buffer.from(' \r\n').toString('base64url') }],
+      ['empty external', { attachmentId: 'empty-body', size: 0 }],
+    ] as const)(`${mode} falls back to HTML for %s plain text`, async (_name, body) => {
+      const connector = setup(body);
+      const text = mode === 'sync'
+        ? (await connector.sync(context)).events[0].payload_text
+        : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'alternatives' }, credentials: context.credentials })).output.messages[0].body;
+      expect(text).toContain(html);
+    });
+  }
+
+  test.each([
+    ['missing nonempty body', { size: 12 }, 200],
+    ['unavailable external body', { attachmentId: 'unavailable', size: 12 }, 503],
+    ['empty external response for nonempty body', { attachmentId: 'nonempty', size: 12 }, 200],
+  ] as const)('does not checkpoint past a %s despite a readable HTML alternative', async (_name, body, status) => {
+    await expect(setup(body, status).sync(context)).rejects.toThrow(/body/);
+  });
+});
+
+describe('Gmail multipart body sections', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+  const inline = (mimeType: string, text: string) => ({
+    mimeType, body: { data: Buffer.from(text).toString('base64url') },
+  });
+
+  function setup(externalStatus = 200) {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    const thread = toThreadResponse({ id: 'mixed-body', messages: [{ id: 'mixed-message' }] });
+    const payload = {
+      ...thread.messages[0].payload,
+      mimeType: 'multipart/mixed',
+      parts: [
+        {
+          mimeType: 'multipart/alternative',
+          parts: [inline('text/html', '<p>HTML duplicate</p>'), inline('text/plain', 'Opening section.')],
+        },
+        {
+          mimeType: 'multipart/alternative',
+          parts: [inline('text/plain', ''), inline('text/html', '<p>HTML-only middle section.</p>')],
+        },
+        { mimeType: 'text/plain', body: { attachmentId: 'inline-tail' } },
+        { mimeType: 'text/plain', headers: [{ name: 'Content-Disposition', value: 'attachment' }], body: { attachmentId: 'excluded' } },
+      ],
+    };
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      return {
+        ok: !url.includes('/attachments/') || externalStatus === 200,
+        status: externalStatus,
+        text: async () => 'body unavailable',
+        json: async () => url.includes('/attachments/') ? { data: Buffer.from('Please sign the final section.').toString('base64url') }
+          : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+          : { threads: [{ id: thread.id }] },
+      };
+    } });
+    return { connector, urls };
+  }
+
+  test.each(['sync', 'get_thread'])('%s retains every inline section without duplicating alternatives', async (mode) => {
+    const { connector, urls } = setup();
+    const body = mode === 'sync'
+      ? (await connector.sync(context)).events[0].payload_text
+      : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'mixed-body' }, credentials: context.credentials })).output.messages[0].body;
+    expect(body).toContain('Opening section.\n\n<p>HTML-only middle section.</p>\n\nPlease sign the final section.');
+    expect(body).not.toContain('HTML duplicate');
+    expect(urls.filter((url) => url.includes('/attachments/'))).toEqual([
+      'https://www.googleapis.com/gmail/v1/users/me/messages/mixed-message/attachments/inline-tail',
+    ]);
+  });
+
+  test('does not checkpoint past a failed later inline section', async () => {
+    await expect(setup(503).connector.sync(context)).rejects.toThrow(/503/);
+  });
+});
+
+describe('Gmail MIME syntax', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+  const inline = (mimeType: string, text: string) => ({
+    mimeType, body: { data: Buffer.from(text).toString('base64url') },
+  });
+
+  for (const mode of ['sync', 'get_thread']) {
+    test.each([
+      ['plain body', inline('TEXT/PLAIN', 'Complete body.')],
+      ['HTML body', inline('Text/Html', 'Complete body.')],
+      ['alternative preference', {
+        mimeType: 'Multipart/Alternative',
+        parts: [inline('text/html', 'Unwanted duplicate.'), inline('TEXT/PLAIN', 'Complete body.')],
+      }],
+      ['attachment whitespace', {
+        mimeType: 'multipart/mixed',
+        parts: [
+          inline('text/plain', 'Complete body.'),
+          { ...inline('text/plain', 'Unwanted attachment.'), headers: [{ name: 'Content-Disposition', value: ' ATTACHMENT \r\n\t; size=20' }] },
+        ],
+      }],
+      ['named inline body', {
+        ...inline('text/plain', 'Complete body.'),
+        filename: 'body.txt',
+        headers: [{ name: 'Content-Disposition', value: 'INLINE; filename="body.txt"' }],
+      }],
+      ['named inline multipart', {
+        mimeType: 'multipart/mixed', filename: 'body.mime',
+        headers: [{ name: 'Content-Disposition', value: 'inline; filename="body.mime"' }],
+        parts: [inline('text/plain', 'Complete body.')],
+      }],
+      ['unknown attachment disposition', {
+        mimeType: 'multipart/mixed',
+        parts: [
+          inline('text/plain', 'Complete body.'),
+          { ...inline('text/plain', 'Unwanted attachment.'), headers: [{ name: 'Content-Disposition', value: 'x-archive' }] },
+        ],
+      }],
+    ])(`${mode} handles valid MIME syntax in %s`, async (_name, payload) => {
+      const connector = new GmailConnector();
+      const thread = toThreadResponse({ id: 'mime-thread', messages: [{ id: 'mime-message' }] });
+      connector.createClient = () => ({ raw: async (url: string) => ({
+        ok: true,
+        json: async () => url.includes('/threads/')
+          ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+          : { threads: [{ id: thread.id }] },
+      }) });
+      const body = mode === 'sync'
+        ? (await connector.sync(context)).events[0].payload_text
+        : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: thread.id }, credentials: context.credentials })).output.messages[0].body;
+      expect(body).toContain('Complete body.');
+      expect(body).not.toContain('Unwanted');
+    });
+  }
+});
+
+describe('Gmail MIME body charset', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+
+  function setup(bytes: Buffer, contentType: string | undefined, external: boolean) {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'encoded-thread', messages: [{ id: 'encoded-message' }] });
+    const payload = {
+      mimeType: 'text/plain',
+      headers: contentType ? [{ name: 'cOnTeNt-TyPe', value: contentType }] : [],
+      body: external ? { attachmentId: 'encoded-body', size: bytes.length }
+        : { data: bytes.toString('base64url'), size: bytes.length },
+    };
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: true,
+      json: async () => url.includes('/attachments/') ? { data: bytes.toString('base64url') }
+        : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        : { threads: [{ id: thread.id }] },
+    }) });
+    return connector;
+  }
+
+  for (const external of [false, true]) {
+    for (const mode of ['sync', 'get_thread']) {
+      test.each([
+        ['Latin-1', Buffer.from('café à Noël', 'latin1'), 'text/plain; CHARSET="ISO-8859-1"', 'café à Noël'],
+        ['default UTF-8', Buffer.from('İstanbul — teşekkürler'), undefined, 'İstanbul — teşekkürler'],
+      ] as const)(`${mode} decodes %s ${external ? 'external' : 'inline'} bytes`, async (_name, bytes, contentType, expected) => {
+        const connector = setup(bytes, contentType, external);
+        const body = mode === 'sync'
+          ? (await connector.sync(context)).events[0].payload_text
+          : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'encoded-thread' }, credentials: context.credentials })).output.messages[0].body;
+        expect(body).toContain(expected);
+        expect(body).not.toContain('\uFFFD');
+      });
+    }
+    test.each([
+      ['invalid UTF-8', Buffer.from([0xc3, 0x28]), 'text/plain; charset=utf-8'],
+      ['unsupported charset', Buffer.from('body'), 'text/plain; charset=unknown-charset'],
+    ] as const)(`does not checkpoint past %s ${external ? 'external' : 'inline'} bytes`, async (_name, bytes, contentType) => {
+      await expect(setup(bytes, contentType, external).sync(context)).rejects.toThrow();
+    });
+  }
 });

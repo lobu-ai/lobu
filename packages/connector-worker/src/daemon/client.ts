@@ -427,7 +427,8 @@ export class WorkerClient implements ExecutorClient {
     terminalStatus: 'completed' | 'failed' | 'timeout' | 'cancelled',
     snapshotJsonl: string
   ): Promise<void> {
-    const route = '/worker/transcript/snapshot';
+    // apiUrl is the app origin; the worker gateway is mounted under /lobu.
+    const route = '/lobu/worker/transcript/snapshot';
     const response = await fetch(`${this.apiUrl}${route}`, {
       method: 'POST',
       headers: {
