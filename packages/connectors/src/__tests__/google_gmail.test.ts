@@ -16,6 +16,7 @@ beforeAll(async () => {
 
 interface FakeMessage {
   id: string;
+  body?: string;
   labelIds?: string[];
   from?: string;
   to?: string;
@@ -56,7 +57,14 @@ function fakeHttp(
       }
       const body = threadMatch
         ? toThreadResponse(byId.get(threadMatch[1]))
-        : { threads: threads.map((t) => ({ id: t.id, historyId: '1', snippet: 's' })) };
+        : (() => {
+            const start = Number(u.searchParams.get('pageToken') ?? 0);
+            const limit = Number(u.searchParams.get('maxResults') ?? 100);
+            return {
+              threads: threads.slice(start, start + limit).map((t) => ({ id: t.id, historyId: '1', snippet: 's' })),
+              ...(start + limit < threads.length ? { nextPageToken: String(start + limit) } : {}),
+            };
+          })();
       return {
         ok: true,
         status: 200,
@@ -80,6 +88,7 @@ function toThreadResponse(thread: FakeThread | undefined) {
       internalDate: String(Date.parse(m.date ?? '2026-07-01T10:00:00Z')),
       payload: {
         mimeType: 'text/plain',
+        ...(m.body ? { body: { data: Buffer.from(m.body).toString('base64url') } } : {}),
         headers: [
           { name: 'Subject', value: `subject ${thread.id}` },
           { name: 'From', value: m.from ?? 'Some One <someone@example.com>' },
@@ -150,9 +159,7 @@ test('person-building sync requests its label union and attribution headers', as
 
   expect(new URL(urls[0]).searchParams.get('q')).toContain('{label:INBOX label:SENT}');
   const threadUrl = urls.find((url) => url.includes('/threads/t-human')) ?? '';
-  for (const header of ['To', 'Cc', 'List-Id', 'Precedence']) {
-    expect(threadUrl).toContain(`metadataHeaders=${header}`);
-  }
+  expect(new URL(threadUrl).searchParams.get('format')).toBe('full');
 });
 
 describe('Gmail replied signal (promote-on-interaction)', () => {
@@ -204,7 +211,7 @@ describe('Gmail replied signal (promote-on-interaction)', () => {
 
 describe('Gmail person attribution rule', () => {
   test('bumps the connector version for the changed sync contract', () => {
-    expect(new GmailConnector().definition.version).toBe('1.0.4');
+    expect(new GmailConnector().definition.version).toBe('1.0.5');
   });
 
   test('autoCreate is gated on person_relevant, with a legacy replied rule for pre-refresh payloads', () => {
@@ -639,5 +646,131 @@ describe('Gmail write scope', () => {
       expect(actions[key]).toBeDefined();
       expect(actions[key].key).toBe(key);
     }
+  });
+});
+
+describe('complete Gmail sync input', () => {
+  const context = (checkpoint: Record<string, unknown> = {}, config: Record<string, unknown> = {}) => ({
+    feedKey: 'threads', credentials: { accessToken: 'synthetic-token' }, checkpoint, config,
+  });
+
+  test('stores full text of every reply and dates the thread by its newest message', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => fakeHttp([{ id: 'thread-full', messages: [
+      { id: 'first', date: '2026-07-01T10:00:00Z', body: 'Original request with details past the snippet.' },
+      { id: 'reply', date: '2026-07-02T11:00:00Z', body: 'The work is complete. Teşekkürler.' },
+    ] }], (url) => urls.push(url));
+    const result = await connector.sync(context());
+    expect(result.events[0].payload_text).toContain('Original request with details past the snippet.');
+    expect(result.events[0].payload_text).toContain('The work is complete. Teşekkürler.');
+    expect(result.events[0].occurred_at.toISOString()).toBe('2026-07-02T11:00:00.000Z');
+    expect(new URL(urls[1]).searchParams.get('format')).toBe('full');
+    expect(result.events[0].origin_id).toBe('thread-full');
+  });
+
+  test('honors the already-declared search scope instead of silently using INBOX', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => fakeHttp([], (url) => urls.push(url));
+    await connector.sync(context({}, { query: '-in:spam -in:trash', labels: ['INBOX', 'SENT'] }));
+    const query = new URL(urls[0]).searchParams.get('q');
+    expect(query).toContain('-in:spam -in:trash');
+    expect(query).not.toContain('label:INBOX');
+  });
+
+  test('resumes the next page without advancing past unprocessed mail', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      const u = new URL(url);
+      const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1];
+      return { ok: true, status: 200, json: async () => id
+        ? toThreadResponse({ id, messages: [{ id: 'm-' + id, body: id }] })
+        : u.searchParams.get('pageToken') === 'page-two'
+          ? { threads: [{ id: 'older' }] }
+          : { threads: [{ id: 'newer' }], nextPageToken: 'page-two' },
+      };
+    } });
+    const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
+    const first = await connector.sync(context(prior, { max_results: 1 }));
+    expect(first.checkpoint.last_sync_at).toBeUndefined();
+    expect(first.checkpoint.pending.page_token).toBe('page-two');
+    // A different lookback must not re-cut a window that is mid-walk: the stored
+    // page token only means anything against the query it was issued for.
+    const second = await connector.sync(context(first.checkpoint, { max_results: 1, lookback_days: 1 }));
+    expect(first.events.map((event) => event.origin_id)).toEqual(['newer']);
+    expect(second.events.map((event) => event.origin_id)).toEqual(['older']);
+    const lists = urls.filter((url) => !new URL(url).pathname.match(/\/threads\//)).map((url) => new URL(url));
+    expect(lists[1].searchParams.get('pageToken')).toBe('page-two');
+    expect(lists[1].searchParams.get('q')).toBe(lists[0].searchParams.get('q'));
+    expect(new Date(second.checkpoint.last_sync_at).getTime()).toBeGreaterThan(Date.parse(prior.last_sync_at));
+  });
+
+  test('keeps an empty page with a continuation token pending', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async () => ({
+      ok: true, json: async () => ({ threads: [], nextPageToken: 'continue-empty' }),
+    }) });
+    const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
+    const result = await connector.sync(context(prior));
+    expect(result.events).toEqual([]);
+    expect(result.checkpoint.last_sync_at).toBeUndefined();
+    expect(result.checkpoint.pending.page_token).toBe('continue-empty');
+  });
+
+  test('rejects a repeated token instead of recording a completed window', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async () => ({
+      ok: true, json: async () => ({ threads: [], nextPageToken: 'same' }),
+    }) });
+    await expect(connector.sync(context({ schema_version: 2, scope: JSON.stringify(['label:INBOX', false]), pending: {
+      query: 'after:1 before:2 (label:INBOX)',
+      started_at: '2026-07-02T00:00:00Z', page_token: 'same',
+    } }))).rejects.toThrow('repeated page token');
+  });
+
+  test('revisits the lookback when replacing snippet checkpoints or widening the filter', async () => {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => fakeHttp([], (url) => urls.push(url));
+    const old = { last_sync_at: new Date(Date.now() - 60_000).toISOString() };
+    const first = await connector.sync(context(old, { lookback_days: 30 }));
+    const after = Number(new URL(urls[0]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
+    expect(after).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
+    expect(first.checkpoint.schema_version).toBe(2);
+    await connector.sync(context(first.checkpoint, { query: '-in:spam -in:trash', lookback_days: 30 }));
+    const widenedAfter = Number(new URL(urls[1]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
+    expect(widenedAfter).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
+  });
+
+  test('preserves a long body including actions beyond an arbitrary preview cap', async () => {
+    const connector = new GmailConnector();
+    const body = 'x'.repeat(200_000) + ' Please submit the signed agreement.';
+    connector.createClient = () => fakeHttp([{ id: 'thread-long', messages: [{ id: 'long', body }] }]);
+    const result = await connector.sync(context());
+    expect(result.events[0].payload_text).toContain(body);
+  });
+
+  test.each(['empty', 'undated'])('does not advance past malformed %s thread data', async (kind) => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: true, status: 200, json: async () => url.includes('/threads/')
+        ? kind === 'empty' ? { id: kind, messages: [] }
+          : toThreadResponse({ id: kind, messages: [{ id: 'm', date: 'invalid-date' }] })
+        : { threads: [{ id: kind }] },
+    }) });
+    await expect(connector.sync(context())).rejects.toThrow(/Gmail returned/);
+  });
+
+  test('does not checkpoint past a failed thread fetch', async () => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async (url: string) =>
+      url.includes('/threads/')
+        ? { ok: false, status: 503, text: async () => 'provider unavailable' }
+        : { ok: true, json: async () => ({ threads: [{ id: 'retry-me' }] }) },
+    });
+    await expect(connector.sync(context())).rejects.toThrow(/503/);
   });
 });

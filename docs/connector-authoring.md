@@ -118,8 +118,8 @@ directly because their executable handlers live elsewhere.
 - **`read`** pushes filtering and pagination to the source and returns rows to
   the caller without persisting them.
 - **Both** lets a connector maintain a small, searchable index while retaining
-  an explicit path to source-owned detail. Gmail can sync selected metadata yet
-  read complete messages on demand; SQL and warehouse connectors can
+  an explicit path to source-owned detail. Gmail can sync a filtered set of
+  threads yet read any message on demand; SQL and warehouse connectors can
   materialize selected queries while pushing ad-hoc compute to the database.
 
 `configSchema` governs the persisted feed instance across every handler.
