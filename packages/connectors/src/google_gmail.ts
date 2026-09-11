@@ -12,7 +12,6 @@ import {
   createHttpClient,
   type EventEnvelope,
   type HttpClient,
-  paginateByCursor,
   type FeedReadContext,
   type FeedReadResult,
   type RuntimeConnectorDefinition,
@@ -35,9 +34,11 @@ interface GmailMessage {
 }
 
 interface GmailMessagePayload {
-  headers: GmailHeader[];
+  /** Present on the top-level payload; nested MIME parts may omit it. */
+  headers?: GmailHeader[];
   mimeType: string;
-  body?: { data?: string; size?: number };
+  filename?: string;
+  body?: { data?: string; size?: number; attachmentId?: string };
   parts?: GmailMessagePayload[];
 }
 
@@ -63,11 +64,24 @@ interface GmailThreadGetResponse {
 // ---------------------------------------------------------------------------
 
 interface GmailCheckpoint {
+  /** Bumped when the shape below changes; a mismatch re-runs the lookback. */
+  schema_version?: number;
+  /** Serialized search + person filter the two fields below were produced under. */
+  scope?: string;
   last_sync_at?: string;
+  /** Set while a window is only part-walked: the run hit `max_results`, or a page came back empty with a cursor. */
+  pending?: {
+    query: string;
+    started_at: string;
+    page_token: string;
+  };
 }
 
 interface GmailConfig {
-  /** Gmail search scope shared by sync and direct source reads. */
+  /**
+   * Gmail search scope shared by sync and direct source reads. Takes precedence
+   * over `labels` and `label` when set.
+   */
   query?: string;
   label?: string;
   /** Non-empty labels to union in the sync query. Overrides `label`. */
@@ -106,7 +120,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     name: 'Gmail',
     description:
       'Syncs Gmail threads, live-reads matching messages, and supports sending, drafts, and replies.',
-    version: '1.0.4',
+    version: '1.0.5',
     faviconDomain: 'mail.google.com',
     authSchema: {
       methods: [
@@ -148,7 +162,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
             query: {
               type: 'string',
               description:
-                'Optional Gmail search scope for sync and source reads, e.g. "label:INBOX newer_than:30d".',
+                'Optional Gmail search scope for sync and source reads, e.g. "label:INBOX newer_than:30d". Takes precedence over `labels` and `label`.',
             },
             label: {
               type: 'string',
@@ -159,7 +173,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
               type: 'array',
               items: { type: 'string' },
               description:
-                'Non-empty labels to union in the sync query, e.g. ["INBOX", "SENT"]. Overrides `label` so outbound-initiated threads are covered.',
+                'Non-empty labels to union in the sync query, e.g. ["INBOX", "SENT"]. Overrides `label` so outbound-initiated threads are covered; ignored when `query` is set.',
             },
             max_results: {
               type: 'integer',
@@ -387,139 +401,135 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const lookbackDays = ctx.config.lookback_days ?? 30;
     const humanSendersOnly = ctx.config.human_senders_only === true;
 
-    const checkpoint = ctx.checkpoint ?? {}
-
-    // Determine the "after" date for the query
-    const afterDate = checkpoint.last_sync_at
+    const checkpoint = ctx.checkpoint ?? {};
+    const scope = ctx.config.query?.trim() || (labels.length > 0
+      ? `{${labels.map((l) => `label:${l}`).join(' ')}}`
+      : `label:${label}`);
+    // Old checkpoints describe snippet-only input. Revisit the configured
+    // lookback once when upgrading or changing the source filter, preserving
+    // thread origin IDs so ingestion supersedes rather than duplicates rows.
+    const scopeKey = JSON.stringify([scope, humanSendersOnly]);
+    const resumable = checkpoint.schema_version === 2 && checkpoint.scope === scopeKey;
+    const pending = resumable ? checkpoint.pending : undefined;
+    const windowStart = pending?.started_at ?? syncStartedAt.toISOString();
+    const afterDate = resumable && checkpoint.last_sync_at
       ? new Date(checkpoint.last_sync_at)
-      : (() => {
-          const d = new Date();
-          d.setDate(d.getDate() - lookbackDays);
-          return d;
-        })();
-
-    // Gmail's `after:` accepts a Unix timestamp (epoch seconds) for second-level
-    // precision. Using `YYYY/MM/DD` (day granularity, host timezone) meant every
-    // sync within the same day re-fetched the whole day's threads as duplicates.
-    const afterEpochSeconds = Math.floor(afterDate.getTime() / 1000);
-    // `labels` unions multiple labels (e.g. INBOX + SENT) so outbound-initiated
-    // threads — often the strongest "this is a real contact" signal — are covered.
-    const query =
-      labels.length > 0
-        ? `after:${afterEpochSeconds} {${labels.map((l) => `label:${l}`).join(' ')}}`
-        : `after:${afterEpochSeconds} label:${label}`;
-
+      : new Date(syncStartedAt.getTime() - lookbackDays * 24 * 60 * 60_000);
+    // Keep the search window fixed across capped runs. Its second-level overlap
+    // covers messages arriving on the boundary; origin_id makes that replay safe.
+    const after = Math.floor(afterDate.getTime() / 1000) - 1;
+    const before = Math.ceil(Date.parse(windowStart) / 1000);
+    const query = pending?.query ?? `after:${after} before:${before} (${scope})`;
+    let pageToken = pending?.page_token;
+    // A stored cursor outlives the run that issued it and Gmail may retire it.
+    // Rejecting it forever would wedge the feed behind a checkpoint only a human
+    // could clear, so the first request of the run — the only one using a cursor
+    // from a previous run — may fall back to re-walking the same window from its
+    // first page. `origin_id` makes that replay a supersede, not a duplicate.
+    let staleCursorRecoverable = pageToken !== undefined;
     const http = this.createClient(token);
     const events: EventEnvelope[] = [];
-    // Bounds the threads FETCHED per run (each is an API call), independent of
-    // how many survive the person filter — a narrow feed must not scan the whole
-    // lookback just because most threads are rejected.
+    // Bounds the threads FETCHED per run (each costs at least one API call),
+    // independent of how many survive the person filter — a narrow feed must not
+    // scan the whole window just because most threads are rejected. It also sizes
+    // each list page, so a page can never push the run past the cap.
     let inspected = 0;
 
-    const pages = paginateByCursor<NonNullable<GmailThreadListResponse['threads']>[number], string>(
-      async (pageToken) => {
-        const params = new URLSearchParams({
-          q: query,
-          maxResults: String(Math.min(100, maxResults - inspected)),
-        });
-        if (pageToken) {
-          params.set('pageToken', pageToken);
+    for (;;) {
+      const params = new URLSearchParams({
+        q: query,
+        maxResults: String(Math.min(100, maxResults - inspected)),
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const listResponse = await http.raw(`${this.BASE_URL}/threads?${params.toString()}`);
+      if (!listResponse.ok) {
+        const detail = await listResponse.text();
+        // Retry a stored cursor once on 400/404. Auth, quota and server errors
+        // must still fail the run without restarting pagination.
+        if (staleCursorRecoverable && (listResponse.status === 400 || listResponse.status === 404)) {
+          staleCursorRecoverable = false;
+          pageToken = undefined;
+          continue;
         }
-
-        const listUrl = `${this.BASE_URL}/threads?${params.toString()}`;
-        const listResponse = await http.raw(listUrl);
-
-        if (!listResponse.ok) {
-          throw new Error(
-            `Gmail threads.list error (${listResponse.status}): ${await listResponse.text()}`
-          );
-        }
-
-        const listData = (await listResponse.json()) as GmailThreadListResponse;
-        return { items: listData.threads ?? [], nextCursor: listData.nextPageToken };
-      },
-      { delayMs: this.RATE_LIMIT_MS }
-    );
-
-    for await (const threads of pages) {
-      if (threads.length === 0) break;
-
-      // Fetch each thread with metadata format
+        throw new Error(`Gmail threads.list error (${listResponse.status}): ${detail}`);
+      }
+      staleCursorRecoverable = false;
+      const listData = (await listResponse.json()) as GmailThreadListResponse;
+      const threads = listData.threads ?? [];
       for (const threadStub of threads) {
+        inspected++;
         try {
-          // Count the GET attempt up front so failed/empty/malformed responses
-          // also consume max_results — the cap bounds API calls, not just events.
-          inspected++;
-          const threadUrl = `${this.BASE_URL}/threads/${threadStub.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Date&metadataHeaders=List-Id&metadataHeaders=Precedence`;
-          const threadResponse = await http.raw(threadUrl);
-
-          if (!threadResponse.ok) continue;
-
-          const thread = (await threadResponse.json()) as GmailThreadGetResponse;
-
-          if (!thread.messages || thread.messages.length === 0) continue;
-
-          const firstMessage = thread.messages[0];
-          const attribution = this.resolvePersonAttribution(
-            thread.messages,
-            humanSendersOnly
-          );
-          const subject = this.getHeader(firstMessage, 'Subject') || '(no subject)';
-          const dateHeader = this.getHeader(firstMessage, 'Date');
-          const occurredAt = dateHeader
-            ? new Date(dateHeader)
-            : new Date(parseInt(firstMessage.internalDate, 10));
-
-          if (Number.isNaN(occurredAt.getTime())) continue;
-
-          // Under human_senders_only the sync is deliberately narrow — only
-          // person-relevant threads are persisted (everything else stays a live
-          // read), so the DB only holds the high-signal set that drives person
-          // building.
+          const response = await http.raw(`${this.BASE_URL}/threads/${threadStub.id}?format=full`);
+          // A thread deleted between list and get has nothing left to sync.
+          // Other failures must fail the run so the same window is retried
+          // rather than checkpointed as complete.
+          if (response.status === 404) continue;
+          if (!response.ok) {
+            throw new Error(`Gmail threads.get error (${response.status}): ${await response.text()}`);
+          }
+          const thread = (await response.json()) as GmailThreadGetResponse;
+          if (!thread.messages?.length) throw new Error('Gmail returned a thread without messages');
+          const messages = [...thread.messages].sort((a, b) => Number(a.internalDate) - Number(b.internalDate));
+          const firstMessage = messages[0];
+          const latestMessage = messages[messages.length - 1];
+          const occurredAt = new Date(Number(latestMessage.internalDate));
+          if (Number.isNaN(occurredAt.getTime())) throw new Error('Gmail returned an invalid message date');
+          const attribution = this.resolvePersonAttribution(messages, humanSendersOnly);
           if (humanSendersOnly && !attribution.personRelevant) continue;
-
-          const event: EventEnvelope = {
+          const messageTexts: string[] = [];
+          for (const message of messages) {
+            const body = await this.extractBody(message.payload, http, message.id) || message.snippet || '';
+            messageTexts.push([
+              `Message: ${message.id}`,
+              `From: ${this.getHeader(message, 'From') || 'Unknown'}`,
+              `To: ${this.getHeader(message, 'To') || ''}`,
+              `Date: ${this.getHeader(message, 'Date') || new Date(Number(message.internalDate)).toISOString()}`,
+              '', body,
+            ].join('\n'));
+          }
+          events.push({
             origin_id: thread.id,
-            title: subject,
-            payload_text: firstMessage.snippet || '',
+            title: this.getHeader(firstMessage, 'Subject') || '(no subject)',
+            payload_text: messageTexts.join('\n\n---\n\n'),
             author_name: attribution.from,
             source_url: `https://mail.google.com/mail/u/0/#inbox/${thread.id}`,
             occurred_at: occurredAt,
             origin_type: 'thread',
             metadata: {
-              message_count: thread.messages.length,
-              label_ids: firstMessage.labelIds ?? [],
-              snippet: firstMessage.snippet,
+              message_count: messages.length,
+              label_ids: [...new Set(messages.flatMap((message) => message.labelIds ?? []))],
+              snippet: latestMessage.snippet,
               replied: attribution.replied,
               person_relevant: attribution.personRelevant,
               ...(attribution.fromEmail ? { from_email: attribution.fromEmail } : {}),
               ...(attribution.fromName ? { from_name: attribution.fromName } : {}),
             },
-          };
-
-          events.push(event);
-        } catch {
-          /* skip individual thread failures */
+          });
         } finally {
-          // Filtering must not remove the per-thread API delay: a narrow feed
-          // can reject most fetched threads and still has to respect Gmail.
-          // The cap check lives here too — a `continue` in the try (failed or
-          // filtered thread) must still consume max_results and halt.
           await sleep(this.RATE_LIMIT_MS);
-          if (inspected >= maxResults) break;
         }
       }
-
-      if (inspected >= maxResults) break;
+      if (listData.nextPageToken && listData.nextPageToken === pageToken) {
+        throw new Error('Gmail returned a repeated page token');
+      }
+      pageToken = listData.nextPageToken;
+      // An empty page with a cursor is still incomplete. Persist its cursor
+      // rather than advance the window or spin on empty provider responses.
+      if (threads.length === 0) break;
+      if (!pageToken || inspected >= maxResults) break;
     }
 
-    // Sort by occurred_at descending
     events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
-
-    const newCheckpoint: GmailCheckpoint = {
-      // Keep events that arrive while this sync is running inside the next window.
-      last_sync_at: syncStartedAt.toISOString(),
-    };
+    // A part-walked window keeps the previous `last_sync_at`: it may not advance
+    // until the whole window has been walked, or the unread tail is skipped.
+    const newCheckpoint: GmailCheckpoint = pageToken
+      ? {
+          schema_version: 2,
+          scope: scopeKey,
+          ...(resumable && checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
+          pending: { query, started_at: windowStart, page_token: pageToken },
+        }
+      : { schema_version: 2, scope: scopeKey, last_sync_at: windowStart };
 
     return {
       events,
@@ -909,13 +919,16 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         ? this.getHeader(thread.messages[0], 'Subject') || '(no subject)'
         : '(no subject)';
 
-    const messages = thread.messages.map((msg) => ({
-      id: msg.id,
-      from: this.getHeader(msg, 'From') || 'Unknown',
-      date: this.getHeader(msg, 'Date') || '',
-      snippet: msg.snippet,
-      body: this.extractBody(msg.payload),
-    }));
+    const messages = [];
+    for (const msg of thread.messages) {
+      messages.push({
+        id: msg.id,
+        from: this.getHeader(msg, 'From') || 'Unknown',
+        date: this.getHeader(msg, 'Date') || '',
+        snippet: msg.snippet,
+        body: await this.extractBody(msg.payload, http, msg.id),
+      });
+    }
 
     return {
       success: true,
@@ -1069,7 +1082,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   }
 
   private getHeader(message: GmailMessage, name: string): string | undefined {
-    const header = message.payload.headers.find((h) => h.name.toLowerCase() === name.toLowerCase());
+    const header = message.payload.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase());
     return header?.value;
   }
 
@@ -1095,40 +1108,62 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     return { name: trimmed, email: null };
   }
 
-  private extractBody(payload: GmailMessagePayload): string {
-    // Try to get body from payload.body.data directly
+  private async extractBody(
+    payload: GmailMessagePayload,
+    http: HttpClient,
+    messageId: string
+  ): Promise<string> {
+    const disposition = payload.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')
+      ?.value.split(';', 1)[0].trim().toLowerCase();
+    // Explicit inline parts can have filenames. Other declared dispositions
+    // (including extensions) are attachments; otherwise use the filename hint.
+    if (disposition !== 'inline' && (disposition || payload.filename)) return '';
+    const mimeType = payload.mimeType.toLowerCase();
+    if (payload.parts?.length) {
+      // Only multipart/alternative contains equivalent versions. Mixed parts
+      // are separate sections and must all be retained in their original order.
+      const isAlternative = mimeType === 'multipart/alternative';
+      const parts = isAlternative
+        ? [
+            ...payload.parts.filter((part) => part.mimeType.toLowerCase() === 'text/plain'),
+            ...payload.parts.filter((part) => part.mimeType.toLowerCase() !== 'text/plain'),
+          ]
+        : payload.parts;
+      const sections: string[] = [];
+      for (const part of parts) {
+        const text = await this.extractBody(part, http, messageId);
+        if (!text) continue;
+        if (isAlternative) return text;
+        sections.push(text);
+      }
+      return sections.join('\n\n');
+    }
+    if (mimeType !== 'text/plain' && mimeType !== 'text/html') return '';
+    let text = '';
     if (payload.body?.data) {
-      return this.base64UrlDecode(payload.body.data);
+      text = this.base64UrlDecode(payload.body.data, payload);
+    } else if (payload.body?.attachmentId) {
+      // Gmail may externalize the body itself, even under format=full. A
+      // failed fetch must not silently replace that body with its alternative.
+      const response = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(payload.body.attachmentId)}`);
+      if (!response.ok) throw new Error(`Gmail message body error (${response.status}): ${await response.text()}`);
+      const body = (await response.json()) as { data?: string };
+      if (typeof body.data !== 'string') throw new Error('Gmail returned a message body without data');
+      text = this.base64UrlDecode(body.data, payload);
     }
-
-    // Search through parts for text/plain or text/html
-    if (payload.parts) {
-      for (const part of payload.parts) {
-        if (part.mimeType === 'text/plain' && part.body?.data) {
-          return this.base64UrlDecode(part.body.data);
-        }
-      }
-      // Fallback to text/html if no plain text
-      for (const part of payload.parts) {
-        if (part.mimeType === 'text/html' && part.body?.data) {
-          return this.base64UrlDecode(part.body.data);
-        }
-      }
-      // Recurse into nested parts (e.g. multipart/alternative inside multipart/mixed)
-      for (const part of payload.parts) {
-        if (part.parts) {
-          const nested = this.extractBody(part);
-          if (nested) return nested;
-        }
-      }
-    }
-
-    return '';
+    if (!text && payload.body?.size) throw new Error('Gmail returned a nonempty message body without data');
+    // An empty plain-text alternative must not hide a readable HTML body.
+    return text.trim() ? text : '';
   }
 
-  private base64UrlDecode(data: string): string {
+  private base64UrlDecode(data: string, payload: GmailMessagePayload): string {
     const padded = data.replace(/-/g, '+').replace(/_/g, '/');
-    return Buffer.from(padded, 'base64').toString('utf-8');
+    const contentType = payload.headers?.find((header) => header.name.toLowerCase() === 'content-type')?.value;
+    const charset = contentType?.match(/;\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]+))/i);
+    const encoding = (charset?.[1] ?? charset?.[2] ?? charset?.[3] ?? 'utf-8').trim();
+    // MIME bodies contain bytes in the part's declared charset. Invalid bytes
+    // or unsupported labels must fail the read instead of persisting corruption.
+    return new TextDecoder(encoding, { fatal: true }).decode(Buffer.from(padded, 'base64'));
   }
 
   private base64UrlEncode(str: string): string {
