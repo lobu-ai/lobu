@@ -50,14 +50,18 @@ export function windowsToCollect(
   const checkpointMs = checkpoint?.window_end
     ? new Date(checkpoint.window_end).getTime()
     : Number.NaN;
-  const earliestMs = latestEndMs - MAX_CATCHUP_WINDOWS * WINDOW_MS;
   const startMs = Number.isFinite(checkpointMs)
-    ? Math.max(checkpointMs, earliestMs)
+    ? checkpointMs
     : latestEndMs - WINDOW_MS;
   if (startMs >= latestEndMs) return [];
 
+  // Bound each sync's work without moving the saved cursor past unread logs.
+  const batchEndMs = Math.min(
+    latestEndMs,
+    startMs + MAX_CATCHUP_WINDOWS * WINDOW_MS
+  );
   const windows: LokiActivityWindow[] = [];
-  for (let cursor = startMs; cursor < latestEndMs; cursor += WINDOW_MS) {
+  for (let cursor = startMs; cursor < batchEndMs; cursor += WINDOW_MS) {
     windows.push({
       start: new Date(cursor),
       end: new Date(cursor + WINDOW_MS),
@@ -248,7 +252,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     name: "Kubernetes logs",
     description:
       "Collect error and warning counts plus recent samples from Lobu production Loki in aligned 20-minute windows.",
-    version: "1.0.0",
+    version: "1.0.1",
     authSchema: {
       methods: [
         {
@@ -305,7 +309,8 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     const events: EventEnvelope[] = [];
     for (const window of windows) {
       const activity = await queryLokiActivity(ctx.config, window);
-      if (activity.errors === 0 && activity.warnings === 0) continue;
+      // Persist empty windows too: a durable zero distinguishes successful
+      // collection from a missing or failed log feed.
       events.push({
         origin_id: window.end.toISOString(),
         origin_type: "log_activity",
