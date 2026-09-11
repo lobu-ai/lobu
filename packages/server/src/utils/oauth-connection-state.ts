@@ -1,4 +1,4 @@
-import { getDb } from '../db/client';
+import { getDb, type DbClient } from '../db/client';
 import { getAuthProfileById, updateAuthProfile } from './auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from './connector-auth';
 import {
@@ -13,6 +13,43 @@ import {
 
 export const OAUTH_SCOPE_PAUSE_LAST_ERROR =
   'Required OAuth scopes are missing; reconnect the connection to grant access.';
+
+/** Serialize consent against the account's existing app binding, before writing credentials. */
+export async function lockOAuthAppBinding(
+  tx: DbClient,
+  organizationId: string,
+  authProfileId: number,
+  appAuthProfileId: number | null,
+  reservePending = false,
+): Promise<boolean> {
+  const [profile] = await tx`
+    SELECT auth_data, account_id FROM auth_profiles
+    WHERE organization_id = ${organizationId} AND id = ${authProfileId}
+      AND profile_kind = 'oauth_account'
+    FOR UPDATE
+  `;
+  if (!profile) return false;
+  const stored = profile.auth_data?.app_auth_profile_id;
+  if (typeof stored === 'number' && stored !== appAuthProfileId) return false;
+  const conflicts = await tx`
+    SELECT 1 FROM connections
+    WHERE organization_id = ${organizationId} AND auth_profile_id = ${authProfileId}
+      AND deleted_at IS NULL AND app_auth_profile_id IS NOT NULL
+      AND app_auth_profile_id IS DISTINCT FROM ${appAuthProfileId}::bigint
+    LIMIT 1
+  `;
+  if (conflicts.length > 0) return false;
+  // Reserve the selected app on a pending account, so same-apply connection
+  // creation and repeated consent links use it. Usable grants stay untouched.
+  if (reservePending && !profile.account_id && appAuthProfileId !== null) {
+    await tx`
+      UPDATE auth_profiles
+      SET auth_data = COALESCE(auth_data, '{}'::jsonb) || ${tx.json({ app_auth_profile_id: appAuthProfileId })}::jsonb
+      WHERE organization_id = ${organizationId} AND id = ${authProfileId}
+    `;
+  }
+  return true;
+}
 
 export async function syncOAuthConnectionsForAuthProfile(
   organizationId: string,
@@ -76,10 +113,12 @@ export async function syncOAuthConnectionsForAuthProfile(
   const oauthMethod = getOAuthAuthMethods(authSchema).find(
     (method) => method.provider.toLowerCase() === (authProfile.provider ?? '').toLowerCase()
   );
-  const requestedScopes = normalizeScopeList(
-    authProfile.auth_data?.requested_scopes ?? oauthMethod?.requiredScopes ?? []
+  // Optional permissions affect the capabilities that declare them, not the
+  // health of every operation/feed backed by this account.
+  const connectorScopesOk = hasAllScopes(
+    grantedScopes,
+    normalizeScopeList(oauthMethod?.requiredScopes)
   );
-  const connectorScopesOk = hasAllScopes(grantedScopes, requestedScopes);
 
   const currentGrantedScopes = normalizeScopeList(authProfile.auth_data?.granted_scopes);
   const nextProfileStatus = connectorScopesOk ? 'active' : 'pending_auth';
@@ -112,7 +151,6 @@ export async function syncOAuthConnectionsForAuthProfile(
 
   const feedsSchema =
     (connectorRow as { feeds_schema?: Record<string, unknown> } | undefined)?.feeds_schema ?? null;
-  const connectionEligibleIds = new Set<number>();
 
   for (const row of feedRows as Array<{
     id: number;
@@ -130,9 +168,6 @@ export async function syncOAuthConnectionsForAuthProfile(
       feedsSchema as Record<string, FeedDefinition> | null,
       row.feed_key
     ).includes('sync');
-    if (feedEligible) {
-      connectionEligibleIds.add(row.connection_id);
-    }
     const scopePaused = row.last_error === OAUTH_SCOPE_PAUSE_LAST_ERROR;
     if (row.status === 'active' && !feedEligible) {
       await sql`
@@ -171,19 +206,20 @@ export async function syncOAuthConnectionsForAuthProfile(
   }
 
   const connectionRows = await sql`
-    SELECT id
+    SELECT id, status
     FROM connections
     WHERE organization_id = ${organizationId}
       AND auth_profile_id = ${authProfileId}
       AND deleted_at IS NULL
   `;
 
-  const hasAnyFeeds = feedRows.length > 0;
-  for (const row of connectionRows as Array<{ id: number }>) {
-    const nextConnectionStatus =
-      connectorScopesOk && (!hasAnyFeeds || connectionEligibleIds.has(row.id))
-        ? 'active'
-        : 'pending_auth';
+  for (const row of connectionRows as Array<{ id: number; status: string }>) {
+    // A paused connection was stopped for a lifecycle reason (uninstall,
+    // unpair, channel removal), not a credential one — renewing the grant must
+    // not silently restart it. 'revoked' IS a credential failure, so a fresh
+    // grant is exactly what recovers it.
+    if (row.status === 'paused') continue;
+    const nextConnectionStatus = connectorScopesOk ? 'active' : 'pending_auth';
     await sql`
       UPDATE connections
       SET status = ${nextConnectionStatus},

@@ -274,6 +274,9 @@ describe("connections.connect — setup_required continuation", () => {
 		expect(res).not.toHaveProperty("error");
 		expect(res.setup_family).toBe("oauth");
 		expect(res.next_action).toBe("configure_oauth_app");
+		expect(new URL(String(res.setup_url)).searchParams.get("setup")).toBe("oauth_app");
+		expect(new URL(String(res.setup_url)).hash).toBe("#connector-oauth-apps");
+		expect(res.instructions).toContain("Keep secrets in that browser form");
 		expect(isAbsoluteUrl(res.setup_url)).toBe(true);
 		expect(res.resume_call).toMatchObject({
 			sdk_method: "connections.connect",

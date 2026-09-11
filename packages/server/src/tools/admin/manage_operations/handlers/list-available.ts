@@ -30,7 +30,7 @@ import {
 	DEVICE_ONLINE_WINDOW_SECONDS,
 	describeDeviceLastSeen,
 } from "../../../../utils/device-liveness";
-import { buildConnectionsUrl } from "../../../../utils/url-builder";
+import { buildConnectionAuthUrl, buildConnectionsUrl } from "../../../../utils/url-builder";
 import {
 	DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
 	describeDeviceConnectorSetupRequired,
@@ -56,7 +56,6 @@ type ExecutionTarget = {
 type InternalExecutionTarget = ExecutionTarget & {
 	config: Record<string, unknown> | null;
 	auth_profile_kind: string | null;
-	auth_profile_slug: string | null;
 	granted_scopes: string[];
 	granted_scopes_known: boolean;
 	requested_scopes: string[];
@@ -79,7 +78,6 @@ type OperationTargetRow = {
 	connector_manifest_hash: string | null;
 	connector_runtime: Record<string, unknown> | null;
 	auth_profile_kind: string | null;
-	auth_profile_slug: string | null;
 	auth_data: Record<string, unknown> | null;
 };
 function executionTargetFromRow(
@@ -95,7 +93,6 @@ function executionTargetFromRow(
 		display_name: row.display_name ?? row.slug,
 		config: row.config,
 		auth_profile_kind: row.auth_profile_kind,
-		auth_profile_slug: row.auth_profile_slug,
 		granted_scopes: readGrantedScopesFromAuthData(row.auth_data),
 		granted_scopes_known: Object.hasOwn(row.auth_data ?? {}, "granted_scopes"),
 		requested_scopes: readRequestedScopesFromAuthData(row.auth_data),
@@ -303,7 +300,6 @@ function buildOperationNextAction(args: {
 	remediationTarget: ExecutionTarget | undefined;
 	remediationConfig: Record<string, unknown> | null | undefined;
 	remediationAuthKind: string | null | undefined;
-	remediationAuthProfileSlug: string | null | undefined;
 	missingScopes: string[];
 	requestedScopes: string[];
 	viewUrl: string | undefined;
@@ -315,7 +311,6 @@ function buildOperationNextAction(args: {
 		remediationTarget,
 		remediationConfig,
 		remediationAuthKind,
-		remediationAuthProfileSlug,
 		missingScopes,
 		requestedScopes,
 		viewUrl,
@@ -378,18 +373,18 @@ function buildOperationNextAction(args: {
 	if (readiness === "scope_upgrade_required") {
 		return {
 			action: "reauthorize",
-			sdk_method: "authProfiles.update",
+			sdk_method: "connections.reauthenticate",
 			connection_id: remediationTarget?.connection_id,
 			requested_scopes: missingScopes,
 			arguments: [
+				remediationTarget?.connection_id,
 				{
-					auth_profile_slug: remediationAuthProfileSlug,
 					requested_scopes: Array.from(
 						new Set([...requestedScopes, ...missingScopes]),
 					),
-					reconnect: true,
 				},
 			],
+			instructions: "Call the returned SDK method to prepare authorization. Show the additional permissions and the exact returned connect_url to the user for consent. After they return, refresh operations.listAvailable for this connection; do not create another connection or feed.",
 			...(viewUrl ? { view_url: viewUrl } : {}),
 		};
 	}
@@ -453,6 +448,7 @@ function buildAvailableOperation(args: {
 	internalTargets: InternalExecutionTarget[];
 	includeInputSchema: boolean;
 	viewUrl: string | undefined;
+	connectionAuthUrl: (connectionId: number) => string | undefined;
 	/** The caller's highest reachable access tier (role × MCP scopes). */
 	callerMax: ToolAccessLevel;
 	/**
@@ -469,7 +465,6 @@ function buildAvailableOperation(args: {
 		const {
 			config,
 			auth_profile_kind: _authProfileKind,
-			auth_profile_slug: _authProfileSlug,
 			granted_scopes,
 			granted_scopes_known,
 			requested_scopes: _requestedScopes,
@@ -578,10 +573,10 @@ function buildAvailableOperation(args: {
 			remediationTarget,
 			remediationConfig: remediationInternalTarget?.config,
 			remediationAuthKind: remediationInternalTarget?.auth_profile_kind,
-			remediationAuthProfileSlug: remediationInternalTarget?.auth_profile_slug,
 			missingScopes,
 			requestedScopes: remediationInternalTarget?.requested_scopes ?? [],
-			viewUrl,
+			viewUrl: remediationTarget && ["scope_upgrade_required", "pending_auth", "error", "revoked"].includes(readiness)
+				? args.connectionAuthUrl(remediationTarget.connection_id) : viewUrl,
 		}),
 	};
 }
@@ -616,7 +611,6 @@ async function loadVisibleOperationTargets(
 		        latest.artifact_hash AS connector_manifest_hash,
 		        latest.runtime AS connector_runtime,
 		        ap.profile_kind AS auth_profile_kind,
-		        ap.slug AS auth_profile_slug,
 		        ap.auth_data AS auth_data,
 		        COALESCE(dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}), false) AS device_online,
 		        dw.last_seen_at AS device_last_seen_at,
@@ -830,6 +824,8 @@ export async function handleListAvailable(
 				internalTargets: targetsByConnector.get(operation.connector_key) ?? [],
 				includeInputSchema: args.include_input_schema !== false,
 				viewUrl: connectorViewUrl(operation.connector_key),
+				connectionAuthUrl: (id) => ownerSlug && baseUrl
+					? buildConnectionAuthUrl(ownerSlug, operation.connector_key, id, baseUrl) : undefined,
 				callerMax,
 				callerLacksMembership,
 			}),

@@ -3,6 +3,7 @@
  */
 
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
+import { normalizeScopeList } from "../../../../auth/oauth/scopes";
 import { notifyConnectionPermissionRequest } from "../../../../notifications/triggers";
 import {
 	getPrimaryAuthProfileForKind,
@@ -20,6 +21,9 @@ import logger from "../../../../utils/logger";
 import { ensureConnectorInstalled } from "../../../../utils/ensure-connector-installed";
 import {
   buildOAuthConnectConfig,
+  getOAuthMethods,
+  resolveRequestedOAuthScopes,
+  resolveOAuthProfileApp,
   ensureEnvBackedOAuthAppProfile,
   getConnectBaseUrl,
 	getGatewayBaseUrl,
@@ -46,7 +50,10 @@ import {
 import { getScopedConnectorDefinition } from "../../../../catalog/connector-definitions";
 import { buildConnectionsUrl } from "../../../../utils/url-builder";
 import { getOrgUrlContext } from "../../../view-urls";
-import { createConnectToken } from "../../../../utils/connect-tokens";
+import {
+  CONNECT_TOKEN_EXPIRED_ERROR,
+  createConnectToken,
+} from "../../../../utils/connect-tokens";
 import { registerConnectorWebhook } from "../../../../connect/webhook-registration";
 import { resolveUsernames } from "../../../../utils/resolve-usernames";
 import type { ToolContext } from "../../../registry";
@@ -56,6 +63,7 @@ import {
 	isManagedPublicOrgConnect,
 } from "./device-binding";
 import { getErrorMessage } from "@lobu/core";
+import { callerIsAdmin } from "../../helpers/db-helpers";
 import {
 	activeConnectionPoll,
 	appInstallationSetupContinuation,
@@ -101,6 +109,7 @@ async function handleConnectImpl(
   }
   const sql = getDb();
   const { organizationId, userId } = ctx;
+  const isAdmin = await callerIsAdmin(sql, ctx);
 	const resumeCall = buildSafeConnectionResumeCall(
 		"connections.connect",
 		args,
@@ -221,48 +230,124 @@ async function handleConnectImpl(
     if (fmtErr) return { error: fmtErr };
   }
 
-  // Idempotent: reuse an existing pending_auth connection with a valid connect
-  // token for the same connector/user. When the caller asked for a specific
-  // slug, only reuse a pending row whose slug matches — otherwise we'd hand back
-  // a connection under the wrong stable identity, so fall through and create a
-  // fresh row with the requested slug instead.
+  // Idempotent: reuse the existing OAuth connection for the same connector/user
+  // instead of stacking duplicates. A connect token that lapsed before the user
+  // consented is reissued below, so a row parked at pending_auth — or revoked by
+  // the token reaper — recovers on the same connection. When the caller asked
+  // for a specific slug, only reuse a row whose slug matches — otherwise we'd
+  // hand back a connection under the wrong stable identity, so fall through and
+  // create a fresh row with the requested slug instead.
   const pendingRows = await sql`
-    SELECT c.id, c.slug, c.visibility, ap.profile_kind AS auth_profile_kind,
-           ct.token, ct.expires_at
+    SELECT c.id, ct.id AS connect_token_id
     FROM connections c
     JOIN connect_tokens ct ON ct.connection_id = c.id
-      AND ct.status = 'pending' AND ct.expires_at > NOW()
-    LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
+      AND ct.auth_type = 'oauth' AND ct.status IN ('pending', 'expired')
     WHERE c.organization_id = ${organizationId}
       AND c.connector_key = ${args.connector_key}
-      AND c.status = 'pending_auth'
+      AND (c.status = 'pending_auth' OR (c.status = 'revoked' AND c.auth_profile_id IS NULL
+        AND c.error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
       AND c.deleted_at IS NULL
 			${requireManaged ? sql`AND c.config->>'consent_only' = 'true'` : sql``}
       ${explicitSlug ? sql`AND c.slug = ${explicitSlug}` : sql``}
       ${deviceBinding.deviceWorkerId ? sql`AND c.device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}
       ${userId ? sql`AND c.created_by = ${userId}` : sql``}
-    ORDER BY ct.created_at DESC
+    ORDER BY ct.created_at DESC, ct.id DESC
     LIMIT 1
   `;
   if (pendingRows.length > 0) {
-    const pending = pendingRows[0] as {
-      id: number;
-      slug: string;
-      visibility: "org" | "private";
-      auth_profile_kind: string | null;
-      token: string;
-      expires_at: Date | string;
-    };
+    const candidate = pendingRows[0] as { id: number; connect_token_id: number };
+    const recovered = await sql.begin(async (tx) => {
+      // Match callback lock order: token, selected account profile, connection.
+      // Discovery is only a hint; authorization and renewal use these live rows.
+      const [token] = await tx`SELECT * FROM connect_tokens
+        WHERE id = ${candidate.connect_token_id} AND organization_id = ${organizationId} FOR UPDATE`;
+      if (!token) return { error: 'Connection setup changed. Retry connecting this account.' };
+      const [targetHint] = await tx`SELECT auth_profile_id FROM connections
+        WHERE id = ${candidate.id} AND organization_id = ${organizationId} AND deleted_at IS NULL`;
+      if (!targetHint) return { error: 'Connection not found' };
+      const [profile] = targetHint.auth_profile_id ? await tx`
+        SELECT ap.*, a.scope AS account_scope FROM auth_profiles ap
+        LEFT JOIN account a ON a.id = ap.account_id
+        WHERE ap.id = ${targetHint.auth_profile_id} AND ap.organization_id = ${organizationId}
+        FOR UPDATE OF ap` : [];
+      const [target] = await tx`SELECT * FROM connections
+        WHERE id = ${candidate.id} AND organization_id = ${organizationId} AND deleted_at IS NULL FOR UPDATE`;
+      if (!target || target.auth_profile_id !== targetHint.auth_profile_id) {
+        return { error: 'Connection setup changed. Retry connecting this account.' };
+      }
+      if (!isAdmin && target.created_by !== userId) return { error: 'You can only re-authenticate connections you created.' };
+      if (target.auth_profile_id && profile?.profile_kind !== 'oauth_account') return { error: 'The selected OAuth account profile is no longer available.' };
+      if (!isAdmin && profile && profile.created_by !== userId) return { error: 'You can only re-authenticate OAuth profiles you created.' };
+      if (target.status === 'active') return { active: true as const, target };
+      if (token.status === 'expired') {
+        // Another retry may have replaced the token while this one waited for its
+        // lock. Rediscover that replacement instead of issuing a second live link.
+        const [latest] = await tx`SELECT id FROM connect_tokens
+          WHERE connection_id = ${target.id} AND organization_id = ${organizationId}
+            AND auth_type = 'oauth' AND status IN ('pending', 'expired')
+          ORDER BY created_at DESC, id DESC LIMIT 1`;
+        if (latest?.id !== token.id) return { error: 'Connection setup changed. Retry connecting this account.' };
+      }
+      if (target.status !== 'pending_auth' && !(target.status === 'revoked' && !target.auth_profile_id &&
+          !target.account_id && target.error_message === CONNECT_TOKEN_EXPIRED_ERROR)) {
+        return { error: 'This connection is no longer awaiting OAuth setup. Review the connection before reconnecting.' };
+      }
+      const oldConfig = (token.auth_config ?? {}) as Record<string, unknown>;
+      const appId = target.app_auth_profile_id ?? profile?.auth_data?.app_auth_profile_id ?? oldConfig.appAuthProfileId ?? null;
+      const [app] = appId ? await tx`SELECT slug, provider FROM auth_profiles
+        WHERE id = ${appId} AND organization_id = ${organizationId} AND profile_kind = 'oauth_app'` : [];
+      if (args.app_auth_profile_slug && args.app_auth_profile_slug !== app?.slug) {
+        return { error: 'A pending account connection uses a different OAuth app. Select that app on the connection before retrying.' };
+      }
+      const provider = String(profile?.provider ?? app?.provider ?? oldConfig.provider ?? '').toLowerCase();
+      const method = getOAuthMethods(connector.auth_schema).find(method => method.provider.toLowerCase() === provider);
+      if (!method) return { error: 'The OAuth provider is no longer available. Review this connector’s app configuration.' };
+      // Previously requested/granted scopes are trusted. Only new requests are
+      // filtered by today's manifest, which may no longer list an existing grant.
+      const scopes = [...new Set([
+        ...(String(oldConfig.provider ?? '').toLowerCase() === provider
+          ? normalizeScopeList(oldConfig.requestedScopes ?? oldConfig.scopes) : []),
+        ...normalizeScopeList(profile?.account_scope ?? profile?.auth_data?.granted_scopes),
+        ...resolveRequestedOAuthScopes(method, args.requested_scopes),
+      ])];
+      const bindingsChanged = token.auth_profile_id !== target.auth_profile_id ||
+        (appId !== null && oldConfig.appAuthProfileId !== appId);
+      const needsRenewal = bindingsChanged || token.status !== 'pending' || new Date(token.expires_at).getTime() <= Date.now();
+      if (needsRenewal) {
+        // Provider endpoints and initialization belong to the current method.
+        // Carry forward only deferred account metadata and the requested scopes.
+        const pendingMeta = oldConfig.pendingProfileMeta as { displayName: string; slug: string } | undefined;
+        const authConfig = { ...buildOAuthConnectConfig(method),
+          ...(pendingMeta ? { pendingProfileMeta: { displayName: pendingMeta.displayName, slug: pendingMeta.slug,
+            connectorKey: target.connector_key, provider: method.provider } } : {}),
+          appAuthProfileId: appId,
+          scopes, requestedScopes: scopes };
+        // Invalidate the old bearer link and issue its replacement atomically.
+        await tx`UPDATE connect_tokens SET status = 'expired' WHERE id = ${token.id}`;
+        const fresh = await createConnectToken({ connectionId: target.id, authProfileId: target.auth_profile_id,
+          organizationId, connectorKey: args.connector_key, authType: 'oauth', authConfig, createdBy: userId }, tx);
+        await tx`UPDATE connections SET status = 'pending_auth', error_message = NULL, updated_at = NOW()
+          WHERE id = ${target.id} AND organization_id = ${organizationId}`;
+        return { token: fresh.token, expires_at: fresh.expires_at, target };
+      }
+      if (args.requested_scopes) {
+        await tx`UPDATE connect_tokens
+          SET auth_config = COALESCE(auth_config, '{}'::jsonb) || ${tx.json({ scopes, requestedScopes: scopes })}::jsonb
+          WHERE id = ${token.id}`;
+      }
+      return { token: token.token as string, expires_at: token.expires_at as Date, target };
+    });
+    if (recovered.error) return { error: recovered.error, setup_url: setupUrl };
+    if ('active' in recovered) return { action: 'connect', connection_id: recovered.target.id,
+      slug: recovered.target.slug, status: 'active',
+      message: 'This connection is already active. Check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task.' };
+    const pending = { ...recovered.target, token: recovered.token, expires_at: recovered.expires_at };
     const connectUrl = `${getConnectBaseUrl(ctx)}/connect/${pending.token}/oauth/start`;
-    // Retrying connect on an existing personal connection must explain the
-    // agent-owner scope too, or the second call silently drops the warning the
-    // first one gave. Derived from what is PERSISTED, mirroring the creation
-    // path's kind expression: an unlinked pending OAuth row is heading for an
-    // `oauth_account` profile (the callback creates it), so absent a linked
-    // profile the kind is personal.
+    // Existing profiles were checked as oauth_account above; unlinked pending
+    // rows receive that kind on consent. Preserve the personal-scope warning.
     const pendingScopeWarning = personalConnectionScopeWarning({
       visibility: pending.visibility,
-      profileKind: pending.auth_profile_kind ?? "oauth_account",
+      profileKind: "oauth_account",
     });
     return {
 			action: "connect",
@@ -276,7 +361,7 @@ async function handleConnectImpl(
       instructions:
         "A pending connection already exists. Send the connect_url to the user to complete OAuth authorization." +
         (pendingScopeWarning ? ` ${pendingScopeWarning}` : "") +
-        " Poll with client.connections.get(connection_id) via query_sdk until status='active'.",
+        " Poll with client.connections.get(connection_id) via query_sdk until status='active', then check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task. Reuse this connection; do not create duplicate connections or feeds.",
     };
   }
 
@@ -287,13 +372,28 @@ async function handleConnectImpl(
     authProfileSlug: args.auth_profile_slug,
     appAuthProfileSlug: args.app_auth_profile_slug,
     deviceWorkerId: deviceBinding.deviceWorkerId,
-    oauthAccountCreatedBy: requireManaged ? userId : undefined,
+    oauthAccountCreatedBy: userId,
   });
 
 	const isOAuthConnect =
 		authSelection.preferredMethodType === "oauth" &&
 		(authSelection.selectedKind === "none" ||
 			authSelection.selectedKind === "oauth_account");
+  const acceptsManagedApp = isOAuthConnect && authSelection.oauthMethod
+    ? await isManagedPublicOrgConnect({ organizationId, connectorKey: args.connector_key, provider: authSelection.oauthMethod.provider })
+    : false;
+  if (isOAuthConnect && authSelection.oauthMethod) {
+    const app = await resolveOAuthProfileApp({ ctx, connectorKey: args.connector_key,
+      method: authSelection.oauthMethod, appAuthProfileSlug: args.app_auth_profile_slug,
+      authProfile: authSelection.authProfile ?? undefined, allowManagedApp: acceptsManagedApp });
+    if ('error' in app) {
+      const setup = buildOAuthAppProfileSetupError({ connectorKey: args.connector_key, method: authSelection.oauthMethod, setupUrl });
+      return oauthAppSetupContinuation({ action: 'connect', connectorKey: args.connector_key, resumeCall,
+        setup: { ...setup, error: app.error + ' Open setup_url to review the app configuration.' } });
+    }
+    authSelection.appAuthProfile = app.appAuthProfile;
+  }
+
 	// Resolve/provision the app before deriving managed-connector policy. On the
 	// first env-backed connect there is no oauth_app row yet; doing this only
 	// after INSERT meant that first grant missed consent_only even though every
@@ -307,14 +407,28 @@ async function handleConnectImpl(
 				profileKind: "oauth_app",
 				provider: authSelection.oauthMethod.provider,
 			})) ??
-			(await ensureEnvBackedOAuthAppProfile({
+			(isAdmin ? await ensureEnvBackedOAuthAppProfile({
 				organizationId,
 				connectorKey: args.connector_key,
 				connectorName: connector.name,
 				method: authSelection.oauthMethod,
 				createdBy: userId,
-			}));
+			}) : null);
 	}
+
+  if (!isAdmin) {
+    if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
+      return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
+    }
+    const app = authSelection.appAuthProfile;
+    const appIsWorkspaceDefault = app?.is_default_for_connector && app.connector_key === args.connector_key;
+    const needsWorkspaceDefault = !authSelection.authProfile && !acceptsManagedApp;
+    if (!app || app.status !== 'active' || (needsWorkspaceDefault && !appIsWorkspaceDefault)) {
+      const setup = buildOAuthAppProfileSetupError({ connectorKey: args.connector_key, method: authSelection.oauthMethod!, setupUrl });
+      return oauthAppSetupContinuation({ action: 'connect', connectorKey: args.connector_key,
+        setup: { ...setup, error: 'Ask an administrator to configure and set the workspace-default OAuth app at setup_url. Then resume this call to authorize your own account.' }, resumeCall });
+    }
+  }
 
   const hasNoAuth =
 		!authSelection.oauthMethod &&
@@ -780,7 +894,8 @@ async function handleConnectImpl(
     connectorKey: args.connector_key,
 		authType: "oauth",
     authConfig: {
-      ...buildOAuthConnectConfig(oauthMethod),
+      ...buildOAuthConnectConfig(oauthMethod, args.requested_scopes),
+      appAuthProfileId: appAuthProfile.id,
       // Profile metadata — callback creates the real profile on success
       pendingProfileMeta: {
         displayName: `${args.display_name ?? connector.name} Account`,
@@ -814,8 +929,8 @@ async function handleConnectImpl(
     connect_token: connectToken.token,
     expires_at: new Date(connectToken.expires_at).toISOString(),
     instructions:
-      `Send the connect_url to the user to complete OAuth authorization with ${oauthMethod.provider}.` +
+      `Open the exact connect_url to let the user authorize their account with ${oauthMethod.provider} using the selected app "${appAuthProfile.display_name}". Explain the requested permissions before the user continues.` +
       (personalScopeWarning ? ` ${personalScopeWarning}` : "") +
-      " Poll with client.connections.get(connection_id) via query_sdk until status='active'.",
+      " Poll with client.connections.get(connection_id) via query_sdk until status='active', then check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task. Reuse this connection; do not create duplicate connections or feeds.",
   };
 }

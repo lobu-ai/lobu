@@ -746,8 +746,8 @@ export default async (_ctx, client) => {
 	},
 	"connections.connect": {
 		summary:
-			"Recommended connector setup entry point. Handles every auth family; the result's `status` tells you what to do next. status 'active' (auth-none, e.g. rss or hackernews) or 'pending_auth' (OAuth waiting on the user) BOTH carry a `connection_id`. status 'setup_required' is a continuation — `connection_id` is OPTIONAL there (may be absent); follow `next_action` / `resume_call` / `completion_check`. After auth is complete, create a feed and either schedule or trigger it; connect() alone syncs nothing.",
-		access: "admin",
+			"Recommended connector setup entry point. Handles every auth family; the result's `status` tells you what to do next. status 'active' (auth-none, e.g. rss or hackernews) or 'pending_auth' (OAuth waiting on the user) BOTH carry a `connection_id`. status 'setup_required' is a continuation — `connection_id` is OPTIONAL there (may be absent); follow `next_action` / `resume_call` / `completion_check`. Pass requested_scopes for optional OAuth permissions and app_auth_profile_slug for an authorized app selection. Perform available setup through the SDK before asking the user to act. Use only returned setup_url/connect_url/install_url links; never invent Lobu routes. Explain the remaining human step, follow resume_call only when required, and verify completion_check. After auth is complete, create a feed only if needed and either schedule or trigger it; connect() alone syncs nothing.",
+		access: "write",
 		example:
 			"const c = await client.connections.connect({ connector_key: 'rss' }); // c.connection_id",
 		usageExample: `// Three-hop: connect() creates the connection, feeds.create() defines the
@@ -803,10 +803,10 @@ export default async (_ctx, client) => {
 	},
 	"connections.reauthenticate": {
 		summary:
-			"Start a fresh auth flow for an existing OAuth-account or interactive connection. Returns connect_url for OAuth or auth_run_id for interactive pairing.",
+			"Recover an existing connection using its bound OAuth app. Pass requested_scopes for additional permissions; existing grants remain usable until successful consent. Return the exact connect_url to the user with the requested permissions, then refresh operations.listAvailable. Interactive pairing returns auth_run_id.",
 		access: "write",
 		signature:
-			"connections.reauthenticate(connection_id: number): Promise<unknown> // or connections.reauthenticate({ connection_id })",
+			"connections.reauthenticate(connection_id: number, options?: { requested_scopes?: string[] }): Promise<unknown> // or connections.reauthenticate({ connection_id }, options)",
 		example: "await client.connections.reauthenticate(42);",
 	},
 	"connections.test": {
@@ -1016,15 +1016,15 @@ export default async (_ctx, client) => {
 		example: "await client.authProfiles.test('google-calendar-account');",
 	},
 	"authProfiles.create": {
-		summary: "Create an auth profile.",
+		summary: "Create an auth profile. For an OAuth account, use app_auth_profile_slug to choose the app and requested_scopes for optional permissions. Give the user only the exact returned connect_url for human consent; keep client secrets in the browser app-configuration form.",
 		access: "write",
 	},
 	"authProfiles.update": {
 		summary:
-			"Update an auth profile. Set reconnect=true on an OAuth-account profile to issue a fresh connect_url.",
+			"Update an auth profile. Set reconnect=true on an OAuth-account profile to issue a fresh connect_url. Use app_auth_profile_slug for an unbound account; an existing grant retains its bound app.",
 		access: "write",
 		signature:
-			"authProfiles.update(input: { auth_profile_slug: string; display_name?: string; slug?: string; credentials?: Record<string, string>; auth_data?: Record<string, unknown>; requested_scopes?: string[]; status?: string; reconnect?: boolean }): Promise<unknown>",
+			"authProfiles.update(input: { auth_profile_slug: string; app_auth_profile_slug?: string; display_name?: string; slug?: string; credentials?: Record<string, string>; auth_data?: Record<string, unknown>; requested_scopes?: string[]; status?: string; reconnect?: boolean }): Promise<unknown>",
 		example:
 			"await client.authProfiles.update({ auth_profile_slug: 'google-calendar-account', reconnect: true });",
 	},

@@ -39,6 +39,7 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 	// create (app_auth_profile pinned-default, target-profile ownership).
 	manage_connections: new Set([
 		"create",
+		"connect",
 		"connect_managed",
 		"update",
 		"reauthenticate",
@@ -99,13 +100,12 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 		"remove_rule",
 	]),
 	manage_connections: new Set([
-		// `create`, `connect_managed`, `update`, and `reauthenticate` are in
+		// `create`, `connect`, `connect_managed`, `update`, and `reauthenticate` are in
 		// MEMBER_WRITE_ACTIONS —
 		// members install / edit their own connections (handler enforces
 		// created_by === ctx.userId + app_auth_profile slug override + role
 		// gates).
 		"delete",
-		"connect",
 		"test",
 		"install_connector",
 		"uninstall_connector",

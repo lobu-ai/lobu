@@ -76,6 +76,12 @@ export const CreateAuthProfileAction = Type.Object({
       description: "Raw auth/session payload for browser-backed profiles",
     })
   ),
+  app_auth_profile_slug: Type.Optional(
+    Type.String({
+      description:
+        "OAuth app for account authorization. Members use the workspace default. Existing account grants cannot switch apps.",
+    })
+  ),
   requested_scopes: Type.Optional(
     Type.Array(Type.String(), {
       description:
@@ -94,6 +100,12 @@ export const UpdateAuthProfileAction = Type.Object({
   slug: Type.Optional(Type.String({ description: "New auth profile slug" })),
   credentials: Type.Optional(Type.Record(Type.String(), Type.String())),
   auth_data: Type.Optional(Type.Record(Type.String(), Type.Any())),
+  app_auth_profile_slug: Type.Optional(
+    Type.String({
+      description:
+        "OAuth app for account authorization. Members use the workspace default. Existing account grants cannot switch apps.",
+    })
+  ),
   requested_scopes: Type.Optional(
     Type.Array(Type.String(), {
       description:

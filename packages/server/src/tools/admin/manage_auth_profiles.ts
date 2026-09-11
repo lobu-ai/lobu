@@ -59,6 +59,7 @@ import {
   getOAuthMethods,
   issueOAuthReconnectLink,
   resolveRequestedOAuthScopes,
+  resolveOAuthProfileApp,
   serializeAuthProfile,
 } from './helpers/connection-helpers';
 
@@ -409,6 +410,10 @@ async function handleCreateAuthProfile(
         createdBy: ctx.userId ?? null,
       });
     }
+    const appSelection = await resolveOAuthProfileApp({ ctx, connectorKey, method: oauthMethod,
+      appAuthProfileSlug: args.app_auth_profile_slug, authProfile: existing ?? undefined });
+    if ('error' in appSelection) return appSelection;
+    const appAuthProfileId = appSelection.appAuthProfile?.id;
     if (existing) {
       if (existing.profile_kind !== 'oauth_account' || existing.connector_key !== connectorKey) {
         return {
@@ -435,6 +440,7 @@ async function handleCreateAuthProfile(
         authProfileId: existing.id,
         authConfig: {
           ...buildOAuthConnectConfig(oauthMethod, requestedScopes),
+          ...(appAuthProfileId ? { appAuthProfileId } : {}),
           requestedScopes,
         },
         createdBy: ctx.userId,
@@ -484,6 +490,7 @@ async function handleCreateAuthProfile(
         authProfileId: authProfile.id,
         authConfig: {
           ...buildOAuthConnectConfig(oauthMethod, requestedScopes),
+          ...(appAuthProfileId ? { appAuthProfileId } : {}),
           requestedScopes,
         },
         createdBy: ctx.userId,
@@ -638,15 +645,36 @@ async function handleUpdateAuthProfile(
 
   }
 
+  if (args.reconnect && existingForRoleCheck?.connector_key) {
+    const connector = await getScopedConnectorDefinition({ organizationId: ctx.organizationId, connectorKey: existingForRoleCheck.connector_key });
+    const method = connector && getOAuthMethods(connector.auth_schema).find(method => method.provider.toLowerCase() === existingForRoleCheck.provider?.toLowerCase());
+    if (method) {
+      const selection = await resolveOAuthProfileApp({ ctx, connectorKey: existingForRoleCheck.connector_key,
+        method, appAuthProfileSlug: args.app_auth_profile_slug, authProfile: existingForRoleCheck });
+      if ('error' in selection) return selection;
+    }
+  }
+
   // The payload that will actually be persisted: an explicit `auth_data` wins,
   // else `credentials` (normalized to a string map), else undefined (leave the
   // existing auth_data as-is).
   const updateAuthDataPayload: Record<string, unknown> | undefined =
     args.auth_data !== undefined
-      ? (args.auth_data as Record<string, unknown>)
+      ? { ...(args.auth_data as Record<string, unknown>) }
       : args.credentials
         ? normalizeAuthValues(args.credentials)
         : undefined;
+
+  // The grant's app binding is callback-owned, including when raw profile data is patched.
+  if (updateAuthDataPayload && existingForRoleCheck?.profile_kind === 'oauth_account') {
+    delete updateAuthDataPayload.app_auth_profile_id;
+    if (existingForRoleCheck.auth_data?.app_auth_profile_id !== undefined) {
+      updateAuthDataPayload.app_auth_profile_id = existingForRoleCheck.auth_data.app_auth_profile_id;
+    }
+  }
+  if (args.app_auth_profile_slug && !args.reconnect) {
+    return { error: 'app_auth_profile_slug selects an app for reconnect=true; it cannot rebind a saved account grant.' };
+  }
 
   let authProfile = await updateAuthProfile({
     organizationId: ctx.organizationId,
@@ -682,6 +710,7 @@ async function handleUpdateAuthProfile(
   if (
     authProfile.profile_kind === 'oauth_account' &&
     authProfileProvider &&
+    !args.reconnect &&
     args.requested_scopes &&
     authProfile.connector_key
   ) {
@@ -713,6 +742,7 @@ async function handleUpdateAuthProfile(
       authProfile,
       ctx,
       requestedScopes: args.requested_scopes,
+      appAuthProfileSlug: args.app_auth_profile_slug,
     });
     if ('error' in reconnect) return reconnect;
 

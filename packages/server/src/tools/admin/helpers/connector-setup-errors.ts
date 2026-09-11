@@ -116,14 +116,24 @@ export function buildOAuthAppProfileSetupError(params: {
 	method: Pick<ConnectorAuthOAuth, "provider" | "setupInstructions">;
 	setupUrl?: string;
 }): ConnectorSetupError {
+	let setupUrl: URL | undefined;
+	try {
+		setupUrl = params.setupUrl ? new URL(params.setupUrl) : undefined;
+	} catch {
+		// Invalid gateway configuration must not turn setup guidance into a crash.
+	}
+	if (setupUrl) {
+		setupUrl.searchParams.set("setup", "oauth_app");
+		setupUrl.hash = "connector-oauth-apps";
+	}
 	return {
-		error: `OAuth app profile not configured for '${params.method.provider}'. Configure the connector's OAuth app credentials, then retry.`,
+		error: `An administrator must configure the OAuth app for '${params.method.provider}'. Open the exact setup_url, copy the callback URL into the provider's app settings, enter the client configuration in Lobu, and set the workspace default. Keep secrets in that browser form. Then resume the returned SDK call to connect the user's account.`,
 		error_code: "connector_setup_required",
 		connector_key: params.connectorKey,
 		provider: params.method.provider,
 		install_type: "oauth_app_profile",
 		next_action: "configure_oauth_app",
-		...(params.setupUrl ? { setup_url: params.setupUrl } : {}),
+		...(setupUrl ? { setup_url: setupUrl.toString() } : {}),
 		...(params.method.setupInstructions
 			? { setup_instructions: params.method.setupInstructions }
 			: {}),

@@ -7,8 +7,17 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { getDb, pgTextArray } from '../db/client';
+import { getDb, pgTextArray, type DbClient } from '../db/client';
 import logger from './logger';
+import { lockOAuthAppBinding } from './oauth-connection-state';
+
+/**
+ * Stamped on a connection whose connect token lapsed unused. `connections.connect`
+ * matches on it to reissue authorization for that same connection instead of
+ * leaving a dead row behind, so the two sites must agree.
+ */
+export const CONNECT_TOKEN_EXPIRED_ERROR =
+  'Connect token expired before authentication was completed';
 
 export interface ConnectTokenRow {
   id: number;
@@ -48,26 +57,37 @@ function generateToken(): string {
  * Create a new connect token for a pending connection
  */
 export async function createConnectToken(
-  params: CreateConnectTokenParams
+  params: CreateConnectTokenParams,
+  transaction?: DbClient,
 ): Promise<ConnectTokenRow> {
   const sql = getDb();
   const token = generateToken();
   const ttlSeconds = params.ttlSeconds ?? 3600; // 1 hour default
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
 
-  const rows = await sql`
+  const insert = async (tx: DbClient) => {
+    if (params.authType === 'oauth' && params.authProfileId) {
+      const selectedAppId = params.authConfig?.appAuthProfileId;
+      if (!(await lockOAuthAppBinding(tx, params.organizationId, params.authProfileId,
+        typeof selectedAppId === 'number' ? selectedAppId : null, true))) {
+        throw new Error('This account is already bound to a different OAuth app. Use a separate account profile for another app.');
+      }
+    }
+    return tx`
     INSERT INTO connect_tokens (
       token, connection_id, auth_profile_id, organization_id, connector_key,
       auth_type, auth_config, created_by, expires_at
     ) VALUES (
       ${token}, ${params.connectionId ?? null}, ${params.authProfileId ?? null},
       ${params.organizationId}, ${params.connectorKey},
-      ${params.authType}, ${params.authConfig ? sql.json(params.authConfig) : null},
+      ${params.authType}, ${params.authConfig ? tx.json(params.authConfig) : null},
       ${params.createdBy ?? null},
       ${expiresAt}
     )
     RETURNING *
-  `;
+    `;
+  };
+  const rows = transaction ? await insert(transaction) : await sql.begin(insert);
 
   logger.info(
     {
@@ -128,7 +148,7 @@ export async function expireStaleConnectTokens(): Promise<number> {
     await sql`
       UPDATE connections
       SET status = 'revoked',
-          error_message = 'Connect token expired before authentication was completed',
+          error_message = ${CONNECT_TOKEN_EXPIRED_ERROR},
           updated_at = NOW()
       WHERE id = ANY(${pgTextArray(connectionIds)}::bigint[])
         AND status = 'pending_auth'

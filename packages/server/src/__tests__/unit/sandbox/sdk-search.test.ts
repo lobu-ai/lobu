@@ -182,7 +182,7 @@ describe("sdkSearch", () => {
 		expect(result.notes).toMatch(/cannot elevate/i);
 	});
 
-	it("shows an owner with mcp:write progressively authorizable admin methods", async () => {
+	it("shows personal account connection setup at write tier", async () => {
 		const result = await sdkSearch(
 			{ query: "connections.connect" },
 			stubEnv,
@@ -191,7 +191,7 @@ describe("sdkSearch", () => {
 
 		expect(result.match_count).toBe(1);
 		expect(result.results[0]).toContain("connections.connect");
-		expect(result.results[0]).toContain("access: administer");
+		expect(result.results[0]).toContain("access: operate (mcp:write)");
 	});
 
 	it("keeps exact read-mode misses caller-aware", async () => {
@@ -201,16 +201,16 @@ describe("sdkSearch", () => {
 			ownerWriteCtx,
 		);
 		expect(owner.notes).toMatch(/requires run_sdk/i);
-		expect(owner.notes).toMatch(/progressively authorizable|OAuth challenge/i);
-		expect(owner.notes).toContain("mcp:admin");
+		expect(owner.notes).not.toMatch(/progressively authorizable|OAuth challenge/i);
+		expect(owner.notes).toContain("mcp:write");
 
 		const member = await sdkSearch(
 			{ query: "connections.connect", mode: "read" },
 			stubEnv,
 			writeCtx,
 		);
-		expect(member.notes).toMatch(/ask a workspace owner\/admin/i);
-		expect(member.notes).not.toMatch(/call via run_sdk/i);
+		expect(member.notes).toMatch(/requires run_sdk/i);
+		expect(member.notes).not.toMatch(/ask a workspace owner\/admin/i);
 	});
 
 	it("keeps hidden admin namespaces role-aware without suggesting run_sdk", async () => {
@@ -308,7 +308,7 @@ describe("sdkSearch", () => {
 		expect(operate.results[0]).toContain("access: operate (mcp:write)");
 
 		const administer = await sdkSearch(
-			{ query: "connections.connect" },
+			{ query: "agents.delete" },
 			stubEnv,
 			adminCtx,
 		);
@@ -463,7 +463,7 @@ describe("sdkSearch", () => {
 		],
 		[
 			"connections.reauthenticate",
-			"connections.reauthenticate(connection_id: number)",
+			"connections.reauthenticate(connection_id: number, options?: { requested_scopes?: string[] })",
 			"client.connections.reauthenticate(42)",
 		],
 		[

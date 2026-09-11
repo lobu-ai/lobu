@@ -83,10 +83,13 @@ describe('requiresOwnerAdmin', () => {
     ).toBe(true);
   });
 
-  it('should allow members to create, managed-connect, and reauthenticate their own connections', () => {
-    // `manage_connections.create`, `connect_managed`, and `reauthenticate` are member-write; the
-    // handler enforces app_auth_profile_slug must match the org default for
-    // non-admins, so non-admins can't bring an alternate OAuth client.
+  it('should allow members to create, connect, and reauthenticate their own connections', () => {
+    // `manage_connections.create`, `connect`, `connect_managed`, and
+    // `reauthenticate` are member-write; the handler enforces that a non-admin
+    // authorizes through the connector's workspace-default app (or a public
+    // managed offer), so non-admins can't bring an alternate OAuth client.
+    expect(requiresOwnerAdmin('manage_connections', { action: 'connect' }, false)).toBe(false);
+    expect(requiresMemberWrite('manage_connections', { action: 'connect' }, false)).toBe(true);
     expect(requiresOwnerAdmin('manage_connections', { action: 'create' }, false)).toBe(false);
     expect(requiresMemberWrite('manage_connections', { action: 'create' }, false)).toBe(true);
     expect(
@@ -775,7 +778,7 @@ query_sql: read ?=read
 run_sdk: write ?=write
 manage_entity: create=write update=write list=read+public get=read+public delete=admin link=write unlink=write update_link=write list_links=read+public merge=admin resolve_duplicates=admin unmerge=admin ?=read
 manage_entity_schema: list=read+public get=read+public create=admin update=admin delete=admin audit=read+public add_rule=admin remove_rule=admin list_rules=read+public ?=read
-manage_connections: list_connector_groups=read+public list=read+public get=read+public create=write setup_options=read+public connect=admin connect_managed=write update=write apply_chat_connection=admin delete=admin reauthenticate=write test=admin install_connector=admin uninstall_connector=admin get_connector_source=admin validate_connector_source=admin update_connector_source=admin rollback_connector_version=admin toggle_connector_login=admin update_connector_auth=admin update_connector_default_config=admin set_channel_about=admin ?=read
+manage_connections: list_connector_groups=read+public list=read+public get=read+public create=write setup_options=read+public connect=write connect_managed=write update=write apply_chat_connection=admin delete=admin reauthenticate=write test=admin install_connector=admin uninstall_connector=admin get_connector_source=admin validate_connector_source=admin update_connector_source=admin rollback_connector_version=admin toggle_connector_login=admin update_connector_auth=admin update_connector_default_config=admin set_channel_about=admin ?=read
 manage_catalog: list_catalog=read+public list_installed=read+public ?=read
 manage_agents: list=read+public get=read+public create=admin update=admin delete=admin ?=read
 manage_conversations: list=read get=read send=write ?=read

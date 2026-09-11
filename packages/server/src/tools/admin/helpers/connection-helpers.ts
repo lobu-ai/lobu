@@ -12,6 +12,7 @@ import {
   browserSessionIsUsable,
   createAuthProfile,
   getAuthProfileBySlug,
+  getAuthProfileById,
   getPrimaryAuthProfileForKind,
   normalizeAuthProfileSlug,
   normalizeAuthValues,
@@ -26,6 +27,7 @@ import {
   readRequestedScopesFromAuthData,
 } from '../../../auth/oauth/scopes';
 import { getWorkspaceRole } from '../../../utils/organization-access';
+import { callerIsAdmin } from './db-helpers';
 import { buildConnectionsUrl } from '../../../utils/url-builder';
 import type { ToolContext } from '../../registry';
 import { getOrgUrlContext } from '../../view-urls';
@@ -146,20 +148,9 @@ export function getOAuthCredentialKeys(method: OAuthAuthMethod): {
 }
 
 /**
- * Resolve the OAuth **app** (client) credentials for a connector, mirroring the
- * exact fallback GLOBAL LOGIN uses (`auth/config.ts`
- * `resolveLoginProviderCredentials`): an explicit `oauth_app` auth profile's
- * `auth_data` wins, otherwise fall back to `process.env[clientIdKey]` /
- * `process.env[clientSecretKey]` (keys default to `${PROVIDER}_CLIENT_ID/_SECRET`
- * via {@link getOAuthCredentialKeys}).
- *
- * This is the single source of truth for "does this connector have OAuth APP
- * credentials" across the connect-create gate (manage_connections) and the
- * `/connect/:token/oauth/start` redirect (connect/routes.ts) — neither has to
- * re-derive keys or duplicate the env fallback. It resolves ONLY the
- * application-level client id/secret; the per-user ACCOUNT token (oauth_account
- * profile, obtained via the real Authorize redirect) is unaffected and still
- * required by callers.
+ * A selected app is authoritative: filling missing fields from deployment
+ * credentials could substitute another client or pair one app's ID with
+ * another app's secret. Use environment credentials only without an app profile.
  */
 export function resolveOAuthAppClientCredentials(params: {
   appProfileAuthData: unknown;
@@ -177,9 +168,12 @@ export function resolveOAuthAppClientCredentials(params: {
       ? params.clientSecretKey
       : `${providerUpper}_CLIENT_SECRET`;
 
-  const authValues = normalizeAuthValues(params.appProfileAuthData ?? {});
-  const clientId = authValues[clientIdKey] || process.env[clientIdKey] || null;
-  const clientSecret = authValues[clientSecretKey] || process.env[clientSecretKey] || null;
+  const authValues = normalizeAuthValues(params.appProfileAuthData ?? {
+    [clientIdKey]: process.env[clientIdKey],
+    [clientSecretKey]: process.env[clientSecretKey],
+  });
+  const clientId = authValues[clientIdKey] || null;
+  const clientSecret = authValues[clientSecretKey] || null;
   return { clientId, clientSecret };
 }
 
@@ -476,10 +470,88 @@ export function getGatewayBaseUrl(ctx: ToolContext): string {
   ).replace(/\/+$/, '');
 }
 
+/** Both connection edits and consent issuance must respect legacy grant bindings. */
+async function oauthAppBindings(profile: AuthProfileRow): Promise<Set<number>> {
+  const sql = getDb();
+  const linked = await sql`
+    SELECT app_auth_profile_id FROM connections
+    WHERE organization_id = ${profile.organization_id} AND auth_profile_id = ${profile.id}
+      AND deleted_at IS NULL AND app_auth_profile_id IS NOT NULL
+  `;
+  const ids = new Set(linked.map(row => Number(row.app_auth_profile_id)));
+  const stored = profile.auth_data?.app_auth_profile_id;
+  if (typeof stored === 'number') ids.add(stored);
+  return ids;
+}
+
+/** Resolve account authorization without changing the app behind an existing grant. */
+export async function resolveOAuthProfileApp(params: {
+  ctx: ToolContext;
+  connectorKey: string;
+  method: OAuthAuthMethod;
+  appAuthProfileSlug?: string;
+  authProfile?: AuthProfileRow;
+  /** The server has verified a public managed-auth offer for this connector. */
+  allowManagedApp?: boolean;
+}): Promise<{ appAuthProfile: AuthProfileRow | null } | { error: string }> {
+  const { ctx, connectorKey, method, authProfile } = params;
+  const sql = getDb();
+  const appIds = authProfile ? await oauthAppBindings(authProfile) : new Set<number>();
+  if (appIds.size > 1) {
+    return { error: 'This account is linked to different OAuth apps. Use a separate account profile for each app before reconnecting.' };
+  }
+  const boundId = appIds.values().next().value;
+  const selected = params.appAuthProfileSlug
+    ? await getAuthProfileBySlug(ctx.organizationId, params.appAuthProfileSlug)
+    : null;
+  if (params.appAuthProfileSlug && !selected) return { error: 'The selected OAuth app was not found in this workspace.' };
+  if (boundId && selected && selected.id !== boundId) {
+    return { error: 'This account is already bound to a different OAuth app. Create a separate account profile to use another app; existing access has not changed.' };
+  }
+  let app = boundId ? await getAuthProfileById(ctx.organizationId, boundId) : selected;
+  if (!app && !boundId) {
+    const apps = await sql<AuthProfileRow>`
+      SELECT * FROM auth_profiles
+      WHERE organization_id = ${ctx.organizationId}
+        AND profile_kind = 'oauth_app' AND status = 'active' AND LOWER(provider) = ${method.provider.toLowerCase()}
+    `;
+    const workspaceDefault = apps.find(row => row.is_default_for_connector && row.connector_key === connectorKey);
+    app = workspaceDefault ?? (apps.length === 1 ? apps[0]! : null);
+    if (!app && params.allowManagedApp) {
+      app = await getPrimaryAuthProfileForKind({
+        organizationId: ctx.organizationId,
+        connectorKey,
+        profileKind: 'oauth_app',
+        provider: method.provider,
+      });
+    }
+    if (!app && apps.length > 1) {
+      return { error: 'Multiple OAuth apps are available. Choose app_auth_profile_slug explicitly or ask an administrator to set the workspace default.' };
+    }
+  }
+  if (boundId || app) {
+    if (!app || app.profile_kind !== 'oauth_app' || app.status !== 'active' ||
+        app.provider?.toLowerCase() !== method.provider.toLowerCase()) {
+      return { error: 'The selected OAuth app is unavailable. Ask an administrator to restore that app configuration before reconnecting.' };
+    }
+    if (
+      !boundId &&
+      !params.allowManagedApp &&
+      (!app.is_default_for_connector || app.connector_key !== connectorKey) &&
+      !(await callerIsAdmin(sql, ctx))
+    ) {
+      return { error: 'Members must use the workspace-default OAuth app. Ask an administrator to set the default before connecting your account.' };
+    }
+  }
+  return { appAuthProfile: app };
+}
+
 export async function issueOAuthReconnectLink(params: {
   authProfile: AuthProfileRow;
   ctx: ToolContext;
   requestedScopes?: string[];
+  connectionId?: number;
+  appAuthProfileSlug?: string;
 }): Promise<
   | { error: string }
   | {
@@ -519,36 +591,51 @@ export async function issueOAuthReconnectLink(params: {
     };
   }
 
-  const requestedScopes = resolveRequestedOAuthScopes(
-    oauthMethod,
-    params.requestedScopes ??
-      (authProfile.auth_data.requested_scopes as string[] | undefined) ??
-      undefined
-  );
-  const updatedProfile =
-    (await updateAuthProfile({
-      organizationId: ctx.organizationId,
-      slug: authProfile.slug,
-      authData: {
-        ...authProfile.auth_data,
-        requested_scopes: requestedScopes,
-      },
-    })) ?? authProfile;
+  const sql = getDb();
+  if (params.connectionId) {
+    const owned = await sql`
+      SELECT 1 FROM connections
+      WHERE organization_id = ${ctx.organizationId} AND id = ${params.connectionId}
+        AND auth_profile_id = ${authProfile.id} AND deleted_at IS NULL
+    `;
+    if (owned.length !== 1) {
+      return { error: 'Connection does not use this OAuth account profile.' };
+    }
+  }
+  const appSelection = await resolveOAuthProfileApp({ ctx, connectorKey: authProfile.connector_key,
+    method: oauthMethod, appAuthProfileSlug: params.appAuthProfileSlug, authProfile });
+  if ('error' in appSelection) return appSelection;
+  const appAuthProfileId = appSelection.appAuthProfile?.id;
+  // A pending attempt must not change the requirements of a usable grant.
+  // Keep selected scopes on the token; the callback commits them with credentials.
+  const requestedScopes = Array.from(new Set([
+    ...readGrantedScopesFromAuthData(authProfile.auth_data),
+    ...resolveRequestedOAuthScopes(oauthMethod, [
+      ...readRequestedScopesFromAuthData(authProfile.auth_data),
+      ...(params.requestedScopes ?? []),
+    ]),
+  ]));
 
   const connectToken = await createConnectToken({
     organizationId: ctx.organizationId,
-    authProfileId: updatedProfile.id,
+    authProfileId: authProfile.id,
+    connectionId: params.connectionId,
     connectorKey: authProfile.connector_key,
     authType: 'oauth',
     authConfig: {
       ...buildOAuthConnectConfig(oauthMethod, requestedScopes),
+      // Ask for every scope the account already holds, including ones the
+      // connector no longer declares — `resolveRequestedOAuthScopes` filters
+      // those out, and consenting without them would downgrade the grant.
+      scopes: requestedScopes,
       requestedScopes,
+      ...(appAuthProfileId ? { appAuthProfileId } : {}),
     },
     createdBy: ctx.userId,
   });
 
   return {
-    authProfile: updatedProfile,
+    authProfile,
     connectUrl: `${getConnectBaseUrl(ctx)}/connect/${connectToken.token}/oauth/start`,
     expiresAt: new Date(connectToken.expires_at).toISOString(),
   };
@@ -720,6 +807,8 @@ export async function resolveConnectionAuthSelection(params: {
   appAuthProfileSlug?: string | null;
   deviceWorkerId?: string | null;
   oauthAccountCreatedBy?: string | null;
+  /** Updates retaining no account must not select an unrelated primary profile. */
+  autoSelectAuthProfile?: boolean;
 }): Promise<AuthSelectionResult> {
   const { organizationId, connectorKey } = params;
   const oauthMethod = getOAuthMethods(params.authSchema)[0] ?? null;
@@ -738,6 +827,10 @@ export async function resolveConnectionAuthSelection(params: {
       })
     : null;
 
+  if (params.appAuthProfileSlug && explicitAppProfile?.profile_kind !== 'oauth_app') {
+    throw new Error('The selected OAuth app was not found for this connector.');
+  }
+
   // 1. Resolve explicitly selected auth profile, or auto-select the primary
   //    auth profile for the connector's preferred auth method.
   const authProfile =
@@ -746,10 +839,10 @@ export async function resolveConnectionAuthSelection(params: {
       slug: params.authProfileSlug,
       connectorKey,
     })) ??
-    (preferredMethodType === 'env_keys' && envMethod
+    (params.autoSelectAuthProfile !== false && preferredMethodType === 'env_keys' && envMethod
       ? await getPrimaryAuthProfileForKind({ organizationId, connectorKey, profileKind: 'env' })
       : null) ??
-    (preferredMethodType === 'browser' && browserMethod
+    (params.autoSelectAuthProfile !== false && preferredMethodType === 'browser' && browserMethod
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,
@@ -757,7 +850,7 @@ export async function resolveConnectionAuthSelection(params: {
           deviceWorkerId: params.deviceWorkerId ?? null,
         })
       : null) ??
-    (preferredMethodType === 'oauth' && oauthMethod
+    (params.autoSelectAuthProfile !== false && preferredMethodType === 'oauth' && oauthMethod
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,
@@ -768,17 +861,18 @@ export async function resolveConnectionAuthSelection(params: {
       : null);
 
   if (!authProfile) {
-    return EMPTY_SELECTION({ oauthMethod, envMethod, browserMethod, preferredMethodType });
+    return {
+      ...EMPTY_SELECTION({ oauthMethod, envMethod, browserMethod, preferredMethodType }),
+      appAuthProfile: explicitAppProfile,
+    };
   }
 
-  // 2. For OAuth accounts, also resolve the app credentials profile. The
-  //    explicit app profile (resolved in step 0) is an `oauth_app` (local
-  //    client credentials); here we accept only `oauth_app`.
+  // 2. For OAuth accounts, also resolve the app credentials profile. Step 0
+  //    already rejected an explicit slug that is not an `oauth_app` (local
+  //    client credentials), so it can be honored as-is here.
   const needsAppAuth = authProfile.profile_kind === 'oauth_account' || !!params.appAuthProfileSlug;
-  const appAuthProfile = needsAppAuth
-    ? ((explicitAppProfile && explicitAppProfile.profile_kind === 'oauth_app'
-        ? explicitAppProfile
-        : null) ??
+  let appAuthProfile = needsAppAuth
+    ? (explicitAppProfile ??
       (oauthMethod && authProfile.profile_kind === 'oauth_account'
         ? await getPrimaryAuthProfileForKind({
             organizationId,
@@ -788,6 +882,19 @@ export async function resolveConnectionAuthSelection(params: {
           })
         : null))
     : null;
+
+  const boundAppIds = authProfile.profile_kind === 'oauth_account'
+    ? await oauthAppBindings(authProfile) : new Set<number>();
+  if (boundAppIds.size > 1) {
+    throw new Error('This account is linked to different OAuth apps. Use a separate account profile for each app.');
+  }
+  const boundAppId = boundAppIds.values().next().value;
+  if (typeof boundAppId === 'number') {
+    if (explicitAppProfile && explicitAppProfile.id !== boundAppId) {
+      throw new Error('This account is already bound to a different OAuth app. Use a separate account profile for another app.');
+    }
+    appAuthProfile = await getAuthProfileById(organizationId, boundAppId);
+  }
 
   return {
     selectedKind: authProfile.profile_kind,

@@ -266,7 +266,7 @@ describe('OAuth feed pause preservation', () => {
     expect(resumed.feeds[1]).toEqual({ feed_key: 'beta', status: 'paused', next_run_at: null });
   });
 
-  it('pauses active feeds and marks the connection pending when no feed is scope-eligible', async () => {
+  it('pauses scope-ineligible feeds while retaining a valid account connection', async () => {
     const seeded = await seedOAuthConnection({
       grantedScopes: [CONNECTOR_SCOPE],
       feeds: [
@@ -278,7 +278,7 @@ describe('OAuth feed pause preservation', () => {
     await syncOAuthConnectionsForAuthProfile(seeded.organizationId, seeded.authProfileId);
 
     expect(await readState(seeded.connectionId)).toEqual({
-      connectionStatus: 'pending_auth',
+      connectionStatus: 'active',
       feeds: [
         { feed_key: 'alpha', status: 'paused', next_run_at: null },
         { feed_key: 'beta', status: 'paused', next_run_at: null },

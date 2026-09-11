@@ -291,7 +291,18 @@ export const ReauthenticateAction = Type.Object({
     description:
       "Connection ID whose OAuth-account or interactive auth profile should be reauthenticated.",
   }),
+  requested_scopes: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Additional OAuth permissions to request. Existing grants remain usable until consent succeeds.",
+    })
+  ),
 });
+
+export type ConnectionReauthenticateOptions = Omit<
+  Static<typeof ReauthenticateAction>,
+  "action" | "connection_id"
+>;
 
 export const TestAction = Type.Object({
   action: Type.Literal("test", {
@@ -511,6 +522,12 @@ export const ConnectAction = Type.Object({
   app_auth_profile_slug: Type.Optional(
     Type.String({
       description: "Reusable auth profile slug for OAuth app credentials",
+    })
+  ),
+  requested_scopes: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Optional OAuth scopes to request when authorizing the account, in addition to required scopes.",
     })
   ),
   config: Type.Optional(
