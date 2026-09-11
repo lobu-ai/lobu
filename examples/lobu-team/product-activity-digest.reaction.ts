@@ -7,6 +7,88 @@ import type {
 const PRODUCT_ACTIVITY_CONNECTION = "lobu-product-activity-db";
 const LOG_ACTIVITY_CONNECTION = "lobu-production-logs";
 const CARD_TEXT_LIMIT = 2_800;
+const LOG_WINDOW_MS = 20 * 60 * 1000;
+const LOG_INGESTION_LAG_MS = 2 * 60 * 1000;
+const FEED_FRESHNESS_MS = 25 * 60 * 1000;
+
+interface FeedCoverageRow {
+  connection_slug: string;
+  connection_status: string;
+  status: string;
+  last_sync_status: string | null;
+  last_sync_at: string | null;
+  consecutive_failures: number;
+  expected_log_window_collected: boolean;
+}
+
+export interface DigestCoverage {
+  product: boolean;
+  logs: boolean;
+  issues: string[];
+}
+
+export function digestCoverage(
+  rows: FeedCoverageRow[],
+  windowEnd: Date
+): DigestCoverage {
+  const issues: string[] = [];
+  const healthy = (slug: string, label: string): boolean => {
+    const feed = rows.find((row) => row.connection_slug === slug);
+    if (!feed) {
+      issues.push(`${label}: feed unavailable`);
+      return false;
+    }
+    if (feed.connection_status !== "active") {
+      issues.push(
+        `${label}: connection ${feed.connection_status ?? "unavailable"}`
+      );
+      return false;
+    }
+    if (
+      feed.status !== "active" ||
+      feed.last_sync_status !== "success" ||
+      Number(feed.consecutive_failures) > 0
+    ) {
+      issues.push(
+        `${label}: feed ${feed.status}; last sync ${feed.last_sync_status ?? "unknown"}`
+      );
+      return false;
+    }
+    const syncedAt = new Date(feed.last_sync_at ?? "").getTime();
+    if (
+      !Number.isFinite(syncedAt) ||
+      syncedAt < windowEnd.getTime() - FEED_FRESHNESS_MS
+    ) {
+      issues.push(`${label}: last successful sync is stale or unknown`);
+      return false;
+    }
+    if (
+      slug === LOG_ACTIVITY_CONNECTION &&
+      feed.expected_log_window_collected !== true
+    ) {
+      issues.push(
+        `${label}: the expected log window has not been collected; catch-up may still be running`
+      );
+      return false;
+    }
+    return true;
+  };
+  return {
+    product: healthy(PRODUCT_ACTIVITY_CONNECTION, "Product activity"),
+    logs: healthy(LOG_ACTIVITY_CONNECTION, "Production logs"),
+    issues,
+  };
+}
+
+function logCounts(
+  digest: ProductActivityDigest,
+  coverage: DigestCoverage
+): string {
+  if (coverage.logs) return `${digest.errors} / ${digest.warnings}`;
+  return digest.errors || digest.warnings
+    ? `${digest.errors} / ${digest.warnings} observed — coverage incomplete`
+    : "Unknown — coverage incomplete";
+}
 
 export const input = {
   type: "object",
@@ -115,22 +197,34 @@ export function hasProductActivity(digest: ProductActivityDigest): boolean {
 
 export function buildProductActivityCard(
   digest: ProductActivityDigest,
-  window: { start: string; end: string }
+  window: { start: string; end: string },
+  coverage: DigestCoverage = {
+    product: false,
+    logs: false,
+    issues: ["Source coverage unverified"],
+  }
 ): CardElement {
   const online = uniqueUsers([...digest.logins, ...digest.mcp_conversations]);
+  const productCount = (count: number) =>
+    coverage.product ? count : `${count} observed`;
   const children: CardElement[] = [
     {
       type: "fields",
       children: [
-        field("Signups", digest.signups.length),
-        field("Login sessions", digest.logins.length),
-        field("Online users", online.length),
-        field("New connections", digest.connections.length),
-        field("Active MCP conversations", digest.mcp_conversations.length),
-        field("Errors / warnings", `${digest.errors} / ${digest.warnings}`),
+        field("Signups", productCount(digest.signups.length)),
+        field("Login sessions", productCount(digest.logins.length)),
+        field("Online users", productCount(online.length)),
+        field("New connections", productCount(digest.connections.length)),
+        field(
+          "Active MCP conversations",
+          productCount(digest.mcp_conversations.length)
+        ),
+        field("Errors / warnings", logCounts(digest, coverage)),
       ],
     },
   ];
+
+  appendSection(children, "Coverage incomplete", coverage.issues.map(safe));
 
   appendSection(children, "New signups", digest.signups.map(safe));
   appendSection(children, "Online users", online.map(safe));
@@ -158,7 +252,7 @@ export function buildProductActivityCard(
   return {
     type: "card",
     title: "Lobu production activity",
-    subtitle: formatWindow(window.start, window.end),
+    subtitle: `Activity received ${formatWindow(window.start, window.end)}`,
     children,
   };
 }
@@ -239,16 +333,20 @@ function formatWindow(start: string, end: string): string {
 
 function summaryBody(
   digest: ProductActivityDigest,
-  window: { start: string; end: string }
+  window: { start: string; end: string },
+  coverage: DigestCoverage
 ): string {
   return (
+    `${coverage.issues.length ? `Coverage incomplete: ${coverage.issues.join("; ")}. Observed activity: ` : ""}` +
     `${formatWindow(window.start, window.end)} · ` +
     `${digest.signups.length} signups · ` +
     `${digest.logins.length} login sessions · ` +
     `${uniqueUsers([...digest.logins, ...digest.mcp_conversations]).length} online users · ` +
     `${digest.connections.length} new connections · ` +
     `${digest.mcp_conversations.length} active MCP conversations · ` +
-    `${digest.errors} errors · ${digest.warnings} warnings`
+    (coverage.logs
+      ? `${digest.errors} errors · ${digest.warnings} warnings`
+      : `Errors / warnings: ${logCounts(digest, coverage)}`)
   );
 }
 
@@ -371,7 +469,25 @@ export default async (
     );
   }
   const digest = collectProductActivityDigest(rows, excludedEmail);
-  if (!hasProductActivity(digest)) {
+  const expectedLogEnd = new Date(
+    Math.floor((end.getTime() - LOG_INGESTION_LAG_MS) / LOG_WINDOW_MS) *
+      LOG_WINDOW_MS
+  ).toISOString();
+  // Bounded configuration rows and an exact source-identity index probe. A
+  // recent sync alone cannot prove catch-up has reached the expected window.
+  const coverageRows = (await client.query(`
+    SELECT c.slug AS connection_slug, c.status AS connection_status, f.status, f.last_sync_status,
+      f.last_sync_at, f.consecutive_failures,
+      EXISTS (SELECT 1 FROM events e WHERE e.connection_id = c.id
+        AND e.origin_id = '${expectedLogEnd}' AND e.origin_type = 'log_activity')
+        AS expected_log_window_collected
+    FROM connections c JOIN feeds f ON f.connection_id = c.id
+    WHERE c.deleted_at IS NULL AND f.deleted_at IS NULL AND (
+      (c.slug = '${PRODUCT_ACTIVITY_CONNECTION}' AND f.feed_key = 'query')
+      OR (c.slug = '${LOG_ACTIVITY_CONNECTION}' AND f.feed_key = 'activity'))
+  `)) as FeedCoverageRow[];
+  const coverage = digestCoverage(coverageRows, end);
+  if (!hasProductActivity(digest) && coverage.issues.length === 0) {
     client.log("No production activity; Slack digest skipped", {
       window_start: start.toISOString(),
       window_end: end.toISOString(),
@@ -381,14 +497,22 @@ export default async (
 
   await client.notifications.send({
     title: "Lobu production activity digest",
-    body: summaryBody(digest, {
-      start: start.toISOString(),
-      end: end.toISOString(),
-    }),
-    card: buildProductActivityCard(digest, {
-      start: start.toISOString(),
-      end: end.toISOString(),
-    }),
+    body: summaryBody(
+      digest,
+      {
+        start: start.toISOString(),
+        end: end.toISOString(),
+      },
+      coverage
+    ),
+    card: buildProductActivityCard(
+      digest,
+      {
+        start: start.toISOString(),
+        end: end.toISOString(),
+      },
+      coverage
+    ),
     recipients: "admins",
     idempotency_key: `product-activity-digest:run:${runId}`,
     automation_source: {

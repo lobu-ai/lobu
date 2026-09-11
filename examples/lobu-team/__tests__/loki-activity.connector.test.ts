@@ -1,10 +1,52 @@
-import { describe, expect, it } from "bun:test";
-import {
+import { describe, expect, it, spyOn } from "bun:test";
+import LokiActivityConnector, {
   queryLokiActivity,
   windowsToCollect,
 } from "../loki-activity.connector.ts";
 
 describe("Lobu Team Loki activity connector", () => {
+  it("persists a successful empty window as coverage evidence", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        status: "success",
+        data: { resultType: "vector", result: [] },
+      })
+    );
+    try {
+      const result = await new LokiActivityConnector().sync({
+        feedKey: "activity",
+        checkpoint: null,
+        config: {
+          LOKI_URL: "https://loki.example.test",
+          namespace: "synthetic",
+        },
+      } as never);
+      expect(result.events).toHaveLength(1);
+      expect(result.events?.[0]?.metadata).toMatchObject({
+        errors: 0,
+        warnings: 0,
+      });
+      expect(result.events?.[0]?.origin_id).toBe(result.checkpoint?.window_end);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+  it("retains an old checkpoint and drains backlog in bounded oldest-first batches", () => {
+    const checkpoint = { window_end: "2026-08-10T12:00:00.000Z" };
+    const now = new Date("2026-08-13T12:23:00.000Z");
+    const first = windowsToCollect(checkpoint, now);
+    expect(first).toHaveLength(72);
+    expect(first[0]?.start.toISOString()).toBe(checkpoint.window_end);
+    expect(first.at(-1)?.end.toISOString()).toBe("2026-08-11T12:00:00.000Z");
+    const second = windowsToCollect(
+      { window_end: first.at(-1)?.end.toISOString() },
+      now
+    );
+    expect(second[0]?.start.toISOString()).toBe(
+      first.at(-1)?.end.toISOString()
+    );
+    expect(second).toHaveLength(72);
+  });
   it("collects aligned 20-minute windows and resumes from its checkpoint", () => {
     const windows = windowsToCollect(
       { window_end: "2026-08-13T11:40:00.000Z" },
