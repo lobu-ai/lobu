@@ -8,10 +8,7 @@
  */
 
 import { deriveToolActorSource } from '../../utils/apply-context';
-import {
-	RESERVED_COLUMN_NAMES,
-	validateEntityRowPatchGrantingApprovedFields,
-} from "../../authz/entity-row-validation";
+import { RESERVED_COLUMN_NAMES } from "../../authz/entity-row-validation";
 import { SCOPE_CHECK_NOT_APPLICABLE } from "../../auth/tool-access";
 import {
 	type EntityTransactionHookContext,
@@ -57,7 +54,6 @@ import {
 	deleteEntity,
 	type EntityData,
 	mergeEntityFields,
-	patchEntityRows,
 } from "../../utils/entity-management";
 import { applyMergeGroupInTransaction } from "../../utils/entity-merge";
 import { ToolUserError } from "../../utils/errors";
@@ -1194,111 +1190,29 @@ export async function applyEntityFieldChangeProposal(
 					`
 				)[0]
 			: undefined;
-		const merge =
-			Object.keys(metadataFields).length > 0
-				? await mergeEntityFields({
-						tx,
-						entityId: proposal.entity_id,
-						fields: metadataFields,
-						source: "human",
-						actorId: approverUserId,
-						note: proposal.reason ?? null,
-						// Don't overwrite a field the human re-edited after this proposal was queued.
-						expectedCurrent: proposal.current ?? null,
-						// This IS the approval — but only for what the card showed.
-						approvedFields: proposal.escalated_fields ?? [],
-					})
-				: ({
-						changed: false,
-						applied: {},
-						blocked: {},
-						stale: {},
-						affirmed: [],
-						nextMetadata: {},
-						nextControls: {},
-					} satisfies FieldMergeResult);
-		if (Object.keys(attributeFields).length > 0) {
-			const rows = await tx<{
-				name: string | null;
-				parent_id: number | null;
-				content: string | null;
-			}>`
-        SELECT name, parent_id, content FROM entities
-        WHERE id = ${proposal.entity_id} AND deleted_at IS NULL
-        FOR UPDATE
-      `;
-			if (rows.length === 0) {
-				throw new ToolUserError(`Entity ${proposal.entity_id} not found`, 404);
-			}
-			const live = {
-				$name: rows[0].name ?? null,
-				$parent_id:
-					rows[0].parent_id == null ? null : Number(rows[0].parent_id),
-				$content: rows[0].content ?? null,
-			} as Record<string, unknown>;
-			const apply: Record<string, unknown> = {};
-			for (const [key, proposed] of Object.entries(attributeFields)) {
-				const expected = proposal.current?.[key];
-				if (
-					proposal.current &&
-					Object.hasOwn(proposal.current, key) &&
-					JSON.stringify(live[key] ?? null) !== JSON.stringify(expected ?? null)
-				) {
-					merge.stale[key] = {
-						expected: expected ?? null,
-						live: live[key] ?? null,
-					};
-					continue;
+		// Plan metadata and attributes from the same locked pre-image and validate
+		// their combined result once. A valid metadata/name transition must not be
+		// judged against a temporary row containing only half of the approved edit.
+		const merge = await mergeEntityFields({
+			tx,
+			entityId: proposal.entity_id,
+			fields: metadataFields,
+			attributes: attributeFields,
+			source: "human",
+			actorId: approverUserId,
+			note: proposal.reason ?? null,
+			expectedCurrent: proposal.current ?? null,
+			approvedFields: proposal.escalated_fields ?? [],
+			beforePersist: (planned) => {
+				// An escalated card is one reviewed unit. Reject drift before rules
+				// see an unapproved fragment; ordinary ownership cards retain their
+				// existing per-field consent and may apply the fields still current.
+				if ((proposal.escalated_fields?.length ?? 0) > 0 &&
+					Object.keys(planned.stale).length > 0) {
+					throw new AtomicCardStaleError(planned.stale);
 				}
-				apply[key] = proposed;
-				merge.applied[key] = { old: live[key] ?? null, new: proposed };
-			}
-			if (Object.keys(apply).length > 0) {
-				const nextName =
-					"$name" in apply ? String(apply.$name ?? "") || null : null;
-				// Applying an approval is a WRITE, so it revalidates. A human blessing
-				// a field cannot bless an illegal state: without this, a rule could be
-				// satisfied by escalating, and the approval would then commit unchecked.
-				await patchEntityRows({
-					tx,
-					ids: [proposal.entity_id],
-					patch: await validateEntityRowPatchGrantingApprovedFields({
-						tx,
-						ids: [proposal.entity_id],
-						patch: {
-							...(nextName !== null ? { name: nextName } : {}),
-							...("$parent_id" in apply
-								? { parentId: apply.$parent_id as number | null }
-								: {}),
-							...("$content" in apply
-								? { content: apply.$content as string | null }
-								: {}),
-						},
-						// Same as the metadata half above, and it has to be set on BOTH: a
-						// card mixing `$name` with a metadata field runs through both
-						// writers inside one transaction, so an escalate re-thrown here
-						// rolls the approved metadata back out too.
-						approvedFields: proposal.escalated_fields ?? [],
-					}),
-				});
-			}
-		}
-		// An ESCALATED card is one unit: `updateEntity` deferred the whole
-		// proposal precisely because the fragment could not stand on its own, so
-		// applying a subset commits a state no rule validated and no human
-		// reviewed. Both halves have run by here, so `merge.stale` is the
-		// complete picture — throwing rolls the whole transaction back rather
-		// than re-deriving staleness with a second, divergent implementation.
-		//
-		// Scoped to escalated cards on purpose. A card minted from a field-
-		// ownership hold carries per-field consent (the human owns the VALUE,
-		// not the row), so its fields stay independently applicable.
-		if (
-			(proposal.escalated_fields?.length ?? 0) > 0 &&
-			Object.keys(merge.stale).length > 0
-		) {
-			throw new AtomicCardStaleError(merge.stale);
-		}
+			},
+		});
 		const appliedChanges = Object.entries(merge.applied).map(
 			([field, value]) => ({ field, old: value.old, new: value.new }),
 		);

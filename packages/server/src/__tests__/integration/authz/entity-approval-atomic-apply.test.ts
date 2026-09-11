@@ -240,9 +240,8 @@ describe("an escalated card applies atomically or not at all", () => {
 		const { org, user, agent, invoice } = await seed();
 		const agentCtx = ctxFor(org.id, { agentId: agent.agentId });
 
-		// A card mixing an ATTRIBUTE key with metadata runs through two writers:
-		// `mergeEntityFields` first, then `patchEntityRows`. Staleness discovered by
-		// the second must still unwind the first.
+		// Attribute and metadata staleness must govern the whole approved unit,
+		// including when only the name changed after the proposal was queued.
 		const result = await updateEntity(
 			invoice.id,
 			{ name: "INV-RENAMED", metadata: { amount: 90000 } },
@@ -276,6 +275,42 @@ describe("an escalated card applies atomically or not at all", () => {
 		expect(await readName(invoice.id)).toBe("INV-HUMAN");
 		// Asserting only the name would pass with the metadata half committed.
 		expect((await readMetadata(invoice.id)).amount).toBe(1000);
+	}, 60_000);
+
+	it.each([false, true])("validates an approved metadata/name transition together (stale name: %s)", async (stale) => {
+		const { org, user, agent, invoice } = await seed();
+		const sql = getTestDb();
+		const compiled = await compileEntityRule(`export default (row) => {
+  if (row.op === "update" && row.changed("vendor")) {
+    if (row.next.$name !== row.next.vendor) row.deny("vendor and display name must change together");
+    row.escalate(["vendor"], "review the vendor change");
+  }
+};`);
+		await sql`UPDATE entity_types SET rules_compiled = ${compiled}
+      WHERE organization_id = ${org.id} AND slug = 'invoice'`;
+		const agentCtx = ctxFor(org.id, { agentId: agent.agentId });
+		const result = await updateEntity(invoice.id, {
+			name: "ACME", metadata: { vendor: "ACME" },
+		}, TEST_ENV, agentCtx);
+		expect(result.deferred).toBeTruthy();
+		await result.deferred?.queue(agentCtx, TEST_ENV);
+		const proposal = await persistedProposal(org.id);
+		expect(proposal.fields).toEqual({ vendor: "ACME", $name: "ACME" });
+		if (stale) {
+			await updateEntity(invoice.id, { name: "Human label" }, TEST_ENV,
+				ctxFor(org.id, { userId: user.id }));
+		}
+		const applied = await applyEntityFieldChangeProposal(
+			proposal as Parameters<typeof applyEntityFieldChangeProposal>[0], user.id,
+		);
+		expect(await readName(invoice.id)).toBe(stale ? "Human label" : "ACME");
+		expect((await readMetadata(invoice.id)).vendor).toBe(stale ? null : "ACME");
+		if (stale) {
+			expect(applied.changed).toBe(false);
+			expect(applied.stale.$name).toBeDefined();
+		} else {
+			expect(applied.applied.$name).toEqual({ old: "INV-ATOMIC", new: "ACME" });
+		}
 	}, 60_000);
 
 	it("CONTROL: a hold card with no escalation still applies its live fields", async () => {

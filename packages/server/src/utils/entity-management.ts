@@ -220,6 +220,13 @@ interface EntityCreateOptions {
 interface EntityUpdateOptions {
 	/** Join an existing semantic mutation transaction when supplied. */
 	sql?: DbClient;
+	/** Keep an automatically derived label current until its name is customized. */
+	derivedName?: {
+		fields: readonly string[];
+		compute: (metadata: Readonly<Record<string, unknown>>) => string;
+	};
+	/** Keyed identities keep their existing URL when their display label changes. */
+	preserveSlug?: boolean;
 	/**
 	 * Semantic caller hook executed after the row write but before commit. Low-level
 	 * projection writers omit it; manage_entity uses it for canonical entity.updated.
@@ -680,6 +687,8 @@ export async function mergeEntityFields(params: {
 	tx: DbClient;
 	entityId: number;
 	fields: Record<string, unknown>;
+	/** Governed top-level attributes from an approved composite proposal. */
+	attributes?: Partial<Record<'$name' | '$parent_id' | '$content', unknown>>;
 	source: FieldWriteSource;
 	/** User id for a human edit; null/system otherwise. */
 	actorId: string | null;
@@ -697,10 +706,15 @@ export async function mergeEntityFields(params: {
 	 * for. See `validateEntityRowPatchGrantingApprovedFields`'s `approvedFields`.
 	 */
 	approvedFields?: readonly string[];
+	/** Assert caller-owned invariants on the full merge before validation or writes. */
+	beforePersist?: (merge: FieldMergeResult) => void;
 }): Promise<FieldMergeResult> {
 	const { tx, entityId, fields, source, actorId } = params;
-	const rows = await tx<{ metadata: unknown; field_controls: unknown }>`
-    SELECT metadata, field_controls FROM entities
+	const rows = await tx<{
+		metadata: unknown; field_controls: unknown;
+		name: string | null; parent_id: number | null; content: string | null;
+	}>`
+    SELECT metadata, field_controls, name, parent_id, content FROM entities
     WHERE id = ${entityId} AND deleted_at IS NULL
     FOR UPDATE
   `;
@@ -725,6 +739,31 @@ export async function mergeEntityFields(params: {
 		affirm: params.affirm,
 		requireApproval: params.requireApproval,
 	});
+	const attributePatch: EntityRowPatch = {};
+	const liveAttributes: Record<string, unknown> = {
+		$name: rows[0].name ?? null,
+		$parent_id: rows[0].parent_id == null ? null : Number(rows[0].parent_id),
+		$content: rows[0].content ?? null,
+	};
+	for (const [field, proposed] of Object.entries(params.attributes ?? {})) {
+		const live = liveAttributes[field];
+		if (params.expectedCurrent && Object.hasOwn(params.expectedCurrent, field) &&
+			JSON.stringify(live) !== JSON.stringify(params.expectedCurrent[field] ?? null)) {
+			merge.stale[field] = { expected: params.expectedCurrent[field] ?? null, live };
+			continue;
+		}
+		if (JSON.stringify(live) === JSON.stringify(proposed ?? null)) continue;
+		if (source !== 'human' && new Set(params.requireApproval ?? []).has(field)) {
+			merge.blocked[field] = { current: live, proposed };
+			continue;
+		}
+		if (field === '$name') attributePatch.name = String(proposed ?? '');
+		if (field === '$parent_id') attributePatch.parentId = proposed as number | null;
+		if (field === '$content') attributePatch.content = proposed as string | null;
+		merge.applied[field] = { old: live, new: proposed };
+		merge.changed = true;
+	}
+	params.beforePersist?.(merge);
 
 	if (merge.changed) {
 		await patchEntityRows({
@@ -734,6 +773,7 @@ export async function mergeEntityFields(params: {
 				tx,
 				ids: [entityId],
 				patch: {
+					...attributePatch,
 					metadata: merge.nextMetadata,
 					fieldControls: merge.nextControls,
 				},
@@ -744,12 +784,7 @@ export async function mergeEntityFields(params: {
 	return merge;
 }
 
-/**
- * Tolerant metadata/controls parse. Exported for `promote-keyed-entities`,
- * which reads live metadata inside a rule-containment catch — a throw there
- * would escape the catch and roll back the window completion it exists to save.
- */
-export function parseEntityJsonObject(value: unknown): Record<string, unknown> {
+function parseEntityJsonObject(value: unknown): Record<string, unknown> {
 	if (value == null) return {};
 	if (typeof value === "string") {
 		try {
@@ -784,11 +819,8 @@ export function parseEntityJsonObject(value: unknown): Record<string, unknown> {
  *
  * A rule that crashes or times out reads as a deny, so a broken rule surfaces as
  * an error rather than an unanswerable approval.
- *
- * Exported for automation promotion, whose merge strips human-owned and
- * policy-gated fields before validating and so faces the same split.
  */
-export async function fullProposalVerdict(params: {
+async function fullProposalVerdict(params: {
 	tx: DbClient;
 	entityId: number;
 	patch: EntityRowPatch;
@@ -1039,6 +1071,9 @@ export async function updateEntity(
 	CreatedEntity & { fieldMerge?: FieldMergeInfo; deferred?: DeferredMutation }
 > {
 	const sql = opts?.sql ?? getDb();
+	if (opts?.derivedName && data.name !== undefined) {
+		throw new Error("An explicit name cannot also be derived from metadata");
+	}
 
 	// Validate write access (uses PG for auth tables)
 	await requireWriteAccess(sql, entityId, ctx);
@@ -1140,6 +1175,18 @@ export async function updateEntity(
 				? JSON.parse(current[0].field_controls as string)
 				: (current[0].field_controls ?? {})
 		) as Record<string, FieldControl>;
+		// There is no ownership marker for top-level names. Only keep deriving a
+		// label that still matches its prior projection; a custom or already
+		// divergent label is preserved. This comparison stays under the row lock.
+		const derivedName = opts?.derivedName &&
+			current[0].name === opts.derivedName.compute(existing)
+			? opts.derivedName : undefined;
+		const proposedName = data.name ?? derivedName?.compute({ ...existing, ...metadataUpdates });
+		let effectiveName = proposedName;
+		const namingFieldsProposed = derivedName?.fields.some((field) =>
+			Object.hasOwn(metadataUpdates, field) &&
+			JSON.stringify(existing[field] ?? null) !== JSON.stringify(metadataUpdates[field] ?? null)
+		) ?? false;
 
 		// Non-human edits run ONE policy pass over metadata fields AND the
 		// top-level attributes (name/content/parent_id as reserved $-paths, so a
@@ -1152,7 +1199,7 @@ export async function updateEntity(
 			string,
 			{ current: unknown; proposed: unknown }
 		> = {};
-		let applyName = data.name !== undefined;
+		let applyName = proposedName !== undefined;
 		let applyParent = data.parent_id !== undefined;
 		let applyContent = hasContent;
 		// Computed for EVERY caller, not just the gated ones: when a write defers
@@ -1162,10 +1209,10 @@ export async function updateEntity(
 			string,
 			{ current: unknown; proposed: unknown }
 		> = {};
-		if (applyName && (data.name ?? null) !== (current[0].name ?? null)) {
+		if (applyName && (namingFieldsProposed || (proposedName ?? null) !== (current[0].name ?? null))) {
 			attributeProposals.$name = {
 				current: current[0].name ?? null,
-				proposed: data.name ?? null,
+				proposed: proposedName ?? null,
 			};
 		}
 		const currentParentId =
@@ -1259,7 +1306,7 @@ export async function updateEntity(
 			mergedMetadata = merge.nextMetadata;
 			// A human edit claims ownership of the fields it sets; an automation-source
 			// merge never claims ownership, so leave field_controls untouched.
-			mergedControls = isHumanEdit ? merge.nextControls : null;
+			mergedControls = isHumanEdit && merge.changed ? merge.nextControls : null;
 			fieldMerge = {
 				applied: Object.keys(merge.applied),
 				blocked: Object.fromEntries(
@@ -1270,6 +1317,17 @@ export async function updateEntity(
 				),
 			};
 		}
+		if (derivedName && mergedMetadata) {
+			// A held metadata value must never leak into the visible title. The
+			// full proposal still retains its corresponding name for approval.
+			effectiveName = derivedName.compute(mergedMetadata);
+			if (effectiveName !== proposedName) {
+				blockedAttributes.$name = {
+					current: applyName ? effectiveName : current[0].name ?? null,
+					proposed: proposedName ?? null,
+				};
+			}
+		}
 		if (Object.keys(blockedAttributes).length > 0) {
 			fieldMerge = {
 				applied: fieldMerge?.applied ?? [],
@@ -1278,11 +1336,13 @@ export async function updateEntity(
 		}
 
 		const rowPatch: EntityRowPatch = {};
-		if (applyName && data.name !== undefined) rowPatch.name = data.name;
-		const slugPatch = data.slug ?? (applyName ? newSlug : null);
+		if (applyName && effectiveName !== undefined && effectiveName !== current[0].name) {
+			rowPatch.name = effectiveName;
+		}
+		const slugPatch = opts?.preserveSlug ? null : data.slug ?? (applyName ? newSlug : null);
 		if (slugPatch !== null) rowPatch.slug = slugPatch;
 		if (applyParent) rowPatch.parentId = data.parent_id ?? null;
-		if (hasMetadataUpdates) rowPatch.metadata = mergedMetadata;
+		if (hasMetadataUpdates && fieldMerge?.applied.length) rowPatch.metadata = mergedMetadata;
 		if (mergedControls !== null) rowPatch.fieldControls = mergedControls;
 		if (data.enabled_classifiers !== undefined) {
 			rowPatch.enabledClassifiers = data.enabled_classifiers;
@@ -1309,11 +1369,15 @@ export async function updateEntity(
 		let deferEscalatedFields: string[] = [];
 		let validated: ValidatedEntityRowPatch | null = null;
 		try {
-			validated = await validateEntityRowPatch({
-				tx,
-				ids: [entityId],
-				patch: rowPatch,
-			});
+			// A replay with no inline changes must not become a new rule verdict
+			// or refresh updated_at. Ownership-held fields still queue below.
+			if (Object.keys(rowPatch).length > 0) {
+				validated = await validateEntityRowPatch({
+					tx,
+					ids: [entityId],
+					patch: rowPatch,
+				});
+			}
 		} catch (err) {
 			if (!(err instanceof EntityRowValidationError)) throw err;
 			const heldFields = Object.keys(fieldMerge?.blocked ?? {});
@@ -1370,7 +1434,7 @@ export async function updateEntity(
 			const escalation =
 				fullVerdict?.verdict.outcome === "escalate"
 					? fullVerdict.verdict
-					: err.verdict.outcome === "escalate"
+					: heldFields.length === 0 && err.verdict.outcome === "escalate"
 						? err.verdict
 						: null;
 
@@ -1410,7 +1474,13 @@ export async function updateEntity(
 
 		if (validated) {
 			await patchEntityRows({ tx, ids: [entityId], patch: validated });
-		} else {
+			if (rowPatch.name !== undefined && rowPatch.name !== current[0].name) {
+				fieldMerge = {
+					applied: [...(fieldMerge?.applied ?? []), "$name"],
+					blocked: fieldMerge?.blocked ?? {},
+				};
+			}
+		} else if (deferWholeWrite) {
 			// Nothing applied, so report every proposed field as blocked rather than
 			// letting `fieldMerge.applied` claim a write that did not happen.
 			fieldMerge = {

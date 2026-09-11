@@ -36,7 +36,6 @@ import { ApprovalAttribution } from '@lobu/core/contracts/interaction-envelope';
 import {
   type CreateOrDeleteDecision,
   deferEntityCreate,
-  deferEntityFieldChange,
   type DeferredMutation,
   runMutationGate,
 } from '../authz/entity-mutation-gate';
@@ -45,15 +44,14 @@ import {
   resolveAutomationOwner,
 } from '../authz/entity-policy';
 import type { DbClient } from '../db/client';
+import type { Env } from '../index';
 import type { EntityOutput } from '../types/automations';
-import type { AppliedChange, BlockedChange } from './entity-field-merge';
-import { recordEntityWriteDenial } from './entity-write-denial-audit';
+import type { AppliedChange } from './entity-field-merge';
+import { EntityPolicyDenialError, recordEntityWriteDenial } from './entity-write-denial-audit';
 import {
-  fullProposalVerdict,
   hardDeleteEntityRows,
   insertEntityRow,
-  mergeEntityFields,
-  parseEntityJsonObject,
+  updateEntity,
 } from './entity-management';
 import { EntityRowValidationError, validateEntityRowInsert } from '../authz/entity-row-validation';
 import logger from './logger';
@@ -283,6 +281,9 @@ async function upsertKeyedEntity(params: {
   identifier: string;
   name: string;
   baseSlug: string;
+  output: EntityOutput;
+  stableKey: string;
+  runId: number;
   metadata: Record<string, unknown>;
   /** Extracted entity field values to sync into metadata (excludes the stable key). */
   fieldValues: Record<string, unknown>;
@@ -309,10 +310,11 @@ async function upsertKeyedEntity(params: {
 }): Promise<{
   entityId: number;
   created: boolean;
-  blocked: Record<string, BlockedChange>;
   /** Fields the automation actually wrote inline (auto-applied), old→new. */
   applied: Record<string, AppliedChange>;
   blockedCreate: boolean;
+  deferred?: DeferredMutation;
+  name?: string;
   /**
    * Set when the write was REFUSED here — every refusal, whichever decider made
    * it: a rule deny on either op, and a policy deny on an update or a create.
@@ -335,8 +337,7 @@ async function upsertKeyedEntity(params: {
   // 1. Existing identity → reuse its entity (the idempotent fast path), and SYNC the
   //    freshly-extracted field values into it honoring human ownership AND the org's
   //    update policy: un-gated fields are written; human-owned or policy-gated
-  //    fields are returned as `blocked` (the caller queues an approval) and never
-  //    overwritten inline.
+  //    fields are returned as a deferred approval and never overwritten inline.
   const existing = await tx<{ entity_id: number | string }>`
     SELECT ei.entity_id
     FROM entity_identities ei
@@ -351,146 +352,71 @@ async function upsertKeyedEntity(params: {
   `;
   if (existing.length > 0) {
     const entityId = Number(existing[0].entity_id);
-    // Owners are 'none' here on purpose: human ownership is enforced inside the
-    // merge itself; the gate only adds the org policy's field gates on top.
-    const decision = await runMutationGate({
-      action: 'update',
-      organizationId,
-      // The automation is the acting principal (its OWN rows bind); its owning agent
-      // is folded in as the ancestor via `ownerAgentId` so the agent's envelope
-      // ALSO binds — max-restrictive, so the agent can tighten but an automation-
-      // specific restriction is never loosened away.
-      principalKind: 'automation',
-      sql: tx,
-      attribution: ApprovalAttribution.Automation,
-      automationId: params.automationId,
-      principalId: mutationPrincipalId({ automationId: params.automationId }),
-      ownerAgentId: params.automationAgentId,
-      ownerResolved: params.automationOwnerResolved,
-      entityTypeSlug: params.entityTypeSlug,
-      entityId,
-      fields: Object.fromEntries(
-        Object.keys(params.fieldValues).map((field) => [field, 'none' as const])
-      ),
-    });
-    // Fail CLOSED on a deny: apply nothing and return a modeled policy outcome.
-    // Unexpected persistence errors still throw and roll back the completion.
-    if (decision.outcome === 'deny') {
-      return {
-        entityId,
-        created: false,
-        blocked: {},
-        applied: {},
-        blockedCreate: false,
-        denied: {
-          source: 'policy',
-          reason: decision.reason,
-          auditFields: Object.keys(params.fieldValues),
-        },
-      };
-    }
-    const requireApproval = [...decision.requireApproval];
+    const applied: Record<string, AppliedChange> = {};
     try {
-      const merge = await mergeEntityFields({
-        tx,
-        entityId,
-        fields: params.fieldValues,
-        source: 'automation',
-        actorId: null,
-        requireApproval,
+      // Promotion is an in-process Automation write, using the same principal
+      // and owning-agent envelope as its reaction. Reuse the shared update
+      // funnel so metadata, derived names, rules and approvals stay atomic.
+      const updated = await updateEntity(entityId, { metadata: params.fieldValues }, {} as Env, {
+        organizationId,
+        userId: null,
+        memberRole: null,
+        agentId: params.automationAgentId,
+        isAuthenticated: true,
+        tokenType: 'session',
+        scopedToOrg: true,
+        allowCrossOrg: false,
+        grantedOrganizationIds: null,
+        directSearchFederation: false,
+        actingAutomationId: params.automationId,
+        actingRunId: params.runId,
+      }, {
+        sql: tx,
+        policyPrincipalKind: 'automation',
+        attribution: ApprovalAttribution.Automation,
+        principalId: mutationPrincipalId({ automationId: params.automationId }),
+        ownerAgentId: params.automationAgentId,
+        ownerResolved: params.automationOwnerResolved,
+        parentRunId: params.runId,
+        preserveSlug: true,
+        derivedName: {
+          fields: params.output.name?.length ? params.output.name : params.output.key,
+          compute: (metadata) => buildEntityName(metadata, params.output, params.stableKey),
+        },
+        afterPersist: async (before, after) => {
+          for (const field of Object.keys(params.fieldValues)) {
+            const oldValue = before.metadata?.[field] ?? null;
+            const newValue = after.metadata?.[field] ?? null;
+            if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+              applied[field] = { old: oldValue, new: newValue };
+            }
+          }
+          if (before.name !== after.name) {
+            applied.$name = { old: before.name, new: after.name };
+          }
+        },
       });
       return {
         entityId,
+        name: updated.name,
         created: false,
-        blocked: merge.blocked,
-        applied: merge.applied,
+        applied,
         blockedCreate: false,
+        deferred: updated.deferred,
       };
     } catch (err) {
+      // The shared funnel rejects before persistence. Unexpected failures still
+      // escape to the enclosing savepoint and roll back the completion.
+      if (err instanceof EntityPolicyDenialError) {
+        return {
+          entityId, created: false, applied: {}, blockedCreate: false,
+          denied: { source: 'policy', reason: err.denial.reason, auditFields: err.denial.deniedFields },
+        };
+      }
       if (!(err instanceof EntityRowValidationError)) throw err;
-      // A write rule is a per-ROW verdict, so it must not escape this row.
-      // Letting it propagate rolls back the whole window completion — every
-      // promoted row and every declared output — and it recurs on every retry,
-      // so one escalating rule permanently poison-pills the automation.
-      //
-      // A deny is a refusal, not a request for review: fail the row closed,
-      // like the policy deny above.
-      if (err.verdict.outcome !== 'escalate') {
-        return {
-          entityId,
-          created: false,
-          blocked: {},
-          applied: {},
-          blockedCreate: false,
-          denied: {
-            source: 'rule',
-            reason: err.verdict.reason,
-            auditFields: err.verdict.fields,
-          },
-        };
-      }
-      // Hold the row WHOLE, and ask the rule about that same whole write.
-      //
-      // The caught verdict judged the RESIDUAL — `mergeEntityFields` strips
-      // human-owned and policy-gated fields before it validates, so the write
-      // the rule answered about can be a strict subset of the one the card
-      // replays. The replay demands `verdict.fields.every(f =>
-      // approvedFields.includes(f))`, so a grant copied off the residual mints
-      // a card no approval can ever clear: approving re-runs the rule against
-      // the full write, it names a field nobody granted, and the write throws.
-      // (`updateEntity` re-asks for the same reason — same helper.)
-      const [live] = await tx<{ metadata: unknown }>`
-        SELECT metadata FROM entities WHERE id = ${entityId}
-      `;
-      // Tolerant parse on purpose: this runs INSIDE the containment catch, so a
-      // throw here would escape it and roll back the very window completion the
-      // catch exists to save.
-      const current = parseEntityJsonObject(live?.metadata);
-      const held: Record<string, BlockedChange> = {};
-      for (const [field, proposed] of Object.entries(params.fieldValues)) {
-        held[field] = { current: current[field] ?? null, proposed };
-      }
-      // `fieldControls` is ungoverned, so a metadata-only patch asks the rule
-      // the whole question the card's replay will ask it.
-      const whole = await fullProposalVerdict({
-        tx,
-        entityId,
-        patch: { metadata: { ...current, ...params.fieldValues } },
-      });
-      // Stated in the terms the card proposes, not the residual's. A deny on
-      // the whole write is the same dead end as an uncovered escalate, so fail
-      // the row closed rather than card a proposal approval cannot rescue.
-      if (whole?.verdict.outcome === 'deny') {
-        return {
-          entityId,
-          created: false,
-          blocked: {},
-          applied: {},
-          blockedCreate: false,
-          denied: {
-            source: 'rule',
-            reason: whole.verdict.reason,
-            auditFields: whole.verdict.fields,
-          },
-        };
-      }
-      // A whole write the rule finds legal still needs the card — those fields
-      // are held by ownership or policy, not by the rule — but no grant, and
-      // no rule reason: neither describes why THIS card exists.
       return {
-        entityId,
-        created: false,
-        blocked: held,
-        applied: {},
-        blockedCreate: false,
-        ...(whole?.verdict.outcome === 'escalate'
-          ? {
-              escalated: {
-                fields: whole.verdict.fields,
-                reason: whole.verdict.reason,
-              },
-            }
-          : {}),
+        entityId, created: false, applied: {}, blockedCreate: false,
+        denied: { source: 'rule', reason: err.verdict.reason, auditFields: err.verdict.fields },
       };
     }
   }
@@ -504,7 +430,6 @@ async function upsertKeyedEntity(params: {
     return {
       entityId: 0,
       created: false,
-      blocked: {},
       applied: {},
       blockedCreate: true,
       ...(params.createGate.outcome === 'deny'
@@ -548,7 +473,6 @@ async function upsertKeyedEntity(params: {
       return {
         entityId: 0,
         created: false,
-        blocked: {},
         applied: {},
         blockedCreate: true,
         denied: {
@@ -565,7 +489,6 @@ async function upsertKeyedEntity(params: {
     return {
       entityId: 0,
       created: false,
-      blocked: {},
       applied: {},
       blockedCreate: true,
       escalated: { fields: err.verdict.fields, reason: err.verdict.reason },
@@ -586,7 +509,7 @@ async function upsertKeyedEntity(params: {
     RETURNING entity_id
   `;
   if (claimed.length > 0) {
-    return { entityId, created: true, blocked: {}, applied: {}, blockedCreate: false };
+    return { entityId, created: true, applied: {}, blockedCreate: false };
   }
 
   // Lost the race: another live transaction already claimed this key. Resolve
@@ -612,14 +535,13 @@ async function upsertKeyedEntity(params: {
     return {
       entityId: Number(winner[0].entity_id),
       created: false,
-      blocked: {},
       applied: {},
       blockedCreate: false,
     };
   }
   // Extremely unlikely: the conflicting claim was tombstoned between our INSERT
   // and this re-read. Keep our entity as the canonical one.
-  return { entityId, created: true, blocked: {}, applied: {}, blockedCreate: false };
+  return { entityId, created: true, applied: {}, blockedCreate: false };
 }
 
 /**
@@ -779,7 +701,8 @@ export async function promoteAutomationEntityOutput(
     try {
       const {
         created,
-        blocked,
+        deferred,
+        name: persistedName,
         applied,
         entityId,
         blockedCreate,
@@ -795,6 +718,9 @@ export async function promoteAutomationEntityOutput(
           identifier,
           name,
           baseSlug: slug,
+          output,
+          stableKey,
+          runId,
           metadata,
           fieldValues,
           createdBy,
@@ -895,25 +821,9 @@ export async function promoteAutomationEntityOutput(
       if (created) {
         result.changes.push({ entityId, name, kind: 'created', applied: {} });
       } else if (Object.keys(applied).length > 0) {
-        result.changes.push({ entityId, name, kind: 'updated', applied });
+        result.changes.push({ entityId, name: persistedName ?? name, kind: 'updated', applied });
       }
-      const blockedFields = Object.keys(blocked);
-      if (blockedFields.length > 0) {
-        result.deferred.push(
-          deferEntityFieldChange({
-            entityId,
-            fields: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].proposed])),
-            current: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].current])),
-            attribution: ApprovalAttribution.Automation,
-            // A rule-held row carries the rule's own grant and reason: the apply
-            // path replays the write, so an empty grant re-escalates, the write
-            // throws, and `applyFailure` resets the run to pending — forever.
-            ...(escalated ? { escalatedFields: escalated.fields, reason: escalated.reason } : {}),
-            automationId,
-            parentRunId: runId,
-          })
-        );
-      }
+      if (deferred) result.deferred.push(deferred);
     } catch (err) {
       // The savepoint gives us a clean error boundary, but the declared output
       // remains atomic: an unexpected failure must roll back the completion so

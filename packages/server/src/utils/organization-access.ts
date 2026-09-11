@@ -11,7 +11,7 @@
  *   also needs `isAuthenticated` (system/internal calls like reaction scripts).
  */
 
-import { type DbClient, getDb } from '../db/client';
+import type { DbClient } from '../db/client';
 import type { ToolContext } from '../tools/registry';
 import { ToolUserError } from './errors';
 
@@ -44,7 +44,7 @@ export async function getWorkspaceRole(
  * Allowed if entity belongs to the user's organization and user is a member.
  */
 async function canReadEntity(sql: DbClient, entityId: number, ctx: ToolContext): Promise<boolean> {
-  const entityResult = await getDb()`
+  const entityResult = await sql`
     SELECT e.organization_id
     FROM entities e
     WHERE e.id = ${entityId}
@@ -82,7 +82,7 @@ export async function requireWriteAccess(
   entityId: number,
   ctx: ToolContext
 ): Promise<void> {
-  const rows = await getDb()`
+  const rows = await sql`
     SELECT 1 FROM entities
     WHERE id = ${entityId} AND organization_id = ${ctx.organizationId}
     LIMIT 1
