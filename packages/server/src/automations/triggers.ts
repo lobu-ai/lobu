@@ -295,12 +295,14 @@ export function assertAutomationInstructions(
 	triggers: AutomationTrigger[],
 	instructions: string | null | undefined,
 	skills?: ReadonlyArray<{ name: string; content: string }> | null,
-	reactionScript?: string | null
+	reactionScript?: string | null,
+	executorSource?: string | null,
 ): void {
 	if (!automationRequiresInstructions(triggers)) return;
 	if (instructions?.trim()) return;
 	if (skills?.some((skill) => skill.content.trim())) return;
 	if (reactionScript?.trim()) return;
+	if (executorSource?.trim()) return;
 	throw new ToolUserError(
 		"This Automation runs from a schedule, an analysis window, or manual runs, so it needs instructions: attach at least one skill, provide instruction text, or set a reaction script. Only event triggers with execution 'turn' may omit all three."
 	);

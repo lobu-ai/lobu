@@ -107,6 +107,11 @@ export interface DesiredAutomation {
   slug: string;
   /** Owning agent id. Every automation belongs to exactly one agent. */
   agent: string;
+  executor?: {
+    kind: "script";
+    source: string;
+    params?: Record<string, unknown>;
+  } | null;
   name?: string;
   description?: string;
   triggers?: DesiredAutomationTrigger[];
@@ -1178,6 +1183,35 @@ export async function loadDesiredStateFromConfig(
   // it) and attach it. state.automations[i] aligns with typedProject.automations[i]
   // (the mapper maps them in order).
   (typedProject.automations ?? []).forEach((automation, i) => {
+    if (automation.executor !== undefined && automation.executor !== "agent") {
+      const desired = state.automations[i];
+      if (!desired) return;
+      if (
+        automation.executor.kind !== "scriptSource" ||
+        typeof automation.executor.path !== "string"
+      ) {
+        throw new ValidationError(
+          `Automation "${automation.slug}": use scriptFromFile("./job.ts") for a script executor.`
+        );
+      }
+      const script = resolveLocalSourceFile({
+        cwd: opts.cwd,
+        owner: `Automation ${JSON.stringify(automation.slug)}`,
+        field: "executor",
+        example: 'scriptFromFile("./job.ts")',
+        rel: automation.executor.path,
+        maxBytes: 131072,
+        sizeHint:
+          "Automation scripts must stay within the sandbox source limit",
+      });
+      desired.executor = {
+        kind: "script",
+        source: script.sourceCode,
+        ...(automation.executor.params
+          ? { params: automation.executor.params }
+          : {}),
+      };
+    }
     // Gate on absence, not truthiness — a present-but-empty
     // `reactionFromFile("")` must reach the validator (which rejects it),
     // matching parseAutomation.

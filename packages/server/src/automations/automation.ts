@@ -1,3 +1,4 @@
+import { enqueueAutomationScript, reconcileAutomationScriptRuns } from './script-enqueue';
 import { randomUUID } from "node:crypto";
 import {
 	resolveAutomationExecutor,
@@ -195,6 +196,7 @@ export function parseAutomationRunPayload(
 
 	return {
 		automation_id: automationId,
+		...(payload.executor ? { executor: payload.executor as AutomationRunPayload['executor'] } : {}),
 		// Optional: device-pinned runs carry only the pin, and manual-open
 		// runs carry neither. The dispatch guard below fails runs that reach
 		// the server lane without an agent.
@@ -457,7 +459,7 @@ export async function reconcileAutomationRuns(
 	db?: DbClient
 ): Promise<ReconcileAutomationRunsResult> {
 	const sql = db ?? getDb();
-	let reconciled = 0;
+	let reconciled = await reconcileAutomationScriptRuns(sql);
 
 	// Find the (small) set of active automation runs awaiting a dispatched
 	// message. If there are none — the common steady state — skip the heavy
@@ -1344,6 +1346,17 @@ async function dispatchAutomationRun(
 				: "Automation run has no assigned agent (device-pinned and manual-open runs do not dispatch server-side)."
 		);
 		return "failed";
+	}
+
+	if (payload.executor) {
+		const [source] = await sql`SELECT run_type FROM runs WHERE id = ${run.id}`;
+		if (source?.run_type !== 'automation' || payload.executor.kind !== 'script') {
+			await failAutomationRun(sql, run.id, 'Script executors currently support live Automation runs; eval capture is unavailable.');
+			return 'failed';
+		}
+		return await enqueueAutomationScript(sql, {
+			organizationId: run.organization_id, automationId: run.automation_id, sourceRunId: run.id,
+		}) ? 'dispatched' : 'reconciled';
 	}
 
 	if (!isLobuGatewayRunning()) {

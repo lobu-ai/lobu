@@ -1,7 +1,7 @@
 import type {
   CardElement,
   ReactionClient,
-  ReactionContext,
+  AutomationScriptContext,
 } from "@lobu/connector-sdk";
 
 const PRODUCT_ACTIVITY_CONNECTION = "lobu-product-activity-db";
@@ -97,18 +97,6 @@ function logCounts(
     ? `${digest.errors} / ${digest.warnings} observed — coverage incomplete`
     : "Unknown — coverage incomplete";
 }
-
-export const input = {
-  type: "object",
-  properties: {
-    run: { type: "boolean" },
-    // Presence rows (logins / MCP conversations) for this email are excluded
-    // from the "Online users" list, and a window whose only activity is that
-    // email reports nothing. Optional — default is no exclusion.
-    exclude_email: { type: "string", format: "email" },
-  },
-  required: ["run"],
-};
 
 interface ActivityRow {
   connection_slug: string;
@@ -390,8 +378,9 @@ function stringArray(value: unknown): string[] {
 }
 
 export default async (
-  ctx: ReactionContext,
-  client: ReactionClient
+  ctx: AutomationScriptContext,
+  client: ReactionClient,
+  params?: Record<string, unknown>
 ): Promise<void> => {
   const runId = Number(ctx.window.run_id);
   if (!Number.isSafeInteger(runId) || runId <= 0) {
@@ -412,14 +401,8 @@ export default async (
   }
 
   const excludedEmail =
-    ctx.extracted_data &&
-    typeof ctx.extracted_data === "object" &&
-    "exclude_email" in ctx.extracted_data &&
-    typeof (ctx.extracted_data as Record<string, unknown>).exclude_email ===
-      "string"
-      ? String(
-          (ctx.extracted_data as Record<string, unknown>).exclude_email
-        ).trim() || null
+    typeof params?.exclude_email === "string"
+      ? params.exclude_email.trim() || null
       : null;
 
   // Read the window in bounded keyset pages ordered by (created_at, id) and

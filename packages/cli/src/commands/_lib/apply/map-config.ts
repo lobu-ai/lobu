@@ -717,6 +717,7 @@ function mapAutomation(automation: Automation): DesiredAutomation {
   return {
     slug: automation.slug,
     agent: agentId(automation.agent),
+    ...(automation.executor === "agent" ? { executor: null } : {}),
     // The author's task statement, carried straight through. Skill BODIES are
     // no longer folded in here — the loader resolves them into `skillSnapshots`
     // (see `resolveAutomationSkills` in desired-state.ts), because the mapper is
@@ -1007,7 +1008,9 @@ export function mapProjectToDesiredState(
     // `project.automations` (the mapper maps in order).
     assertAutomationSkills(
       automation,
-      project.automations?.[i]?.reaction !== undefined
+      project.automations?.[i]?.reaction !== undefined ||
+        (project.automations?.[i]?.executor !== undefined &&
+          project.automations?.[i]?.executor !== "agent")
     );
     for (const trigger of automation.triggers ?? []) {
       if (

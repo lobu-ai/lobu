@@ -300,8 +300,25 @@ export const AutomationOutputsSchema = Type.Object(
 // value contract to TypeScript consumers.
 export type AutomationOutputs = Record<string, AutomationOutput>;
 
+export const AutomationScriptExecutorSchema = Type.Object(
+  {
+    kind: Type.Literal("script"),
+    source: Type.String({ minLength: 1, maxLength: 131072 }),
+    params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.",
+  }
+);
+export type AutomationScriptExecutor = Static<
+  typeof AutomationScriptExecutorSchema
+>;
+
 export const AutomationExecutionConfigSchema = Type.Object(
   {
+    executor: Type.Optional(AutomationScriptExecutorSchema),
     timeout_seconds: Type.Optional(
       Type.Integer({
         minimum: 1,

@@ -470,7 +470,8 @@ function buildAutomationProposal(
       args.triggers ?? [],
       args.prompt,
       args.skills,
-      args.reaction_script
+      args.reaction_script,
+      args.execution_config?.executor?.source,
     );
     if (!args.managed_agent_id) {
       throw new ToolUserError(

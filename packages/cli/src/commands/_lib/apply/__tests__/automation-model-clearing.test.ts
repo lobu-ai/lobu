@@ -39,6 +39,63 @@ function snapshot(automation: RemoteAutomation): RemoteSnapshot {
 }
 
 describe("Automation model overrides", () => {
+  test("applies script changes and records the executor for a stable second apply", async () => {
+    const executor = {
+      kind: "script" as const,
+      source: "export default async () => ({ ok: true });",
+      params: { first: 1, second: 2 },
+    };
+    const state = emptyState();
+    state.automations = [
+      { slug: "digest", agent: "worker", prompt: "", executor },
+    ];
+    const remote = snapshot({
+      automation_id: "42",
+      slug: "digest",
+      managed_agent_id: "worker",
+      prompt: "",
+      execution_config: { model: "old/model" },
+    });
+    const plan = computeDiff(state, remote);
+    const updateAutomation = mock(async () => undefined);
+    await executePlan(
+      {
+        state,
+        remote,
+        plan,
+        client: { updateAutomation } as unknown as ApplyClient,
+      },
+      []
+    );
+    expect(updateAutomation).toHaveBeenCalledWith({
+      automation_id: "42",
+      execution_config: { executor },
+    });
+    const recorded = buildAttributionAndOwned(state, remote);
+    expect(recorded.attribution.automations[0]?.execution_config).toEqual({
+      executor,
+    });
+    remote.automations[0]!.execution_config = {
+      executor: { ...executor, params: { second: 2, first: 1 } },
+    };
+    expect(
+      computeDiff(state, remote, { baseline: toBaseline(recorded) }).rows.every(
+        (row) => row.verb === "noop"
+      )
+    ).toBe(true);
+    state.automations[0]!.executor = null;
+    const update = computeDiff(state, remote, {
+      baseline: toBaseline(recorded),
+    });
+    expect(
+      update.rows.some(
+        (row) =>
+          row.verb === "update" &&
+          row.changedFields?.includes("execution_config")
+      )
+    ).toBe(true);
+  });
+
   test("maps explicit model removal from declarative config", () => {
     const agent = defineAgent({ id: "worker" });
     const state = mapProjectToDesiredState(

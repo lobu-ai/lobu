@@ -1,20 +1,24 @@
 import { describe, expect, it, mock } from "bun:test";
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import type {
+  ReactionClient,
+  AutomationScriptContext,
+} from "@lobu/connector-sdk";
 import productActivityDigest, {
   buildProductActivityCard,
   collectProductActivityDigest,
   digestCoverage,
-} from "../product-activity-digest.reaction.ts";
+} from "../product-activity-digest.script.ts";
+
+const params = { exclude_email: "operator@example.test" };
 
 const context = {
-  extracted_data: { run: true, exclude_email: "operator@example.test" },
+  trigger_signals: [],
   entities: [],
   window: {
     run_id: 1234,
     automation_id: 42,
     window_start: "2026-08-13T12:00:00.000Z",
     window_end: "2026-08-13T12:20:00.000Z",
-    content_analyzed: 0,
   },
   automation: {
     id: 42,
@@ -24,7 +28,7 @@ const context = {
   },
   organization_id: "lobu-team-id",
   organization_slug: "lobu-team",
-} satisfies ReactionContext;
+} satisfies AutomationScriptContext;
 
 const healthyFeeds = ["lobu-product-activity-db", "lobu-production-logs"].map(
   (connection_slug) => ({
@@ -39,7 +43,7 @@ const healthyFeeds = ["lobu-product-activity-db", "lobu-production-logs"].map(
 );
 const healthyCoverage = { product: true, logs: true, issues: [] };
 
-describe("Lobu Team product activity digest reaction", () => {
+describe("Lobu Team product activity digest script", () => {
   it("requires both feed health and a collected source window", () => {
     const end = new Date(context.window.window_end);
     expect(digestCoverage(healthyFeeds, end)).toEqual(healthyCoverage);
@@ -149,7 +153,7 @@ describe("Lobu Team product activity digest reaction", () => {
       log,
     } as unknown as ReactionClient;
 
-    await productActivityDigest(context, client);
+    await productActivityDigest(context, client, params);
 
     expect(send).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(
@@ -206,7 +210,7 @@ describe("Lobu Team product activity digest reaction", () => {
       log: mock(),
     } as unknown as ReactionClient;
 
-    await productActivityDigest(context, client);
+    await productActivityDigest(context, client, params);
 
     expect(send).toHaveBeenCalledTimes(1);
     const notification = send.mock.calls[0]?.[0];
@@ -329,7 +333,7 @@ describe("Lobu Team product activity digest reaction", () => {
       log: mock(),
     } as unknown as ReactionClient;
 
-    await productActivityDigest(context, client);
+    await productActivityDigest(context, client, params);
 
     expect(send).not.toHaveBeenCalled();
   });
@@ -365,7 +369,7 @@ describe("Lobu Team product activity digest reaction", () => {
       log: mock(),
     } as unknown as ReactionClient;
 
-    await productActivityDigest(context, client);
+    await productActivityDigest(context, client, params);
 
     expect(query.mock.calls).toHaveLength(3);
     const serializedCard = JSON.stringify(send.mock.calls[0]?.[0]?.card);
@@ -428,11 +432,15 @@ describe("Lobu Team product activity digest reaction", () => {
     const query = mock().mockResolvedValue(page);
     const send = mock();
     await expect(
-      productActivityDigest(context, {
-        query,
-        notifications: { send },
-        log: mock(),
-      } as unknown as ReactionClient)
+      productActivityDigest(
+        context,
+        {
+          query,
+          notifications: { send },
+          log: mock(),
+        } as unknown as ReactionClient,
+        params
+      )
     ).rejects.toThrow("exceeded its row budget");
     expect(query).toHaveBeenCalledTimes(20);
     expect(send).not.toHaveBeenCalled();

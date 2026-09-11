@@ -150,7 +150,7 @@ export async function markAutomationRunCompleted(
   `;
 }
 
-async function markAutomationRunFailed(
+export async function markAutomationRunFailed(
 	sql: DbClient,
 	runId: number,
 	message: string,

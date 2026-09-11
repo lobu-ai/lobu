@@ -232,7 +232,7 @@ export type {
   NetworkInterceptStartObservation,
 } from './extension-network.js';
 export { extensionNetworkSync } from './extension-network.js';
-export type { ReactionContext } from './reaction-sdk.js';
+export type { ReactionContext, AutomationScriptContext } from './reaction-sdk.js';
 export type { ReactionClient } from './reaction-client-types.js';
 export type {
   CardElement,

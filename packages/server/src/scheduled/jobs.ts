@@ -1,3 +1,6 @@
+import { runAutomationScriptTask } from '../automations/script-task';
+import type { AutomationScriptTaskPayload } from '../automations/script-enqueue';
+import { AUTOMATION_SCRIPT_TASK } from './task-definitions';
 /**
  * TaskScheduler boot + periodic platform-internal jobs.
  *
@@ -482,6 +485,10 @@ function registerMaintenanceTasks(
   // failure — that is what asks this scheduler for another attempt; a
   // deterministic failure settles the task and is recorded on
   // `automation_reactions` instead of re-burning the 60s executor budget.
+  scheduler.register(AUTOMATION_SCRIPT_TASK, async (ctx) => {
+    await runAutomationScriptTask(ctx.payload as AutomationScriptTaskPayload, env, ctx.taskRunId, ctx.attempt);
+  });
+
   scheduler.register(AUTOMATION_REACTION_TASK, async (ctx) => {
     const outcome = await runAutomationReactionTask(
       ctx.payload as AutomationReactionTaskPayload,

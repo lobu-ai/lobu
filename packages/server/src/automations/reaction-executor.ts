@@ -11,7 +11,7 @@
  * level access checks treat them as system calls, just like before.
  */
 
-import type { ReactionContext } from '@lobu/connector-sdk';
+import type { ReactionContext, AutomationScriptContext } from '@lobu/connector-sdk';
 import { SCOPE_CHECK_NOT_APPLICABLE } from '../auth/tool-access';
 import type { Env } from '../index';
 import { buildClientSDK } from '../sandbox/client-sdk';
@@ -23,7 +23,7 @@ const REACTION_TIMEOUT_MS = 60_000;
 
 interface ExecuteReactionOptions {
   compiledScript: string;
-  context: ReactionContext;
+  context: ReactionContext | AutomationScriptContext;
   env: Record<string, string | undefined>;
   /** Optional params object captured at reaction definition time. */
   params?: Record<string, unknown>;
@@ -37,6 +37,15 @@ interface ExecuteReactionOptions {
 export async function executeReaction(options: ExecuteReactionOptions): Promise<{
   success: boolean;
   error?: string;
+}> {
+  const result = await executeAutomationScript(options);
+  return result.success ? { success: true } : { success: false, error: result.error };
+}
+
+export async function executeAutomationScript(options: ExecuteReactionOptions): Promise<{
+  success: boolean;
+  error?: string;
+  returnValue?: unknown;
 }> {
   const { compiledScript, context, env, params, timeoutMs = REACTION_TIMEOUT_MS } = options;
 
@@ -80,6 +89,9 @@ export async function executeReaction(options: ExecuteReactionOptions): Promise<
     limits: { timeoutMs },
   });
 
+  if (result.success && result.returnTruncated && !('extracted_data' in context)) {
+    return { success: false, error: 'OutputSizeExceeded: Automation script return value exceeds the sandbox output limit.' };
+  }
   if (result.success) {
     logger.info(
       {
@@ -88,9 +100,9 @@ export async function executeReaction(options: ExecuteReactionOptions): Promise<
         sdk_calls: result.sdkCalls,
         duration_ms: result.durationMs,
       },
-      'Reaction script executed successfully'
+      'Automation script executed successfully'
     );
-    return { success: true };
+    return { success: true, returnValue: result.returnValue };
   }
 
   const errorMessage = result.error
@@ -103,7 +115,7 @@ export async function executeReaction(options: ExecuteReactionOptions): Promise<
       run_id: context.window.run_id,
       error: errorMessage,
     },
-    'Reaction script execution failed'
+      'Automation script execution failed'
   );
   return { success: false, error: errorMessage };
 }
