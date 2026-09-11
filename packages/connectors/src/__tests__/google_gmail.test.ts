@@ -1009,3 +1009,103 @@ describe('Gmail multipart body sections', () => {
     await expect(setup(503).connector.sync(context)).rejects.toThrow(/503/);
   });
 });
+
+describe('Gmail MIME syntax', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+  const inline = (mimeType: string, text: string) => ({
+    mimeType, body: { data: Buffer.from(text).toString('base64url') },
+  });
+
+  for (const mode of ['sync', 'get_thread']) {
+    test.each([
+      ['plain body', inline('TEXT/PLAIN', 'Complete body.')],
+      ['HTML body', inline('Text/Html', 'Complete body.')],
+      ['alternative preference', {
+        mimeType: 'Multipart/Alternative',
+        parts: [inline('text/html', 'Unwanted duplicate.'), inline('TEXT/PLAIN', 'Complete body.')],
+      }],
+      ['attachment whitespace', {
+        mimeType: 'multipart/mixed',
+        parts: [
+          inline('text/plain', 'Complete body.'),
+          { ...inline('text/plain', 'Unwanted attachment.'), headers: [{ name: 'Content-Disposition', value: ' ATTACHMENT \r\n\t; size=20' }] },
+        ],
+      }],
+      ['named inline body', {
+        ...inline('text/plain', 'Complete body.'),
+        filename: 'body.txt',
+        headers: [{ name: 'Content-Disposition', value: 'INLINE; filename="body.txt"' }],
+      }],
+      ['named inline multipart', {
+        mimeType: 'multipart/mixed', filename: 'body.mime',
+        headers: [{ name: 'Content-Disposition', value: 'inline; filename="body.mime"' }],
+        parts: [inline('text/plain', 'Complete body.')],
+      }],
+      ['unknown attachment disposition', {
+        mimeType: 'multipart/mixed',
+        parts: [
+          inline('text/plain', 'Complete body.'),
+          { ...inline('text/plain', 'Unwanted attachment.'), headers: [{ name: 'Content-Disposition', value: 'x-archive' }] },
+        ],
+      }],
+    ])(`${mode} handles valid MIME syntax in %s`, async (_name, payload) => {
+      const connector = new GmailConnector();
+      const thread = toThreadResponse({ id: 'mime-thread', messages: [{ id: 'mime-message' }] });
+      connector.createClient = () => ({ raw: async (url: string) => ({
+        ok: true,
+        json: async () => url.includes('/threads/')
+          ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+          : { threads: [{ id: thread.id }] },
+      }) });
+      const body = mode === 'sync'
+        ? (await connector.sync(context)).events[0].payload_text
+        : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: thread.id }, credentials: context.credentials })).output.messages[0].body;
+      expect(body).toContain('Complete body.');
+      expect(body).not.toContain('Unwanted');
+    });
+  }
+});
+
+describe('Gmail MIME body charset', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+
+  function setup(bytes: Buffer, contentType: string | undefined, external: boolean) {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'encoded-thread', messages: [{ id: 'encoded-message' }] });
+    const payload = {
+      mimeType: 'text/plain',
+      headers: contentType ? [{ name: 'cOnTeNt-TyPe', value: contentType }] : [],
+      body: external ? { attachmentId: 'encoded-body', size: bytes.length }
+        : { data: bytes.toString('base64url'), size: bytes.length },
+    };
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: true,
+      json: async () => url.includes('/attachments/') ? { data: bytes.toString('base64url') }
+        : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        : { threads: [{ id: thread.id }] },
+    }) });
+    return connector;
+  }
+
+  for (const external of [false, true]) {
+    for (const mode of ['sync', 'get_thread']) {
+      test.each([
+        ['Latin-1', Buffer.from('café à Noël', 'latin1'), 'text/plain; CHARSET="ISO-8859-1"', 'café à Noël'],
+        ['default UTF-8', Buffer.from('İstanbul — teşekkürler'), undefined, 'İstanbul — teşekkürler'],
+      ] as const)(`${mode} decodes %s ${external ? 'external' : 'inline'} bytes`, async (_name, bytes, contentType, expected) => {
+        const connector = setup(bytes, contentType, external);
+        const body = mode === 'sync'
+          ? (await connector.sync(context)).events[0].payload_text
+          : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'encoded-thread' }, credentials: context.credentials })).output.messages[0].body;
+        expect(body).toContain(expected);
+        expect(body).not.toContain('\uFFFD');
+      });
+    }
+    test.each([
+      ['invalid UTF-8', Buffer.from([0xc3, 0x28]), 'text/plain; charset=utf-8'],
+      ['unsupported charset', Buffer.from('body'), 'text/plain; charset=unknown-charset'],
+    ] as const)(`does not checkpoint past %s ${external ? 'external' : 'inline'} bytes`, async (_name, bytes, contentType) => {
+      await expect(setup(bytes, contentType, external).sync(context)).rejects.toThrow();
+    });
+  }
+});

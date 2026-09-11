@@ -1113,17 +1113,20 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     http: HttpClient,
     messageId: string
   ): Promise<string> {
-    // Text files attached to a message are not its body.
-    const disposition = payload.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')?.value;
-    if (payload.filename || /^attachment(?:;|$)/i.test(disposition ?? '')) return '';
+    const disposition = payload.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')
+      ?.value.split(';', 1)[0].trim().toLowerCase();
+    // Explicit inline parts can have filenames. Other declared dispositions
+    // (including extensions) are attachments; otherwise use the filename hint.
+    if (disposition !== 'inline' && (disposition || payload.filename)) return '';
+    const mimeType = payload.mimeType.toLowerCase();
     if (payload.parts?.length) {
       // Only multipart/alternative contains equivalent versions. Mixed parts
       // are separate sections and must all be retained in their original order.
-      const isAlternative = payload.mimeType === 'multipart/alternative';
+      const isAlternative = mimeType === 'multipart/alternative';
       const parts = isAlternative
         ? [
-            ...payload.parts.filter((part) => part.mimeType === 'text/plain'),
-            ...payload.parts.filter((part) => part.mimeType !== 'text/plain'),
+            ...payload.parts.filter((part) => part.mimeType.toLowerCase() === 'text/plain'),
+            ...payload.parts.filter((part) => part.mimeType.toLowerCase() !== 'text/plain'),
           ]
         : payload.parts;
       const sections: string[] = [];
@@ -1135,10 +1138,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       }
       return sections.join('\n\n');
     }
-    if (payload.mimeType !== 'text/plain' && payload.mimeType !== 'text/html') return '';
+    if (mimeType !== 'text/plain' && mimeType !== 'text/html') return '';
     let text = '';
     if (payload.body?.data) {
-      text = this.base64UrlDecode(payload.body.data);
+      text = this.base64UrlDecode(payload.body.data, payload);
     } else if (payload.body?.attachmentId) {
       // Gmail may externalize the body itself, even under format=full. A
       // failed fetch must not silently replace that body with its alternative.
@@ -1146,16 +1149,21 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       if (!response.ok) throw new Error(`Gmail message body error (${response.status}): ${await response.text()}`);
       const body = (await response.json()) as { data?: string };
       if (typeof body.data !== 'string') throw new Error('Gmail returned a message body without data');
-      text = this.base64UrlDecode(body.data);
+      text = this.base64UrlDecode(body.data, payload);
     }
     if (!text && payload.body?.size) throw new Error('Gmail returned a nonempty message body without data');
     // An empty plain-text alternative must not hide a readable HTML body.
     return text.trim() ? text : '';
   }
 
-  private base64UrlDecode(data: string): string {
+  private base64UrlDecode(data: string, payload: GmailMessagePayload): string {
     const padded = data.replace(/-/g, '+').replace(/_/g, '/');
-    return Buffer.from(padded, 'base64').toString('utf-8');
+    const contentType = payload.headers?.find((header) => header.name.toLowerCase() === 'content-type')?.value;
+    const charset = contentType?.match(/;\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]+))/i);
+    const encoding = (charset?.[1] ?? charset?.[2] ?? charset?.[3] ?? 'utf-8').trim();
+    // MIME bodies contain bytes in the part's declared charset. Invalid bytes
+    // or unsupported labels must fail the read instead of persisting corruption.
+    return new TextDecoder(encoding, { fatal: true }).decode(Buffer.from(padded, 'base64'));
   }
 
   private base64UrlEncode(str: string): string {
