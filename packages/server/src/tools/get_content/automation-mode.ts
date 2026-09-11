@@ -18,7 +18,7 @@ import type { Env } from '../../index';
 import type { Outputs, UnprocessedRange, AutomationSource } from '../../types/automations';
 import { ToolUserError } from '../../utils/errors';
 import { type DataSourceContext, executeDataSources } from '../../utils/execute-data-sources';
-import { finalizeDynamicQueryRows } from '../../utils/content-read-bounds';
+import { AUTOMATION_READ_MAX_BYTES, finalizeDynamicQueryRows } from '../../utils/content-read-bounds';
 import logger from '../../utils/logger';
 import { runMetric } from '../../metrics/run-metric';
 import { getRecentFeedbackSummary } from '../../utils/automation-feedback';
@@ -91,11 +91,68 @@ function isMetricSource(
   return source.kind === 'metric' && source.ref?.type === 'metric';
 }
 
+// Budgeting and normal reads must normalize the same source rows, including
+// duplicate event identities that appear in more than one authored source.
+function normalizeEventSources(
+  results: Record<string, unknown[]>,
+  eventSourceNames: ReadonlySet<string>
+): unknown[] {
+  const seen = new Set<number>();
+  const allContent: unknown[] = [];
+
+  for (const [sourceName, rows] of Object.entries(results)) {
+    if (!eventSourceNames.has(sourceName)) continue;
+    for (const row of rows) {
+      const rec = row as Record<string, unknown>;
+      const id = typeof rec.id === 'number' ? rec.id : Number(rec.id);
+      if (Number.isFinite(id) && !seen.has(id)) {
+        seen.add(id);
+        allContent.push({
+          id,
+          entity_ids: rec.entity_ids,
+          platform: rec.platform ?? rec.connector_key,
+          origin_id: rec.origin_id as string,
+          semantic_type: rec.semantic_type ?? 'content',
+          origin_type: rec.origin_type ?? null,
+          payload_type: rec.payload_type ?? 'text',
+          payload_text: rec.payload_text ?? rec.text_content,
+          payload_truncated: rec.payload_truncated === true ? true : undefined,
+          content_length:
+            rec.content_length == null ? undefined : Number(rec.content_length),
+          payload_data: rec.payload_data ?? {},
+          payload_template: rec.payload_template ?? null,
+          attachments: parseRecordArray(rec.attachments),
+          attachments_truncated:
+            rec.attachments_truncated === true ? true : undefined,
+          attachments_bytes:
+            rec.attachments_bytes == null ? undefined : Number(rec.attachments_bytes),
+          author_name: rec.author_name ?? rec.author,
+          title: rec.title,
+          text_content: rec.payload_text ?? rec.text_content,
+          rating: (rec.metadata as Record<string, unknown>)?.rating || null,
+          source_url: rec.source_url ?? rec.url,
+          score: Number(rec.score) || 0,
+          metadata: rec.metadata || {},
+          classifications: {},
+          created_at: rec.created_at,
+          occurred_at: rec.occurred_at ?? rec.created_at,
+          origin_parent_id: rec.origin_parent_id ?? null,
+          root_origin_id: rec.origin_id as string,
+          depth: 0,
+        });
+      }
+    }
+  }
+
+  return allContent;
+}
+
 async function queryContentData(
   sql: DbClient,
   params: ContentQueryParams
 ): Promise<{
   sourcesContent: Record<string, unknown[]>;
+  eventSourceNames: ReadonlySet<string>;
   allContent: unknown[];
   page?: { has_more: boolean; next_cursor?: { occurred_at: string; id: number } };
   sourcesPage: Record<string, { returned: number; limit: number; has_more: boolean }>;
@@ -364,55 +421,11 @@ async function queryContentData(
     }
   }
 
-  const seen = new Set<number>();
-  const allContent: unknown[] = [];
-
-  for (const [sourceName, rows] of Object.entries(results)) {
-    if (!eventSourceNames.has(sourceName)) continue;
-    for (const row of rows) {
-      const rec = row as Record<string, unknown>;
-      const id = typeof rec.id === 'number' ? rec.id : Number(rec.id);
-      if (Number.isFinite(id) && !seen.has(id)) {
-        seen.add(id);
-        allContent.push({
-          id,
-          entity_ids: rec.entity_ids,
-          platform: rec.platform ?? rec.connector_key,
-          origin_id: rec.origin_id as string,
-          semantic_type: rec.semantic_type ?? 'content',
-          origin_type: rec.origin_type ?? null,
-          payload_type: rec.payload_type ?? 'text',
-          payload_text: rec.payload_text ?? rec.text_content,
-          payload_truncated: rec.payload_truncated === true ? true : undefined,
-          content_length:
-            rec.content_length == null ? undefined : Number(rec.content_length),
-          payload_data: rec.payload_data ?? {},
-          payload_template: rec.payload_template ?? null,
-          attachments: parseRecordArray(rec.attachments),
-          attachments_truncated:
-            rec.attachments_truncated === true ? true : undefined,
-          attachments_bytes:
-            rec.attachments_bytes == null ? undefined : Number(rec.attachments_bytes),
-          author_name: rec.author_name ?? rec.author,
-          title: rec.title,
-          text_content: rec.payload_text ?? rec.text_content,
-          rating: (rec.metadata as Record<string, unknown>)?.rating || null,
-          source_url: rec.source_url ?? rec.url,
-          score: Number(rec.score) || 0,
-          metadata: rec.metadata || {},
-          classifications: {},
-          created_at: rec.created_at,
-          occurred_at: rec.occurred_at ?? rec.created_at,
-          origin_parent_id: rec.origin_parent_id ?? null,
-          root_origin_id: rec.origin_id as string,
-          depth: 0,
-        });
-      }
-    }
-  }
+  const allContent = normalizeEventSources(results, eventSourceNames);
 
   return {
     sourcesContent: results as Record<string, unknown[]>,
+    eventSourceNames,
     sourcesPage,
     allContent,
     page: pageResult,
@@ -841,16 +854,15 @@ export async function handleAutomationMode(
       beforeId: args.before_id,
     },
   });
-  const {
+  const { eventSourceNames, totalCount, totalCountChars } = contentData;
+  let {
     sourcesContent,
     allContent,
     page: contentPage,
     sourcesPage,
-    totalCount,
-    totalCountChars,
   } = contentData;
 
-  const contentIds = allContent
+  let contentIds = allContent
     .map((item) => Number((item as Record<string, unknown>).id))
     .filter((id) => Number.isFinite(id) && id > 0)
     .map((id) => Math.trunc(id));
@@ -864,7 +876,7 @@ export async function handleAutomationMode(
   const tokenRunId =
     context.claimedWindow?.runId ??
     (boundRun && args.run_id != null ? Number(args.run_id) : null);
-  const windowToken = await generateWindowToken(
+  const signWindow = () => generateWindowToken(
     {
       automation_id: automationId,
       ...(tokenRunId != null ? { run_id: tokenRunId } : {}),
@@ -899,6 +911,7 @@ export async function handleAutomationMode(
     },
     env
   );
+  let windowToken = await signWindow();
 
   // Bound entities ride the payload as structured rows (id, name, type,
   // metadata, field_controls) — field_controls marks human-owned field values
@@ -981,7 +994,7 @@ export async function handleAutomationMode(
     logger.warn({ err }, '[get_content] Failed to fetch reaction data for automation mode');
   }
 
-  return {
+  const response = (): GetContentResult => ({
     content: allContent as ContentItem[],
     total: contentIds.length,
     page: {
@@ -1025,5 +1038,74 @@ export async function handleAutomationMode(
       totalCountChars > 400_000
         ? `Content is ~${Math.ceil(totalCountChars / 4000)}k tokens. Consider reducing limit or date range.`
         : undefined,
+  });
+
+  const serializedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  const initial = response();
+  if (serializedBytes(initial) <= AUTOMATION_READ_MAX_BYTES) return initial;
+
+  // Reserve the entire fixed envelope before admitting primary event rows.
+  // Context sources have no cursor: never trim them to make a response fit.
+  // Include their normalized event representations as well as their raw rows.
+  const primaryRows = sourcesContent.content ?? [];
+  const auxiliarySources = { ...sourcesContent, content: [] };
+  const auxiliaryContent = normalizeEventSources(auxiliarySources, eventSourceNames);
+  const fixedEnvelope = { ...initial, sources: auxiliarySources, content: auxiliaryContent };
+  // The existing token contains the full ID set, so it already bounds the ID
+  // claim. Reserve room for a newly introduced next cursor, its signed claims,
+  // and changing page counters. The final serialized result is checked again.
+  let usedBytes = serializedBytes(fixedEnvelope) + 1024;
+  const cannotFit = () => new ToolUserError(
+    'Automation knowledge response cannot fit its byte budget with the required context and one content row. ' +
+      'Narrow non-pageable sources or bound entity payloads. Exact event inputs must fit in full. ' +
+      'No source rows were skipped and the window was not completed.',
+    422
+  );
+  if (!contentPage) throw cannotFit();
+
+  const normalizedBytes = new Map(initial.content.map((row) => {
+    const record = row as Record<string, unknown>;
+    return [Number(record.id), serializedBytes(record) + 1];
+  }));
+  const auxiliaryBytes = new Map(auxiliaryContent.map((row) => {
+    const record = row as Record<string, unknown>;
+    return [Number(record.id), serializedBytes(record) + 1];
+  }));
+  const seenPrimaryIds = new Set<number>();
+
+  let retained = 0;
+  for (const [index, row] of primaryRows.entries()) {
+    const id = Number((row as Record<string, unknown>).id);
+    usedBytes += serializedBytes(row) + 1;
+    if (!seenPrimaryIds.has(id)) {
+      seenPrimaryIds.add(id);
+      usedBytes += (normalizedBytes.get(id) ?? 0) - (auxiliaryBytes.get(id) ?? 0);
+    }
+    // A primary row can replace a larger auxiliary representation of the same
+    // event, so later prefixes may fit even if an earlier prefix did not.
+    if (usedBytes <= AUTOMATION_READ_MAX_BYTES) retained = index + 1;
+  }
+  if (retained === 0 || retained === primaryRows.length) throw cannotFit();
+
+  const keptRows = primaryRows.slice(0, retained);
+  const last = keptRows[keptRows.length - 1] as Record<string, unknown>;
+  const lastId = Number(last.id);
+  if (!last.occurred_at || !Number.isFinite(lastId)) throw cannotFit();
+  sourcesContent = { ...sourcesContent, content: keptRows };
+  allContent = normalizeEventSources(sourcesContent, eventSourceNames);
+  contentIds = allContent.map(item => Math.trunc(Number((item as Record<string, unknown>).id)))
+    .filter(id => Number.isFinite(id) && id > 0);
+  contentPage = {
+    has_more: true,
+    next_cursor: { occurred_at: new Date(last.occurred_at as string | Date).toISOString(), id: Math.trunc(lastId) },
   };
+  sourcesPage = {
+    ...sourcesPage,
+    content: { returned: retained, limit: contentLimit, has_more: true },
+  };
+  // Sign precisely the retained IDs and cursor, never the byte-omitted suffix.
+  windowToken = await signWindow();
+  const bounded = response();
+  if (serializedBytes(bounded) > AUTOMATION_READ_MAX_BYTES) throw cannotFit();
+  return bounded;
 }

@@ -10,6 +10,8 @@
 export const CONTENT_TEXT_HEAD_CHARS = 4_000;
 export const CONTENT_JSON_MAX_BYTES = 16 * 1024;
 export const QUERY_SQL_RESULT_MAX_BYTES = 1_048_576;
+/** Whole Automation envelope, matching the script-output cap and below the SDK bridge cap. */
+export const AUTOMATION_READ_MAX_BYTES = 1_048_576;
 
 const TRUNCATION_SUFFIX = '… [truncated]';
 const SAFE_SQL_REF = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
