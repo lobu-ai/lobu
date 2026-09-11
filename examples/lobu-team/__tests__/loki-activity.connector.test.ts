@@ -22,11 +22,14 @@ describe("Lobu Team Loki activity connector", () => {
         },
       } as never);
       expect(result.events).toHaveLength(1);
-      expect(result.events?.[0]?.metadata).toMatchObject({
+      const event = result.events[0]!;
+      expect(event.metadata).toMatchObject({
         errors: 0,
         warnings: 0,
       });
-      expect(result.events?.[0]?.origin_id).toBe(result.checkpoint?.window_end);
+      expect(result.checkpoint).toEqual({
+        window_end: event.origin_id,
+      });
     } finally {
       fetchSpy.mockRestore();
     }
@@ -38,13 +41,9 @@ describe("Lobu Team Loki activity connector", () => {
     expect(first).toHaveLength(72);
     expect(first[0]?.start.toISOString()).toBe(checkpoint.window_end);
     expect(first.at(-1)?.end.toISOString()).toBe("2026-08-11T12:00:00.000Z");
-    const second = windowsToCollect(
-      { window_end: first.at(-1)?.end.toISOString() },
-      now
-    );
-    expect(second[0]?.start.toISOString()).toBe(
-      first.at(-1)?.end.toISOString()
-    );
+    const firstBatchEnd = first.at(-1)!.end.toISOString();
+    const second = windowsToCollect({ window_end: firstBatchEnd }, now);
+    expect(second[0]?.start.toISOString()).toBe(firstBatchEnd);
     expect(second).toHaveLength(72);
   });
   it("collects aligned 20-minute windows and resumes from its checkpoint", () => {

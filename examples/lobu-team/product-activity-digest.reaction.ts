@@ -9,7 +9,9 @@ const LOG_ACTIVITY_CONNECTION = "lobu-production-logs";
 const CARD_TEXT_LIMIT = 2_800;
 const LOG_WINDOW_MS = 20 * 60 * 1000;
 const LOG_INGESTION_LAG_MS = 2 * 60 * 1000;
-const FEED_FRESHNESS_MS = 25 * 60 * 1000;
+// Both feeds are scheduled 2–3 minutes before this digest. Ten minutes allows
+// normal run delay without treating a missed 20-minute cycle as current.
+const FEED_FRESHNESS_MS = 10 * 60 * 1000;
 
 interface FeedCoverageRow {
   connection_slug: string;
@@ -21,7 +23,7 @@ interface FeedCoverageRow {
   expected_log_window_collected: boolean;
 }
 
-export interface DigestCoverage {
+interface DigestCoverage {
   product: boolean;
   logs: boolean;
   issues: string[];
@@ -198,11 +200,7 @@ export function hasProductActivity(digest: ProductActivityDigest): boolean {
 export function buildProductActivityCard(
   digest: ProductActivityDigest,
   window: { start: string; end: string },
-  coverage: DigestCoverage = {
-    product: false,
-    logs: false,
-    issues: ["Source coverage unverified"],
-  }
+  coverage: DigestCoverage
 ): CardElement {
   const online = uniqueUsers([...digest.logins, ...digest.mcp_conversations]);
   const productCount = (count: number) =>

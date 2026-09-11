@@ -14,7 +14,6 @@ const context = {
     automation_id: 42,
     window_start: "2026-08-13T12:00:00.000Z",
     window_end: "2026-08-13T12:20:00.000Z",
-    granularity: "20 minutes",
     content_analyzed: 0,
   },
   automation: {
@@ -33,7 +32,7 @@ const healthyFeeds = ["lobu-product-activity-db", "lobu-production-logs"].map(
     connection_status: "active",
     status: "active",
     last_sync_status: "success",
-    last_sync_at: "2026-08-13T12:03:00.000Z",
+    last_sync_at: "2026-08-13T12:18:00.000Z",
     consecutive_failures: 0,
     expected_log_window_collected: true,
   })
@@ -63,6 +62,17 @@ describe("Lobu Team product activity digest reaction", () => {
       expect(coverage.logs).toBe(false);
       expect(coverage.issues).toHaveLength(1);
     }
+
+    const missedProductCycle = digestCoverage(
+      healthyFeeds.map((row) =>
+        row.connection_slug === "lobu-product-activity-db"
+          ? { ...row, last_sync_at: "2026-08-13T12:03:00.000Z" }
+          : row
+      ),
+      end
+    );
+    expect(missedProductCycle.product).toBe(false);
+    expect(missedProductCycle.logs).toBe(true);
   });
 
   it("labels observed log counts as partial during catch-up", async () => {
@@ -353,6 +363,10 @@ describe("Lobu Team product activity digest reaction", () => {
     const statement = String(query.mock.calls[0]?.[0]);
     expect(statement).toContain("e.created_at >= '2026-08-13T12:00:00.000Z'");
     expect(statement).toContain("e.created_at < '2026-08-13T12:20:00.000Z'");
+    const coverageStatement = String(query.mock.calls[1]?.[0]);
+    expect(coverageStatement).toContain(
+      "e.origin_id = '2026-08-13T12:00:00.000Z'"
+    );
   });
 
   it("rejects invalid windows before reading or notifying", async () => {
@@ -410,7 +424,7 @@ describe("Lobu Team product activity digest reaction", () => {
       productActivityDigest(
         {
           ...context,
-          window: { ...context.window, run_id: undefined },
+          window: { ...context.window, run_id: undefined as never },
         },
         client
       )
