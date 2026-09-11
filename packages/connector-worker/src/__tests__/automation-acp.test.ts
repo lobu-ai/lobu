@@ -664,7 +664,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
 
     expect(requests).toEqual([
       {
-        url: 'https://lobu.test/worker/transcript/snapshot',
+        url: 'https://lobu.test/lobu/worker/transcript/snapshot',
         authorization: 'Bearer run-scoped-token',
         body: {
           runId: 99,
