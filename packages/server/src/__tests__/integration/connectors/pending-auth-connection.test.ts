@@ -220,7 +220,7 @@ describe('connectors — pending-auth oauth_account in the same apply', () => {
     `;
     expect(reconnectTokens).toHaveLength(2);
     expect(reconnectTokens[0]).toMatchObject({
-      connection_id: null,
+      connection_id: connectionId,
       auth_profile_id: profileId,
     });
 

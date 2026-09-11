@@ -76,10 +76,12 @@ export async function syncOAuthConnectionsForAuthProfile(
   const oauthMethod = getOAuthAuthMethods(authSchema).find(
     (method) => method.provider.toLowerCase() === (authProfile.provider ?? '').toLowerCase()
   );
-  const requestedScopes = normalizeScopeList(
-    authProfile.auth_data?.requested_scopes ?? oauthMethod?.requiredScopes ?? []
+  // Optional permissions affect the capabilities that declare them, not the
+  // health of every operation/feed backed by this account.
+  const connectorScopesOk = hasAllScopes(
+    grantedScopes,
+    normalizeScopeList(oauthMethod?.requiredScopes)
   );
-  const connectorScopesOk = hasAllScopes(grantedScopes, requestedScopes);
 
   const currentGrantedScopes = normalizeScopeList(authProfile.auth_data?.granted_scopes);
   const nextProfileStatus = connectorScopesOk ? 'active' : 'pending_auth';
@@ -112,7 +114,6 @@ export async function syncOAuthConnectionsForAuthProfile(
 
   const feedsSchema =
     (connectorRow as { feeds_schema?: Record<string, unknown> } | undefined)?.feeds_schema ?? null;
-  const connectionEligibleIds = new Set<number>();
 
   for (const row of feedRows as Array<{
     id: number;
@@ -130,9 +131,6 @@ export async function syncOAuthConnectionsForAuthProfile(
       feedsSchema as Record<string, FeedDefinition> | null,
       row.feed_key
     ).includes('sync');
-    if (feedEligible) {
-      connectionEligibleIds.add(row.connection_id);
-    }
     const scopePaused = row.last_error === OAUTH_SCOPE_PAUSE_LAST_ERROR;
     if (row.status === 'active' && !feedEligible) {
       await sql`
@@ -171,19 +169,20 @@ export async function syncOAuthConnectionsForAuthProfile(
   }
 
   const connectionRows = await sql`
-    SELECT id
+    SELECT id, status
     FROM connections
     WHERE organization_id = ${organizationId}
       AND auth_profile_id = ${authProfileId}
       AND deleted_at IS NULL
   `;
 
-  const hasAnyFeeds = feedRows.length > 0;
-  for (const row of connectionRows as Array<{ id: number }>) {
-    const nextConnectionStatus =
-      connectorScopesOk && (!hasAnyFeeds || connectionEligibleIds.has(row.id))
-        ? 'active'
-        : 'pending_auth';
+  for (const row of connectionRows as Array<{ id: number; status: string }>) {
+    // A paused connection was stopped for a lifecycle reason (uninstall,
+    // unpair, channel removal), not a credential one — renewing the grant must
+    // not silently restart it. 'revoked' IS a credential failure, so a fresh
+    // grant is exactly what recovers it.
+    if (row.status === 'paused') continue;
+    const nextConnectionStatus = connectorScopesOk ? 'active' : 'pending_auth';
     await sql`
       UPDATE connections
       SET status = ${nextConnectionStatus},

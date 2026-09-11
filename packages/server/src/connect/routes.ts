@@ -44,7 +44,7 @@ import { registerConnectorWebhook } from './webhook-registration';
 import { mergeOAuthScopeAuthData, normalizeScopeList } from '../auth/oauth/scopes';
 import { createSyncRun, describeSyncRunSkip } from '../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
-import { buildConnectionsUrl, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
+import { buildConnectionAuthUrl, buildConnectionsUrl, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import {
   ATLASSIAN_JIRA_ISSUES_FEED_KEY,
   isAtlassianMcpConfig,
@@ -64,6 +64,7 @@ import {
 import { resolveSession } from '../auth/resolve-session';
 
 interface OAuthAuthConfig {
+  appAuthProfileId?: number;
   provider: string;
   scopes: string[];
   clientIdKey?: string;
@@ -582,7 +583,8 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
     return c.json({ error: 'OAuth provider not configured for this connector' }, 400);
   }
 
-  const { clientId, clientSecret } = await resolveOAuthCredentialsForToken(tokenRow, authConfig);
+  const { clientId, clientSecret, appAuthProfileId } =
+    await resolveOAuthCredentialsForToken(tokenRow, authConfig);
 
   if (!clientId) {
     return c.json(
@@ -608,14 +610,22 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
 
   const baseUrl = getBaseUrl(c);
   const redirectUri = `${baseUrl}/connect/oauth/callback`;
-  const pkceCodeVerifier = authConfig.usePkce ? buildPkceVerifier() : undefined;
+  // Reusing a pending URL must send the challenge for the verifier saved on
+  // that token; generating a new unsaved verifier makes the callback fail.
+  const pkceCodeVerifier = authConfig.usePkce
+    ? authConfig.pkceCodeVerifier ?? buildPkceVerifier()
+    : undefined;
 
   const needsUpdate =
-    authConfig.redirectUri !== redirectUri || (authConfig.usePkce && !authConfig.pkceCodeVerifier);
+    authConfig.redirectUri !== redirectUri ||
+    (authConfig.usePkce && !authConfig.pkceCodeVerifier) ||
+    // Stamp the app actually used so the callback binds the grant to it.
+    (!!appAuthProfileId && authConfig.appAuthProfileId !== appAuthProfileId);
 
   if (needsUpdate) {
     const effectiveAuthConfig = {
       ...authConfig,
+      ...(appAuthProfileId ? { appAuthProfileId } : {}),
       redirectUri,
       ...(pkceCodeVerifier ? { pkceCodeVerifier } : {}),
     };
@@ -660,20 +670,26 @@ connectRoutes.get('/oauth/callback', async (c) => {
     return c.json({ error: 'Missing state parameter' }, 400);
   }
 
-  if (error) {
-    return c.redirect(`${getBaseUrl(c)}/connect/${token}?error=${encodeURIComponent(error)}`);
-  }
-
-  if (!code) {
-    return c.json({ error: 'Missing authorization code' }, 400);
-  }
-
   const tokenRow = await resolveConnectToken(token);
   if (!tokenRow) {
     return c.json({ error: 'Invalid or expired connect token' }, 404);
   }
 
   const baseUrl = getBaseUrl(c);
+  // Resolve the token first: a denied or failed consent still has to land the
+  // user back on the connection they were recovering, not on a bare error page.
+  if (error) {
+    return c.redirect(
+      await oauthResultUrl(
+        tokenRow,
+        baseUrl,
+        error === 'access_denied' ? 'cancelled' : 'failed'
+      )
+    );
+  }
+  if (!code) {
+    return c.json({ error: 'Missing authorization code' }, 400);
+  }
   const authConfig = tokenRow.auth_config as OAuthAuthConfig | null;
   return handleOAuthCallback(
     c,
@@ -735,7 +751,7 @@ async function handleOAuthCallback(
   });
 
   if (!tokens) {
-    return c.redirect(`${baseUrl}/connect/${token}?error=token_exchange_failed`);
+    return c.redirect(await oauthResultUrl(tokenRow, baseUrl, 'failed'));
   }
 
   // Jira 3LO tokens are site-agnostic — REST needs cloud_id. Discover the
@@ -874,11 +890,21 @@ async function handleOAuthCallback(
             provider = ${authConfig!.provider},
             status = 'active',
             auth_data = ${tx.json(
-              mergeOAuthScopeAuthData(existingAuthData, {
-                requestedScopes: authConfig.requestedScopes ?? authConfig.scopes,
-                grantedScopes,
-                identity: rawUserInfo,
-              })
+              mergeOAuthScopeAuthData(
+                {
+                  ...existingAuthData,
+                  // The grant records the app that issued it; a later reconnect
+                  // reuses that app rather than silently swapping clients.
+                  ...(authConfig.appAuthProfileId
+                    ? { app_auth_profile_id: authConfig.appAuthProfileId }
+                    : {}),
+                },
+                {
+                  requestedScopes: authConfig.requestedScopes ?? authConfig.scopes,
+                  grantedScopes,
+                  identity: rawUserInfo,
+                }
+              )
             )},
             display_name = COALESCE(display_name, ${displayNameOverride}),
             updated_at = NOW()
@@ -911,7 +937,9 @@ async function handleOAuthCallback(
             'active',
             ${tx.json(
               mergeOAuthScopeAuthData(
-                {},
+                authConfig.appAuthProfileId
+                  ? { app_auth_profile_id: authConfig.appAuthProfileId }
+                  : {},
                 {
                   requestedScopes: authConfig.requestedScopes ?? authConfig.scopes,
                   grantedScopes,
@@ -938,6 +966,8 @@ async function handleOAuthCallback(
       // it is personal-credential-backed, DOWNGRADE it to 'private' — an org read
       // through the connection uses this user's token. Downgrade-only: we never
       // widen a connection here, and 'private' is the floor for personal creds.
+      // Only on a first grant: a reconnect (token already bound to a profile)
+      // must not re-narrow visibility an admin has since widened.
       const attachedKind = authProfileId
         ? (
             (await tx`
@@ -947,7 +977,8 @@ async function handleOAuthCallback(
             `) as Array<{ profile_kind: string }>
           )[0]?.profile_kind
         : undefined;
-      const forcePrivate = isPersonalCredentialKind(attachedKind);
+      const forcePrivate =
+        !tokenRow.auth_profile_id && isPersonalCredentialKind(attachedKind);
 
       // Stamp Jira cloud_id via atomic JSONB merge so a concurrent replica
       // updating action_modes / webhook state is not clobbered by a full
@@ -958,7 +989,8 @@ async function handleOAuthCallback(
           UPDATE connections
           SET account_id = ${resolvedAccountId},
               auth_profile_id = COALESCE(${authProfileId ?? null}, auth_profile_id),
-              status = 'active',
+              status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
+              error_message = CASE WHEN status = 'paused' THEN error_message ELSE NULL END,
               visibility = CASE WHEN ${forcePrivate} THEN 'private' ELSE visibility END,
               display_name = COALESCE(display_name, ${displayNameOverride}),
               config = (
@@ -976,7 +1008,8 @@ async function handleOAuthCallback(
           UPDATE connections
           SET account_id = ${resolvedAccountId},
               auth_profile_id = COALESCE(${authProfileId ?? null}, auth_profile_id),
-              status = 'active',
+              status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
+              error_message = CASE WHEN status = 'paused' THEN error_message ELSE NULL END,
               visibility = CASE WHEN ${forcePrivate} THEN 'private' ELSE visibility END,
               display_name = COALESCE(display_name, ${displayNameOverride}),
               updated_at = NOW()
@@ -985,13 +1018,13 @@ async function handleOAuthCallback(
         `;
       }
 
-      await tx`
-        UPDATE feeds
-        SET status = 'active',
-            next_run_at = NOW(),
-            updated_at = NOW()
-        WHERE connection_id = ${tokenRow.connection_id}
-      `;
+      if (!tokenRow.auth_profile_id) {
+        await tx`
+          UPDATE feeds
+          SET status = 'active', next_run_at = NOW(), updated_at = NOW()
+          WHERE connection_id = ${tokenRow.connection_id}
+        `;
+      }
     }
 
     await tx`
@@ -1077,18 +1110,41 @@ async function handleOAuthCallback(
     });
   }
 
-  const ownerSlug = await getOrganizationSlug(tokenRow.organization_id);
-  if (ownerSlug && tokenRow.connector_key) {
-    return c.redirect(buildConnectionsUrl(ownerSlug, baseUrl, tokenRow.connector_key));
-  }
+  return c.redirect(await oauthResultUrl(tokenRow, baseUrl, 'connected'));
+}
 
-  return c.redirect(`${baseUrl}`);
+/**
+ * Where the browser lands after consent. A token bound to a connection returns
+ * to that connection's auth controls so the outcome is visible next to the
+ * account it changed; a profile-only token returns to connector setup.
+ */
+async function oauthResultUrl(
+  tokenRow: ConnectTokenRow,
+  baseUrl: string,
+  result: 'connected' | 'cancelled' | 'failed'
+): Promise<string> {
+  const ownerSlug = await getOrganizationSlug(tokenRow.organization_id);
+  if (ownerSlug && tokenRow.connection_id) {
+    return buildConnectionAuthUrl(
+      ownerSlug,
+      tokenRow.connector_key,
+      tokenRow.connection_id,
+      baseUrl,
+      result
+    );
+  }
+  if (result === 'connected') {
+    return ownerSlug
+      ? buildConnectionsUrl(ownerSlug, baseUrl, tokenRow.connector_key)
+      : baseUrl;
+  }
+  return `${baseUrl}/connect/${tokenRow.token}?error=${result}`;
 }
 
 async function resolveOAuthCredentialsForToken(
   tokenRow: { connection_id: number | null; organization_id: string; connector_key: string },
   authConfig: OAuthAuthConfig
-): Promise<{ clientId: string | null; clientSecret: string | null }> {
+): Promise<{ clientId: string | null; clientSecret: string | null; appAuthProfileId?: number }> {
   const appAuthProfileId = await fetchAppAuthProfileId(
     tokenRow.connection_id,
     tokenRow.organization_id
@@ -1097,7 +1153,7 @@ async function resolveOAuthCredentialsForToken(
     authConfig.provider,
     tokenRow.connector_key,
     tokenRow.organization_id,
-    appAuthProfileId,
+    authConfig.appAuthProfileId ?? appAuthProfileId,
     authConfig.clientIdKey,
     authConfig.clientSecretKey
   );
@@ -1138,22 +1194,30 @@ async function resolveOAuthClientCredentials(
   appAuthProfileId?: number | null,
   clientIdKey?: string,
   clientSecretKey?: string
-): Promise<{ clientId: string | null; clientSecret: string | null }> {
-  const appProfile =
-    (appAuthProfileId ? await getAuthProfileById(organizationId, appAuthProfileId) : null) ??
-    (await getPrimaryAuthProfileForKind({
+): Promise<{ clientId: string | null; clientSecret: string | null; appAuthProfileId?: number }> {
+  const appProfile = appAuthProfileId
+    ? await getAuthProfileById(organizationId, appAuthProfileId)
+    : await getPrimaryAuthProfileForKind({
       organizationId,
       connectorKey,
       profileKind: 'oauth_app',
       provider,
-    }));
+    });
+  if (appAuthProfileId && (!appProfile || appProfile.profile_kind !== 'oauth_app' ||
+      appProfile.status !== 'active' ||
+      appProfile.provider?.toLowerCase() !== provider.toLowerCase())) {
+    return { clientId: null, clientSecret: null };
+  }
 
-  return resolveOAuthAppClientCredentials({
-    appProfileAuthData: appProfile?.auth_data,
-    provider,
-    clientIdKey,
-    clientSecretKey,
-  });
+  return {
+    ...resolveOAuthAppClientCredentials({
+      appProfileAuthData: appProfile?.auth_data,
+      provider,
+      clientIdKey,
+      clientSecretKey,
+    }),
+    ...(appProfile ? { appAuthProfileId: appProfile.id } : {}),
+  };
 }
 
 export { connectRoutes };

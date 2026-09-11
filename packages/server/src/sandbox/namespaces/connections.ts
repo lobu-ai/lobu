@@ -8,6 +8,7 @@
  */
 
 import type {
+	ConnectionReauthenticateOptions,
 	ConnectionSetupOptionsInput,
 	ConnectionConnectInput,
 	ConnectionConnectManagedInput,
@@ -39,7 +40,10 @@ export interface ConnectionsNamespace {
 	connectManaged(input: ConnectionConnectManagedInput): Promise<unknown>;
 	update(input: ConnectionUpdateInput): Promise<unknown>;
 	delete(connection_id: number): Promise<unknown>;
-	reauthenticate(connection_id: number): Promise<unknown>;
+	reauthenticate(
+		connection_id: number,
+		options?: ConnectionReauthenticateOptions,
+	): Promise<unknown>;
 	test(connection_id: number): Promise<unknown>;
 	installConnector(input: InstallConnectorInput): Promise<unknown>;
 	uninstallConnector(connector_key: string): Promise<unknown>;
@@ -104,7 +108,8 @@ export function buildConnectionsNamespace(
 			}),
 		}),
 		reauthenticate: method("reauthenticate", {
-			mapArgs: (connection_id) => ({
+			mapArgs: (connection_id, options) => ({
+				...(options as ConnectionReauthenticateOptions | undefined),
 				connection_id: idArg(
 					"connections.reauthenticate",
 					"connection_id",

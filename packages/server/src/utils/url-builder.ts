@@ -396,6 +396,19 @@ export function buildConnectionUrl(
   );
 }
 
+/** Open the existing connection's authorization controls, preserving workspace identity. */
+export function buildConnectionAuthUrl(
+  ownerSlug: string,
+  connectorKey: string,
+  connectionId: number,
+  baseUrl?: string,
+  result?: 'connected' | 'cancelled' | 'failed'
+): string {
+  const params = new URLSearchParams({ settings: 'true' });
+  if (result) params.set('auth_result', result);
+  return `${buildConnectionUrl(ownerSlug, connectorKey, connectionId, baseUrl)}?${params}#connection-auth`;
+}
+
 /**
  * A slice of the memory/events log to permalink into. One discriminated union
  * so every caller (approval_url, notification resourceUrl, agent output) picks a

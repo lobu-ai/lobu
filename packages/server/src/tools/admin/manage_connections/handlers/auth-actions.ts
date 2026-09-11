@@ -89,7 +89,7 @@ export async function handleReauthenticate(
       return { error: 'You can only re-authenticate OAuth profiles you created.' };
     }
 
-    const reconnect = await issueOAuthReconnectLink({ authProfile, ctx });
+    const reconnect = await issueOAuthReconnectLink({ authProfile, ctx, connectionId: row.id, requestedScopes: args.requested_scopes });
     if ('error' in reconnect) return reconnect;
     return {
       action: 'reauthenticate',

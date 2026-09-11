@@ -2,7 +2,7 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
-import { manageAuthProfiles } from "../../tools/admin/manage_auth_profiles";
+import { buildConnectionsNamespace } from "../../sandbox/namespaces/connections";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
 import { createAuthProfile } from "../../utils/auth-profiles";
@@ -194,50 +194,23 @@ describe("operation readiness respects OAuth scopes", () => {
 		expect(op.next_action?.requested_scopes).toEqual([WRITE_SCOPE]);
 	});
 
-	it("provides an invokable next_action that requests the missing scope", async () => {
+	it("provides an invokable next_action without changing the current grant", async () => {
 		const seeded = await seedScopedConnection([READONLY_SCOPE]);
 		const op = await listOp("create_event", seeded.connectionId);
 		expect(op.next_action).toMatchObject({
-			sdk_method: "authProfiles.update",
-			arguments: [
-				{
-					auth_profile_slug: seeded.profileSlug,
-					requested_scopes: [READONLY_SCOPE, WRITE_SCOPE],
-					reconnect: true,
-				},
-			],
+			sdk_method: "connections.reauthenticate",
+			arguments: [seeded.connectionId, { requested_scopes: [READONLY_SCOPE, WRITE_SCOPE] }],
 		});
-
-		const writeScopedCtx = {
-			...ctx,
-			scopes: ["mcp:read", "mcp:write"],
-		};
-		const result = await manageAuthProfiles(
-			{
-				action: "update_auth_profile",
-				auth_profile_slug: seeded.profileSlug,
-				requested_scopes: [WRITE_SCOPE],
-				reconnect: true,
-			} as never,
-			{} as Env,
-			writeScopedCtx,
-		);
-		expect(result).toMatchObject({
-			action: "update_auth_profile",
-			connect_url: expect.any(String),
-			auth_profile: {
-				requested_scopes: [READONLY_SCOPE, WRITE_SCOPE],
-			},
-		});
-		const [stored] = await getTestDb()`
-			SELECT auth_data
-			FROM auth_profiles
-			WHERE organization_id = ${orgId} AND slug = ${seeded.profileSlug}
-		`;
-		expect(stored?.auth_data).toMatchObject({
-			requested_scopes: [READONLY_SCOPE, WRITE_SCOPE],
-			granted_scopes: [READONLY_SCOPE],
-		});
+		expect(op.next_action?.view_url).toContain(`/${seeded.connectionId}?settings=true#connection-auth`);
+		const client = buildConnectionsNamespace({ ...ctx, scopes: ["mcp:read", "mcp:write"] }, {} as Env);
+		const result = await client.reauthenticate(seeded.connectionId, { requested_scopes: [WRITE_SCOPE] });
+		expect(result).toMatchObject({ action: "reauthenticate", connect_url: expect.any(String) });
+		const [stored] = await getTestDb()`SELECT auth_data FROM auth_profiles
+			WHERE organization_id = ${orgId} AND slug = ${seeded.profileSlug}`;
+		expect(stored?.auth_data).toMatchObject({ requested_scopes: [READONLY_SCOPE], granted_scopes: [READONLY_SCOPE] });
+		const [pending] = await getTestDb()`SELECT auth_config FROM connect_tokens
+			WHERE connection_id = ${seeded.connectionId} ORDER BY id DESC LIMIT 1`;
+		expect(pending.auth_config.requestedScopes).toEqual([READONLY_SCOPE, WRITE_SCOPE]);
 	});
 
 	it("rejects direct execution with retry-after-consent guidance before creating a run", async () => {

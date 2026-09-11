@@ -86,7 +86,7 @@ describe('OAuth callback downgrades a fresh personal connection to private (e2e)
           {
             type: 'oauth',
             provider: 'cboauth',
-            requiredScopes: ['read'],
+            requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
             clientIdKey: 'CBOAUTH_CLIENT_ID',
             clientSecretKey: 'CBOAUTH_CLIENT_SECRET',
             tokenUrl: PROVIDER_TOKEN_URL,

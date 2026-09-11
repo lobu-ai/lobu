@@ -20,6 +20,9 @@ import logger from "../../../../utils/logger";
 import { ensureConnectorInstalled } from "../../../../utils/ensure-connector-installed";
 import {
   buildOAuthConnectConfig,
+  getOAuthMethods,
+  resolveRequestedOAuthScopes,
+  resolveOAuthProfileApp,
   ensureEnvBackedOAuthAppProfile,
   getConnectBaseUrl,
 	getGatewayBaseUrl,
@@ -46,7 +49,10 @@ import {
 import { getScopedConnectorDefinition } from "../../../../catalog/connector-definitions";
 import { buildConnectionsUrl } from "../../../../utils/url-builder";
 import { getOrgUrlContext } from "../../../view-urls";
-import { createConnectToken } from "../../../../utils/connect-tokens";
+import {
+  CONNECT_TOKEN_EXPIRED_ERROR,
+  createConnectToken,
+} from "../../../../utils/connect-tokens";
 import { registerConnectorWebhook } from "../../../../connect/webhook-registration";
 import { resolveUsernames } from "../../../../utils/resolve-usernames";
 import type { ToolContext } from "../../../registry";
@@ -56,6 +62,7 @@ import {
 	isManagedPublicOrgConnect,
 } from "./device-binding";
 import { getErrorMessage } from "@lobu/core";
+import { callerIsAdmin } from "../../helpers/db-helpers";
 import {
 	activeConnectionPoll,
 	appInstallationSetupContinuation,
@@ -101,6 +108,7 @@ async function handleConnectImpl(
   }
   const sql = getDb();
   const { organizationId, userId } = ctx;
+  const isAdmin = await callerIsAdmin(sql, ctx);
 	const resumeCall = buildSafeConnectionResumeCall(
 		"connections.connect",
 		args,
@@ -221,21 +229,25 @@ async function handleConnectImpl(
     if (fmtErr) return { error: fmtErr };
   }
 
-  // Idempotent: reuse an existing pending_auth connection with a valid connect
-  // token for the same connector/user. When the caller asked for a specific
-  // slug, only reuse a pending row whose slug matches — otherwise we'd hand back
-  // a connection under the wrong stable identity, so fall through and create a
-  // fresh row with the requested slug instead.
+  // Idempotent: reuse the existing OAuth connection for the same connector/user
+  // instead of stacking duplicates. A connect token that lapsed before the user
+  // consented is reissued below, so a row parked at pending_auth — or revoked by
+  // the token reaper — recovers on the same connection. When the caller asked
+  // for a specific slug, only reuse a row whose slug matches — otherwise we'd
+  // hand back a connection under the wrong stable identity, so fall through and
+  // create a fresh row with the requested slug instead.
   const pendingRows = await sql`
     SELECT c.id, c.slug, c.visibility, ap.profile_kind AS auth_profile_kind,
-           ct.token, ct.expires_at
+           ct.token, ct.expires_at, ct.status AS token_status, ct.auth_profile_id, ct.auth_config, app.slug AS app_slug
     FROM connections c
     JOIN connect_tokens ct ON ct.connection_id = c.id
-      AND ct.status = 'pending' AND ct.expires_at > NOW()
+      AND ct.auth_type = 'oauth' AND ct.status IN ('pending', 'expired')
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
+    LEFT JOIN auth_profiles app ON app.id = c.app_auth_profile_id
     WHERE c.organization_id = ${organizationId}
       AND c.connector_key = ${args.connector_key}
-      AND c.status = 'pending_auth'
+      AND (c.status = 'pending_auth' OR (c.status = 'revoked' AND c.auth_profile_id IS NULL
+        AND c.error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
       AND c.deleted_at IS NULL
 			${requireManaged ? sql`AND c.config->>'consent_only' = 'true'` : sql``}
       ${explicitSlug ? sql`AND c.slug = ${explicitSlug}` : sql``}
@@ -252,7 +264,38 @@ async function handleConnectImpl(
       auth_profile_kind: string | null;
       token: string;
       expires_at: Date | string;
+      token_status: string;
+      auth_profile_id: number | null;
+      auth_config: Record<string, unknown>;
+      app_slug: string | null;
     };
+    if (args.app_auth_profile_slug && args.app_auth_profile_slug !== pending.app_slug) {
+      return { error: 'A pending account connection uses a different OAuth app. Finish or cancel that setup before choosing another app.', setup_url: setupUrl };
+    }
+    if (args.requested_scopes) {
+      const pendingProvider = String(pending.auth_config.provider ?? '').toLowerCase();
+      const method = getOAuthMethods(connector.auth_schema).find(
+        method => method.provider.toLowerCase() === pendingProvider
+      );
+      if (method) {
+        const scopes = resolveRequestedOAuthScopes(method, [
+          ...(Array.isArray(pending.auth_config.requestedScopes) ? pending.auth_config.requestedScopes : []),
+          ...args.requested_scopes,
+        ]);
+        pending.auth_config = { ...pending.auth_config, scopes, requestedScopes: scopes };
+        await sql`UPDATE connect_tokens SET auth_config = ${sql.json(pending.auth_config)}
+          WHERE token = ${pending.token} AND status = 'pending'`;
+      }
+    }
+    if (pending.token_status !== 'pending' || new Date(pending.expires_at).getTime() <= Date.now()) {
+      const { pkceCodeVerifier: _verifier, redirectUri: _redirect, ...authConfig } = pending.auth_config;
+      const fresh = await createConnectToken({ connectionId: pending.id, authProfileId: pending.auth_profile_id,
+        organizationId, connectorKey: args.connector_key, authType: 'oauth', authConfig, createdBy: userId });
+      pending.token = fresh.token;
+      pending.expires_at = fresh.expires_at;
+      await sql`UPDATE connections SET status = 'pending_auth', error_message = NULL, updated_at = NOW()
+        WHERE id = ${pending.id} AND organization_id = ${organizationId}`;
+    }
     const connectUrl = `${getConnectBaseUrl(ctx)}/connect/${pending.token}/oauth/start`;
     // Retrying connect on an existing personal connection must explain the
     // agent-owner scope too, or the second call silently drops the warning the
@@ -276,7 +319,7 @@ async function handleConnectImpl(
       instructions:
         "A pending connection already exists. Send the connect_url to the user to complete OAuth authorization." +
         (pendingScopeWarning ? ` ${pendingScopeWarning}` : "") +
-        " Poll with client.connections.get(connection_id) via query_sdk until status='active'.",
+        " Poll with client.connections.get(connection_id) via query_sdk until status='active', then check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task. Reuse this connection; do not create duplicate connections or feeds.",
     };
   }
 
@@ -287,13 +330,28 @@ async function handleConnectImpl(
     authProfileSlug: args.auth_profile_slug,
     appAuthProfileSlug: args.app_auth_profile_slug,
     deviceWorkerId: deviceBinding.deviceWorkerId,
-    oauthAccountCreatedBy: requireManaged ? userId : undefined,
+    oauthAccountCreatedBy: userId,
   });
 
 	const isOAuthConnect =
 		authSelection.preferredMethodType === "oauth" &&
 		(authSelection.selectedKind === "none" ||
 			authSelection.selectedKind === "oauth_account");
+  const acceptsManagedApp = isOAuthConnect && authSelection.oauthMethod
+    ? await isManagedPublicOrgConnect({ organizationId, connectorKey: args.connector_key, provider: authSelection.oauthMethod.provider })
+    : false;
+  if (isOAuthConnect && authSelection.oauthMethod) {
+    const app = await resolveOAuthProfileApp({ ctx, connectorKey: args.connector_key,
+      method: authSelection.oauthMethod, appAuthProfileSlug: args.app_auth_profile_slug,
+      authProfile: authSelection.authProfile ?? undefined, allowManagedApp: acceptsManagedApp });
+    if ('error' in app) {
+      const setup = buildOAuthAppProfileSetupError({ connectorKey: args.connector_key, method: authSelection.oauthMethod, setupUrl });
+      return oauthAppSetupContinuation({ action: 'connect', connectorKey: args.connector_key, resumeCall,
+        setup: { ...setup, error: app.error + ' Open setup_url to review the app configuration.' } });
+    }
+    authSelection.appAuthProfile = app.appAuthProfile;
+  }
+
 	// Resolve/provision the app before deriving managed-connector policy. On the
 	// first env-backed connect there is no oauth_app row yet; doing this only
 	// after INSERT meant that first grant missed consent_only even though every
@@ -307,14 +365,26 @@ async function handleConnectImpl(
 				profileKind: "oauth_app",
 				provider: authSelection.oauthMethod.provider,
 			})) ??
-			(await ensureEnvBackedOAuthAppProfile({
+			(isAdmin ? await ensureEnvBackedOAuthAppProfile({
 				organizationId,
 				connectorKey: args.connector_key,
 				connectorName: connector.name,
 				method: authSelection.oauthMethod,
 				createdBy: userId,
-			}));
+			}) : null);
 	}
+
+  if (!isAdmin) {
+    if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
+      return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
+    }
+    const app = authSelection.appAuthProfile;
+    if (!app || app.status !== 'active' || (!authSelection.authProfile && !acceptsManagedApp && (!app.is_default_for_connector || app.connector_key !== args.connector_key))) {
+      const setup = buildOAuthAppProfileSetupError({ connectorKey: args.connector_key, method: authSelection.oauthMethod!, setupUrl });
+      return oauthAppSetupContinuation({ action: 'connect', connectorKey: args.connector_key,
+        setup: { ...setup, error: 'Ask an administrator to configure and set the workspace-default OAuth app at setup_url. Then resume this call to authorize your own account.' }, resumeCall });
+    }
+  }
 
   const hasNoAuth =
 		!authSelection.oauthMethod &&
@@ -780,7 +850,8 @@ async function handleConnectImpl(
     connectorKey: args.connector_key,
 		authType: "oauth",
     authConfig: {
-      ...buildOAuthConnectConfig(oauthMethod),
+      ...buildOAuthConnectConfig(oauthMethod, args.requested_scopes),
+      appAuthProfileId: appAuthProfile.id,
       // Profile metadata — callback creates the real profile on success
       pendingProfileMeta: {
         displayName: `${args.display_name ?? connector.name} Account`,
@@ -814,8 +885,8 @@ async function handleConnectImpl(
     connect_token: connectToken.token,
     expires_at: new Date(connectToken.expires_at).toISOString(),
     instructions:
-      `Send the connect_url to the user to complete OAuth authorization with ${oauthMethod.provider}.` +
+      `Open the exact connect_url to let the user authorize their account with ${oauthMethod.provider} using the selected app "${appAuthProfile.display_name}". Explain the requested permissions before the user continues.` +
       (personalScopeWarning ? ` ${personalScopeWarning}` : "") +
-      " Poll with client.connections.get(connection_id) via query_sdk until status='active'.",
+      " Poll with client.connections.get(connection_id) via query_sdk until status='active', then check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task. Reuse this connection; do not create duplicate connections or feeds.",
   };
 }

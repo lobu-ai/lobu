@@ -10,6 +10,14 @@ import { randomBytes } from 'node:crypto';
 import { getDb, pgTextArray } from '../db/client';
 import logger from './logger';
 
+/**
+ * Stamped on a connection whose connect token lapsed unused. `connections.connect`
+ * matches on it to reissue authorization for that same connection instead of
+ * leaving a dead row behind, so the two sites must agree.
+ */
+export const CONNECT_TOKEN_EXPIRED_ERROR =
+  'Connect token expired before authentication was completed';
+
 export interface ConnectTokenRow {
   id: number;
   token: string;
@@ -128,7 +136,7 @@ export async function expireStaleConnectTokens(): Promise<number> {
     await sql`
       UPDATE connections
       SET status = 'revoked',
-          error_message = 'Connect token expired before authentication was completed',
+          error_message = ${CONNECT_TOKEN_EXPIRED_ERROR},
           updated_at = NOW()
       WHERE id = ANY(${pgTextArray(connectionIds)}::bigint[])
         AND status = 'pending_auth'
