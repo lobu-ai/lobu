@@ -906,7 +906,8 @@ export async function materializeDueAutomationRuns(
 				`;
 				if (
 					sourceState.empty ||
-					previous[0]?.fingerprint === sourceState.fingerprint
+					(sourceState.fingerprint !== undefined &&
+						previous[0]?.fingerprint === sourceState.fingerprint)
 				) {
 					const skippedRun = await enqueueAutomationRunForRecord(
 						sql,

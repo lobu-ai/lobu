@@ -161,7 +161,7 @@ export function summarizeResults(results: AutomationOperationResult[]) {
 function validateAutomationConfig(input: {
   prompt?: string;
   classifiers?: unknown[];
-  sources?: Array<{ name: string; query: string }>;
+  sources?: Array<{ name: string; query: string; context?: boolean }>;
 }): string | null {
   // Instruction PRESENCE is trigger-shape-dependent (event-turn Automations may
   // run with no instruction text) and is enforced by assertAutomationInstructions
@@ -217,12 +217,10 @@ function validateAutomationConfig(input: {
       if (!trimmed.startsWith('SELECT') && !trimmed.startsWith('WITH')) {
         return `source "${source.name}": query must be a SELECT statement (read-only)`;
       }
-      // Automation-mode content aggregation keys every row by `id` and the signed
-      // window_token only carries those ids; a source that omits `id` yields
-      // content_linked: 0 at complete_window and SILENTLY skips the reaction.
-      // Reject it at save time so the failure is loud, not invisible.
-      if (!queryProjectsIdColumn(source.query)) {
-        return `source "${source.name}": query must project an "id" column (e.g. SELECT id, ... FROM events). Without it the reaction is silently skipped because no content can be linked to the window.`;
+      // Event sources need ids for signed window tokens and completion links.
+      // Context rows are not event citations, so aggregates need no event id.
+      if (!source.context && !queryProjectsIdColumn(source.query)) {
+        return `source "${source.name}": query must project an "id" column (e.g. SELECT id, ... FROM events) so event content can be linked to the window.`;
       }
     }
   }
@@ -240,7 +238,7 @@ function validateAutomationConfig(input: {
 export function assertAutomationVersionConfigValid(parsed: {
   prompt?: string;
   classifiers?: unknown[];
-  sources?: Array<{ name: string; query: string }>;
+  sources?: Array<{ name: string; query: string; context?: boolean }>;
 }): void {
   const validation = validateAutomationConfig({
     prompt: parsed.prompt,

@@ -17,7 +17,7 @@ import { type DbClient, parsePgNumberArray } from '../../db/client';
 import type { Env } from '../../index';
 import type { Outputs, UnprocessedRange, AutomationSource } from '../../types/automations';
 import { ToolUserError } from '../../utils/errors';
-import { type DataSourceContext, executeDataSources } from '../../utils/execute-data-sources';
+import { type DataSourceContext, executeDataSources, MAX_DATA_SOURCE_ROWS } from '../../utils/execute-data-sources';
 import { AUTOMATION_READ_MAX_BYTES, finalizeDynamicQueryRows } from '../../utils/content-read-bounds';
 import logger from '../../utils/logger';
 import { runMetric } from '../../metrics/run-metric';
@@ -158,6 +158,7 @@ async function queryContentData(
   sourcesPage: Record<string, { returned: number; limit: number; has_more: boolean }>;
   totalCount: number;
   totalCountChars: number;
+  exceedsRowLimit: boolean;
 }> {
   const page = params.page;
   const queryContext: DataSourceContext = {
@@ -199,6 +200,7 @@ async function queryContentData(
 
   const results = await executeDataSources(sqlSources, queryContext, sql, {
     throwOnError: params.throwOnSourceError,
+    includeOverflowRow: true,
     excludeWorkspaceAudit: params.excludeWorkspaceAudit,
     wrapQuery: page
       ? (scopedQuery, queryParams, sourceName) => {
@@ -213,8 +215,8 @@ async function queryContentData(
           // Context sources do not share the event cursor contract (their id may
           // be an entity id and they may not expose occurred_at). They still get
           // the same row budget plus one sentinel so sources_page can state
-          // explicitly when the payload was truncated. Fingerprinting does not
-          // pass page, so skip_if_unchanged still sees the complete source state.
+          // explicitly when the payload was truncated. Fingerprinting checks its
+          // own overflow sentinel before deciding whether a run can be skipped.
           if (!isEventSource) {
             nextParams.push(sourceLimit + 1);
             const limitParam = `$${nextParams.length}`;
@@ -261,8 +263,16 @@ async function queryContentData(
             params: nextParams,
           };
         }
-      : undefined,
+      : params.fingerprintMode
+        ? (scopedQuery, queryParams) => ({
+            // security-allowed: scopedQuery is the validated, scoped source SQL.
+            sql: `SELECT * FROM (${scopedQuery}) AS _automation_fingerprint LIMIT $${queryParams.length + 1}`,
+            params: [...queryParams, MAX_DATA_SOURCE_ROWS + 1],
+          })
+        : undefined,
   });
+
+  const exceedsRowLimit = Object.values(results).some(rows => rows.length > MAX_DATA_SOURCE_ROWS);
 
   if (page) {
     for (const sourceName of dynamicEventSourceNames) {
@@ -431,12 +441,13 @@ async function queryContentData(
     page: pageResult,
     totalCount,
     totalCountChars,
+    exceedsRowLimit,
   };
 }
 
 /**
  * Cheap-vs-LLM schedule gate: execute the same normalized sources used by
- * read_knowledge and fingerprint their JSON rows. No model is called. The
+ * read_knowledge and fingerprint their JSON rows. No model is called.
  * An unchanged window is persisted as durable zero-content cursor progress, so
  * subsequent ticks fingerprint the next period instead of retrying the same time.
  */
@@ -445,7 +456,7 @@ export async function fingerprintAutomationSources(args: {
   automationId: number;
   windowStart: string;
   windowEnd: string;
-}): Promise<{ fingerprint: string; empty: boolean }> {
+}): Promise<{ fingerprint: string | undefined; empty: boolean }> {
   const rows = await args.sql`
     SELECT w.organization_id, w.entity_ids, w.sources, w.created_by, v.version_sources
     FROM automations w
@@ -475,6 +486,9 @@ export async function fingerprintAutomationSources(args: {
     throwOnSourceError: true,
     fingerprintMode: true,
   });
+  // A capped prefix cannot prove an unchanged source. Dispatch the run instead
+  // of allowing the scheduler to book unexamined arrivals.
+  if (result.exceedsRowLimit) return { fingerprint: undefined, empty: false };
   const sourceState = Object.fromEntries(
     Object.entries(result.sourcesContent).map(([sourceName, sourceRows]) => [
       sourceName,
@@ -811,10 +825,9 @@ export async function handleAutomationMode(
   // at the mark and skip nothing, so this is null for them.
   const unclaimedNote = arrivalMark ? describeUnclaimedArrivals(arrivalMark, windowStart) : null;
 
-  // NOTE: Window creation is deferred to complete_window action
-  // This allows batched processing where each batch creates its own window
+  // Pagination changes the rows returned, never the run's assigned arrival bounds.
 
-  const contentLimit = Math.min(Math.max(args.limit || 100, 1), 1000); // Page size; agents can request more pages with next_cursor.
+  const contentLimit = Math.min(Math.max(args.limit || 100, 1), MAX_DATA_SOURCE_ROWS); // Page size; agents can request more pages with next_cursor.
   const contentOffset = args.offset || 0;
   const windowStartIso = windowStart.toISOString();
   const windowEndIso = windowEnd.toISOString();
@@ -845,7 +858,7 @@ export async function handleAutomationMode(
       ? [triggerInputSourceName]
       : undefined,
     automationId: Number(automation.id),
-    throwOnSourceError: context.throwOnSourceError,
+    throwOnSourceError: context.throwOnSourceError || Boolean(context.claimedWindow || boundRun),
     excludeWorkspaceAudit: context.excludeWorkspaceAudit,
     page: {
       sourceName: 'content',
