@@ -64,6 +64,18 @@ async function state(connectionId: number) {
   return { connection, feeds };
 }
 
+async function waitForBlockedConnectTokens(count: number): Promise<void> {
+  const sql = getTestDb();
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const rows = await sql`SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'
+        AND query ILIKE '%connect_tokens%'`;
+    if (rows.length >= count) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`Expected ${count} blocked connect-token queries`);
+}
+
 describe('OAuth reconnect preserves the existing connection until consent', () => {
   beforeAll(async () => { await cleanupTestDatabase(); await initWorkspaceProvider(); });
   afterEach(() => { globalThis.fetch = originalFetch; });
@@ -116,27 +128,17 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
       ready();
       await gate;
     });
-    const waitForBlocked = async (count: number) => {
-      for (let attempt = 0; attempt < 200; attempt++) {
-        const rows = await sql`SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'
-            AND query ILIKE '%connect_tokens%'`;
-        if (rows.length >= count) return;
-        await new Promise(resolve => setTimeout(resolve, 25));
-      }
-      throw new Error(`Expected ${count} blocked connect-token queries`);
-    };
     await held;
     const opening = connectRoutes.request(path, {}, {} as Env);
     const retries: Array<Promise<unknown>> = [];
     try {
       // Queue /oauth/start first. The retries read the pre-initialization
       // snapshot before start saves its verifier on the held token row.
-      await waitForBlocked(1);
+      await waitForBlockedConnectTokens(1);
       retries.push(client.connect({ ...args, requested_scopes: [OLD] }));
-      await waitForBlocked(2);
+      await waitForBlockedConnectTokens(2);
       retries.push(client.connect({ ...args, requested_scopes: [EXTRA] }));
-      await waitForBlocked(3);
+      await waitForBlockedConnectTokens(3);
     } finally {
       release();
       await Promise.allSettled([holder, opening, ...retries]);
@@ -180,6 +182,188 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(connected.connection.status).toBe('active');
     expect(connected.connection.auth_data.granted_scopes).toEqual(authorizedScopes);
     expect(connected.connection.auth_data.requested_scopes).toEqual(saved.auth_config.requestedScopes);
+  });
+
+  it.each(['app', 'account', 'provider'] as const)('renews stale pending tokens after changing the selected %s', async (target) => {
+    const s = await seed();
+    const sql = getTestDb();
+    const user = await createTestUser({ name: 'Synthetic pending owner' });
+    await addUserToOrganization(user.id, s.org.id, 'owner');
+    const client = buildConnectionsNamespace({ ...s.ctx, userId: user.id }, {} as Env);
+    const initial = await client.connect({ connector_key: KEY, app_auth_profile_slug: s.app.slug, requested_scopes: [OLD] }) as { connection_id: number; connect_url: string };
+    await connectRoutes.request(new URL(initial.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
+    let profileId: number | null = null;
+    const app = target !== 'account' ? s.otherApp : s.app;
+    const provider = target === 'provider' ? 'alternate' : 'synthetic';
+    const providerOrigin = target === 'provider' ? 'https://alternate.example' : 'https://provider.example';
+    if (target === 'provider') {
+      await sql`UPDATE connector_definitions SET auth_schema = jsonb_set(auth_schema, '{methods}',
+        (auth_schema->'methods') || ${sql.json([{ type: 'oauth', provider, requiredScopes: [BASE], optionalScopes: [OLD, EXTRA],
+          clientIdKey: 'client_id', clientSecretKey: 'client_secret', authorizationUrl: `${providerOrigin}/authorize`,
+          tokenUrl: `${providerOrigin}/token`, userinfoUrl: `${providerOrigin}/userinfo` }])}::jsonb)
+        WHERE organization_id = ${s.org.id} AND key = ${KEY}`;
+      await sql`UPDATE auth_profiles SET provider = ${provider} WHERE id = ${app.id}`;
+    }
+    if (target !== 'account') {
+      await client.update({ connection_id: initial.connection_id, app_auth_profile_slug: app.slug });
+    } else {
+      const profile = await createAuthProfile({ organizationId: s.org.id, connectorKey: KEY,
+        displayName: 'Replacement pending account', profileKind: 'oauth_account', provider: 'synthetic',
+        authData: { app_auth_profile_id: app.id }, status: 'pending_auth', createdBy: user.id });
+      profileId = profile.id;
+      await client.update({ connection_id: initial.connection_id, auth_profile_slug: profile.slug });
+    }
+    const retried = await client.connect({ connector_key: KEY, app_auth_profile_slug: app.slug, requested_scopes: [EXTRA] }) as { connection_id: number; connect_url: string };
+    expect(retried.connection_id).toBe(initial.connection_id);
+    expect(retried.connect_url).not.toBe(initial.connect_url);
+    expect((await connectRoutes.request(new URL(initial.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env)).status).toBe(404);
+    const start = await connectRoutes.request(new URL(retried.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
+    const authorization = new URL(start.headers.get('location')!);
+    expect(authorization.origin).toBe(providerOrigin);
+    expect(authorization.searchParams.get('client_id')).toBe(target !== 'account' ? 'synthetic-other-client' : 'synthetic-selected-client');
+    expect(authorization.searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining(target === 'provider' ? [BASE, EXTRA] : [BASE, OLD, EXTRA]));
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === `${providerOrigin}/token`) return Response.json({ access_token: 'synthetic-rebound-token', scope: [BASE, OLD, EXTRA].join(' ') });
+      if (url === `${providerOrigin}/userinfo`) return Response.json({ id: 'synthetic-rebound-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const token = authorization.searchParams.get('state');
+    const callback = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-rebound-code`, {}, {} as Env);
+    expect(callback.headers.get('location')).not.toContain('auth_result=failed');
+    const [connection] = await sql`SELECT status, auth_profile_id, app_auth_profile_id FROM connections WHERE id = ${initial.connection_id}`;
+    expect(connection.status).toBe('active');
+    expect(connection.app_auth_profile_id).toBe(app.id);
+    if (profileId) expect(connection.auth_profile_id).toBe(profileId);
+    const [account] = await sql`SELECT ap.provider, ap.connector_key, a."providerId" FROM auth_profiles ap
+      JOIN account a ON a.id = ap.account_id WHERE ap.id = ${connection.auth_profile_id}`;
+    expect(account).toMatchObject({ provider, connector_key: KEY, providerId: provider });
+  });
+
+  it('does not renew a superseded token when expired setup retries queue together', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${s.connection.id}`;
+    const initial = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(initial.connect_url).pathname.split('/').at(-3)!;
+    await sql`UPDATE connect_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE token = ${token}`;
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => { ready = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const holder = sql.begin(async (tx: typeof sql) => {
+      await tx`SELECT token FROM connect_tokens WHERE token = ${token} FOR UPDATE`;
+      ready();
+      await gate;
+    });
+    await held;
+    const first = s.client.connect({ connector_key: KEY, requested_scopes: [OLD] });
+    let second: Promise<unknown> | undefined;
+    try {
+      await waitForBlockedConnectTokens(1);
+      second = s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] });
+      await waitForBlockedConnectTokens(2);
+    } finally {
+      release();
+      await Promise.allSettled([holder, first, second]);
+    }
+    const renewed = await first as { connect_url: string };
+    await expect(second).rejects.toThrow('Connection setup changed. Retry connecting this account.');
+    const retried = await s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] }) as { connect_url: string };
+    expect(retried.connect_url).toBe(renewed.connect_url);
+    expect(retried.connect_url).not.toBe(initial.connect_url);
+    const pending = await sql`SELECT auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id} AND status = 'pending'`;
+    expect(pending).toHaveLength(1);
+    expect(pending[0].auth_config.requestedScopes).toEqual(expect.arrayContaining([BASE, OLD, EXTRA]));
+    expect((await connectRoutes.request(new URL(initial.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env)).status).toBe(404);
+  });
+
+  it('preserves already granted scopes outside the current manifest when retrying reconnect setup', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const legacy = 'legacy.already-granted';
+    await sql`UPDATE account SET scope = ${[BASE, OLD, legacy].join(' ')} WHERE id = ${s.profile.account_id}`;
+    await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${s.connection.id}`;
+    const initial = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const retry = await s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] }) as { connect_url: string };
+    expect(retry.connect_url).toBe(initial.connect_url);
+    const start = await connectRoutes.request(new URL(retry.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
+    expect(new URL(start.headers.get('location')!).searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining([BASE, OLD, legacy, EXTRA]));
+  });
+
+  it('does not expose a different member profile-bound reconnect token through pending connect retries', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const member = await createTestUser({ name: 'Synthetic connection owner' });
+    await addUserToOrganization(member.id, s.org.id, 'member');
+    await sql`UPDATE connections SET created_by = ${member.id}, status = 'pending_auth' WHERE id = ${s.connection.id}`;
+    await s.client.reauthenticate(s.connection.id);
+    const before = await sql`SELECT token, status, auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id}`;
+    const memberClient = buildConnectionsNamespace({ ...s.ctx, userId: member.id, memberRole: 'member' }, {} as Env);
+    await expect(memberClient.connect({ connector_key: KEY, requested_scopes: [EXTRA] })).rejects.toThrow('OAuth profiles you created');
+    expect(await sql`SELECT token, status, auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id}`).toEqual(before);
+  });
+
+  it('keeps a connection active when its callback finishes ahead of a queued setup retry', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${s.connection.id}`;
+    const initial = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(initial.connect_url).pathname.split('/').at(-3)!;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ access_token: 'synthetic-completed-token', scope: [BASE, OLD].join(' ') });
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-completed-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => { ready = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const holder = sql.begin(async (tx: typeof sql) => {
+      await tx`SELECT token FROM connect_tokens WHERE token = ${token} FOR UPDATE`;
+      ready();
+      await gate;
+    });
+    await held;
+    const callback = connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-completed-code`, {}, {} as Env);
+    let retry: Promise<unknown> | undefined;
+    try {
+      await waitForBlockedConnectTokens(1);
+      retry = s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] });
+      await waitForBlockedConnectTokens(2);
+    } finally {
+      release();
+      await Promise.allSettled([holder, callback, retry]);
+    }
+    expect((await callback).headers.get('location')).not.toContain('auth_result=failed');
+    expect(await retry).toMatchObject({ connection_id: s.connection.id, status: 'active' });
+    expect(await retry).not.toHaveProperty('connect_url');
+    expect((await state(s.connection.id)).connection.status).toBe('active');
+    expect(await sql`SELECT status FROM connect_tokens WHERE connection_id = ${s.connection.id}`).toEqual([{ status: 'completed' }]);
+  });
+
+  it('rebuilds renewed OAuth configuration from the current connector method', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${s.connection.id}`;
+    const initial = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(initial.connect_url).pathname.split('/').at(-3)!;
+    await sql`UPDATE connect_tokens SET expires_at = NOW() - INTERVAL '1 hour',
+      auth_config = auth_config || ${sql.json({ authParams: { retired_parameter: 'old' }, resource: 'https://retired.example' })}::jsonb
+      WHERE token = ${token}`;
+    await sql`UPDATE connector_definitions SET auth_schema = auth_schema #- '{methods,0,userinfoUrl}'
+      WHERE organization_id = ${s.org.id} AND key = ${KEY}`;
+    const renewed = await s.client.connect({ connector_key: KEY }) as { connect_url: string };
+    const nextToken = new URL(renewed.connect_url).pathname.split('/').at(-3)!;
+    const [row] = await sql`SELECT auth_config FROM connect_tokens WHERE token = ${nextToken}`;
+    expect(row.auth_config).not.toHaveProperty('userinfoUrl');
+    expect(row.auth_config).not.toHaveProperty('authParams');
+    expect(row.auth_config).not.toHaveProperty('resource');
+    expect(row.auth_config.requestedScopes).toEqual(expect.arrayContaining([BASE, OLD]));
+    const start = await connectRoutes.request(new URL(renewed.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
+    expect(start.status).toBe(302);
+    expect(new URL(start.headers.get('location')!).searchParams.has('retired_parameter')).toBe(false);
   });
 
   it('does not rebind a legacy grant through connection update', async () => {

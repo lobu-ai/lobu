@@ -7,7 +7,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { getDb, pgTextArray } from '../db/client';
+import { getDb, pgTextArray, type DbClient } from '../db/client';
 import logger from './logger';
 import { lockOAuthAppBinding } from './oauth-connection-state';
 
@@ -57,14 +57,15 @@ function generateToken(): string {
  * Create a new connect token for a pending connection
  */
 export async function createConnectToken(
-  params: CreateConnectTokenParams
+  params: CreateConnectTokenParams,
+  transaction?: DbClient,
 ): Promise<ConnectTokenRow> {
   const sql = getDb();
   const token = generateToken();
   const ttlSeconds = params.ttlSeconds ?? 3600; // 1 hour default
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
 
-  const rows = await sql.begin(async (tx) => {
+  const insert = async (tx: DbClient) => {
     if (params.authType === 'oauth' && params.authProfileId) {
       const selectedAppId = params.authConfig?.appAuthProfileId;
       if (!(await lockOAuthAppBinding(tx, params.organizationId, params.authProfileId,
@@ -85,7 +86,8 @@ export async function createConnectToken(
     )
     RETURNING *
     `;
-  });
+  };
+  const rows = transaction ? await insert(transaction) : await sql.begin(insert);
 
   logger.info(
     {
