@@ -19,6 +19,33 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
+import TurndownService from 'turndown';
+
+function createEmailBodyConverter(): TurndownService {
+  const converter = new TurndownService({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+    preformattedCode: true,
+    blankReplacement: (_content, node) =>
+      node.nodeName === 'TD' || node.nodeName === 'TH' ? ' | ' : node.isBlock ? '\n\n' : '',
+  });
+  converter.remove(['head', 'title', 'script', 'style', 'template']);
+  // Email layout tables also carry invoices and schedules. Keep every cell
+  // boundary instead of joining adjacent amounts or losing empty columns.
+  converter.addRule('emailTableCell', {
+    filter: ['td', 'th'],
+    replacement: (content) => `${content.trim()} | `,
+  });
+  converter.addRule('emailTableRow', {
+    filter: 'tr',
+    replacement: (content) => `\n${content.replace(/\s*\|\s*$/, '')}\n`,
+  });
+  converter.addRule('emailImageDescription', {
+    filter: 'img',
+    replacement: (_content, node) => node.getAttribute('alt') ?? '',
+  });
+  return converter;
+}
 
 // ---------------------------------------------------------------------------
 // Gmail API types
@@ -120,7 +147,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     name: 'Gmail',
     description:
       'Syncs Gmail threads, live-reads matching messages, and supports sending, drafts, and replies.',
-    version: '1.0.5',
+    version: '1.0.6',
     faviconDomain: 'mail.google.com',
     authSchema: {
       methods: [
@@ -405,11 +432,11 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const scope = ctx.config.query?.trim() || (labels.length > 0
       ? `{${labels.map((l) => `label:${l}`).join(' ')}}`
       : `label:${label}`);
-    // Old checkpoints describe snippet-only input. Revisit the configured
-    // lookback once when upgrading or changing the source filter, preserving
-    // thread origin IDs so ingestion supersedes rather than duplicates rows.
     const scopeKey = JSON.stringify([scope, humanSendersOnly]);
-    const resumable = checkpoint.schema_version === 2 && checkpoint.scope === scopeKey;
+    // Older checkpoints predate full-body or readable-HTML ingestion. Revisit
+    // the configured lookback when upgrading or changing the source filter;
+    // stable thread origin IDs let ingestion supersede the previous content.
+    const resumable = checkpoint.schema_version === 3 && checkpoint.scope === scopeKey;
     const pending = resumable ? checkpoint.pending : undefined;
     const windowStart = pending?.started_at ?? syncStartedAt.toISOString();
     const afterDate = resumable && checkpoint.last_sync_at
@@ -478,7 +505,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           if (humanSendersOnly && !attribution.personRelevant) continue;
           const messageTexts: string[] = [];
           for (const message of messages) {
-            const body = await this.extractBody(message.payload, http, message.id) || message.snippet || '';
+            const body = await this.extractBody(message.payload, http, message.id, true) || message.snippet || '';
             messageTexts.push([
               `Message: ${message.id}`,
               `From: ${this.getHeader(message, 'From') || 'Unknown'}`,
@@ -524,12 +551,12 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     // until the whole window has been walked, or the unread tail is skipped.
     const newCheckpoint: GmailCheckpoint = pageToken
       ? {
-          schema_version: 2,
+          schema_version: 3,
           scope: scopeKey,
           ...(resumable && checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
           pending: { query, started_at: windowStart, page_token: pageToken },
         }
-      : { schema_version: 2, scope: scopeKey, last_sync_at: windowStart };
+      : { schema_version: 3, scope: scopeKey, last_sync_at: windowStart };
 
     return {
       events,
@@ -1108,10 +1135,13 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     return { name: trimmed, email: null };
   }
 
+  private readonly emailBodyConverter = createEmailBodyConverter();
+
   private async extractBody(
     payload: GmailMessagePayload,
     http: HttpClient,
-    messageId: string
+    messageId: string,
+    readableHtml = false
   ): Promise<string> {
     const disposition = payload.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')
       ?.value.split(';', 1)[0].trim().toLowerCase();
@@ -1131,7 +1161,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         : payload.parts;
       const sections: string[] = [];
       for (const part of parts) {
-        const text = await this.extractBody(part, http, messageId);
+        const text = await this.extractBody(part, http, messageId, readableHtml);
         if (!text) continue;
         if (isAlternative) return text;
         sections.push(text);
@@ -1152,6 +1182,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       text = this.base64UrlDecode(body.data, payload);
     }
     if (!text && payload.body?.size) throw new Error('Gmail returned a nonempty message body without data');
+    // Convert each HTML leaf after charset decoding, preserving plain parts,
+    // multipart ordering and the get_thread operation's original body format.
+    if (readableHtml && mimeType === 'text/html') text = this.emailBodyConverter.turndown(text);
     // An empty plain-text alternative must not hide a readable HTML body.
     return text.trim() ? text : '';
   }

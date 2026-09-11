@@ -211,7 +211,7 @@ describe('Gmail replied signal (promote-on-interaction)', () => {
 
 describe('Gmail person attribution rule', () => {
   test('bumps the connector version for the changed sync contract', () => {
-    expect(new GmailConnector().definition.version).toBe('1.0.5');
+    expect(new GmailConnector().definition.version).toBe('1.0.6');
   });
 
   test('autoCreate is gated on person_relevant, with a legacy replied rule for pre-refresh payloads', () => {
@@ -725,7 +725,7 @@ describe('complete Gmail sync input', () => {
     connector.createClient = () => ({ raw: async () => ({
       ok: true, json: async () => ({ threads: [], nextPageToken: 'same' }),
     }) });
-    await expect(connector.sync(context({ schema_version: 2, scope: JSON.stringify(['label:INBOX', false]), pending: {
+    await expect(connector.sync(context({ schema_version: 3, scope: JSON.stringify(['label:INBOX', false]), pending: {
       query: 'after:1 before:2 (label:INBOX)',
       started_at: '2026-07-02T00:00:00Z', page_token: 'same',
     } }))).rejects.toThrow('repeated page token');
@@ -739,7 +739,7 @@ describe('complete Gmail sync input', () => {
     const first = await connector.sync(context(old, { lookback_days: 30 }));
     const after = Number(new URL(urls[0]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
     expect(after).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
-    expect(first.checkpoint.schema_version).toBe(2);
+    expect(first.checkpoint.schema_version).toBe(3);
     await connector.sync(context(first.checkpoint, { query: '-in:spam -in:trash', lookback_days: 30 }));
     const widenedAfter = Number(new URL(urls[1]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
     expect(widenedAfter).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
@@ -781,7 +781,7 @@ describe('complete Gmail sync input', () => {
     });
     const result = await connector.sync(
       context({
-        schema_version: 2,
+        schema_version: 3,
         scope: JSON.stringify(['label:INBOX', false]),
         pending: { query: 'after:1 before:2 (label:INBOX)', started_at: '2026-07-02T00:00:00Z', page_token: 'retired' },
       })
@@ -804,7 +804,7 @@ describe('complete Gmail sync input', () => {
     await expect(
       connector.sync(
         context({
-          schema_version: 2,
+          schema_version: 3,
           scope: JSON.stringify(['label:INBOX', false]),
           pending: { query: 'after:1 before:2 (label:INBOX)', started_at: '2026-07-02T00:00:00Z', page_token: 'live' },
         })
@@ -940,7 +940,7 @@ describe('Gmail empty MIME alternatives', () => {
       const text = mode === 'sync'
         ? (await connector.sync(context)).events[0].payload_text
         : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'alternatives' }, credentials: context.credentials })).output.messages[0].body;
-      expect(text).toContain(html);
+      expect(text).toContain(mode === 'sync' ? 'Please confirm the delivery date.' : html);
     });
   }
 
@@ -998,7 +998,9 @@ describe('Gmail multipart body sections', () => {
     const body = mode === 'sync'
       ? (await connector.sync(context)).events[0].payload_text
       : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'mixed-body' }, credentials: context.credentials })).output.messages[0].body;
-    expect(body).toContain('Opening section.\n\n<p>HTML-only middle section.</p>\n\nPlease sign the final section.');
+    expect(body).toContain(mode === 'sync'
+      ? 'Opening section.\n\nHTML-only middle section.\n\nPlease sign the final section.'
+      : 'Opening section.\n\n<p>HTML-only middle section.</p>\n\nPlease sign the final section.');
     expect(body).not.toContain('HTML duplicate');
     expect(urls.filter((url) => url.includes('/attachments/'))).toEqual([
       'https://www.googleapis.com/gmail/v1/users/me/messages/mixed-message/attachments/inline-tail',
@@ -1108,4 +1110,81 @@ describe('Gmail MIME body charset', () => {
       await expect(setup(bytes, contentType, external).sync(context)).rejects.toThrow();
     });
   }
+});
+
+describe('Gmail readable HTML sync bodies', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+  const html = `<html><head><style>${'.layout { color: red; }'.repeat(5000)}</style><title>Layout title</title></head><body>
+    <script>trackingCode()</script><template>templateOnly</template>
+    <h2>Delivery &amp; payment</h2><p>Confirm café delivery by Friday.</p>
+    <table><tr><th>Item</th><th>Amount</th></tr><tr><td>Order 42</td><td>42 TL</td></tr></table>
+    <p><a href="https://example.com/confirm?order=42&amp;view=full">Confirm order</a></p>
+    <blockquote><p>Earlier reply: address approved.</p></blockquote>
+    <img src="https://tracking.example.com/pixel" alt="Invoice attached">
+    <img src="data:image/png;base64,unneeded">
+    <pre><code>line one\n  line two</code></pre>
+    <p>Please submit the signed agreement at the end.</p></body></html>`;
+
+  function setup(external = false) {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'html-thread', messages: [
+      { id: 'later', body: 'I have confirmed the order.', date: '2026-07-02T10:00:00Z' },
+      { id: 'earlier', date: '2026-07-01T10:00:00Z' },
+    ] });
+    thread.messages[1].payload = {
+      ...thread.messages[1].payload, mimeType: 'text/html',
+      body: external ? { attachmentId: 'html-body' } : { data: Buffer.from(html).toString('base64url') },
+    };
+    const urls: string[] = [];
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      return { ok: true, status: 200, json: async () => url.includes('/attachments/')
+        ? { data: Buffer.from(html).toString('base64url') }
+        : url.includes('/threads/') ? thread : { threads: [{ id: thread.id }] } };
+    } });
+    return { connector, urls };
+  }
+
+  test.each([false, true])('stores readable complete HTML content (external body: %s)', async (external) => {
+    const { connector } = setup(external);
+    const result = await connector.sync(context);
+    const text = result.events[0].payload_text;
+    expect(text).not.toMatch(/<style>|\.layout|trackingCode|templateOnly|Layout title|tracking\.example|data:image/);
+    expect(text).toContain('Delivery & payment');
+    expect(text).toContain('Confirm café delivery by Friday.');
+    expect(text).toContain('Item | Amount');
+    expect(text).toContain('Order 42 | 42 TL');
+    expect(text).toContain('[Confirm order](https://example.com/confirm?order=42&view=full)');
+    expect(text).toContain('> Earlier reply: address approved.');
+    expect(text).toContain('Invoice attached');
+    expect(text).toContain('line one\n  line two');
+    expect(text).toContain('Please submit the signed agreement at the end.');
+    expect(text.indexOf('Message: earlier')).toBeLessThan(text.indexOf('Message: later'));
+    expect(text).toContain('\n\n---\n\nMessage: later');
+    expect(text).toContain('I have confirmed the order.');
+    expect(text.length).toBeLessThan(1000);
+    expect(result.events[0].origin_id).toBe('html-thread');
+  });
+
+  test('keeps the get_thread operation body in its original representation', async () => {
+    const { connector } = setup();
+    const result = await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'html-thread' }, credentials: context.credentials });
+    expect(result.output.messages.find((message: { id: string }) => message.id === 'earlier').body).toBe(html);
+  });
+
+  test('does not checkpoint past a body conversion failure', async () => {
+    const { connector } = setup();
+    connector.emailBodyConverter.turndown = () => { throw new Error('synthetic conversion failure'); };
+    await expect(connector.sync(context)).rejects.toThrow('synthetic conversion failure');
+  });
+
+  test('revisits stored HTML on upgrade without changing thread identity', async () => {
+    const { connector, urls } = setup();
+    const previous = { schema_version: 2, scope: JSON.stringify(['label:INBOX', false]), last_sync_at: new Date(Date.now() - 60_000).toISOString() };
+    const result = await connector.sync({ ...context, config: { lookback_days: 30 }, checkpoint: previous });
+    const after = Number(new URL(urls[0]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
+    expect(after).toBeLessThan(Date.parse(previous.last_sync_at) / 1000 - 29 * 86400);
+    expect(result.checkpoint.schema_version).toBe(3);
+    expect(result.events[0].origin_id).toBe('html-thread');
+  });
 });
