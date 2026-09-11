@@ -390,7 +390,10 @@ describe("whatsAppWebAdapterProgram connection readiness", () => {
           },
         },
       }).settle(),
-    ).toMatchObject({ ok: false, error: { state: "logged_out" } });
+    ).toMatchObject({
+      ok: false,
+      error: { state: "not_ready", reason: "connection_unpaired" },
+    });
   });
 });
 
@@ -811,9 +814,11 @@ describe("whatsAppWebAdapterProgram collect scaling", () => {
         Chat: { _models: [chatModel] },
         Contact: { _models: contacts },
       },
-      WAWebSocketModel: { Socket: { state: "CONNECTED", stream: "CONNECTED", hasSynced: true } },
       // `collect` is capability-gated on the history loader, and readiness
-      // needs an authenticated self identity.
+      // needs a live socket and an authenticated self identity.
+      WAWebSocketModel: {
+        Socket: { state: "CONNECTED", stream: "CONNECTED", hasSynced: true },
+      },
       WAWebChatLoadMessages: { loadEarlierMsgs: async () => undefined },
       WAWebUserPrefsMeUser: {
         getMaybeMePnUser: () => ({ _serialized: "me@c.us" }),

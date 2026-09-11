@@ -305,6 +305,14 @@ async function invokeAdapter<T extends object>(
 
 const LOGGED_OUT_PATTERN = /logged_out|qr_code_visible/;
 /**
+ * The one readiness verdict a reload can fix: the account is authenticated and
+ * its stores are hydrated, but the live stream is gone, so the page serves
+ * cached state indefinitely. Matched on the message rather than the error
+ * prototype -- see classifyWhatsAppReadinessFailure for why that is the
+ * reliable half of an adapter failure.
+ */
+const STALLED_STREAM_PATTERN = /WhatsApp Web not_ready: stream_disconnected/;
+/**
  * `hydrating`/`stores_settling` are the adapter's own words for "the page is
  * still coming up", so they arrive prefixed as a WhatsAppAdapterError.
  */
@@ -372,20 +380,20 @@ async function readyWhatsAppTab(
       lastError = error;
       // A persistent scrape-owned tab can keep its cached stores after its
       // stream stalls, so nothing recovers on its own. Reload it once, inside
-      // the existing readiness deadline, deferred inside the page so navigation
-      // lets the expression return before navigation starts.
-      if (
-        !reloaded &&
-        error instanceof WhatsAppAdapterError &&
-        error.message === "WhatsApp Web not_ready: stream_disconnected"
-      ) {
+      // the existing readiness deadline, and defer the reload inside the page
+      // so the expression returns before navigation tears the world down.
+      // A dispatch that fails here is not a readiness verdict of its own:
+      // swallow it and keep polling on the error that triggered the reload.
+      if (!reloaded && STALLED_STREAM_PATTERN.test(String(error))) {
         reloaded = true;
-        await dispatcher.dispatch("evaluate", {
-          tab_id: tabId,
-          expression:
-            "(() => { setTimeout(() => location.reload(), 100); return true; })()",
-          await_promise: false,
-        });
+        await dispatcher
+          .dispatch("evaluate", {
+            tab_id: tabId,
+            expression:
+              "(() => { setTimeout(() => location.reload(), 100); return true; })()",
+            await_promise: false,
+          })
+          .catch(() => undefined);
       }
       if (LOGGED_OUT_PATTERN.test(String(error))) {
         throw new Error(

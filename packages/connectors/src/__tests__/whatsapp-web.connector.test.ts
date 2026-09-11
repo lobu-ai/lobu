@@ -600,6 +600,42 @@ describe("sync over the generic chrome bridge", () => {
     }
   });
 
+  it("reports the readiness failure, not a failed reload dispatch", async () => {
+    // The reload is a recovery attempt, not a verdict. A bridge that refuses
+    // it (tab already navigating, ownership guard) must not replace the
+    // readiness error the run is actually retrying on, or a transient stall
+    // surfaces as an unclassifiable bridge failure.
+    const { dispatcher } = makeDispatcher({
+      probe: {
+        ok: false,
+        error: { state: "not_ready", reason: "stream_disconnected" },
+      },
+    });
+    const bridge = dispatcher as unknown as {
+      dispatch: (
+        action: string,
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+    };
+    const inner = bridge.dispatch;
+    bridge.dispatch = async (action, input) => {
+      if (String(input.expression ?? "").includes("location.reload()")) {
+        throw new Error("chrome refused the reload");
+      }
+      return inner(action, input);
+    };
+    const realNow = Date.now;
+    let ticks = 0;
+    Date.now = () => realNow() + ticks++ * 40_000;
+    try {
+      await expect(
+        messagesFeed().sync(syncCtx(null, dispatcher)),
+      ).rejects.toThrow("stream_disconnected");
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   it("marks persistent store hydration as a transient dependency failure", async () => {
     const realNow = Date.now;
     let calls = 0;
