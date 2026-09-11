@@ -57,6 +57,12 @@ export function digestCoverage(
       return false;
     }
     const syncedAt = new Date(feed.last_sync_at ?? "").getTime();
+    if (syncedAt >= windowEnd.getTime()) {
+      issues.push(
+        `${label}: latest successful sync completed at or after the window cutoff`
+      );
+      return false;
+    }
     if (
       !Number.isFinite(syncedAt) ||
       syncedAt < windowEnd.getTime() - FEED_FRESHNESS_MS
@@ -477,7 +483,8 @@ export default async (
     SELECT c.slug AS connection_slug, c.status AS connection_status, f.status, f.last_sync_status,
       f.last_sync_at, f.consecutive_failures,
       EXISTS (SELECT 1 FROM events e WHERE e.connection_id = c.id
-        AND e.origin_id = '${expectedLogEnd}' AND e.origin_type = 'log_activity')
+        AND e.origin_id = '${expectedLogEnd}' AND e.origin_type = 'log_activity'
+        AND e.created_at < '${end.toISOString()}')
         AS expected_log_window_collected
     FROM connections c JOIN feeds f ON f.connection_id = c.id
     WHERE c.deleted_at IS NULL AND f.deleted_at IS NULL AND (

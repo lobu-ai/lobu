@@ -99,6 +99,29 @@ describe("Lobu Team product activity digest reaction", () => {
     );
   });
 
+  it("does not use a later feed recovery to complete an earlier arrival window", async () => {
+    for (const last_sync_at of [
+      context.window.window_end,
+      "2026-08-13T12:23:00.000Z",
+    ]) {
+      const send = mock();
+      const feeds = healthyFeeds.map((row) => ({ ...row, last_sync_at }));
+      expect(
+        digestCoverage(feeds, new Date(context.window.window_end))
+      ).toMatchObject({
+        product: false,
+        logs: false,
+      });
+      await productActivityDigest(context, {
+        query: mock().mockResolvedValue(feeds).mockResolvedValueOnce([]),
+        notifications: { send },
+        log: mock(),
+      } as unknown as ReactionClient);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[0]?.body).toContain("Coverage incomplete");
+    }
+  });
+
   it("reports missing coverage even when no activity arrived", async () => {
     const send = mock();
     await productActivityDigest(context, {
@@ -366,6 +389,9 @@ describe("Lobu Team product activity digest reaction", () => {
     const coverageStatement = String(query.mock.calls[1]?.[0]);
     expect(coverageStatement).toContain(
       "e.origin_id = '2026-08-13T12:00:00.000Z'"
+    );
+    expect(coverageStatement).toContain(
+      "e.created_at < '2026-08-13T12:20:00.000Z'"
     );
   });
 
