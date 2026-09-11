@@ -285,11 +285,12 @@ export function assertAutomationOutputsUseWindowExecution(
  * values (inherited prompt/skills when omitted, resolved triggers after
  * write-merge).
  *
- * Any one of the three sources satisfies the requirement on its own. Pinned
- * skills remain separate from the stored prompt, while a reaction script
- * supplies the extraction contract through its exported `input` schema or the
- * free-form fallback. Dispatch provides the built-in extraction instruction
- * when a reaction-only Automation has no authored prompt.
+ * Any instruction source satisfies the requirement on its own. Pinned skills
+ * remain separate from the stored prompt, while a reaction script supplies the
+ * extraction contract through its exported `input` schema or the free-form
+ * fallback. A script executor is itself the complete job. Dispatch provides
+ * the built-in extraction instruction when a reaction-only Automation has no
+ * authored prompt.
  */
 export function assertAutomationInstructions(
 	triggers: AutomationTrigger[],
@@ -304,7 +305,7 @@ export function assertAutomationInstructions(
 	if (reactionScript?.trim()) return;
 	if (executorSource?.trim()) return;
 	throw new ToolUserError(
-		"This Automation runs from a schedule, an analysis window, or manual runs, so it needs instructions: attach at least one skill, provide instruction text, or set a reaction script. Only event triggers with execution 'turn' may omit all three."
+		"This Automation runs from a schedule, an analysis window, or manual runs, so it needs instructions: attach at least one skill, provide instruction text, set a reaction script, or configure a script executor. Only event triggers with execution 'turn' may omit all instruction sources."
 	);
 }
 

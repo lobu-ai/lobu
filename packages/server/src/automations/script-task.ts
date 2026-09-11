@@ -52,7 +52,7 @@ export async function runAutomationScriptTask(
   };
   const result = await executeAutomationScript({ compiledScript: input.executor.source, params: input.executor.params, context, env: env as Record<string, string | undefined> });
   let error = result.error;
-  if (result.success && result.returnValue !== undefined &&
+  if (result.success && result.didReturnValue === true &&
       (!result.returnValue || typeof result.returnValue !== 'object' || Array.isArray(result.returnValue))) {
     error = 'ValidationError: Automation scripts must return an object or no value.';
   }

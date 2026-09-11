@@ -1133,8 +1133,8 @@ export async function loadProjectConfig(
 /**
  * Load desired state from a TypeScript entrypoint (`lobu.config.ts`): import the
  * `defineConfig()` project, map it to `DesiredState`, then attach the
- * file-based artifacts (agent-dir markdown + skills, automation reaction scripts,
- * local connector source).
+ * file-based artifacts (agent-dir markdown + skills, Automation executor and
+ * reaction scripts, local connector source).
  */
 export async function loadDesiredStateFromConfig(
   opts: LoadDesiredStateOptions
@@ -1178,20 +1178,30 @@ export async function loadDesiredStateFromConfig(
     );
   }
 
-  // Automation reaction scripts: a sibling `.ts` file referenced by path. The
-  // mapper stays pure; resolve + read the source here (raw, server compiles
-  // it) and attach it. state.automations[i] aligns with typedProject.automations[i]
-  // (the mapper maps them in order).
+  // Automation executor and reaction scripts: sibling `.ts` files referenced
+  // by path. The mapper stays pure; resolve + read each raw source here for the
+  // server to compile. state.automations[i] aligns with
+  // typedProject.automations[i] (the mapper maps them in order).
   (typedProject.automations ?? []).forEach((automation, i) => {
     if (automation.executor !== undefined && automation.executor !== "agent") {
       const desired = state.automations[i];
       if (!desired) return;
       if (
+        !automation.executor ||
+        typeof automation.executor !== "object" ||
         automation.executor.kind !== "scriptSource" ||
         typeof automation.executor.path !== "string"
       ) {
         throw new ValidationError(
           `Automation "${automation.slug}": use scriptFromFile("./job.ts") for a script executor.`
+        );
+      }
+      if (
+        automation.executor.params !== undefined &&
+        !isRecord(automation.executor.params)
+      ) {
+        throw new ValidationError(
+          `Automation "${automation.slug}": scriptFromFile params must be an object, not an array.`
         );
       }
       const script = resolveLocalSourceFile({

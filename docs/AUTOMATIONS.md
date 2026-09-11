@@ -42,9 +42,9 @@ return a JSON object for the run result, or return no value.
 Activation freezes the code, parameters, version, and window on the run. A durable
 sandbox task executes it with the same scoped SDK and autonomous approval rules
 as a reaction. The sandbox has a 60-second attempt limit and up to three attempts;
-deterministic failures stop immediately. A successful script commits its result
-and advances a scheduled/manual arrival window. Failure never advances the
-arrival mark. Task exhaustion is reconciled into a failed Automation run.
+classified deterministic failures stop immediately. A successful script commits
+its result and advances a scheduled/manual arrival window. Failure never advances
+the arrival mark. Task exhaustion is reconciled into a failed Automation run.
 External effects are at-least-once: use `ctx.window.run_id` in idempotency keys.
 Scripts must handle gated or pending SDK results before returning success.
 

@@ -64,6 +64,58 @@ describe('Automation script executor', () => {
     await expect(workspace.owner.automations.update({ automation_id: String(automationId), execution_config: null })).rejects.toThrow('needs instructions');
   });
 
+  it('keeps script-owned windows out of the external processor lane', async () => {
+    const { workspace, automationId } = await seedScriptAutomation();
+    await expect(workspace.owner.automations.claimNextWindow({
+      automation_id: String(automationId),
+    })).rejects.toThrow('cannot be claimed by an external processor');
+    expect(await getTestDb()`SELECT id FROM runs WHERE automation_id = ${automationId}`).toEqual([]);
+  });
+
+  it('keeps a pinned script run out of the external lane after its live config changes', async () => {
+    const { workspace, agentId, automationId } = await seedScriptAutomation();
+    const sql = getTestDb();
+    const start = '2026-01-01T00:00:00.000Z';
+    const end = '2026-01-01T00:20:00.000Z';
+    await sql`UPDATE automations SET next_window_start = ${start}::timestamptz WHERE id = ${automationId}`;
+    const run = await createAutomationRun({
+      organizationId: workspace.org.id,
+      agentId,
+      automationId,
+      windowStart: start,
+      windowEnd: end,
+      dispatchSource: 'scheduled',
+    });
+    await sql`UPDATE automations SET execution_config = NULL WHERE id = ${automationId}`;
+
+    await expect(workspace.owner.automations.claimNextWindow({
+      automation_id: String(automationId),
+    })).rejects.toThrow('cannot be claimed by an external processor');
+    expect((await sql`SELECT status FROM runs WHERE id = ${run.runId}`)[0]?.status).toBe('pending');
+  });
+
+  it('manually dispatches without the model gateway and recognizes its runtime claim', async () => {
+    const { workspace, automationId } = await seedScriptAutomation();
+    const first = await workspace.owner.automations.trigger({
+      automation_id: String(automationId),
+    });
+    expect(first).toMatchObject({
+      created: true,
+      execution: { owner: 'lobu', next_action: { kind: 'handled_elsewhere' } },
+    });
+
+    const second = await workspace.owner.automations.trigger({
+      automation_id: String(automationId),
+    });
+    expect(second).toMatchObject({
+      run_id: first.run_id,
+      created: false,
+      execution: { owner: 'lobu', next_action: { kind: 'handled_elsewhere' } },
+    });
+    const [run] = await getTestDb()`SELECT status, claimed_by FROM runs WHERE id = ${first.run_id}`;
+    expect(run).toMatchObject({ status: 'running', claimed_by: 'automation-script' });
+  });
+
   it('rejects agent-only settings when updating a script job', async () => {
     const base = { executionConfig: { executor: { kind: 'script', source: SOURCE } }, agentId: 'synthetic-owner', validateSource: false };
     await expect(assertAutomationScriptExecutor({ ...base,
@@ -112,6 +164,23 @@ describe('Automation script executor', () => {
     await runAutomationScriptTask(payload, TEST_ENV, taskRunId);
     const [again] = await sql`SELECT action_output FROM runs WHERE id = ${runId}`;
     expect(again!.action_output).toEqual(run!.action_output);
+  });
+
+  it('accepts no return value as an empty action output', async () => {
+    const noValue = await dispatchedScript('export default async () => {};');
+    await runAutomationScriptTask(noValue.payload, TEST_ENV, noValue.taskRunId);
+    const [completed] = await noValue.sql`SELECT status, action_output FROM runs WHERE id = ${noValue.runId}`;
+    expect(completed).toMatchObject({ status: 'completed', action_output: {} });
+  });
+
+  it('rejects an explicit null return as a deterministic validation failure', async () => {
+    const explicitNull = await dispatchedScript('export default async () => null;');
+    await runAutomationScriptTask(explicitNull.payload, TEST_ENV, explicitNull.taskRunId);
+    const [failed] = await explicitNull.sql`SELECT status, error_message FROM runs WHERE id = ${explicitNull.runId}`;
+    expect(failed).toMatchObject({
+      status: 'failed',
+      error_message: 'ValidationError: Automation scripts must return an object or no value.',
+    });
   });
 
   it('is claimed and settled by the real durable task queue', async () => {

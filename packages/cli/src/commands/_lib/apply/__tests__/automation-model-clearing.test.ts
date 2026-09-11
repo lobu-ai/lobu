@@ -38,7 +38,7 @@ function snapshot(automation: RemoteAutomation): RemoteSnapshot {
   };
 }
 
-describe("Automation model overrides", () => {
+describe("Automation execution config", () => {
   test("applies script changes and records the executor for a stable second apply", async () => {
     const executor = {
       kind: "script" as const,

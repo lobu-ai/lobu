@@ -1,7 +1,11 @@
+import type {
+  AutomationExecutionConfig,
+  AutomationScriptExecutor,
+} from '@lobu/core/contracts/tools/manage-automations';
 import { listOrgModelProviderSlugs } from '../../lobu/model-config';
 import { ToolUserError } from '../../utils/errors';
 import { isAdminOrOwnerRole } from '../access-control';
-import type { AutomationExecutionConfig, AutomationScriptExecutor } from '@lobu/core/contracts/tools/manage-automations';
+
 export function automationScriptExecutor(config: unknown): AutomationScriptExecutor | undefined {
   return (config as AutomationExecutionConfig | null | undefined)?.executor;
 }

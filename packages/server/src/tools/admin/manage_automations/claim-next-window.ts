@@ -21,6 +21,8 @@ import { runLeaseFence } from '../../../runs/run-lease';
 const DEFAULT_LEASE_SECONDS = 900;
 const MIN_LEASE_SECONDS = 30;
 const MAX_LEASE_SECONDS = 3600;
+const SCRIPT_EXTERNAL_CLAIM_ERROR =
+  'Script Automations execute through the runtime and cannot be claimed by an external processor.';
 
 /**
  * The durable owner of an Automation window claim.
@@ -142,8 +144,10 @@ export async function handleClaimNextWindow(
       managed_agent_id: string | null;
       device_worker_id: string | null;
       agent_kind: string | null;
+      executor_kind: string | null;
     }>`
-      SELECT organization_id, schedule, managed_agent_id, device_worker_id, agent_kind
+      SELECT organization_id, schedule, managed_agent_id, device_worker_id, agent_kind,
+             execution_config->'executor'->>'kind' AS executor_kind
       FROM automations
       WHERE id = ${automationId}
         AND organization_id = ${ctx.organizationId}
@@ -165,10 +169,12 @@ export async function handleClaimNextWindow(
         expires_at: string | Date | null;
         window_start: string;
         window_end: string;
+        executor_kind: string | null;
       }>`
         SELECT id, claimed_by, expires_at,
                approved_input->>'window_start' AS window_start,
-               approved_input->>'window_end' AS window_end
+               approved_input->>'window_end' AS window_end,
+               approved_input->'executor'->>'kind' AS executor_kind
         FROM runs
         WHERE id = ${args.run_id}
           AND automation_id = ${automationId}
@@ -184,6 +190,9 @@ export async function handleClaimNextWindow(
       ) {
         throw new ToolUserError('Automation window continuation does not own an active lease.', 409);
       }
+      if (continuation.executor_kind === 'script') {
+        throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
+      }
       runId = Number(continuation.id);
       windowStart = new Date(continuation.window_start);
       windowEnd = new Date(continuation.window_end);
@@ -195,6 +204,9 @@ export async function handleClaimNextWindow(
         WHERE id = ${runId}
       `;
     } else {
+      if (automation.executor_kind === 'script') {
+        throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
+      }
       // The arrival window [mark, horizon). Empty only while the mark is
       // younger than the settle budget (a just-created or just-seeded
       // Automation): nothing stored since it has settled yet.
@@ -237,8 +249,14 @@ export async function handleClaimNextWindow(
       // A pending run already queued at the mark owns its own horizon (the
       // scheduler or a manual trigger cut it earlier). Adopt that range: it is
       // a prefix of what is claimable now, and the remainder is the next claim.
-      const [queued] = await tx<{ id: number; window_end: string }>`
-        SELECT id, approved_input->>'window_end' AS window_end FROM runs
+      const [queued] = await tx<{
+        id: number;
+        window_end: string;
+        executor_kind: string | null;
+      }>`
+        SELECT id, approved_input->>'window_end' AS window_end,
+               approved_input->'executor'->>'kind' AS executor_kind
+        FROM runs
         WHERE automation_id = ${automationId}
           AND run_type = 'automation'
           AND status = 'pending'
@@ -246,6 +264,9 @@ export async function handleClaimNextWindow(
           AND (approved_input->>'window_start')::timestamptz = ${windowStart.toISOString()}::timestamptz
         LIMIT 1
       `;
+      if (queued?.executor_kind === 'script') {
+        throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
+      }
       if (queued) windowEnd = new Date(queued.window_end);
       const run = queued
         ? { runId: Number(queued.id) }
