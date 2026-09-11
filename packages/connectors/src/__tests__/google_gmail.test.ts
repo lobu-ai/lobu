@@ -32,7 +32,7 @@ interface FakeThread {
 }
 
 /**
- * Fake Gmail HTTP client: serves threads.list (one page) and threads/<id>
+ * Fake Gmail HTTP client: serves paginated threads.list and threads/<id>
  * lookups from the given fixtures. Header values come from the per-message
  * `from`/`date` fields; snippets are constant. `failThreadIds` respond 404.
  */
@@ -900,5 +900,112 @@ describe('Gmail externally stored message bodies', () => {
   test('a failed external body fetch cannot advance the sync checkpoint', async () => {
     const { connector } = setup(503);
     await expect(connector.sync(syncContext)).rejects.toThrow(/503/);
+  });
+});
+
+describe('Gmail empty MIME alternatives', () => {
+  const html = '<p>Please confirm the delivery date.</p>';
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+
+  function setup(plainBody: Record<string, unknown>, attachmentStatus = 200) {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'alternatives', messages: [{ id: 'message' }] });
+    const payload = {
+      ...thread.messages[0].payload,
+      mimeType: 'multipart/alternative',
+      parts: [
+        { mimeType: 'text/plain', body: plainBody },
+        { mimeType: 'text/html', body: { data: Buffer.from(html).toString('base64url') } },
+      ],
+    };
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: !url.includes('/attachments/') || attachmentStatus === 200,
+      status: attachmentStatus,
+      text: async () => 'body unavailable',
+      json: async () => url.includes('/attachments/') ? { data: '' }
+        : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        : { threads: [{ id: 'alternatives' }] },
+    }) });
+    return connector;
+  }
+
+  for (const mode of ['sync', 'get_thread']) {
+    test.each([
+      ['empty inline', { data: '', size: 0 }],
+      ['absent', {}],
+      ['whitespace', { data: Buffer.from(' \r\n').toString('base64url') }],
+      ['empty external', { attachmentId: 'empty-body', size: 0 }],
+    ] as const)(`${mode} falls back to HTML for %s plain text`, async (_name, body) => {
+      const connector = setup(body);
+      const text = mode === 'sync'
+        ? (await connector.sync(context)).events[0].payload_text
+        : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'alternatives' }, credentials: context.credentials })).output.messages[0].body;
+      expect(text).toContain(html);
+    });
+  }
+
+  test.each([
+    ['missing nonempty body', { size: 12 }, 200],
+    ['unavailable external body', { attachmentId: 'unavailable', size: 12 }, 503],
+    ['empty external response for nonempty body', { attachmentId: 'nonempty', size: 12 }, 200],
+  ] as const)('does not checkpoint past a %s despite a readable HTML alternative', async (_name, body, status) => {
+    await expect(setup(body, status).sync(context)).rejects.toThrow(/body/);
+  });
+});
+
+describe('Gmail multipart body sections', () => {
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
+  const inline = (mimeType: string, text: string) => ({
+    mimeType, body: { data: Buffer.from(text).toString('base64url') },
+  });
+
+  function setup(externalStatus = 200) {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    const thread = toThreadResponse({ id: 'mixed-body', messages: [{ id: 'mixed-message' }] });
+    const payload = {
+      ...thread.messages[0].payload,
+      mimeType: 'multipart/mixed',
+      parts: [
+        {
+          mimeType: 'multipart/alternative',
+          parts: [inline('text/html', '<p>HTML duplicate</p>'), inline('text/plain', 'Opening section.')],
+        },
+        {
+          mimeType: 'multipart/alternative',
+          parts: [inline('text/plain', ''), inline('text/html', '<p>HTML-only middle section.</p>')],
+        },
+        { mimeType: 'text/plain', body: { attachmentId: 'inline-tail' } },
+        { mimeType: 'text/plain', headers: [{ name: 'Content-Disposition', value: 'attachment' }], body: { attachmentId: 'excluded' } },
+      ],
+    };
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      return {
+        ok: !url.includes('/attachments/') || externalStatus === 200,
+        status: externalStatus,
+        text: async () => 'body unavailable',
+        json: async () => url.includes('/attachments/') ? { data: Buffer.from('Please sign the final section.').toString('base64url') }
+          : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+          : { threads: [{ id: thread.id }] },
+      };
+    } });
+    return { connector, urls };
+  }
+
+  test.each(['sync', 'get_thread'])('%s retains every inline section without duplicating alternatives', async (mode) => {
+    const { connector, urls } = setup();
+    const body = mode === 'sync'
+      ? (await connector.sync(context)).events[0].payload_text
+      : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'mixed-body' }, credentials: context.credentials })).output.messages[0].body;
+    expect(body).toContain('Opening section.\n\n<p>HTML-only middle section.</p>\n\nPlease sign the final section.');
+    expect(body).not.toContain('HTML duplicate');
+    expect(urls.filter((url) => url.includes('/attachments/'))).toEqual([
+      'https://www.googleapis.com/gmail/v1/users/me/messages/mixed-message/attachments/inline-tail',
+    ]);
+  });
+
+  test('does not checkpoint past a failed later inline section', async () => {
+    await expect(setup(503).connector.sync(context)).rejects.toThrow(/503/);
   });
 });

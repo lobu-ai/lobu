@@ -444,8 +444,8 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       const listResponse = await http.raw(`${this.BASE_URL}/threads?${params.toString()}`);
       if (!listResponse.ok) {
         const detail = await listResponse.text();
-        // Gmail answers a retired pageToken with 400; 404 covers the same
-        // condition. Anything else (auth, quota, outage) must still fail the run.
+        // Retry a stored cursor once on 400/404. Auth, quota and server errors
+        // must still fail the run without restarting pagination.
         if (staleCursorRecoverable && (listResponse.status === 400 || listResponse.status === 404)) {
           staleCursorRecoverable = false;
           pageToken = undefined;
@@ -1113,31 +1113,44 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     http: HttpClient,
     messageId: string
   ): Promise<string> {
-    const textParts: GmailMessagePayload[] = [];
-    const visit = (part: GmailMessagePayload) => {
-      // Text files attached to a message are not its body. Descend through
-      // MIME containers, choosing plain text over the equivalent HTML part.
-      const disposition = part.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')?.value;
-      if (part.filename || /^attachment(?:;|$)/i.test(disposition ?? '')) return;
-      if (part.mimeType === 'text/plain' || part.mimeType === 'text/html') textParts.push(part);
-      for (const child of part.parts ?? []) visit(child);
-    };
-    visit(payload);
-    const part = textParts.find((item) => item.mimeType === 'text/plain') ?? textParts[0];
-    if (!part) return '';
-    if (part.body?.data) return this.base64UrlDecode(part.body.data);
-    const attachmentId = part.body?.attachmentId;
-    if (attachmentId) {
+    // Text files attached to a message are not its body.
+    const disposition = payload.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')?.value;
+    if (payload.filename || /^attachment(?:;|$)/i.test(disposition ?? '')) return '';
+    if (payload.parts?.length) {
+      // Only multipart/alternative contains equivalent versions. Mixed parts
+      // are separate sections and must all be retained in their original order.
+      const isAlternative = payload.mimeType === 'multipart/alternative';
+      const parts = isAlternative
+        ? [
+            ...payload.parts.filter((part) => part.mimeType === 'text/plain'),
+            ...payload.parts.filter((part) => part.mimeType !== 'text/plain'),
+          ]
+        : payload.parts;
+      const sections: string[] = [];
+      for (const part of parts) {
+        const text = await this.extractBody(part, http, messageId);
+        if (!text) continue;
+        if (isAlternative) return text;
+        sections.push(text);
+      }
+      return sections.join('\n\n');
+    }
+    if (payload.mimeType !== 'text/plain' && payload.mimeType !== 'text/html') return '';
+    let text = '';
+    if (payload.body?.data) {
+      text = this.base64UrlDecode(payload.body.data);
+    } else if (payload.body?.attachmentId) {
       // Gmail may externalize the body itself, even under format=full. A
-      // failed fetch must not silently replace that body with its snippet.
-      const response = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`);
+      // failed fetch must not silently replace that body with its alternative.
+      const response = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(payload.body.attachmentId)}`);
       if (!response.ok) throw new Error(`Gmail message body error (${response.status}): ${await response.text()}`);
       const body = (await response.json()) as { data?: string };
       if (typeof body.data !== 'string') throw new Error('Gmail returned a message body without data');
-      return this.base64UrlDecode(body.data);
+      text = this.base64UrlDecode(body.data);
     }
-    if (part.body?.size) throw new Error('Gmail returned a nonempty message body without data');
-    return '';
+    if (!text && payload.body?.size) throw new Error('Gmail returned a nonempty message body without data');
+    // An empty plain-text alternative must not hide a readable HTML body.
+    return text.trim() ? text : '';
   }
 
   private base64UrlDecode(data: string): string {
