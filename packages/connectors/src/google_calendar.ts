@@ -56,7 +56,38 @@ interface CalendarEventListResponse {
 // Checkpoint
 // ---------------------------------------------------------------------------
 
+/**
+ * Leading element of `CalendarCheckpoint.scope`. Bumping it retires every
+ * stored checkpoint, because a cursor is only safe to resume when this exact
+ * code minted it. Bumped to 2 when the bootstrap became resumable: before that
+ * a capped run advanced the sync token after silently discarding the unread
+ * tail, so those tokens describe an incomplete window.
+ */
+const CHECKPOINT_SCOPE_VERSION = 2;
+
+/**
+ * Hard ceiling on pages fetched per run, shared by both traversals. At 250
+ * events/page that is 50k events — more than any reasonable calendar window,
+ * and the only bound when every item on a page is filtered out.
+ */
+const MAX_SYNC_PAGES = 200;
+
 interface CalendarCheckpoint {
+  /**
+   * Query identity this checkpoint's cursors belong to, as
+   * `[CHECKPOINT_SCOPE_VERSION, calendarId, lookbackDays]`. A checkpoint belongs
+   * to one configured feed; changing its calendar or lookback invalidates
+   * both cursors below.
+   * Absent or mismatched means "start a fresh bootstrap".
+   */
+  scope?: string;
+  /**
+   * Unfinished bootstrap: the `events.list` query as first issued (so the
+   * `timeMin`/`timeMax` window stays fixed across runs, which the page token
+   * requires) plus the token for the page still to fetch. Absent once the
+   * traversal has reached the last page.
+   */
+  pending?: { params: string; page_token: string };
   sync_token?: string;
   last_sync_at?: string;
 }
@@ -124,7 +155,7 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     key: 'google.calendar',
     name: 'Google Calendar',
     description: 'Syncs calendar events from Google Calendar and supports creating new events.',
-    version: '1.1.1',
+    version: '1.1.2',
     faviconDomain: 'calendar.google.com',
     authSchema: {
       methods: [
@@ -219,7 +250,7 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
             max_results: {
               type: 'integer', minimum: 1, maximum: 2500, default: 100,
               description:
-                'Maximum events to persist during initial collection; incremental collections persist every change.',
+                'Soft cap on events per initial collection run: a provider page is never split, and remaining pages resume on the next run. Incremental collections persist every change.',
             },
           },
         },
@@ -429,106 +460,129 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     const events: EventEnvelope[] = [];
     const durableChanges = ctx.feedKey === 'changes';
 
-    // No cursor-version guard: v1.1.0 changes tokens (minted without
-    // showDeleted) were retired by a one-time migration that cleared any
-    // unversioned changes checkpoint. Hosted prod carried exactly one such feed
-    // and it was already versioned, so the migration was a no-op. Self-hosted
-    // installs upgrading from that release with a v1.1.0 changes token are out
-    // of migration reach and may see Google reject the token under the current
-    // query shape; their recovery is to clear the feed checkpoint.
-    if (checkpoint.sync_token) {
+    // A checkpoint minted under a different scope (or by an older version that
+    // truncated its bootstrap) cannot be resumed: revisit the configured
+    // lookback once instead. Origin IDs are unchanged, so the replay supersedes
+    // the existing rows rather than duplicating them.
+    const scope = JSON.stringify([CHECKPOINT_SCOPE_VERSION, calendarId, lookbackDays]);
+    const resumable = checkpoint.scope === scope;
+
+    /** Traversal reached the last page: store its cursor and stamp the run. */
+    const finish = (items: EventEnvelope[], syncToken?: string): SyncResult => {
+      const result = this.buildResult(items, syncToken);
+      return { ...result, checkpoint: { ...result.checkpoint, scope } };
+    };
+
+    if (resumable && checkpoint.sync_token) {
       const result = await this.syncWithToken(
         http,
         calendarId,
         checkpoint.sync_token,
-        maxResults,
         durableChanges
       );
-      if (result) {
-        return this.buildResult(result.events, result.nextSyncToken);
-      }
+      if (result) return finish(result.events, result.nextSyncToken);
       // The stored token was rejected (see isSyncTokenRejection). Fall through
-      // to a full sync exactly once — no retry loop. The full sync below either
-      // succeeds and overwrites the checkpoint with a token minted under the
-      // current grant, or throws (the scope is genuinely missing) and the error
-      // reaches the run record instead of being swallowed.
+      // to one complete bootstrap under the current grant — no retry loop. It
+      // either succeeds and overwrites the checkpoint with a token minted under
+      // that grant, or throws and the error reaches the run record.
     }
 
-    // Full sync
+    // Bootstrap: walk the configured window, resuming a parked page if one is
+    // in scope, until the last page hands over a durable cursor.
     const timeMin = new Date();
     timeMin.setDate(timeMin.getDate() - lookbackDays);
     const timeMax = new Date();
     timeMax.setDate(timeMax.getDate() + 365); // Include future events
 
-    let nextSyncToken: string | undefined;
+    const pending = resumable ? checkpoint.pending : undefined;
+    // Google permits timeMin on the initial full sync but forbids it with
+    // syncToken. Once issued, the query is replayed verbatim on every resuming
+    // run: a page token is only valid against the window that minted it.
+    const params = pending
+      ? new URLSearchParams(pending.params)
+      : durableChanges
+        ? new URLSearchParams({
+            maxResults: '250',
+            singleEvents: 'true',
+            showDeleted: 'true',
+            timeMin: timeMin.toISOString(),
+          })
+        : new URLSearchParams({
+            maxResults: '250',
+            orderBy: 'startTime',
+            singleEvents: 'true',
+            timeMin: timeMin.toISOString(),
+            timeMax: timeMax.toISOString(),
+          });
+    const baseParams = params.toString();
 
-    // Safety bound — at 250 events/page, 200 pages = 50k events, more than
-    // any reasonable calendar window. Stops a runaway loop if the upstream
-    // ever returns a self-referential page token.
-    const MAX_PAGES = 200;
+    /**
+     * Ran out of budget mid-traversal: park the next page token and return no
+     * sync token and no `last_sync_at`, so nothing downstream can read this run
+     * as a completed window. The next scheduled run resumes from `token`.
+     */
+    const park = (token: string): SyncResult => ({
+      ...this.buildResult(events, undefined),
+      checkpoint: { scope, pending: { params: baseParams, page_token: token } },
+    });
 
-    const pages = paginateByCursor<CalendarEvent, string>(
-      async (pageToken) => {
-        // Google permits timeMin on the initial full sync but forbids it with
-        // syncToken. Other durable parameters remain stable across both paths.
-        const params = durableChanges
-          ? new URLSearchParams({
-              maxResults: '250',
-              singleEvents: 'true',
-              showDeleted: 'true',
-              timeMin: timeMin.toISOString(),
-            })
-          : new URLSearchParams({
-              maxResults: '250',
-              orderBy: 'startTime',
-              singleEvents: 'true',
-              timeMin: timeMin.toISOString(),
-              timeMax: timeMax.toISOString(),
-            });
-        if (pageToken) {
-          params.set('pageToken', pageToken);
-        }
+    let pageToken = pending?.page_token;
+    const seenTokens = new Set<string>();
+    for (let page = 0; ; page++) {
+      if (pageToken) {
+        seenTokens.add(pageToken);
+        params.set('pageToken', pageToken);
+      }
 
-        const url = `${this.BASE_URL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
-        const response = await http.raw(url);
+      const url = `${this.BASE_URL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
+      const response = await http.raw(url);
+      if (!response.ok) {
+        // No checkpoint is returned, so the parked token survives and this
+        // exact page is retried on the next run.
+        throw new Error(
+          `Calendar events.list error (${response.status}): ${await response.text()}`
+        );
+      }
 
-        if (!response.ok) {
-          throw new Error(
-            `Calendar events.list error (${response.status}): ${await response.text()}`
-          );
-        }
-
-        const data = (await response.json()) as CalendarEventListResponse;
-        // Google only returns nextSyncToken on the LAST page (no nextPageToken).
-        // Capture it whenever present so the trailing value survives; the
-        // generator keeps paging until nextPageToken is exhausted, otherwise the
-        // sync token is never obtained and every subsequent sync re-runs the full
-        // window from scratch.
-        nextSyncToken = data.nextSyncToken;
-        return { items: data.items ?? [], nextCursor: data.nextPageToken };
-      },
-      { maxPages: MAX_PAGES }
-    );
-
-    // Keep paginating past `maxResults`, just stop appending events once the cap
-    // is reached, so the trailing nextSyncToken is still captured.
-    for await (const items of pages) {
+      const data = (await response.json()) as CalendarEventListResponse;
+      const items = data.items ?? [];
+      // A provider page is atomic: `max_results` caps how much a run starts,
+      // never how much of a fetched page is stored. Dropping a page's tail
+      // would lose those events for good once the cursor moved past them.
       for (const calEvent of items) {
-        if (events.length >= maxResults) break;
         const envelope = durableChanges
           ? this.calendarEventToChangeEnvelope(calEvent)
           : this.calendarEventToEnvelope(calEvent);
         if (envelope) events.push(envelope);
       }
-    }
 
-    if (durableChanges && !nextSyncToken) {
-      throw new Error(
-        'Google Calendar changes traversal completed without a durable sync token.'
-      );
-    }
+      // Google only returns nextSyncToken on the LAST page (no nextPageToken),
+      // so the traversal has to reach it before the feed can go incremental.
+      if (!data.nextPageToken) {
+        if (durableChanges && !data.nextSyncToken) {
+          throw new Error(
+            'Google Calendar changes traversal completed without a durable sync token.'
+          );
+        }
+        return finish(events, data.nextSyncToken);
+      }
+      if (seenTokens.has(data.nextPageToken)) {
+        throw new Error('Google Calendar returned a repeated page token.');
+      }
+      pageToken = data.nextPageToken;
 
-    return this.buildResult(events, nextSyncToken);
+      // Stop once this run has collected its share, once the provider returns
+      // an empty page, or at the hard ceiling — the last of which is the only
+      // bound on a window of nothing but filtered-out items, where
+      // `events.length` never reaches the cap.
+      if (
+        events.length >= maxResults ||
+        items.length === 0 ||
+        page + 1 >= MAX_SYNC_PAGES
+      ) {
+        return park(pageToken);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -575,23 +629,28 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     http: HttpClient,
     calendarId: string,
     syncToken: string,
-    maxResults: number,
     durableChanges: boolean
   ): Promise<{ events: EventEnvelope[]; nextSyncToken?: string } | null> {
     const events: EventEnvelope[] = [];
     let nextSyncToken: string | undefined;
+    let unreadPage: string | undefined;
+    const seenTokens = new Set<string>();
     // The stored syncToken was rejected (410 expired, or 403 because it was
     // minted under a superseded grant) — abort and let the caller drop it and
     // fall through to a full sync. Signalled out of the generator via this flag.
     let syncTokenRejected = false;
 
-    // Same hard ceiling as the full-sync path — defensive only.
-    const MAX_PAGES = 200;
-
     const pages = paginateByCursor<CalendarEvent, string>(
       async (pageToken) => {
-        // Consume every incremental change before advancing the durable token;
-        // max_results limits only the historical bootstrap.
+        if (pageToken) {
+          if (seenTokens.has(pageToken)) {
+            throw new Error('Google Calendar returned a repeated page token.');
+          }
+          seenTokens.add(pageToken);
+        }
+        // Consume every incremental change before advancing the durable token,
+        // so the page size is fixed rather than derived from `max_results`,
+        // which limits only the historical bootstrap.
         const params = durableChanges
           ? new URLSearchParams({
               maxResults: '250',
@@ -600,7 +659,7 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
               showDeleted: 'true',
             })
           : new URLSearchParams({
-              maxResults: String(Math.max(1, Math.min(250, maxResults - events.length))),
+              maxResults: '250',
               syncToken,
             });
         if (pageToken) {
@@ -622,9 +681,10 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
         const data = (await response.json()) as CalendarEventListResponse;
         // Capture the trailing nextSyncToken; generator pages until exhausted.
         nextSyncToken = data.nextSyncToken;
+        unreadPage = data.nextPageToken;
         return { items: data.items ?? [], nextCursor: data.nextPageToken };
       },
-      { maxPages: MAX_PAGES }
+      { maxPages: MAX_SYNC_PAGES }
     );
 
     for await (const items of pages) {
@@ -637,6 +697,15 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     }
 
     if (syncTokenRejected) return null;
+    // The generator stopped at MAX_SYNC_PAGES with a page still unread. Unlike
+    // the bootstrap there is nothing to park — an incremental cursor advances
+    // only on the last page — so fail the run and keep the stored token, rather
+    // than returning a silently partial batch.
+    if (unreadPage) {
+      throw new Error(
+        'Google Calendar incremental traversal exceeded its page bound before completing.'
+      );
+    }
     if (durableChanges && !nextSyncToken) {
       throw new Error(
         'Google Calendar incremental changes traversal completed without a durable sync token.'
