@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import {
 	resolveAutomationExecutor,
 } from "../tools/admin/manage_automations/executors";
-import { generateWorkerToken, getErrorMessage } from "@lobu/core";
 import {
 	automationTriggerSignals,
 	isWorkspaceEventTriggerSignal,
@@ -11,7 +10,6 @@ import { intervals } from "../config/intervals";
 import type { DbClient } from "../db/client";
 import { getDb, pgTextArray } from "../db/client";
 import { getInternalGatewayUrl } from "../gateway/config/index";
-import { AUTOMATION_RUN_SOURCE } from "../gateway/automation-run-session";
 import { incrementCounter, setGauge } from "../gateway/metrics/prometheus";
 import type { Env } from "../index";
 import { isLobuGatewayRunning } from "../lobu/gateway";
@@ -412,8 +410,8 @@ async function markAutomationRunFailedIdempotent(
     `;
 		if (!failed) return;
 		// Same gate as the twin in run-completion.ts. The dispatch lane claims
-		// both run types, so every failure here — session-create, embedded Lobu
-		// unavailable, preflight, message POST — can be an eval. An eval clones
+		// both run types, so every failure here — session creation, embedded Lobu
+		// unavailable, or message POST — can be an eval. An eval clones
 		// `dispatch_source` verbatim, so ungated it would advance the live cron
 		// cursor of the Automation it is only replaying, or park it entirely when
 		// the schedule does not parse.
@@ -1306,74 +1304,6 @@ export async function ensureAutomationAgentExists(
 	return rows.length > 0;
 }
 
-const LOBU_MEMORY_MCP_ID = "lobu-memory";
-// Automation agents reach knowledge reads + complete_window via query_sdk / run_sdk
-// now that flat admin tools are omitted from MCP tools/list.
-const AUTOMATION_REQUIRED_TOOLS = ["query_sdk", "run_sdk"];
-
-export async function preflightAutomationMemoryTools(params: {
-	organizationId: string;
-	agentId: string;
-	runId: number;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
-	const conversationId = `${params.agentId}_automation_${params.runId}_preflight`;
-	const token = generateWorkerToken(
-		params.agentId,
-		conversationId,
-		`automation-${params.runId}`,
-		{
-			channelId: `api_automation_${params.runId}`,
-			agentId: params.agentId,
-			organizationId: params.organizationId,
-			platform: "api",
-			source: AUTOMATION_RUN_SOURCE,
-			sessionKey: `automation_${params.runId}`,
-		}
-	);
-	const url = `${getInternalGatewayUrl()}/mcp/${LOBU_MEMORY_MCP_ID}/tools`;
-
-	try {
-		const response = await fetch(url, {
-			headers: { Authorization: `Bearer ${token}` },
-		});
-		const body = (await response.json().catch(() => null)) as {
-			tools?: Array<{ name?: unknown }>;
-			error?: unknown;
-		} | null;
-
-		if (!response.ok) {
-			const detail =
-				typeof body?.error === "string" ? body.error : response.statusText;
-			return {
-				ok: false,
-				error: `${LOBU_MEMORY_MCP_ID} tools preflight failed (${response.status}): ${detail}`,
-			};
-		}
-
-		const toolNames = new Set(
-			(body?.tools ?? [])
-				.map((tool) => (typeof tool.name === "string" ? tool.name : ""))
-				.filter(Boolean)
-		);
-		const missing = AUTOMATION_REQUIRED_TOOLS.filter(
-			(name) => !toolNames.has(name)
-		);
-		if (missing.length > 0) {
-			return {
-				ok: false,
-				error: `${LOBU_MEMORY_MCP_ID} tools preflight failed: missing ${missing.join(", ")}`,
-			};
-		}
-
-		return { ok: true };
-	} catch (error) {
-		return {
-			ok: false,
-			error: `${LOBU_MEMORY_MCP_ID} tools preflight failed: ${getErrorMessage(error)}`,
-		};
-	}
-}
-
 async function dispatchAutomationRun(
 	sql: DbClient,
 	run: ClaimedAutomationRunRow
@@ -1419,18 +1349,6 @@ async function dispatchAutomationRun(
 			"Failed to generate an embedded Lobu service token."
 		);
 		return "failed";
-	}
-
-	if (payload.trigger_execution !== "turn") {
-		const preflight = await preflightAutomationMemoryTools({
-			organizationId: run.organization_id,
-			agentId: payload.agent_id,
-			runId: run.id,
-		});
-		if (!preflight.ok) {
-			await failAutomationRun(sql, run.id, preflight.error);
-			return "failed";
-		}
 	}
 
 	// Per-automation inference overrides live in automations.execution_config

@@ -91,11 +91,11 @@ interface McpFixture {
 }
 
 /** An MCP surface with one server publishing three tools and an instruction block. */
-function mcpFixture(options: { fail?: boolean } = {}): McpFixture {
+function mcpFixture(options: { fail?: boolean; serverId?: string } = {}): McpFixture {
   const listed: McpFixture['listed'] = [];
   const configService = {
     getMcpStatus: async () => [
-      { id: 'lobu-memory', name: 'lobu-memory', requiresAuth: false, requiresInput: false },
+      { id: options.serverId ?? 'lobu-memory', name: 'lobu-memory', requiresAuth: false, requiresInput: false },
     ],
   } as unknown as McpConfigService;
   const proxy = {
@@ -157,8 +157,8 @@ async function admittedMessage(message: MessagePayload): Promise<MessagePayload>
 
 /**
  * The producer receives an already admitted queue message in production.
- * Returns the producer's outcome: an `AgentErrorCode` when the agent cannot
- * run, `undefined` when the turn was produced or nothing is owed a reply.
+ * Returns the producer's outcome: a `TurnFailure` when the agent cannot run,
+ * `undefined` when the turn was produced or nothing is owed a reply.
  */
 async function enqueueMessage(message: MessagePayload, deps: Parameters<typeof enqueueAgentTurn>[1]) {
   return await enqueueAgentTurn(await admittedMessage(message), deps);
@@ -920,7 +920,7 @@ describe('agent turn producer', () => {
         // The canonical correlation the resolver scopes its query by.
         conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(runRow!.id)}`,
       },
-      { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL },
+      { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL },
     );
 
     const runs = await agentTurnRuns();
@@ -1007,8 +1007,8 @@ describe('agent turn producer', () => {
           description: 'Write data',
           input_schema: { type: 'object', properties: { code: { type: 'string' } } },
         },
-        // No description and no schema published: the same defaults the
-        // subprocess lane's plugin fills in.
+        // No description and no schema published: the same defaults
+        // `@lobu/plugin-mcp` fills in.
         {
           mcp_id: 'lobu-memory',
           name: 'query_sql',
@@ -1023,9 +1023,87 @@ describe('agent turn producer', () => {
     )).toBe(true);
   });
 
-  // The policy is the agent's own (`buildToolPolicy`, shared with the
-  // subprocess lane); applying it to MCP tools is this lane's own stricter
-  // choice — the subprocess lane registers its MCP tools unfiltered.
+  async function automationMessage(execution: 'window' | 'turn' = 'window') {
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const author = await createTestUser({ name: 'Tool Policy Author' });
+    const [automation] = await sql<{ id: number }>`
+      INSERT INTO automations (organization_id, created_by, automation_group_id, name, slug, managed_agent_id)
+      VALUES (${org.id}, ${author.id}, 0, 'Tool policy', 'tool-policy', ${AGENT_ID}) RETURNING id
+    `;
+    const automationId = Number(automation!.id);
+    await sql`UPDATE automations SET automation_group_id = ${automationId} WHERE id = ${automationId}`;
+    const [version] = await sql<{ id: number }>`
+      INSERT INTO automation_versions (automation_id, version, name, created_by, prompt, skills)
+      VALUES (${automationId}, 1, 'Tool policy', ${author.id}, 'Complete the window.', ${sql.json([])}) RETURNING id
+    `;
+    const [run] = await sql<{ id: number }>`
+      INSERT INTO runs (organization_id, run_type, queue_name, status, automation_id, approved_input)
+      VALUES (${org.id}, 'automation', 'automations', 'running', ${automationId},
+        ${sql.json({ version_id: Number(version!.id), trigger_execution: execution })}) RETURNING id
+    `;
+    return {
+      ...messageFor(org.id),
+      conversationId: `${AGENT_ID}_automation_${automationId}_run_${Number(run!.id)}`,
+      platformMetadata: { source: 'automation-run' },
+    };
+  }
+
+  it.each([
+    { policy: { strictMode: true }, missing: 'query_sdk, run_sdk' },
+    { policy: { strictMode: true, allowedTools: ['query_sdk'] }, missing: 'run_sdk' },
+    { policy: { allowedTools: ['*'], deniedTools: ['run_sdk'] }, missing: 'run_sdk' },
+  ])('rejects a window before inference when policy excludes $missing', async ({ policy, missing }) => {
+    const message = await automationMessage();
+    message.agentOptions = { ...message.agentOptions, toolsConfig: policy };
+    const result = await enqueueMessage(message, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
+    });
+    expect(result).toEqual({ error: expect.stringContaining(`tool policy excludes ${missing}`) });
+    expect(await agentTurnRuns()).toEqual([]);
+  });
+
+  it('distinguishes failed Automation discovery from excluded tools', async () => {
+    const result = await enqueueMessage(await automationMessage(), {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture({ fail: true }).mcp, gatewayUrl: GATEWAY_URL,
+    });
+    expect(result).toEqual({ error: expect.stringContaining('tool discovery failed') });
+    expect(await agentTurnRuns()).toEqual([]);
+  });
+
+  it.each(['absent', 'other server'] as const)('refuses a missing memory mount (%s) even though other tools are available', async (kind) => {
+    const result = await enqueueMessage(await automationMessage(), {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL,
+      ...(kind === 'other server' ? { mcp: mcpFixture({ serverId: 'synthetic-other' }).mcp } : {}),
+    });
+    expect(result).toEqual({ error: expect.stringContaining('required tools are unavailable') });
+    expect(await agentTurnRuns()).toEqual([]);
+  });
+
+  it.each(['ordinary', 'turn'] as const)('preserves intentional tool-free %s execution', async (kind) => {
+    const message = kind === 'turn' ? await automationMessage('turn') : messageFor((await createTestOrganization()).id);
+    message.agentOptions = { ...message.agentOptions, toolsConfig: { strictMode: true } };
+    expect(await enqueueMessage(message, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
+    })).toBeUndefined();
+    const [run] = await agentTurnRuns();
+    expect(run.action_input.turn.tools).toBeUndefined();
+  });
+
+  it('admits a window with explicitly eligible memory tools', async () => {
+    const message = await automationMessage();
+    message.agentOptions = { ...message.agentOptions, toolsConfig: { strictMode: true, allowedTools: ['query_sdk', 'run_sdk'] } };
+    expect(await enqueueMessage(message, {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
+    })).toBeUndefined();
+    const [run] = await agentTurnRuns();
+    expect(run.action_input.turn.tools.definitions.map((tool: { name: string }) => tool.name)).toEqual(['query_sdk', 'run_sdk']);
+  });
+
   it('filters the tools through the agent tool policy', async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
@@ -2685,11 +2763,11 @@ describe('agent turn producer', () => {
     expect(await agentTurnRuns()).toHaveLength(4);
   });
 
-  it("delivers the named misconfiguration to the client, not a deadline timeout", async () => {
-    const org = await createTestOrganization();
+  it.each(['model', 'window tools'] as const)("delivers the %s misconfiguration to the client, not a deadline timeout", async (kind) => {
     const sql = getTestDb();
-    const message = messageFor(org.id);
-    message.agentOptions = {};
+    const message = kind === 'model' ? messageFor((await createTestOrganization()).id) : await automationMessage();
+    const organizationId = message.organizationId!;
+    message.agentOptions = kind === 'model' ? {} : { ...message.agentOptions, toolsConfig: { strictMode: true } };
     const deploymentName = 'agent-turn-unrunnable-fixture';
 
     // Exactly the sequence `handleMessage` runs: arm the liveness marker, then
@@ -2701,7 +2779,7 @@ describe('agent turn producer', () => {
       send: async (_q: string, body: unknown, opts?: { singletonKey?: string }) => {
         await sql`
           INSERT INTO runs (organization_id, run_type, queue_name, status, action_input, idempotency_key)
-          VALUES (${org.id}, 'chat_message', 'internal:turn_timeout', 'pending',
+          VALUES (${organizationId}, 'chat_message', 'internal:turn_timeout', 'pending',
                   ${sql.json(body as Record<string, unknown>)}, ${opts?.singletonKey ?? null})
         `;
       },
@@ -2709,12 +2787,12 @@ describe('agent turn producer', () => {
     await armTurnTimeout(queue as never, {
       messageId: message.messageId,
       channelId: message.channelId,
-      conversationId: message.channelId,
+      conversationId: message.conversationId,
       userId: message.userId,
       platform: message.platform,
       platformMetadata: message.platformMetadata,
       deploymentName,
-      organizationId: org.id,
+      organizationId,
     });
 
     const unrunnable = await enqueueMessage(message, {
@@ -2722,11 +2800,13 @@ describe('agent turn producer', () => {
       catalog: catalogFor(claudeModule()),
       gatewayUrl: GATEWAY_URL,
     });
-    expect(unrunnable).toBe(AgentErrorCode.NO_MODEL_CONFIGURED);
+    expect(unrunnable).toEqual(kind === 'model' ? AgentErrorCode.NO_MODEL_CONFIGURED
+      : { error: expect.stringContaining('tool policy excludes query_sdk, run_sdk') });
     expect(await agentTurnRuns()).toHaveLength(0);
 
     // The consumer discharges the marker it armed, with the producer's reason.
     expect(await failTurnIfPending(deploymentName, message.messageId, unrunnable!)).toBe(true);
+    expect(await failTurnIfPending(deploymentName, message.messageId, unrunnable!)).toBe(false);
 
     // The marker is gone, so the deadline sweep can never fire a second,
     // wrong-cause error for this turn.
@@ -2742,10 +2822,10 @@ describe('agent turn producer', () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toMatchObject({
       messageId: message.messageId,
-      errorCode: AgentErrorCode.NO_MODEL_CONFIGURED,
+      ...(kind === 'model' ? { errorCode: AgentErrorCode.NO_MODEL_CONFIGURED } : {}),
     });
     expect(delivered[0]!.errorCode).not.toBe(AgentErrorCode.WORKER_UNRESPONSIVE);
-    expect(String(delivered[0]!.error)).toContain('model');
+    expect(String(delivered[0]!.error)).toContain(kind === 'model' ? 'model' : 'tool policy excludes');
   });
 
   it('stays silent when no turn is owed a reply at all', async () => {
