@@ -168,6 +168,12 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
         `${row.id}:${new Date(row.due_date).getTime() < nowMs ? "overdue" : "soon"}`
     )
     .join("-");
+  const [hashed] = (await client.query(
+    `SELECT md5(${sqlString(signature)}) AS digest`
+  )) as Array<{ digest: string }>;
+  if (!hashed || !/^[a-f0-9]{32}$/.test(hashed.digest)) {
+    throw new Error("Could not compute due-task digest key");
+  }
   await client.notifications.send({
     title:
       overdue.length > 0
@@ -175,6 +181,6 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
         : `Task reminder — ${rows.length} due soon`,
     body: lines.join("\n"),
     recipients: "admins",
-    idempotency_key: `task-due-digest:${day}:${signature}`,
+    idempotency_key: `task-due-digest:${day}:${hashed.digest}`,
   });
 }

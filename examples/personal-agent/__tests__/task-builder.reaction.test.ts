@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 import notifyTasks from "../task-builder.reaction";
 
@@ -51,6 +52,13 @@ function harness(
   const client = {
     query: async (sql: string) => {
       queries.push(sql);
+      if (sql.startsWith("SELECT md5('")) {
+        const signature = sql.slice(
+          "SELECT md5('".length,
+          -"') AS digest".length
+        );
+        return [{ digest: createHash("md5").update(signature).digest("hex") }];
+      }
       if (sql.includes("semantic_type = 'change_set'")) {
         return changeKind
           ? [{ metadata: { changes: [{ entityId: 42, kind: changeKind }] } }]
@@ -222,7 +230,27 @@ describe("Task Builder completion reaction", () => {
     expect(h.sends[0]?.title).toBe("Task reminder — 1 overdue");
     expect(h.sends[0]?.body).toContain("OVERDUE");
     expect(h.sends[0]?.idempotency_key).toMatch(
-      /^task-due-digest:\d{4}-\d{2}-\d{2}:7:overdue$/
+      /^task-due-digest:\d{4}-\d{2}-\d{2}:[a-f0-9]{32}$/
+    );
+  });
+  test("a full due digest keeps its notification key within the API limit", async () => {
+    const dueTasks = Array.from({ length: 25 }, (_, i) => ({
+      id: 100000 + i,
+      name: `Synthetic deadline ${i}`,
+      due_date: new Date(Date.now() - 3600000).toISOString(),
+      priority: "high",
+    }));
+    const h = harness(null, null, dueTasks);
+    await notifyTasks(context([]), h.client);
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends[0]!.idempotency_key!.length).toBeLessThanOrEqual(300);
+    const replay = harness(null, null, dueTasks);
+    await notifyTasks(context([]), replay.client);
+    expect(replay.sends[0]!.idempotency_key).toBe(h.sends[0]!.idempotency_key);
+    const changed = harness(null, null, dueTasks.slice(1));
+    await notifyTasks(context([]), changed.client);
+    expect(changed.sends[0]!.idempotency_key).not.toBe(
+      h.sends[0]!.idempotency_key
     );
   });
 });
