@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -254,4 +255,61 @@ describe("check-mac-bundle-ids", () => {
       }
     }
   });
+
+  // Brand assets are served immutable, so every referencing URL carries a
+  // content-hash token. Regenerating an asset without updating its refs
+  // leaves browsers and edge caches on the stale copy.
+  it.skipIf(owlettoSubmoduleStubbed)(
+    "cache-busts brand assets with content hashes",
+    () => {
+      const pub = join(REPO_ROOT, "packages/owletto/public");
+      const files = [
+        "favicon.ico",
+        "favicon.svg",
+        "apple-touch-icon.png",
+        "site.webmanifest",
+        "icon-192.png",
+        "icon-512.png",
+        "icon-maskable-512.png",
+        "lobu-og.png",
+      ];
+      const token: Record<string, string> = {};
+      for (const file of files) {
+        token[file] = createHash("sha256")
+          .update(readFileSync(join(pub, file)))
+          .digest("hex")
+          .slice(0, 8);
+      }
+      const index = readFileSync(
+        join(REPO_ROOT, "packages/owletto/index.html"),
+        "utf8"
+      );
+      for (const file of [
+        "favicon.ico",
+        "favicon.svg",
+        "apple-touch-icon.png",
+        "site.webmanifest",
+      ]) {
+        expect(index).toContain(`/${file}?v=${token[file]}`);
+      }
+      expect(index).toContain(
+        `https://app.lobu.ai/lobu-og.png?v=${token["lobu-og.png"]}`
+      );
+      const manifest = JSON.parse(
+        readFileSync(join(pub, "site.webmanifest"), "utf8")
+      ) as { icons: Array<{ src: string }> };
+      for (const icon of manifest.icons) {
+        const match = icon.src.match(/^\/([^?]+)\?v=([0-9a-f]{8})$/);
+        if (!match) {
+          throw new Error(`manifest icon src is not versioned: ${icon.src}`);
+        }
+        expect(match[2]).toBe(token[match[1]]);
+      }
+      const serverPages = readFileSync(
+        join(REPO_ROOT, "packages/server/src/public-pages.ts"),
+        "utf8"
+      );
+      expect(serverPages).toContain(`/lobu-og.png?v=${token["lobu-og.png"]}`);
+    }
+  );
 });

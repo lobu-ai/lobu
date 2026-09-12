@@ -188,6 +188,12 @@ describe.skipIf(!WEB_AVAILABLE)('public page contract', () => {
     expect(response.headers.get('cache-control')).toContain('public, max-age=300');
     expect(body).toContain('Public Contract Org | Lobu');
     expect(body).toContain('window.__LOBU_PUBLIC_BOOTSTRAP__');
+    expect(body).toContain(
+      '<meta property="og:image" content="http://localhost/lobu-og.png?v=c4cf0dfc" />'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:image" content="http://localhost/lobu-og.png?v=c4cf0dfc" />'
+    );
     expect(body).toContain('Tracked public brands');
     expect(body).toContain('Brand launch feedback');
   });

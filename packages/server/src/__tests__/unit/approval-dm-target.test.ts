@@ -1,8 +1,8 @@
 /**
  * Approval delivery precedence: conversation → requester DM → inbox.
  *
- * `deliverToBotConnections` tries the DM tier BEFORE the channel tier and
- * returns on success, so feeding the requester into that tier unconditionally
+ * Notification delivery selects a resolved owner DM before channel targets,
+ * so feeding the requester into that tier unconditionally
  * would send an approval asked for in a channel to the asker's DM instead —
  * inverting the order. This pins the seam where that inversion lives.
  */
