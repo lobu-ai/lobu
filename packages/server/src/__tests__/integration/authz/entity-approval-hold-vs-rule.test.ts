@@ -169,7 +169,7 @@ async function readMetadata(id: number): Promise<Record<string, unknown>> {
 async function runCount(organizationId: string): Promise<number> {
 	const sql = getTestDb();
 	const rows = await sql<{ n: string }[]>`
-    SELECT count(*)::text AS n FROM runs WHERE organization_id = ${organizationId}
+    SELECT count(*)::text AS n FROM runs WHERE organization_id = ${organizationId} AND run_type = 'internal'
   `;
 	return Number(rows[0].n);
 }
@@ -322,7 +322,7 @@ describe("approval hold vs a frozen-state rule", () => {
 		const sql = getTestDb();
 		const [queued] = await sql<{ action_input: unknown }[]>`
       SELECT action_input FROM runs
-      WHERE organization_id = ${org.id}
+      WHERE organization_id = ${org.id} AND run_type = 'internal'
       ORDER BY id DESC LIMIT 1
     `;
 		const input = (
@@ -375,7 +375,7 @@ describe("approval hold vs a frozen-state rule", () => {
 		const sql = getTestDb();
 		const [queued] = await sql<{ action_input: unknown }[]>`
       SELECT action_input FROM runs
-      WHERE organization_id = ${org.id}
+      WHERE organization_id = ${org.id} AND run_type = 'internal'
       ORDER BY id DESC LIMIT 1
     `;
 		const input = (
@@ -591,7 +591,7 @@ describe("approval hold vs a frozen-state rule", () => {
 		// escalates a field the grant does not cover.
 		const [queued] = await sql<{ action_input: unknown }[]>`
       SELECT action_input FROM runs
-      WHERE organization_id = ${org.id}
+      WHERE organization_id = ${org.id} AND run_type = 'internal'
       ORDER BY id DESC LIMIT 1
     `;
 		const input = (
