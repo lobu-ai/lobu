@@ -75,8 +75,7 @@
     "!**/*.map",
     "!dist/commands/daemon.js",
     "!dist/commands/automation.js",
-    "!dist/commands/connector.js",
-    "!dist/commands/_lib/connector-run-cmd.js"
+    "!dist/commands/connector.js"
   ],
   "engines": {
     "node": ">=22 <25 || >=26"

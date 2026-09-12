@@ -799,6 +799,15 @@ const EMPTY_SELECTION = (params: {
   preferredMethodType: params.preferredMethodType ?? 'none',
 });
 
+export function isExplicitNoAuthSelection(params: {
+  authSchema: AuthSchema;
+  authProfileSlug?: string | null;
+  appAuthProfileSlug?: string | null;
+}): boolean {
+  return params.authProfileSlug === null && params.appAuthProfileSlug === null &&
+    getAuthMethods(params.authSchema).some(method => method.type === 'none');
+}
+
 export async function resolveConnectionAuthSelection(params: {
   organizationId: string;
   connectorKey: string;
@@ -819,6 +828,11 @@ export async function resolveConnectionAuthSelection(params: {
   const envMethod = getEnvKeyMethods(params.authSchema)[0] ?? null;
   const browserMethod = getBrowserMethods(params.authSchema)[0] ?? null;
   const preferredMethodType = getPreferredAuthMethodType(params.authSchema);
+  if (isExplicitNoAuthSelection(params)) {
+    return EMPTY_SELECTION({ oauthMethod, envMethod, browserMethod });
+  }
+  // Explicit null clears an account; only omission permits primary fallback.
+  const autoSelect = params.autoSelectAuthProfile !== false && params.authProfileSlug !== null;
 
   // 0. An explicit app profile slug points at an `oauth_app` (local client
   //    credentials). Resolve it once so it can be honored as the oauth_account
@@ -843,10 +857,10 @@ export async function resolveConnectionAuthSelection(params: {
       slug: params.authProfileSlug,
       connectorKey,
     })) ??
-    (params.autoSelectAuthProfile !== false && preferredMethodType === 'env_keys' && envMethod
+    (autoSelect && preferredMethodType === 'env_keys' && envMethod
       ? await getPrimaryAuthProfileForKind({ organizationId, connectorKey, profileKind: 'env' })
       : null) ??
-    (params.autoSelectAuthProfile !== false && preferredMethodType === 'browser' && browserMethod
+    (autoSelect && preferredMethodType === 'browser' && browserMethod
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,
@@ -854,7 +868,7 @@ export async function resolveConnectionAuthSelection(params: {
           deviceWorkerId: params.deviceWorkerId ?? null,
         })
       : null) ??
-    (params.autoSelectAuthProfile !== false && preferredMethodType === 'oauth' && oauthMethod
+    (autoSelect && preferredMethodType === 'oauth' && oauthMethod
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,

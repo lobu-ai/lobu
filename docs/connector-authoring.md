@@ -209,9 +209,9 @@ owns authentication. Full schemas are in the SDK reference.
 
 - npm deps go in the project/package `package.json` and are bundled by esbuild;
   native deps go in `runtime.nix.packages` as nixpkgs refs.
-- Workers run isolated with a restricted env (`PATH`, `HOME`, `TMPDIR`, `TZ`,
-  `NODE_ENV`, `NODE_PATH` only) and no filesystem
-  persistence — state lives in `checkpoint`.
+- Connector code runs in a V8 isolate and sees only the explicit `job.env`
+  values, without an ambient host environment or filesystem. Persist sync
+  state in `checkpoint`.
 - Browser scraping: use `extensionDomScrape` / `extensionNetworkSync` through
   the paired extension for page and network operations.
 

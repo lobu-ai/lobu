@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import lockfile from "proper-lockfile";
 import { x as extract } from "tar";
@@ -288,13 +289,24 @@ export async function ensureComponent(
   const signal = options.signal
     ? AbortSignal.any([options.signal, controller.signal])
     : controller.signal;
-  const release = await lockfile.lock(destination, {
-    realpath: false,
-    stale: 60_000,
-    update: 10_000,
-    retries: { retries: 900, minTimeout: 1000, maxTimeout: 1000 },
-    onCompromised: (error) => controller.abort(error),
-  });
+  let release: () => Promise<void>;
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    try {
+      release = await lockfile.lock(destination, {
+        realpath: false,
+        stale: 60_000,
+        update: 10_000,
+        onCompromised: (error) => controller.abort(error),
+      });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || attempt >= 900)
+        throw error;
+      // proper-lockfile's internal retries cannot be cancelled.
+      await delay(1000, undefined, { signal });
+    }
+  }
   let temporary: string | undefined;
   try {
     signal.throwIfAborted();

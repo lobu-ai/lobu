@@ -837,9 +837,6 @@ app.use("/api/workers/*", async (c, next) => {
 				"/api/workers/complete-action",
 			]);
 			const requestPath = new URL(c.req.url).pathname;
-			const isAuthProfileSubpath = requestPath.startsWith(
-				"/api/workers/me/auth-profiles",
-			);
 			const isFeedSubpath = requestPath.startsWith("/api/workers/me/feeds");
 			// /api/workers/me/runs/<runId>/complete-automation — device-side Automation
 			// completion endpoint added in #798. The handler does its own
@@ -859,7 +856,6 @@ app.use("/api/workers/*", async (c, next) => {
 				/^\/api\/workers\/me\/automations\/\d+\/trigger$/.test(requestPath);
 			if (
 				!allowedPathsForUserWorker.has(requestPath) &&
-				!isAuthProfileSubpath &&
 				!isFeedSubpath &&
 				!isAutomationCompleteSubpath &&
 				!isDeviceChatCompleteSubpath &&

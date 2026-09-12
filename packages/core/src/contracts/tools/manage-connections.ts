@@ -172,13 +172,15 @@ export const CreateAction = Type.Object({
     })
   ),
   auth_profile_slug: Type.Optional(
-    Type.String({
-      description: "Reusable auth profile slug for runtime/account auth",
+    Type.Union([Type.String(), Type.Null()], {
+      description:
+        "Reusable runtime/account auth profile slug. Set both auth profile fields to null to select a declared no-auth method; omit for automatic selection.",
     })
   ),
   app_auth_profile_slug: Type.Optional(
-    Type.String({
-      description: "Reusable auth profile slug for OAuth app credentials",
+    Type.Union([Type.String(), Type.Null()], {
+      description:
+        "Reusable OAuth app profile slug. Set both auth profile fields to null to select a declared no-auth method.",
     })
   ),
   config: Type.Optional(

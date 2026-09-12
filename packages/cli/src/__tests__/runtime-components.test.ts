@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   ensureComponent,
   selectedRuntimeComponents,
@@ -193,6 +194,47 @@ describe("atomic runtime installation", () => {
     expect(
       await readFile(join(paths[0]!, "dist/server.mjs"), "utf8")
     ).toContain("20.0.0");
+  });
+  test("cancels promptly while another installer holds the cache lock", async () => {
+    const { options } = await fixture();
+    const started = Promise.withResolvers<void>();
+    const unblock = Promise.withResolvers<void>();
+    const first = ensureComponent(component, {
+      ...options,
+      installDependencies: async (directory) => {
+        started.resolve();
+        await unblock.promise;
+        await options.installDependencies(directory);
+      },
+    });
+    await started.promise;
+    const controller = new AbortController();
+    const waiting = ensureComponent(component, {
+      ...options,
+      signal: controller.signal,
+    });
+    let outcome: string;
+    try {
+      await delay(25);
+      controller.abort();
+      outcome = await Promise.race([
+        waiting.then(
+          () => "installed",
+          (error: Error) => error.name
+        ),
+        delay(250, "still waiting"),
+      ]);
+    } finally {
+      unblock.resolve();
+      await Promise.allSettled([first, waiting]);
+    }
+    expect(outcome).toBe("AbortError");
+    await expect(
+      ensureComponent(component, {
+        cacheRoot: options.cacheRoot,
+        offline: true,
+      })
+    ).resolves.toBe(await first);
   });
   test("a failed install is never promoted and retry can complete", async () => {
     const { options } = await fixture();
