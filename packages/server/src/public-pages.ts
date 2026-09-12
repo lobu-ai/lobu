@@ -931,7 +931,7 @@ function stripOverriddenHead(templateHtml: string): string {
 }
 
 function injectIntoTemplate(templateHtml: string, model: PublicPageModel): string {
-  const ogImage = model.openGraphImage || `${new URL(model.canonicalUrl).origin}/lobu-og.png`;
+  const ogImage = model.openGraphImage || `${new URL(model.canonicalUrl).origin}/lobu-og.png?v=c4cf0dfc`;
   const headTags = [
     `<meta name="description" content="${escapeAttribute(model.description)}" />`,
     `<meta name="robots" content="${escapeAttribute(model.robots)}" />`,

@@ -861,7 +861,7 @@ describe("approval-run transition atomicity", () => {
 	it("queueAgentAsk run + pending card commit atomically (card failure leaves no run)", async () => {
 		const sql = getTestDb();
 		const runsBefore = await sql`
-			SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId}
+			SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND run_type = 'internal'
 		`;
 		const eventsBefore = await sql`
 			SELECT count(*)::int AS n FROM events
@@ -881,7 +881,7 @@ describe("approval-run transition atomicity", () => {
 		// The run INSERT shared the rolled-back transaction: no stranded pending
 		// run and no orphaned card.
 		const runsAfter = await sql`
-			SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId}
+			SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND run_type = 'internal'
 		`;
 		expect(runsAfter[0].n).toBe(runsBefore[0].n);
 		const eventsAfter = await sql`

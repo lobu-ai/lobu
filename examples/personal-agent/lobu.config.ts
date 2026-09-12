@@ -24,12 +24,13 @@ import type PollVoteReaction from "./poll-vote.reaction.ts";
 import type RevolutTransactionsConnector from "./revolut-transactions.connector.ts";
 import type SpotifyConnector from "./spotify.connector.ts";
 import { takeoutConfig } from "./takeout-dirs.ts";
+import { taskBuilderPrompt } from "./task-builder.prompt.ts";
+import type TaskBuilderReaction from "./task-builder.reaction.ts";
 import type TwitterTakeoutConnector from "./twitter-takeout.connector.ts";
 
 const hourlyTaskCollaboratorSkill = defineSkill({
   name: "hourly-task-collaborator",
-  content:
-    "Review the current hourly window's content and the collaborative task list in the payload's task_list source. The task_list source includes recently closed tasks (metadata status done or dismissed) for reference so you know what is already finished. Return a JSON object with a tasks array matching the provided task schema. Extract only concrete actions Burak or his personal agent should take; ignore advertisements, newsletters, automated notices, passive information, and vague ideas. For every task, copy source_scope, source_origin_id, and source_event_id exactly from the recent_signals or upcoming_calendar row it came from. The upcoming_calendar source lists confirmed meetings, flights, and events in the next 30 days, ordered soonest first; draw preparation tasks from it only when a concrete action is genuinely needed, and never emit a task that merely restates that an event is scheduled. Set task_key to a short stable machine key for that distinct action within the source (for example send-deck or book-flight); keep the same task_key when only the wording or status changes. Preserve existing tasks instead of restating them. Never re-emit, reopen, or recreate any task whose status is done or dismissed in the task list, even if the originating message still appears in recent signals. Set status to backlog unless there is clear evidence work has started. Assign owner \"Burak\" unless the action can be safely completed by the personal agent. Use ISO-8601 due_date only when a real deadline is present. Include source and a short rationale. Produce at most 12 tasks, ordered by priority.",
+  content: taskBuilderPrompt,
 });
 
 const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
@@ -415,6 +416,24 @@ const task = defineEntityType({
         type: "string",
         description: "Why this task is worth doing",
       })
+    ),
+    agent_help: Type.Optional(
+      Type.Union(
+        [
+          Type.Object(
+            {
+              summary: Type.String({ minLength: 1, maxLength: 600 }),
+              prompt: Type.String({ minLength: 1, maxLength: 6000 }),
+            },
+            { additionalProperties: false }
+          ),
+          Type.Null(),
+        ],
+        {
+          description:
+            "Proposed agent work for the user to review and start; null when no longer applicable.",
+        }
+      )
     ),
     source_event_id: Type.Optional(
       Type.Unsafe({
@@ -1224,14 +1243,8 @@ const marketQuotesConnection = defineConnection({
   feeds: [],
 });
 
-// Gmail person-building, not mailbox mirroring. One narrow feed materializes
-// only person-relevant threads (human_senders_only) so the DB holds a small
-// high-signal set that drives person minting/merging — full email content stays
-// a live read via the connector's search/get_thread actions, never persisted.
-// Adopts the existing `gmail-buremba` slug so the OAuth grant is reused; stale
-// duplicate gmail connections/feeds in prod surface as drift until cleaned up.
-// Apply requires referenced auth profiles to be declared. Omitting credentials
-// preserves the existing OAuth grant and app secret.
+// Remote Gmail reads reuse the existing OAuth grant. No scheduled mail copies;
+// service notices remain eligible because they can contain concrete obligations.
 const gmailAccountAuth = defineAuthProfile({
   slug: "personal",
   connector: "google.gmail",
@@ -1256,9 +1269,10 @@ const gmailConnection = defineConnection({
   feeds: [
     {
       feed: "threads",
+      schedule: null,
       config: {
-        human_senders_only: true,
-        labels: ["INBOX", "SENT"],
+        human_senders_only: false,
+        query: "-in:spam -in:trash",
         max_results: 500,
         lookback_days: 365,
       },
@@ -1428,8 +1442,8 @@ const hourlyTaskCollaborator = defineAutomation({
   agent: personalAgent,
   slug: "hourly-task-collaborator",
   name: "Hourly Task Collaborator",
-  model: "hetzner/DeepSeek-V4-Flash-0731",
-  triggers: [every("0 * * * *")],
+  model: "chatgpt/gpt-6-astra",
+  triggers: [every("0 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
   outputs: {
     tasks: {
@@ -1439,38 +1453,20 @@ const hourlyTaskCollaborator = defineAutomation({
     },
   },
   sources: {
-    // Past-facing conversational signal. `calendar_event` is deliberately NOT in
-    // this filter and `occurred_at <= now()` is deliberately present: calendar
-    // rows are dated when the meeting HAPPENS, so future-dated ones sort ahead of
-    // every message under `occurred_at DESC` and evict the entire window. On prod
-    // 213 of 254 Google Calendar rows are future-dated (mostly two recurring
-    // series expanded out to 2056) — more than the LIMIT 200 window holds.
-    recent_signals:
-      "SELECT id, id AS source_event_id, COALESCE('connection:' || connection_id::text, 'connector:' || connector_key, 'event') AS source_scope, COALESCE(origin_id, 'event:' || id::text) AS source_origin_id, occurred_at, title, payload_text, semantic_type, connector_key, metadata FROM events WHERE semantic_type IN ('message','thread','reminder','note') AND occurred_at <= now() ORDER BY occurred_at DESC LIMIT 200",
-    // Forward-facing calendar, on its own budget so it can neither starve
-    // recent_signals nor be starved by a busy messaging day. Ascending + a small
-    // LIMIT keeps it to the NEAREST events; the upper bound is what stops the
-    // 2056 recurring expansions from filling it on a sparse calendar.
-    //
-    // 30 days, not 7: measured against prod 2026-08-07, a 7-day window returns
-    // 0 rows (the next real event is 18 days out). Row counts from now-1d:
-    // 7d=0, 30d=4, 60d=5, 90d=7. 30d is the smallest round window that is
-    // non-empty on real data and still covers the next flight; retune here if
-    // the calendar fills in.
-    //
-    // Those counts span BOTH calendar connectors, because this source keys off
-    // `semantic_type` and not `connector_key` — that is the entire point of the
-    // shared vocabulary. Counting google.calendar alone gives 3/4/6 and is the
-    // wrong measurement: the 30-day window's second row is an apple.calendar
-    // holiday.
-    upcoming_calendar:
-      "SELECT id, id AS source_event_id, COALESCE('connection:' || connection_id::text, 'connector:' || connector_key, 'event') AS source_scope, COALESCE(origin_id, 'event:' || id::text) AS source_origin_id, occurred_at, title, payload_text, semantic_type, connector_key, metadata FROM events WHERE semantic_type = 'calendar_event' AND occurred_at BETWEEN now() - interval '1 day' AND now() + interval '30 days' ORDER BY occurred_at ASC LIMIT 20",
-    // context-only: existing tasks are dedup reference data, not window signal
-    task_list: context(
-      "SELECT NULL::bigint AS id, t.name, t.metadata, t.updated_at FROM entities t WHERE t.entity_type = 'task' AND t.deleted_at IS NULL AND (COALESCE(t.metadata->>'status', 'backlog') NOT IN ('done', 'dismissed') OR t.updated_at > now() - interval '14 days') ORDER BY t.updated_at DESC LIMIT 100"
+    // SQL frames summarize the run-bound arrival range. The agent queries each
+    // cohort using its window token; no raw-body or arbitrary task-count cap.
+    arrival_frame: context(
+      "SELECT connector_key, connection_id, origin_type, COUNT(*)::int AS event_count, MIN(created_at) AS first_arrival, MAX(created_at) AS last_arrival, MIN(occurred_at) AS oldest_source_time, MAX(occurred_at) AS newest_source_time, SUM(COALESCE(LENGTH(payload_text),0)) AS text_chars FROM events WHERE semantic_type NOT IN ('change','audit') AND connector_key IS DISTINCT FROM 'google.gmail' GROUP BY connector_key, connection_id, origin_type ORDER BY connector_key NULLS LAST, connection_id NULLS LAST, origin_type NULLS LAST"
     ),
+    chats_frame: context(
+      "SELECT platform, connection_id, channel_id, COUNT(*)::int AS message_count, MIN(created_at) AS first_arrival, MAX(created_at) AS last_arrival FROM channel_messages GROUP BY platform, connection_id, channel_id ORDER BY platform, connection_id, channel_id"
+    ),
+    mail: "@feed:threads",
   },
-  skills: ["hourly-task-collaborator"],
+  prompt: taskBuilderPrompt,
+  reaction: reactionFromFile<typeof TaskBuilderReaction>(
+    "./task-builder.reaction.ts"
+  ),
 });
 
 const duplicateEntityResolution = defineAutomation({

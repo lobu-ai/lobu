@@ -12,7 +12,9 @@ import {
 	pgTextArray,
 } from "../db/client";
 import { resolveBoundChannelRows } from "../gateway/channels/bound-channels";
-import { getChatInstanceManager, isLobuGatewayRunning } from "../lobu/gateway";
+import { getChatInstanceManager } from "../lobu/gateway";
+import { NOTIFICATION_DELIVERY_TASK } from "../scheduled/task-definitions";
+import { enqueueTasksInTransaction } from "../scheduled/task-scheduler";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
 import { resolveSlackUserIdForUser } from "../lobu/stores/chat-identity.js";
 import { resolveEventKindDefinition } from "../utils/event-kind-validation";
@@ -99,10 +101,11 @@ interface CreateNotificationParams {
 	 * Lobu user whose Slack DM is the first chat destination — the owner of the
 	 * change under review (field-change approvals), or the requester of an
 	 * approval that has no chat origin. When set, bot delivery tries their DM
-	 * FIRST — resolved via
-	 * the owner's workspace-scoped Slack identity — and only falls back
-	 * to the configured-target/org-wide channel chain when the owner has no
-	 * Slack identity or the DM fails. In-app inbox targeting is unaffected.
+	 * FIRST, resolved via the owner's workspace-scoped Slack identity. When no
+	 * identity resolves at creation, delivery falls back to the configured-target
+	 * or org-wide channel snapshot. Once a DM resolves, durable retries stay on
+	 * that private destination rather than widening to a channel after a transient
+	 * post failure. In-app inbox targeting is unaffected.
 	 */
 	ownerUserId?: string | null;
 	/**
@@ -144,15 +147,12 @@ interface CreateNotificationParams {
  * Forward a notification to the org's active chat-bot connections so it lands
  * in the bound channel — e.g. an automation digest posting to #leads.
  *
- * Resolves connections + their Automation subscriptions straight from Postgres and
- * posts in-process via the chat manager. Every app pod loads every active
- * connection at boot, so the locally-held instance can post regardless of
- * which pod fired the notification — correct under N>1 replicas, no cross-pod
- * routing needed.
+ * Resolves connections + their Automation subscriptions straight from Postgres.
+ * Durable delivery may run on any app pod; the chat manager lazily hydrates an
+ * active connection on the claiming pod before it posts.
  *
- * Best-effort: a connection with no live instance or no binding is skipped
- * without failing the others. A connection bound to several channels posts to
- * each.
+ * A connection bound to several channels produces one independently receipted
+ * destination per channel.
  */
 interface BotDeliveryTarget {
 	connectionId: string;
@@ -440,13 +440,11 @@ type PersistedNotificationDeliveryRecord = Omit<
  * Post-hoc metadata UPDATE, matching the routing stamp in
  * `gateway/routes/internal/interactions.ts`: `events` is append-only for
  * DELETE, and this touches delivery metadata only — never payload. It has to
- * run after the fan-out because the platform ids do not exist until the post
- * returns, and the durable notification write must not block on a best-effort
- * chat post.
+ * run after each post because the platform ids do not exist before it returns.
  *
  * Best-effort by default: losing the record costs a later in-place edit, not
- * the notification itself. `present_event` opts into required persistence
- * because the pointer drives in-place refresh and deduplicates later calls.
+ * the notification itself. `present_event` and durable delivery require
+ * persistence because receipts drive in-place refresh and deduplicate retries.
  */
 async function persistDeliveryMetadata(
 	eventId: number,
@@ -648,29 +646,6 @@ async function presentStoredEventToConversationLocked(
 	};
 }
 
-async function recordDeliveryError(
-	eventId: number,
-	code: "automation_target_unavailable" | "automation_target_post_failed",
-): Promise<void> {
-	try {
-		const sql = getDb();
-		await sql`
-      UPDATE events
-      SET metadata = coalesce(metadata, '{}'::jsonb)
-        || jsonb_build_object(
-          'delivery_error',
-          jsonb_build_object('code', ${code}, 'recorded_at', NOW())
-        )
-      WHERE id = ${eventId}
-    `;
-	} catch (err) {
-		logger.warn(
-			{ err, eventId, code },
-			"[Notifications] Failed to record delivery error",
-		);
-	}
-}
-
 function jsonRecord(value: unknown): Record<string, unknown> {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		return value as Record<string, unknown>;
@@ -722,13 +697,17 @@ type StoredApprovalNotification = {
 export async function refreshApprovalNotificationCards(
 	organizationId: string,
 	runIds: number[],
+	options?: { required?: boolean },
 ): Promise<void> {
 	const ids = [
 		...new Set(runIds.filter((id) => Number.isSafeInteger(id) && id > 0)),
 	];
 	if (ids.length === 0) return;
 	const manager = getChatInstanceManager();
-	if (!manager) return;
+	if (!manager) {
+		if (options?.required) throw new Error("Notification chat gateway is unavailable");
+		return;
+	}
 	const rows = await getDb()<StoredApprovalNotification>`
 		SELECT
 			r.id AS run_id,
@@ -804,6 +783,7 @@ export async function refreshApprovalNotificationCards(
 						content,
 					})
 					.catch((err: unknown) => {
+						if (options?.required) throw err;
 						logger.warn(
 							{
 								err,
@@ -1044,140 +1024,345 @@ export async function resolveNotificationKindCard(
 	}
 }
 
-async function deliverToBotConnections(
-	params: Omit<CreateNotificationParams, "userId">,
-	eventId: number,
-): Promise<void> {
-	if (!isLobuGatewayRunning()) return;
-	const manager = getChatInstanceManager();
-	if (!manager) return;
+type NotificationDeliveryContext = Pick<
+	CreateNotificationParams,
+	| "connectionId"
+	| "channelId"
+	| "teamId"
+	| "deliveryScope"
+	| "ownerUserId"
+	| "decisionRunId"
+	| "actionOrigin"
+	| "automationId"
+>;
 
-	const text = params.body ? `${params.title}\n\n${params.body}` : params.title;
-	// Card precedence, richest first:
-	//   1. an explicit `card` — the caller built it, so it wins outright;
-	//   2. the notification's own event kind, whose render template gives chat
-	//      the same content the Memory view shows. This is what stops a caller
-	//      authoring its content twice (`payloadData` for web, a hand-built card
-	//      for chat) and drifting between them;
-	//   3. the markdown body.
-	const baseCard = params.card ?? (await resolveNotificationKindCard(params, eventId));
-	const card = baseCard ? addActionOrigin(baseCard, params.actionOrigin) : null;
-	const content = card ? { card } : { markdown: text };
-	const deliveryPlan = await resolveNotificationDeliveryPlan({
-		organizationId: params.organizationId,
-		automationId: params.automationId,
+interface NotificationDeliveryRequest {
+	context: NotificationDeliveryContext;
+	strictAutomationTarget: boolean;
+	targets: BotDeliveryTarget[];
+	ownerDm: { connectionId: string; slackUserId: string } | null;
+}
+
+export interface NotificationDeliveryTaskPayload {
+	organizationId: string;
+	eventId: number;
+}
+
+async function ownerIsMember(
+	organizationId: string,
+	userId: string,
+): Promise<boolean> {
+	const [member] = await getDb()`
+		SELECT 1 FROM member
+		WHERE "organizationId" = ${organizationId} AND "userId" = ${userId}
+		LIMIT 1
+	`;
+	return Boolean(member);
+}
+
+async function snapshotNotificationDelivery(
+	params: Omit<CreateNotificationParams, "userId">,
+): Promise<NotificationDeliveryRequest> {
+	const context: NotificationDeliveryContext = {
 		connectionId: params.connectionId,
 		channelId: params.channelId,
 		teamId: params.teamId,
 		deliveryScope: params.deliveryScope,
-	});
-	if (deliveryPlan.strictAutomationTarget && deliveryPlan.targets.length === 0) {
-		logger.error(
-			{
-				organizationId: params.organizationId,
-				automationId: params.automationId,
-			},
-			"[Notifications] Automation delivery target is unavailable — refusing org-wide fallback",
-		);
-		await recordDeliveryError(eventId, "automation_target_unavailable");
-		return;
-	}
+		ownerUserId: params.ownerUserId,
+		decisionRunId: params.decisionRunId,
+		actionOrigin: params.actionOrigin,
+		automationId: params.automationId,
+	};
+	const plan = await resolveNotificationDeliveryPlan(params);
+	const ownerDm =
+		params.ownerUserId &&
+		!plan.strictAutomationTarget &&
+		(await ownerIsMember(params.organizationId, params.ownerUserId))
+			? await resolveOwnerDmTarget(
+					params.organizationId,
+					params.ownerUserId,
+					params.connectionId,
+				)
+			: null;
+	return { context, ...plan, ownerDm };
+}
 
-	// Owner-routed tier: an approval whose gated fields have ONE human owner
-	// goes to that owner's Slack DM first (same card, same approve/reject
-	// buttons — the interaction bridge is connection-scoped, so clicks route
-	// identically). Any miss — no identity row, DM open/post failure — logs and
-	// falls through to the configured-target/org-wide chain unchanged.
-	if (params.ownerUserId && !deliveryPlan.strictAutomationTarget) {
+function sameDeliveryTarget(a: BotDeliveryTarget, b: BotDeliveryTarget): boolean {
+	return (
+		a.connectionId === b.connectionId &&
+		a.channelKey === b.channelKey &&
+		a.teamId === b.teamId
+	);
+}
+
+/**
+ * The inbox and this task commit together. A queue retry rehydrates the saved
+ * notification and posts only destinations without durable receipts. Selected
+ * destinations are frozen at creation and revalidated, so a later binding cannot
+ * turn a delayed private notification into new channel traffic.
+ *
+ * Providers do not accept a common idempotency key: acceptance followed by a
+ * lost receipt can still duplicate an external message. Never claim exactly-once.
+ */
+export async function deliverNotificationTask(
+	input: NotificationDeliveryTaskPayload,
+): Promise<void> {
+	const sql = getDb();
+	const [saved] = await sql<{ metadata: Record<string, unknown> }>`
+		SELECT metadata FROM events
+		WHERE id = ${input.eventId} AND organization_id = ${input.organizationId}
+	`;
+	if (!saved) {
+		throw new Error("Notification event is unavailable in this organization");
+	}
+	const request = saved.metadata.delivery_request as
+		| NotificationDeliveryRequest
+		| undefined;
+	if (!request || !Array.isArray(request.targets)) {
+		throw new Error("Notification delivery request is missing");
+	}
+	if (request.strictAutomationTarget && request.targets.length === 0) {
+		throw new Error("Automation notification target is unavailable");
+	}
+	const destinations = request.ownerDm
+		? [
+				{
+					connectionId: request.ownerDm.connectionId,
+					channelKey: "dm",
+					platform: "slack",
+					teamId: null,
+				},
+			]
+		: request.targets;
+	const failures: unknown[] = [];
+	let hasDelivery = false;
+	let approvalRunIdToRefresh = request.context.decisionRunId ?? null;
+	for (const target of destinations) {
 		try {
-			const dm = await resolveOwnerDmTarget(
-				params.organizationId,
-				params.ownerUserId,
-				params.connectionId,
-			);
-			if (dm) {
-				const sent = await manager.postDirectMessage(
-					dm.connectionId,
-					dm.slackUserId,
-					content,
-				);
+			// Reuse the event-row receipt boundary used by presentStoredEventToConversation.
+			// Each destination commits separately; a failure must not roll back a prior
+			// successful post's receipt and cause it to be sent again on retry.
+			await sql.begin(async (tx) => {
+				const [row] = await tx<{
+					title: string;
+					payload_text: string | null;
+					payload_data: Record<string, unknown>;
+					metadata: Record<string, unknown>;
+					semantic_type: string;
+					entity_ids: unknown;
+					superseded_by: number | null;
+				}>`
+					SELECT
+						title, payload_text, payload_data, metadata, semantic_type,
+						entity_ids, superseded_by
+					FROM events
+					WHERE id = ${input.eventId} AND organization_id = ${input.organizationId}
+					FOR UPDATE
+				`;
+				if (!row) throw new Error("Notification event disappeared");
+				if (row.superseded_by !== null) return;
+				const receipts = deliveryRecords(row.metadata);
+
+				const context = request.context;
+				// A delayed approval or browser handoff may already have been resolved.
+				// The event resource is also checked for approval families with no buttons.
+				const resourceId =
+					row.metadata.resource_type === "event" &&
+					typeof row.metadata.resource_id === "string" &&
+					/^\d+$/.test(row.metadata.resource_id)
+						? Number(row.metadata.resource_id)
+						: null;
+				const [resource] =
+					resourceId != null && Number.isSafeInteger(resourceId)
+						? await tx<{
+								run_id: number | null;
+								interaction_type: string | null;
+								interaction_status: string | null;
+								superseded_by: number | null;
+							}>`
+								SELECT run_id, interaction_type, interaction_status, superseded_by
+								FROM events
+								WHERE id = ${resourceId}
+								  AND organization_id = ${input.organizationId}
+							`
+						: [];
+				const decisionRunId = context.decisionRunId ??
+					(resource?.interaction_type === "approval" ? resource.run_id : null);
+				approvalRunIdToRefresh ??= decisionRunId;
+				if (
+					receipts.some(
+						(receipt) =>
+							receipt.connectionId === target.connectionId &&
+							receipt.channelKey === target.channelKey,
+					)
+				) {
+					hasDelivery = true;
+					return;
+				}
+				if (
+					resource?.interaction_type &&
+					(resource.superseded_by !== null ||
+						resource.interaction_status !== "pending")
+				) {
+					return;
+				}
+				const browserRunId = typeof row.metadata.browser_handoff_run_id === "number"
+					? row.metadata.browser_handoff_run_id : null;
+				if (decisionRunId != null || browserRunId != null) {
+					const runIds = [decisionRunId, browserRunId].filter(
+						(id): id is number => id != null,
+					);
+					// Match the inbox and page-activation endpoint's ready contract.
+					// A browser handoff and an approval can reference different runs.
+					const states = await tx<{
+						id: number;
+						approval_status: string;
+						browser_ready: boolean;
+					}>`
+						SELECT id, approval_status, COALESCE(
+							run_type = 'action' AND status = 'pending'
+							AND approval_status = 'auto'
+							AND activation_kind = 'page_visit'
+							AND run_metadata->>'page_activation_identity' = 'exact'
+							AND activated_at IS NULL
+							AND expires_at > current_timestamp,
+							false
+						) AS browser_ready
+						FROM runs
+						WHERE organization_id = ${input.organizationId}
+						  AND id = ANY(${pgBigintArray(runIds)}::bigint[])
+					`;
+					const decision = states.find((state) => Number(state.id) === decisionRunId);
+					const browser = states.find((state) => Number(state.id) === browserRunId);
+					if ((decisionRunId != null && !decision) || (browserRunId != null && !browser)) {
+						throw new Error("Notification decision run is unavailable");
+					}
+					if (
+						(decisionRunId != null && decision?.approval_status !== "pending") ||
+						(browserRunId != null && !browser?.browser_ready)
+					) {
+						return;
+					}
+				}
+
+				const current = await resolveNotificationDeliveryPlan({
+					...context,
+					organizationId: input.organizationId,
+				});
+				if (request.strictAutomationTarget && !current.strictAutomationTarget) {
+					throw new Error("Automation notification target changed");
+				}
+				if (request.ownerDm) {
+					if (
+						!context.ownerUserId ||
+						!(await ownerIsMember(input.organizationId, context.ownerUserId))
+					) {
+						throw new Error("Notification owner is no longer a workspace member");
+					}
+					const dm = await resolveOwnerDmTarget(
+						input.organizationId,
+						context.ownerUserId,
+						context.connectionId,
+					);
+					if (
+						!dm ||
+						dm.connectionId !== request.ownerDm.connectionId ||
+						dm.slackUserId !== request.ownerDm.slackUserId
+					) {
+						throw new Error("Notification owner destination changed");
+					}
+				} else if (
+					!current.targets.some((currentTarget) =>
+						sameDeliveryTarget(target, currentTarget),
+					)
+				) {
+					throw new Error("Notification destination is no longer authorized");
+				}
+				const manager = getChatInstanceManager();
+				if (!manager) throw new Error("Notification chat gateway is unavailable");
+				const params: Omit<CreateNotificationParams, "userId"> = {
+					...context,
+					organizationId: input.organizationId,
+					type: row.metadata.notification_type as CreateNotificationParams["type"],
+					title: row.title,
+					body: row.payload_text,
+					semanticType:
+						row.semantic_type === "notification" ? undefined : row.semantic_type,
+					payloadData: row.payload_data,
+					entityIds: parsePgNumberArray(row.entity_ids),
+					resourceUrl:
+						typeof row.metadata.resource_url === "string"
+							? row.metadata.resource_url
+							: null,
+				};
+				const baseCard = isCard(row.metadata.card)
+					? row.metadata.card
+					: await resolveNotificationKindCard(params, input.eventId);
+				const card = baseCard
+					? receipts.length
+						? baseCard
+						: addActionOrigin(baseCard, context.actionOrigin)
+					: undefined;
+				const body = row.payload_text
+					? `${row.title}\n\n${row.payload_text}`
+					: row.title;
+				const link = toAbsolutePermalink(params.resourceUrl);
+				const content = card
+					? { card }
+					: { markdown: link ? `${body}\n\n${link}` : body };
+				const sent = request.ownerDm
+					? await manager.postDirectMessage(
+							target.connectionId,
+							request.ownerDm.slackUserId,
+							content,
+						)
+					: await manager.postMessageToChannel(
+							target.connectionId,
+							target.channelKey,
+							content,
+						);
+				if (!sent.messageId) {
+					throw new Error("Delivery did not return an addressable message id");
+				}
 				await persistDeliveryMetadata(
-					eventId,
+					input.eventId,
 					[
+						...receipts,
 						{
-							connectionId: dm.connectionId,
-							channelKey: "dm",
+							connectionId: target.connectionId,
+							channelKey: target.channelKey,
 							messageId: sent.messageId,
 							threadId: sent.threadId,
 						},
 					],
-					card ?? undefined,
+					card,
+					{ db: tx, required: true },
 				);
-				return;
-			}
-			logger.warn(
-				{ organizationId: params.organizationId, ownerUserId: params.ownerUserId },
-				"[Notifications] Approval owner has no Slack identity in a connected workspace — falling back to channel delivery",
-			);
-		} catch (err) {
-			logger.warn(
-				{
-					err,
-					organizationId: params.organizationId,
-					ownerUserId: params.ownerUserId,
-				},
-				"[Notifications] Owner DM delivery failed — falling back to channel delivery",
-			);
+				hasDelivery = true;
+			});
+		} catch (error) {
+			failures.push(error);
 		}
 	}
-
-	try {
-		const targets = deliveryPlan.targets;
-		if (targets.length === 0) return;
-
-		const posted = await Promise.allSettled(
-			targets.map(
-				async ({
-					connectionId,
-					channelKey,
-				}): Promise<NotificationDeliveryRecord> => {
-					const sent = await manager.postMessageToChannel(
-						connectionId,
-						channelKey,
-						content,
-					);
-					return {
-						connectionId,
-						channelKey,
-						messageId: sent.messageId,
-						threadId: sent.threadId,
-					};
-				},
-			),
+	// Close the decision-during-post race: after receipt commit a concurrent
+	// terminalizer can see it; if it committed earlier, this refresh sees the
+	// terminal state. Refresh failure consumes this same task's retry budget.
+	if (hasDelivery && approvalRunIdToRefresh != null) {
+		await refreshApprovalNotificationCards(
+			input.organizationId,
+			[approvalRunIdToRefresh],
+			{ required: true },
 		);
-		const delivered: NotificationDeliveryRecord[] = [];
-		posted.forEach((result, index) => {
-			if (result.status === "fulfilled") {
-				delivered.push(result.value);
-				return;
-			}
-			logger.warn(
-				{
-					err: result.reason,
-					connectionId: targets[index]?.connectionId,
-					channelKey: targets[index]?.channelKey,
-				},
-				"[Notifications] Failed to post to bot connection channel",
-			);
-		});
-		await persistDeliveryMetadata(eventId, delivered, card ?? undefined);
-		if (deliveryPlan.strictAutomationTarget && delivered.length === 0) {
-			await recordDeliveryError(eventId, "automation_target_post_failed");
-		}
-	} catch (err) {
-		logger.warn(
-			{ err },
-			"[Notifications] Failed to deliver to bot connections",
+	}
+	if (failures.length) {
+		throw new AggregateError(
+			failures,
+			"Notification delivery failed: " +
+				failures
+					.map((error) =>
+						error instanceof Error ? error.message : String(error),
+					)
+					.join("; "),
 		);
 	}
 }
@@ -1235,6 +1420,8 @@ export async function createNotificationForUsers(
 		if (prior !== null) return { created: false, eventId: prior };
 	}
 
+	metadata.delivery_request = await snapshotNotificationDelivery(params);
+
 	let eventId: number;
 	try {
 		eventId = (await sql.begin(async (tx) => {
@@ -1267,6 +1454,16 @@ export async function createNotificationForUsers(
       FROM unnest(${pgTextArray(userIds)}::text[]) AS u(uid)
       ON CONFLICT DO NOTHING
     `;
+      await enqueueTasksInTransaction(tx, [{
+        name: NOTIFICATION_DELIVERY_TASK,
+        payload: { organizationId: params.organizationId, eventId: event.id },
+        opts: {
+          idempotencyKey: `${NOTIFICATION_DELIVERY_TASK}:${event.id}`,
+          organizationId: params.organizationId,
+          automationId: params.automationId ?? undefined,
+          parentRunId: params.runId ?? undefined,
+        },
+      }]);
 			return event.id;
 		})) as number;
 	} catch (error) {
@@ -1286,15 +1483,6 @@ export async function createNotificationForUsers(
 		throw error;
 	}
 
-	// Deliver to bot connections (fire-and-forget). The bot delivery targets
-	// the org's connection default channels and is identical for every user in
-	// this call, so fan it out once — not once per user.
-	deliverToBotConnections(params, eventId).catch((err) =>
-		logger.warn(
-			{ err },
-			"[Notifications] Failed to deliver to bot connections",
-		),
-	);
 	return { created: true, eventId };
 }
 

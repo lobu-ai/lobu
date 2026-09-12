@@ -137,7 +137,7 @@ describe("approval-event atomicity (item 16)", () => {
 
 	it("happy path: run + approval event committed atomically and event is readable by run id", async () => {
 		const sql = getTestDb();
-		const before = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId}`;
+		const before = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND connector_key = ${CONNECTOR}`;
 
 		const result = (await manageOperations(
 			{ action: "execute", connection_id: connectionId, operation_key: "needs_approval", input: {} },
@@ -178,13 +178,13 @@ describe("approval-event atomicity (item 16)", () => {
 			initiator: { kind: "user", user_id: userId },
 		});
 
-		const after = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId}`;
+		const after = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND connector_key = ${CONNECTOR}`;
 		expect(after[0].n).toBe(before[0].n + 1);
 	});
 
 	it("event write failure rolls back the run — no orphaned pending run, no event", async () => {
 		const sql = getTestDb();
-		const before = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId}`;
+		const before = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND connector_key = ${CONNECTOR}`;
 		const eventsBefore = await sql`
 			SELECT count(*)::int AS n FROM events
 			WHERE organization_id = ${orgId}
@@ -202,7 +202,7 @@ describe("approval-event atomicity (item 16)", () => {
 		).rejects.toThrow(/approval-event write failure/);
 
 		// The run INSERT shared the rolled-back transaction: no new run row.
-		const after = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId}`;
+		const after = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${orgId} AND connector_key = ${CONNECTOR}`;
 		expect(after[0].n).toBe(before[0].n);
 
 		// And NO new approval event was written (the failed insert rolled back with

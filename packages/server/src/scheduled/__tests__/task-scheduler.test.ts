@@ -28,6 +28,8 @@ import {
 import {
   AUTOMATION_REACTION_TASK,
   AUTOMATION_REACTION_TASK_QUEUE,
+  NOTIFICATION_DELIVERY_TASK,
+  NOTIFICATION_DELIVERY_TASK_QUEUE,
 } from "../task-definitions";
 
 interface SentRecord {
@@ -192,19 +194,22 @@ describe("TaskScheduler.start (cron seeding)", () => {
     expect(queue.sent).toHaveLength(1);
   });
 
-  test("registers the Automation reaction lane only when its handler exists", async () => {
+  test.each([
+    [AUTOMATION_REACTION_TASK, AUTOMATION_REACTION_TASK_QUEUE],
+    [NOTIFICATION_DELIVERY_TASK, NOTIFICATION_DELIVERY_TASK_QUEUE],
+  ])("registers the %s lane only when its handler exists", async (taskName, queueName) => {
     const withoutReactionQueue = new FakeQueue();
     await new TaskScheduler(withoutReactionQueue).start();
     expect(
-      withoutReactionQueue.workers.has(AUTOMATION_REACTION_TASK_QUEUE),
+      withoutReactionQueue.workers.has(queueName),
     ).toBe(false);
 
     const withReactionQueue = new FakeQueue();
     const scheduler = new TaskScheduler(withReactionQueue);
-    scheduler.register(AUTOMATION_REACTION_TASK, async () => {});
+    scheduler.register(taskName, async () => {});
     await scheduler.start();
 
-    expect(withReactionQueue.workers.has(AUTOMATION_REACTION_TASK_QUEUE)).toBe(
+    expect(withReactionQueue.workers.has(queueName)).toBe(
       true,
     );
   });
