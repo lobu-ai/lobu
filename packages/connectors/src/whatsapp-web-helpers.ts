@@ -7,15 +7,15 @@
  * `whatsapp-web-adapter.js` and is injected into the page. Everything here runs
  * in the connector-worker.
  *
- * Semantics are preserved verbatim so the new connector's event stream is
- * byte-comparable with the extension-native feed it replaces. The one shape
- * change is the tail: the extension produced a device "feed item"; this
- * produces a `EventEnvelope` for the connector SDK.
+ * Message normalization stays byte-comparable with the extension-native feed
+ * it replaces. The connector emits an `EventEnvelope` instead of a device feed
+ * item, and its checkpoint also carries acknowledgments for the generic source
+ * observation buffer.
  */
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-export const WHATSAPP_ADAPTER_VERSION = 11;
+export const WHATSAPP_ADAPTER_VERSION = 14;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_SOURCE = "whatsapp_web";
 const RECENT_OVERLAP_SECONDS = 15 * 60;
@@ -106,6 +106,12 @@ export interface BrowserCheckpoint {
   dirty?: DirtyMarker[];
   diagnostics?: Record<string, unknown>;
   last_run_at?: string;
+  /** Exact buffered revisions included in the last successful sync. */
+  source_ack?: {
+    binding_id: string;
+    epoch: string;
+    records: Array<{ id: string; revision: number }>;
+  };
 }
 
 export interface DirtyMarker {
@@ -392,10 +398,8 @@ export function normalizeRelayedMessage(
 }
 
 /**
- * Merge the freshly collected model with any durable rows. The extension fed
- * its IndexedDB outbox in here; the connector has no background observer, so
- * `durable` is empty in the live path and non-empty only in tests. The ordering
- * contract is unchanged: the freshly reconciled WhatsApp model is authoritative
+ * Merge the freshly collected model with durable source observations. The
+ * ordering contract is unchanged: the freshly reconciled model is authoritative
  * and a durable row may never replace current state.
  */
 export function mergeCollectedMessages(

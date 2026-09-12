@@ -56,6 +56,7 @@ import {
   materializeDueFeeds,
 } from '../scheduled/check-due-feeds';
 import { reconcileDeviceCapabilities } from './device-reconcile';
+import { sourceFeedContextForRun, receiveFeedNotifications } from '../runs/feed-notifications';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCode } from '../utils/ensure-connector-installed';
 import { resolveDeviceClaimableOrgs } from '../utils/device-claimable-orgs';
@@ -287,6 +288,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let backendCapacityProvided = false;
   let connectorManifestsProvided = false;
   let connectorManifestsRaw: unknown;
+  let feedNotifications: NonNullable<PollRequest['feed_notifications']> = [];
   // Agent CLIs this device can spawn. `null` is NOT the same as `[]`: null means
   // the client never told us (today that is every client except the
   // connector-worker daemon — the Mac app, the Chrome bridge, older daemons)
@@ -317,6 +319,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     backendCapacityProvided = Object.hasOwn(body, 'backend_capacity');
     connectorManifestsProvided = Object.hasOwn(body, 'connector_manifests');
     connectorManifestsRaw = body.connector_manifests;
+    feedNotifications = body.feed_notifications ?? [];
     agentKinds = normalizeAgentKinds(body.agent_kinds);
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
@@ -685,9 +688,17 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     worker_kind: workerKind,
     platform: platformLabel,
   });
+  // Receiving source activity is independent of the device's run capacity.
+  // This also renews/revokes idle source bindings without opening a new API.
+  const feedReceiptMetadata = feedNotifications.length > 0
+    ? { feed_notification_receipts: isUserScopedWorker && deviceWorkerId
+        ? await receiveFeedNotifications(sql, feedNotifications, deviceWorkerId, orgScopeIds)
+        : feedNotifications.map((notice) => ({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, active: false })) }
+    : {};
   if (capacityAvailable === 0) {
     return c.json({
       next_poll_seconds: 10,
+      ...feedReceiptMetadata,
       ...(effectivePlatform === 'chrome-extension' ? { page_activations: [] } : {}),
     });
   }
@@ -698,6 +709,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     // worker stopped polling" must not look identical on the metric.
     return c.json({
       next_poll_seconds: 30,
+      ...feedReceiptMetadata,
       ...(effectivePlatform === 'chrome-extension' ? { page_activations: [] } : {}),
     });
   }
@@ -730,8 +742,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         effectivePlatform === 'chrome-extension'
         ? []
         : undefined;
-  const pollMetadata =
-    pageActivations === undefined ? {} : { page_activations: pageActivations };
+  const pollMetadata = {
+    ...feedReceiptMetadata,
+    ...(pageActivations === undefined ? {} : { page_activations: pageActivations }),
+  };
 
   const claimNextPendingRun = async () =>
     sql.begin(async (tx) => {
@@ -1938,6 +1952,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       )
     : selectedActionInput;
 
+  const sourceFeedContext = row.run_type === 'action' && row.parent_run_id != null
+    ? await sourceFeedContextForRun(sql, row.parent_run_id, deviceWorkerId, row.organization_id)
+    : undefined;
+
   return c.json({
     ...pollMetadata,
     run_id: row.run_id,
@@ -1978,6 +1996,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     // Mac/iOS bridge decodes `operation_key`; chrome uses `action_key` directly.
     operation_key: row.action_key ?? undefined,
     action_input: actionInput,
+    feed_context: sourceFeedContext,
     auth_profile_id: deliverConnectionAuth ? (row.run_auth_profile_id ?? undefined) : undefined,
     previous_credentials: previousCredentials,
   });

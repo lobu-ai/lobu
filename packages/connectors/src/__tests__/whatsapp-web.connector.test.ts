@@ -1,18 +1,11 @@
 /**
  * Parity suite for the WhatsApp Web connector.
  *
- * The assertions here are ported from the Owletto extension's
- * `whatsapp-web.test.js` — the same fixtures and the same expected values —
- * because the bar for deleting the extension-native connector is that this one
- * produces the same events from the same inputs. Where a test named a mechanism
- * that did not survive the move (the IndexedDB outbox, the activation gate, the
- * `chrome.scripting` injection path), the equivalent is asserted against what
- * replaced it: the feed checkpoint and the generic `evaluate` op.
- *
- * The tests the extension owned that have NO equivalent here — the live
- * observer relay and the per-run action ledger — are called out in the
- * connector's header. They are not silently dropped assertions; there is no
- * generic op to carry them.
+ * The event-shape assertions are ported from the Owletto extension's
+ * `whatsapp-web.test.js` with the same fixtures and expected values. The newer
+ * source-observation cases cover the generic feed buffer and checkpoint that
+ * replace the native connector's IndexedDB outbox, while page calls continue
+ * through the generic `evaluate` operation.
  */
 
 import { readFileSync } from "node:fs";
@@ -81,6 +74,7 @@ function makeDispatcher(
     async (action: string, input: Record<string, unknown>) => {
       calls.push({ action, input });
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
+      if (action === "feed_listen") return typeof responses.feed_listen === "function" ? responses.feed_listen(input) : responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [] };
       if (action !== "evaluate") return {};
       const expression = String(input.expression ?? "");
       if (expression.includes("location.reload()")) {
@@ -107,7 +101,7 @@ function makeDispatcher(
           },
         };
       }
-      const entry = responses[request.op];
+      const entry = responses[request.op] ?? (request.op === "listen" ? { ok: true } : undefined);
       // Await a function entry: a response may be a promise the test resolves
       // later, which is how a slow device answer is modelled.
       const value =
@@ -504,7 +498,7 @@ describe("sync over the generic chrome bridge", () => {
       url: "https://web.whatsapp.com/",
       persistent: true,
     });
-    expect(adapterOps.slice(0, 2)).toEqual(["probe", "collect"]);
+    expect(adapterOps.slice(0, 3)).toEqual(["probe", "listen", "collect"]);
     expect(result.events.map((event) => event.origin_id)).toEqual(["plain"]);
   });
 
@@ -674,6 +668,15 @@ describe("sync over the generic chrome bridge", () => {
     let probed = false;
     const dispatch = mock(async (action: string, input: Record<string, unknown>) => {
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
+      if (action === "feed_listen") {
+        return {
+          bridge_id: "synthetic-feed",
+          binding_id: "synthetic-feed",
+          epoch: "synthetic-epoch",
+          token: "synthetic-token",
+          records: [],
+        };
+      }
       if (action !== "evaluate") return {};
       const expression = String(input.expression ?? "");
       if (expression.includes("a.version ===")) return { value: true };
@@ -696,7 +699,7 @@ describe("sync over the generic chrome bridge", () => {
     const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
     await expect(
       messagesFeed().sync(syncCtx(null, dispatcher))
-    ).rejects.toThrow(/^(?!\[lobu:dependency_unavailable)/);
+    ).rejects.toThrow(/^evaluation timed out$/);
     expect(probed).toBe(true);
   });
 
@@ -790,8 +793,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for readiness semantics", () => {
-    expect(connector.definition.version).toBe("1.0.2");
+  it("bumps the WhatsApp connector version for page observation semantics", () => {
+    expect(connector.definition.version).toBe("1.0.4");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -1330,5 +1333,86 @@ describe("quarantined messages", () => {
     const first = await run(initializeBrowserCheckpoint({}));
     const second = await run(first.checkpoint as BrowserCheckpoint);
     expect((second.checkpoint as { dirty?: unknown[] }).dirty).toHaveLength(1);
+  });
+});
+
+describe("buffered source records use normal feed ingestion", () => {
+  const observation = (records: Array<{ revision: number; payload: Record<string, unknown> }>, extra = {}) => ({
+    bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records, ...extra,
+  });
+
+  it("treats a missing extension capability as a dependency while retaining real listener failures", async () => {
+    const missing = makeDispatcher({ probe: READY, feed_listen: () => {
+      throw new Error("Owletto for Chrome: unknown dispatch (connector='chrome', action_key='feed_listen').");
+    } });
+    await expect(messagesFeed().sync(syncCtx(null, missing.dispatcher))).rejects.toThrow(
+      /^\[lobu:dependency_unavailable:browser_extension_update_required\]/
+    );
+    const broken = makeDispatcher({
+      probe: READY,
+      feed_listen: () => {
+        throw new Error("Feed listener could not bind its page document");
+      },
+    });
+    await expect(
+      messagesFeed().sync(syncCtx(null, broken.dispatcher))
+    ).rejects.toThrow("Feed listener could not bind its page document");
+  });
+
+  it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    const { dispatcher } = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
+      collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
+    });
+    const result = await messagesFeed().sync(syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
+    expect(result.events.map((event) => event.origin_id)).toEqual(["live-a"]);
+    const next = result.checkpoint as BrowserCheckpoint;
+    expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
+    expect(next.backfill).toEqual(checkpoint.backfill);
+    expect(next.head).toEqual(checkpoint.head);
+  });
+
+  it("uses the current source model for buffered identity and lets dry runs inspect without installing an observer", async () => {
+    const { dispatcher, adapterOps } = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([{ revision: 7, payload: message("same", { body: "old" }) }], { listening: false }),
+      collect: collectResponse([message("same", { body: "edited" })]),
+    });
+    const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].payload_text).toBe("edited");
+    expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([{ id: "same", revision: 7 }]);
+    expect(adapterOps).not.toContain("listen");
+  });
+
+  it("surfaces a page error until a successful listener rebind proves recovery", async () => {
+    const sourceError = {
+      revision: 9,
+      payload: {
+        id: "whatsapp-web:source-observation-error",
+        source_error: "WhatsApp source observation failed; recovery is required",
+      },
+    };
+    const preview = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([sourceError], { listening: false }),
+      collect: collectResponse([]),
+    });
+    await expect(messagesFeed().sync(syncCtx(null, preview.dispatcher))).rejects.toThrow(
+      "WhatsApp source observation failed; recovery is required"
+    );
+
+    const recovered = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([sourceError]),
+      collect: collectResponse([]),
+    });
+    const result = await messagesFeed().sync(syncCtx(null, recovered.dispatcher));
+    expect(result.events).toEqual([]);
+    expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([
+      { id: "whatsapp-web:source-observation-error", revision: 9 },
+    ]);
   });
 });

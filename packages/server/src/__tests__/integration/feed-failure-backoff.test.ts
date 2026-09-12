@@ -157,6 +157,26 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     await cleanupTestDatabase();
   });
 
+  it('preserves a notification received after a sync was enqueued', async () => {
+    const org = await createTestOrganization();
+    const connId = await insertConnection(org.id);
+    const feedId = await insertFeed(org.id, connId, 0);
+    const runId = await insertRunningRun(org.id, connId, feedId);
+    const sql = getTestDb();
+    // Enqueue consumes the old due time; a notification arriving after the
+    // source snapshot requests another sync even while this one is running.
+    await sql`UPDATE feeds SET next_run_at = current_timestamp WHERE id = ${feedId}`;
+    const { ctx, result } = mockWorkerCtx({
+      worker_id: WORKER_ID, run_id: runId, status: 'success', items_collected: 0,
+    });
+    await completeWorkerJob(ctx);
+    expect(result().status).toBe(200);
+    const [feed] = await sql`
+      SELECT next_run_at <= current_timestamp AS due FROM feeds WHERE id = ${feedId}
+    `;
+    expect(feed.due).toBe(true);
+  });
+
   it('does not charge a temporarily unavailable browser dependency to source-health failures', async () => {
     const org = await createTestOrganization();
     const connId = await insertConnection(org.id);
