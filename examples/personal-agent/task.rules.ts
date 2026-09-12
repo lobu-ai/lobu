@@ -3,6 +3,12 @@ import type { EntityWriteRule } from "@lobu/cli/config";
 // A stale extraction or reply cannot silently undo a completed/dismissed task.
 // The existing review path still lets a human explicitly reopen it.
 const taskRules: EntityWriteRule = (row) => {
+  if (
+    ["done", "dismissed"].includes(String(row.next.status)) &&
+    row.next.agent_help != null
+  ) {
+    row.deny("Clear agent_help when closing a task.");
+  }
   if (!["done", "dismissed"].includes(String(row.committed.status))) return;
   const guardedFields: string[] = [];
   if (

@@ -341,6 +341,29 @@ describe("personal task lifecycle through persistent runtime", () => {
     expect((await h.entities())[0].metadata.status).toBe("done");
   });
 
+  it.each([
+    "done",
+    "dismissed",
+  ])("rejects closing a task as %s while retaining agent help", async (status) => {
+    const h = await setup();
+    await h.react(await h.complete([task]));
+    const [saved] = await h.entities();
+    await expect(
+      h.workspace.owner.entities.update({
+        entity_id: Number(saved.id),
+        metadata: { status },
+      })
+    ).rejects.toThrow("Clear agent_help when closing a task");
+    expect((await h.entities())[0].metadata).toMatchObject(task);
+    expect(await h.notices()).toHaveLength(1);
+    await h.workspace.owner.entities.update({
+      entity_id: Number(saved.id),
+      metadata: { status, agent_help: null },
+    });
+    expect((await h.entities())[0].metadata.status).toBe(status);
+    expect((await h.entities())[0].metadata.agent_help).toBeNull();
+  });
+
   it("recovers a provider failure without losing or duplicating the committed notice", async () => {
     const h = await setup();
     await h.react(await h.complete([task]));
