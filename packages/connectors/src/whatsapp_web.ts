@@ -1,42 +1,12 @@
 /**
- * WhatsApp Web connector.
+ * WhatsApp owns its page adapter, normalization, and collection checkpoints.
+ * The paired browser provides generic evaluate and feed_listen operations;
+ * its durable record buffer wakes the existing feed sync through worker poll.
+ * Successful sync checkpoints acknowledge exact buffered revisions. Ordinary
+ * collection still supplies history and reconciles the page's current state.
  *
- * Replaces the extension-native `whatsapp.local` connector. What it does is
- * the same and the event stream is byte-comparable; what changes is WHERE the
- * code lives. Previously ~6,000 lines of WhatsApp-specific logic shipped inside
- * the Owletto Chrome extension and rode a bespoke `browser.whatsapp` capability
- * plus a `LEGACY_NATIVE_CHROME_EXTENSION_CONNECTORS` branch through seven
- * server files. Now the extension is a frozen generic substrate: this connector
- * ships its own code, pins to a `chrome-extension` device, and drives the page
- * through the generic `navigate` / `evaluate` ops every other browser connector
- * already uses (LinkedIn, Revolut, Midas, Hacker News).
- *
- * Three files make up the port:
- *   • `whatsapp-web-adapter.js`  — the MAIN-world adapter, injected verbatim
- *     into the page via `Function.prototype.toString()`. It alone touches
- *     WhatsApp's private module graph.
- *   • `whatsapp-web-helpers.ts`  — the transport-neutral normalise/checkpoint
- *     layer that used to run in the extension service worker.
- *   • this file                  — tab management, the RPC bridge, the sync
- *     loop, and the six actions.
- *
- * Auth is implicit, exactly as it was: the user is signed into WhatsApp Web in
- * the paired Chrome. The QR lives on web.whatsapp.com itself, so there is no
- * artifact to relay — and `AuthContext` carries no chrome dispatcher, so an
- * `authenticate()` run could not read the page even if we wanted to. A
- * logged-out page surfaces as a readiness failure naming the exact remedy.
- *
- * Two pieces of the extension implementation are deliberately NOT ported,
- * because the generic op catalog has no primitive for them:
- *   • the live observer + IndexedDB outbox. There is no push channel from a
- *     page to a connector run, so liveness is per-sync `collect` against the
- *     tab's hot in-memory model rather than a background relay. The persistent
- *     agent window keeps that model hydrated between runs.
- *   • the per-run action ledger. `ActionContext` exposes no durable store, so
- *     an interrupted write is not fenced by a connector-side ledger; the four
- *     irreversible actions stay `requiresApproval: true` as they were.
- * Everything else — backfill cursors, dirty-marker reconciliation, and media
- * retry state — moved from IndexedDB into the feed checkpoint.
+ * Auth stays in the user's signed-in WhatsApp Web tab. Message writes retain
+ * their existing approval requirements and have no connector-side action ledger.
  */
 
 import {
@@ -654,7 +624,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.2",
+    version: "1.0.3",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -665,6 +635,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     feeds: {
       messages: {
         sync: (ctx) => this.syncMessages(ctx),
+        webhook: { events: ["message"], mode: "trigger" },
         key: "messages",
         name: "Messages",
         description:
@@ -1005,9 +976,31 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       config: ctx.config as Record<string, unknown>,
     });
 
-    // Dirty markers and media retries used to live in the extension's
-    // IndexedDB. They ride the feed checkpoint now — the only durable store a
-    // connector run has.
+    const observed = await dispatcher.dispatch<{
+      bridge_id: string;
+      binding_id: string;
+      epoch: string;
+      token: string;
+      listening?: boolean;
+      records: Array<{ revision: number; payload: Record<string, unknown> }>;
+    }>("feed_listen", { tab_id: tabId }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("Owletto for Chrome: unknown dispatch") && message.includes("action_key='feed_listen'")) {
+        throw new Error("[lobu:dependency_unavailable:browser_extension_update_required] Update the paired Owletto extension to support connector feed listeners");
+      }
+      throw error;
+    });
+    if (!observed.bridge_id || !Array.isArray(observed.records)) {
+      throw new Error("The paired browser must support connector feed listeners; update the Owletto extension");
+    }
+    if (observed.listening !== false) await invokeAdapter(dispatcher, tabId, {
+      op: "listen", bridge_id: observed.bridge_id, token: observed.token,
+      chat_filter: request.chat_filter,
+      minimum_timestamp: request.minimum_timestamp,
+      recent_since: request.recent_since ?? Math.floor(Date.now() / 1000) - 15 * 60,
+    });
+
+    // Recovery ranges and media retries remain in the normal feed checkpoint.
     const dirtyBefore = checkpoint.dirty ?? [];
     const dirtyBatch = dirtyBefore.slice(0, MAX_DIRTY_MARKERS_PERSISTED);
     request.dirty_ranges = dirtyBatch.map((marker) => ({
@@ -1028,11 +1021,18 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     const historyMessages = (result.history_pages ?? []).flatMap(
       (page) => page.messages ?? []
     );
+    const inScope = (row: Record<string, unknown>) =>
+      (request.chat_filter !== "group" || row.is_group === true) &&
+      (request.chat_filter !== "individual" || row.is_group !== true) &&
+      (request.minimum_timestamp == null || Number(row.timestamp) >= request.minimum_timestamp);
+    const buffered = observed.records.filter((row) => inScope(row.payload));
+    const bufferedIds = new Set(buffered.map((row) => row.payload.id));
     const messages = mergeCollectedMessages(
       [...(result.messages ?? []), ...historyMessages],
-      [],
+      buffered.map((row) => row.payload),
       request.minimum_timestamp
-    ).slice(0, request.max_messages);
+    ).sort((a, b) => Number(bufferedIds.has(b.id)) - Number(bufferedIds.has(a.id)) || a.timestamp - b.timestamp || a.id.localeCompare(b.id))
+      .slice(0, request.max_messages);
 
     const emittedIds = new Set(messages.map((message) => message.id));
     const reconciledKeys = new Set(
@@ -1059,6 +1059,22 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       result,
       messages
     );
+    // A live burst can consume this run's budget. Retain collection cursors
+    // when any collected row was deferred, so backfill cannot skip that page.
+    const deferredCollection = mergeCollectedMessages(
+      [...(result.messages ?? []), ...historyMessages], [], request.minimum_timestamp
+    ).some((row) => !emittedIds.has(row.id));
+    if (deferredCollection) {
+      nextCheckpoint.head = checkpoint.head;
+      nextCheckpoint.backfill = { ...checkpoint.backfill, complete: false };
+    }
+    nextCheckpoint.source_ack = {
+      binding_id: observed.binding_id,
+      epoch: observed.epoch,
+      records: observed.records
+        .filter((row) => emittedIds.has(String(row.payload.id)) || !inScope(row.payload))
+        .map((row) => ({ id: String(row.payload.id), revision: row.revision })),
+    };
 
     // Carry forward the markers this run did not reconcile, plus anything the
     // adapter newly quarantined.

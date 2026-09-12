@@ -35,6 +35,7 @@
  * Any replica can serve any delivery.
  */
 
+import { requestFeedSync } from '../../../runs/feed-notifications';
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { createLogger } from "@lobu/core";
@@ -575,10 +576,8 @@ async function markGithubFeedDue(params: {
 	feedKey: string;
 }): Promise<boolean> {
 	const { sql, connectorKey, install, repo, feedKey } = params;
-	const rows = await sql`
-		UPDATE feeds f
-		SET next_run_at = now(), updated_at = now()
-		FROM connections c
+	const rows = await requestFeedSync(sql, sql`
+		SELECT f.id FROM feeds f, connections c
 		WHERE f.connection_id = c.id
 		  AND c.organization_id = ${install.organizationId}
 		  AND c.connector_key = ${connectorKey}
@@ -590,8 +589,7 @@ async function markGithubFeedDue(params: {
 		  AND lower(f.config->>'repo_name') = lower(${repo.name})
 		  AND f.status = 'active'
 		  AND f.deleted_at IS NULL
-		RETURNING f.id
-	`;
+	`);
 	return rows.length > 0;
 }
 
@@ -610,10 +608,8 @@ async function markGithubFeedDueForConnection(params: {
 }): Promise<boolean> {
 	const { sql, connectorKey, connectionId, organizationId, repo, feedKey } =
 		params;
-	const rows = await sql`
-		UPDATE feeds f
-		SET next_run_at = now(), updated_at = now()
-		FROM connections c
+	const rows = await requestFeedSync(sql, sql`
+		SELECT f.id FROM feeds f, connections c
 		WHERE f.connection_id = c.id
 		  AND c.id = ${connectionId}
 		  AND c.organization_id = ${organizationId}
@@ -625,8 +621,7 @@ async function markGithubFeedDueForConnection(params: {
 		  AND lower(f.config->>'repo_name') = lower(${repo.name})
 		  AND f.status = 'active'
 		  AND f.deleted_at IS NULL
-		RETURNING f.id
-	`;
+	`);
 	return rows.length > 0;
 }
 

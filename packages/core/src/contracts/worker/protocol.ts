@@ -141,6 +141,14 @@ export function defaultBackendCapacity(): Record<string, number> {
 }
 
 /** `POST /api/workers/poll` request body. */
+export const FeedNotificationSchema = Type.Object({
+  feed_id: Type.Integer({ minimum: 1 }),
+  connection_id: Type.Integer({ minimum: 1 }),
+  feed_key: Type.String({ minLength: 1, maxLength: 200 }),
+  notification_id: Type.String({ minLength: 1, maxLength: 200 }),
+  changed: Type.Boolean(),
+});
+
 export const PollRequestSchema = Type.Object({
   worker_id: Type.String(),
   capabilities: Type.Optional(Type.Record(Type.String(), Type.Boolean())),
@@ -161,6 +169,10 @@ export const PollRequestSchema = Type.Object({
    */
   label: Type.Optional(Type.String()),
   connector_manifests: Type.Optional(Type.Unknown()),
+  /** Connector feed wake hints. Records still travel through normal sync. */
+  feed_notifications: Type.Optional(
+    Type.Array(FeedNotificationSchema, { maxItems: 64 })
+  ),
   /**
    * Agent kinds this device can run for Automations (e.g. `["claude-code"]`).
    * Advertised by the connector-worker daemon, derived from the binaries
@@ -644,9 +656,46 @@ export const AgentTurnPollPayloadSchema = Type.Object({
   }),
 });
 
+/** Exact source revisions accepted by a successful connector sync. */
+export const FeedSourceAckSchema = Type.Object({
+  binding_id: Type.String({ minLength: 1, maxLength: 200 }),
+  epoch: Type.String({ minLength: 1, maxLength: 200 }),
+  records: Type.Array(
+    Type.Object({
+      id: Type.String({ minLength: 1, maxLength: 1024 }),
+      revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    }),
+    { maxItems: 1000 }
+  ),
+});
+export type FeedSourceAck = Static<typeof FeedSourceAckSchema>;
+
 /** `POST /api/workers/poll` response body (a claimed run, or a poll-again). */
 export const PollResponseSchema = Type.Object({
   next_poll_seconds: Type.Optional(Type.Number()),
+  feed_notification_receipts: Type.Optional(
+    Type.Array(
+      Type.Object({
+        feed_id: Type.Integer(),
+        connection_id: Type.Integer(),
+        feed_key: Type.String(),
+        notification_id: Type.String(),
+        active: Type.Boolean(),
+        ack: Type.Optional(Type.Union([FeedSourceAckSchema, Type.Null()])),
+      })
+    )
+  ),
+  /** Server-derived parent sync authority; never taken from action input. */
+  feed_context: Type.Optional(
+    Type.Object({
+      dry_run: Type.Boolean(),
+      connection_id: Type.Integer(),
+      feed_id: Type.Integer(),
+      feed_key: Type.String(),
+      device_worker_id: Type.String(),
+      ack: Type.Union([FeedSourceAckSchema, Type.Null()]),
+    })
+  ),
   page_activations: Type.Optional(
     Type.Array(
       Type.Object({

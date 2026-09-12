@@ -35,7 +35,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 11;
+  const ADAPTER_VERSION = 12;
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",
@@ -51,6 +51,103 @@ export function whatsAppWebAdapterProgram() {
   const existing = globalThis[GLOBAL_KEY];
   if (existing?.version === ADAPTER_VERSION) {
     return;
+  }
+  existing?.detach?.();
+  const listeners = new Map();
+
+  function detach(bindingId) {
+    const selected = bindingId ? [listeners.get(bindingId)] : [...listeners.values()];
+    for (const state of selected) {
+      if (!state) continue;
+      state.collection.off("add", state.onAdd);
+      state.collection.off("change", state.onChange);
+      window.removeEventListener("message", state.onReply);
+      listeners.delete(state.id);
+    }
+  }
+
+  function listen(request) {
+    const collection = requireFirst(["WAWebCollections"])?.Msg;
+    if (typeof collection?.on !== "function" || typeof collection?.off !== "function") {
+      throw new Error("WhatsApp message observation is unavailable in this build");
+    }
+    if (!request.bridge_id || !request.token) throw new Error("A feed bridge is required");
+    const previous = listeners.get(request.bridge_id);
+    if (previous?.error) {
+      // Keep the failure visible until revocation/recovery, and update the
+      // token so the current bridge can still detach this failed observer.
+      previous.token = request.token;
+      throw new Error(previous.error);
+    }
+    detach(request.bridge_id);
+    const state = previous ?? {
+      id: request.bridge_id, collection, sequence: 0,
+      pending: new Map(), fingerprints: new Map(),
+      pendingBytes: 0, fingerprintBytes: 0, error: null,
+    };
+    state.token = request.token;
+    state.request = request;
+    if (state.error) throw new Error(state.error);
+    const post = (entry) => window.postMessage({
+      type: "lobu-feed-record", token: state.token,
+      sequence: entry.sequence, record: entry.record,
+    }, location.origin);
+    const observe = (model, kind) => {
+      if (state.error) return;
+      const sequence = ++state.sequence;
+      void normalizeMessage(model, "reconcile").then((record) => {
+        if (listeners.get(state.id) !== state || !record || record.timestamp <= 0) return;
+        if (state.request.chat_filter === "group" && !record.is_group) return;
+        if (state.request.chat_filter === "individual" && record.is_group) return;
+        if (state.request.minimum_timestamp != null && record.timestamp < state.request.minimum_timestamp) return;
+        // Loading historical models also emits add. Changes to old messages
+        // still pass; they are exactly what the recent collection window misses.
+        if (kind === "add" && record.timestamp < state.request.recent_since) return;
+        const previous = state.pending.get(record.id);
+        const seen = state.fingerprints.get(record.id);
+        if (seen && seen.sequence >= sequence) return;
+        const fingerprint = JSON.stringify(record);
+        if (seen?.fingerprint === fingerprint) { seen.sequence = sequence; return; }
+        const bytes = new TextEncoder().encode(fingerprint).length;
+        if (bytes > 128 * 1024 || state.pendingBytes - (previous?.bytes ?? 0) + bytes > 16 * 1024 * 1024 ||
+          (state.pending.size >= 10_000 && !previous)) {
+          state.error = "WhatsApp page observation buffer overflowed; recovery is required";
+          return;
+        }
+        const entry = { sequence, record, bytes };
+        state.pendingBytes += bytes - (previous?.bytes ?? 0);
+        state.pending.set(record.id, entry);
+        state.fingerprintBytes += bytes - (seen?.bytes ?? 0);
+        state.fingerprints.delete(record.id);
+        state.fingerprints.set(record.id, { fingerprint, sequence, bytes });
+        while (state.fingerprints.size > 10_000 || state.fingerprintBytes > 16 * 1024 * 1024) {
+          const oldest = state.fingerprints.keys().next().value;
+          state.fingerprintBytes -= state.fingerprints.get(oldest).bytes;
+          state.fingerprints.delete(oldest);
+        }
+        post(entry);
+      }).catch(() => {
+        // A failing private source model remains recoverable through collect.
+        // Report it on the next sync rather than silently claiming full capture.
+        state.error = "WhatsApp source observation failed; recovery is required";
+      });
+    };
+    state.onAdd = (model) => observe(model, "add");
+    state.onChange = (model) => observe(model, "change");
+    state.onReply = (event) => {
+      if (event.source !== window || event.origin !== location.origin || event.data?.token !== state.token) return;
+      if (event.data.type === "lobu-feed-record:stop") { detach(state.id); return; }
+      if (event.data.type !== "lobu-feed-record:ack" || !event.data.ok) return;
+      for (const [id, entry] of state.pending) {
+        if (entry.sequence === event.data.sequence) { state.pendingBytes -= entry.bytes; state.pending.delete(id); break; }
+      }
+    };
+    listeners.set(state.id, state);
+    collection.on("add", state.onAdd);
+    collection.on("change", state.onChange);
+    window.addEventListener("message", state.onReply);
+    for (const entry of state.pending.values()) post(entry);
+    return { ok: true, listening: true };
   }
 
   function requireFirst(names) {
@@ -1610,6 +1707,7 @@ export function whatsAppWebAdapterProgram() {
           ? { ok: true, status, capabilities: operationCapabilities() }
           : { ok: false, error: status };
       }
+      if (request.op === "listen") return listen(request);
       const capabilities = operationCapabilities();
       if (capabilities[request.op] !== true) {
         return {
@@ -1650,5 +1748,5 @@ export function whatsAppWebAdapterProgram() {
     }
   }
 
-  globalThis[GLOBAL_KEY] = { version: ADAPTER_VERSION, invoke };
+  globalThis[GLOBAL_KEY] = { version: ADAPTER_VERSION, invoke, detach };
 }

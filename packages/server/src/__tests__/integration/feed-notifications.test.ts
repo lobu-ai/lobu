@@ -1,0 +1,108 @@
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createGithubWebhookDelivery, deliverGithubConnectorConnectionWebhook } from '../../gateway/routes/public/app-webhooks';
+import { receiveFeedNotifications, requestFeedSync, sourceFeedContextForRun } from '../../runs/feed-notifications';
+import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
+import { addUserToOrganization, createTestOrganization, createTestUser } from '../setup/test-fixtures';
+
+async function fixture() {
+  const sql = getTestDb();
+  const org = await createTestOrganization();
+  const user = await createTestUser();
+  await addUserToOrganization(user.id, org.id);
+  const [device] = await sql`
+    INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, last_seen_at)
+    VALUES (${user.id}, 'synthetic-source-worker', 'headless', ${sql.json([])}, ${org.id}, now()) RETURNING id
+  `;
+  const [connection] = await sql`
+    INSERT INTO connections (organization_id, connector_key, slug, status, device_worker_id, visibility)
+    VALUES (${org.id}, 'synthetic.source', 'source-notification-test', 'active', ${device.id}::uuid, 'org') RETURNING id
+  `;
+  await sql`
+    INSERT INTO connector_definitions (organization_id, key, name, version, status, feeds_schema, auth_schema)
+    VALUES (${org.id}, 'synthetic.source', 'Source', '1.0.0', 'active',
+      ${sql.json({ items: { operations: ['sync'], webhook: { mode: 'trigger', events: ['changed'] } } })}, ${sql.json({ methods: [] })})
+  `;
+  const feeds = await sql`
+    INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+    VALUES (${org.id}, ${connection.id}, 'items', 'active', '* * * * *', now() + interval '1 hour'),
+           (${org.id}, ${connection.id}, 'items', 'active', '* * * * *', now() + interval '1 hour') RETURNING id
+  `;
+  const notice = {
+    feed_id: Number(feeds[0].id), connection_id: Number(connection.id), feed_key: 'items',
+    notification_id: 'synthetic-notification', changed: true,
+  };
+  return { sql, org, device, connection, feeds, notice };
+}
+
+describe('source feed notifications', () => {
+  beforeEach(cleanupTestDatabase);
+
+  it('uses the shared trigger mutation and targets a feed instance, not all copies of its feed key', async () => {
+    const { sql, org, device, feeds, notice } = await fixture();
+    const receipts = await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect(receipts[0].active).toBe(true);
+    const rows = await sql`SELECT id, next_run_at <= now() AS due FROM feeds ORDER BY id`;
+    expect(rows.map((row) => row.due)).toEqual([true, false]);
+    await requestFeedSync(sql, sql`SELECT id FROM feeds WHERE id = ${feeds[1].id}`);
+    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feeds[1].id}`)[0].due).toBe(true);
+  });
+
+  it('rejects foreign organization, device, connection and inactive feed without moving schedules', async () => {
+    const { sql, org, device, notice } = await fixture();
+    const other = await createTestOrganization();
+    expect((await receiveFeedNotifications(sql, [notice], device.id, [other.id]))[0].active).toBe(false);
+    expect((await receiveFeedNotifications(sql, [notice], '00000000-0000-4000-8000-000000000099', [org.id]))[0].active).toBe(false);
+    expect((await receiveFeedNotifications(sql, [{ ...notice, connection_id: 999999 }], device.id, [org.id]))[0].active).toBe(false);
+    await sql`UPDATE feeds SET status = 'paused' WHERE id = ${notice.feed_id}`;
+    expect((await receiveFeedNotifications(sql, [notice], device.id, [org.id]))[0].active).toBe(false);
+    expect((await sql`SELECT next_run_at FROM feeds WHERE id = ${notice.feed_id}`)[0].next_run_at).toBeNull();
+  });
+
+  it('preserves failure backoff and delivers only saved checkpoint acknowledgments', async () => {
+    const { sql, org, device, notice } = await fixture();
+    const ack = { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-1', revision: 3 }] };
+    await sql`UPDATE feeds SET consecutive_failures = 2, checkpoint = ${sql.json({ source_ack: ack })} WHERE id = ${notice.feed_id}`;
+    const [receipt] = await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect(receipt.ack).toEqual(ack);
+    expect((await sql`SELECT next_run_at > now() + interval '50 minutes' AS backed_off FROM feeds WHERE id = ${notice.feed_id}`)[0].backed_off).toBe(true);
+    await sql`UPDATE feeds SET consecutive_failures = 0 WHERE id = ${notice.feed_id}`;
+    await receiveFeedNotifications(sql, [{ ...notice, changed: false }], device.id, [org.id]);
+    expect((await sql`SELECT next_run_at > now() AS future FROM feeds WHERE id = ${notice.feed_id}`)[0].future).toBe(true);
+  });
+
+  it('preserves both GitHub ingress selectors through the shared scheduling mutation', async () => {
+    const { sql, org, connection, feeds } = await fixture();
+    await sql`UPDATE connections SET config = ${sql.json({ installation_ref: 'synthetic-installation' })} WHERE id = ${connection.id}`;
+    await sql`UPDATE feeds SET config = ${sql.json({ repo_owner: 'synthetic-owner', repo_name: 'synthetic-repo' })} WHERE id = ${feeds[0].id}`;
+    const body = {
+      sql, rawBody: new TextEncoder().encode(JSON.stringify({ repository: { owner: { login: 'Synthetic-Owner' }, name: 'Synthetic-Repo' } })),
+      headers: new Headers({ 'x-github-event': 'changed' }),
+    };
+    const deliver = createGithubWebhookDelivery({ connectorKey: 'synthetic.source' });
+    expect(await deliver({ ...body, install: { id: 'wrong-installation', organizationId: org.id, externalTenantId: 'synthetic-tenant' } })).toEqual({ triggered: false });
+    expect(await deliver({ ...body, install: { id: 'synthetic-installation', organizationId: org.id, externalTenantId: 'synthetic-tenant' } })).toEqual({ triggered: true });
+    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds ORDER BY id`).map((row) => row.due)).toEqual([true, false]);
+    await sql`UPDATE feeds SET next_run_at = now() + interval '1 hour' WHERE id = ${feeds[0].id}`;
+    expect(await deliverGithubConnectorConnectionWebhook({ ...body, connectionId: Number(connection.id), organizationId: org.id, connectorKey: 'synthetic.source' })).toEqual({ triggered: true });
+    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds ORDER BY id`).map((row) => row.due)).toEqual([true, false]);
+    expect(await deliverGithubConnectorConnectionWebhook({ ...body, connectionId: 999999, organizationId: org.id, connectorKey: 'synthetic.source' })).toEqual({ triggered: false });
+  });
+
+  it('derives source authority only from an active parent sync and fences dry runs', async () => {
+    const { sql, org, device, connection, notice } = await fixture();
+    const [run] = await sql`
+      INSERT INTO runs (organization_id, run_type, feed_id, connection_id, status, claimed_by)
+      VALUES (${org.id}, 'sync', ${notice.feed_id}, ${connection.id}, 'running', 'synthetic-source-worker') RETURNING id
+    `;
+    const ctx = await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id);
+    expect(ctx).toMatchObject({ feed_id: notice.feed_id, connection_id: notice.connection_id, dry_run: false });
+    expect(await sourceFeedContextForRun(sql, null, device.id, org.id)).toBeUndefined();
+    await sql`UPDATE runs SET dry_run = true WHERE id = ${run.id}`;
+    await sql`UPDATE feeds SET status = 'paused' WHERE id = ${notice.feed_id}`;
+    expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toMatchObject({ dry_run: true, ack: null });
+    await sql`UPDATE runs SET dry_run = false WHERE id = ${run.id}`;
+    expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toBeUndefined();
+    await sql`UPDATE runs SET status = 'completed' WHERE id = ${run.id}`;
+    expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toBeUndefined();
+  });
+});
