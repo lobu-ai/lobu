@@ -160,6 +160,7 @@ describe("device worker poll body", () => {
       "os.shell": true,
       "os.files": true,
       "automations.execute": true,
+      feed_delivery: true,
     });
   });
 
@@ -192,6 +193,7 @@ describe("device worker poll body", () => {
     expect(calls[0].body.capabilities).toEqual({
       "os.files": true,
       "os.shell": false,
+      feed_delivery: true,
     });
   });
 });
