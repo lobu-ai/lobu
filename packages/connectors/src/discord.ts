@@ -2,11 +2,13 @@ import {
 	type ConnectorDefinition,
 	IntegrationConnector,
 } from "@lobu/connector-sdk";
+import { CHAT_AUTOMATION_EVENTS } from "./chat-automation-events.js";
 
 export default class DiscordConnector extends IntegrationConnector {
 	readonly definition: ConnectorDefinition = {
 		key: "discord",
 		kind: "integration",
+		automationEvents: CHAT_AUTOMATION_EVENTS,
 		name: "Discord",
 		description:
 			"Connect a Discord bot and route server conversations to Lobu agents.",
