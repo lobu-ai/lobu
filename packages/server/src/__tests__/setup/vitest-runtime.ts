@@ -7,7 +7,7 @@ export function assertNodeVitestRuntime(
   // Two triggers, both meaning "this run is not the supported one":
   //   versions.bun         — the vitest process itself is Bun (`bunx --bun
   //                          vitest`, `bun node_modules/.bin/vitest`), which
-  //                          does not honour `forks.singleFork`.
+  //                          does not honour the Node fork-pool contract.
   //   lifecycleEvent bunx  — `bunx vitest`. Today bunx honours vitest's
   //                          `#!/usr/bin/env node` shebang, so versions.bun is
   //                          NOT set and the check above misses it. That
@@ -17,7 +17,7 @@ export function assertNodeVitestRuntime(
   if (!versions.bun && lifecycleEvent !== 'bunx') return;
 
   throw new Error(
-    '@lobu/server Vitest must run under Node: integration files share one Postgres and require forks.singleFork.\n' +
+    '@lobu/server Vitest must run under Node: integration files share one Postgres and require a single fork worker.\n' +
       `Use: ${NODE_VITEST_COMMAND}`
   );
 }
