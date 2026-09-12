@@ -7,9 +7,12 @@ type Task = {
   slug: string;
   metadata: Record<string, unknown>;
 };
-type ChangeSet = {
-  metadata: { changes?: Array<{ entityId?: number; kind?: string }> };
+type TaskChange = {
+  entityId?: number;
+  kind?: string;
+  applied?: Record<string, { old: unknown; new: unknown }>;
 };
+type ChangeSet = { metadata: { changes?: TaskChange[] } };
 
 function proposal(value: unknown): Proposal | null {
   if (!value || typeof value !== "object") return null;
@@ -24,6 +27,13 @@ function proposal(value: unknown): Proposal | null {
 
 function sqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function noticeValue(field: string, value: unknown): string | null {
+  if (field === "agent_help") return JSON.stringify(proposal(value));
+  if (field === "due_date")
+    return value ? new Date(String(value)).toISOString() : null;
+  return value == null ? null : String(value);
 }
 
 // Outputs are proposals for writes. Check the run's committed change set, then
@@ -42,7 +52,7 @@ export default async function notifyTaskChanges(
     : [];
   if (changeSets.length > 1)
     throw new Error("Task Builder run has multiple change sets");
-  const taskChanges = new Map<number, string>();
+  const taskChanges = new Map<number, TaskChange>();
   for (const change of changeSets[0]?.metadata.changes ?? []) {
     if (
       typeof change.entityId === "number" &&
@@ -50,7 +60,7 @@ export default async function notifyTaskChanges(
       change.entityId > 0 &&
       (change.kind === "created" || change.kind === "updated")
     ) {
-      taskChanges.set(change.entityId, change.kind);
+      taskChanges.set(change.entityId, change);
     }
   }
   for (const value of changes) {
@@ -78,12 +88,13 @@ export default async function notifyTaskChanges(
     const task = rows[0];
     if (!task || ["done", "dismissed"].includes(String(task.metadata.status)))
       continue;
-    if (!taskChanges.has(task.id)) {
+    const committed = taskChanges.get(task.id);
+    if (!committed) {
       client.log(`Skipped unchanged or denied task ${task.id}`);
       continue;
     }
     const help = proposal(task.metadata.agent_help);
-    if (!help && taskChanges.get(task.id) !== "created") continue;
+    if (!help && committed.kind !== "created") continue;
     const proposed = proposal(candidate.agent_help);
     if (
       Object.hasOwn(candidate, "agent_help") &&
@@ -94,26 +105,61 @@ export default async function notifyTaskChanges(
       );
       continue;
     }
+    if (help && committed.kind === "updated") {
+      const relevant = ["agent_help", "priority", "due_date"].flatMap(
+        (field) => {
+          const change = committed.applied?.[field];
+          return change ? [{ field, change }] : [];
+        }
+      );
+      // Only applied changes can trigger an alert. Re-read state must still
+      // match this run, so a delayed reaction cannot revive a superseded offer.
+      if (
+        relevant.some(
+          ({ field, change }) =>
+            noticeValue(field, change.new) !==
+            noticeValue(field, task.metadata[field])
+        ) ||
+        !relevant.some(
+          ({ field, change }) =>
+            noticeValue(field, change.old) !== noticeValue(field, change.new)
+        )
+      )
+        continue;
+    }
     const action = String(task.metadata.action || task.name)
       .replace(/\s+/g, " ")
       .trim();
     const draft = `Review task #${task.id}: ${action}. Read its current status, source, rationale and agent_help before acting. If it is still unresolved, help with the saved proposal. Verify the evidence and available capabilities, prepare reviewable results, and ask for any missing decision or permission. Do not act on a closed task.`;
     const root = `/${encodeURIComponent(ctx.organization_slug)}`;
+    const priority = task.metadata.priority ?? null;
+    const due = task.metadata.due_date
+      ? new Date(String(task.metadata.due_date)).toISOString()
+      : null;
+    const urgency = [
+      priority ? `Priority: ${priority}` : null,
+      due ? `Due: ${due}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const noticeKey = help
+      ? `notice:v2:${committed.kind === "created" ? "created" : `run:${ctx.window.run_id}`}`
+      : "created:v1";
     await client.notifications.send({
       title: (help ? "Agent help available: " : "Task: ")
         .concat(action)
         .slice(0, 200),
       body: (help
-        ? `${help.summary}\n\nOpen to review the request and start an agent.`
+        ? `${help.summary}${urgency ? `\n\n${urgency}` : ""}\n\nOpen to review the request and start an agent.`
         : String(task.metadata.rationale || action)
       ).slice(0, 1000),
       recipients: "admins",
       resource_url: help
         ? `${root}/chat/personal-agent?new=1&prompt=${encodeURIComponent(draft)}`
         : `${root}/task/${encodeURIComponent(task.slug)}`,
-      // A first offer can follow an ordinary new-task notice. Retries and
-      // wording changes reuse each notice's key; withdrawing help sends none.
-      idempotency_key: `task-builder:task:${task.id}:${help ? "notice" : "created"}:v1`,
+      // Each relevant committed update has a retry-stable occurrence key.
+      // Returning to an earlier proposal or urgency still gets a fresh alert.
+      idempotency_key: `task-builder:task:${task.id}:${noticeKey}`,
     });
   }
   // Check deadlines even when this run did not create or update a task.
