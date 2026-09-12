@@ -12,7 +12,6 @@ Install into your org from this directory:
 lobu apply
 ```
 
-Shared browser helpers live in `@lobu/connector-sdk` (`runReviewScrape` behind the
-`@lobu/connector-sdk/browser` subpath; `validateUrlDomain` and the checkpoint pipeline on
-the root). Each file here is a site-specific
-connector only.
+Browser scrapers use the paired Chrome extension through the SDK's
+`extensionDomScrape` and `extensionNetworkSync` helpers. The standalone
+`@lobu/connector-sdk/browser` subpath has been retired.

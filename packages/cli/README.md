@@ -35,10 +35,13 @@ lobu runtime install --offline               # verify the installed cache
 a run: this command refuses a cold cache so downloading cannot consume the
 already-claimed run's lease.
 
-The unused `browserNetworkSync` SDK helper and its vanilla Playwright CDP
-attachment path have been removed. Connectors use `extensionNetworkSync`
-through the paired Chrome extension. Standalone browser launch helpers and
-raw CDP authentication utilities remain available in the browser SDK subpath.
+Browser tools use the paired Chrome extension through `extensionNetworkSync`
+and `extensionDomScrape`. The standalone browser SDK, external CDP endpoints,
+`lobu memory browser-auth`, and local `lobu connector run` have been removed.
+For connector tests, use the gateway's existing dry-run path with a configured
+feed: `lobu memory run manage_feeds '{"action":"trigger_feed","feed_id":123,"dry_run":true}'`.
+The run uses the feed's configured runtime, including its paired extension;
+inspect the preview with `manage_feeds` action `read_feed`.
 
 Lobu boots as a single Node process with embedded Postgres (including pgvector)
 by default. `lobu init` writes `DATABASE_URL=file://.`; `file://` values select

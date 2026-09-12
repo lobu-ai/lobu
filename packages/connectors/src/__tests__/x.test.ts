@@ -861,7 +861,7 @@ describe("XConnector definition", () => {
 		expect(def.feeds.home_feed.description).toMatch(/home timeline/i);
 		// Extension is the browser fallback method (no public API for the timeline).
 		const browserMethod = def.authSchema.methods.find(
-			(m: any) => m.type === "browser",
+			(m: any) => m.type === "none" && m.label === "Paired Chrome extension",
 		);
 		expect(browserMethod).toBeDefined();
 	});

@@ -80,7 +80,8 @@ export default defineConfig({
     // parallel means one file's `cleanupTestDatabase()` can wipe another file's
     // fixtures mid-run. Serialize files so fixtures stay stable.
     pool: "forks",
-    poolOptions: { forks: { singleFork: true } },
+    maxWorkers: 1,
+    fileParallelism: false,
     // CRITICAL for the shared DB singleton in db/client.ts: with vitest's
     // default `isolate: true`, each test file gets a fresh module registry —
     // so each one re-runs `let dbSingleton = null` and opens its own pool.

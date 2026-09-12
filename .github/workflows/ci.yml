@@ -629,7 +629,7 @@ jobs:
 
       - name: owletto tests (vitest)
         if: steps.submodule.outputs.stubbed != 'true'
-        run: cd packages/owletto && ../../node_modules/.bin/vitest run
+        run: cd packages/owletto && bun run test
 
       - name: SPA prod build (barrel ban + vite + bundle tripwire)
         # Same command docker/app uses. Fails on runtime `@lobu/core` barrel
@@ -829,7 +829,7 @@ jobs:
         # independently asserts zero failures — and a missing/unparseable
         # report (crashed run) also fails.
         run: |
-          node node_modules/.bin/vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json" \
+          bun run test -- run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json" \
             --shard=${{ matrix.shard }}/3 \
             --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage
           mv coverage/lcov.info coverage/vitest-shard-${{ matrix.shard }}.lcov.info

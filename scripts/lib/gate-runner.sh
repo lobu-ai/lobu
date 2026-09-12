@@ -104,7 +104,7 @@ gate_frontend() {
   gate_require_submodule || return 77
   (cd packages/core && bun run build) || return 1
   (cd packages/connector-sdk && bun run build) || return 1
-  (cd packages/owletto && ../../node_modules/.bin/vitest run) || return 1
+  (cd packages/owletto && bun run test) || return 1
   (cd packages/owletto && bun run build) || return 1
   if [ -x /usr/bin/google-chrome-stable ]; then
     (cd packages/owletto && bun run smoke:boot) || return 1
@@ -115,7 +115,7 @@ gate_frontend() {
 
 gate_server_integration_vitest() {
   gate_require_db || return 77
-  (cd packages/server && node ../../node_modules/.bin/vitest run --reporter=default) || return 1
+  (cd packages/server && bun run test -- run --reporter=default) || return 1
   GATE_RAN_VITEST=1
 }
 

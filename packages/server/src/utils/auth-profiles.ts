@@ -50,24 +50,20 @@ export interface AuthProfileRow {
   updated_at: string;
   device_worker_id: string | null;
   browser_kind: BrowserKind | null;
-  user_data_dir: string | null;
-  cdp_url: string | null;
   is_default_for_connector: boolean;
 }
 
 interface BrowserSessionSummary {
-  auth_mode: 'cdp' | 'cookies' | 'empty';
+  auth_mode: 'cookies' | 'empty';
   cookie_count: number;
   captured_at: string | null;
   auth_cookie_name: string | null;
   expires_at: string | null;
   is_expired: boolean;
-  cdp_url: string | null;
 }
 
 interface BrowserSessionReadiness extends BrowserSessionSummary {
   usable: boolean;
-  resolved_cdp_url: string | null;
 }
 
 // `auth-credential-secrets` imports `normalizeAuthValues` from this module and
@@ -151,10 +147,6 @@ export function summarizeBrowserSessionAuthData(
   connectorKey?: string | null
 ): BrowserSessionSummary {
   const cookies = Array.isArray(authData?.cookies) ? authData.cookies : [];
-  const cdpUrl =
-    typeof authData?.cdp_url === 'string' && authData.cdp_url.trim().length > 0
-      ? authData.cdp_url.trim()
-      : null;
   const authCookie = findLikelyBrowserAuthCookie(authData, connectorKey);
   const expiresAt =
     authCookie && typeof authCookie.expires === 'number' && authCookie.expires > 0
@@ -162,33 +154,13 @@ export function summarizeBrowserSessionAuthData(
       : null;
 
   return {
-    auth_mode: cdpUrl ? 'cdp' : cookies.length > 0 ? 'cookies' : 'empty',
+    auth_mode: cookies.length > 0 ? 'cookies' : 'empty',
     cookie_count: cookies.length,
     captured_at: typeof authData?.captured_at === 'string' ? authData.captured_at : null,
     auth_cookie_name: typeof authCookie?.name === 'string' ? authCookie.name : null,
     expires_at: expiresAt,
     is_expired: expiresAt ? new Date(expiresAt).getTime() < Date.now() : false,
-    cdp_url: cdpUrl,
   };
-}
-
-async function resolveReachableBrowserSessionCdpUrl(cdpUrl: string | null): Promise<string | null> {
-  const configuredUrl = cdpUrl?.trim();
-  if (!configuredUrl) return null;
-
-  try {
-    const { fetchCdpVersionInfo, resolveCdpUrl } = await import('@lobu/connector-sdk/browser/cdp');
-
-    if (configuredUrl.toLowerCase() === 'auto') {
-      return await resolveCdpUrl('auto');
-    }
-
-    const normalizedUrl = configuredUrl.replace(/\/+$/, '');
-    const info = await fetchCdpVersionInfo(normalizedUrl);
-    return info ? normalizedUrl : null;
-  } catch {
-    return null;
-  }
 }
 
 export async function getBrowserSessionReadiness(
@@ -196,19 +168,9 @@ export async function getBrowserSessionReadiness(
   connectorKey?: string | null
 ): Promise<BrowserSessionReadiness> {
   const summary = summarizeBrowserSessionAuthData(authData, connectorKey);
-  if (summary.cdp_url) {
-    const resolvedCdpUrl = await resolveReachableBrowserSessionCdpUrl(summary.cdp_url);
-    return {
-      ...summary,
-      usable: !!resolvedCdpUrl,
-      resolved_cdp_url: resolvedCdpUrl,
-    };
-  }
-
   return {
     ...summary,
     usable: summary.cookie_count > 0 && !!summary.auth_cookie_name && !summary.is_expired,
-    resolved_cdp_url: null,
   };
 }
 
@@ -269,7 +231,7 @@ const AUTH_PROFILE_COLUMNS = `
   id, organization_id, slug, display_name, connector_key,
   profile_kind, status, auth_data, account_id, provider,
   created_by, created_at, updated_at,
-  device_worker_id, browser_kind, user_data_dir, cdp_url,
+  device_worker_id, browser_kind,
   is_default_for_connector
 ` as const;
 
@@ -350,8 +312,6 @@ export async function createAuthProfile(params: {
   createdBy?: string | null;
   deviceWorkerId?: string | null;
   browserKind?: BrowserKind | null;
-  userDataDir?: string | null;
-  cdpUrl?: string | null;
 }, db: DbClient = getDb()): Promise<AuthProfileRow> {
   const sql = db;
   const normalizedProvider = params.provider ? params.provider.toLowerCase() : null;
@@ -383,9 +343,7 @@ export async function createAuthProfile(params: {
           provider,
           created_by,
           device_worker_id,
-          browser_kind,
-          user_data_dir,
-          cdp_url
+          browser_kind
         ) VALUES (
           ${params.organizationId},
           ${slug},
@@ -402,9 +360,7 @@ export async function createAuthProfile(params: {
           ${normalizedProvider},
           ${params.createdBy ?? null},
           ${params.deviceWorkerId ?? null},
-          ${params.browserKind ?? null},
-          ${params.userDataDir ?? null},
-          ${params.cdpUrl ?? null}
+          ${params.browserKind ?? null}
         )
         ON CONFLICT (organization_id, slug) DO NOTHING
         RETURNING ${sql.unsafe(AUTH_PROFILE_COLUMNS)}
@@ -644,12 +600,8 @@ export async function getPrimaryAuthProfileForKind(params: {
     return rows.length > 0 ? (rows[0] as AuthProfileRow) : null;
   }
 
-  // browser_session is device-scoped, not connector-scoped: any active profile
-  // on the connection's device can serve any connector run pinned to that
-  // device. One CDP attach holds cookies for every site in that Chrome; a
-  // managed user-data-dir can be authenticated against multiple sites by the
-  // user. Connector_key on the profile, when set, is just a legacy hint —
-  // never a gate.
+  // Cookie-backed sessions can be shared by connectors on the same device.
+  // Preserve the stored device scope when resolving an existing profile.
   if (params.profileKind === 'browser_session') {
     const deviceWorkerId = params.deviceWorkerId ?? null;
     const rows = await sql`

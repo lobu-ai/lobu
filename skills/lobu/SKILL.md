@@ -68,7 +68,7 @@ If the user wants the agent to know people in Slack, ask whether that means conv
 
 Change into the generated project directory and verify `pwd` contains the intended `lobu.config.ts`; never run project commands from its parent. Run `npx @lobu/cli@latest validate`, boot with `npx @lobu/cli@latest run`, and verify health and the local Web UI. With the embedded database default, `lobu run` creates and selects the local context and auto-applies the project; with an external `DATABASE_URL`, it does neither, so authenticate and apply to that runtime explicitly. Send a harmless direct chat message without tools.
 
-Before consent to access provider data, inspect only catalog, connection, auth-profile, and feed metadata. For a `browser_session` profile only, `npx @lobu/cli@latest connector run <key> --auth-profile <browser-session-profile-slug> --check` resolves the device-bound path without execution. Never use `connector run` as a generic managed OAuth or env-profile check; those durable credentials stay at the gateway. Do not run a feed or connector dry-run before consent, because a dry-run may still read provider data. Ask explicitly before accessing real provider data. Only after approval, dry-run the connector or feed server-side and trigger the selected feed manually if that connector actually declares one. A feed dry-run records its run but persists no collected events, entities, attachments, checkpoint changes, or feed sync state. Run each Automation once, poll `client.operations.getRun` with its returned `run_id`, and show each completed run plus any declared result event or entity. For a run-result-only or reaction-only Automation, use the completed run and the Automation `view_url` returned by Lobu. For Slack, treat DM, channel mention, App Home, and requested member discovery as four separate checks. Keep actions in approval mode unless the user explicitly approves execution. If any step fails, fix it and rerun that step; do not silently substitute a different path.
+Before consent to access provider data, inspect only catalog, connection, auth-profile, and feed metadata. For browser access, inspect the paired device and connection metadata without invoking browser actions. Durable managed OAuth and env-profile credentials stay at the gateway. Do not run a feed or connector dry-run before consent, because a dry-run may still read provider data. Ask explicitly before accessing real provider data. Only after approval, dry-run the connector or feed server-side and trigger the selected feed manually if that connector actually declares one. A feed dry-run records its run but persists no collected events, entities, attachments, checkpoint changes, or feed sync state. Run each Automation once, poll `client.operations.getRun` with its returned `run_id`, and show each completed run plus any declared result event or entity. For a run-result-only or reaction-only Automation, use the completed run and the Automation `view_url` returned by Lobu. For Slack, treat DM, channel mention, App Home, and requested member discovery as four separate checks. Keep actions in approval mode unless the user explicitly approves execution. If any step fails, fix it and rerun that step; do not silently substitute a different path.
 
 ### 6. Offer the deployment choice
 
@@ -82,7 +82,7 @@ After the local proof, ask the user whether to keep running locally or deploy to
 - Keep reusable capability bundles in `skills/<name>/SKILL.md` or `agents/<agent>/skills/<name>/SKILL.md`.
 - Use `lobu login` for CLI authentication. Do not use a separate memory login command.
 - Use `lobu connect` for MCP client and skill setup.
-- Use `lobu memory ...` for memory operations, seeding, direct tool calls, and browser-auth capture.
+- Use `lobu memory ...` for memory operations, seeding, and direct tool calls.
 
 Reference the canonical docs before guessing how a feature works:
 [Lobu concepts](https://github.com/lobu-ai/lobu/blob/main/docs/CONCEPTS.md)
@@ -200,14 +200,15 @@ Run `lobu connect --url <mcp-url>` without a client id to choose interactively. 
 
 ## Browser-Authenticated Connectors
 
-For connectors that need a real browser session, `browser-auth` launches a dedicated Chrome with remote debugging, stores its CDP endpoint on the auth profile, and the connector attaches over CDP at sync time (harvesting cookies live):
+For connectors that need a signed-in browser, pair the Owletto Chrome extension
+and sign in on the source site in that browser. Browser operations run through
+that paired device; external remote-debugging endpoints and CLI browser-auth
+capture are no longer supported.
 
-```bash
-lobu memory browser-auth --connector <key> --auth-profile-slug <slug>
-lobu memory browser-auth --connector <key> --auth-profile-slug <slug> --check
-```
-
-Use `--dedicated-profile` only when you want a non-default dedicated Chrome profile directory; use `--remote-debug-port` to customize the CDP port (default `9222`).
+To test a configured feed without writing ingested data, run `manage_feeds`
+action `trigger_feed` with `feed_id` and `dry_run: true`, then inspect
+`read_feed` for the completed run's preview. The dry run uses the normal device
+routing and authorization checks.
 
 ## Agent-Facing Tool Surface
 

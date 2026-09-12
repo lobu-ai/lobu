@@ -65,11 +65,6 @@ RUN mkdir -p packages/lobu-cli packages/browser-extension packages/mcpsandbox \
       done \
     && echo '{"name":"lobu","version":"0.0.0","private":true}' > packages/lobu-cli/package.json
 
-# The runtime uses playwright (npm:patchright). It must not download
-# browser binaries during dependency installation — the
-# runtime stage installs the single patchright Chromium this image uses.
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
 # Hoisted layout (npm-style flat node_modules) is required so the bundled
 # server.bundle.mjs (built below) can resolve transitive npm deps via Node's
 # resolver. Bun's default isolated linker uses .bun/<pkg>@<ver>/ paths that
@@ -182,7 +177,7 @@ ARG BUN_VERSION
 WORKDIR /app
 
 # curl for health checks, git/gh for GitHub connector agent tooling, bun for
-# tsx-equivalent, Chromium deps for connectors.
+# tsx-equivalent and native runtime dependencies.
 #
 # `gh` stays because the GitHub connector declares it (`nix: { packages: ['gh'] }`)
 # and a nix-less host still needs it on PATH. bubblewrap is gone: it existed to
@@ -190,9 +185,6 @@ WORKDIR /app
 # spawned binaries, and nothing probes for one now that turns run in-isolate.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git gh unzip socat \
-      libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 \
-      libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-      libgbm1 libpango-1.0-0 libcairo2 libasound2 libwayland-client0 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun

@@ -45,13 +45,6 @@ export {
   deleteDeviceWorker,
 } from './worker-api/device-management';
 
-// Device-scoped browser auth profiles (/api/workers/me/auth-profiles/*)
-export {
-  listMyDeviceAuthProfiles,
-  createMyDeviceAuthProfile,
-  deleteMyDeviceAuthProfile,
-} from './worker-api/device-auth-profiles';
-
 // Device-scoped feed CRUD (/api/workers/me/feeds/*)
 export {
   listMyDeviceFeeds,

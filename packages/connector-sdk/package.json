@@ -56,14 +56,6 @@
       "types": "./dist/egress-policy.d.ts",
       "import": "./dist/egress-policy.js"
     },
-    "./browser/cdp": {
-      "types": "./dist/browser/cdp.d.ts",
-      "import": "./dist/browser/cdp.js"
-    },
-    "./browser": {
-      "types": "./dist/browser/index.d.ts",
-      "import": "./dist/browser/index.js"
-    },
     "./sources": {
       "types": "./dist/sources/index.d.ts",
       "import": "./dist/sources/index.js"
@@ -90,18 +82,9 @@
     "ky": "^1.14.0",
     "tar": "^7.4.3"
   },
-  "peerDependencies": {
-    "playwright": "npm:patchright@^1.57.0"
-  },
-  "peerDependenciesMeta": {
-    "playwright": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/tar": "^6.1.13",
-    "playwright": "npm:patchright@^1.57.0",
     "typescript": "^5.3.3"
   },
   "engines": {

@@ -25,8 +25,7 @@ Root `AGENTS.md` holds the invariants and the workflow. This file holds the mech
 | `grep` finding nothing in a CI log you can read | CI triage |
 | `codex exec` / `pi -p` hanging at 0% CPU | Shell & CLI |
 | `unexpected EOF while looking for matching '` | Shell & CLI |
-| `Chromium binary not found at PLAYWRIGHT_BROWSERS_PATH` | Browser & connectors |
-| `Missing --auth-profile` | Browser & connectors |
+| Paired browser unavailable | Browser & connectors |
 | Browser automation hitting a login wall | Browser & connectors |
 | A connector action exists live but not under `packages/connectors` | Browser & connectors |
 | A device manifest edit never reaches `connector_definitions` | Browser & connectors |
@@ -123,15 +122,15 @@ Rollback to a pre-cutover binary must also be quiesced and deploy its matching U
 
 ## Browser & connectors
 
-**Chromium launch failures: read which of the two errors you got.** `packages/connector-sdk/src/browser/launcher.ts` distinguishes them — `Chromium binary not found at PLAYWRIGHT_BROWSERS_PATH=…` means a path mismatch, `Playwright not installed` means the package itself is unresolvable. Two things must hold to prevent the path/revision failure: `docker/worker/Dockerfile` and `docker/app/Dockerfile` set `ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` *before* install; and the install explicitly uses patchright's revision (`node node_modules/playwright/cli.js install chromium` in the worker image, `npx patchright install chromium` in the app image) rather than the vanilla `node_modules/.bin/playwright`. In-pod check:
-
-```sh
-PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node -e "const p=require('playwright').chromium.executablePath();console.log(p, require('fs').existsSync(p))"
-```
+**Browser operations use the paired extension.** Lobu no longer installs a
+standalone Chromium runtime or accepts external remote-debugging endpoints.
+Check the paired device's capabilities, connection pin and heartbeat when a
+browser operation cannot run. The extension owns its internal browser protocol
+connection; see `docs/BROWSER_TESTING.md`.
 
 **Connector success status in `runs` is `completed`, not `success`.** To re-trigger one feed: `UPDATE feeds SET next_run_at = now() WHERE id = <id>` — always with the `WHERE`, and against a dev database. Unscoped, it schedules every feed in the table at once.
 
-**To drive the user's real logged-in browser, use the paired Owletto extension**, not claude-in-chrome (that drives a different Chrome without their sessions) and not `lobu connector run` (local Playwright/CDP only — it errors with "Missing --auth-profile"). The recipe is in `docs/BROWSER_TESTING.md` under "Driving the paired Owletto extension"; it routes through `packages/server/src/worker-api/dispatch-chrome-action.ts`. Discover the `operations` namespace with `search_sdk operations`, then call it through `run_sdk`. A new server-side chrome action also needs a handler in the *installed* extension build, so check `git ls-tree origin/main packages/owletto`, never the working-tree submodule HEAD.
+**To drive the user's real logged-in browser, use the paired Owletto extension**, not claude-in-chrome (that drives a different Chrome without their sessions). The local CDP-based `lobu connector run` command has been retired. The recipe is in `docs/BROWSER_TESTING.md` under "Driving the paired Owletto extension"; it routes through `packages/server/src/worker-api/dispatch-chrome-action.ts`. Discover the `operations` namespace with `search_sdk operations`, then call it through `run_sdk`. A new server-side chrome action also needs a handler in the *installed* extension build, so check `git ls-tree origin/main packages/owletto`, never the working-tree submodule HEAD.
 
 **A connector capability can be DB-backed with no file under `packages/connectors`.** Check the active `connector_definitions` row and `operations.listAvailable({ connection_id })` before declaring an action absent. Organization-scoped code in `connector_versions` wins over the shared artifact for the active version. Catalog refresh skips keys with no bundled source, but re-syncs keys that do have bundled source and can reset their active definition to bundled metadata; inspect the active version after deploy. Connector source in `examples/` still requires `lobu apply` to update the organization copy.
 

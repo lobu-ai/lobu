@@ -42,10 +42,6 @@ import { globalCatalogRoutes, orgInstalledRoutes } from "./catalog/routes";
 import { connectionTokenRoutes } from "./connect/connection-token-route";
 import { setupRoutes } from "./connect/setup-routes";
 import { connectRoutes } from "./connect/routes";
-import {
-	restGetAuthProfileForRun,
-	restGetFeedForRun,
-} from "./connector-run/routes";
 import { getDb } from "./db/client";
 import * as invalidationEmitter from "./events/emitter";
 import { streamInvalidationEvents } from "./events/sse";
@@ -747,10 +743,8 @@ import {
 	completeAutomationRun,
 	completeDeviceChatRun,
 	completeWorkerJob,
-	createMyDeviceAuthProfile,
 	createMyDeviceFeed,
 	deleteDeviceWorker,
-	deleteMyDeviceAuthProfile,
 	deleteMyDeviceFeed,
 	emitAuthArtifact,
 	fetchEventsForEmbedding,
@@ -758,7 +752,6 @@ import {
 	getAuthRun,
 	heartbeat,
 	listDeviceWorkers,
-	listMyDeviceAuthProfiles,
 	listMyDeviceFeeds,
 	mintDeviceChildToken,
 	pollAuthSignal,
@@ -959,9 +952,6 @@ app.post("/api/workers/fetch-events", fetchEventsForEmbedding);
 app.post("/api/workers/emit-auth-artifact", emitAuthArtifact);
 app.post("/api/workers/poll-auth-signal", pollAuthSignal);
 app.post("/api/workers/complete-auth", completeAuthRun);
-app.get("/api/workers/me/auth-profiles", listMyDeviceAuthProfiles);
-app.post("/api/workers/me/auth-profiles", createMyDeviceAuthProfile);
-app.delete("/api/workers/me/auth-profiles/:id", deleteMyDeviceAuthProfile);
 app.get("/api/workers/me/feeds", listMyDeviceFeeds);
 app.post("/api/workers/me/feeds", createMyDeviceFeed);
 app.delete("/api/workers/me/feeds/:id", deleteMyDeviceFeed);
@@ -1075,13 +1065,6 @@ app.get("/api/organizations", async (c) => {
 app.post("/api/:orgSlug/preview/claims", mcpAuth, createPreviewClaim);
 
 // Notifications
-app.get(
-	"/api/:orgSlug/connector-run/auth-profile/:slug",
-	mcpAuth,
-	restGetAuthProfileForRun,
-);
-app.get("/api/:orgSlug/connector-run/feed/:id", mcpAuth, restGetFeedForRun);
-
 app.get("/api/:orgSlug/notifications", mcpAuth, restListNotifications);
 app.get(
 	"/api/:orgSlug/notifications/unread-count",

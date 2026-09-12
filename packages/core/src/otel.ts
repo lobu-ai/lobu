@@ -1,7 +1,7 @@
 import type { Span, Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
   NodeTracerProvider,
   SimpleSpanProcessor,
@@ -37,12 +37,10 @@ export function initTracing(config: OtelConfig): void {
     return;
   }
 
-  const resource = new Resource({
+  const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: config.serviceName,
     [ATTR_SERVICE_VERSION]: config.serviceVersion || "1.0.0",
   });
-
-  provider = new NodeTracerProvider({ resource });
 
   const exporter = new OTLPTraceExporter({
     url: config.otlpEndpoint,
@@ -50,7 +48,10 @@ export function initTracing(config: OtelConfig): void {
   });
 
   // SimpleSpanProcessor exports immediately — workers are short-lived
-  provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+  provider = new NodeTracerProvider({
+    resource,
+    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  });
   provider.register();
 
   tracer = trace.getTracer(config.serviceName, config.serviceVersion);

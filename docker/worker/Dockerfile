@@ -104,9 +104,6 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       libimage-exiftool-perl \
-      libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-      libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
-      libcairo2 libasound2 libxshmfence1 libxfixes3 libglib2.0-0 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. Pinned UID and numeric final USER so the kubelet can

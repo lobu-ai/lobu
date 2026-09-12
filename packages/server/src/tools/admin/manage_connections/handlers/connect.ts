@@ -498,9 +498,6 @@ async function handleConnectImpl(
 			};
 		}
 	}
-	const isDeviceBoundBrowserSessionConnect =
-		authSelection.authProfile?.profile_kind === "browser_session" &&
-		!!profileDeviceWorkerIdConnect;
 	// Same guard as create-path: when the profile contributed a device we
 	// didn't already check against, re-run the duplicate-connection check now
 	// so the partial unique index never decides the outcome with a raw error.
@@ -524,8 +521,7 @@ async function handleConnectImpl(
     }
   }
   const browserProfileUsable =
-		authSelection.authProfile?.profile_kind === "browser_session" &&
-    !isDeviceBoundBrowserSessionConnect
+		authSelection.authProfile?.profile_kind === "browser_session"
 			? (
 					await getBrowserSessionReadiness(
 						authSelection.authProfile.auth_data,
@@ -533,15 +529,10 @@ async function handleConnectImpl(
 					)
 				).usable
       : false;
-  // Device-bound browser_session profiles are "ready" by virtue of the
-  // cookies being on disk on the device. `getBrowserSessionReadiness` only
-  // looks at server-side auth_data, which is empty for these — without this
-  // exemption the connect path rejects them with "select or create a browser
-  // auth profile" even when the Mac app just created one.
   const hasReadySelection =
     !!authSelection.authProfile &&
 		(authSelection.authProfile.profile_kind === "browser_session"
-      ? isDeviceBoundBrowserSessionConnect || browserProfileUsable
+      ? browserProfileUsable
 			: authSelection.authProfile.status === "active") &&
 		(authSelection.selectedKind !== "oauth_account" ||
 			(authSelection.appAuthProfile?.status === "active" &&
@@ -556,7 +547,6 @@ async function handleConnectImpl(
     !!authSelection.browserMethod &&
     !!authSelection.authProfile &&
 		authSelection.authProfile.profile_kind === "browser_session" &&
-    !isDeviceBoundBrowserSessionConnect &&
     !browserProfileUsable;
 	// Interactive-auth connectors (e.g. WhatsApp QR) bypass standard auth-profile
 	// selection: the connection starts pending_auth and an auth run drives the
@@ -858,7 +848,7 @@ async function handleConnectImpl(
       auth_profile_slug: authSelection.authProfile?.slug ?? undefined,
       instructions:
         `Complete browser auth for profile '${authSelection.authProfile?.slug}'. ` +
-        `Run: lobu memory browser-auth --connector ${args.connector_key} --auth-profile-slug ${authSelection.authProfile?.slug}`,
+        `Refresh auth profile ${authSelection.authProfile?.slug} using the connector’s authorization instructions.`,
       view_url: buildSetupUrl({ connectorKey: args.connector_key }),
     };
   }

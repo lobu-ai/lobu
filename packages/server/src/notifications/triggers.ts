@@ -598,8 +598,8 @@ export async function notifyBrowserAuthExpired(params: {
 	connectionId: number;
 	connectorKey: string;
 	/**
-	 * Set for connectors that store a `browser_session` auth profile (the CLI /
-	 * Mac browser-auth capture flow). Omitted for extension-scrape connectors
+	 * Set for custom connectors that store a `browser_session` auth profile.
+	 * Omitted for extension-scrape connectors
 	 * (e.g. Revolut, LinkedIn) that reuse the live browser session and have no
 	 * stored auth profile — those just need the user to re-login on the site.
 	 */
@@ -614,7 +614,7 @@ export async function notifyBrowserAuthExpired(params: {
 			connector: params.connectorKey,
 			status: "Session expired — syncing stopped",
 			fix: params.authProfileSlug
-				? `Run: lobu memory browser-auth --connector ${params.connectorKey} --auth-profile-slug ${params.authProfileSlug}`
+				? `Refresh auth profile ${params.authProfileSlug} using the connector’s authorization instructions.`
 				: `Open ${params.connectorKey} in the browser where your Owletto extension runs and sign in.`,
 		},
 		resourceType: "connection",

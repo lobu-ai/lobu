@@ -39,7 +39,7 @@ export function findBundledConnectorFile(key: string): string | null {
 }
 
 // The isolate build, because the isolate is what runs the artifact -- both in
-// production and under `lobu connector run`. The other build externalized the
+// production and in the packaged runtime self-check. The other build externalized the
 // SDK as ESM for a forked Node child to resolve at runtime; that child is gone,
 // and a bundle shaped for it cannot load in an isolate at all.
 const compiler = createIsolateConnectorCompiler();

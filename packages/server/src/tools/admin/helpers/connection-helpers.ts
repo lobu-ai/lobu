@@ -78,8 +78,6 @@ type BrowserAuthMethod = {
   type: 'browser';
   required?: boolean;
   description?: string;
-  capture?: 'cli' | 'cdp';
-  defaultCdpUrl?: string;
 };
 
 type InteractiveAuthMethod = {
@@ -937,8 +935,6 @@ export function serializeAuthProfile(authProfile: AuthProfileRow): Record<string
     updated_at: authProfile.updated_at,
     device_worker_id: authProfile.device_worker_id,
     browser_kind: authProfile.browser_kind,
-    user_data_dir: authProfile.user_data_dir,
-    cdp_url: authProfile.cdp_url,
     is_default_for_connector: authProfile.is_default_for_connector,
     ...(authProfile.profile_kind === 'oauth_account'
       ? {
@@ -950,8 +946,6 @@ export function serializeAuthProfile(authProfile: AuthProfileRow): Record<string
     ...(authProfile.profile_kind === 'browser_session'
       ? {
           has_auth_data:
-            !!authProfile.device_worker_id ||
-            !!browserSummary?.cdp_url ||
             browserSessionIsUsable(authProfile.auth_data, authProfile.connector_key),
         }
       : {}),

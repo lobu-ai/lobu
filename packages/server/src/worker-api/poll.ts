@@ -1877,10 +1877,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const connectionIsDevicePinned = row.connection_device_worker_id != null;
   const deliverConnectionAuth =
     !isDeviceOwnedRun && !!row.connection_id && (!isUserScopedWorker || connectionIsDevicePinned);
-  // `user_data_dir` and `cdp_url` for device-bound browser profiles flow to
-  // the worker via `sessionState.user_data_dir` / `sessionState.cdp_url`
-  // (set inside resolveExecutionAuth). No need to thread them as separate
-  // top-level fields here.
   const { credentials, connectionCredentials, sessionState } = deliverConnectionAuth
     ? await resolveExecutionAuth({
         organizationId: row.organization_id,

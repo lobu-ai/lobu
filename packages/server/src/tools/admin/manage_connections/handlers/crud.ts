@@ -1200,27 +1200,11 @@ export async function handleCreate(
       };
     }
   }
-  // For device-bound profiles, browser cookies live on disk in the profile's
-  // user_data_dir. The server's auth_data is empty, so the readiness probe
-  // returns unusable — but the connection is fine to mark active, since the
-  // Mac app handles auth status independently.
-  const isDeviceBoundBrowserSession =
-		authSelection?.authProfile?.profile_kind === "browser_session" &&
-		!!profileDeviceWorkerId;
-
-  // Device-bound browser profiles can be `pending_auth` on the profile itself
-  // until the user logs in (the Mac app launches the managed Chrome) — but
-  // the cookies live on disk on the device, not server-side, so a run is
-  // perfectly capable of executing. Mark the connection active so
-  // materializeDueFeeds picks it up; the run will fail loudly if cookies
-  // are missing, which is the same as any other "logged out" case.
   const connectionStatus =
     interactiveMethod ||
 		(authSelection?.authProfile?.profile_kind === "browser_session" &&
-      !isDeviceBoundBrowserSession &&
       !browserProfileUsable) ||
-		(authSelection?.authProfile?.status === "pending_auth" &&
-			!isDeviceBoundBrowserSession)
+		(authSelection?.authProfile?.status === "pending_auth")
 			? "pending_auth"
 			: "active";
 
@@ -1755,13 +1739,8 @@ export async function handleUpdate(
       nextDeviceWorkerId = updateProfileDeviceWorkerId;
     }
   }
-  const isDeviceBoundBrowserSessionUpdate =
-		effectiveSelectedAuthProfile?.profile_kind === "browser_session" &&
-    !!updateProfileDeviceWorkerId;
-
   const browserProfileUsable =
-		effectiveSelectedAuthProfile?.profile_kind === "browser_session" &&
-    !isDeviceBoundBrowserSessionUpdate
+		effectiveSelectedAuthProfile?.profile_kind === "browser_session"
       ? (
           await getBrowserSessionReadiness(
             effectiveSelectedAuthProfile.auth_data,
@@ -1772,9 +1751,7 @@ export async function handleUpdate(
   const effectiveStatus =
     args.status ??
 		(effectiveSelectedAuthProfile?.profile_kind === "browser_session"
-      ? isDeviceBoundBrowserSessionUpdate
-				? "active"
-        : browserProfileUsable
+      ? browserProfileUsable
 					? "active"
 					: "pending_auth"
       : null);

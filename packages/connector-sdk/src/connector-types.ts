@@ -367,18 +367,7 @@ export interface ConnectorAuthBrowser {
   type: 'browser';
   required?: boolean;
   description?: string;
-  /**
-   * How browser auth is captured:
-   * - 'cli': Extract cookies from Chrome profile via `lobu memory browser-auth`
-   * - 'cdp': Connect to a running Chrome instance via Chrome DevTools Protocol.
-   *          Requires Chrome launched with --remote-debugging-port=9222.
-   *          Used for services (like Google) that block headless browsers.
-   */
-  capture?: 'cli' | 'cdp';
-  /** Required cookie domains for 'cli' capture (e.g. ['x.com', '.x.com']) */
   requiredDomains?: string[];
-  /** Default CDP URL for 'cdp' capture (default: http://127.0.0.1:9222) */
-  defaultCdpUrl?: string;
 }
 
 /**

@@ -1117,40 +1117,7 @@ Memory:
   // ─── connector ──────────────────────────────────────────────────────
   const connector = program
     .command("connector")
-    .description(
-      "Run connectors locally against an auth profile (no feed required)"
-    );
-  connector
-    .command("run [connector_key]")
-    .description(
-      "Execute a connector locally; events stream to stdout, nothing is persisted"
-    )
-    .option(
-      "--auth-profile <slug>",
-      "Auth profile slug (browser_session only in v1)"
-    )
-    .option(
-      "--config <json>",
-      'Feed config as JSON object (e.g. \'{"start_url":"https://..."}\')'
-    )
-    .option(
-      "--checkpoint-from-feed <id>",
-      "Borrow checkpoint state from this feed id"
-    )
-    .option(
-      "--from-feed <id>",
-      "Resolve connector + auth + config + checkpoint from this feed id"
-    )
-    .option("--max-items <n>", "Cap pagination to this many items")
-    .option("--check", "Resolve + validate without executing the connector")
-    .option("--json", "Emit machine-readable JSON to stdout (artifact-shaped)")
-    .option("-c, --context <name>", "Use a named context")
-    .option("--url <url>", "Server URL override")
-    .option("--org <slug>", "Org slug override")
-    .action(async (connectorKey: string | undefined, options) => {
-      const { connectorRunCommand } = await loadDeviceCommand("connector");
-      await connectorRunCommand(connectorKey, options);
-    });
+    .description("Connector runtime diagnostics");
   // Hidden internal command: the CLI side of the connector-runtime parity
   // smoke gate. Runs the SAME runConnectorRuntimeSelfCheck() the worker image
   // runs (compile + isolate execution), so a packaging/parity drift
@@ -1305,7 +1272,7 @@ Memory:
   // ─── memory ─────────────────────────────────────────────────────────
   const memory = program
     .command("memory")
-    .description("Lobu memory MCP — tools, seeding, and browser-auth capture");
+    .description("Lobu memory MCP — tools and seeding");
 
   const memoryOrg = memory
     .command("org")
@@ -1394,43 +1361,6 @@ Memory:
       ) => {
         const { memorySeedCommand } = await import("./commands/memory/seed.js");
         await memorySeedCommand(pathArg, options);
-      }
-    );
-
-  memory
-    .command("browser-auth")
-    .description(
-      "Set up browser auth for a connector: launch a dedicated Chrome with remote debugging and store its CDP endpoint on the auth profile"
-    )
-    .requiredOption("--connector <key>", 'Connector key (e.g. "x")')
-    .option("--domains <list>", "Comma-separated cookie domains override")
-    .option(
-      "--auth-profile-slug <slug>",
-      "Browser auth profile slug to store the CDP endpoint on"
-    )
-    .option(
-      "--remote-debug-port <port>",
-      "Remote debugging port for the dedicated Chrome",
-      "9222"
-    )
-    .option("--dedicated-profile <name>", "Dedicated Chrome profile dir name")
-    .option(
-      "--check",
-      "Check if the CDP endpoint stored on a browser auth profile is reachable"
-    )
-    .action(
-      async (options: {
-        connector: string;
-        domains?: string;
-        authProfileSlug?: string;
-        remoteDebugPort?: string;
-        dedicatedProfile?: string;
-        check?: boolean;
-      }) => {
-        const { memoryBrowserAuthCommand } = await import(
-          "./commands/memory/browser-auth.js"
-        );
-        await memoryBrowserAuthCommand(options);
       }
     );
 

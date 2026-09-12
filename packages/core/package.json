@@ -243,11 +243,11 @@
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/sdk-trace-node": "^1.30.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
-    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.222.0",
+    "@opentelemetry/resources": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
-    "@sentry/node": "^10.23.0",
+    "@sentry/node": "^10.74.0",
     "winston": "^3.17.0"
   },
   "devDependencies": {

@@ -3126,11 +3126,8 @@ export default class XConnector extends ConnectorRuntime {
 					},
 				},
 				{
-					type: "browser",
-					capture: "cdp",
-					requiredDomains: ["x.com", ".x.com"],
-					description:
-						"Fallback for browser-based scraping via the paired Owletto Chrome extension when API access is unavailable. Rides the user’s signed-in x.com session; required for the home-timeline feed (no public API exists for it).",
+					type: "none",
+					label: "Paired Chrome extension",
 				},
 			],
 		},

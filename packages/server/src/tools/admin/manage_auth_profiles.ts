@@ -51,7 +51,6 @@ import { getScopedConnectorDefinition } from "../../catalog/connector-definition
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import { callerIsAdmin } from './helpers/db-helpers';
 import {
-  getBrowserMethods,
   getEnvKeyMethods,
   getOAuthCredentialKeys,
   getOAuthMethods,
@@ -164,21 +163,6 @@ async function handleTestAuthProfile(
       authProfile.auth_data,
       authProfile.connector_key
     );
-    if (summary.cdp_url) {
-      const readiness = await getBrowserSessionReadiness(
-        authProfile.auth_data,
-        authProfile.connector_key
-      );
-      return {
-        action: 'test_auth_profile',
-        status: readiness.usable ? 'ok' : 'warning',
-        message: readiness.usable
-          ? `Browser session profile '${authProfile.slug}' CDP endpoint reachable`
-          : `Browser session profile '${authProfile.slug}' CDP configured but endpoint not responding at ${summary.cdp_url}`,
-        ...summary,
-        cdp_url: readiness.resolved_cdp_url ?? summary.cdp_url,
-      };
-    }
     if (summary.cookie_count === 0) {
       return {
         action: 'test_auth_profile',
@@ -353,7 +337,7 @@ async function handleCreateAuthProfile(
   }
 
   // browser_session profiles are device-scoped; connector_key is optional
-  // (only used as a hint to look up a default cdp_url). Other kinds remain
+  // for sessions shared by multiple connectors. Other kinds remain
   // per-connector and require it.
   const connector = args.connector_key
     ? await getScopedConnectorDefinition({
@@ -369,7 +353,7 @@ async function handleCreateAuthProfile(
   // Handle browser_session up front — it's the only kind that may skip
   // connector_key entirely. Everything below assumes a connector context.
   if (args.profile_kind === 'browser_session') {
-    return handleCreateBrowserSessionProfile(args, ctx, connector);
+    return handleCreateBrowserSessionProfile(args, ctx);
   }
 
   if (!args.connector_key || !connector) {
@@ -544,32 +528,10 @@ async function handleCreateAuthProfile(
 
 async function handleCreateBrowserSessionProfile(
   args: Static<typeof CreateAuthProfileAction>,
-  ctx: ToolContext,
-  connector: Awaited<ReturnType<typeof getScopedConnectorDefinition>>
+  ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
-  // browser_session profiles are device-scoped resources — connector_key, if
-  // provided, is just a hint for picking a default cdp_url from a known
-  // connector's browser method. The stored profile is not connector-bound.
-  const browserMethod = connector
-    ? (getBrowserMethods(connector.auth_schema)[0] ?? null)
-    : null;
-  const captureMode = browserMethod?.capture ?? 'cdp';
-
-  const authData =
-    captureMode === 'cdp'
-      ? {
-          cdp_url:
-            typeof args.auth_data?.cdp_url === 'string' &&
-            args.auth_data.cdp_url.trim().length > 0
-              ? args.auth_data.cdp_url.trim()
-              : browserMethod?.defaultCdpUrl || 'auto',
-        }
-      : ((args.auth_data as Record<string, unknown> | undefined) ?? {});
-  const browserSessionReady =
-    captureMode === 'cdp'
-      ? (await getBrowserSessionReadiness(authData, null)).usable
-      : false;
-
+  const authData = (args.auth_data as Record<string, unknown> | undefined) ?? {};
+  const browserSessionReady = (await getBrowserSessionReadiness(authData)).usable;
   const authProfile = await createAuthProfile({
     organizationId: ctx.organizationId,
     connectorKey: null,

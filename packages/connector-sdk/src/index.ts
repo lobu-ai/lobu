@@ -198,8 +198,8 @@ export type {
 } from './automation-triggers.js';
 
 // =============================================================================
-// Browser automation lives behind `@lobu/connector-sdk/browser` (Playwright,
-// CDP, error artifacts). The root must stay loadable inside a V8 isolate.
+// Browser automation uses the paired-extension primitives below.
+// The root must stay loadable inside a V8 isolate.
 // =============================================================================
 
 export { applyLookbackCutoff } from './checkpoint/lookback.js';

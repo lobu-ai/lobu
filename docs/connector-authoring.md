@@ -201,19 +201,19 @@ Declare `actions` with an `inputSchema`, `requiresApproval`, and annotations
 ### Auth methods
 
 `none`, `env_keys` (scope `connection` or `organization`), `oauth` (built-in or
-custom provider with `clientIdKey`/`clientSecretKey`), and `browser` (`cli`
-browser-auth or live `cdp`). Full schemas are in the SDK reference.
+custom provider with `clientIdKey`/`clientSecretKey`), and `browser` for custom
+cookie-backed sessions. Paired-extension connectors use `none` when the browser
+owns authentication. Full schemas are in the SDK reference.
 
 ### Dependencies and environment
 
 - npm deps go in the project/package `package.json` and are bundled by esbuild;
   native deps go in `runtime.nix.packages` as nixpkgs refs.
 - Workers run isolated with a restricted env (`PATH`, `HOME`, `TMPDIR`, `TZ`,
-  `NODE_ENV`, `NODE_PATH`, `PLAYWRIGHT_BROWSERS_PATH` only) and no filesystem
+  `NODE_ENV`, `NODE_PATH` only) and no filesystem
   persistence — state lives in `checkpoint`.
-- Browser scraping: use `launchBrowser` / `runReviewScrape` from `@lobu/connector-sdk/browser`
-  (patchright) for public scraping; use the extension bridge for user-session
-  scraping of logged-in sites.
+- Browser scraping: use `extensionDomScrape` / `extensionNetworkSync` through
+  the paired extension for page and network operations.
 
 ## Full reference
 

@@ -742,31 +742,6 @@ describe('first-party tool-name coverage', () => {
     assertRegistered(used);
   });
 
-  // CLI bootstrap tools that the `lobu memory browser-auth` flow drives via the
-  // REST proxy (`POST /api/{slug}/{toolName}`). Under the uniform surface
-  // model they are ordinary registered tools — visible everywhere, gated by
-  // per-action tier x role x scope like everything else.
-  const CLI_REST_BOOTSTRAP_TOOLS = ['manage_catalog', 'manage_auth_profiles'] as const;
-
-  it.each(CLI_REST_BOOTSTRAP_TOOLS)('CLI bootstrap tool %s is registered', (name) => {
-    expect(getTool(name)).toBeDefined();
-  });
-
-  it('CLI browser-auth no longer calls bootstrap tools over MCP RPC', () => {
-    // After the REST migration, browser-auth.ts must use `restToolCall(...)`
-    // for these tools — never `mcpRpc(..., 'tools/call', ...)`. This drift
-    // detector fails the moment someone re-introduces an MCP RPC call site.
-    if (!present(cliSrcRoot)) return;
-    const browserAuth = join(cliSrcRoot, '_lib', 'browser-auth-cmd.ts');
-    if (!present(browserAuth)) return;
-    const content = readFileSync(browserAuth, 'utf-8');
-    expect(content).not.toMatch(/'tools\/call'/);
-    for (const tool of CLI_REST_BOOTSTRAP_TOOLS) {
-      // The REST helper takes the tool name as the second positional argument.
-      const restPattern = new RegExp(`restToolCall<[^>]*>\\(\\s*\\w+\\s*,\\s*['"]${tool}['"]`);
-      expect(content).toMatch(restPattern);
-    }
-  });
 });
 
 const ACCESS_SURFACE = `
