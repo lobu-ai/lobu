@@ -19,14 +19,14 @@ if [ "${SKIP_BUILD:-}" != "1" ]; then
   echo "== build + install =="
   INSTALL=1 OPEN=1 "$ROOT/scripts/build-owletto-mac.sh"
 else
-  echo "== SKIP_BUILD=1 — using existing /Applications/Owletto.app =="
+  echo "== SKIP_BUILD=1 — using existing /Applications/Lobu.app =="
 fi
 
 echo "== codesign =="
-codesign -dv --verbose=4 /Applications/Owletto.app 2>&1 | grep -E "Authority|Identifier|TeamIdentifier" || true
+codesign -dv --verbose=4 /Applications/Lobu.app 2>&1 | grep -E "Authority|Identifier|TeamIdentifier" || true
 
-echo "== waiting for Owletto to pair/poll (${POLL_WAIT_SECS:-45}s) =="
-echo "   (menubar Owletto should show connected to prod before probes run)"
+echo "== waiting for Lobu to pair/poll (${POLL_WAIT_SECS:-45}s) =="
+echo "   (menubar Lobu should show connected to prod before probes run)"
 sleep "${POLL_WAIT_SECS:-45}"
 
 probe() {
@@ -52,7 +52,7 @@ probe() {
     fi
   done
   echo "error: $op failed after $max_attempts attempts" >&2
-  echo "  • Confirm Owletto menubar is connected (prod gateway, signed in)" >&2
+  echo "  • Confirm Lobu menubar is connected (prod gateway, signed in)" >&2
   echo "  • Connection ${CONN_ID} should be bound to this Mac device" >&2
   return 1
 }

@@ -1838,7 +1838,7 @@ jobs:
             -derivedDataPath "$DERIVED_DATA" \
             CODE_SIGNING_ALLOWED=NO
           scripts/verify-mac-device-daemon.sh \
-            "$DERIVED_DATA/Build/Products/Release/Owletto.app/Contents/Resources/lobu-device-daemon/lobu-device-daemon"
+            "$DERIVED_DATA/Build/Products/Release/Lobu.app/Contents/Resources/lobu-device-daemon/lobu-device-daemon"
 
   # Connector-runtime parity smoke gate. Guards against the packaging/parity
   # drift that broke prod: the worker image shipped missing `COPY packages/core`,

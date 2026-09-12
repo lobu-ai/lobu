@@ -36,8 +36,8 @@ help:
 	@echo "  make pre-pr                                 - Local fast gates before push, minus what the commit hook already runs (GitHub CI is the canonical gate)"
 	@echo "  make pr-fast                                - Optional: broad Linux merge jobs (Daytona sandbox, else local)"
 	@echo "  make pr-full [REMOTE_JOBS='unit …']        - Optional: full Linux CI (Daytona sandbox, else local)"
-	@echo "  make owletto-mac [INSTALL=1] [OPEN=1]      - Build Owletto.app with the Developer ID identity (TCC grants match the notarized release); INSTALL=1 replaces /Applications/Owletto.app, OPEN=1 launches it"
-	@echo "  make owletto-mac-e2e ORG=<slug> CONN_ID=<id> [SKIP_BUILD=1] - Build/install the signed Owletto.app then probe prod computer_use (permissions + list_windows) via the paired device connection"
+	@echo "  make owletto-mac [INSTALL=1] [OPEN=1]      - Build Lobu.app with the Developer ID identity (TCC grants match the notarized release); INSTALL=1 replaces /Applications/Lobu.app, OPEN=1 launches it"
+	@echo "  make owletto-mac-e2e ORG=<slug> CONN_ID=<id> [SKIP_BUILD=1] - Build/install the signed Lobu.app then probe prod computer_use (permissions + list_windows) via the paired device connection"
 
 # Strict typecheck — mirrors the Dockerfile so local matches CI. Catches
 # what `build-packages` (relaxed, bundler-only) misses.
@@ -113,17 +113,17 @@ task-clean:
 	@: $${NAME?Usage: make task-clean NAME=<name> [FORCE=1]}
 	@./scripts/task-clean.sh "$(NAME)" $$( [ "$(FORCE)" = "1" ] && echo --force )
 
-# Build the Owletto Mac app locally with the same Developer ID identity as the
+# Build the Lobu Mac app locally with the same Developer ID identity as the
 # mac-release CI, so TCC grants (Screen Recording, Accessibility) match the
 # notarized release instead of a default Apple Development build. Syncs the
-# owletto submodule first. INSTALL=1 replaces /Applications/Owletto.app; OPEN=1
+# owletto submodule first. INSTALL=1 replaces /Applications/Lobu.app; OPEN=1
 # launches it. See scripts/build-owletto-mac.sh header for details.
 owletto-mac:
 	@INSTALL="$(INSTALL)" OPEN="$(OPEN)" ./scripts/build-owletto-mac.sh
 
-# Build/install the signed Owletto.app then probe prod computer_use against the
+# Build/install the signed Lobu.app then probe prod computer_use against the
 # paired device connection (permissions + list_windows). SKIP_BUILD=1 reuses the
-# already-installed /Applications/Owletto.app. See scripts/owletto-mac-e2e.sh.
+# already-installed /Applications/Lobu.app. See scripts/owletto-mac-e2e.sh.
 owletto-mac-e2e:
 	@SKIP_BUILD="$(SKIP_BUILD)" ORG="$(ORG)" CONN_ID="$(CONN_ID)" ./scripts/owletto-mac-e2e.sh
 
