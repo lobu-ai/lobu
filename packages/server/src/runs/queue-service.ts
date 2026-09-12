@@ -52,6 +52,8 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { normalizePageActivationUrls } from './page-activation';
 import { AUTOMATION_RUN_TYPES_PG } from "./run-types.js";
 
+import { notifyWorkerWork } from './worker-wakeup';
+
 type AutomationDispatchSource = 'scheduled' | 'manual' | 'event';
 export type AutomationActivationTrigger =
   | AutomationEventTrigger
@@ -584,6 +586,7 @@ async function createSyncRunWithClient(
   logger.info(
     `[queue] Created sync run ${runId} for feed ${feedId} (${feed.connector_key}, version=${connectorVersion})`
   );
+  await notifyWorkerWork(sql);
   return { ok: true, runId };
 }
 
@@ -762,6 +765,7 @@ async function createAutomationRunWithClient(
     `[queue] Created automation run ${runId} for automation ${params.automationId} (${params.dispatchSource})`
   );
 
+  await notifyWorkerWork(sql);
   return { runId, status, created: true };
 }
 
@@ -1083,6 +1087,7 @@ export async function createAutomationEventRun(
       )
       RETURNING id, status
     `;
+    await notifyWorkerWork(tx);
     return {
       runId: Number(inserted[0]?.id),
       status: String(inserted[0]?.status),
@@ -1173,6 +1178,7 @@ export async function createAuthRun(params: {
     logger.info(
       `[queue] Created auth run ${runId} (${params.connectorKey}, profile=${params.authProfileId})`
     );
+    await notifyWorkerWork(sql);
     return runId;
   } catch (error) {
     if (isUniqueViolation(error, 'idx_runs_active_auth_per_profile')) {
@@ -1530,6 +1536,7 @@ export async function createConnectorOperationRun(params: {
   logger.info(
     `[queue] Created action run ${runId} (${params.connectorKey}/${params.operationKey}, approval=${approvalStatus})`
   );
+  if (row.status === 'pending' && row.approval_status === 'auto') await notifyWorkerWork(sql);
   return {
     runId,
     created: true,

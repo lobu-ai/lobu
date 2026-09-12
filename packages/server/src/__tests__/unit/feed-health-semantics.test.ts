@@ -7,6 +7,17 @@ const syncFeed = (
 ) => deriveFeedHealthSemantics({ operations: ["sync"], store: "events", ...input }, now);
 
 describe("feed execution mode", () => {
+  test("delivery feeds remain streaming while exposing ingestion failures", () => {
+    expect(deriveFeedHealthSemantics({
+      operations: ['delivery', 'read'], store: 'events', status: 'active',
+      webhook_driven: true, last_sync_status: 'failed',
+    })).toEqual({ executionMode: 'streaming', attention: 'last_attempt_failed' });
+    expect(deriveFeedHealthSemantics({
+      operations: ['delivery'], store: 'events', status: 'active',
+      webhook_driven: true, last_sync_status: 'success',
+    })).toEqual({ executionMode: 'streaming', attention: 'healthy' });
+  });
+
   test("a read-only feed is source_only", () => {
     expect(
       deriveFeedHealthSemantics({ operations: ["read"], store: "events", status: "active" }),

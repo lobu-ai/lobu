@@ -152,6 +152,8 @@ export const FeedNotificationSchema = Type.Object({
 /** `POST /api/workers/poll` request body. */
 export const PollRequestSchema = Type.Object({
   worker_id: Type.String(),
+  /** Maximum time to hold an empty claim request; available work returns immediately. */
+  wait_seconds: Type.Optional(Type.Integer({ minimum: 0, maximum: 25 })),
   capabilities: Type.Optional(Type.Record(Type.String(), Type.Boolean())),
   /** Number of additional runs the worker can accept at this instant. */
   capacity_available: Type.Optional(

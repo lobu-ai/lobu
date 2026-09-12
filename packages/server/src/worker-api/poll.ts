@@ -88,6 +88,7 @@ import {
   trustedChromeActionInput,
 } from './browser-action-context';
 import { runLeaseFence } from '../runs/run-lease';
+import { waitForWorkerWork } from '../runs/worker-wakeup';
 import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lockAgentTurnRun, nativeSessionBase, releaseNextAgentTurn } from '../runs/agent-turn-inputs';
 
 // A failure at the DISPATCH stage means the agent never ran: the run is not
@@ -285,6 +286,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let app_version: string | null = null;
   let label: string | null = null;
   let capacityAvailable: number | null = null;
+  let waitSeconds = 0;
   let backendCapacity: Record<string, number> = {};
   let backendCapacityProvided = false;
   let connectorManifestsProvided = false;
@@ -316,6 +318,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     app_version = body.app_version ?? null;
     label = body.label ?? null;
     capacityAvailable = body.capacity_available ?? null;
+    waitSeconds = body.wait_seconds ?? 0;
     backendCapacity = body.backend_capacity ?? {};
     backendCapacityProvided = Object.hasOwn(body, 'backend_capacity');
     connectorManifestsProvided = Object.hasOwn(body, 'connector_manifests');
@@ -1172,58 +1175,64 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   };
 
-  let pending = await claimWithDiagnostics();
+  const findPending = async () => {
+    let pending = await claimWithDiagnostics();
 
-  if (!pending) {
-    // Keep the explicit return type: TypeScript cannot infer the assignment
-    // made inside onRunCreated when it narrows the transaction result.
-    const materializedRun = await sql.begin(
-      async (tx): Promise<MaterializedDueFeedRun | null> => {
-        const lockRows = await tx<{ acquired: boolean }>`
-          SELECT pg_try_advisory_xact_lock(${DUE_FEEDS_LOCK_KEY}) AS acquired
-        `;
+    if (!pending) {
+      // Keep the explicit return type: TypeScript cannot infer the assignment
+      // made inside onRunCreated when it narrows the transaction result.
+      const materializedRun = await sql.begin(
+        async (tx): Promise<MaterializedDueFeedRun | null> => {
+          const lockRows = await tx<{ acquired: boolean }>`
+            SELECT pg_try_advisory_xact_lock(${DUE_FEEDS_LOCK_KEY}) AS acquired
+          `;
 
-        if (!lockRows[0]?.acquired) {
-          return null;
+          if (!lockRows[0]?.acquired) {
+            return null;
+          }
+
+          let createdRun: MaterializedDueFeedRun | null = null;
+          await materializeDueFeeds(c.env, tx, {
+            claimContext: connectorClaimContext,
+            // The caller has exactly one free claim slot. Scan past broken or
+            // raced head rows, but stop after filling that one slot.
+            maxRunsCreated: 1,
+            onRunCreated: (run) => {
+              createdRun = run;
+            },
+          });
+          return createdRun;
         }
-
-        let createdRun: MaterializedDueFeedRun | null = null;
-        await materializeDueFeeds(c.env, tx, {
-          claimContext: connectorClaimContext,
-          // The caller has exactly one free claim slot. Scan past broken or
-          // raced head rows, but stop after filling that one slot.
-          maxRunsCreated: 1,
-          onRunCreated: (run) => {
-            createdRun = run;
-          },
-        });
-        return createdRun;
-      }
-    );
-
-    // Production Pino defaults to info. Emit one correlatable event only
-    // when this exact poller actually materialized a scoped sync, after the
-    // transaction committed. Ordinary empty polls stay metric-only, avoiding
-    // per-worker log volume and high-cardinality metric labels.
-    if (materializedRun) {
-      logger.info(
-        {
-          dispatch_event: 'worker_scoped_sync_materialized',
-          run_id: materializedRun.runId,
-          feed_id: materializedRun.feedId,
-          worker_id,
-          device_worker_id: deviceWorkerId,
-          eligibility_lane: materializedRun.eligibilityLane,
-        },
-        '[pollWorkerJob] Materialized due sync for current poller'
       );
+
+      // Production Pino defaults to info. Emit one correlatable event only
+      // when this exact poller actually materialized a scoped sync, after the
+      // transaction committed. Ordinary empty polls stay metric-only, avoiding
+      // per-worker log volume and high-cardinality metric labels.
+      if (materializedRun) {
+        logger.info(
+          {
+            dispatch_event: 'worker_scoped_sync_materialized',
+            run_id: materializedRun.runId,
+            feed_id: materializedRun.feedId,
+            worker_id,
+            device_worker_id: deviceWorkerId,
+            eligibility_lane: materializedRun.eligibilityLane,
+          },
+          '[pollWorkerJob] Materialized due sync for current poller'
+        );
+      }
+
+      pending = await claimWithDiagnostics();
     }
 
-    pending = await claimWithDiagnostics();
-  }
-
+    return pending;
+  };
+  const pending = await waitForWorkerWork({
+    claim: findPending, waitMs: waitSeconds * 1000, signal: c.req.raw.signal,
+  });
   if (!pending) {
-    return c.json({ next_poll_seconds: 10, ...pollMetadata });
+    return c.json({ next_poll_seconds: waitSeconds > 0 ? 0 : 10, ...pollMetadata });
   }
 
   const row = pending as unknown as {

@@ -9,6 +9,48 @@ function deferred<T = void>() {
 }
 
 describe("worker daemon capacity polling", () => {
+  test("holds only claims with capacity and cancels an idle request on shutdown", async () => {
+    const entered = deferred();
+    let observedWait: number | undefined;
+    let observedSignal: AbortSignal | undefined;
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async (_capacity: number, options: { waitSeconds?: number; signal: AbortSignal }) => {
+          observedWait = options.waitSeconds;
+          observedSignal = options.signal;
+          entered.resolve();
+          return new Promise((_, reject) => {
+            options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
+        },
+      } as never,
+      execute: async () => { throw new Error('No job was claimed'); },
+    });
+    const running = loop.start();
+    await entered.promise;
+    expect(observedWait).toBe(25);
+    loop.stop();
+    await running;
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  test("reopens an expired held request without another idle delay", async () => {
+    let polls = 0;
+    const loop = new WorkerPollLoop({
+      client: { healthCheck: async () => true, poll: async () => {
+        polls++;
+        if (polls === 2) loop.stop();
+        return { next_poll_seconds: 0 };
+      } } as never,
+      execute: async () => {},
+    });
+    const start = performance.now();
+    await loop.start();
+    expect(polls).toBe(2);
+    expect(performance.now() - start).toBeLessThan(100);
+  });
+
   for (const throws of [false, true]) {
     test(`drains ten queued commands without interval gaps (executor throws: ${throws})`, async () => {
       const executed: number[] = [];

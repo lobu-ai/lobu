@@ -308,7 +308,7 @@ const GUEST_RUNNER = String.raw`
       };
     }
 
-    var syncResult = await instance.sync({
+    var syncContext = {
       feedKey: job.feedKey,
       feedId: job.feedId,
       config: mergedConfig,
@@ -318,7 +318,10 @@ const GUEST_RUNNER = String.raw`
       sessionState: withDispatcher(job.sessionState),
       emitEvents: emitEvents,
       updateCheckpoint: updateCheckpoint
-    });
+    };
+    var syncResult = job.delivery
+      ? await instance.onDelivery(Object.assign(syncContext, { delivery: job.delivery }))
+      : await instance.sync(syncContext);
     var trailingEvents = syncResult && Array.isArray(syncResult.events) ? syncResult.events : [];
     await emitEvents(trailingEvents);
     var meta = (syncResult && syncResult.metadata) || {};
