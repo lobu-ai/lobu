@@ -62,6 +62,8 @@ The same MCP endpoint works with **Claude Code, Codex, OpenCode, Antigravity, Ch
 
 Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/) · [Grok](https://lobu.ai/connect-from/grok/)
 
+Download Owletto: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/download/Owletto.dmg) · [Chrome extension](https://chromewebstore.google.com/detail/jhgcecbdpnoehfnhpdfihlchjddapepi)
+
 To test changes merged to `main`, run `bunx @lobu/cli@canary --help`. The
 `canary` tag moves only when a maintainer runs **Publish Packages** from `main`
 in GitHub Actions with channel `canary`; that run requires the commit's CI and
