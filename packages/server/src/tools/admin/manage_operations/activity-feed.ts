@@ -143,7 +143,9 @@ function buildNotificationCard(
 	// machine. A future interaction kind plugs its own source in here —
 	// the card contract (interaction_*) does not change.
 	const interactionStatus =
-		interactionType === "approval" &&
+		interactionType === "authorization" && typeof n.interaction_status === "string"
+			? n.interaction_status
+			: interactionType === "approval" &&
 		typeof n.approval_status === "string" &&
 		n.approval_status !== ""
 			? n.approval_status
@@ -429,13 +431,13 @@ function collapseKeyForRun(row: {
  * to do; pinning those made month-old dead drafts outrank live work.
  */
 function cardNeedsAttention(card: RawCard): boolean {
+	if (card.interaction_type === "authorization") return card.interaction_status === "pending";
 	return Boolean(card.unread) || cardHasPendingDecision(card);
 }
 
 function cardHasPendingDecision(card: RawCard): boolean {
 	return (
-		(card.interaction_type === "approval" &&
-			card.interaction_status === "pending") ||
+		card.interaction_status === "pending" ||
 		card.browser_handoff?.state === "ready"
 	);
 }

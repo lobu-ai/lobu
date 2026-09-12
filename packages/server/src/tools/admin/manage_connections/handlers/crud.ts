@@ -85,6 +85,7 @@ import {
 } from "../../../../utils/device-autowire-suppression";
 import logger from "../../../../utils/logger";
 import { syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
+import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { resolveUsernames } from "../../../../utils/resolve-usernames";
@@ -939,6 +940,7 @@ export async function handleCreate(
           authProfileSlug: args.auth_profile_slug,
           appAuthProfileSlug: args.app_auth_profile_slug,
           deviceWorkerId: deviceBinding.deviceWorkerId,
+          oauthAccountCreatedBy: effectiveCreatedBy,
         });
 
   if (authSelection) {
@@ -1006,6 +1008,11 @@ export async function handleCreate(
     };
   }
 
+  if (authSelection?.authProfile) {
+    const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, ctx.userId, effectiveCreatedBy);
+    if (ownershipError) return { error: ownershipError };
+  }
+
   // Non-admin members can only bind a connection to a runtime auth profile
   // they own. `env` profiles are admin-managed org-shared credentials —
   // members must never bind to them. `oauth_account` and `browser_session`
@@ -1020,8 +1027,7 @@ export async function handleCreate(
       };
     }
     if (
-			(profile.profile_kind === "oauth_account" ||
-				profile.profile_kind === "browser_session") &&
+			profile.profile_kind === "browser_session" &&
       profile.created_by !== ctx.userId
     ) {
       return {
@@ -1488,7 +1494,8 @@ export async function handleUpdate(
   // `update` is now member-writable so members can edit their own
   // connection. Resolve the caller's role once up front and gate every
   // member action on "I created this connection" — admins/owners are
-  // unrestricted.
+  // allowed to manage metadata. Personal credential/configuration edits are
+  // checked below against the same owner-only policy as reconnect.
   const callerIsAdmin = await resolveCallerIsAdmin(sql, {
     organizationId,
     userId: ctx.userId,
@@ -1635,6 +1642,10 @@ export async function handleUpdate(
   }
 
   const currentAuthProfile = await getAuthProfileById(organizationId, existing.auth_profile_id);
+  if (currentAuthProfile && (hasAuthProfileArg || hasAppAuthProfileArg || hasDeviceWorkerArg || args.config !== undefined)) {
+    const ownershipError = oauthAccountOwnershipError(currentAuthProfile, ctx.userId, existing.created_by);
+    if (ownershipError) return { error: ownershipError };
+  }
   const currentAppAuthProfile = await getAuthProfileById(organizationId, existing.app_auth_profile_id);
   const authSelection = await resolveConnectionAuthSelection({
     organizationId,
@@ -1681,6 +1692,11 @@ export async function handleUpdate(
     };
   }
 
+  if (hasAuthProfileArg && authSelection.authProfile) {
+    const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, ctx.userId, existing.created_by);
+    if (ownershipError) return { error: ownershipError };
+  }
+
   // Non-admins may only bind to a runtime profile they own. Mirrors the
   // handleCreate target-profile guard so a member who created a connection
   // can't pivot it onto another member's credentials. `env` profiles are
@@ -1694,8 +1710,7 @@ export async function handleUpdate(
       };
     }
     if (
-			(profile.profile_kind === "oauth_account" ||
-				profile.profile_kind === "browser_session") &&
+			profile.profile_kind === "browser_session" &&
       profile.created_by !== ctx.userId
     ) {
       return {

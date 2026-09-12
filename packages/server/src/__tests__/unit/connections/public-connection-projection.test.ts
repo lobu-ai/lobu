@@ -26,8 +26,8 @@ const FULL_ROW: Record<string, unknown> = {
 	credential_mode: "byo",
 	effective_credential_mode: "byo",
 	config: { host: "internal.example" },
-	created_by: "8a2D2Yb57odFHO2PldhD6n392Cf6456B",
-	created_by_username: "buremba",
+	created_by: "synthetic-owner",
+	created_by_username: "synthetic-owner",
 	account_id: "acct_9",
 	external_tenant_id: "T0192",
 	agent_id: "atlas-curator",
@@ -41,7 +41,7 @@ const FULL_ROW: Record<string, unknown> = {
 	app_auth_profile_name: "GitHub app",
 	app_auth_profile_status: "active",
 	app_auth_profile_kind: "app",
-	device_label: "Burak's Mac",
+	device_label: "Synthetic Mac",
 	device_platform: "darwin",
 	device_worker_id: "dw_5",
 	device_worker_handle: "worker-5",
@@ -51,7 +51,7 @@ const FULL_ROW: Record<string, unknown> = {
 	error_message: "connection refused to 10.1.2.3",
 	unhealthy_alerted_at: null,
 	deleted_at: null,
-	organization_id: "org_25266d0da771e611",
+	organization_id: "org_synthetic_projection",
 };
 
 const PUBLIC_ROW = {
@@ -77,8 +77,8 @@ const PUBLIC_ROW = {
 
 function ctxWith(memberRole: string | null): ToolContext {
 	return {
-		organizationId: "org_25266d0da771e611",
-		userId: memberRole ? "u_1" : null,
+		organizationId: "org_synthetic_projection",
+		userId: memberRole ? "synthetic-owner" : null,
 		memberRole,
 		isAuthenticated: !!memberRole,
 	} as ToolContext;
@@ -114,7 +114,7 @@ describe("public connection projection", () => {
 		}
 	});
 
-	it("leaves an in-process system caller's row untouched", () => {
+	it("keeps system metadata without exposing a human authorization link", () => {
 		// An automation reaction: userId null, isAuthenticated true, tokenType
 		// 'session' (automations/reaction-executor.ts). It reads credential_mode /
 		// error_message / device fields, so narrowing it would break reactions.
@@ -124,7 +124,14 @@ describe("public connection projection", () => {
 			tokenType: "session",
 		} as ToolContext;
 
-		expect(projectConnectionForReader(FULL_ROW, systemCtx)).toBe(FULL_ROW);
+		const { connect_token: _token, ...metadata } = FULL_ROW;
+		expect(projectConnectionForReader(FULL_ROW, systemCtx)).toEqual(metadata);
+	});
+
+	it.each(["owner", "admin", "member"])("withholds another owner's connect token from a %s", (role) => {
+		const result = projectConnectionForReader(FULL_ROW, { ...ctxWith(role), userId: "synthetic-other-user" });
+		expect(result.connect_token).toBeUndefined();
+		expect(result.created_by).toBe("synthetic-owner");
 	});
 
 	it("does not treat a userId-less TOKEN as a system caller", () => {

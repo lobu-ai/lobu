@@ -710,7 +710,7 @@ export default async (_ctx, client) => {
 		enforcedTier: "admin",
 	},
 	"connections.list": {
-		summary: "List configured connections in the current organization.",
+		summary: "List configured connection metadata. Administrators can see other users' private connections here; this does not grant access to their data or credentials. Use operations.listAvailable to discover executable targets. Reuse an existing connection and ask its owner to reconnect when authorization is needed.",
 		access: "read",
 		signature:
 			"connections.list(input?: { connector_key?: string; status?: string; setup_attempt_id?: string; limit?: number; offset?: number }): Promise<unknown>",

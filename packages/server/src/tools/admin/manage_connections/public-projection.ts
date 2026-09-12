@@ -30,7 +30,7 @@ const PUBLIC_CONNECTION_FIELDS: ReadonlySet<string> = new Set([
 /**
  * True for an in-process system call — an automation reaction and friends, which
  * run with `userId: null` + `isAuthenticated: true` + `tokenType: 'session'`
- * (automations/reaction-executor.ts). Those keep full-row access: they read
+ * (automations/reaction-executor.ts). Those keep operational metadata: they read
  * `credential_mode` / `error_message` / device fields to decide what to do,
  * and narrowing them would break reactions silently rather than loudly.
  *
@@ -63,7 +63,15 @@ export function projectConnectionForReader(
 	row: Record<string, unknown>,
 	ctx: ToolContext
 ): Record<string, unknown> {
-	if (ctx.memberRole || isInProcessSystemCall(ctx)) return row;
+	if (ctx.memberRole || isInProcessSystemCall(ctx)) {
+		// Inventory access does not include the bearer link that replaces a
+		// person's credentials. Both list and get cross this projection.
+		if (row.connect_token && (!ctx.userId || row.created_by !== ctx.userId)) {
+			const { connect_token: _token, ...metadata } = row;
+			return metadata;
+		}
+		return row;
+	}
 
 	const projected: Record<string, unknown> = {};
 	for (const key of Object.keys(row)) {
