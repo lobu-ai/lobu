@@ -18,6 +18,7 @@ import { createTestOrganization } from "../setup/test-fixtures";
 
 describe("event-trigger connector eligibility", () => {
 	let orgId: string;
+	let chatOrgId: string;
 
 	async function defineConnector(
 		key: string,
@@ -58,6 +59,7 @@ describe("event-trigger connector eligibility", () => {
 		await cleanupTestDatabase();
 		orgId = (await createTestOrganization({ name: "Trigger Eligibility Org" }))
 			.id;
+		chatOrgId = (await createTestOrganization({ name: "Chat Catalog Org" })).id;
 		const sql = getTestDb();
 		await ensureMemberEntityType(orgId);
 		await sql`
@@ -88,6 +90,36 @@ describe("event-trigger connector eligibility", () => {
 			feeds: {},
 		});
 	});
+
+	it.each(["slack", "whatsapp", "telegram", "discord", "teams", "gchat"])(
+		"accepts the bundled %s message trigger with its existing chat reply policy",
+		async (connectorKey) => {
+			// Exercise the same catalog and capability guard used to save an
+			// Automation, rather than testing a detached metadata constant.
+			const entry = (await listCatalogEntries(["connectors"])).connectors.find(
+				(connector) => connector.id === connectorKey,
+			);
+			const event = entry?.detail.automation_events?.find(
+				(candidate) => candidate.key === "message.created",
+			);
+			expect(event?.defaults).toEqual({
+				execution: "turn",
+				activeRun: "steer",
+				output: "reply_to_source",
+			});
+			await expect(
+				assertAutomationTriggerConnections(getTestDb(), chatOrgId, [{
+					kind: "event",
+					connector_key: connectorKey,
+					event_types: ["message.created"],
+					execution: "turn",
+					active_run: "steer",
+					output: "reply_to_source",
+					match: { channel_id: "synthetic-conversation", mention_only: true },
+				}]),
+			).resolves.toBeUndefined();
+		},
+	);
 
 	it("rejects a connector with no declared events AND no feeds", async () => {
 		const sql = getTestDb();

@@ -2,11 +2,13 @@ import {
 	type ConnectorDefinition,
 	IntegrationConnector,
 } from "@lobu/connector-sdk";
+import { CHAT_AUTOMATION_EVENTS } from "./chat-automation-events.js";
 
 export default class TelegramConnector extends IntegrationConnector {
 	readonly definition: ConnectorDefinition = {
 		key: "telegram",
 		kind: "integration",
+		automationEvents: CHAT_AUTOMATION_EVENTS,
 		name: "Telegram",
 		description: "Connect a Telegram bot and route chats to Lobu agents.",
 		version: "1.0.0",

@@ -1,34 +1,3 @@
-import type { ConnectorAutomationEvent } from "@lobu/connector-sdk";
-
-export const SLACK_AUTOMATION_EVENTS: ConnectorAutomationEvent[] = [
-	{
-		key: "message.created",
-		label: "A message is sent",
-		description: "Runs for messages in the selected Slack conversation scope.",
-		resourceType: "channel",
-		filterSchema: {
-			type: "object",
-			properties: {
-				channel_id: {
-					type: "string",
-					title: "Channel",
-					description: "Optional channel or direct-message identifier.",
-				},
-				mention_only: {
-					type: "boolean",
-					title: "Only when mentioned",
-				},
-			},
-		},
-		capabilities: { steering: true, replyToSource: true },
-		defaults: {
-			execution: "turn",
-			activeRun: "steer",
-			output: "reply_to_source",
-		},
-	},
-];
-
 interface SlackMessageEvent {
 	type?: string;
 	channel?: string;

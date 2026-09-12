@@ -2,11 +2,13 @@ import {
 	type ConnectorDefinition,
 	IntegrationConnector,
 } from "@lobu/connector-sdk";
+import { CHAT_AUTOMATION_EVENTS } from "./chat-automation-events.js";
 
 export default class GoogleChatConnector extends IntegrationConnector {
 	readonly definition: ConnectorDefinition = {
 		key: "gchat",
 		kind: "integration",
+		automationEvents: CHAT_AUTOMATION_EVENTS,
 		name: "Google Chat",
 		description: "Connect a Google Chat app to Lobu.",
 		version: "1.0.2",
