@@ -44,7 +44,10 @@ const context = (tasks: unknown[]): ReactionContext => ({
 function harness(
   metadata: Record<string, unknown> | null = candidate,
   changeKind: "created" | "updated" | "denied" | null = "created",
-  dueTasks: DueTask[] = []
+  dueTasks: DueTask[] = [],
+  applied: Record<string, { old: unknown; new: unknown }> = {
+    agent_help: { old: null, new: metadata?.agent_help },
+  }
 ) {
   const sends: Parameters<ReactionClient["notifications"]["send"]>[0][] = [];
   const queries: string[] = [];
@@ -57,17 +60,17 @@ function harness(
           "SELECT md5('".length,
           -"') AS digest".length
         );
-        return [
-          {
-            digest: createHash("md5")
-              .update(signature.replace(/''/g, "'"))
-              .digest("hex"),
-          },
-        ];
+        return [{ digest: createHash("md5").update(signature).digest("hex") }];
       }
       if (sql.includes("semantic_type = 'change_set'")) {
         return changeKind
-          ? [{ metadata: { changes: [{ entityId: 42, kind: changeKind }] } }]
+          ? [
+              {
+                metadata: {
+                  changes: [{ entityId: 42, kind: changeKind, applied }],
+                },
+              },
+            ]
           : [];
       }
       if (sql.includes("AS due_date")) return dueTasks;
@@ -110,22 +113,16 @@ describe("Task Builder completion reaction", () => {
     expect(url.pathname).toBe("/example/chat/personal-agent");
     expect(url.searchParams.get("new")).toBe("1");
     expect(url.searchParams.get("prompt")).toContain("Read its current status");
-    expect(h.sends[0]?.idempotency_key).toMatch(
-      /^task-builder:task:42:notice:v2:[a-f0-9]{32}$/
+    expect(h.sends[0]?.idempotency_key).toBe(
+      "task-builder:task:42:notice:v2:created"
     );
   });
-  test("replays and wording changes address the same notification", async () => {
+  test("a creation retry reuses its notification after display wording changes", async () => {
     const first = harness();
     await notifyTasks(context([candidate]), first.client);
     const reworded = { ...candidate, action: "Handle the OAuth review" };
     const second = harness(reworded);
-    await notifyTasks(
-      {
-        ...context([reworded]),
-        window: { ...context([]).window, run_id: 902 },
-      },
-      second.client
-    );
+    await notifyTasks(context([candidate]), second.client);
     expect(first.sends[0]?.title).not.toBe(second.sends[0]?.title);
     expect(first.sends[0]?.idempotency_key).toBe(
       second.sends[0]?.idempotency_key
@@ -151,7 +148,13 @@ describe("Task Builder completion reaction", () => {
     const first = harness();
     await notifyTasks(context([candidate]), first.client);
     const updated = { ...candidate, ...change };
-    const second = harness(updated, "updated");
+    const applied = Object.fromEntries(
+      Object.entries(change).map(([key, value]) => [
+        key,
+        { old: (candidate as Record<string, unknown>)[key], new: value },
+      ])
+    );
+    const second = harness(updated, "updated", [], applied);
     await notifyTasks(context([updated]), second.client);
     expect(second.sends).toHaveLength(1);
     expect(second.sends[0]?.idempotency_key).not.toBe(
@@ -163,13 +166,48 @@ describe("Task Builder completion reaction", () => {
       expect(second.sends[0]?.body).toContain("Due: 2026-09-13T12:00:00.000Z");
     if ("agent_help" in change)
       expect(second.sends[0]?.body).toContain(change.agent_help.summary);
-    const replay = harness(updated, "updated");
+    const replay = harness(updated, "updated", [], applied);
     await notifyTasks(context([updated]), replay.client);
     expect(replay.sends[0]?.idempotency_key).toBe(
       second.sends[0]?.idempotency_key
     );
   });
-  test("equivalent deadline formats and unrelated edits reuse the offer", async () => {
+  test.each([
+    { field: "priority", a: "low", b: "high" },
+    { field: "due_date", a: "2026-09-13T12:00:00Z", b: "2026-09-14T12:00:00Z" },
+    {
+      field: "agent_help",
+      a: help,
+      b: { ...help, summary: "Investigate the new request." },
+    },
+  ])("a reverted $field change alerts again but its retry deduplicates", async ({
+    field,
+    a,
+    b,
+  }) => {
+    const keys = [];
+    for (const [index, value] of [a, b, a].entries()) {
+      const task = { ...candidate, [field]: value };
+      const applied = {
+        [field]: { old: index === 0 ? null : index === 1 ? a : b, new: value },
+      };
+      const run = {
+        ...context([task]),
+        window: { ...context([]).window, run_id: 901 + index },
+      };
+      const h = harness(task, "updated", [], applied);
+      await notifyTasks(run, h.client);
+      expect(h.sends).toHaveLength(1);
+      const key = h.sends[0]?.idempotency_key;
+      expect(key).toBe(`task-builder:task:42:notice:v2:run:${901 + index}`);
+      keys.push(key);
+      const retry = harness(task, "updated", [], applied);
+      await notifyTasks(run, retry.client);
+      expect(retry.sends[0]?.idempotency_key).toBe(keys[index]);
+    }
+    expect(new Set(keys).size).toBe(3);
+  });
+  test("equivalent deadline formats and unrelated edits send no new offer", async () => {
     const original = { ...candidate, due_date: "2026-09-13T12:00:00Z" };
     const first = harness(original);
     await notifyTasks(context([original]), first.client);
@@ -179,11 +217,29 @@ describe("Task Builder completion reaction", () => {
       status: "active",
       rationale: "Investigation started; proposal and deadline are unchanged.",
     };
-    const second = harness(updated, "updated");
+    const second = harness(updated, "updated", [], {
+      due_date: { old: original.due_date, new: updated.due_date },
+      status: { old: original.status, new: updated.status },
+      rationale: { old: null, new: updated.rationale },
+    });
     await notifyTasks(context([updated]), second.client);
-    expect(second.sends[0]?.idempotency_key).toBe(
-      first.sends[0]?.idempotency_key
-    );
+    expect(second.sends).toHaveLength(0);
+  });
+  test.each([
+    { priority: { old: "low", new: "high" } },
+    { due_date: { old: null, new: "2026-09-13T12:00:00Z" } },
+  ])("does not alert for superseded urgency: %p", async (applied) => {
+    const h = harness(candidate, "updated", [], applied);
+    await notifyTasks(context([candidate]), h.client);
+    expect(h.sends).toHaveLength(0);
+  });
+  test("unchanged saved help and display-only edits send no new offer", async () => {
+    const h = harness(candidate, "updated", [], {
+      action: { old: "Old display title", new: candidate.action },
+      agent_help: { old: { ...help, summary: ` ${help.summary} ` }, new: help },
+    });
+    await notifyTasks(context([candidate]), h.client);
+    expect(h.sends).toHaveLength(0);
   });
   test.each([
     "done",

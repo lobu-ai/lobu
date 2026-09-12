@@ -7,9 +7,12 @@ type Task = {
   slug: string;
   metadata: Record<string, unknown>;
 };
-type ChangeSet = {
-  metadata: { changes?: Array<{ entityId?: number; kind?: string }> };
+type TaskChange = {
+  entityId?: number;
+  kind?: string;
+  applied?: Record<string, { old: unknown; new: unknown }>;
 };
+type ChangeSet = { metadata: { changes?: TaskChange[] } };
 
 function proposal(value: unknown): Proposal | null {
   if (!value || typeof value !== "object") return null;
@@ -26,17 +29,11 @@ function sqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-async function digest(
-  client: ReactionClient,
-  signature: string
-): Promise<string> {
-  const [hashed] = (await client.query(
-    `SELECT md5(${sqlString(signature)}) AS digest`
-  )) as Array<{ digest: string }>;
-  if (!hashed || !/^[a-f0-9]{32}$/.test(hashed.digest)) {
-    throw new Error("Could not compute task notification key");
-  }
-  return hashed.digest;
+function noticeValue(field: string, value: unknown): string | null {
+  if (field === "agent_help") return JSON.stringify(proposal(value));
+  if (field === "due_date")
+    return value ? new Date(String(value)).toISOString() : null;
+  return value == null ? null : String(value);
 }
 
 // Outputs are proposals for writes. Check the run's committed change set, then
@@ -55,7 +52,7 @@ export default async function notifyTaskChanges(
     : [];
   if (changeSets.length > 1)
     throw new Error("Task Builder run has multiple change sets");
-  const taskChanges = new Map<number, string>();
+  const taskChanges = new Map<number, TaskChange>();
   for (const change of changeSets[0]?.metadata.changes ?? []) {
     if (
       typeof change.entityId === "number" &&
@@ -63,7 +60,7 @@ export default async function notifyTaskChanges(
       change.entityId > 0 &&
       (change.kind === "created" || change.kind === "updated")
     ) {
-      taskChanges.set(change.entityId, change.kind);
+      taskChanges.set(change.entityId, change);
     }
   }
   for (const value of changes) {
@@ -91,12 +88,13 @@ export default async function notifyTaskChanges(
     const task = rows[0];
     if (!task || ["done", "dismissed"].includes(String(task.metadata.status)))
       continue;
-    if (!taskChanges.has(task.id)) {
+    const committed = taskChanges.get(task.id);
+    if (!committed) {
       client.log(`Skipped unchanged or denied task ${task.id}`);
       continue;
     }
     const help = proposal(task.metadata.agent_help);
-    if (!help && taskChanges.get(task.id) !== "created") continue;
+    if (!help && committed.kind !== "created") continue;
     const proposed = proposal(candidate.agent_help);
     if (
       Object.hasOwn(candidate, "agent_help") &&
@@ -106,6 +104,28 @@ export default async function notifyTaskChanges(
         `Skipped unapplied or superseded proposal for task ${task.id}`
       );
       continue;
+    }
+    if (help && committed.kind === "updated") {
+      const relevant = ["agent_help", "priority", "due_date"].flatMap(
+        (field) => {
+          const change = committed.applied?.[field];
+          return change ? [{ field, change }] : [];
+        }
+      );
+      // Only applied changes can trigger an alert. Re-read state must still
+      // match this run, so a delayed reaction cannot revive a superseded offer.
+      if (
+        relevant.some(
+          ({ field, change }) =>
+            noticeValue(field, change.new) !==
+            noticeValue(field, task.metadata[field])
+        ) ||
+        !relevant.some(
+          ({ field, change }) =>
+            noticeValue(field, change.old) !== noticeValue(field, change.new)
+        )
+      )
+        continue;
     }
     const action = String(task.metadata.action || task.name)
       .replace(/\s+/g, " ")
@@ -123,7 +143,7 @@ export default async function notifyTaskChanges(
       .filter(Boolean)
       .join(" · ");
     const noticeKey = help
-      ? `notice:v2:${await digest(client, JSON.stringify({ help, priority, due }))}`
+      ? `notice:v2:${committed.kind === "created" ? "created" : `run:${ctx.window.run_id}`}`
       : "created:v1";
     await client.notifications.send({
       title: (help ? "Agent help available: " : "Task: ")
@@ -137,8 +157,8 @@ export default async function notifyTaskChanges(
       resource_url: help
         ? `${root}/chat/personal-agent?new=1&prompt=${encodeURIComponent(draft)}`
         : `${root}/task/${encodeURIComponent(task.slug)}`,
-      // Replays and display-title edits reuse the saved proposal's key. Changed
-      // work or urgency gets a new alert; withdrawing help still sends none.
+      // Each relevant committed update has a retry-stable occurrence key.
+      // Returning to an earlier proposal or urgency still gets a fresh alert.
       idempotency_key: `task-builder:task:${task.id}:${noticeKey}`,
     });
   }
@@ -194,7 +214,12 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
         `${row.id}:${new Date(row.due_date).getTime() < nowMs ? "overdue" : "soon"}`
     )
     .join("-");
-  const hashed = await digest(client, signature);
+  const [hashed] = (await client.query(
+    `SELECT md5(${sqlString(signature)}) AS digest`
+  )) as Array<{ digest: string }>;
+  if (!hashed || !/^[a-f0-9]{32}$/.test(hashed.digest)) {
+    throw new Error("Could not compute due-task digest key");
+  }
   await client.notifications.send({
     title:
       overdue.length > 0
@@ -202,6 +227,6 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
         : `Task reminder — ${rows.length} due soon`,
     body: lines.join("\n"),
     recipients: "admins",
-    idempotency_key: `task-due-digest:${day}:${hashed}`,
+    idempotency_key: `task-due-digest:${day}:${hashed.digest}`,
   });
 }
