@@ -914,6 +914,9 @@ describe("WhatsApp source observation", () => {
       emit: (kind: string, body: string, t = 1100, remote = "15550000000@c.us") => {
         for (const fn of handlers.get(kind) ?? []) fn({ attributes: { id: { id: "synthetic-message", remote }, from: "15550000000@c.us", body, type: "chat", t } });
       },
+      emitModel: (kind: string, model: unknown) => {
+        for (const fn of handlers.get(kind) ?? []) fn(model);
+      },
       reply: (data: unknown) => { for (const fn of replies) fn({ source: window, origin: "https://web.whatsapp.com", data }); },
     };
   }
@@ -963,5 +966,35 @@ describe("WhatsApp source observation", () => {
     release("15550000000@c.us");
     await settle();
     expect(source.posts).toHaveLength(1);
+  });
+
+  it("wakes the feed when page normalization or its bounded buffer fails", async () => {
+    const normalization = install();
+    await normalization.listen();
+    normalization.emitModel("change", {
+      get attributes() { throw new Error("synthetic normalization failure"); },
+    });
+    await settle();
+    expect(normalization.posts[0]?.record).toEqual({
+      id: "whatsapp-web:source-observation-error",
+      source_error: "WhatsApp source observation failed; recovery is required",
+    });
+    expect(await normalization.listen("replacement-token")).toEqual({
+      ok: false,
+      error: {
+        state: "operation_failed",
+        reason: "WhatsApp source observation failed; recovery is required",
+      },
+    });
+    expect(normalization.posts[1]?.token).toBe("replacement-token");
+
+    const overflow = install();
+    await overflow.listen();
+    overflow.emit("add", "x".repeat(129 * 1024));
+    await settle();
+    expect(overflow.posts[0]?.record).toEqual({
+      id: "whatsapp-web:source-observation-error",
+      source_error: "WhatsApp page observation buffer overflowed; recovery is required",
+    });
   });
 });

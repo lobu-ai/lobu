@@ -35,7 +35,8 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 12;
+  const ADAPTER_VERSION = 13;
+  const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",
@@ -72,11 +73,28 @@ export function whatsAppWebAdapterProgram() {
       throw new Error("WhatsApp message observation is unavailable in this build");
     }
     if (!request.bridge_id || !request.token) throw new Error("A feed bridge is required");
+    const post = (state, entry) => window.postMessage({
+      type: "lobu-feed-record", token: state.token,
+      sequence: entry.sequence, record: entry.record,
+    }, location.origin);
+    const reportError = (state, message, sequence = ++state.sequence) => {
+      state.error = message;
+      // The transport is connector-agnostic. Persist this connector-owned
+      // marker like any other record so the same path wakes a manual feed.
+      post(state, {
+        sequence,
+        record: {
+          id: SOURCE_ERROR_ID,
+          source_error: message,
+        },
+      });
+    };
     const previous = listeners.get(request.bridge_id);
     if (previous?.error) {
       // Keep the failure visible until revocation/recovery, and update the
       // token so the current bridge can still detach this failed observer.
       previous.token = request.token;
+      reportError(previous, previous.error);
       throw new Error(previous.error);
     }
     detach(request.bridge_id);
@@ -88,10 +106,6 @@ export function whatsAppWebAdapterProgram() {
     state.token = request.token;
     state.request = request;
     if (state.error) throw new Error(state.error);
-    const post = (entry) => window.postMessage({
-      type: "lobu-feed-record", token: state.token,
-      sequence: entry.sequence, record: entry.record,
-    }, location.origin);
     const observe = (model, kind) => {
       if (state.error) return;
       const sequence = ++state.sequence;
@@ -111,7 +125,7 @@ export function whatsAppWebAdapterProgram() {
         const bytes = new TextEncoder().encode(fingerprint).length;
         if (bytes > 128 * 1024 || state.pendingBytes - (previous?.bytes ?? 0) + bytes > 16 * 1024 * 1024 ||
           (state.pending.size >= 10_000 && !previous)) {
-          state.error = "WhatsApp page observation buffer overflowed; recovery is required";
+          reportError(state, "WhatsApp page observation buffer overflowed; recovery is required", sequence);
           return;
         }
         const entry = { sequence, record, bytes };
@@ -125,11 +139,9 @@ export function whatsAppWebAdapterProgram() {
           state.fingerprintBytes -= state.fingerprints.get(oldest).bytes;
           state.fingerprints.delete(oldest);
         }
-        post(entry);
+        post(state, entry);
       }).catch(() => {
-        // A failing private source model remains recoverable through collect.
-        // Report it on the next sync rather than silently claiming full capture.
-        state.error = "WhatsApp source observation failed; recovery is required";
+        reportError(state, "WhatsApp source observation failed; recovery is required", sequence);
       });
     };
     state.onAdd = (model) => observe(model, "add");
@@ -146,7 +158,7 @@ export function whatsAppWebAdapterProgram() {
     collection.on("add", state.onAdd);
     collection.on("change", state.onChange);
     window.addEventListener("message", state.onReply);
-    for (const entry of state.pending.values()) post(entry);
+    for (const entry of state.pending.values()) post(state, entry);
     return { ok: true, listening: true };
   }
 

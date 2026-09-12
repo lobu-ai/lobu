@@ -1207,8 +1207,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			//  - Hard auto-pause: once the NEW count crosses the pause threshold, the
 			//    feed is paused (status='paused'; the DB trigger nulls next_run_at).
 			//    Crossing the threshold emits feed.auto_paused so Automations can react.
-			//    Manual feeds (no schedule) can't exponentially back off (nextRun is
-			//    NULL) but still hard-pause.
+			//    Manual feeds (no schedule) normally remain unscheduled here; a retained
+			//    source wake hint can re-arm one through the shared backoff policy.
 			const backoffBaseMs = feedBackoff.baseMs;
 			const backoffMaxMs = feedBackoff.maxMs;
 			const pauseThreshold = feedBackoff.pauseThreshold;

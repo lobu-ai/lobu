@@ -43,6 +43,8 @@ import {
 } from "./whatsapp-web-helpers.js";
 import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
+const SOURCE_OBSERVATION_ERROR_ID = "whatsapp-web:source-observation-error";
+
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
  *
@@ -58,11 +60,8 @@ import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
  * governs how long a COLD tab may take, and it must outlast one full hydration
  * with margin.
  *
- * This is the server-side half of the fix. The other half lives in the
- * extension: a `persistent: true` navigate re-issues CDP `Page.navigate` on the
- * plain-navigate path, reloading the very tab whose state it means to reuse, so
- * every run pays cold hydration. Until that ships, this budget is what lets a
- * cold run finish at all.
+ * The extension's persistent navigate now reuses an already-loaded page. This
+ * ceiling remains the recovery bound for a genuinely cold or reloaded tab.
  */
 const READY_TIMEOUT_MS = 120_000;
 const READY_POLL_INTERVAL_MS = 500;
@@ -146,9 +145,8 @@ function requireExtensionDispatcher(ctx: {
  *
  * The window is persistent on purpose: a cold tab costs a 20s load plus up to
  * 25s of WhatsApp hydration, and every one of those seconds is spent inside a
- * run's budget. Reusing the window keeps the message model hot, which is also
- * what makes per-sync `collect` an adequate substitute for the live observer
- * the extension used to run.
+ * run's budget. Reusing the window keeps the message model hot for ordinary
+ * collection and keeps the page observer attached between syncs.
  */
 async function openWhatsAppTab(
   dispatcher: ChromeActionDispatcher
@@ -624,7 +622,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.3",
+    version: "1.0.4",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -993,12 +991,21 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     if (!observed.bridge_id || !Array.isArray(observed.records)) {
       throw new Error("The paired browser must support connector feed listeners; update the Owletto extension");
     }
+    const sourceErrors = observed.records.filter((row) =>
+      row.payload.id === SOURCE_OBSERVATION_ERROR_ID &&
+      typeof row.payload.source_error === "string"
+    );
+    // A real rebind proves a prior page failure recovered. A dry snapshot
+    // cannot install that listener, so it must keep surfacing the marker.
     if (observed.listening !== false) await invokeAdapter(dispatcher, tabId, {
       op: "listen", bridge_id: observed.bridge_id, token: observed.token,
       chat_filter: request.chat_filter,
       minimum_timestamp: request.minimum_timestamp,
       recent_since: request.recent_since ?? Math.floor(Date.now() / 1000) - 15 * 60,
     });
+    else if (sourceErrors.length > 0) {
+      throw new Error(String(sourceErrors[0].payload.source_error));
+    }
 
     // Recovery ranges and media retries remain in the normal feed checkpoint.
     const dirtyBefore = checkpoint.dirty ?? [];
@@ -1025,7 +1032,9 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       (request.chat_filter !== "group" || row.is_group === true) &&
       (request.chat_filter !== "individual" || row.is_group !== true) &&
       (request.minimum_timestamp == null || Number(row.timestamp) >= request.minimum_timestamp);
-    const buffered = observed.records.filter((row) => inScope(row.payload));
+    const buffered = observed.records.filter((row) =>
+      !sourceErrors.includes(row) && inScope(row.payload)
+    );
     const bufferedIds = new Set(buffered.map((row) => row.payload.id));
     const messages = mergeCollectedMessages(
       [...(result.messages ?? []), ...historyMessages],
@@ -1072,7 +1081,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       binding_id: observed.binding_id,
       epoch: observed.epoch,
       records: observed.records
-        .filter((row) => emittedIds.has(String(row.payload.id)) || !inScope(row.payload))
+        .filter((row) => sourceErrors.includes(row) || emittedIds.has(String(row.payload.id)) || !inScope(row.payload))
         .map((row) => ({ id: String(row.payload.id), revision: row.revision })),
     };
 

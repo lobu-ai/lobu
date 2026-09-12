@@ -4,10 +4,10 @@
  * The assertions here are ported from the Owletto extension's
  * `whatsapp-web.test.js` — the same fixtures and the same expected values —
  * because the bar for deleting the extension-native connector is that this one
- * produces the same events from the same inputs. Where a test named a mechanism
- * that did not survive the move (the IndexedDB outbox, the activation gate, the
- * `chrome.scripting` injection path), the equivalent is asserted against what
- * replaced it: the feed checkpoint and the generic `evaluate` op.
+ * produces the same events from the same inputs. Where a mechanism moved out of
+ * the native connector (the IndexedDB outbox, activation gate, or
+ * `chrome.scripting` injection path), the equivalent is asserted against the
+ * generic feed buffer, feed checkpoint, or `evaluate` operation.
  *
  */
 
@@ -789,8 +789,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for readiness semantics", () => {
-    expect(connector.definition.version).toBe("1.0.3");
+  it("bumps the WhatsApp connector version for page observation semantics", () => {
+    expect(connector.definition.version).toBe("1.0.4");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -1374,5 +1374,34 @@ describe("buffered source records use normal feed ingestion", () => {
     expect(result.events[0].payload_text).toBe("edited");
     expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([{ id: "same", revision: 7 }]);
     expect(adapterOps).not.toContain("listen");
+  });
+
+  it("surfaces a page error until a successful listener rebind proves recovery", async () => {
+    const sourceError = {
+      revision: 9,
+      payload: {
+        id: "whatsapp-web:source-observation-error",
+        source_error: "WhatsApp source observation failed; recovery is required",
+      },
+    };
+    const preview = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([sourceError], { listening: false }),
+      collect: collectResponse([]),
+    });
+    await expect(messagesFeed().sync(syncCtx(null, preview.dispatcher))).rejects.toThrow(
+      "WhatsApp source observation failed; recovery is required"
+    );
+
+    const recovered = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([sourceError]),
+      collect: collectResponse([]),
+    });
+    const result = await messagesFeed().sync(syncCtx(null, recovered.dispatcher));
+    expect(result.events).toEqual([]);
+    expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([
+      { id: "whatsapp-web:source-observation-error", revision: 9 },
+    ]);
   });
 });

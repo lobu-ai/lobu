@@ -8,7 +8,7 @@ WhatsApp messages enter the existing `whatsapp.web.messages` feed and Automation
 WhatsApp Web collection changes
   -> connector-owned page adapter normalizes the source record
   -> generic extension transport persists the record and notifies worker poll
-  -> shared server scheduling marks the existing feed due
+  -> shared server scheduling requests the existing feed sync under its backoff
   -> normal connector sync merges current source, history and buffered records
   -> existing ingestion and Automation subscriptions
 ```
@@ -20,8 +20,9 @@ The WhatsApp implementation stays in `packages/connectors`. The extension owns o
 - One browser operation, `feed_listen({tab_id})`, binds a page and returns a bounded, non-destructive buffer snapshot. A dry run reads without installing a listener or consuming records.
 - Authority comes from the server's top-level `feed_context`, derived from the running parent sync, its feed, connection and owning device. Action input cannot grant authority.
 - Existing worker poll carries bounded `feed_notifications` containing feed instance, connection, feed key and notification identity. Bodies and credentials are absent.
-- Poll receipts confirm committed scheduling. A receipt also carries any saved `source_ack` from a successful sync checkpoint. Intermediate checkpoints and failed/dry completions cannot advance source acknowledgments.
+- A changed notification's poll receipt confirms committed scheduling. Each active receipt also carries any saved `source_ack` from a successful sync checkpoint. Intermediate checkpoints and failed/dry completions cannot advance source acknowledgments.
 - Each acknowledgment names a binding, buffer epoch and exact record revisions. A newer revision survives an older acknowledgment. Partial acknowledgment schedules remaining work through the same feed.
+- Connector-owned normalization and page-buffer failures use the same bounded record transport as wake hints. Sync surfaces the recovery error while the failed listener remains installed, then acknowledges the marker only after a fresh listener binds successfully.
 - Feed pause/removal, connection revocation or device unpairing stops the binding. The extension validates the actual sender document, tab and origin.
 
 The initial limits are 64 bindings, 10,000 coalesced records or 16 MiB per binding, 128 KiB per record, and 1,000 records or 4 MiB per snapshot. Overflow must surface as a recovery error; it is not a complete-capture claim. Scheduled sync remains the bootstrap and recovery path. A logged-in Web tab is required; an open desktop WhatsApp app is insufficient.

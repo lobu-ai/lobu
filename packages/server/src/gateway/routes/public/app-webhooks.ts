@@ -35,13 +35,13 @@
  * Any replica can serve any delivery.
  */
 
-import { requestFeedSync } from '../../../runs/feed-notifications';
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { createLogger } from "@lobu/core";
 import type { StoredConnection } from "@lobu/core";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import { type DbClient, getDb } from "../../../db/client.js";
+import { requestFeedSync } from "../../../runs/feed-notifications.js";
 import {
 	handleWebhookIngest,
 	readBodyWithCap,
@@ -136,15 +136,16 @@ export interface AppWebhookProvider {
 	 * Optional: handle the delivery itself instead of storing a raw event. For
 	 * connectors with a sync mapping (github) the canonical record is the poll, so
 	 * the provider decides per event type (see the github plugin):
-	 *  - TRIGGER (most events) — mark the affected feed due (`next_run_at = now()`)
-	 *    and let the poll fetch the complete record (dedupes/supersedes by stable
-	 *    origin_id). No identity resolution here — the poll resolves it once.
+	 *  - TRIGGER (most events) — request the affected feed's next sync, respecting
+	 *    source failure backoff, and let the poll fetch the complete record
+	 *    (dedupes/supersedes by stable origin_id). No identity resolution here —
+	 *    the poll resolves it once.
 	 *  - STORE (event-complete signals, e.g. stars) — resolve the actor and insert
 	 *    the structured event directly, keyed on the same origin_id the poll uses.
 	 * No raw blob is stored either way. Providers that define this NEVER fall
 	 * through to the raw ingest path; providers without it keep raw store
-	 * (jira/linear). `triggered` reports whether a feed was marked due OR an event
-	 * stored (telemetry only — the router acks 200 either way; an unconfigured
+	 * (jira/linear). `triggered` reports whether a feed sync was requested OR an
+	 * event stored (telemetry only — the router acks 200 either way; an unconfigured
 	 * repo/feed is a no-op, not an error).
 	 */
 	onDelivery?(params: {
@@ -409,8 +410,8 @@ interface WebhookRoute {
  * Routing strategies (declared by the connector per feed):
  *  - TRIGGER — the poll brings strictly more than the webhook (an `issues`
  *    payload omits computed counts; a `push` lacks the immutable github user id
- *    `/commits` returns), so the delivery marks THAT feed due and the poll
- *    fetches the complete record.
+ *    `/commits` returns), so the delivery requests THAT feed's next sync and
+ *    the poll fetches the complete record.
  *  - STORE — the payload is event-complete (a `star` carries actor + starred_at)
  *    and re-polling the whole list is waste, so the event is stored directly.
  */
@@ -500,10 +501,10 @@ export function createGithubWebhookDelivery(options: {
 			return { triggered: stored };
 		}
 
-		// TRIGGER: the poll brings more, so mark THAT feed due and let the poll
+		// TRIGGER: the poll brings more, so request THAT feed's next sync and let it
 		// fetch the complete record (dedupes/supersedes by origin_id) and resolve
 		// the person once — no webhook-side resolution (avoids double work).
-		const triggered = await markGithubFeedDue({
+		const triggered = await requestGithubFeedSync({
 			sql,
 			connectorKey,
 			install,
@@ -561,14 +562,13 @@ function extractGithubRepo(
 }
 
 /**
- * Mark the active github feed for (install, repo, feedKey) due NOW so the
- * orchestrator syncs it on its next tick — the webhook becomes the "when to run"
- * signal, with the schedule as the self-covering backstop. Scoped to the one
- * feed the event belongs to, so unrelated feeds aren't re-polled. Idempotent:
- * redeliveries just re-stamp `next_run_at`. Returns whether the feed matched
+ * Request the active github feed sync for (install, repo, feedKey). A healthy
+ * feed becomes due now; a failing feed retains its backoff. The schedule stays
+ * the self-covering backstop. Scoped to the one feed the event belongs to, so
+ * unrelated feeds are not re-polled. Returns whether the feed matched
  * (telemetry only — an unconfigured repo/feed is a no-op, not an error).
  */
-async function markGithubFeedDue(params: {
+async function requestGithubFeedSync(params: {
 	sql: DbClient;
 	connectorKey: string;
 	install: { id: number | string; organizationId: string };
@@ -594,11 +594,11 @@ async function markGithubFeedDue(params: {
 }
 
 /**
- * OAuth/PAT GitHub connection path: mark the single connection's matching feed
- * due. Same poll-canonical contract as {@link markGithubFeedDue}, but keyed by
- * connection id rather than app installation_ref.
+ * OAuth/PAT GitHub connection path: request the single connection's matching
+ * feed sync. Same poll-canonical contract as {@link requestGithubFeedSync}, but
+ * keyed by connection id rather than app installation_ref.
  */
-async function markGithubFeedDueForConnection(params: {
+async function requestGithubFeedSyncForConnection(params: {
 	sql: DbClient;
 	connectorKey: string;
 	connectionId: number;
@@ -628,9 +628,10 @@ async function markGithubFeedDueForConnection(params: {
 /**
  * Poll-canonical handling for a GitHub connector connection webhook
  * (`POST /api/v1/webhooks/:connectionId` after the OAuth/PAT bridge).
- * TRIGGER events mark the feed due so the next CheckDueFeeds tick runs the
- * poll and attaches automation_signals; STORE events land structured rows under
- * the real github connector_key. Never raw-stores under webhook:<id>.
+ * TRIGGER events request the feed's next sync so a CheckDueFeeds tick runs the
+ * poll after any failure backoff and attaches automation_signals; STORE events
+ * land structured rows under the real github connector_key. Never raw-stores
+ * under webhook:<id>.
  */
 export async function deliverGithubConnectorConnectionWebhook(params: {
 	sql: DbClient;
@@ -677,7 +678,7 @@ export async function deliverGithubConnectorConnectionWebhook(params: {
 		return { triggered: stored };
 	}
 
-	const triggered = await markGithubFeedDueForConnection({
+	const triggered = await requestGithubFeedSyncForConnection({
 		sql,
 		connectorKey,
 		connectionId,
@@ -691,7 +692,7 @@ export async function deliverGithubConnectorConnectionWebhook(params: {
 /**
  * The active github feed matching (install, repo, feedKey) and its connection.
  * The store path is gated on this exactly like the trigger path
- * ({@link markGithubFeedDue}) — a repo with no such feed configured is a no-op,
+ * ({@link requestGithubFeedSync}) — a repo with no such feed configured is a no-op,
  * not an unconfigured event. The connection id is the feed's own, so the stored
  * event shares the poll's (connection_id, origin_id) and consolidates.
  */
@@ -1125,9 +1126,9 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 		}
 
 		// 4. Structured-delivery providers handle the delivery as a sync signal
-		//    (GitHub: resolve identity + mark the affected repo's feeds due, no raw
-		//    event — the poll stays the canonical record, so push and backfill are
-		//    one consolidated dataset) or as a structured connector event (Jira →
+		//    (GitHub: request the affected repo feed, no raw event — the poll resolves
+		//    identity and stays the canonical record, so push and backfill are one
+		//    consolidated dataset) or as a structured connector event (Jira →
 		//    Rovo issues feed). A handler may return handled:false when its target
 		//    is not configured yet; that falls through to the raw store below,
 		//    preserving the staged migration (Atlassian Rovo before the legacy Jira

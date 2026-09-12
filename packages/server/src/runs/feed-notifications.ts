@@ -37,8 +37,8 @@ export async function receiveFeedNotifications(
 ): Promise<Array<{ feed_id: number; connection_id: number; feed_key: string; notification_id: string; active: boolean; ack?: unknown }>> {
   const receipts: Array<{ feed_id: number; connection_id: number; feed_key: string; notification_id: string; active: boolean; ack?: unknown }> = [];
   for (const notice of notifications) {
-    // One transaction owns both eligibility and the due write. A receipt means
-    // committed scheduling, not that the connector has ingested its records.
+    // One transaction owns both eligibility and any due write. For a changed
+    // notification, its receipt means committed scheduling, not ingestion.
     const received = await sql.begin(async (tx) => {
       const rows = await tx`
         SELECT f.id, f.checkpoint
