@@ -1,14 +1,12 @@
 /**
  * WhatsApp Web MAIN-world adapter.
  *
- * Ported statement-for-statement from the Owletto extension's
- * whatsapp-web-main-v1.js. Three changes, all mechanical: the IIFE wrapper
- * became a named function, this repo's Biome profile reformatted it (the
- * extension is linted under Owletto's own scope, which uses tabs), and each
- * intentional empty `catch` carries a note so the shared lint config needs no
- * exemption for this file. Nothing else moved. Do not "clean it up" beyond
- * that: it reaches into WhatsApp's own module registry via window.require and
- * its shape is load-bearing.
+ * Ported from the Owletto extension's whatsapp-web-main-v1.js. WhatsApp's
+ * normalization and action code retain the extension implementation; the
+ * connector-owned feed listener below now observes changes and emits records
+ * through the generic browser transport. Do not "clean it up" casually: it
+ * reaches into WhatsApp's own module registry via window.require and its shape
+ * is load-bearing.
  *
  * How it gets into the page: the connector serialises this function with
  * Function.prototype.toString() and runs `(<source>)()` through the generic

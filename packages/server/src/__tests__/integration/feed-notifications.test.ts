@@ -47,6 +47,17 @@ describe('source feed notifications', () => {
     expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feeds[1].id}`)[0].due).toBe(true);
   });
 
+  it('wakes a manual feed when its bound source reports a change', async () => {
+    const { sql, org, device, notice } = await fixture();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${notice.feed_id}`;
+    const [receipt] = await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect(receipt.active).toBe(true);
+    const [feed] = await sql`
+      SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${notice.feed_id}
+    `;
+    expect(feed.due).toBe(true);
+  });
+
   it('rejects foreign organization, device, connection and inactive feed without moving schedules', async () => {
     const { sql, org, device, notice } = await fixture();
     const other = await createTestOrganization();
@@ -102,6 +113,18 @@ describe('source feed notifications', () => {
     expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toMatchObject({ dry_run: true, ack: null });
     await sql`UPDATE runs SET dry_run = false WHERE id = ${run.id}`;
     expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toBeUndefined();
+    await sql`UPDATE feeds SET status = 'active' WHERE id = ${notice.feed_id}`;
+    await sql`
+      UPDATE connector_definitions
+      SET feeds_schema = ${sql.json({ items: { operations: [], webhook: { mode: 'trigger', events: ['changed'] } } })}
+      WHERE organization_id = ${org.id} AND key = 'synthetic.source'
+    `;
+    expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toBeUndefined();
+    await sql`
+      UPDATE connector_definitions
+      SET feeds_schema = ${sql.json({ items: { operations: ['sync'], webhook: { mode: 'trigger', events: ['changed'] } } })}
+      WHERE organization_id = ${org.id} AND key = 'synthetic.source'
+    `;
     await sql`UPDATE runs SET status = 'completed' WHERE id = ${run.id}`;
     expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toBeUndefined();
   });

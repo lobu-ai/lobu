@@ -140,7 +140,7 @@ export function defaultBackendCapacity(): Record<string, number> {
   return { [EXECUTION_BACKENDS.compiledConnector]: 1 };
 }
 
-/** `POST /api/workers/poll` request body. */
+/** Bounded source-activity hint included in a worker poll. */
 export const FeedNotificationSchema = Type.Object({
   feed_id: Type.Integer({ minimum: 1 }),
   connection_id: Type.Integer({ minimum: 1 }),
@@ -149,6 +149,7 @@ export const FeedNotificationSchema = Type.Object({
   changed: Type.Boolean(),
 });
 
+/** `POST /api/workers/poll` request body. */
 export const PollRequestSchema = Type.Object({
   worker_id: Type.String(),
   capabilities: Type.Optional(Type.Record(Type.String(), Type.Boolean())),

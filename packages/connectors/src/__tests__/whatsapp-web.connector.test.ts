@@ -1,14 +1,11 @@
 /**
  * Parity suite for the WhatsApp Web connector.
  *
- * The assertions here are ported from the Owletto extension's
- * `whatsapp-web.test.js` — the same fixtures and the same expected values —
- * because the bar for deleting the extension-native connector is that this one
- * produces the same events from the same inputs. Where a mechanism moved out of
- * the native connector (the IndexedDB outbox, activation gate, or
- * `chrome.scripting` injection path), the equivalent is asserted against the
- * generic feed buffer, feed checkpoint, or `evaluate` operation.
- *
+ * The event-shape assertions are ported from the Owletto extension's
+ * `whatsapp-web.test.js` with the same fixtures and expected values. The newer
+ * source-observation cases cover the generic feed buffer and checkpoint that
+ * replace the native connector's IndexedDB outbox, while page calls continue
+ * through the generic `evaluate` operation.
  */
 
 import { readFileSync } from "node:fs";
@@ -671,7 +668,15 @@ describe("sync over the generic chrome bridge", () => {
     let probed = false;
     const dispatch = mock(async (action: string, input: Record<string, unknown>) => {
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
-      if (action === "feed_listen") return responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [] };
+      if (action === "feed_listen") {
+        return {
+          bridge_id: "synthetic-feed",
+          binding_id: "synthetic-feed",
+          epoch: "synthetic-epoch",
+          token: "synthetic-token",
+          records: [],
+        };
+      }
       if (action !== "evaluate") return {};
       const expression = String(input.expression ?? "");
       if (expression.includes("a.version ===")) return { value: true };
@@ -694,7 +699,7 @@ describe("sync over the generic chrome bridge", () => {
     const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
     await expect(
       messagesFeed().sync(syncCtx(null, dispatcher))
-    ).rejects.toThrow(/^(?!\[lobu:dependency_unavailable)/);
+    ).rejects.toThrow(/^evaluation timed out$/);
     expect(probed).toBe(true);
   });
 
@@ -711,7 +716,6 @@ describe("sync over the generic chrome bridge", () => {
     let calls = 0;
     const dispatch = mock(async (action: string, input: Record<string, unknown>) => {
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
-      if (action === "feed_listen") return responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [] };
       if (action !== "evaluate") return {};
       const expression = String(input.expression ?? "");
       if (expression.includes("a.version ===")) return { value: true };
@@ -1344,8 +1348,15 @@ describe("buffered source records use normal feed ingestion", () => {
     await expect(messagesFeed().sync(syncCtx(null, missing.dispatcher))).rejects.toThrow(
       /^\[lobu:dependency_unavailable:browser_extension_update_required\]/
     );
-    const broken = makeDispatcher({ probe: READY, feed_listen: () => { throw new Error("Feed observation buffer overflowed"); } });
-    await expect(messagesFeed().sync(syncCtx(null, broken.dispatcher))).rejects.toThrow("Feed observation buffer overflowed");
+    const broken = makeDispatcher({
+      probe: READY,
+      feed_listen: () => {
+        throw new Error("Feed listener could not bind its page document");
+      },
+    });
+    await expect(
+      messagesFeed().sync(syncCtx(null, broken.dispatcher))
+    ).rejects.toThrow("Feed listener could not bind its page document");
   });
 
   it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {

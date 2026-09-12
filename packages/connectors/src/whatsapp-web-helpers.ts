@@ -7,10 +7,10 @@
  * `whatsapp-web-adapter.js` and is injected into the page. Everything here runs
  * in the connector-worker.
  *
- * Semantics are preserved verbatim so the new connector's event stream is
- * byte-comparable with the extension-native feed it replaces. The one shape
- * change is the tail: the extension produced a device "feed item"; this
- * produces a `EventEnvelope` for the connector SDK.
+ * Message normalization stays byte-comparable with the extension-native feed
+ * it replaces. The connector emits an `EventEnvelope` instead of a device feed
+ * item, and its checkpoint also carries acknowledgments for the generic source
+ * observation buffer.
  */
 
 import type { EventEnvelope } from "@lobu/connector-sdk";

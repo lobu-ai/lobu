@@ -22,10 +22,10 @@ The WhatsApp implementation stays in `packages/connectors`. The extension owns o
 - Existing worker poll carries bounded `feed_notifications` containing feed instance, connection, feed key and notification identity. Bodies and credentials are absent.
 - A changed notification's poll receipt confirms committed scheduling. Each active receipt also carries any saved `source_ack` from a successful sync checkpoint. Intermediate checkpoints and failed/dry completions cannot advance source acknowledgments.
 - Each acknowledgment names a binding, buffer epoch and exact record revisions. A newer revision survives an older acknowledgment. Partial acknowledgment schedules remaining work through the same feed.
-- Connector-owned normalization and page-buffer failures use the same bounded record transport as wake hints. Sync surfaces the recovery error while the failed listener remains installed, then acknowledges the marker only after a fresh listener binds successfully.
+- Connector-owned normalization and page-buffer failures emit a bounded source-error record, so manual feeds receive the same wake hint as ordinary changes. A real sync rebinds the failed observer before acknowledging that marker; a non-binding dry snapshot continues to surface the error.
 - Feed pause/removal, connection revocation or device unpairing stops the binding. The extension validates the actual sender document, tab and origin.
 
-The initial limits are 64 bindings, 10,000 coalesced records or 16 MiB per binding, 128 KiB per record, and 1,000 records or 4 MiB per snapshot. Overflow must surface as a recovery error; it is not a complete-capture claim. Scheduled sync remains the bootstrap and recovery path. A logged-in Web tab is required; an open desktop WhatsApp app is insufficient.
+The initial limits are 64 bindings, 10,000 coalesced records or 16 MiB per binding, 128 KiB per record, and 1,000 records or 4 MiB per snapshot. A full extension buffer rejects incoming records without acknowledging them; the source retains them for retry while normal sync drains the accepted backlog. Rebinding rotates the recovery epoch, so only a fresh successful checkpoint can clear the retry hint. The generic transport rejects an individually oversized record without disabling its binding; the WhatsApp adapter applies the same bound before transport and emits its connector recovery marker instead. Scheduled sync remains the bootstrap and recovery path. A logged-in Web tab is required; an open desktop WhatsApp app is insufficient.
 
 ## Correctness and acceptance
 

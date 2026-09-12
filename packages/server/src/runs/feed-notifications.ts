@@ -106,6 +106,7 @@ export async function sourceFeedContextForRun(
       AND (f.status = 'active' OR (r.dry_run AND f.status = 'paused')) AND f.deleted_at IS NULL
       AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
       AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
+      AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb
   `;
   if (!row) return undefined;
   return {

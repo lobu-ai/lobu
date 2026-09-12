@@ -968,7 +968,7 @@ describe("WhatsApp source observation", () => {
     expect(source.posts).toHaveLength(1);
   });
 
-  it("wakes the feed when page normalization or its bounded buffer fails", async () => {
+  it("emits a source-error record when page normalization or its bounded buffer fails", async () => {
     const normalization = install();
     await normalization.listen();
     normalization.emitModel("change", {
