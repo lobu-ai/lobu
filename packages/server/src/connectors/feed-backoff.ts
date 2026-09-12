@@ -1,17 +1,19 @@
 /**
- * Failure backoff + hard auto-pause policy for scheduled connector feeds.
+ * Failure backoff + hard auto-pause policy for connector feeds.
  *
  * A feed whose connector keeps failing (revoked auth, source outage, connector
  * bug) used to re-enqueue every plain cron cadence regardless of
  * `consecutive_failures`. On a 5-minute feed that is a failing run every 5
  * minutes, forever — hammering the connector and its upstream API rate limit.
  *
- * The policy lives here so the completion path (run-lifecycle.ts) and the
- * `feed.auto_paused` signal (automations/platform-events.ts) read the same
- * numbers. It applies ONLY once connector code has actually executed and
- * reported an outcome. A never-claimed run is a dispatch failure — the
- * connector never ran — so check-stalled-executions.ts deliberately does not
- * consume this source-health budget.
+ * The policy lives here so completion (run-lifecycle.ts), source wake
+ * scheduling (runs/feed-notifications.ts), and the `feed.auto_paused` signal
+ * (automations/platform-events.ts) read the same numbers. It applies ONLY once
+ * connector code has actually executed and reported an outcome. A never-claimed
+ * run is a dispatch failure — the connector never ran — so
+ * check-stalled-executions.ts deliberately does not consume this source-health
+ * budget. Manual feeds normally stay unscheduled after failure; a retained
+ * source wake hint may re-arm one under this same delay.
  *
  *  1. Exponential backoff on `next_run_at` after a failure, so a failing feed
  *     retries progressively less often instead of every cadence.

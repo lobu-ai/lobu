@@ -20,7 +20,7 @@ import type {
 	PollAuthSignalRequest,
 	StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
-import { HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
+import { FeedSourceAckSchema, HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "hono";
 import {
@@ -895,6 +895,8 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				triggerAudioTranscriptions(run.organization_id, pendingTranscriptions);
 			}
 
+			// Source acknowledgments advance only on successful completion; streaming
+			// checkpoints must preserve the last committed acknowledgment.
 			// Update feed + run checkpoint if provided (so mid-run state like QR
 			// codes surface in UI via recent_runs[0].checkpoint before the run
 			// completes). No dry-run guard: on a dry run these write to the tx and
@@ -905,7 +907,8 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				if (run.feed_id) {
 					await db`
       UPDATE feeds
-      SET checkpoint = ${db.json(batch.checkpoint)},
+      SET checkpoint = (${db.json(batch.checkpoint)}::jsonb - 'source_ack') ||
+          CASE WHEN checkpoint ? 'source_ack' THEN jsonb_build_object('source_ack', checkpoint->'source_ack') ELSE '{}'::jsonb END,
           updated_at = current_timestamp
       WHERE id = ${run.feed_id}
     `;
@@ -1021,6 +1024,9 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		// both carry whatever bytes the OS shell emitted.
 		if (req.checkpoint) {
 			req.checkpoint = stripNulDeep(req.checkpoint) as Record<string, unknown>;
+		}
+		if (req.checkpoint?.source_ack != null && !Value.Check(FeedSourceAckSchema, req.checkpoint.source_ack)) {
+			return c.json({ error: "Invalid source acknowledgment checkpoint" }, 400);
 		}
 		if (req.auth_update) {
 			req.auth_update = stripNulDeep(req.auth_update) as Record<
@@ -1201,8 +1207,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			//  - Hard auto-pause: once the NEW count crosses the pause threshold, the
 			//    feed is paused (status='paused'; the DB trigger nulls next_run_at).
 			//    Crossing the threshold emits feed.auto_paused so Automations can react.
-			//    Manual feeds (no schedule) can't exponentially back off (nextRun is
-			//    NULL) but still hard-pause.
+			//    Manual feeds (no schedule) normally remain unscheduled here; a retained
+			//    source wake hint can re-arm one through the shared backoff policy.
 			const backoffBaseMs = feedBackoff.baseMs;
 			const backoffMaxMs = feedBackoff.maxMs;
 			const pauseThreshold = feedBackoff.pauseThreshold;
@@ -1223,7 +1229,10 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						},
             next_run_at = ${
 							isSuccess
-								? nextRun
+								// Enqueue consumes the previous due time. A newly-due value
+								// belongs to a notification received during this run; preserve
+								// it under the same row lock as completion/checkpoint commit.
+								? sql`CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END`
 								: sql`CASE
                     WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
                     WHEN ${nextRun}::timestamptz IS NULL THEN NULL

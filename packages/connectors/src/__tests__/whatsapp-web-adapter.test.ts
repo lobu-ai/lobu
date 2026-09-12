@@ -137,13 +137,10 @@ describe("whatsAppWebAdapterProgram serialisation", () => {
     expect(clause).toContain("chatRows.length > 0");
   });
 
-  it("carries no live relay — the connector pulls via `collect`", () => {
-    // The MAIN-world adapter used to postMessage every add/change to the
-    // extension's content script. On the connector path nothing listens, so
-    // leaving it in bound handlers over WAWebCollections.Msg and normalized
-    // every message in the user's live tab for no consumer, plus a 500ms
-    // readiness retry timer that never stopped.
-    expect(source).not.toContain("postMessage");
+  it("attaches only through a feed listener and has no page polling loop", () => {
+    expect(source).toContain('request.op === "listen"');
+    expect(source).toContain('collection.on("add", state.onAdd)');
+    expect(source).toContain('collection.off("add", state.onAdd)');
     expect(source).not.toContain("setInterval");
   });
 
@@ -884,5 +881,142 @@ describe("whatsAppWebAdapterProgram collect scaling", () => {
     expect(large.reads()).toBeLessThanOrEqual(500 * 2);
     // And the same must hold at the smaller size, so this cannot pass by luck.
     expect(small.reads()).toBeLessThanOrEqual(50 * 2);
+  });
+});
+
+describe("WhatsApp source observation", () => {
+  function install(toPn?: (value: unknown) => unknown) {
+    const handlers = new Map<string, Set<(model: unknown) => void>>();
+    const replies = new Set<(event: unknown) => void>();
+    const posts: any[] = [];
+    const collection = {
+      _models: [],
+      on: (kind: string, fn: (model: unknown) => void) => {
+        if (!handlers.has(kind)) handlers.set(kind, new Set());
+        handlers.get(kind)!.add(fn);
+      },
+      off: (kind: string, fn: (model: unknown) => void) => handlers.get(kind)?.delete(fn),
+    };
+    const globals: Record<string, any> = {};
+    const window = {
+      require: (name: string) => name === "WAWebCollections"
+        ? { Msg: collection, Chat: { _models: [] }, Contact: { _models: [] } }
+        : name === "WAWebLidMigrationUtils" ? { toPn } : null,
+      addEventListener: (_kind: string, fn: (event: unknown) => void) => replies.add(fn),
+      removeEventListener: (_kind: string, fn: (event: unknown) => void) => replies.delete(fn),
+      postMessage: (data: unknown) => posts.push(data),
+    };
+    new Function("globalThis", "window", "location", `(${whatsAppWebAdapterProgram.toString()})();`)(globals, window, { origin: "https://web.whatsapp.com" });
+    const adapter = globals.__owlettoWhatsAppAdapterV1;
+    return {
+      posts, handlers,
+      listen: (token = "synthetic-token", extra = {}) => adapter.invoke({ op: "listen", adapter_version: WHATSAPP_ADAPTER_VERSION, bridge_id: "synthetic-feed", token, recent_since: 1000, ...extra }),
+      emit: (kind: string, body: string, t = 1100, remote = "15550000000@c.us") => {
+        for (const fn of handlers.get(kind) ?? []) fn({ attributes: { id: { id: "synthetic-message", remote }, from: "15550000000@c.us", body, type: "chat", t } });
+      },
+      emitModel: (kind: string, model: unknown) => {
+        for (const fn of handlers.get(kind) ?? []) fn(model);
+      },
+      reply: (data: unknown) => { for (const fn of replies) fn({ source: window, origin: "https://web.whatsapp.com", data }); },
+    };
+  }
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("ignores historical hydration while retaining changes to old messages", async () => {
+    const source = install();
+    await source.listen();
+    source.emit("add", "historical", 900);
+    await settle();
+    expect(source.posts).toHaveLength(0);
+    source.emit("change", "edited history", 900);
+    await settle();
+    expect(source.posts[0].record.body).toBe("edited history");
+    source.emit("change", "edited history", 900);
+    await settle();
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("reattaches once, retries unaccepted records, and stops on revocation", async () => {
+    const source = install();
+    await source.listen();
+    source.emit("add", "new message");
+    await settle();
+    await source.listen("replacement-token");
+    expect(source.handlers.get("add")?.size).toBe(1);
+    expect(source.posts).toHaveLength(2);
+    expect(source.posts[1].token).toBe("replacement-token");
+    source.reply({ type: "lobu-feed-record:ack", token: "replacement-token", sequence: source.posts[1].sequence, ok: true });
+    await source.listen("third-token");
+    expect(source.posts).toHaveLength(2);
+    source.reply({ type: "lobu-feed-record:stop", token: "third-token" });
+    source.emit("change", "after stop");
+    await settle();
+    expect(source.posts).toHaveLength(2);
+  });
+
+  it("does not revive an older async revision after the newer one is acknowledged", async () => {
+    let release!: (value: string) => void;
+    const source = install(() => new Promise<string>((resolve) => { release = resolve; }));
+    await source.listen();
+    source.emit("change", "older", 1100, "synthetic@lid");
+    source.emit("change", "newer");
+    await settle();
+    expect(source.posts[0].record.body).toBe("newer");
+    source.reply({ type: "lobu-feed-record:ack", token: "synthetic-token", sequence: source.posts[0].sequence, ok: true });
+    release("15550000000@c.us");
+    await settle();
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("emits a source-error record when page normalization or its bounded buffer fails", async () => {
+    const normalization = install();
+    await normalization.listen();
+    normalization.emitModel("change", {
+      get attributes() { throw new Error("synthetic normalization failure"); },
+    });
+    await settle();
+    expect(normalization.posts[0]?.record).toEqual({
+      id: "whatsapp-web:source-observation-error",
+      source_error: "WhatsApp source observation failed; recovery is required",
+    });
+    expect(await normalization.listen("replacement-token")).toEqual({ ok: true, listening: true });
+    expect(normalization.posts[1]?.token).toBe("replacement-token");
+    expect(normalization.posts[1]?.record).toEqual(normalization.posts[0]?.record);
+    expect(normalization.handlers.get("add")?.size).toBe(1);
+    expect(normalization.handlers.get("change")?.size).toBe(1);
+    normalization.emit("add", "healthy after rebind");
+    await settle();
+    expect(normalization.posts.at(-1)?.record.body).toBe("healthy after rebind");
+
+    const overflow = install();
+    await overflow.listen();
+    overflow.emit("add", "x".repeat(129 * 1024));
+    await settle();
+    expect(overflow.posts[0]?.record).toEqual({
+      id: "whatsapp-web:source-observation-error",
+      source_error: "WhatsApp page observation buffer overflowed; recovery is required",
+    });
+    expect(await overflow.listen("recovered-token")).toEqual({ ok: true, listening: true });
+    overflow.emit("add", "bounded after rebind");
+    await settle();
+    expect(overflow.posts.at(-1)?.record.body).toBe("bounded after rebind");
+  });
+
+  it("ignores a detached listener's delayed failure after a successful rebind", async () => {
+    let release!: (value: string) => void;
+    const source = install(() => new Promise<string>((resolve) => { release = resolve; }));
+    await source.listen();
+    source.emitModel("change", { attributes: {
+      id: { id: "synthetic-delayed", remote: "synthetic@lid" },
+      from: "15550000000@c.us", type: "chat", t: 1100,
+      get body() { throw new Error("detached normalization failed"); },
+    } });
+    await source.listen("replacement-token");
+    release("15550000000@c.us");
+    await settle();
+    expect(source.posts).toHaveLength(0);
+    source.emit("add", "current listener stays healthy");
+    await settle();
+    expect(source.posts[0]?.record.body).toBe("current listener stays healthy");
   });
 });

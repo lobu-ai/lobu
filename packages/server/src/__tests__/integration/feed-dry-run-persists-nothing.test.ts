@@ -222,6 +222,23 @@ describe('feed dry run persists nothing', () => {
     expect(preview.truncated).toBe(true);
   });
 
+  it('keeps source acknowledgments at the last successful completion during streaming and failure', async () => {
+    const sql = getTestDb();
+    const { feedId, runId } = await seed(false);
+    const savedAck = { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-item', revision: 1 }] };
+    const offeredAck = { ...savedAck, records: [{ id: 'source-item', revision: 2 }] };
+    await sql`UPDATE feeds SET checkpoint = ${sql.json({ ...FEED_CHECKPOINT, source_ack: savedAck })} WHERE id = ${feedId}`;
+    const batch = { ...batchFor(runId), checkpoint: { cursor: 'streamed', source_ack: offeredAck } };
+    const streaming = mockWorkerCtx(batch);
+    await streamContent(streaming.ctx);
+    expect(streaming.result().status).toBe(200);
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual({ cursor: 'streamed', source_ack: savedAck });
+    const failed = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'failed', error: 'synthetic failure after streaming', checkpoint: batch.checkpoint });
+    await completeWorkerJob(failed.ctx);
+    expect(failed.result().status).toBe(200);
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint.source_ack).toEqual(savedAck);
+  });
+
   it('CONTROL: the same batch on a non-dry run does persist', async () => {
     const sql = getTestDb();
     const { orgId, feedId, runId } = await seed(false);
