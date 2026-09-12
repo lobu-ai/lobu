@@ -9,6 +9,15 @@ export default defineConfig({
   // the repo root (with an explicit Node-backed invocation) or from inside the
   // package via the canonical `bun run test -- run ...` script.
   root: PACKAGE_ROOT,
+  resolve: {
+    alias: {
+      // Example fixtures load the real authoring config; server CI does not
+      // build the CLI distribution, so resolve its dependency-light source.
+      "@lobu/cli/config": fileURLToPath(
+        new URL("../cli/src/config/index.ts", import.meta.url),
+      ),
+    },
+  },
   test: {
     globalSetup: ["./src/__tests__/setup/global-setup.ts"],
     // Automation windows select rows by `events.created_at` and stop one
