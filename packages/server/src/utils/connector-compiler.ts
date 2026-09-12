@@ -131,14 +131,15 @@ async function main() {
       ? null
       : Object.fromEntries(Object.entries(def.feeds).map(([feedKey, rawFeed]) => {
           const feed = rawFeed && typeof rawFeed === 'object' ? rawFeed : {};
-          const { sync, read, ...serializable } = feed;
+          const { sync, read, onDelivery, ...serializable } = feed;
           const operations = [];
           if (typeof sync === 'function') operations.push('sync');
           if (typeof read === 'function') operations.push('read');
+          if (typeof onDelivery === 'function') operations.push('delivery');
           if (operations.length === 0) {
             throw new Error(
               'Connector feed ' + JSON.stringify(feedKey) +
-              ' must implement sync and/or read on its feed definition.'
+              ' must implement sync, read or onDelivery on its feed definition.'
             );
           }
           return [feedKey, { ...serializable, operations }];

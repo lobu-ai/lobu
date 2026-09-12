@@ -1,3 +1,4 @@
+import type { FeedOperation } from '@lobu/connector-sdk';
 /**
  * Derived feed-health semantics.
  *
@@ -135,7 +136,7 @@ type FeedAttentionState =
 
 interface FeedHealthSemanticsInput {
   /** Operations derived from the selected connector feed handlers. */
-  operations?: Array<'sync' | 'read'> | null;
+  operations?: FeedOperation[] | null;
   /** Storage plane. Channel feeds read transcripts rather than connector events. */
   store?: 'events' | 'channel_messages' | null;
   /** `feeds.status` — 'active' | 'paused' | 'error'. */
@@ -309,7 +310,8 @@ export function deriveFeedHealthSemantics(
   // Read-only feeds are evaluated on demand; they have no sync lifecycle.
   if (
     input.operations?.includes('read') === true &&
-    input.operations.includes('sync') === false
+    input.operations.includes('sync') === false &&
+    input.operations.includes('delivery') === false
   ) {
     return {
       executionMode: "source_only",
@@ -317,7 +319,9 @@ export function deriveFeedHealthSemantics(
     };
   }
 
-  const executionMode: FeedExecutionMode = isScheduled(input)
+  const executionMode: FeedExecutionMode = input.operations?.includes('delivery') && !input.operations.includes('sync')
+    ? "streaming"
+    : isScheduled(input)
     ? "scheduled"
     : "no_schedule";
 

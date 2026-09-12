@@ -1,3 +1,4 @@
+import type { FeedOperation } from '@lobu/connector-sdk';
 /**
  * Device-connector reconciliation.
  *
@@ -43,7 +44,7 @@ import {
  */
 interface ManifestFeed {
   name?: string;
-  operations?: Array<'sync' | 'read'>;
+  operations?: FeedOperation[];
 }
 
 /** A device worker counts toward "serves capability X" only if seen this recently. */

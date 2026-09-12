@@ -1,3 +1,4 @@
+import type { FeedOperation } from '@lobu/connector-sdk';
 /**
  * Connector-health alerter.
  *
@@ -275,7 +276,7 @@ interface FeedHealthRow {
    *  worker row is gone entirely. */
   device_stale: boolean | null;
   feed_id: string | null;
-  operations: Array<'sync' | 'read'> | null;
+  operations: FeedOperation[] | null;
   /** Connector declares a webhook route for this feed key — the dispatch path
    *  that re-arms `next_run_at` without a cron. */
   webhook_driven: boolean | null;

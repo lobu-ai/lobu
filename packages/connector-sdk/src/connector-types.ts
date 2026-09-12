@@ -901,6 +901,22 @@ export interface SyncContext<C = Record<string, unknown>, F = Record<string, unk
   updateCheckpoint?: (checkpoint: C | null) => Promise<void>;
 }
 
+/** Authenticated source input. Identity is scoped to the connection and feed. */
+export interface FeedDelivery {
+  /** Stable transport identity, reused when the same delivery is retried. */
+  id: string;
+  /** Connector-declared source event (for example a webhook event name). */
+  event: string;
+  /** Source data, interpreted and validated by the connector. */
+  payload: unknown;
+}
+
+/** Delivery uses the same checkpoint, credentials and host capabilities as pull. */
+export interface FeedDeliveryContext<C = Record<string, unknown>, F = Record<string, unknown>>
+  extends SyncContext<C, F> {
+  delivery: FeedDelivery;
+}
+
 /**
  * The credential a run is handed. On the isolate lane `accessToken` is a
  * per-run `lobu_secret_<uuid>` placeholder the host resolves into the request
@@ -983,7 +999,7 @@ export interface WebhookRegistration {
 // Feed source reads + connection queries
 // =============================================================================
 
-export type FeedOperation = 'sync' | 'read';
+export type FeedOperation = 'sync' | 'read' | 'delivery';
 
 /** Fixed half-open source-time bounds, preserved across every page of a read. */
 export interface FeedReadWindow {
@@ -1033,6 +1049,10 @@ export type FeedSyncHandler<C = Record<string, unknown>, F = Record<string, unkn
   ctx: SyncContext<C, F>
 ) => Promise<SyncResult<C>>;
 
+export type FeedDeliveryHandler<C = Record<string, unknown>, F = Record<string, unknown>> = (
+  ctx: FeedDeliveryContext<C, F>
+) => Promise<SyncResult<C>>;
+
 export type FeedReadHandler<F = Record<string, unknown>> = (
   ctx: FeedReadContext<F>
 ) => Promise<FeedReadResult>;
@@ -1044,6 +1064,7 @@ export interface RuntimeFeedDefinition<
 > extends Omit<FeedDefinition, 'operations'> {
   sync?: FeedSyncHandler<C, F>;
   read?: FeedReadHandler<F>;
+  onDelivery?: FeedDeliveryHandler<C, F>;
 }
 
 /** Runtime-only connector definition. Metadata extraction strips handlers. */
