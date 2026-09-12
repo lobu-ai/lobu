@@ -11,6 +11,35 @@ cd my-bot
 lobu run
 ```
 
+The CLI installs cloud commands and the connector compiler. On the first
+`lobu run`, it downloads the matching server runtime. Embedded Postgres and
+local embeddings are separate components, selected from the effective
+`DATABASE_URL`, `EMBEDDINGS_SERVICE_URL`, and `EMBEDDINGS_BACKEND` settings.
+External Postgres plus a remote embeddings service installs neither native
+component. Model weights download when local embeddings are first requested.
+
+Software is cached under `~/.cache/lobu/runtime`, separately from database files
+and model weights. Versions, platform, libc, and Node ABI have separate cache
+entries. Interrupted installs can be retried; completed installations work
+without contacting the registry. Set `LOBU_RUNTIME_CACHE_DIR` to relocate this
+cache, including for CI or an offline installation on a matching platform.
+
+```bash
+lobu runtime install                         # preinstall all components
+lobu runtime install server postgres         # select components
+lobu runtime install --offline               # verify the installed cache
+```
+
+`lobu daemon` prepares the device runtime before polling. Callers of
+`lobu automation execute` must run `lobu runtime install device` before claiming
+a run: this command refuses a cold cache so downloading cannot consume the
+already-claimed run's lease.
+
+The unused `browserNetworkSync` SDK helper and its vanilla Playwright CDP
+attachment path have been removed. Connectors use `extensionNetworkSync`
+through the paired Chrome extension. Standalone browser launch helpers and
+raw CDP authentication utilities remain available in the browser SDK subpath.
+
 Lobu boots as a single Node process with embedded Postgres (including pgvector)
 by default. `lobu init` writes `DATABASE_URL=file://.`; `file://` values select
 an embedded database, while `postgres://` or `postgresql://` connects to an

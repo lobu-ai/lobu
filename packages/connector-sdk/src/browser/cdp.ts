@@ -160,7 +160,7 @@ export async function resolveCdpUrl(
   // For Chrome's new DevTools UI style (WS-only, no HTTP), we can't probe without
   // triggering the dialog. Instead we build a ws:// candidate URL for any Chrome
   // port that doesn't serve HTTP. The actual connection happens once in
-  // acquireBrowser() via connectOverCDP(), which is when the user clicks "Allow".
+  // acquireBrowser() via CdpPage, which is when the user clicks "Allow".
   const listeningPorts = await discoverChromeListeningPorts();
   const discovered: Array<{ wsUrl: string; info: CdpVersionInfo }> = [];
 

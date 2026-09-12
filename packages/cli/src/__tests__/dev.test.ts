@@ -17,7 +17,6 @@ import {
   findEnclosingMonorepoRoot,
   getLocalSignInWarning,
   isSharedDatabaseUrl,
-  resolveBackendBundle,
   shouldAutoApplyLocalProject,
   shouldRefuseSharedDatabaseUrl,
   waitForServerReachable,
@@ -26,100 +25,13 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..", "..");
 
-type PackageJson = {
-  dependencies?: Record<string, string>;
-  devDependencies?: Record<string, string>;
-  optionalDependencies?: Record<string, string>;
-};
-
-function readPackageJson(path: string): PackageJson {
-  return JSON.parse(readFileSync(path, "utf8")) as PackageJson;
-}
-
-describe("lobu run backend bundle resolution", () => {
+describe("lobu run project resolution", () => {
   const tempDirs: string[] = [];
 
   afterEach(() => {
     while (tempDirs.length > 0) {
       const dir = tempDirs.pop();
       if (dir) rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("finds the server bundle copied to the CLI dist root", () => {
-    const root = mkdtempSync(join(tmpdir(), "lobu-cli-dist-"));
-    tempDirs.push(root);
-
-    const commandsDir = join(root, "dist", "commands");
-    mkdirSync(commandsDir, { recursive: true });
-
-    // Single bundle for both backends — it self-selects on DATABASE_URL.
-    const bundlePath = join(root, "dist", "server.bundle.mjs");
-    writeFileSync(bundlePath, "// bundle placeholder\n");
-
-    expect(resolveBackendBundle(commandsDir)).toBe(bundlePath);
-  });
-
-  test("CLI package declares runtime deps for the embedded server bundle", () => {
-    const cli = readPackageJson(
-      join(repoRoot, "packages", "cli", "package.json")
-    );
-    const server = readPackageJson(
-      join(repoRoot, "packages", "server", "package.json")
-    );
-    const core = readPackageJson(
-      join(repoRoot, "packages", "core", "package.json")
-    );
-    const connectorSdk = readPackageJson(
-      join(repoRoot, "packages", "connector-sdk", "package.json")
-    );
-    const cliRuntimeDeps = {
-      ...cli.dependencies,
-      ...cli.optionalDependencies,
-    };
-
-    expect(cliRuntimeDeps["@lobu/embeddings"]).toBeDefined();
-
-    const assertDeclared = (deps: Record<string, string> | undefined) => {
-      for (const name of Object.keys(deps ?? {})) {
-        if (name.startsWith("@lobu/")) continue;
-        expect(cliRuntimeDeps[name]).toBeDefined();
-      }
-    };
-
-    // `lobu run` executes packages/server/dist/server.bundle.mjs from inside
-    // the published @lobu/cli package. The bundle inlines @lobu workspace
-    // source, while non-workspace packages remain bare imports resolved from
-    // @lobu/cli's node_modules.
-    assertDeclared(server.dependencies);
-    assertDeclared(server.optionalDependencies);
-    assertDeclared(core.dependencies);
-    assertDeclared(connectorSdk.dependencies);
-
-    // These are server build/dev deps today, but the embedded runtime imports
-    // them at startup, while compiling bundled connector code, or while running
-    // the local embedded Postgres.
-    for (const name of ["dotenv", "esbuild", "vite", "embedded-postgres"]) {
-      expect(cliRuntimeDeps[name]).toBeDefined();
-    }
-
-    // @lobu/pgvector-embedded ships prebuilt native binaries esbuild can't
-    // inline, and it's `private` (never published). It must therefore NOT be a
-    // runtime/registry dependency of the published CLI — otherwise
-    // `npm i @lobu/cli` would 404 on it. Instead build.cjs vendors it into
-    // dist/vendor/pgvector-embedded, and embedded-runtime.ts loads it from
-    // there when the bare specifier isn't resolvable.
-    expect(cliRuntimeDeps["@lobu/pgvector-embedded"]).toBeUndefined();
-    const cliBuildScript = readFileSync(
-      join(repoRoot, "packages", "cli", "scripts", "build.cjs"),
-      "utf8"
-    );
-    expect(cliBuildScript).toContain("dist/vendor/pgvector-embedded");
-
-    // Compiled connector code deliberately leaves these native/browser deps
-    // external, so npx-installed CLIs must provide them too.
-    for (const name of ["playwright", "sharp", "jimp"]) {
-      expect(cliRuntimeDeps[name]).toBeDefined();
     }
   });
 
@@ -255,23 +167,6 @@ describe("lobu run backend bundle resolution", () => {
         })
       ).toBe(false);
     });
-  });
-
-  test("CLI build copies local runtime assets for installed lobu run", () => {
-    expect(existsSync(join(repoRoot, "db", "migrations"))).toBe(true);
-    expect(
-      existsSync(join(repoRoot, "packages", "cli", "scripts", "build.cjs"))
-    ).toBe(true);
-
-    const buildScript = readFileSync(
-      join(repoRoot, "packages", "cli", "scripts", "build.cjs"),
-      "utf8"
-    );
-    expect(buildScript).toContain('copyDirIfExists("../../db/migrations"');
-    expect(buildScript).toContain('"server.bundle.mjs"');
-    // The gate bundle dynamically imports server-main.bundle.mjs at runtime;
-    // both must ship or `lobu run` breaks after the Node-version check passes.
-    expect(buildScript).toContain('"server-main.bundle.mjs"');
   });
 });
 
@@ -925,7 +820,9 @@ describe("lobu run hosted-chat link-code ordering", () => {
     // /preview/claims, which fails with "fetch failed" if the embedded gateway
     // isn't listening yet. It must be called from the announceLocalSignIn
     // then-chain (after reachability + auto-apply), never the pre-spawn banner.
-    const spawnIndex = devSource.indexOf('const child = spawn("node"');
+    const spawnIndex = devSource.indexOf(
+      "const child = spawn(process.execPath"
+    );
     const chainCallIndex = devSource.indexOf(
       "printPreviewInstructions(cwd)",
       devSource.indexOf("announceLocalSignIn")

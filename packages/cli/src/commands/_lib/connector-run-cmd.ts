@@ -25,7 +25,6 @@
 
 import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { EventEnvelope } from "@lobu/connector-sdk";
@@ -98,17 +97,6 @@ async function authedGet<T>(apiUrl: string, token: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-function ensurePlaywrightAvailable(): void {
-  try {
-    const require_ = createRequire(import.meta.url);
-    require_.resolve("playwright");
-  } catch {
-    throw new Error(
-      "Playwright is not installed. `lobu connector run` drives browser_session profiles via Playwright. Install: `bunx playwright install chromium`"
-    );
-  }
-}
-
 function parseJsonFlag(
   raw: string | undefined,
   flagName: string
@@ -147,8 +135,6 @@ export async function connectorRun(
   args: ConnectorRunOptions,
   positionalKey?: string
 ): Promise<void> {
-  ensurePlaywrightAvailable();
-
   // Resolve API endpoint + auth from the chosen context. The agent API URL
   // (e.g. https://app.lobu.ai/api/v1) shares an origin with the connector-run
   // REST routes — unlike the memory MCP URL, which historically defaulted to

@@ -16,7 +16,7 @@ import { resolve } from "node:path";
 import {
   createIsolateConnectorCompiler,
   findBundledConnectorFile as findInDirs,
-} from "@lobu/connector-worker/compile";
+} from "../../internal/connector-compiler.js";
 
 const SOURCE_DIR_CANDIDATES = [
   // Published CLI runtime: packages/cli/scripts/build.cjs copies the

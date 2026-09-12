@@ -9,6 +9,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -171,6 +172,39 @@ describe("publish loop (subprocess, stub npm)", () => {
    */
   function writeStubNpm(blockNames: string[]) {
     mkdirSync(binDir, { recursive: true });
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    for (const file of ["publish-packages.mjs", "runtime-components.mjs"])
+      copyFileSync(
+        join(REPO_ROOT, "scripts", file),
+        join(scratch, "scripts", file)
+      );
+    copyFileSync(
+      join(REPO_ROOT, "package.json"),
+      join(scratch, "package.json")
+    );
+    for (const entry of readdirSync(join(REPO_ROOT, "packages"))) {
+      const source = join(REPO_ROOT, "packages", entry, "package.json");
+      if (!existsSync(source)) continue;
+      mkdirSync(join(scratch, "packages", entry), { recursive: true });
+      copyFileSync(source, join(scratch, "packages", entry, "package.json"));
+    }
+    const version = JSON.parse(
+      readFileSync(join(REPO_ROOT, "packages/cli/package.json"), "utf8")
+    ).version;
+    for (const key of ["server", "device", "postgres", "embeddings"]) {
+      const dir = join(scratch, "dist/runtime-components", key);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ name: `@lobu/runtime-${key}`, version })
+      );
+    }
+    writeFileSync(
+      join(binDir, "bun"),
+      "#!/usr/bin/env node\nrequire('node:fs').writeFileSync('bun.lock', '{}');\n",
+      { mode: 0o755 }
+    );
+
     writeFileSync(
       join(binDir, "npm"),
       [
@@ -181,6 +215,7 @@ describe("publish loop (subprocess, stub npm)", () => {
         `const log = ${JSON.stringify(logFile)};`,
         // `npm view <pkg>@<ver> version` → nothing is published yet.
         "if (args[0] === 'view') { process.exit(1); }",
+        "if (args[0] === 'install') { fs.writeFileSync('package-lock.json', '{}'); process.exit(0); }",
         "if (args[0] === 'publish') {",
         "  const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));",
         "  fs.appendFileSync(log, pkg.name + '\\n');",
@@ -200,12 +235,12 @@ describe("publish loop (subprocess, stub npm)", () => {
     return spawnSync(
       process.execPath,
       [
-        join(REPO_ROOT, "scripts/publish-packages.mjs"),
+        join(scratch, "scripts/publish-packages.mjs"),
         "--skip-bump",
         "--skip-build",
       ],
       {
-        cwd: REPO_ROOT,
+        cwd: scratch,
         encoding: "utf8",
         env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
       }
@@ -249,7 +284,8 @@ describe("publish loop (subprocess, stub npm)", () => {
       : [];
 
     expect(result.status).toBe(0);
-    expect(attempted.length).toBe(__testing.PACKAGES.length);
+    expect(attempted.length).toBe(__testing.PACKAGES.length + 4);
+    expect(attempted.at(-1)).toBe("@lobu/cli");
     expect(attempted).toContain("@lobu/cli");
   });
 });

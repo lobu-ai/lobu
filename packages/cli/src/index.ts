@@ -1,26 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AGENTS.md allow-list entry: the subcommand handlers below are lazy-loaded
-// via `await import("./commands/...")` rather than static imports. See the
-// AGENTS.md allow-list (Agent Rules → "No new dynamic imports outside the
-// documented allow-list") for the documented exceptions and rationale —
-// sibling entries cover the connector / apply / browser-auth codepaths and
-// test files. This comment only documents the specific reason this file
-// qualifies.
-//
-// Why: the CLI's command graph pulls in `postgres`, `playwright`, every
-// `@chat-adapter/*`, the bundled server, etc. Measured boot times on a 2026
-// macOS host:
-//
-//   lazy (current)   `lobu --help` / `--version` : ~60ms
-//   static import    same invocations           : ~470-540ms (8x slower)
-//
-// `lobu --help` runs every time a user TAB-completes or pokes the CLI; the
-// 400ms penalty is paid on every shell hit even when the user never runs the
-// subcommand whose module would have been loaded. Dynamic import keeps the
-// hot path (commander parses argv, prints help) free of any module the user
-// didn't actually invoke. The measurement was redone after the round-2 audit
-// (REPORT.md → "CLI dynamic-imports rule conflict") so future contributors
-// have a fresh data point before re-litigating the rule.
+// Command modules load after argument parsing. The base CLI installs only
+// configuration and cloud dependencies; server/device commands prepare their
+// versioned runtime components before loading them. The previous distribution
+// installed roughly 2 GiB; the isolated base CLI install measures 178 MiB, with
+// help using about 86 MiB RSS. Keep help free of runtime installation.
 //
 // Rules for adding a new subcommand:
 //   1. Put the handler in `./commands/<name>.ts`.
@@ -30,6 +13,10 @@
 //   4. Do NOT hoist the import to the top of this file.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import {
+  loadDeviceCommand,
+  preinstallRuntime,
+} from "./internal/runtime-components.js";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,6 +105,7 @@ Local dev:
   chat <prompt>            Send a prompt to an agent and stream the response
   validate                 Validate lobu.config.ts
   doctor                   Health checks (deps, DB, pgvector, ports, keys)
+  runtime install [...]    Preinstall runtime components for offline use
   telemetry                Show / toggle anonymous error reporting
   opencode-plugin <action> Install, inspect, or remove interactive OpenCode support
 
@@ -1160,7 +1148,7 @@ Memory:
     .option("--url <url>", "Server URL override")
     .option("--org <slug>", "Org slug override")
     .action(async (connectorKey: string | undefined, options) => {
-      const { connectorRunCommand } = await import("./commands/connector.js");
+      const { connectorRunCommand } = await loadDeviceCommand("connector");
       await connectorRunCommand(connectorKey, options);
     });
   // Hidden internal command: the CLI side of the connector-runtime parity
@@ -1175,9 +1163,8 @@ Memory:
     )
     .option("--json", "Emit machine-readable JSON to stdout")
     .action(async (options: { json?: boolean }) => {
-      const { connectorRuntimeSelfCheckCommand } = await import(
-        "./commands/connector.js"
-      );
+      const { connectorRuntimeSelfCheckCommand } =
+        await loadDeviceCommand("connector");
       await connectorRuntimeSelfCheckCommand(options);
     });
 
@@ -1214,7 +1201,7 @@ Memory:
       "Log poll/heartbeat/retry detail (default: one line per run)"
     )
     .action(async (options) => {
-      const { daemonCommand } = await import("./commands/daemon.js");
+      const { daemonCommand } = await loadDeviceCommand("daemon");
       await daemonCommand({ ...options, cliVersion: version });
     });
 
@@ -1260,11 +1247,21 @@ Memory:
       )
       .option("--debug", "Log heartbeat/retry detail")
   ).action(async (options) => {
-    const { automationExecuteCommand } = await import(
-      "./commands/automation.js"
-    );
+    const { automationExecuteCommand } = await loadDeviceCommand("automation");
     await automationExecuteCommand(options);
   });
+
+  program
+    .command("runtime")
+    .description("Manage the runtime components cached for this CLI release")
+    .command("install [components...]")
+    .description(
+      "Preinstall server, device, postgres, and embeddings for offline use"
+    )
+    .option("--offline", "Check the existing cache without downloading")
+    .action(async (components: string[], options: { offline?: boolean }) => {
+      await preinstallRuntime(components, options.offline);
+    });
 
   // ─── doctor ─────────────────────────────────────────────────────────
   program

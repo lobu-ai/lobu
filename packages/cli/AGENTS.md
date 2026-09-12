@@ -1,6 +1,6 @@
 # CLI package agent rules
 
-Read root `AGENTS.md` first. This package is the `lobu` binary users install from npm: commands, project templates, config resolution, and the bundled server the Owletto Mac app shells out to.
+Read root `AGENTS.md` first. This package is the `lobu` binary users install from npm: commands, project templates, config resolution, and installation of version-matched runtime components. The Owletto Mac app shells out to this launcher.
 
 ## Boundaries
 - This is a published user-facing binary. Error messages are product surface — write them for someone who has never read this repo, and use **Automation** consistently in anything a user or agent sees.

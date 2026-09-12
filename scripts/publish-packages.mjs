@@ -11,11 +11,13 @@
 // failure can be retried without bumping the version.
 
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { COMPONENTS, lockRuntimeComponent } from "./runtime-components.mjs";
 
 // Anchored to this file, not process.cwd(), so the manifest reads below resolve
 // the same way whether the script is run from the repo root or imported by a
@@ -40,15 +42,9 @@ const PACKAGES = [
   { dir: "packages/connector-sdk", transform: rewriteWorkspaceRefs },
   { dir: "packages/client", transform: rewriteWorkspaceRefs },
   { dir: "packages/embeddings", transform: rewriteWorkspaceRefs },
-  // @lobu/pgvector-embedded is NOT published: it's `private` and ships its
-  // prebuilt native binaries inside the @lobu/cli tarball (build.cjs copies it
-  // to dist/vendor/pgvector-embedded), so the bundled server resolves it at
-  // runtime without a registry fetch. esbuild can't inline the native
-  // binaries, hence it stays a runtime sidecar rather than part of
-  // server.bundle.mjs.
-  // connector-worker precedes cli: @lobu/cli depends on it at runtime, and the
-  // blocked-dependency skip below relies on a dependency always being attempted
-  // before its dependents. A guard test asserts this ordering holds.
+  // The private pgvector package ships inside @lobu/runtime-postgres.
+  // Standalone workers remain published for container/fleet consumers; the
+  // CLI's device component carries its own versioned copy of their source.
   { dir: "packages/connector-worker", transform: rewriteWorkspaceRefs },
   { dir: "packages/promptfoo-provider", transform: rewriteWorkspaceRefs },
   // Advance the CLI entry point only after every sibling package succeeds.
@@ -445,6 +441,28 @@ async function publishPackage({ dir, transform }, otp, tag) {
   }
 }
 
+async function publishRuntimeComponents(otp, tag) {
+  const version = workspacePackageVersion("@lobu/cli");
+  for (const [key, component] of Object.entries(COMPONENTS)) {
+    const dir = `dist/runtime-components/${key}`;
+    const absolute = path.join(REPO_ROOT, dir);
+    const manifest = JSON.parse(
+      readFileSync(path.join(absolute, "package.json"), "utf8")
+    );
+    if (manifest.name !== component.name || manifest.version !== version) {
+      throw new Error(
+        `Stale runtime artifact: ${dir}. Rebuild before publishing.`
+      );
+    }
+    if (
+      !isVersionPublished(manifest.name, version) &&
+      !existsSync(path.join(absolute, "dist/dependencies.bun.lock"))
+    )
+      lockRuntimeComponent(absolute);
+    await publishPackage({ dir }, otp, tag);
+  }
+}
+
 function parseArgs(argv) {
   // Positional bump: patch | minor | major | <explicit-version> | skip
   // Flags: --otp=<code>, --skip-build, --skip-bump
@@ -489,6 +507,12 @@ async function main() {
     console.log("\n[2/4] Building packages");
     run("bun", ["run", "build:packages"]);
     run("bun", ["run", "build:lobu"]);
+    const smoke = await mkdtemp(path.join(tmpdir(), "lobu-release-smoke-"));
+    try {
+      run("node", ["scripts/pack-cli-smoke.mjs", path.join(smoke, "install")]);
+    } finally {
+      await rm(smoke, { recursive: true, force: true });
+    }
   }
 
   console.log("\n[3/4] Publishing to npm");
@@ -519,6 +543,16 @@ async function main() {
       continue;
     }
     try {
+      // These are launcher-installed release dependencies, deliberately absent
+      // from the CLI's npm dependencies. Every component must be available
+      // before the CLI entry point/tag can advance.
+      if (pkg.dir === "packages/cli") {
+        if (unavailableNames.size > 0)
+          throw new Error(
+            "Cannot publish CLI while a release dependency is unavailable"
+          );
+        await publishRuntimeComponents(otp, tag);
+      }
       await publishPackage(pkg, otp, tag);
     } catch (error) {
       // Direct canary publication must stop before advancing any later tag.
@@ -567,8 +601,7 @@ async function main() {
         "  1. Locally, authenticated as an @lobu owner (classic automation token",
         "     or an interactive login with 2FA — NOT the CI granular token):",
         ...blocked.map(
-          (e) =>
-            `       (cd packages/${e.dir.replace(/^packages\//, "")} && npm publish --access public)`
+          (e) => `       (cd ${e.dir} && npm publish --access public)`
         ),
         "  2. Add each newly-created package to the CI granular token's",
         "     allow-list (npmjs.com → Access Tokens), OR register it as a",

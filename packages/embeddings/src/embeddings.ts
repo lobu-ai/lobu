@@ -4,29 +4,20 @@ import {
   env as transformersEnv,
 } from '@xenova/transformers';
 
-const DEFAULT_MODEL_NAME = 'Xenova/bge-base-en-v1.5';
-export const DEFAULT_DIMENSIONS = 768;
-export const DEFAULT_BATCH_SIZE = 32;
+import { DEFAULT_BATCH_SIZE, getLocalModelName } from './metadata.js';
+export { DEFAULT_BATCH_SIZE, DEFAULT_DIMENSIONS, getLocalModelName } from './metadata.js';
 
 transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE || '~/.cache/huggingface/transformers/';
 transformersEnv.backends.onnx.wasm.numThreads = 1;
 
 let extractorPromise: Promise<FeatureExtractionPipeline> | null = null;
 
-function getModelName(): string {
-  return process.env.EMBEDDINGS_MODEL || DEFAULT_MODEL_NAME;
-}
-
-export function getLocalModelName(): string {
-  return getModelName();
-}
-
 async function getExtractor(): Promise<FeatureExtractionPipeline> {
   if (extractorPromise) {
     return extractorPromise;
   }
 
-  const modelName = getModelName();
+  const modelName = getLocalModelName();
   console.info(`[EmbeddingsService] Loading model: ${modelName}...`);
   const startTime = Date.now();
 

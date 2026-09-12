@@ -133,12 +133,8 @@ COPY --from=builder --chown=worker:worker /app/packages/connector-worker ./packa
 # Install patchright's Chromium for browser-based connectors.
 # The runtime resolves `require('playwright')` to patchright (the
 # `npm:patchright` alias in package.json), so the installed Chromium revision
-# MUST be patchright's, not vanilla playwright's. `bunx --bun playwright install`
-# resolved to the vanilla `playwright` bin (node_modules/.bin/playwright ->
-# playwright-vanilla/cli.js won the bin-name conflict) and installed a DIFFERENT
-# revision (chromium-1223) than runtime patchright expects (chromium-1217) ->
-# `Executable doesn't exist`. Invoke patchright's own cli (node_modules/playwright
-# == patchright) so install revision == runtime revision by construction.
+# must match patchright. Invoke the installed alias's own CLI so a test-only
+# vanilla Playwright binary cannot win a shared .bin name.
 # PLAYWRIGHT_BROWSERS_PATH pins BOTH install target and runtime lookup to an
 # absolute, HOME-independent path (default $HOME/.cache/ms-playwright differs by
 # USER and breaks browser connectors running under another cwd). /ms-playwright

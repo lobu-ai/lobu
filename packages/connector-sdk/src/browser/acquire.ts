@@ -5,9 +5,8 @@
  * cascade:
  *
  *   1. CDP — connect to user's real Chrome via raw CDP protocol.
- *      Uses CdpPage for DOM scraping (avoids Playwright's connectOverCDP crash
- *      on browsers with many tabs). For network interception, callers use
- *      Playwright's connectOverCDP on the resolved wsUrl directly.
+ *      Uses CdpPage for DOM scraping. Network interception belongs to the
+ *      paired extension through extensionNetworkSync.
  *
  *   2. Playwright — launch headless browser, inject stored cookies.
  *      Cookies may come from a previous CDP session (freshest) or CLI capture.

@@ -79,7 +79,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc",
+    "build": "bun run clean && tsc",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
@@ -91,14 +91,10 @@
     "tar": "^7.4.3"
   },
   "peerDependencies": {
-    "playwright": "npm:patchright@^1.57.0",
-    "playwright-vanilla": "npm:playwright@^1.60.0"
+    "playwright": "npm:patchright@^1.57.0"
   },
   "peerDependenciesMeta": {
     "playwright": {
-      "optional": true
-    },
-    "playwright-vanilla": {
       "optional": true
     }
   },

@@ -16,5 +16,3 @@ export type { BrowserLaunchOptions, EnhancedBrowser } from './launcher.js';
 export { captureErrorArtifacts, launchBrowser } from './launcher.js';
 export type { ReviewExtractResult, RunReviewScrapeOptions } from './review-scrape.js';
 export { handleCookieConsent, runReviewScrape } from './review-scrape.js';
-export type { BrowserNetworkConfig, BrowserNetworkResult } from './network.js';
-export { browserNetworkSync } from './network.js';

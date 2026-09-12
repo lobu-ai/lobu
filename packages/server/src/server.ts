@@ -44,6 +44,7 @@ import {
 	resolveMigrationsDir,
 	runMigrations,
 	startEmbeddedRuntime,
+	startEmbeddings,
 } from "./embedded-runtime";
 import { externalDbBootstrapHooks } from "./local-bootstrap";
 import { getEnvFromProcess } from "./utils/env";
@@ -190,6 +191,11 @@ async function main(): Promise<void> {
 		preListenHooks = rt.preListenHooks;
 		extraTeardown = rt.extraTeardown;
 		logger.info(`Data: ${rt.dataDir}`);
+	}
+
+	if (external && process.env.LOBU_RUN_OWNS_DB === "1") {
+		const embeddings = await startEmbeddings();
+		if (embeddings) extraTeardown.push(() => { embeddings.kill(); });
 	}
 
 	// Imported AFTER env + DATABASE_URL are finalised: the lifecycle's transitive

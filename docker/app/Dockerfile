@@ -65,8 +65,8 @@ RUN mkdir -p packages/lobu-cli packages/browser-extension packages/mcpsandbox \
       done \
     && echo '{"name":"lobu","version":"0.0.0","private":true}' > packages/lobu-cli/package.json
 
-# The CLI depends on playwright (npm:patchright) and playwright-vanilla
-# (npm:playwright). Neither may download browser binaries during install — the
+# The runtime uses playwright (npm:patchright). It must not download
+# browser binaries during dependency installation — the
 # runtime stage installs the single patchright Chromium this image uses.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
@@ -99,6 +99,7 @@ COPY packages/connector-worker/ packages/connector-worker/
 COPY packages/pgvector-embedded/ packages/pgvector-embedded/
 COPY packages/server/ packages/server/
 COPY packages/cli/ packages/cli/
+COPY scripts/runtime-components.mjs scripts/runtime-components.mjs
 # Bundled into the CLI dist by packages/cli/scripts/build.cjs: the starter
 # skill and the embedded-DB migrations.
 COPY skills/lobu/ skills/lobu/
@@ -134,8 +135,7 @@ RUN cd packages/server && bunx tsc --noEmit
 RUN cd packages/server && bun run build:server
 
 # Build the CLI (#2231). It must build after build:server because
-# packages/cli/scripts/build.cjs copies the server bundles + catalog manifests
-# into the CLI dist. It runs *before* the owletto web build, so the CLI dist
+# packages/cli/scripts/build.cjs prepares the separate runtime artifacts. It runs *before* the owletto web build, so the CLI dist
 # intentionally carries no second copy of the SPA — the container already
 # serves the web UI from packages/owletto/dist, which the bundled server finds
 # through its monorepo-relative fallback.
@@ -148,6 +148,10 @@ RUN cd packages/cli && bun run build
 # for the type-check + bundle above, so we drop them only afterward. This also
 # means the in-image `lobu run` cannot boot an embedded database; it must use
 # the container's external DATABASE_URL.
+RUN if [ "$KEEP_EMBEDDED_PG" = "1" ]; then \
+      mkdir -p packages/server/dist/vendor/pgvector-embedded \
+      && cp -r packages/pgvector-embedded/dist packages/pgvector-embedded/prebuilt packages/pgvector-embedded/package.json packages/server/dist/vendor/pgvector-embedded; \
+    fi
 RUN if [ "$KEEP_EMBEDDED_PG" != "1" ]; then \
       rm -rf node_modules/embedded-postgres node_modules/@embedded-postgres; \
     fi
@@ -219,15 +223,6 @@ COPY --from=builder /app/packages/server ./packages/server
 COPY --from=builder /app/packages/cli ./packages/cli
 RUN ln -s /app/packages/cli/bin/lobu.js /usr/local/bin/lobu
 COPY --from=builder /app/packages/owletto ./packages/owletto
-
-# The embedded runtime (DATABASE_URL=file://, previews) loads the pgvector
-# injector from the server bundle dist/vendor; the CLI build vendors it into
-# its own dist. Copy it when keeping the embedded-postgres runtime.
-ARG KEEP_EMBEDDED_PG=0
-RUN if [ "$KEEP_EMBEDDED_PG" = "1" ]; then \
-      mkdir -p /app/packages/server/dist/vendor \
-      && cp -r /app/packages/cli/dist/vendor/pgvector-embedded /app/packages/server/dist/vendor/pgvector-embedded; \
-    fi
 
 # Database migrations (+ statement-at-a-time runner for transaction:false)
 COPY db/migrations ./db/migrations

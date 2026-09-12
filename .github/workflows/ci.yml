@@ -1729,7 +1729,7 @@ jobs:
             echo "mac=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No paths affecting the Mac build changed — skipping mac-build-smoke."
           fi
-          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/cli/|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
+          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/pgvector-embedded/|packages/cli/|scripts/(runtime-components\.mjs|pack-cli-smoke\.mjs|verify-cli-runtime\.mjs|publish-packages\.mjs|canary-publish\.mjs|published-artifact-smoke\.sh)$|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
             echo "connector=true" >> "$GITHUB_OUTPUT"
           else
             echo "connector=false" >> "$GITHUB_OUTPUT"
@@ -1853,7 +1853,7 @@ jobs:
     needs: optional-smoke-filter
     if: needs.optional-smoke-filter.outputs.connector == 'true'
     runs-on: ${{ vars.CI_LINUX_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -1941,3 +1941,11 @@ jobs:
 
       - name: CLI runtime self-check (host)
         run: node packages/cli/bin/lobu.js connector runtime-self-check --json
+
+      - name: Packed CLI and lazy runtime parity (Bun and Node-only npm)
+        # Runtime artifacts live outside packages/*/dist and are regenerated
+        # even on a dist-cache hit. Test actual packed consumers, native addons,
+        # embedded/external server startup, and shutdown without workspace links.
+        run: |
+          bun run --cwd packages/cli build
+          node scripts/pack-cli-smoke.mjs "$RUNNER_TEMP/lazy-runtime-smoke"

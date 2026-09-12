@@ -235,6 +235,7 @@ function withFixture(
       "canary-publish.mjs",
       "publish-packages.mjs",
       "release-provenance.mjs",
+      "runtime-components.mjs",
     ]) {
       copyFileSync(
         new URL(`../${file}`, import.meta.url),
@@ -262,6 +263,15 @@ function withFixture(
       `${root}/package.json`,
       JSON.stringify({ version: "19.2.0" })
     );
+    for (const key of ["server", "device", "postgres", "embeddings"]) {
+      const dir = `${root}/dist/runtime-components/${key}`;
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        `${dir}/package.json`,
+        JSON.stringify({ name: `@lobu/runtime-${key}`, version })
+      );
+      tags[`@lobu/runtime-${key}`] = { latest: "19.2.0" };
+    }
     writeFileSync(`${root}/registry.json`, JSON.stringify(tags));
     writeFileSync(`${root}/published.json`, "{}");
     writeFileSync(
@@ -283,7 +293,8 @@ const tags = JSON.parse(fs.readFileSync('${root}/registry.json', 'utf8'));
 const published = JSON.parse(fs.readFileSync('${root}/published.json', 'utf8'));
 const fault = process.env.CANARY_TEST_FAULT;
 if (fault === 'registry') process.exit(1);
-if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(fault === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
+if (args[0] === 'install') fs.writeFileSync('package-lock.json', '{}');
+else if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(fault === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
 else if (args[0] === 'view' && args[2] === 'version') {
   const at = args[1].lastIndexOf('@');
   const name = args[1].slice(0, at), requested = args[1].slice(at + 1);
@@ -304,7 +315,12 @@ else if (args[0] === 'publish') {
 } else process.exit(2);
 `
     );
-    for (const bin of ["git", "npm"]) chmodSync(`${root}/bin/${bin}`, 0o755);
+    writeFileSync(
+      `${root}/bin/bun`,
+      "#!/usr/bin/env node\nrequire('node:fs').writeFileSync('bun.lock', '{}');\n"
+    );
+    for (const bin of ["git", "npm", "bun"])
+      chmodSync(`${root}/bin/${bin}`, 0o755);
     test(
       root,
       (op, value, fault) =>
