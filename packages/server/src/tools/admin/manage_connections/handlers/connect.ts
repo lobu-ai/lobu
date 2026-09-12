@@ -452,6 +452,7 @@ async function handleConnectImpl(
         AND created_by = ${userId} AND auth_profile_id = ${authSelection.authProfile.id}
         AND app_auth_profile_id IS NOT DISTINCT FROM ${authSelection.appAuthProfile?.id ?? null}::bigint
         AND deleted_at IS NULL
+        ${requireManaged ? sql`AND config->>'consent_only' = 'true'` : sql``}
         ${explicitSlug ? sql`AND slug = ${explicitSlug}` : sql``}
         ${args.config ? sql`AND COALESCE(config, '{}'::jsonb) @> ${sql.json(args.config)}::jsonb` : sql``}
         ${deviceBinding.deviceWorkerId ? sql`AND device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}

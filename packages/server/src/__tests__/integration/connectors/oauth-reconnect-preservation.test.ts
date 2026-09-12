@@ -100,6 +100,27 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(await state(s.connection.id)).toEqual(before);
   });
 
+  it('keeps ordinary connections and feeds intact when managed OAuth is enabled', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const before = await state(s.connection.id);
+    await sql`UPDATE "organization" SET visibility = 'public' WHERE id = ${s.org.id}`;
+    await sql`UPDATE auth_profiles SET is_default_for_connector = false WHERE id = ${s.otherApp.id}`;
+    await sql`UPDATE auth_profiles SET is_default_for_connector = true WHERE id = ${s.app.id}`;
+    const args = { connector_key: KEY, managed_by_org: s.org.slug };
+    const result = await s.client.connectManaged(args) as { connection_id: number; status: string };
+    expect(result.connection_id).toBeDefined();
+    expect(result.connection_id).not.toBe(s.connection.id);
+    expect(result.status).toBe('active');
+    const [managed] = await sql`SELECT config FROM connections WHERE id = ${result.connection_id}`;
+    expect(managed.config.consent_only).toBe(true);
+    expect(await sql`SELECT id FROM feeds WHERE connection_id = ${result.connection_id}`).toHaveLength(0);
+    expect(await s.client.connectManaged(args)).toMatchObject({ connection_id: result.connection_id, status: 'active' });
+    expect(await state(s.connection.id)).toEqual(before);
+    const [ordinary] = await sql`SELECT config FROM connections WHERE id = ${s.connection.id}`;
+    expect(ordinary.config?.consent_only).not.toBe(true);
+  });
+
   it.each(['admin', 'owner'] as const)('does not let another %s rotate or rebind a personal grant', async (role) => {
     const s = await seed();
     const other = await createTestUser({ name: 'Synthetic other administrator' });
