@@ -159,6 +159,12 @@ function messagesFeed() {
 // ── canonical identity and cutover (verbatim from the extension suite) ──
 
 describe("canonical WhatsApp identity and cutover", () => {
+  it('backfills a fresh connection whose cutover is null', () => {
+    const { request } = buildCollectionPlan({});
+    expect(request.backfill_disabled).toBe(false);
+    expect(request.minimum_timestamp).toBeNull();
+    expect(request.recent_since).toBeNull();
+  });
   it("uses raw key.id and never the serialized compound key", () => {
     expect(
       rawMessageId({ id: "3EB0ABC", _serialized: "false_123@c.us_3EB0ABC_in" })
@@ -794,7 +800,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   it("bumps the WhatsApp connector version for page observation semantics", () => {
-    expect(connector.definition.version).toBe("1.0.4");
+    expect(connector.definition.version).toBe("1.0.5");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -1272,9 +1278,8 @@ describe("quarantined messages", () => {
    * Two fields do that work, and both have to arrive: `key` is what
    * `reconciledKeys` matches to DROP a marker, and `message_id` is what the
    * adapter filters `dirty_ranges` on to look one up. A marker missing either
-   * is not "slightly wrong" — it is permanently stuck, and because `dirty`
-   * being non-empty pins `backfill.complete = false`, the backfill never
-   * finishes either.
+   * is permanently stuck. Diagnostics survive collection completion without
+   * holding history open or causing an endless continuation loop.
    */
   it("carries a quarantined message forward with a reconcilable identity", async () => {
     const dispatcher = makeDispatcher({
@@ -1303,6 +1308,16 @@ describe("quarantined messages", () => {
     const marker = dirty[0] as Record<string, unknown>;
     expect(marker.message_id).toBe("QUARANTINED-1");
     expect(marker.key).toBe("111@s.whatsapp.net:QUARANTINED-1");
+    expect((checkpoint as BrowserCheckpoint).backfill.complete).toBe(true);
+  });
+
+  it('continues incomplete history and stops requesting work when history is exhausted', async () => {
+    const run = (complete: boolean) => messagesFeed().sync(syncCtx(
+      initializeBrowserCheckpoint({}), makeDispatcher({ probe: READY,
+        collect: { ok: true, messages: [], backfill: { complete } },
+      }).dispatcher));
+    expect((await run(false)).next_sync_after_seconds).toBe(1);
+    expect((await run(true)).next_sync_after_seconds).toBeUndefined();
   });
 
   it("does not accumulate a duplicate when the same message is re-quarantined", async () => {
@@ -1442,6 +1457,38 @@ describe("live delivered message batches", () => {
       binding_id: "synthetic-binding", epoch: "synthetic-epoch",
       records: [{ id: "live-one", revision: 1 }, { id: "live-two", revision: 2 }],
     });
+  });
+
+  it('activates a fresh message during backfill and suppresses historical pages across runs', async () => {
+    const boundary = Math.floor(Date.now() / 1000);
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.live_since = boundary;
+    const rows = [message('old-history', { timestamp: boundary - 1000 }),
+      message('new-arrival', { timestamp: boundary + 1 })];
+    const first = await messagesFeed().sync(syncCtx(checkpoint, makeDispatcher({
+      probe: READY, collect: { ...collectResponse(rows), backfill: { complete: false } },
+    }).dispatcher));
+    expect(first.events[0].automation_signals).toEqual([]);
+    expect(first.events[1].automation_signals).toMatchObject([{ event_type: 'message' }]);
+    const next = await messagesFeed().sync(syncCtx(first.checkpoint as BrowserCheckpoint, makeDispatcher({
+      probe: READY, collect: collectResponse([message('older-page', { timestamp: boundary - 2000 })]),
+    }).dispatcher));
+    expect(next.events[0].automation_signals).toEqual([]);
+    expect(next.checkpoint?.live_since).toBe(boundary);
+    expect(next.next_sync_after_seconds).toBeUndefined();
+    const pushed = delivered([{ revision: 1, payload: message('pushed-new', { timestamp: boundary + 2 }) }]);
+    pushed.checkpoint = next.checkpoint as BrowserCheckpoint;
+    expect((await connector.onDelivery(pushed)).events[0].automation_signals).toMatchObject([{ event_type: 'message' }]);
+  });
+
+  it('clears an untimestamped diagnostic when the source later delivers its complete record', async () => {
+    const input = delivered([{ revision: 3, payload: message('recovered') }]);
+    input.checkpoint.dirty = [{ key: 'synthetic:recovered', message_id: 'recovered', reason: 'missing_stable_timestamp' }];
+    input.checkpoint.diagnostics = { dirty_reconciliation: { pending_count: 1 } };
+    const result = await connector.onDelivery(input);
+    expect(result.checkpoint?.dirty).toBeUndefined();
+    expect(result.checkpoint?.diagnostics?.dirty_reconciliation).toBeUndefined();
+    expect(result.checkpoint?.backfill.complete).toBe(true);
   });
 
   it("acknowledges excluded records but leaves records outside the processing budget buffered", async () => {

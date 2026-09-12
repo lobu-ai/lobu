@@ -579,7 +579,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				run.feed_id != null &&
 				run.feed_key &&
 				acceptedItems.some(
-					(item) => (item.automation_signals?.length ?? 0) === 0
+					(item) => item.automation_signals === undefined
 				)
 			) {
 				deriveContext = await loadConnectorDeriveFeedContext(
@@ -747,7 +747,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 									}
 								}
 								const drafts = item.automation_signals ?? [];
-								if (drafts.length > 0) {
+								if (item.automation_signals !== undefined) {
 									for (const [draftIndex, draft] of drafts.entries()) {
 										const signal = materializeConnectorAutomationSignal({
 											draft,
@@ -1016,6 +1016,10 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 	try {
 		const req = await c.req.json<CompleteRequest>();
+		if (req.next_sync_after_seconds !== undefined &&
+			(!Number.isInteger(req.next_sync_after_seconds) || req.next_sync_after_seconds < 1 || req.next_sync_after_seconds > 86400)) {
+			return c.json({ error: "Invalid connector continuation delay" }, 400);
+		}
 
 		// Strip NUL (0x00) from connector- and worker-supplied payloads before they
 		// hit Postgres (see streamContent). The final checkpoint and refreshed
@@ -1126,11 +1130,12 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						: sql`,
 	          items_collected = ${req.items_collected ?? 0},
 	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-				returning: sql`feed_id, connection_id, dry_run`,
+				returning: sql`feed_id, connection_id, dry_run, run_metadata`,
 			})) as unknown as Array<{
 				feed_id: number | null;
 				connection_id: number | null;
 				dry_run: boolean;
+				run_metadata: { feed_due?: boolean } | null;
 			}>;
 
 			if (updatedRuns.length === 0) return updatedRuns;
@@ -1166,12 +1171,18 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 					timezone: string | null;
 				}>;
 
-				// Manual feeds (no schedule) stay unscheduled after completion.
+				// The connector can continue bounded work without a recurring schedule.
 				const schedule = feedRows[0]?.schedule ?? null;
-				const nextRun = schedule
+				const cronNextRun = schedule
 					? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
 					: null;
 				const isSuccess = req.status === "success";
+				const continuation = isSuccess && req.next_sync_after_seconds !== undefined
+					? new Date(Date.now() + req.next_sync_after_seconds * 1000) : null;
+				const retryDue = !isSuccess && updatedRuns[0]?.run_metadata?.feed_due === true;
+				const nextRun = [cronNextRun ? new Date(cronNextRun) : null, continuation, retryDue ? new Date() : null]
+					.filter((value): value is Date => value !== null)
+					.sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
 
 				// A connector that could not reach a required execution dependency never
 				// reached the source. Preserve the last real source-health result, do not
@@ -1180,7 +1191,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 					await sql`
 	          UPDATE feeds
 	          SET last_error = ${req.error_message ?? null},
-	              next_run_at = ${nextRun},
+	              next_run_at = ${retryDue ? new Date(Date.now() + feedBackoff.baseMs) : nextRun},
 	              updated_at = current_timestamp
 	          WHERE id = ${feedId}
 	        `;
@@ -1223,7 +1234,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 									// Enqueue consumes the previous due time. A newly-due value
 									// belongs to a notification received during this run; preserve
 									// it under the same row lock as completion/checkpoint commit.
-									? sql`CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END`
+									? sql`LEAST(next_run_at, ${nextRun}::timestamptz)`
 									: sql`CASE
 	                    WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
 	                    WHEN ${nextRun}::timestamptz IS NULL THEN NULL

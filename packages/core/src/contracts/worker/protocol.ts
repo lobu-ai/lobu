@@ -871,6 +871,9 @@ export const CompleteRequestSchema = Type.Composite([
     items_collected: Type.Optional(Type.Integer()),
     error_message: Type.Optional(Type.String()),
     checkpoint: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    next_sync_after_seconds: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: 86400 })
+    ),
     auth_update: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   }),
   WorkerExitDiagnosticsSchema,

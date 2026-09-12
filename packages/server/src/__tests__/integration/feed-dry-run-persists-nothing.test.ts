@@ -128,6 +128,79 @@ function batchFor(runId: number) {
   };
 }
 
+describe('bounded connector continuation', () => {
+  beforeEach(cleanupTestDatabase);
+
+  it('arms an unscheduled feed only when successful completion requests more work', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${feedId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', checkpoint: { page: 1 }, next_sync_after_seconds: 2 });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(200);
+    const [feed] = await sql`SELECT checkpoint, schedule, next_run_at > now() AS future,
+      next_run_at < now() + interval '5 seconds' AS soon FROM feeds WHERE id = ${feedId}`;
+    expect(feed).toEqual({ checkpoint: { page: 1 }, schedule: null, future: true, soon: true });
+  });
+
+  it.each([true, false])('leaves an idle feed unscheduled (dry run: %s)', async (dry) => {
+    const { feedId, runId } = await seed(dry);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${feedId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', ...(dry ? { next_sync_after_seconds: 2 } : {}) });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(200);
+    expect((await sql`SELECT next_run_at FROM feeds WHERE id = ${feedId}`)[0].next_run_at).toBeNull();
+  });
+
+  it('preserves a source wake received during the current run', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = now() WHERE id = ${feedId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', next_sync_after_seconds: 60 });
+    await completeWorkerJob(completion.ctx);
+    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feedId}`)[0].due).toBe(true);
+  });
+
+  it.each([0, -1, 1.5, 86401, '2'])('rejects invalid continuation %s without finalizing the run', async (delay) => {
+    const { runId } = await seed(false);
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', next_sync_after_seconds: delay });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(400);
+    expect((await getTestDb()`SELECT status FROM runs WHERE id = ${runId}`)[0].status).toBe('running');
+  });
+
+  it('backs off a failed due run without requiring a cron schedule', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${feedId}`;
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ feed_due: true })} WHERE id = ${runId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'failed', error_message: 'temporary failure' });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(200);
+    const [feed] = await sql`SELECT consecutive_failures, next_run_at > now() AS retry FROM feeds WHERE id = ${feedId}`;
+    expect(feed).toEqual({ consecutive_failures: 1, retry: true });
+  });
+
+  it('cannot rearm a paused feed or change a finalized continuation', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET status = 'paused', schedule = NULL WHERE id = ${feedId}`;
+    const complete = () => mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', next_sync_after_seconds: 1, checkpoint: { finished: true } });
+    await completeWorkerJob(complete().ctx);
+    expect((await sql`SELECT status, next_run_at FROM feeds WHERE id = ${feedId}`)[0])
+      .toEqual({ status: 'paused', next_run_at: null });
+    await sql`UPDATE feeds SET status = 'active' WHERE id = ${feedId}`;
+    await completeWorkerJob(complete().ctx);
+    expect((await sql`SELECT next_run_at FROM feeds WHERE id = ${feedId}`)[0].next_run_at).toBeNull();
+  });
+});
+
 describe('feed dry run persists nothing', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();

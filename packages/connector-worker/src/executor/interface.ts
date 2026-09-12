@@ -124,6 +124,7 @@ export type ExecutorResult =
   | {
       mode: 'sync';
       checkpoint: Record<string, unknown> | null;
+      next_sync_after_seconds?: number;
       auth_update?: Record<string, unknown> | null;
       metadata?: Record<string, unknown>;
     }

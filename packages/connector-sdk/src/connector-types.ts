@@ -858,7 +858,8 @@ export interface EventEnvelope {
   metadata?: Record<string, unknown>;
   /** Pre-computed embedding vector */
   embedding?: number[];
-  /** Connector-normalized Automation activations derived from this event. */
+  /** Connector-normalized Automation activations. Omit for platform derivation;
+   * an explicit empty array suppresses activation (for example, backfill). */
   automation_signals?: ConnectorAutomationSignalDraft[];
 }
 
@@ -943,6 +944,9 @@ export interface SyncResult<C = Record<string, unknown>> {
   events: EventEnvelope[];
   /** Updated checkpoint to persist */
   checkpoint: C | null;
+  /** Request another bounded sync in 1..86400 seconds while work remains.
+   * Omit when caught up. This does not create or change a recurring schedule. */
+  next_sync_after_seconds?: number;
   /** Updated auth state to persist on the linked auth profile (browser cookies, etc.) */
   auth_update?: Record<string, unknown> | null;
   /** Optional metadata about the sync */
