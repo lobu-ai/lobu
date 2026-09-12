@@ -26,6 +26,19 @@ function sqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+async function digest(
+  client: ReactionClient,
+  signature: string
+): Promise<string> {
+  const [hashed] = (await client.query(
+    `SELECT md5(${sqlString(signature)}) AS digest`
+  )) as Array<{ digest: string }>;
+  if (!hashed || !/^[a-f0-9]{32}$/.test(hashed.digest)) {
+    throw new Error("Could not compute task notification key");
+  }
+  return hashed.digest;
+}
+
 // Outputs are proposals for writes. Check the run's committed change set, then
 // re-read each entity because a later run can close it before this queued task.
 export default async function notifyTaskChanges(
@@ -99,21 +112,34 @@ export default async function notifyTaskChanges(
       .trim();
     const draft = `Review task #${task.id}: ${action}. Read its current status, source, rationale and agent_help before acting. If it is still unresolved, help with the saved proposal. Verify the evidence and available capabilities, prepare reviewable results, and ask for any missing decision or permission. Do not act on a closed task.`;
     const root = `/${encodeURIComponent(ctx.organization_slug)}`;
+    const priority = task.metadata.priority ?? null;
+    const due = task.metadata.due_date
+      ? new Date(String(task.metadata.due_date)).toISOString()
+      : null;
+    const urgency = [
+      priority ? `Priority: ${priority}` : null,
+      due ? `Due: ${due}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const noticeKey = help
+      ? `notice:v2:${await digest(client, JSON.stringify({ help, priority, due }))}`
+      : "created:v1";
     await client.notifications.send({
       title: (help ? "Agent help available: " : "Task: ")
         .concat(action)
         .slice(0, 200),
       body: (help
-        ? `${help.summary}\n\nOpen to review the request and start an agent.`
+        ? `${help.summary}${urgency ? `\n\n${urgency}` : ""}\n\nOpen to review the request and start an agent.`
         : String(task.metadata.rationale || action)
       ).slice(0, 1000),
       recipients: "admins",
       resource_url: help
         ? `${root}/chat/personal-agent?new=1&prompt=${encodeURIComponent(draft)}`
         : `${root}/task/${encodeURIComponent(task.slug)}`,
-      // A first offer can follow an ordinary new-task notice. Retries and
-      // wording changes reuse each notice's key; withdrawing help sends none.
-      idempotency_key: `task-builder:task:${task.id}:${help ? "notice" : "created"}:v1`,
+      // Replays and display-title edits reuse the saved proposal's key. Changed
+      // work or urgency gets a new alert; withdrawing help still sends none.
+      idempotency_key: `task-builder:task:${task.id}:${noticeKey}`,
     });
   }
   // Check deadlines even when this run did not create or update a task.
@@ -168,12 +194,7 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
         `${row.id}:${new Date(row.due_date).getTime() < nowMs ? "overdue" : "soon"}`
     )
     .join("-");
-  const [hashed] = (await client.query(
-    `SELECT md5(${sqlString(signature)}) AS digest`
-  )) as Array<{ digest: string }>;
-  if (!hashed || !/^[a-f0-9]{32}$/.test(hashed.digest)) {
-    throw new Error("Could not compute due-task digest key");
-  }
+  const hashed = await digest(client, signature);
   await client.notifications.send({
     title:
       overdue.length > 0
@@ -181,6 +202,6 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
         : `Task reminder — ${rows.length} due soon`,
     body: lines.join("\n"),
     recipients: "admins",
-    idempotency_key: `task-due-digest:${day}:${hashed.digest}`,
+    idempotency_key: `task-due-digest:${day}:${hashed}`,
   });
 }

@@ -57,7 +57,13 @@ function harness(
           "SELECT md5('".length,
           -"') AS digest".length
         );
-        return [{ digest: createHash("md5").update(signature).digest("hex") }];
+        return [
+          {
+            digest: createHash("md5")
+              .update(signature.replace(/''/g, "'"))
+              .digest("hex"),
+          },
+        ];
       }
       if (sql.includes("semantic_type = 'change_set'")) {
         return changeKind
@@ -104,7 +110,9 @@ describe("Task Builder completion reaction", () => {
     expect(url.pathname).toBe("/example/chat/personal-agent");
     expect(url.searchParams.get("new")).toBe("1");
     expect(url.searchParams.get("prompt")).toContain("Read its current status");
-    expect(h.sends[0]?.idempotency_key).toBe("task-builder:task:42:notice:v1");
+    expect(h.sends[0]?.idempotency_key).toMatch(
+      /^task-builder:task:42:notice:v2:[a-f0-9]{32}$/
+    );
   });
   test("replays and wording changes address the same notification", async () => {
     const first = harness();
@@ -121,6 +129,60 @@ describe("Task Builder completion reaction", () => {
     expect(first.sends[0]?.title).not.toBe(second.sends[0]?.title);
     expect(first.sends[0]?.idempotency_key).toBe(
       second.sends[0]?.idempotency_key
+    );
+  });
+  test.each([
+    { priority: "high" },
+    { due_date: "2026-09-13T12:00:00Z" },
+    {
+      agent_help: {
+        summary: "Restore monitoring after the quota was exhausted.",
+        prompt: help.prompt,
+      },
+    },
+    {
+      agent_help: {
+        summary: help.summary,
+        prompt:
+          "Investigate dropped spans and prepare a recovery plan for review.",
+      },
+    },
+  ])("alerts again when the saved work changes: %p", async (change) => {
+    const first = harness();
+    await notifyTasks(context([candidate]), first.client);
+    const updated = { ...candidate, ...change };
+    const second = harness(updated, "updated");
+    await notifyTasks(context([updated]), second.client);
+    expect(second.sends).toHaveLength(1);
+    expect(second.sends[0]?.idempotency_key).not.toBe(
+      first.sends[0]?.idempotency_key
+    );
+    if ("priority" in change)
+      expect(second.sends[0]?.body).toContain("Priority: high");
+    if ("due_date" in change)
+      expect(second.sends[0]?.body).toContain("Due: 2026-09-13T12:00:00.000Z");
+    if ("agent_help" in change)
+      expect(second.sends[0]?.body).toContain(change.agent_help.summary);
+    const replay = harness(updated, "updated");
+    await notifyTasks(context([updated]), replay.client);
+    expect(replay.sends[0]?.idempotency_key).toBe(
+      second.sends[0]?.idempotency_key
+    );
+  });
+  test("equivalent deadline formats and unrelated edits reuse the offer", async () => {
+    const original = { ...candidate, due_date: "2026-09-13T12:00:00Z" };
+    const first = harness(original);
+    await notifyTasks(context([original]), first.client);
+    const updated = {
+      ...original,
+      due_date: "2026-09-13T13:00:00+01:00",
+      status: "active",
+      rationale: "Investigation started; proposal and deadline are unchanged.",
+    };
+    const second = harness(updated, "updated");
+    await notifyTasks(context([updated]), second.client);
+    expect(second.sends[0]?.idempotency_key).toBe(
+      first.sends[0]?.idempotency_key
     );
   });
   test.each([
