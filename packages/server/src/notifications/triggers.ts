@@ -433,8 +433,8 @@ async function notifyOrgAdmins(
 /**
  * Which user, if any, should get the approval as a Slack DM.
  *
- * `deliverToBotConnections` tries the DM tier BEFORE the channel tier and
- * returns on success, so this is a real precedence decision and not a
+ * Notification delivery selects a resolved owner DM before channel targets,
+ * so this is a real precedence decision and not a
  * preference: hand it the requester while a chat origin is also set and an
  * approval asked for in a channel silently lands in the asker's DM instead,
  * inverting the documented conversation → DM → inbox order.

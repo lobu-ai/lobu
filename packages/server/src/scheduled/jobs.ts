@@ -35,6 +35,7 @@ import {
 import { TaskScheduler } from './task-scheduler';
 import {
   AUTOMATION_REACTION_TASK,
+  NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
   WORKSPACE_EVENT_ACTIVATION_TASK,
 } from './task-definitions';
@@ -47,6 +48,8 @@ import { runScoreEvalRuns } from './score-eval-runs';
 import { getDb, pgTextArray } from '../db/client';
 import {
   createNotificationForUsers,
+  deliverNotificationTask,
+  type NotificationDeliveryTaskPayload,
   refreshInteractiveEventCardTask,
   type InteractiveEventCardRefreshTaskPayload,
 } from '../notifications/service';
@@ -492,6 +495,12 @@ function registerMaintenanceTasks(
         '[task] automation-reaction settled',
       );
     }
+  });
+
+  scheduler.register(NOTIFICATION_DELIVERY_TASK, async (ctx) => {
+    await deliverNotificationTask(
+      ctx.payload as NotificationDeliveryTaskPayload,
+    );
   });
 
   // scheduled_jobs ticker: scans the table every minute, spawns due rows
