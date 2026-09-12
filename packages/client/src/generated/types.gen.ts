@@ -2388,13 +2388,13 @@ export type ManageConnectionsData = {
          */
         slug?: string;
         /**
-         * Reusable auth profile slug for runtime/account auth
+         * Reusable runtime/account auth profile slug. Set both auth profile fields to null to select a declared no-auth method; omit for automatic selection.
          */
-        auth_profile_slug?: string;
+        auth_profile_slug?: string | null;
         /**
-         * Reusable auth profile slug for OAuth app credentials
+         * Reusable OAuth app profile slug. Set both auth profile fields to null to select a declared no-auth method.
          */
-        app_auth_profile_slug?: string;
+        app_auth_profile_slug?: string | null;
         /**
          * Connection config
          */
@@ -4041,8 +4041,7 @@ export type ManageAuthProfilesResponses = {
         cookie_count?: number;
         auth_cookie_name?: string | null;
         is_expired?: boolean;
-        cdp_url?: string | null;
-        auth_mode?: "cdp" | "cookies" | "empty";
+        auth_mode?: "cookies" | "empty";
       }
     | {
         action: "create_auth_profile";

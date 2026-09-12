@@ -56,14 +56,6 @@
       "types": "./dist/egress-policy.d.ts",
       "import": "./dist/egress-policy.js"
     },
-    "./browser/cdp": {
-      "types": "./dist/browser/cdp.d.ts",
-      "import": "./dist/browser/cdp.js"
-    },
-    "./browser": {
-      "types": "./dist/browser/index.d.ts",
-      "import": "./dist/browser/index.js"
-    },
     "./sources": {
       "types": "./dist/sources/index.d.ts",
       "import": "./dist/sources/index.js"
@@ -79,7 +71,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc",
+    "build": "bun run clean && tsc",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
@@ -89,18 +81,6 @@
     "isomorphic-git": "^1.34.0",
     "ky": "^1.14.0",
     "tar": "^7.4.3"
-  },
-  "peerDependencies": {
-    "playwright": "npm:patchright@^1.57.0",
-    "playwright-vanilla": "npm:playwright@^1.60.0"
-  },
-  "peerDependenciesMeta": {
-    "playwright": {
-      "optional": true
-    },
-    "playwright-vanilla": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

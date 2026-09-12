@@ -155,6 +155,8 @@ jobs:
           bun run build:packages
           bun run build:lobu
       - name: Smoke the packed CLI before publication
+        env:
+          LOBU_RUNTIME_CACHE_DIR: ${{ runner.temp }}/canary-smoke/runtime
         run: |
           node scripts/pack-cli-smoke.mjs "$RUNNER_TEMP/canary-smoke"
           cd "$RUNNER_TEMP/canary-smoke"

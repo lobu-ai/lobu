@@ -17,8 +17,38 @@ import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
-import { resolveDeviceWorkerForRequest } from './device-auth-profiles';
 import { parseJsonBody } from '../gateway/routes/shared/helpers';
+
+/**
+ * Resolve the device_workers row for the authenticated user + workerId.
+ *
+ * Returns `{ device }` on success or `{ device: null, error }` on failure so
+ * callers can early-return the error response without throwing.
+ */
+async function resolveDeviceWorkerForRequest(
+  c: Context<{ Bindings: Env }>,
+  workerId: string
+): Promise<{ device: { id: string; organization_id: string } | null; error?: Response }> {
+  const userId = c.var.workerUserId;
+  if (!userId) {
+    return { device: null, error: c.json({ error: 'Unauthorized' }, 401) };
+  }
+  const sql = getDb();
+  const rows = (await sql`
+    SELECT id, organization_id
+    FROM device_workers
+    WHERE user_id = ${userId} AND worker_id = ${workerId}
+    LIMIT 1
+  `) as unknown as Array<{ id: string; organization_id: string | null }>;
+  const row = rows[0];
+  if (!row) {
+    return { device: null, error: c.json({ error: 'Device not registered yet — poll first' }, 404) };
+  }
+  if (!row.organization_id) {
+    return { device: null, error: c.json({ error: 'Device has no organization attached' }, 409) };
+  }
+  return { device: { id: row.id, organization_id: row.organization_id } };
+}
 
 async function resolveDeviceConnection(
   c: Context<{ Bindings: Env }>,

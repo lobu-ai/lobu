@@ -139,7 +139,7 @@ Chrome ops: `navigate` (new tab, existing `tab_id`, or `persistent` agent window
 
 The recipe above drives the same **paired Owletto extension** that extension-scrape connectors (Revolut, LinkedIn) use — the Chrome that holds the user's live sessions. Anything said there applies: `operations.execute` → `dispatchChromeActionToExtension` → device-worker queue → the paired extension. No deploy required.
 
-`lobu connector run` is the wrong tool here — it only does local Playwright/CDP against a `browser_session` auth profile, so it errors `Missing --auth-profile` for device-worker connectors (Revolut has no auth profile).
+The standalone `lobu connector run` command has been retired. Use the connector-operations bridge above for device-worker connectors; they do not need a browser auth profile.
 
 Gotchas:
 - `search_sdk operations` surfaces the `operations` namespace and current method signatures. Use `Object.keys(client)` inside a `run_sdk` script only when checking discovery/runtime parity.

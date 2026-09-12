@@ -228,12 +228,10 @@ a Mac advertises it through Owletto, a headless server through the
 connector-worker daemon — so it exists only where a device offers it.
 
 Each connector defines its own `config` keys and feed keys — don't guess them.
-Read the installed catalog schemas before authoring config. `lobu connector run`
-is not a generic validation path: it supports only a device-bound
-`browser_session` profile and requires
-`--auth-profile <browser-session-profile-slug>`. For managed OAuth or env-backed
-profiles, validate the authored project and inspect catalog/connection metadata;
-after the user approves provider-data access, use a server-side feed dry-run.
+Read the installed catalog schemas before authoring config. Validate the authored
+project and inspect catalog, connection, and paired-device metadata. Browser
+actions use the paired extension. After the user approves provider-data access,
+use a server-side feed dry-run.
 
 Discover live capabilities before writing connector config. Call
 `client.connections.setupOptions({ connector_key })` in the selected runtime

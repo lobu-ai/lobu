@@ -5,9 +5,9 @@ import { validateEmbeddingDimensions } from "./embedding-utils.js";
 import {
 	DEFAULT_BATCH_SIZE,
 	DEFAULT_DIMENSIONS,
-	batchGenerateLocalEmbeddings,
 	getLocalModelName,
-} from "./embeddings.js";
+} from "./metadata.js";
+import { loadLocalEmbeddings } from "./local-runtime.js";
 import { scrubSecrets } from "./internal/scrub-secrets.js";
 import {
 	generateOpenAIEmbeddings,
@@ -185,6 +185,7 @@ app.post("/api/embeddings", async (c) => {
 			process.env.EMBEDDINGS_BATCH_SIZE,
 			DEFAULT_BATCH_SIZE,
 		);
+		const { batchGenerateLocalEmbeddings } = await loadLocalEmbeddings();
 		const embeddings = await batchGenerateLocalEmbeddings(
 			parsed.texts,
 			batchSize,

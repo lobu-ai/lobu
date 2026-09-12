@@ -629,7 +629,7 @@ jobs:
 
       - name: owletto tests (vitest)
         if: steps.submodule.outputs.stubbed != 'true'
-        run: cd packages/owletto && ../../node_modules/.bin/vitest run
+        run: cd packages/owletto && bun run test
 
       - name: SPA prod build (barrel ban + vite + bundle tripwire)
         # Same command docker/app uses. Fails on runtime `@lobu/core` barrel
@@ -710,7 +710,7 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/lobu_test
       # The integration suite runs all 70+ test files in a single forked
-      # process (vitest.config.ts: pool:'forks', singleFork:true). With the
+      # process (vitest.config.ts: pool:'forks', maxWorkers:1). With the
       # production default of `DB_POOL_MAX=20` plus the test pool's `max:5`
       # the suite has ~26 sockets to play with — fine on its own, but
       # `idle_timeout:0` in db/client.ts keeps every connection forever, so
@@ -829,7 +829,7 @@ jobs:
         # independently asserts zero failures — and a missing/unparseable
         # report (crashed run) also fails.
         run: |
-          node node_modules/.bin/vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json" \
+          bun run test -- run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json" \
             --shard=${{ matrix.shard }}/3 \
             --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage
           mv coverage/lcov.info coverage/vitest-shard-${{ matrix.shard }}.lcov.info
@@ -961,7 +961,7 @@ jobs:
         # gateway suites are not mutually hermetic — co-running the whole tree in
         # one process leaks DB rows and module singletons across files (org rows,
         # service registries) and fails. A process per dir gives each dir a clean
-        # module registry, matching why vitest uses singleFork here. `find`
+        # module registry, matching Vitest's single fork worker here. `find`
         # auto-discovers every nested directory, including
         # src/gateway/infrastructure/queue (#1238). Run all dirs and fail at the
         # end so one run reports every failing dir, not just the first.
@@ -1729,7 +1729,7 @@ jobs:
             echo "mac=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No paths affecting the Mac build changed — skipping mac-build-smoke."
           fi
-          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/cli/|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
+          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/pgvector-embedded/|packages/cli/|scripts/(runtime-components\.mjs|pack-cli-smoke\.mjs|verify-cli-runtime\.mjs|publish-packages\.mjs|canary-publish\.mjs|published-artifact-smoke\.sh)$|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
             echo "connector=true" >> "$GITHUB_OUTPUT"
           else
             echo "connector=false" >> "$GITHUB_OUTPUT"
@@ -1853,7 +1853,7 @@ jobs:
     needs: optional-smoke-filter
     if: needs.optional-smoke-filter.outputs.connector == 'true'
     runs-on: ${{ vars.CI_LINUX_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -1941,3 +1941,11 @@ jobs:
 
       - name: CLI runtime self-check (host)
         run: node packages/cli/bin/lobu.js connector runtime-self-check --json
+
+      - name: Packed CLI and lazy runtime parity (Bun and Node-only npm)
+        # Runtime artifacts live outside packages/*/dist and are regenerated
+        # even on a dist-cache hit. Test actual packed consumers, native addons,
+        # embedded/external server startup, and shutdown without workspace links.
+        run: |
+          bun run --cwd packages/cli build
+          node scripts/pack-cli-smoke.mjs "$RUNNER_TEMP/lazy-runtime-smoke"

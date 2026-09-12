@@ -1,11 +1,9 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isHostedChatPlatform } from "@lobu/core";
 import chalk from "chalk";
 import ora from "ora";
@@ -21,6 +19,7 @@ import {
 } from "../internal/context.js";
 import { type Credentials, saveCredentials } from "../internal/credentials.js";
 import { parseEnvContent } from "../internal/index.js";
+import { prepareRuntime } from "../internal/runtime-components.js";
 import { checkNodeSupport } from "../internal/node-version.js";
 import { loadProjectLink } from "../internal/project-link.js";
 import { loadProjectConfig } from "./_lib/apply/desired-state.js";
@@ -291,28 +290,6 @@ export async function devCommand(
     mergedEnv.DATABASE_URL = embeddedDataRoot;
   }
 
-  // One bundle for both backends — it self-selects on DATABASE_URL.
-  const bundlePath = resolveBackendBundle();
-  if (!bundlePath) {
-    spinner.fail("server bundle not found");
-    console.error(
-      chalk.red("\n  Could not locate the server bundle (server.bundle.mjs).\n")
-    );
-    console.error(
-      chalk.dim(
-        "  Installed CLIs ship the bundle inside their own dist/. If you're"
-      )
-    );
-    console.error(
-      chalk.dim(
-        "  seeing this from a published @lobu/cli, please file an issue."
-      )
-    );
-    console.error(chalk.dim("  In the monorepo, build it via:"));
-    console.error(chalk.dim("    make build-packages\n"));
-    process.exit(1);
-  }
-
   spinner.succeed(
     mode === "external"
       ? "Environment ready"
@@ -347,6 +324,9 @@ export async function devCommand(
     );
     process.exit(1);
   }
+
+  const runtime = await prepareRuntime("server", mergedEnv);
+  const bundlePath = runtime.entries.server!;
 
   if (!options.quiet) {
     console.log(chalk.cyan(`\n  Starting Lobu...\n`));
@@ -404,6 +384,7 @@ export async function devCommand(
 
   const childEnv: Record<string, string> = {
     ...mergedEnv,
+    ...runtime.env,
     LOBU_DEV_PROJECT_PATH: projectPath,
     // `lobu run` owns the local DB lifecycle for both backends. The embedded
     // path already migrates on boot; this flag tells the server bundle to also
@@ -420,7 +401,7 @@ export async function devCommand(
     ...(logLevel ? { LOG_LEVEL: logLevel } : {}),
   };
 
-  const child = spawn("node", [bundlePath], {
+  const child = spawn(process.execPath, [bundlePath], {
     cwd,
     env: childEnv,
     stdio: "inherit",
@@ -601,38 +582,6 @@ export function findEnclosingMonorepoRoot(startDir: string): string | null {
     if (parent === cur) break;
     cur = parent;
   }
-  return null;
-}
-
-export function resolveBackendBundle(
-  startDir = dirname(fileURLToPath(import.meta.url))
-): string | null {
-  const here = startDir;
-  const require_ = createRequire(import.meta.url);
-  const bundleName = "server.bundle.mjs";
-
-  for (const bundled of [
-    join(here, bundleName),
-    join(here, "..", bundleName),
-  ]) {
-    if (existsSync(bundled)) return bundled;
-  }
-
-  try {
-    return require_.resolve("@lobu/server/dist/server.bundle.mjs");
-  } catch {
-    // not installed as a dep
-  }
-
-  let cur = here;
-  for (let i = 0; i < 6; i++) {
-    const candidate = join(cur, "packages/server/dist", bundleName);
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-
   return null;
 }
 

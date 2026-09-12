@@ -1,41 +1,15 @@
 import { createHash } from 'node:crypto';
 
 /**
- * Single source of truth for npm packages that connector code may import but
- * which the connector runtime provides instead of bundling into each compiled
- * connector artifact.
- *
- * These deps must be installed in every runtime that executes compiled
- * connectors — the server container that hosts in-process feed sync,
- * and the connector-worker daemon that runs out-of-process. They appear in:
- *
- *   - `packages/connector-worker/src/compile/index.ts` (`@lobu/connector-sdk`
- *     is externalized by the SDK plugin; the rest use esbuild's `external` list)
- *   - `packages/connector-worker/package.json` dependencies (so the runtime can
- *     resolve them)
- *   - `assertExternalDepsResolvable()` (boot-time check that crashes loud
- *     instead of failing silently per-feed)
- *
- * Rule of thumb: besides the shared connector SDK, only externalize deps that
- * genuinely can't be bundled —
- * native binaries (`sharp`, `jimp`) or runtime install steps
- * (`playwright` ships browsers via `npx playwright install`). Pure JS deps
- * like `pino` or `link-preview-js` should be bundled instead, even if it
- * costs a few hundred KB per connector — bundling eliminates the entire
- * class of "compiled connector references X but X isn't installed in the
- * worker image" outages.
+ * Packages that cannot run inside a connector isolate. The compiler leaves
+ * these imports unresolved so the guest fails closed with the package name;
+ * externalization is not a promise to install or provide them at runtime.
  */
-/** Native/browser dependencies externalized through esbuild's `external` option. */
 export const EXTERNAL_RUNTIME_DEPS = ['playwright', 'sharp', 'jimp'] as const;
 
-/** Shared framework externalized by the connector SDK esbuild plugin. */
+/** The compiler needs the SDK source to inline it into every connector. */
 const CONNECTOR_SDK_RUNTIME_DEP = '@lobu/connector-sdk' as const;
-
-/** Every bare package specifier a compiled connector expects the runtime to supply. */
-export const RUNTIME_PROVIDED_PACKAGES = [
-  CONNECTOR_SDK_RUNTIME_DEP,
-  ...EXTERNAL_RUNTIME_DEPS,
-] as const;
+export const RUNTIME_PROVIDED_PACKAGES = [CONNECTOR_SDK_RUNTIME_DEP] as const;
 
 /**
  * Bump when the compile pipeline changes in a way that makes previously

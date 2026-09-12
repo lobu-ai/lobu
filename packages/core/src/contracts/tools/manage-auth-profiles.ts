@@ -184,13 +184,8 @@ export const ManageAuthProfilesResultSchema = Type.Union([
     cookie_count: Type.Optional(Type.Integer()),
     auth_cookie_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     is_expired: Type.Optional(Type.Boolean()),
-    cdp_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     auth_mode: Type.Optional(
-      Type.Union([
-        Type.Literal("cdp"),
-        Type.Literal("cookies"),
-        Type.Literal("empty"),
-      ])
+      Type.Union([Type.Literal("cookies"), Type.Literal("empty")])
     ),
   }),
   Type.Object({

@@ -44,11 +44,6 @@ const config: KnipConfig = {
         "src/**/*.test.ts",
       ],
       ignoreDependencies: [
-        // Native media/ML deps reached at runtime by connector bundles
-        // (embeddings, image processing), not statically imported in src/.
-        "@xenova/transformers",
-        "jimp",
-        "sharp",
         // Resolved by path at guest-bundle build time (agent-turn/
         // pi-file-tools-bundle.ts) to stand in for `node:path` inside Pi's
         // file tools; never statically imported in src/.
@@ -64,17 +59,13 @@ const config: KnipConfig = {
         // so its exports (e.g. the `$id`-registered MatchStrategy schema) have
         // no in-repo importer and must be treated as public API, not dead.
         "src/identity-types.ts",
-        // Public subpaths `@lobu/connector-sdk/browser`, `/sources` and
+        // Public subpaths `@lobu/connector-sdk/sources` and
         // `/device-manifest-hash` (package.json exports): the Node-only halves
         // of the SDK, kept off the isolate-safe root entry.
-        "src/browser/index.ts",
         "src/sources/index.ts",
         "src/device-manifest-hash.ts",
       ],
       ignoreDependencies: [
-        // Browser connector backend (CDP) — used under src/browser/, reached
-        // at runtime not via the SDK's main entry graph.
-        "playwright",
         // Type-only dep for the `tar` file source.
         "@types/tar",
       ],
@@ -146,65 +137,8 @@ const config: KnipConfig = {
         // Build helper invoked as `node scripts/build.cjs`.
         "scripts/build.cjs",
       ],
-      // The published `lobu` CLI is an umbrella: its build bundles @lobu/server,
-      // so it re-declares ITS runtime deps in its own
-      // package.json (npm installs them for the bundled output). knip only sees
-      // cli/src, which doesn't import these directly, so it flags them — but
-      // every one is used by the bundled server at runtime. Listed
-      // explicitly so a real unused cli dep would still surface.
-      ignoreDependencies: [
-        "@aws-sdk/client-bedrock",
-        "@aws-sdk/client-secrets-manager",
-        "@chat-adapter/discord",
-        "@chat-adapter/gchat",
-        "@chat-adapter/slack",
-        "@chat-adapter/teams",
-        "@chat-adapter/telegram",
-        "@chat-adapter/whatsapp",
-        "@hono/node-server",
-        "@hono/zod-openapi",
-        "@lobu/embeddings",
-        "@mariozechner/pi-ai",
-        "@mariozechner/pi-coding-agent",
-        "@modelcontextprotocol/sdk",
-        "@opentelemetry/api",
-        "@opentelemetry/exporter-trace-otlp-grpc",
-        "@opentelemetry/resources",
-        "@opentelemetry/sdk-trace-node",
-        "@opentelemetry/semantic-conventions",
-        "@polyglot-sql/sdk",
-        "@react-email/components",
-        "@react-email/render",
-        "@scalar/hono-api-reference",
-        "@sentry/node",
-        "@better-auth/core",
-        "@better-auth/passkey",
-        "better-auth",
-        "chat",
-        "dotenv",
-        "embedded-postgres",
-        "esbuild",
-        "hono",
-        "hono-pino",
-        "isomorphic-git",
-        "jimp",
-        "ky",
-        "kysely",
-        "kysely-postgres-js",
-        "pino",
-        "react",
-        "resend",
-        "sharp",
-        "tar",
-        "vite",
-        "winston",
-        "zod",
-        // Server's Vercel runtime provider (gateway/runtime/providers/vercel.ts),
-        // reached only through the bundled server.
-        "@vercel/sandbox",
-        // Vendored into dist/vendor by scripts/build.cjs (file copy, no import).
-        "@lobu/pgvector-embedded",
-      ],
+      // The compiler is bundled from worker-owned source at CLI build time.
+      ignoreDependencies: ["esbuild"],
     },
     ".": {
       entry: [

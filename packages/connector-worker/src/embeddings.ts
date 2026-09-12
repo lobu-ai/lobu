@@ -7,10 +7,10 @@
 
 import {
   DEFAULT_DIMENSIONS,
-  batchGenerateLocalEmbeddings,
   getLocalModelName,
   validateEmbeddingDimensions,
-} from '@lobu/embeddings';
+} from '@lobu/embeddings/metadata';
+import { pathToFileURL } from 'node:url';
 import { MAX_EMBEDDING_TEXT_BYTES, truncateToBytes } from './embeddings-text.js';
 import { resolveServiceModel } from './embeddings-model.js';
 
@@ -129,6 +129,12 @@ export async function batchGenerateEmbeddings(
     return fetchEmbeddingsFromService(clamped);
   }
 
+  // The launcher prepares the ONNX component before the worker claims jobs.
+  // Keeping this import behind the local branch avoids loading ONNX on remote
+  // workers (the old CLI install measured 2 GiB including local inference).
+  const entry = process.env.LOBU_RUNTIME_EMBEDDINGS_ENTRY;
+  const specifier = entry ? pathToFileURL(entry).href : '@lobu/embeddings';
+  const { batchGenerateLocalEmbeddings } = await import(specifier) as typeof import('@lobu/embeddings');
   const embeddings = await batchGenerateLocalEmbeddings(clamped, batchSize);
   for (const embedding of embeddings) {
     validateEmbeddingDimensions(embedding, getExpectedDimensions(), 'Local embeddings');

@@ -11,7 +11,6 @@ import {
 } from '../../../../utils/device-liveness';
 import {
   getAuthProfileById,
-  getBrowserSessionReadiness,
   normalizeAuthValues,
   summarizeBrowserSessionAuthData,
 } from '../../../../utils/auth-profiles';
@@ -319,20 +318,6 @@ export async function handleTest(
 
   if (authProfile?.profile_kind === 'browser_session') {
     const summary = summarizeBrowserSessionAuthData(authProfile.auth_data, conn.connector_key);
-    if (summary.cdp_url) {
-      const readiness = await getBrowserSessionReadiness(authProfile.auth_data, conn.connector_key);
-      // A configured-but-unreachable CDP endpoint is transient (the browser may
-      // come back), so this warning is retryable — unlike the missing-cookie ones.
-      return withDeviceHealth({
-        action: 'test',
-        status: readiness.usable ? 'ok' : 'warning',
-        message: readiness.usable
-          ? `Browser auth profile '${authProfile.slug}' CDP endpoint reachable`
-          : `Browser auth profile '${authProfile.slug}' CDP configured but endpoint not responding at ${summary.cdp_url}`,
-        expires_at: summary.expires_at,
-        ...(readiness.usable ? {} : testErrorFields('NETWORK')),
-      });
-    }
     if (summary.cookie_count === 0) {
       return withDeviceHealth({
         action: 'test',
@@ -384,7 +369,7 @@ export async function handleTest(
           action: 'test',
           status: 'warning',
           // Offline is transient — the device may reconnect — so this is
-          // retryable, mirroring the CDP-unreachable branch above.
+          // retryable because the paired browser can reconnect.
           message: `Device '${deviceName}' is offline (${describeDeviceLastSeen(
             conn.device_last_seen_at
           )}) — bring it online to execute`,

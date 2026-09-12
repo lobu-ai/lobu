@@ -25,7 +25,7 @@ import http from "node:http";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import postgres from "postgres";
 import {
 	executeMigrationSection,
@@ -505,9 +505,12 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 
 	// Heavy deps stay behind dynamic import so the external/prod path never
 	// loads the embedded-postgres binary resolution or the pgvector injector.
-	const { default: EmbeddedPostgres } = await import("embedded-postgres");
-	const { injectPgvector, resolveEmbeddedNativeDir } =
-		await importPgvectorEmbedded();
+	const componentEntry = process.env.LOBU_RUNTIME_POSTGRES_ENTRY;
+	// The launcher installs PG only for an embedded DATABASE_URL. Loading its
+	// entry by absolute URL keeps native package resolution inside that cache.
+	const component = componentEntry ? await import(pathToFileURL(componentEntry).href) : null;
+	const { default: EmbeddedPostgres } = component ?? await import("embedded-postgres");
+	const { injectPgvector, resolveEmbeddedNativeDir } = component ?? await importPgvectorEmbedded();
 	const nativeDir = resolveEmbeddedNativeDir();
 
 	// The bundled Postgres binary needs its SONAME symlinks in place before it can
@@ -745,7 +748,8 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
 	}
 }
 
-async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
+export async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
+	if (process.env.EMBEDDINGS_SERVICE_URL?.trim()) return null;
 	const embeddingsPort = parseInt(process.env.EMBEDDINGS_PORT || "0", 10);
 	const publishedServerPath = (() => {
 		try {
@@ -755,6 +759,7 @@ async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
 		}
 	})();
 	const serverPath = resolveExistingPath(
+		...(process.env.LOBU_RUNTIME_EMBEDDINGS_SERVER ? [process.env.LOBU_RUNTIME_EMBEDDINGS_SERVER] : []),
 		join(APP_ROOT, "packages", "embeddings", "src", "server.ts"),
 		join(process.cwd(), "packages", "embeddings", "src", "server.ts"),
 		...(publishedServerPath ? [publishedServerPath] : []),

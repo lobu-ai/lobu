@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase } from '../../__tests__/setup/test-db';
 import {
   addUserToOrganization,
@@ -10,6 +10,7 @@ import {
   createTestUser,
 } from '../../__tests__/setup/test-fixtures';
 import { get, postForm } from '../../__tests__/setup/test-helpers';
+import { clearAuthCacheForTests } from '../index';
 import {
   verifySettingsSessionOrToken,
   verifySettingsToken,
@@ -23,8 +24,10 @@ import {
 // See auth/routes.ts.
 describe('deep-link token exchange', () => {
   beforeEach(async () => {
+    clearAuthCacheForTests();
     await cleanupTestDatabase();
   });
+  afterEach(() => clearAuthCacheForTests());
 
   async function patForNewUser(
     slug: string,
@@ -99,6 +102,28 @@ describe('deep-link token exchange', () => {
     expect(cookie).toMatch(/SameSite=Lax/i);
     expect(cookie).not.toMatch(/Partitioned/i);
     expect(cookie).not.toMatch(/SameSite=None/i);
+  });
+
+  it.each(['development', 'production'])('minted cookie authenticates under %s Node settings on loopback HTTP', async (nodeEnv) => {
+    const { token } = await patForNewUser(`cookie-${nodeEnv}`, `cookie-${nodeEnv}@test.example.com`);
+    clearAuthCacheForTests();
+    try {
+      const env = { NODE_ENV: nodeEnv };
+      const minted = await get(`/api/exchange-token?token=${encodeURIComponent(token)}&next=/`, { env });
+      expect(minted.status).toBe(302);
+      const cookie = minted.headers.getSetCookie()
+        .filter((value) => !value.includes('Max-Age=0'))
+        .map((value) => value.split(';')[0]).join('; ');
+      const resolved = await get('/api/auth/get-session', { env, cookie });
+      expect(resolved.status).toBe(200);
+      expect((await resolved.json())?.user?.email).toBe(`cookie-${nodeEnv}@test.example.com`);
+      if (nodeEnv === 'production') {
+        expect(cookie.startsWith('__Secure-better-auth.session_token=')).toBe(true);
+        expect(minted.headers.get('set-cookie')).toContain('Secure');
+      }
+    } finally {
+      clearAuthCacheForTests();
+    }
   });
 
   // The deep-link cookie must land at the SAME scope Better Auth uses; a
@@ -202,8 +227,10 @@ describe('deep-link token exchange', () => {
 // the agent-ownership check (verifySettingsSessionOrToken) accepts it.
 describe('SSE ticket (/api/sse-ticket)', () => {
   beforeEach(async () => {
+    clearAuthCacheForTests();
     await cleanupTestDatabase();
   });
+  afterEach(() => clearAuthCacheForTests());
 
   async function sessionTokenForNewUser(slug: string, email: string): Promise<string> {
     const org = await createTestOrganization({ slug });

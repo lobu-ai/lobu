@@ -13,7 +13,6 @@ import { loadDesiredStateFromConfig } from "../commands/_lib/apply/desired-state
 import { agentScaffoldCommand } from "../commands/agent";
 import { isPortFree } from "../commands/dev";
 import { initCommand } from "../commands/init";
-import { buildBrowserAuthData } from "../commands/memory/_lib/browser-auth-cmd";
 import { loadProjectLink, saveProjectLink } from "../internal/project-link";
 
 describe("isPortFree", () => {
@@ -247,52 +246,20 @@ describe("agent scaffold", () => {
   });
 });
 
-describe("buildBrowserAuthData", () => {
-  // Regression guard: the connector-side cascade in
-  // @lobu/connector-sdk (acquire.ts, browser/network.ts,
-  // browser-scraper-utils.ts) short-circuits on `userDataDir` and tries
-  // Playwright launchPersistentContext, which can't reopen the profile
-  // dir the dedicated Chrome we just launched is holding. The auth_data
-  // payload we write to the auth profile must therefore expose `cdp_url`
-  // and MUST NOT expose `user_data_dir` — otherwise sync silently
-  // diverges from the CDP-attach contract.
-  test("payload contains cdp_url + captured_via + browser_profile and never user_data_dir", () => {
-    const payload = buildBrowserAuthData({
-      cdpUrl: "http://127.0.0.1:9222",
-      profileName: "linkedin",
-      capturedAt: "2026-05-28T00:00:00.000Z",
-    });
-    expect(payload).toEqual({
-      cdp_url: "http://127.0.0.1:9222",
-      captured_at: "2026-05-28T00:00:00.000Z",
-      captured_via: "cli",
-      browser_profile: "linkedin",
-    });
-    expect(payload).not.toHaveProperty("user_data_dir");
-  });
-});
-
-describe("memory browser-auth --help", () => {
-  test("advertises the CDP flags and not the removed cookie-copy flags", async () => {
+describe("retired browser commands", () => {
+  test("help exposes the supported commands without CDP capture or local execution", () => {
     const cliEntry = join(import.meta.dir, "..", "..", "bin", "lobu.js");
-    const proc = Bun.spawnSync({
-      cmd: [process.execPath, cliEntry, "memory", "browser-auth", "--help"],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const out =
-      new TextDecoder().decode(proc.stdout) +
-      new TextDecoder().decode(proc.stderr);
-
-    // Present: the CDP-only surface.
-    expect(out).toContain("--connector");
-    expect(out).toContain("--auth-profile-slug");
-    expect(out).toContain("--remote-debug-port");
-    expect(out).toContain("--dedicated-profile");
-    expect(out).toContain("--check");
-
-    // Removed: the old cookie-copy capture flags.
-    expect(out).not.toContain("--launch-cdp");
-    expect(out).not.toContain("--chrome-profile");
+    for (const command of ["memory", "connector"]) {
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, cliEntry, command, "--help"],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      const output = new TextDecoder().decode(result.stdout);
+      expect(output).not.toContain("browser-auth");
+      expect(output).not.toContain("remote-debug");
+      expect(output).not.toContain("run [connector_key]");
+    }
   });
 });

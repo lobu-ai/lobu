@@ -49,6 +49,10 @@
         "types": "./dist/server.d.ts",
         "default": "./dist/server.js"
       }
+    },
+    "./metadata": {
+      "types": "./dist/metadata.d.ts",
+      "import": "./dist/metadata.js"
     }
   }
 }

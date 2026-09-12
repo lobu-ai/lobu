@@ -1,26 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AGENTS.md allow-list entry: the subcommand handlers below are lazy-loaded
-// via `await import("./commands/...")` rather than static imports. See the
-// AGENTS.md allow-list (Agent Rules → "No new dynamic imports outside the
-// documented allow-list") for the documented exceptions and rationale —
-// sibling entries cover the connector / apply / browser-auth codepaths and
-// test files. This comment only documents the specific reason this file
-// qualifies.
-//
-// Why: the CLI's command graph pulls in `postgres`, `playwright`, every
-// `@chat-adapter/*`, the bundled server, etc. Measured boot times on a 2026
-// macOS host:
-//
-//   lazy (current)   `lobu --help` / `--version` : ~60ms
-//   static import    same invocations           : ~470-540ms (8x slower)
-//
-// `lobu --help` runs every time a user TAB-completes or pokes the CLI; the
-// 400ms penalty is paid on every shell hit even when the user never runs the
-// subcommand whose module would have been loaded. Dynamic import keeps the
-// hot path (commander parses argv, prints help) free of any module the user
-// didn't actually invoke. The measurement was redone after the round-2 audit
-// (REPORT.md → "CLI dynamic-imports rule conflict") so future contributors
-// have a fresh data point before re-litigating the rule.
+// Command modules load after argument parsing. The base CLI installs only
+// configuration and cloud dependencies; server/device commands prepare their
+// versioned runtime components before loading them. The previous distribution
+// installed roughly 2 GiB; the isolated base CLI install measures 178 MiB, with
+// help using about 86 MiB RSS. Keep help free of runtime installation.
 //
 // Rules for adding a new subcommand:
 //   1. Put the handler in `./commands/<name>.ts`.
@@ -30,6 +13,10 @@
 //   4. Do NOT hoist the import to the top of this file.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import {
+  loadDeviceCommand,
+  preinstallRuntime,
+} from "./internal/runtime-components.js";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,6 +105,7 @@ Local dev:
   chat <prompt>            Send a prompt to an agent and stream the response
   validate                 Validate lobu.config.ts
   doctor                   Health checks (deps, DB, pgvector, ports, keys)
+  runtime install [...]    Preinstall runtime components for offline use
   telemetry                Show / toggle anonymous error reporting
   opencode-plugin <action> Install, inspect, or remove interactive OpenCode support
 
@@ -1129,40 +1117,7 @@ Memory:
   // ─── connector ──────────────────────────────────────────────────────
   const connector = program
     .command("connector")
-    .description(
-      "Run connectors locally against an auth profile (no feed required)"
-    );
-  connector
-    .command("run [connector_key]")
-    .description(
-      "Execute a connector locally; events stream to stdout, nothing is persisted"
-    )
-    .option(
-      "--auth-profile <slug>",
-      "Auth profile slug (browser_session only in v1)"
-    )
-    .option(
-      "--config <json>",
-      'Feed config as JSON object (e.g. \'{"start_url":"https://..."}\')'
-    )
-    .option(
-      "--checkpoint-from-feed <id>",
-      "Borrow checkpoint state from this feed id"
-    )
-    .option(
-      "--from-feed <id>",
-      "Resolve connector + auth + config + checkpoint from this feed id"
-    )
-    .option("--max-items <n>", "Cap pagination to this many items")
-    .option("--check", "Resolve + validate without executing the connector")
-    .option("--json", "Emit machine-readable JSON to stdout (artifact-shaped)")
-    .option("-c, --context <name>", "Use a named context")
-    .option("--url <url>", "Server URL override")
-    .option("--org <slug>", "Org slug override")
-    .action(async (connectorKey: string | undefined, options) => {
-      const { connectorRunCommand } = await import("./commands/connector.js");
-      await connectorRunCommand(connectorKey, options);
-    });
+    .description("Connector runtime diagnostics");
   // Hidden internal command: the CLI side of the connector-runtime parity
   // smoke gate. Runs the SAME runConnectorRuntimeSelfCheck() the worker image
   // runs (compile + isolate execution), so a packaging/parity drift
@@ -1175,9 +1130,8 @@ Memory:
     )
     .option("--json", "Emit machine-readable JSON to stdout")
     .action(async (options: { json?: boolean }) => {
-      const { connectorRuntimeSelfCheckCommand } = await import(
-        "./commands/connector.js"
-      );
+      const { connectorRuntimeSelfCheckCommand } =
+        await loadDeviceCommand("connector");
       await connectorRuntimeSelfCheckCommand(options);
     });
 
@@ -1214,7 +1168,7 @@ Memory:
       "Log poll/heartbeat/retry detail (default: one line per run)"
     )
     .action(async (options) => {
-      const { daemonCommand } = await import("./commands/daemon.js");
+      const { daemonCommand } = await loadDeviceCommand("daemon");
       await daemonCommand({ ...options, cliVersion: version });
     });
 
@@ -1260,11 +1214,21 @@ Memory:
       )
       .option("--debug", "Log heartbeat/retry detail")
   ).action(async (options) => {
-    const { automationExecuteCommand } = await import(
-      "./commands/automation.js"
-    );
+    const { automationExecuteCommand } = await loadDeviceCommand("automation");
     await automationExecuteCommand(options);
   });
+
+  program
+    .command("runtime")
+    .description("Manage the runtime components cached for this CLI release")
+    .command("install [components...]")
+    .description(
+      "Preinstall server, device, postgres, and embeddings for offline use"
+    )
+    .option("--offline", "Check the existing cache without downloading")
+    .action(async (components: string[], options: { offline?: boolean }) => {
+      await preinstallRuntime(components, options.offline);
+    });
 
   // ─── doctor ─────────────────────────────────────────────────────────
   program
@@ -1308,7 +1272,7 @@ Memory:
   // ─── memory ─────────────────────────────────────────────────────────
   const memory = program
     .command("memory")
-    .description("Lobu memory MCP — tools, seeding, and browser-auth capture");
+    .description("Lobu memory MCP — tools and seeding");
 
   const memoryOrg = memory
     .command("org")
@@ -1397,43 +1361,6 @@ Memory:
       ) => {
         const { memorySeedCommand } = await import("./commands/memory/seed.js");
         await memorySeedCommand(pathArg, options);
-      }
-    );
-
-  memory
-    .command("browser-auth")
-    .description(
-      "Set up browser auth for a connector: launch a dedicated Chrome with remote debugging and store its CDP endpoint on the auth profile"
-    )
-    .requiredOption("--connector <key>", 'Connector key (e.g. "x")')
-    .option("--domains <list>", "Comma-separated cookie domains override")
-    .option(
-      "--auth-profile-slug <slug>",
-      "Browser auth profile slug to store the CDP endpoint on"
-    )
-    .option(
-      "--remote-debug-port <port>",
-      "Remote debugging port for the dedicated Chrome",
-      "9222"
-    )
-    .option("--dedicated-profile <name>", "Dedicated Chrome profile dir name")
-    .option(
-      "--check",
-      "Check if the CDP endpoint stored on a browser auth profile is reachable"
-    )
-    .action(
-      async (options: {
-        connector: string;
-        domains?: string;
-        authProfileSlug?: string;
-        remoteDebugPort?: string;
-        dedicatedProfile?: string;
-        check?: boolean;
-      }) => {
-        const { memoryBrowserAuthCommand } = await import(
-          "./commands/memory/browser-auth.js"
-        );
-        await memoryBrowserAuthCommand(options);
       }
     );
 

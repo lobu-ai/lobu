@@ -1,28 +1,9 @@
 /**
- * Extension Network Sync
- *
- * Mirror of `browserNetworkSync` (browser/network.ts) that runs against the
- * Owletto Chrome extension instead of a Playwright-launched browser. Same
- * shape — `interceptPatterns`, `parseResponse`, scroll loop — but the
- * driver is a series of `chrome.*` connector actions enqueued through the
- * caller-supplied `ChromeActionDispatcher`.
- *
- * Why this exists: server-side connectors today use `browserNetworkSync`,
- * which spawns a Playwright window for every run. That's heavy and runs
- * outside the user's real session (cookies / cdp-url plumbing). The
- * extension stack already gives us a debugger-attached tab inside the
- * user's signed-in Chrome — adding a Network-domain primitive
- * (apps/chrome/network-intercept.js) lets the same parse pipeline run
- * there for free.
- *
- * Wire shape: the dispatcher returns the same `observation` envelope the
- * extension produces on /api/workers/complete-action. Connectors don't
- * need to know how the run is routed (sync vs queued) — they just await
- * the dispatcher.
- *
- * Migration scope: LinkedIn and Revolut are on this extension path (no
- * Playwright fallback). X still uses `browserNetworkSync` (CDP attach); we
- * keep that helper alive for it and drop it once every consumer has migrated.
+ * Network interception through the paired Owletto Chrome extension.
+ * Connectors supply interception patterns, response parsing, and scrolling;
+ * the ChromeActionDispatcher routes chrome.* operations to the user's browser.
+ * The dispatcher returns the extension's observation envelope so connectors
+ * use the same contract for direct and queued operations.
  */
 
 import { sdkLogger } from './logger.js';
@@ -138,7 +119,7 @@ export interface ExtensionNetworkResult<TItem> {
 
 /**
  * Drive a navigate → start → (scroll → drain){,n} → stop pipeline against
- * the extension. Mirrors `browserNetworkSync` but emits action runs instead
+ * the extension. Emits action runs
  * of driving a Playwright Page.
  */
 export async function extensionNetworkSync<TItem>(opts: {

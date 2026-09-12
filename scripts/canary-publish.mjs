@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { PACKAGES } from "./publish-packages.mjs";
 import { parseStableVersion } from "./release-provenance.mjs";
+import { COMPONENTS } from "./runtime-components.mjs";
 
 const CANARY = /^\d+\.\d+\.\d+-canary\.[1-9]\d*\.g([a-f0-9]{40})$/;
 
@@ -90,7 +91,10 @@ function main() {
   if (!isAncestor(sha, "origin/main")) throw new Error("Candidate left main");
   // Validate every current tag before npm publish can advance any of them.
   // This check is read-only: OIDC supports publication, not dist-tag updates.
-  const names = manifests.map((pkg) => pkg.name);
+  const names = [
+    ...manifests.map((pkg) => pkg.name),
+    ...Object.values(COMPONENTS).map((component) => component.name),
+  ];
   for (const name of names) {
     const tags = JSON.parse(
       command("npm", ["view", name, "dist-tags", "--json"])

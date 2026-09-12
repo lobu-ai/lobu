@@ -11,6 +11,40 @@ cd my-bot
 lobu run
 ```
 
+The CLI installs cloud commands and the connector compiler. On the first
+`lobu run`, it downloads the matching server runtime. Embedded Postgres and
+local embeddings are separate components, selected from the effective
+`DATABASE_URL`, `EMBEDDINGS_SERVICE_URL`, and `EMBEDDINGS_BACKEND` settings.
+External Postgres plus a remote embeddings service installs neither native
+component. Model weights download when local embeddings are first requested.
+
+Software is cached under `~/.cache/lobu/runtime`, separately from database files
+and model weights. Versions, platform, libc, and Node ABI have separate cache
+entries. Interrupted installs can be retried; completed installations work
+without contacting the registry. Set `LOBU_RUNTIME_CACHE_DIR` to relocate this
+cache, including for CI or an offline installation on a matching platform.
+
+```bash
+lobu runtime install                         # preinstall all components
+lobu runtime install server postgres         # select components
+lobu runtime install --offline               # verify the installed cache
+```
+
+`lobu daemon` prepares the device runtime before polling. Callers of
+`lobu automation execute` must run `lobu runtime install device` before claiming
+a run: this command refuses a cold cache so downloading cannot consume the
+already-claimed run's lease.
+
+Browser tools use the paired Chrome extension through `extensionNetworkSync`
+and `extensionDomScrape`. The standalone browser SDK, external CDP endpoints,
+`lobu memory browser-auth`, and local `lobu connector run` have been removed.
+For connector tests, discover the feed with `search_sdk`, then use the gateway's
+existing dry-run path with its returned id:
+`lobu memory exec 'export default async (_ctx, client) => client.feeds.trigger({ feed_id: 123, dry_run: true });'`.
+The run uses the feed's configured runtime, including its paired extension;
+inspect the preview with `client.feeds.get({ feed_id: 123 })` through `lobu memory exec`.
+A dry run may access the upstream provider, so obtain consent first.
+
 Lobu boots as a single Node process with embedded Postgres (including pgvector)
 by default. `lobu init` writes `DATABASE_URL=file://.`; `file://` values select
 an embedded database, while `postgres://` or `postgresql://` connects to an

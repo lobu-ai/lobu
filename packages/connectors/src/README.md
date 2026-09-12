@@ -173,32 +173,14 @@ request body goes upstream verbatim (the provider rejects it). Over plain
 `http:` it is resolved only for the run's own machine: a loopback or reserved
 address the allowlist names exactly.
 
-### `browser` - Browser session (cookies/CDP)
+### Browser authentication
 
-For connectors that scrape authenticated pages:
-
-```typescript
-authSchema: {
-  methods: [{
-    type: 'browser',
-    capture: 'cli',             // How auth is captured:
-                                //   'cli'  - `lobu memory browser-auth` launches a dedicated Chrome
-                                //           with CDP enabled; user signs in once; the connector
-                                //           attaches over CDP at sync time (cdp_url stored on the
-                                //           auth profile).
-                                //   'cdp'  - Connect to a Chrome the user is already running with
-                                //           --remote-debugging-port=9222 (no dedicated profile).
-    requiredDomains: [           // Domains the connector needs an authenticated session on. Used
-      'x.com',                   // to verify the live Chrome session via the `--check` flow.
-      '.x.com',
-    ],
-    defaultCdpUrl: 'auto',       // CDP URL (for 'cdp' capture). 'auto' detects local Chrome.
-    description: 'Connect to Chrome for authenticated scraping.',
-  }],
-}
-```
-
-Use `'cdp'` for services like Google that block headless browsers — it connects to the user's already-running Chrome session. Use `'cli'` for sites where attaching to a dedicated, user-signed-in Chrome (per auth profile) is acceptable.
+Browser connectors use the paired Chrome extension and its signed-in session.
+Declare `{ type: 'none', label: 'Paired Chrome extension' }` when no separate
+Lobu-stored credential is required, and call the extension bridge for browser
+operations. Custom connectors that explicitly consume stored session cookies
+may still declare `type: 'browser'` with `requiredDomains`; they own their
+session authorization instructions.
 
 ## Feeds
 
@@ -486,38 +468,15 @@ Platform-specific logic:
 
 ## Browser-Based Connectors
 
-For headless public scraping, use `@lobu/connector-sdk/browser` (`launchBrowser`,
-`runReviewScrape`) together with the root's `validateUrlDomain` / `validatePublicUrl`. The
-browser helpers live behind that subpath because they need a Node process (Playwright, CDP);
-the package root stays loadable inside a V8 isolate, and a connector that imports the subpath
-cannot run there at all. Bundled connectors import timing/checkpoint helpers
-from `./scraper-utils.ts` (re-exports from the SDK).
+Use `extensionDomScrape` or `extensionNetworkSync` from `@lobu/connector-sdk`.
+They run through the paired Chrome extension on the connection's configured
+device. Validate caller-provided URLs with `validateUrlDomain` or
+`validatePublicUrl` before requesting browser work.
 
-Review-site scrapers (Trustpilot, G2, etc.) live in `examples/brand-intelligence/` — they are
-not bundled because scraping may violate third-party terms of service.
-
-```typescript
-import type { SyncContext } from '@lobu/connector-sdk';
-import { runReviewScrape } from '@lobu/connector-sdk/browser';
-
-const syncReviews = (ctx: SyncContext) => runReviewScrape(ctx, {
-    connectorKey: 'my-connector-sync',
-    baseUrl: 'https://www.example.com/reviews',
-    expectedDomain: 'example.com',
-    cookieConsentSelector: '[data-cookie-consent-accept]',
-    reviewCardSelector: '[data-review-card]',
-    gotoTimeoutMs: 30000,
-    extract: async (page, cardsFound) => ({ /* ... */ }),
-  });
-```
-
-For user-session scraping (logged-in sites), use the Chrome extension bridge
-(`extensionDomScrape` / `extensionNetworkSync`) instead of headless Playwright.
-
-### Browser packages
-
-Browser connectors use `patchright` (an npm alias for Playwright). The SDK exports
-`launchBrowser()` and `captureErrorArtifacts()` for lower-level control.
+The standalone `@lobu/connector-sdk/browser` exports have been retired. A
+connector must use the extension bridge for page and network operations.
+Scrape-owned scratch tabs may be created and closed automatically; interactive
+drafts wait for the user to visit their pending URL and are never auto-submitted.
 
 ## Worker Sandbox Environment
 

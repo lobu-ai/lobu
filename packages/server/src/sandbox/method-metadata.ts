@@ -811,7 +811,7 @@ export default async (_ctx, client) => {
 	},
 	"connections.test": {
 		summary:
-			"Inspect a connection's authentication or device availability: OAuth token validity/expiry, env/app-auth presence, browser-session cookies, or (for an auth-free connection pinned to a device) whether the paired device is online. Only the browser-session CDP path makes an outbound network probe; the rest are metadata checks.",
+			"Inspect a connection's authentication or device availability: OAuth token validity/expiry, env/app-auth presence, browser-session cookies, or (for an auth-free connection pinned to a device) whether the paired device is online. These are metadata checks; browser sessions run through the paired extension.",
 		access: "external",
 		enforcedTier: "admin",
 		signature:

@@ -84,7 +84,8 @@ import {
 	isDeviceAutowireIdentity,
 } from "../../../../utils/device-autowire-suppression";
 import logger from "../../../../utils/logger";
-import { syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
+import { OAUTH_SCOPE_PAUSE_LAST_ERROR, syncOAuthConnectionsForAuthProfile } from "../../../../utils/oauth-connection-state";
+import { CONNECT_TOKEN_EXPIRED_ERROR } from "../../../../utils/connect-tokens";
 import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
@@ -106,6 +107,7 @@ import {
 	ensureEnvBackedOAuthAppProfile,
 	getGatewayBaseUrl,
   getInteractiveMethods,
+  isExplicitNoAuthSelection,
   isPersonalCredentialKind,
   isPersonalCredVisibilityViolation,
   mapConnectionStatusToFeedStatus,
@@ -120,6 +122,7 @@ import {
 } from "../../helpers/db-helpers";
 import {
 	type FeedDefinition,
+	feedOperations,
 	splitConfigByFeedScope,
 } from "../../helpers/feed-helpers";
 import type { ConnectionsArgs, ManageConnectionsResult } from "../schemas";
@@ -807,7 +810,12 @@ export async function handleCreate(
   // App install callback. Selection-aware: a create that supplies an auth profile
   // / app profile / env creds / managedBy resolves to a different method and is
   // allowed through.
-  const appInstallGuard = await rejectUnboundAppInstallationCreate({
+  const explicitlyNoAuth = isExplicitNoAuthSelection({
+    authSchema: connector.auth_schema,
+    authProfileSlug: args.auth_profile_slug,
+    appAuthProfileSlug: args.app_auth_profile_slug,
+  });
+  const appInstallGuard = explicitlyNoAuth ? null : await rejectUnboundAppInstallationCreate({
     organizationId,
     authSchema: connector.auth_schema,
     config: args.config,
@@ -891,7 +899,7 @@ export async function handleCreate(
   // standard auth profile selection and instead drive an `authenticate()` run
   // that emits artifacts (qr/code/etc.) for the UI to render.
 	const interactiveMethod =
-		getInteractiveMethods(connector.auth_schema)[0] ?? null;
+		explicitlyNoAuth ? null : getInteractiveMethods(connector.auth_schema)[0] ?? null;
 	if (interactiveMethod && !userId) {
 		return { error: "Interactive pairing requires an authenticated user." };
 	}
@@ -948,7 +956,7 @@ export async function handleCreate(
 			!!authSelection.oauthMethod ||
 			!!authSelection.envMethod ||
 			!!authSelection.browserMethod;
-    if (requiresAuth && !authSelection.authProfile) {
+    if (requiresAuth && !explicitlyNoAuth && !authSelection.authProfile) {
 			const setupFamily = authSelection.browserMethod
 				? "browser"
 				: authSelection.envMethod
@@ -1134,6 +1142,11 @@ export async function handleCreate(
     };
   }
 
+  const explicitConfig = splitConfig.connectionConfig ?? {};
+  if (explicitlyNoAuth && (explicitConfig.managedBy || explicitConfig.installation_ref || explicitConfig.consent_only)) {
+    return { error: 'No-auth selection cannot be combined with delegated or app-installation credentials. Create a separate connection.' };
+  }
+
   // Managed-connector path (mirrors handleConnect): a member creating an OAuth
   // connection for a managed connector in a PUBLIC org gets a CONSENT-ONLY
   // connection — it holds the OAuth grant for cloud-delegated token fetch but
@@ -1147,7 +1160,7 @@ export async function handleCreate(
   // the cloud but it SYNCS LOCALLY — consent_only and managedBy are mutually
   // exclusive), a non-OAuth method, or any non-managed / non-public-org create.
   const isManagedCreate =
-    !isManagedByConnection && authSelection?.oauthMethod
+    !isManagedByConnection && authSelection?.selectedKind === 'oauth_account' && authSelection.oauthMethod
       ? await isManagedPublicOrgConnect({
           organizationId,
           connectorKey: args.connector_key,
@@ -1200,27 +1213,11 @@ export async function handleCreate(
       };
     }
   }
-  // For device-bound profiles, browser cookies live on disk in the profile's
-  // user_data_dir. The server's auth_data is empty, so the readiness probe
-  // returns unusable — but the connection is fine to mark active, since the
-  // Mac app handles auth status independently.
-  const isDeviceBoundBrowserSession =
-		authSelection?.authProfile?.profile_kind === "browser_session" &&
-		!!profileDeviceWorkerId;
-
-  // Device-bound browser profiles can be `pending_auth` on the profile itself
-  // until the user logs in (the Mac app launches the managed Chrome) — but
-  // the cookies live on disk on the device, not server-side, so a run is
-  // perfectly capable of executing. Mark the connection active so
-  // materializeDueFeeds picks it up; the run will fail loudly if cookies
-  // are missing, which is the same as any other "logged out" case.
   const connectionStatus =
     interactiveMethod ||
 		(authSelection?.authProfile?.profile_kind === "browser_session" &&
-      !isDeviceBoundBrowserSession &&
       !browserProfileUsable) ||
-		(authSelection?.authProfile?.status === "pending_auth" &&
-			!isDeviceBoundBrowserSession)
+		(authSelection?.authProfile?.status === "pending_auth")
 			? "pending_auth"
 			: "active";
 
@@ -1596,7 +1593,8 @@ export async function handleUpdate(
   // default (mirrors handleCreate's gate). Clearing the app profile is
   // admin-only — otherwise a member could strip the org default off a
   // shared connection.
-  if (hasAppAuthProfileArg && !callerIsAdmin) {
+  if (hasAppAuthProfileArg && !callerIsAdmin &&
+    (args.app_auth_profile_slug !== null || existing.app_auth_profile_id !== null)) {
     const slug = args.app_auth_profile_slug;
     if (!slug) {
 			return { error: "Only admins can clear the OAuth app profile." };
@@ -1647,6 +1645,15 @@ export async function handleUpdate(
     if (ownershipError) return { error: ownershipError };
   }
   const currentAppAuthProfile = await getAuthProfileById(organizationId, existing.app_auth_profile_id);
+  const explicitlyNoAuth = isExplicitNoAuthSelection({
+    authSchema: existing.auth_schema,
+    authProfileSlug: args.auth_profile_slug,
+    appAuthProfileSlug: args.app_auth_profile_slug,
+  });
+  const retainedConfig = parseJsonObject(existing.config);
+  if (explicitlyNoAuth && (retainedConfig.managedBy || retainedConfig.installation_ref || retainedConfig.consent_only)) {
+    return { error: 'Delegated and app-installation connections cannot switch to no-auth. Create a separate connection.' };
+  }
   const authSelection = await resolveConnectionAuthSelection({
     organizationId,
     connectorKey: existing.connector_key,
@@ -1656,6 +1663,11 @@ export async function handleUpdate(
     appAuthProfileSlug: hasAppAuthProfileArg ? args.app_auth_profile_slug : currentAppAuthProfile?.slug,
     deviceWorkerId: nextDeviceWorkerId,
   });
+
+  if (args.auth_profile_slug === null && !explicitlyNoAuth &&
+    (authSelection.oauthMethod || authSelection.envMethod || authSelection.browserMethod)) {
+    return { error: 'This connector requires an auth profile. Select a replacement profile, or explicitly select a declared no-auth method by clearing both profile fields.' };
+  }
 
   if (args.auth_profile_slug && !authSelection.authProfile) {
 		return {
@@ -1755,13 +1767,8 @@ export async function handleUpdate(
       nextDeviceWorkerId = updateProfileDeviceWorkerId;
     }
   }
-  const isDeviceBoundBrowserSessionUpdate =
-		effectiveSelectedAuthProfile?.profile_kind === "browser_session" &&
-    !!updateProfileDeviceWorkerId;
-
   const browserProfileUsable =
-		effectiveSelectedAuthProfile?.profile_kind === "browser_session" &&
-    !isDeviceBoundBrowserSessionUpdate
+		effectiveSelectedAuthProfile?.profile_kind === "browser_session"
       ? (
           await getBrowserSessionReadiness(
             effectiveSelectedAuthProfile.auth_data,
@@ -1772,9 +1779,7 @@ export async function handleUpdate(
   const effectiveStatus =
     args.status ??
 		(effectiveSelectedAuthProfile?.profile_kind === "browser_session"
-      ? isDeviceBoundBrowserSessionUpdate
-				? "active"
-        : browserProfileUsable
+      ? browserProfileUsable
 					? "active"
 					: "pending_auth"
       : null);
@@ -1943,7 +1948,7 @@ export async function handleUpdate(
     // Mirrors the shape manage_feeds already uses for handleUpdateFeed.
     const updateOutcome = await sql.begin(async (tx) => {
       const lockedRows = await tx`
-        SELECT config
+        SELECT config, app_auth_profile_id
         FROM connections
         WHERE id = ${args.connection_id}
           AND organization_id = ${organizationId}
@@ -1951,6 +1956,9 @@ export async function handleUpdate(
         FOR UPDATE
       `;
       if (lockedRows.length === 0) return { rows: [] };
+      if (hasAppAuthProfileArg && !callerIsAdmin && args.app_auth_profile_slug === null && lockedRows[0].app_auth_profile_id !== null) {
+        return { denial: { error: 'Only admins can clear the OAuth app profile.' } };
+      }
       const lockedConfig = parseJsonObject(
         (lockedRows[0] as { config: unknown }).config,
       );
@@ -1979,6 +1987,9 @@ export async function handleUpdate(
         : lockedConnectionConfig
           ? { ...lockedConfig, ...lockedConnectionConfig }
           : lockedConfig;
+      if (explicitlyNoAuth && (lockedResultingConfig.managedBy || lockedResultingConfig.installation_ref || lockedResultingConfig.consent_only)) {
+        return { denial: { error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' } };
+      }
       if (actionModesChanged(lockedConfig, lockedResultingConfig)) {
         const denied = denyNonHumanActionModesWrite(ctx);
         if (denied) return { denial: denied };
@@ -1988,9 +1999,15 @@ export async function handleUpdate(
         UPDATE connections
         SET display_name = COALESCE(${args.display_name ?? null}, display_name),
             slug = COALESCE(${nextSlug}, slug),
-            status = COALESCE(${effectiveStatus}, status),
+            status = CASE WHEN ${explicitlyNoAuth} AND ${args.status === undefined}
+              AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
+              THEN 'active' ELSE COALESCE(${effectiveStatus}, status) END,
             auth_profile_id = ${nextAuthProfileId},
             app_auth_profile_id = ${nextAppAuthProfileId},
+            account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL ELSE account_id END,
+            error_message = CASE WHEN ${explicitlyNoAuth}
+              AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
+              THEN NULL ELSE error_message END,
             visibility = CASE WHEN ${rebindToPersonalCred} THEN 'private' ELSE visibility END,
             entity_ids = COALESCE(${entityIdsValue}::bigint[], entity_ids),
             config = ${
@@ -2002,6 +2019,20 @@ export async function handleUpdate(
         WHERE id = ${args.connection_id} AND organization_id = ${organizationId} AND deleted_at IS NULL
         RETURNING *
       `;
+      if (explicitlyNoAuth && rows[0]?.status === 'active') {
+        const feedsSchema = existing.feeds_schema as Record<string, FeedDefinition> | null;
+        const syncKeys = Object.keys(feedsSchema ?? {}).filter(key => feedOperations(feedsSchema, key).includes('sync'));
+        // Only OAuth's own pause marker is resumable; unmarked manual pauses stay put.
+        await tx`
+          UPDATE feeds SET status = 'active', last_error = NULL,
+            next_run_at = CASE WHEN schedule IS NOT NULL AND feed_key = ANY(${pgTextArray(syncKeys)}::text[])
+              THEN COALESCE(next_run_at, NOW()) ELSE NULL END,
+            updated_at = NOW()
+          WHERE organization_id = ${organizationId} AND connection_id = ${args.connection_id}
+            AND deleted_at IS NULL AND status IN ('active', 'paused')
+            AND last_error = ${OAUTH_SCOPE_PAUSE_LAST_ERROR}
+        `;
+      }
       // The device pin writes in THIS transaction, not after it. The pre-flight
       // above is an unlocked SELECT, so two replicas can both see the device as
       // free and race into `idx_connections_org_connector_device_live`; the
@@ -2098,8 +2129,8 @@ export async function handleUpdate(
     status: string;
   };
 
-  // OAuth metadata edits must preserve operator-paused feeds.
-  if (effectiveSelectedAuthProfile?.profile_kind !== "oauth_account" || effectiveStatus !== null) {
+  // Metadata edits and credential detachment must preserve operator-paused feeds.
+  if (args.status !== undefined || (!explicitlyNoAuth && effectiveStatus !== null)) {
     await sql`
     UPDATE feeds
     SET status = ${mapConnectionStatusToFeedStatus(updatedConnection.status)},

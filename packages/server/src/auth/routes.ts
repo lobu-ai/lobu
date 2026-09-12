@@ -17,7 +17,7 @@ import { resolveBaseUrl } from './base-url';
 import { createAuth } from './index';
 import { mcpAuth, requireAuth } from './middleware';
 import { findExistingPersonalOrg } from './personal-org-provisioning';
-import { hostOnlyExpiry, sessionCookieName } from './session-cookie-scope';
+import { hostOnlyExpiry } from './session-cookie-scope';
 import { OAuthClientsStore } from './oauth/clients';
 import { OAuthProvider } from './oauth/provider';
 import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES_STRING } from './oauth/scopes';
@@ -308,7 +308,7 @@ async function createSessionToken(
 
 /**
  * Mint a Better Auth session for a user and return the first-party Set-Cookie
- * value (SameSite=Lax, +Secure on https). For deep links that land in a
+ * value (SameSite=Lax, with Better Auth's configured Secure setting). Deep links land in a
  * top-level browser tab — the CLI/menu-bar `GET /exchange-token` and
  * `/local-init`. Cross-site embeds (the extension iframe) can't rely on this
  * cookie and use Bearer auth via `/extension-session` instead.
@@ -325,40 +325,38 @@ async function mintSessionCookieValue(
     }
   | { error: string }
 > {
-  const secret = c.env.BETTER_AUTH_SECRET;
-  if (!secret) return { error: 'BETTER_AUTH_SECRET not set' };
-
-  const sessionToken = await createSessionToken(c, userId);
+  if (!c.env.BETTER_AUTH_SECRET) return { error: 'BETTER_AUTH_SECRET not set' };
+  const auth = await createAuth(c.env, c.req.raw);
+  const authContext = await auth.$context;
+  const session = await authContext.internalAdapter.createSession(userId);
+  const sessionToken = session?.token;
   if (!sessionToken) return { error: 'failed to mint session' };
 
-  // Cookie shape: `<token>.<base64(HMAC-SHA256(token, secret))>`, URL-encoded.
-  const sig = createHmac('sha256', secret).update(sessionToken).digest('base64');
+  // Use Better Auth's configured cookie name and scope. Production can enable
+  // secure cookies even on loopback HTTP, so deriving the prefix from the
+  // request URL makes the minted cookie invisible to Better Auth's reader.
+  const sessionCookie = authContext.authCookies.sessionToken;
+  const cookieName = sessionCookie.name;
+  const secure = sessionCookie.attributes.secure === true;
+  const cookiePath = sessionCookie.attributes.path ?? '/';
+  const cookieDomain = sessionCookie.attributes.domain;
+  const sig = createHmac('sha256', authContext.secret).update(sessionToken).digest('base64');
   const cookieValue = encodeURIComponent(`${sessionToken}.${sig}`);
-  // __Secure- prefix iff the canonical baseURL is https — matches whatever
-  // Better Auth would set during normal sign-in even when TLS is terminated
-  // by a reverse proxy and the bind itself speaks plain HTTP.
-  const baseUrl = resolveBaseUrl({ request: c.req.raw });
-  const isHttps = baseUrl.startsWith('https://');
-  const cookieName = sessionCookieName(isHttps);
-
   const parts = [
     `${cookieName}=${cookieValue}`,
-    'Path=/',
+    `Path=${cookiePath}`,
     'HttpOnly',
     'SameSite=Lax',
-    `Max-Age=${60 * 60 * 24 * 7}`,
+    `Max-Age=${sessionCookie.attributes.maxAge ?? 60 * 60 * 24 * 7}`,
   ];
-  // Must carry the SAME Domain Better Auth uses — a host-only twin here bricks
-  // login permanently. Why: auth/session-cookie-scope.ts.
-  const cookieDomain = process.env.AUTH_COOKIE_DOMAIN;
   if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
-  if (isHttps) parts.push('Secure');
+  if (secure) parts.push('Secure');
   return {
     cookieName,
     cookieHeader: parts.join('; '),
     // Kill any host-only twin left by an older build of this route (or by a
     // document.cookie plant) in the same response that sets the real cookie.
-    hostOnlyExpiryHeader: cookieDomain ? hostOnlyExpiry(cookieName, isHttps) : null,
+    hostOnlyExpiryHeader: cookieDomain ? hostOnlyExpiry(cookieName, secure, cookiePath) : null,
     sessionToken,
   };
 }

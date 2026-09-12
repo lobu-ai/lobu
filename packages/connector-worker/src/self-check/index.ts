@@ -30,7 +30,6 @@ import { extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	createIsolateConnectorCompiler,
-	EXTERNAL_RUNTIME_DEPS,
 } from "../compile/index.js";
 import { executeDaemonBuiltin } from "../daemon/builtins/index.js";
 import type { ExecutorJob } from "../executor/interface.js";
@@ -421,13 +420,6 @@ export async function runConnectorRuntimeSelfCheck(
 		() => import(pathToFileURL(sdkRequire().resolve("@lobu/core")).href),
 	);
 
-	// External runtime deps (native binaries + Playwright) are provided by the
-	// connector-worker package. Compiled modules may live under an unrelated cwd,
-	// but the registered loader deliberately resolves these imports from this
-	// package graph; probe the same anchor here.
-	for (const dep of EXTERNAL_RUNTIME_DEPS) {
-		await check(`resolve:${dep}`, () => require_.resolve(dep));
-	}
 
 	const candidates =
 		opts?.connectorSourceCandidates ?? DEFAULT_CONNECTOR_SOURCE_CANDIDATES;

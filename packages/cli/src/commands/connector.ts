@@ -4,18 +4,6 @@ import {
   printSelfCheckResult,
   runConnectorRuntimeSelfCheck,
 } from "@lobu/connector-worker/self-check";
-import {
-  type ConnectorRunOptions,
-  connectorRun,
-} from "./_lib/connector-run-cmd.js";
-
-export async function connectorRunCommand(
-  connectorKey: string | undefined,
-  options: ConnectorRunOptions
-): Promise<void> {
-  await connectorRun(options, connectorKey);
-}
-
 /**
  * `lobu connector runtime-self-check` — the CLI side of the connector-runtime
  * parity smoke gate. STATIC-imports the SAME `runConnectorRuntimeSelfCheck`

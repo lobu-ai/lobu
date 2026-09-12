@@ -1,6 +1,6 @@
 /**
  * Shared HTTP transport for every CLI client (Agent API, `lobu apply`, the
- * memory MCP REST proxy, connector-run). Centralizes three things that used to
+ * memory MCP REST proxy). Centralizes three things that used to
  * be hand-rolled per client:
  *
  *   1. a default request timeout (`AbortSignal.timeout`) so a hung server never

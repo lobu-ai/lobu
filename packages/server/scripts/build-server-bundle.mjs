@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Bundle the single server entrypoint into a standalone ESM file consumed by
- * the published @lobu/cli package. One entry (server.ts) serves both backends.
+ * @lobu/runtime-server, installed by the CLI. One entry serves both backends.
  *
  * Why: prod runs under Node so isolated-vm (V8 native addon) loads. Running
  * the TS source through tsx exposes Node's CJS↔ESM lexer interop with
@@ -14,8 +14,8 @@
  * instead of their CJS dist. esbuild compiles the TS inline.
  *
  * External: bare specifiers stay external (loaded from node_modules at
- * runtime). Published `@lobu/cli` declares those runtime dependencies
- * directly so Node's resolver finds them from the CLI install. Native addons
+ * runtime). Published `@lobu/runtime-server` declares those dependencies
+ * directly so Node's resolver finds them inside its component cache. Native addons
  * (isolated-vm), embedded-postgres + pgvector binaries, and packages with
  * require-in-the-middle hooks (Sentry, OpenTelemetry, pino) MUST stay external
  * to keep their runtime hooks working.

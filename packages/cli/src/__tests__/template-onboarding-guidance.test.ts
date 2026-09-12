@@ -85,14 +85,13 @@ describe("generated TESTING.md onboarding guidance", () => {
     expect(testingTemplate).toContain("memory health --context local");
     expect(testingTemplate).toContain("--dry-run --new");
     expect(testingTemplate).toContain("client.feeds.trigger");
+    expect(testingTemplate).not.toContain("connector run");
+    expect(testingTemplate).not.toContain("browser-auth");
     expect(testingTemplate).toContain(
-      "--auth-profile <browser-session-profile-slug> --check"
+      "Browser actions require a paired extension"
     );
     expect(testingTemplate).toContain(
-      "does not support managed OAuth or env-backed profiles"
-    );
-    expect(testingTemplate).toMatch(
-      /Do not use it as a generic\s+connector check/
+      "inspect its device metadata without invoking browser actions"
     );
     expect(testingTemplate).toContain(
       "explicitly approves provider-data access"

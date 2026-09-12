@@ -176,6 +176,21 @@ fi
 # Whether this artifact OWES us the bundle is derived from the artifact, not
 # pinned to a version — see scripts/lib/guest-bundle-expectation.sh.
 GUEST_DIST_DIR="$INSTALL_DIR/node_modules/@lobu/connector-worker/dist"
+if [ -f "$INSTALL_DIR/node_modules/@lobu/cli/dist/runtime-components.json" ]; then
+  # New launchers keep the worker inside the installed device component.
+  # The self-check above prepared it; this read must never download anything.
+  GUEST_DIST_DIR="$(node --input-type=module - "$INSTALL_DIR/node_modules/@lobu/cli" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const cli = process.argv[2];
+const { ensureComponent } = await import(pathToFileURL(join(cli, 'dist/internal/runtime-components.js')));
+const { device } = JSON.parse(readFileSync(join(cli, 'dist/runtime-components.json'), 'utf8'));
+const directory = await ensureComponent(device, { offline: true });
+console.log(dirname(join(directory, device.entries.worker)));
+NODE
+)" || { fail "installed device component is unavailable"; exit 1; }
+fi
 GUEST_BUNDLE="$GUEST_DIST_DIR/agent-turn/guest.bundle.js"
 case "$(lobu_guest_bundle_verdict "$GUEST_DIST_DIR")" in
   present)

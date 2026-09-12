@@ -65,11 +65,6 @@ RUN mkdir -p packages/lobu-cli packages/browser-extension packages/mcpsandbox \
       done \
     && echo '{"name":"lobu","version":"0.0.0","private":true}' > packages/lobu-cli/package.json
 
-# The CLI depends on playwright (npm:patchright) and playwright-vanilla
-# (npm:playwright). Neither may download browser binaries during install — the
-# runtime stage installs the single patchright Chromium this image uses.
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
 # Hoisted layout (npm-style flat node_modules) is required so the bundled
 # server.bundle.mjs (built below) can resolve transitive npm deps via Node's
 # resolver. Bun's default isolated linker uses .bun/<pkg>@<ver>/ paths that
@@ -99,6 +94,7 @@ COPY packages/connector-worker/ packages/connector-worker/
 COPY packages/pgvector-embedded/ packages/pgvector-embedded/
 COPY packages/server/ packages/server/
 COPY packages/cli/ packages/cli/
+COPY scripts/runtime-components.mjs scripts/runtime-components.mjs
 # Bundled into the CLI dist by packages/cli/scripts/build.cjs: the starter
 # skill and the embedded-DB migrations.
 COPY skills/lobu/ skills/lobu/
@@ -134,8 +130,7 @@ RUN cd packages/server && bunx tsc --noEmit
 RUN cd packages/server && bun run build:server
 
 # Build the CLI (#2231). It must build after build:server because
-# packages/cli/scripts/build.cjs copies the server bundles + catalog manifests
-# into the CLI dist. It runs *before* the owletto web build, so the CLI dist
+# packages/cli/scripts/build.cjs prepares the separate runtime artifacts. It runs *before* the owletto web build, so the CLI dist
 # intentionally carries no second copy of the SPA — the container already
 # serves the web UI from packages/owletto/dist, which the bundled server finds
 # through its monorepo-relative fallback.
@@ -148,6 +143,10 @@ RUN cd packages/cli && bun run build
 # for the type-check + bundle above, so we drop them only afterward. This also
 # means the in-image `lobu run` cannot boot an embedded database; it must use
 # the container's external DATABASE_URL.
+RUN if [ "$KEEP_EMBEDDED_PG" = "1" ]; then \
+      mkdir -p packages/server/dist/vendor/pgvector-embedded \
+      && cp -r packages/pgvector-embedded/dist packages/pgvector-embedded/prebuilt packages/pgvector-embedded/package.json packages/server/dist/vendor/pgvector-embedded; \
+    fi
 RUN if [ "$KEEP_EMBEDDED_PG" != "1" ]; then \
       rm -rf node_modules/embedded-postgres node_modules/@embedded-postgres; \
     fi
@@ -178,7 +177,7 @@ ARG BUN_VERSION
 WORKDIR /app
 
 # curl for health checks, git/gh for GitHub connector agent tooling, bun for
-# tsx-equivalent, Chromium deps for connectors.
+# tsx-equivalent and native runtime dependencies.
 #
 # `gh` stays because the GitHub connector declares it (`nix: { packages: ['gh'] }`)
 # and a nix-less host still needs it on PATH. bubblewrap is gone: it existed to
@@ -186,9 +185,6 @@ WORKDIR /app
 # spawned binaries, and nothing probes for one now that turns run in-isolate.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git gh unzip socat \
-      libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 \
-      libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-      libgbm1 libpango-1.0-0 libcairo2 libasound2 libwayland-client0 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun
@@ -220,30 +216,9 @@ COPY --from=builder /app/packages/cli ./packages/cli
 RUN ln -s /app/packages/cli/bin/lobu.js /usr/local/bin/lobu
 COPY --from=builder /app/packages/owletto ./packages/owletto
 
-# The embedded runtime (DATABASE_URL=file://, previews) loads the pgvector
-# injector from the server bundle dist/vendor; the CLI build vendors it into
-# its own dist. Copy it when keeping the embedded-postgres runtime.
-ARG KEEP_EMBEDDED_PG=0
-RUN if [ "$KEEP_EMBEDDED_PG" = "1" ]; then \
-      mkdir -p /app/packages/server/dist/vendor \
-      && cp -r /app/packages/cli/dist/vendor/pgvector-embedded /app/packages/server/dist/vendor/pgvector-embedded; \
-    fi
-
 # Database migrations (+ statement-at-a-time runner for transaction:false)
 COPY db/migrations ./db/migrations
 COPY scripts/migrate-up.mjs ./scripts/migrate-up.mjs
-
-# Install Playwright/patchright Chromium for browser-based connectors.
-# PLAYWRIGHT_BROWSERS_PATH pins both the install target and the runtime lookup to
-# an absolute, HOME-independent path (default is $HOME/.cache/ms-playwright, which
-# differs by USER and breaks the connector child forked in another cwd). chmod 755
-# keeps it readable regardless of which user the runtime resolves to. The install
-# must fail the build loudly — the old `2>/dev/null ... || true` silently shipped
-# images with no Chromium. `playwright` is the patchright alias, so a single
-# patchright install is deterministic.
-RUN mkdir -p /ms-playwright && chmod 755 /ms-playwright
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npx patchright install chromium
 
 # Build metadata + environment defaults
 ARG APP_GIT_SHA=unknown

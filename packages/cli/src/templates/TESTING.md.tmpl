@@ -52,18 +52,10 @@ npx @lobu/cli@latest memory exec \
 
 Before consent to access provider data, inspect only the installed catalog,
 connection, auth-profile, and feed metadata. `lobu validate` already checks the
-auth/config shape. For a `browser_session` profile only, resolve the local
-device-bound path without executing it:
-
-```bash
-npx @lobu/cli@latest connector run <connector-key> \
-  --auth-profile <browser-session-profile-slug> --check
-```
-
-`connector run` does not support managed OAuth or env-backed profiles because
-their durable credentials never leave the gateway. Do not use it as a generic
-connector check. For those profiles, confirm the connection is active and its
-declared config matches the installed catalog schema; wait for consent before a
+auth/config shape. Confirm the connection is active and its declared config
+matches the installed catalog schema. Browser actions require a paired extension;
+inspect its device metadata without invoking browser actions. Durable managed
+OAuth and env-profile credentials stay at the gateway. Wait for consent before a
 server-side feed dry-run, because that dry-run may read upstream provider data.
 
 After the user explicitly approves provider-data access, dry-run a collected

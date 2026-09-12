@@ -533,20 +533,13 @@ runlobu "$PROJ" context add smoke-empty --url "http://localhost:$GW_PORT"
 expect_fail_grep "lobu login (non-interactive device-code -> graceful bail)" "interactive terminal" "$PROJ" login -c smoke-empty
 runlobu "$PROJ" context rm smoke-empty
 
-note "connector run (needs Chrome/Playwright + a browser_session profile)"
-# --check resolves+validates without executing; with no auth profile it errors --
-# assert it fails gracefully (clean message, controlled exit), not a crash.
-runlobu "$PROJ" connector run --check -c local
-[ "$RC" -ne 0 ] && pass "lobu connector run --check (graceful failure without auth profile)" || softfail "lobu connector run --check unexpectedly succeeded (exit=$RC)"
-
-# The browser-auth check path is non-interactive and must fail cleanly when no
-# profile exists. The capture path remains a deliberate human/browser boundary.
-expect_fail_grep "lobu memory browser-auth --check (missing profile -> graceful)" "not found" "$PROJ" memory browser-auth --connector x --auth-profile-slug smoke-browser --check
+note "retired external browser commands"
+expect_fail_grep "lobu connector run is retired" "unknown command" "$PROJ" connector run
+expect_fail_grep "lobu memory browser-auth is retired" "unknown command" "$PROJ" memory browser-auth
 
 note "browser/interactive paths -- not unattended-runnable"
 skip "lobu login (interactive device-code happy path) -- needs a real TTY; --token + non-interactive bail covered above"
 skip "lobu org create -- opens a browser to /orgs/new"
-skip "lobu memory browser-auth (capture) -- needs local Chrome + Keychain prompt"
 skip "lobu chat --user platform:id -- needs a configured Telegram/Slack connection"
 
 # ============================================================================
