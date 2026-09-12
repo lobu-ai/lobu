@@ -653,6 +653,13 @@ async function handleUpdate(
 			before.entity_type as string,
 			metadataForValidation,
 			ctx,
+			{
+				legacyAutomationEntityId:
+					(before.metadata as Record<string, unknown> | null)?.source ===
+					'automation_promotion'
+						? entityId
+						: undefined,
+			},
 		);
 		if (!validation.valid) {
 			const errorMessages =

@@ -308,6 +308,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     `;
     expect(childTypes).toHaveLength(2);
     expect(childTypes.every((r) => String(r.slug) === 'topic')).toBe(true);
+    expect(childTypes.every((r) => r.source === null)).toBe(true);
 
     // Origin provenance lives on the entity itself — each promoted child carries
     // its run_id / stable_key in metadata (no separate observation event).

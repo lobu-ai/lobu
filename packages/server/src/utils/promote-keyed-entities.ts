@@ -765,9 +765,7 @@ export async function promoteAutomationEntityOutput(
       }
     }
     const metadata: Record<string, unknown> = {
-      // `source` can be a declared domain field (for example an evidence URL).
-      // Origin attribution is already carried by automation_id/automation_output/run_id.
-      source: 'automation_promotion',
+      // Domain source evidence is preserved; provenance has its own keys below.
       ...fieldValues,
       automation_id: automationId,
       automation_output: outputName,

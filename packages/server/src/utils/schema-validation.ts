@@ -24,6 +24,10 @@ interface ValidationResult {
   errors?: ValidationError[];
 }
 
+interface MetadataValidationOptions {
+  legacyAutomationEntityId?: number;
+}
+
 /**
  * Fetch the metadata schema for an entity type from the database.
  * Returns null if no schema is defined (allowing any metadata).
@@ -83,6 +87,25 @@ function withoutAutomationProvenanceKeys(
   );
 }
 
+function schemaMayDefineSource(schema: Record<string, unknown>): boolean {
+  const properties = schema.properties;
+  if (
+    properties &&
+    typeof properties === 'object' &&
+    !Array.isArray(properties) &&
+    Object.hasOwn(properties, 'source')
+  ) return true;
+  const patterns = schema.patternProperties;
+  if (
+    patterns &&
+    typeof patterns === 'object' &&
+    !Array.isArray(patterns) &&
+    Object.keys(patterns).some((pattern) => new RegExp(pattern).test('source'))
+  ) return true;
+  if (Array.isArray(schema.required) && schema.required.includes('source')) return true;
+  return schema.additionalProperties !== false;
+}
+
 /**
  * Validate entity metadata against the entity type's JSON schema.
  *
@@ -96,7 +119,8 @@ function withoutAutomationProvenanceKeys(
 export async function validateEntityMetadata(
   entityType: string,
   metadata: Record<string, unknown> | undefined | null,
-  ctx: ToolContext
+  ctx: ToolContext,
+  options: MetadataValidationOptions = {}
 ): Promise<ValidationResult> {
   // No metadata provided - valid (defaults to empty object). An explicit empty
   // object still needs schema validation because the schema may require fields.
@@ -129,8 +153,38 @@ export async function validateEntityMetadata(
   // otherwise fail every round-trip under additionalProperties: false.
   const ajv = getAjv();
   const validate = ajv.compile(schema);
-  const candidate = withoutAutomationProvenanceKeys(metadata);
-  const isValid = validate(candidate);
+  let candidate = withoutAutomationProvenanceKeys(metadata);
+  let isValid = validate(candidate);
+  // Old promotion stamped this exact marker even when source was not a domain
+  // field. Only an update of an existing promoted row may ignore it, and only
+  // when the schema does not define source as domain data.
+  if (
+    !isValid &&
+    options.legacyAutomationEntityId != null &&
+    candidate !== metadata &&
+    candidate.source === 'automation_promotion' &&
+    !schemaMayDefineSource(schema) &&
+    validate.errors?.some(
+      (error) => error.instancePath === '' &&
+        error.keyword === 'additionalProperties' &&
+        error.params.additionalProperty === 'source'
+    )
+  ) {
+    const identities = await getDb()`
+      SELECT 1
+      FROM entity_identities
+      WHERE entity_id = ${options.legacyAutomationEntityId}
+        AND organization_id = ${ctx.organizationId}
+        AND namespace = 'automation_key'
+        AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    if (identities.length > 0) {
+      candidate = { ...candidate };
+      delete candidate.source;
+      isValid = validate(candidate);
+    }
+  }
   if (candidate !== metadata) {
     // The AJV singleton runs with coerceTypes, mutating the validated object
     // in place — callers persist those coercions. When we validated a stripped
