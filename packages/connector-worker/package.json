@@ -1,7 +1,7 @@
 {
   "name": "@lobu/connector-worker",
   "version": "19.2.0",
-  "description": "Self-hosted worker for Lobu memory — connectors and embedding generation",
+  "description": "Self-hosted worker for Lobu memory \u2014 connectors and embedding generation",
   "type": "module",
   "bin": {
     "connector-worker": "./dist/bin.js"
@@ -79,11 +79,8 @@
     "@mariozechner/pi-agent-core": "^0.73.1",
     "@mariozechner/pi-ai": "^0.73.1",
     "esbuild": "^0.28.1",
-    "jimp": "^1.6.0",
     "just-bash": "^2.14.2",
     "pathe": "^2.0.3",
-    "playwright": "npm:patchright@^1.57.0",
-    "sharp": "^0.35.3",
     "undici": "7.29.0"
   },
   "devDependencies": {

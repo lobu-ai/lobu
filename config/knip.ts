@@ -44,10 +44,6 @@ const config: KnipConfig = {
         "src/**/*.test.ts",
       ],
       ignoreDependencies: [
-        // Media deps checked by the connector runtime contract, not statically
-        // imported in src/.
-        "jimp",
-        "sharp",
         // Resolved by path at guest-bundle build time (agent-turn/
         // pi-file-tools-bundle.ts) to stand in for `node:path` inside Pi's
         // file tools; never statically imported in src/.

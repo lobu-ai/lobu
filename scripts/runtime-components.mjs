@@ -120,6 +120,7 @@ export async function buildRuntimeComponents() {
   const serverSource = readPackage("server");
   const server = workspaceRefs(structuredClone(serverSource));
   const worker = workspaceRefs(readPackage("connector-worker"));
+  const connectors = workspaceRefs(readPackage("connectors"));
   const embeddings = workspaceRefs(readPackage("embeddings"));
   for (const [key, component] of Object.entries(catalog)) {
     const directory = join(runtimeRoot, key);
@@ -140,6 +141,7 @@ export async function buildRuntimeComponents() {
       manifest.dependencies = {
         ...readPackage("core").dependencies,
         ...readPackage("connector-sdk").dependencies,
+        ...connectors.dependencies,
         ...worker.dependencies,
         ...server.dependencies,
       };
@@ -212,6 +214,7 @@ export async function buildRuntimeComponents() {
       }
       writeJson(join(directory, "vendor/cli/package.json"), vendorCli);
       manifest.dependencies = {
+        ...connectors.dependencies,
         "@lobu/cli": "file:vendor/cli",
         "@lobu/connector-worker": "file:vendor/connector-worker",
       };
@@ -321,6 +324,21 @@ export async function buildRuntimeComponents() {
           `Reinstall workspace dependencies before packaging ${specifier}`
         );
       copy(source, join(directory, "vendor", targetName));
+      // This is an already-built patched package. npm 10 can run a local
+      // package's prepare hook even with --ignore-scripts; build sources are
+      // not published, and no lifecycle hook belongs in this vendored copy.
+      const vendorManifestPath = join(
+        directory,
+        "vendor",
+        targetName,
+        "package.json"
+      );
+      const vendorManifest = JSON.parse(
+        readFileSync(vendorManifestPath, "utf8")
+      );
+      delete vendorManifest.scripts;
+      delete vendorManifest.devDependencies;
+      writeJson(vendorManifestPath, vendorManifest);
       manifest.dependencies[name] = `file:vendor/${targetName}`;
       for (const [path, pkg] of vendorManifests) {
         if (pkg.dependencies?.[name])
@@ -345,6 +363,7 @@ export async function buildRuntimeComponents() {
     if (key === "embeddings") verify.push('await import("./embeddings.js");');
     if (key === "device")
       verify.push(
+        'await import("@lobu/connector-worker/executor/runtime");',
         'const nativeRequire = createRequire(import.meta.resolve("@lobu/connector-worker/daemon"));'
       );
     else verify.push("const nativeRequire = require;");

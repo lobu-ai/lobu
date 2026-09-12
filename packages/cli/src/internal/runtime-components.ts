@@ -203,7 +203,10 @@ async function installDependencies(
       ? "npm.cmd"
       : "npm";
   const args = hasBun
-    ? ["install", "--frozen-lockfile", "--ignore-scripts"]
+    ? // Bun 1.3's hoisted linker creates empty nested directories for repeated
+      // file dependencies, shadowing the vendored SDK's package exports. Its
+      // isolated linker preserves the complete graph on both 1.3 and 1.4.
+      ["install", "--frozen-lockfile", "--ignore-scripts", "--linker=isolated"]
     : ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
   if (!existsSync(join(directory, hasBun ? "bun.lock" : "npm-shrinkwrap.json")))
     throw new Error("Runtime release is missing its frozen dependency lock");

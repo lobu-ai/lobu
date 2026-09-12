@@ -114,8 +114,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ("non-numeric user, cannot verify user is non-root"). Keep in sync
 # with worker.containerSecurityContext.runAsUser in charts/lobu.
 RUN useradd -m -u 1001 -s /bin/bash worker && \
-    mkdir -p /app/.cache/transformers /ms-playwright && \
-    chown -R worker:worker /app /ms-playwright
+    mkdir -p /app/.cache/transformers && \
+    chown -R worker:worker /app
 
 COPY --from=builder --chown=worker:worker /app/node_modules ./node_modules
 COPY --from=builder --chown=worker:worker /app/package.json ./
@@ -130,20 +130,7 @@ COPY --from=builder --chown=worker:worker /app/packages/connectors ./packages/co
 COPY --from=builder --chown=worker:worker /app/packages/embeddings ./packages/embeddings
 COPY --from=builder --chown=worker:worker /app/packages/connector-worker ./packages/connector-worker
 
-# Install patchright's Chromium for browser-based connectors.
-# The runtime resolves `require('playwright')` to patchright (the
-# `npm:patchright` alias in package.json), so the installed Chromium revision
-# must match patchright. Invoke the installed alias's own CLI so a test-only
-# vanilla Playwright binary cannot win a shared .bin name.
-# PLAYWRIGHT_BROWSERS_PATH pins BOTH install target and runtime lookup to an
-# absolute, HOME-independent path (default $HOME/.cache/ms-playwright differs by
-# USER and breaks browser connectors running under another cwd). /ms-playwright
-# is created + chowned to worker above; the connector worker reads it directly.
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 USER 1001
-WORKDIR /app/packages/connector-worker
-RUN node node_modules/playwright/cli.js install chromium
-WORKDIR /app
 
 ENV NODE_ENV=production
 ENV TRANSFORMERS_CACHE=/app/.cache/transformers

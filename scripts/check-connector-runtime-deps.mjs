@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 /**
  * Tripwire: assert that every dep declared in RUNTIME_PROVIDED_PACKAGES is
- * present in the worker package.json. Catches "added a dep to the
- * compiler's external list but forgot to install it in the runtime
- * image" — the failure mode that silently broke the Reddit automation
- * for a week.
+ * present in the worker package.json. The isolate compiler needs the SDK
+ * for inlining; its externalized native imports are unsupported and are not
+ * installation requirements.
  *
  * Run in CI; exits non-zero on drift.
  */
@@ -24,20 +23,16 @@ const runtimeDepsSource = readFileSync(
 const sdkMatch = runtimeDepsSource.match(
   /CONNECTOR_SDK_RUNTIME_DEP\s*=\s*['"]([^'"]+)['"]\s*as\s+const/
 );
-const externalMatch = runtimeDepsSource.match(
-  /EXTERNAL_RUNTIME_DEPS\s*=\s*\[([^\]]+)\]\s*as\s+const/
+const providedMatch = runtimeDepsSource.match(
+  /RUNTIME_PROVIDED_PACKAGES\s*=\s*\[\s*CONNECTOR_SDK_RUNTIME_DEP\s*,?\s*\]\s*as\s+const/
 );
-if (!sdkMatch || !externalMatch) {
+if (!sdkMatch || !providedMatch) {
   console.error(
-    "Could not parse connector runtime dependencies from packages/connector-worker/src/runtime-deps.ts"
+    "Compiler dependency list changed; update this packaging check"
   );
   process.exit(2);
 }
-const external = externalMatch[1]
-  .split(",")
-  .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
-  .filter(Boolean);
-const declared = [sdkMatch[1], ...external];
+const declared = [sdkMatch[1]];
 
 const workerPkg = JSON.parse(
   readFileSync(
@@ -53,7 +48,7 @@ if (missing.length > 0) {
   console.error(
     `❌ RUNTIME_PROVIDED_PACKAGES includes deps that are NOT in packages/connector-worker/package.json:\n` +
       missing.map((d) => `  - ${d}`).join("\n") +
-      `\n\nEither add them as worker dependencies, or stop providing/externalizing them at runtime\n` +
+      `\n\nDeclare compiler dependencies in the worker package\n` +
       `(packages/connector-worker/src/runtime-deps.ts).`
   );
   process.exit(1);

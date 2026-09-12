@@ -8,13 +8,13 @@ import {
 } from '../executor/runtime-dependency-loader.js';
 
 describe('connector runtime dependency loader', () => {
-  test('classifies the SDK, SDK subpaths, and external runtime packages', () => {
+  test('only stages the SDK needed for compilation', () => {
     expect(isConnectorRuntimeDependency('@lobu/connector-sdk')).toBe(true);
     expect(
       isConnectorRuntimeDependency('@lobu/connector-sdk/define-connector')
     ).toBe(true);
-    expect(isConnectorRuntimeDependency('playwright')).toBe(true);
-    expect(isConnectorRuntimeDependency('sharp/lib/index.js')).toBe(true);
+    expect(isConnectorRuntimeDependency('playwright')).toBe(false);
+    expect(isConnectorRuntimeDependency('sharp/lib/index.js')).toBe(false);
     expect(isConnectorRuntimeDependency('node:fs')).toBe(false);
     expect(isConnectorRuntimeDependency('connector-owned-package')).toBe(false);
   });

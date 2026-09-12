@@ -69,9 +69,11 @@ export function resolveEmbeddedNativeDir(
 ): string {
   let entry: string;
   try {
-    // The platform package uses a string `exports` ("./dist/index.js"), so only
-    // the package root resolves; walk up from there to `native`.
-    entry = require.resolve(`@embedded-postgres/${platform}`);
+    // Resolve from the package that owns these optional dependencies. An
+    // isolated installation does not hoist its binaries into our graph.
+    // The platform package exports its JS entry; native lives beside dist.
+    const postgresRequire = createRequire(require.resolve("embedded-postgres"));
+    entry = postgresRequire.resolve(`@embedded-postgres/${platform}`);
   } catch {
     throw new Error(
       `@lobu/pgvector-embedded: @embedded-postgres/${platform} is not installed. ` +
