@@ -979,14 +979,14 @@ describe("WhatsApp source observation", () => {
       id: "whatsapp-web:source-observation-error",
       source_error: "WhatsApp source observation failed; recovery is required",
     });
-    expect(await normalization.listen("replacement-token")).toEqual({
-      ok: false,
-      error: {
-        state: "operation_failed",
-        reason: "WhatsApp source observation failed; recovery is required",
-      },
-    });
+    expect(await normalization.listen("replacement-token")).toEqual({ ok: true, listening: true });
     expect(normalization.posts[1]?.token).toBe("replacement-token");
+    expect(normalization.posts[1]?.record).toEqual(normalization.posts[0]?.record);
+    expect(normalization.handlers.get("add")?.size).toBe(1);
+    expect(normalization.handlers.get("change")?.size).toBe(1);
+    normalization.emit("add", "healthy after rebind");
+    await settle();
+    expect(normalization.posts.at(-1)?.record.body).toBe("healthy after rebind");
 
     const overflow = install();
     await overflow.listen();
@@ -996,5 +996,27 @@ describe("WhatsApp source observation", () => {
       id: "whatsapp-web:source-observation-error",
       source_error: "WhatsApp page observation buffer overflowed; recovery is required",
     });
+    expect(await overflow.listen("recovered-token")).toEqual({ ok: true, listening: true });
+    overflow.emit("add", "bounded after rebind");
+    await settle();
+    expect(overflow.posts.at(-1)?.record.body).toBe("bounded after rebind");
+  });
+
+  it("ignores a detached listener's delayed failure after a successful rebind", async () => {
+    let release!: (value: string) => void;
+    const source = install(() => new Promise<string>((resolve) => { release = resolve; }));
+    await source.listen();
+    source.emitModel("change", { attributes: {
+      id: { id: "synthetic-delayed", remote: "synthetic@lid" },
+      from: "15550000000@c.us", type: "chat", t: 1100,
+      get body() { throw new Error("detached normalization failed"); },
+    } });
+    await source.listen("replacement-token");
+    release("15550000000@c.us");
+    await settle();
+    expect(source.posts).toHaveLength(0);
+    source.emit("add", "current listener stays healthy");
+    await settle();
+    expect(source.posts[0]?.record.body).toBe("current listener stays healthy");
   });
 });

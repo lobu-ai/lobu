@@ -35,7 +35,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 13;
+  const ADAPTER_VERSION = 14;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -90,22 +90,20 @@ export function whatsAppWebAdapterProgram() {
       });
     };
     const previous = listeners.get(request.bridge_id);
-    if (previous?.error) {
-      // Keep the failure visible until revocation/recovery, and update the
-      // token so the current bridge can still detach this failed observer.
-      previous.token = request.token;
-      reportError(previous, previous.error);
-      throw new Error(previous.error);
-    }
     detach(request.bridge_id);
-    const state = previous ?? {
+    // A new listener identity fences pending normalization from the detached
+    // handlers. Keep unaccepted records, but retry a transient source failure
+    // by attaching fresh handlers to the current collection.
+    const state = {
+      ...(previous ?? {
       id: request.bridge_id, collection, sequence: 0,
       pending: new Map(), fingerprints: new Map(),
       pendingBytes: 0, fingerprintBytes: 0, error: null,
+      }),
+      collection, error: null,
     };
     state.token = request.token;
     state.request = request;
-    if (state.error) throw new Error(state.error);
     const observe = (model, kind) => {
       if (state.error) return;
       const sequence = ++state.sequence;
@@ -141,6 +139,7 @@ export function whatsAppWebAdapterProgram() {
         }
         post(state, entry);
       }).catch(() => {
+        if (listeners.get(state.id) !== state) return;
         reportError(state, "WhatsApp source observation failed; recovery is required", sequence);
       });
     };
@@ -155,9 +154,20 @@ export function whatsAppWebAdapterProgram() {
       }
     };
     listeners.set(state.id, state);
-    collection.on("add", state.onAdd);
-    collection.on("change", state.onChange);
-    window.addEventListener("message", state.onReply);
+    try {
+      collection.on("add", state.onAdd);
+      collection.on("change", state.onChange);
+      window.addEventListener("message", state.onReply);
+    } catch (error) {
+      reportError(state, "WhatsApp source observation failed; recovery is required");
+      throw error;
+    }
+    // Repost the failure under the fresh token. The durable bridge retains it
+    // until a successful connector checkpoint acknowledges its exact revision.
+    if (previous?.error) post(state, {
+      sequence: ++state.sequence,
+      record: { id: SOURCE_ERROR_ID, source_error: previous.error },
+    });
     for (const entry of state.pending.values()) post(state, entry);
     return { ok: true, listening: true };
   }
