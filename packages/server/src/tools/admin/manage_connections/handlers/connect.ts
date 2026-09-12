@@ -4,6 +4,7 @@
 
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
 import { normalizeScopeList } from "../../../../auth/oauth/scopes";
+import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { notifyConnectionPermissionRequest } from "../../../../notifications/triggers";
 import {
 	getPrimaryAuthProfileForKind,
@@ -21,6 +22,7 @@ import logger from "../../../../utils/logger";
 import { ensureConnectorInstalled } from "../../../../utils/ensure-connector-installed";
 import {
   buildOAuthConnectConfig,
+  issueOAuthReconnectLink,
   getOAuthMethods,
   resolveRequestedOAuthScopes,
   resolveOAuthProfileApp,
@@ -249,6 +251,8 @@ async function handleConnectImpl(
       AND c.deleted_at IS NULL
 			${requireManaged ? sql`AND c.config->>'consent_only' = 'true'` : sql``}
       ${explicitSlug ? sql`AND c.slug = ${explicitSlug}` : sql``}
+      ${args.config ? sql`AND c.config @> ${sql.json(args.config)}::jsonb` : sql``}
+      ${args.auth_profile_slug ? sql`AND c.auth_profile_id = (SELECT id FROM auth_profiles WHERE organization_id = ${organizationId} AND slug = ${args.auth_profile_slug})` : sql``}
       ${deviceBinding.deviceWorkerId ? sql`AND c.device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}
       ${userId ? sql`AND c.created_by = ${userId}` : sql``}
     ORDER BY ct.created_at DESC, ct.id DESC
@@ -275,9 +279,12 @@ async function handleConnectImpl(
       if (!target || target.auth_profile_id !== targetHint.auth_profile_id) {
         return { error: 'Connection setup changed. Retry connecting this account.' };
       }
-      if (!isAdmin && target.created_by !== userId) return { error: 'You can only re-authenticate connections you created.' };
+      if (!userId || target.created_by !== userId) return { error: 'You can only re-authenticate connections you created.' };
       if (target.auth_profile_id && profile?.profile_kind !== 'oauth_account') return { error: 'The selected OAuth account profile is no longer available.' };
-      if (!isAdmin && profile && profile.created_by !== userId) return { error: 'You can only re-authenticate OAuth profiles you created.' };
+      if (profile) {
+        const ownershipError = oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, userId, target.created_by);
+        if (ownershipError) return { error: ownershipError };
+      }
       if (target.status === 'active') return { active: true as const, target };
       if (token.status === 'expired') {
         // Another retry may have replaced the token while this one waited for its
@@ -416,6 +423,11 @@ async function handleConnectImpl(
 			}) : null);
 	}
 
+  if (authSelection.authProfile) {
+    const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, userId);
+    if (ownershipError) return { error: ownershipError };
+  }
+
   if (!isAdmin) {
     if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
       return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
@@ -427,6 +439,42 @@ async function handleConnectImpl(
       const setup = buildOAuthAppProfileSetupError({ connectorKey: args.connector_key, method: authSelection.oauthMethod!, setupUrl });
       return oauthAppSetupContinuation({ action: 'connect', connectorKey: args.connector_key,
         setup: { ...setup, error: 'Ask an administrator to configure and set the workspace-default OAuth app at setup_url. Then resume this call to authorize your own account.' }, resumeCall });
+    }
+  }
+
+  // An identified account already has a durable connection. Retry that
+  // connection instead of creating another owner/profile/history chain.
+  // An explicit new slug or different source config still selects a new source.
+  if (isOAuthConnect && authSelection.authProfile) {
+    const existing = await sql`
+      SELECT id, slug, status FROM connections
+      WHERE organization_id = ${organizationId} AND connector_key = ${args.connector_key}
+        AND created_by = ${userId} AND auth_profile_id = ${authSelection.authProfile.id}
+        AND app_auth_profile_id IS NOT DISTINCT FROM ${authSelection.appAuthProfile?.id ?? null}::bigint
+        AND deleted_at IS NULL
+        ${explicitSlug ? sql`AND slug = ${explicitSlug}` : sql``}
+        ${args.config ? sql`AND config @> ${sql.json(args.config)}::jsonb` : sql``}
+        ${deviceBinding.deviceWorkerId ? sql`AND device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}
+      ORDER BY id LIMIT 2
+    `;
+    if (existing.length > 1) return { error: 'This account has multiple connections. Select the existing connection by slug before retrying.' };
+    if (existing.length === 1) {
+      const target = existing[0];
+      const needsAuthorization = target.status === 'pending_auth' || target.status === 'revoked' ||
+        authSelection.authProfile.status !== 'active' || Boolean(args.requested_scopes?.length);
+      if (needsAuthorization) {
+        const reconnect = await issueOAuthReconnectLink({ authProfile: authSelection.authProfile, ctx,
+          connectionId: Number(target.id), requestedScopes: args.requested_scopes,
+          appAuthProfileSlug: authSelection.appAuthProfile?.slug });
+        if ('error' in reconnect) return reconnect;
+        return { action: 'connect', connection_id: Number(target.id), slug: target.slug, status: target.status,
+          auth_type: 'oauth', instructions: 'Open the authorization link to renew access for this account.',
+          connect_url: reconnect.connectUrl, expires_at: reconnect.expiresAt };
+      }
+      return {
+      action: 'connect', connection_id: Number(existing[0].id), slug: existing[0].slug, status: existing[0].status,
+      message: 'This account already has a connection. Reuse it and check operations.listAvailable for capability readiness; use connections.reauthenticate if additional authorization is needed.',
+      };
     }
   }
 
@@ -909,7 +957,7 @@ async function handleConnectImpl(
 
   const connectUrl = `${getConnectBaseUrl(ctx)}/connect/${connectToken.token}/oauth/start`;
 
-  // Fire-and-forget notification to org admins
+  // Notify the personal connection owner.
   notifyConnectionPermissionRequest({
     orgId: organizationId,
     connectionId: connection.id,

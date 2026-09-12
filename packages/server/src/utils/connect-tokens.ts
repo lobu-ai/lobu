@@ -9,7 +9,7 @@
 import { randomBytes } from 'node:crypto';
 import { getDb, pgTextArray, type DbClient } from '../db/client';
 import logger from './logger';
-import { lockOAuthAppBinding } from './oauth-connection-state';
+import { lockOAuthAccountBinding } from './oauth-connection-state';
 
 /**
  * Stamped on a connection whose connect token lapsed unused. `connections.connect`
@@ -68,9 +68,12 @@ export async function createConnectToken(
   const insert = async (tx: DbClient) => {
     if (params.authType === 'oauth' && params.authProfileId) {
       const selectedAppId = params.authConfig?.appAuthProfileId;
-      if (!(await lockOAuthAppBinding(tx, params.organizationId, params.authProfileId,
-        typeof selectedAppId === 'number' ? selectedAppId : null, true))) {
-        throw new Error('This account is already bound to a different OAuth app. Use a separate account profile for another app.');
+      if (!(await lockOAuthAccountBinding(tx, {
+        organizationId: params.organizationId, authProfileId: params.authProfileId,
+        appAuthProfileId: typeof selectedAppId === 'number' ? selectedAppId : null,
+        reservePending: true, ownerUserId: params.createdBy ?? null,
+      }))) {
+        throw new Error('This account is already bound to a different OAuth app or owner. Use your own account profile with its selected app.');
       }
     }
     return tx`

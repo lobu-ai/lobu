@@ -83,12 +83,6 @@ export async function handleReauthenticate(
   if (row.profile_kind === 'oauth_account') {
     const authProfile = await getAuthProfileById(organizationId, row.auth_profile_id);
     if (!authProfile) return { error: 'Connection auth profile not found' };
-    // Defense in depth for legacy/admin-bound rows where connection and profile
-    // creators may differ: owning the connection must not grant profile access.
-    if (!callerIsAdmin && authProfile.created_by !== ctx.userId) {
-      return { error: 'You can only re-authenticate OAuth profiles you created.' };
-    }
-
     const reconnect = await issueOAuthReconnectLink({ authProfile, ctx, connectionId: row.id, requestedScopes: args.requested_scopes });
     if ('error' in reconnect) return reconnect;
     return {

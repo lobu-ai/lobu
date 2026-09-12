@@ -80,6 +80,88 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
   beforeAll(async () => { await cleanupTestDatabase(); await initWorkspaceProvider(); });
   afterEach(() => { globalThis.fetch = originalFetch; });
 
+  it('reuses an active connection for the selected personal account on repeated connect', async () => {
+    const s = await seed();
+    const before = await state(s.connection.id);
+    const result = await s.client.connect({ connector_key: KEY, auth_profile_slug: s.profile.slug, app_auth_profile_slug: s.app.slug }) as { connection_id: number };
+    expect(result.connection_id).toBe(s.connection.id);
+    expect(await state(s.connection.id)).toEqual(before);
+    const [count] = await getTestDb()`SELECT COUNT(*)::int AS count FROM connections WHERE organization_id = ${s.org.id} AND deleted_at IS NULL`;
+    expect(count.count).toBe(1);
+  });
+
+  it('reuses the same connection while requesting additional authorization', async () => {
+    const s = await seed();
+    const before = await state(s.connection.id);
+    const result = await s.client.connect({ connector_key: KEY, auth_profile_slug: s.profile.slug,
+      app_auth_profile_slug: s.app.slug, requested_scopes: [EXTRA] }) as { connection_id: number; connect_url: string };
+    expect(result.connection_id).toBe(s.connection.id);
+    expect(result.connect_url).toContain('/oauth/start');
+    expect(await state(s.connection.id)).toEqual(before);
+  });
+
+  it.each(['admin', 'owner'] as const)('does not let another %s rotate or rebind a personal grant', async (role) => {
+    const s = await seed();
+    const other = await createTestUser({ name: 'Synthetic other administrator' });
+    await addUserToOrganization(other.id, s.org.id, role);
+    const ctx = { ...s.ctx, userId: other.id, memberRole: role };
+    const before = await state(s.connection.id);
+    const reconnect = await manageConnections({ action: 'reauthenticate', connection_id: s.connection.id }, {} as Env, ctx);
+    expect(reconnect).toHaveProperty('error');
+    const profileReconnect = await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: s.profile.slug, reconnect: true }, {} as Env, ctx);
+    expect(profileReconnect).toHaveProperty('error');
+    for (const patch of [{ config: { synthetic: true } }, { app_auth_profile_slug: s.otherApp.slug }, { device_worker_id: null }]) {
+      expect(await manageConnections({ action: 'update', connection_id: s.connection.id, ...patch }, {} as Env, ctx)).toHaveProperty('error');
+    }
+    expect(await manageAuthProfiles({ action: 'delete_auth_profile', auth_profile_slug: s.profile.slug }, {} as Env, ctx)).toHaveProperty('error');
+    const own = await createTestConnection({ organization_id: s.org.id, connector_key: KEY, created_by: other.id, visibility: 'private', createDefaultFeed: false });
+    const rebind = await manageConnections({ action: 'update', connection_id: own.id, auth_profile_slug: s.profile.slug }, {} as Env, ctx);
+    expect(rebind).toHaveProperty('error');
+    const [count] = await getTestDb()`SELECT COUNT(*)::int AS count FROM connect_tokens WHERE auth_profile_id = ${s.profile.id}`;
+    expect(count.count).toBe(0);
+    expect(await state(s.connection.id)).toEqual(before);
+  });
+
+  it.each(['connection', 'profile', 'grant'] as const)('rejects a stale reconnect after the %s owner changes', async (target) => {
+    const s = await seed();
+    const result = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    const other = await createTestUser({ name: 'Synthetic replacement owner' });
+    await addUserToOrganization(other.id, s.org.id, 'owner');
+    const sql = getTestDb();
+    if (target === 'connection') await sql`UPDATE connections SET created_by = ${other.id} WHERE id = ${s.connection.id}`;
+    if (target === 'profile') await sql`UPDATE auth_profiles SET created_by = ${other.id} WHERE id = ${s.profile.id}`;
+    if (target === 'grant') await sql`UPDATE account SET "userId" = ${other.id} WHERE id = ${s.profile.account_id}`;
+    const before = await state(s.connection.id);
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ access_token: 'synthetic-stale-owner-token', scope: [BASE, OLD].join(' ') });
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-provider-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const response = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-stale-code`, {}, {} as Env);
+    expect(response.headers.get('location')).toContain('auth_result=failed');
+    expect(await state(s.connection.id)).toEqual(before);
+  });
+
+  it('rejects a different upstream identity without replacing the existing grant', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE auth_profiles SET auth_data = auth_data || ${sql.json({ identity: { id: 'synthetic-original-user' } })}::jsonb WHERE id = ${s.profile.id}`;
+    const before = await state(s.connection.id);
+    const result = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ access_token: 'synthetic-different-account-token', scope: [BASE, OLD].join(' ') });
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-different-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const response = await connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-different-code`, {}, {} as Env);
+    expect(response.headers.get('location')).toContain('auth_result=failed');
+    expect(await state(s.connection.id)).toEqual(before);
+  });
+
   it('reopening the same PKCE authorization link keeps its challenge matched to the stored verifier', async () => {
     const s = await seed();
     await getTestDb()`UPDATE connector_definitions SET auth_schema = jsonb_set(auth_schema, '{methods,0,usePkce}', 'true') WHERE organization_id = ${s.org.id} AND key = ${KEY}`;
@@ -296,11 +378,11 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const sql = getTestDb();
     const member = await createTestUser({ name: 'Synthetic connection owner' });
     await addUserToOrganization(member.id, s.org.id, 'member');
-    await sql`UPDATE connections SET created_by = ${member.id}, status = 'pending_auth' WHERE id = ${s.connection.id}`;
     await s.client.reauthenticate(s.connection.id);
+    await sql`UPDATE connections SET created_by = ${member.id}, status = 'pending_auth' WHERE id = ${s.connection.id}`;
     const before = await sql`SELECT token, status, auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id}`;
     const memberClient = buildConnectionsNamespace({ ...s.ctx, userId: member.id, memberRole: 'member' }, {} as Env);
-    await expect(memberClient.connect({ connector_key: KEY, requested_scopes: [EXTRA] })).rejects.toThrow('OAuth profiles you created');
+    await expect(memberClient.connect({ connector_key: KEY, requested_scopes: [EXTRA] })).rejects.toThrow('OAuth account profiles you created');
     expect(await sql`SELECT token, status, auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id}`).toEqual(before);
   });
 

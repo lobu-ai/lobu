@@ -564,14 +564,24 @@ export async function notifyConnectionPermissionRequest(params: {
 	connectorKey: string;
 	connectUrl?: string;
 }): Promise<void> {
-	await notifyOrgAdmins(params.orgId, (orgSlug) => {
+	const sql = getDb();
+	const [connection] = await sql`
+		SELECT c.created_by, c.display_name
+		FROM connections c
+		JOIN "member" m ON m."organizationId" = c.organization_id AND m."userId" = c.created_by
+		WHERE c.organization_id = ${params.orgId} AND c.id = ${params.connectionId} AND c.deleted_at IS NULL
+	`;
+	if (!connection?.created_by) return;
+	const orgSlug = await getOrgSlug(params.orgId);
+	await sendNotification(params.orgId, [connection.created_by], {
 		// No "Authorize: <url>" line glued into the body any more: the card
 		// carries the destination as a link button, and the inbox has the
 		// resource URL, so interpolating it here only duplicated it as prose.
-		return {
 			type: "connection_permission_request",
-			title: `Connection "${params.connectorKey}" needs authorization`,
-			body: "A new connection was created and requires OAuth authorization.",
+			title: `Connection "${connection.display_name ?? params.connectorKey}" needs authorization`,
+			body: "Connect your account to finish setting up this connection.",
+			ownerUserId: connection.created_by,
+			deliveryScope: "targeted",
 			semanticType: CONNECTION_AUTHORIZATION_KIND,
 			payloadData: {
 				connector: params.connectorKey,
@@ -585,7 +595,6 @@ export async function notifyConnectionPermissionRequest(params: {
 				params.connectorKey,
 				params.connectionId,
 			),
-		};
 	});
 }
 

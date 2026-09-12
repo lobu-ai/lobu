@@ -1298,6 +1298,27 @@ export async function createNotificationForUsers(
 	return { created: true, eventId };
 }
 
+/** One live-state projection for the inbox and badge; reading is not resolving. */
+function connectionAuthorizationSql(sql: DbClient, userId: string) {
+	const isRequest = sql`e.metadata->>'notification_type' = 'connection_permission_request'`;
+	return {
+		isRequest,
+		join: sql`LEFT JOIN LATERAL (
+			SELECT c.created_by AS owner_user_id, c.display_name, c.deleted_at,
+				(c.deleted_at IS NULL AND (
+					c.status IN ('pending_auth', 'revoked') OR ap.status IN ('pending_auth', 'revoked', 'error')
+				)) IS TRUE AS pending
+			FROM connections c
+			LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id AND ap.organization_id = c.organization_id
+			WHERE c.id = CASE WHEN e.metadata->>'resource_id' ~ '^[0-9]{1,18}$'
+				THEN (e.metadata->>'resource_id')::bigint END
+				AND c.organization_id = e.organization_id
+		) auth_request ON (${isRequest})`,
+		visible: sql`(${isRequest}) IS NOT TRUE OR auth_request.owner_user_id = ${userId}`,
+		pending: sql`COALESCE(auth_request.pending, false)`,
+	};
+}
+
 export async function listNotifications(opts: {
 	organizationId: string;
 	userId: string;
@@ -1319,6 +1340,7 @@ export async function listNotifications(opts: {
 	const clientIds = opts.clientIds?.length ? opts.clientIds : null;
 	const mcpActivityId = opts.mcpActivityId?.trim() || null;
 	const attentionOnly = opts.attentionOnly ?? false;
+	const authorization = connectionAuthorizationSql(sql, opts.userId);
 	// The attention read reorders rows (see ORDER BY), which would make a keyset
 	// cursor skip notifications. It is a single bounded read by contract; fail
 	// loudly rather than paginate an order the cursor does not match.
@@ -1339,6 +1361,8 @@ export async function listNotifications(opts: {
 	) OR (
 		ar.approval_status = 'pending'
 		AND (pe.connection_id IS NULL OR pc.id IS NOT NULL)
+	) OR (
+		${authorization.isRequest} AND ${authorization.pending}
 	), false)`;
 
 	const rows = (await sql`
@@ -1347,8 +1371,16 @@ export async function listNotifications(opts: {
       e.organization_id,
       t.user_id,
       COALESCE(e.metadata->>'notification_type', 'generic') AS type,
-      e.title,
-      e.payload_text AS body,
+      CASE WHEN ${authorization.isRequest} THEN
+        CASE WHEN ${authorization.pending} THEN 'Connection "' || COALESCE(auth_request.display_name, 'Account') || '" needs authorization'
+          WHEN auth_request.deleted_at IS NOT NULL THEN 'Connection removed'
+          ELSE 'Authorization completed' END
+        ELSE e.title END AS title,
+      CASE WHEN ${authorization.isRequest} THEN
+        CASE WHEN ${authorization.pending} THEN 'Connect your account to finish setting up this connection.'
+          WHEN auth_request.deleted_at IS NOT NULL THEN 'This connection was removed and no longer needs authorization.'
+          ELSE 'This connection no longer needs authorization.' END
+        ELSE e.payload_text END AS body,
       e.metadata->>'resource_type' AS resource_type,
       e.metadata->>'resource_id' AS resource_id,
       e.metadata->>'resource_url' AS resource_url,
@@ -1432,7 +1464,10 @@ export async function listNotifications(opts: {
       ) AS device_worker_id,
       device_worker.label AS device_label,
       device_worker.platform AS device_platform,
-      pe.interaction_type AS interaction_type,
+      CASE WHEN ${authorization.isRequest} THEN 'authorization' ELSE pe.interaction_type END AS interaction_type,
+      CASE WHEN ${authorization.isRequest} THEN
+        CASE WHEN ${authorization.pending} THEN 'pending' ELSE 'completed' END
+        ELSE NULL END AS interaction_status,
       -- Whether the decision needs FIELDS or is a bare yes/no. Consumers pick
       -- the affordance from this, not from a list of known action keys.
       pe.interaction_input_schema AS interaction_input_schema,
@@ -1454,6 +1489,7 @@ export async function listNotifications(opts: {
       t.delivered_at AS created_at
     FROM notification_targets t
     JOIN events e ON e.id = t.event_id
+    ${authorization.join}
     LEFT JOIN feeds fd ON fd.id = e.feed_id
     LEFT JOIN automation_versions wv ON wv.id = e.automation_version_id
     LEFT JOIN connections source_connection
@@ -1505,12 +1541,14 @@ export async function listNotifications(opts: {
      )
     WHERE e.organization_id = ${opts.organizationId}
       AND t.user_id = ${opts.userId}
+      AND (${authorization.visible})
       AND (${cursor}::bigint IS NULL OR e.id < ${cursor})
-      AND (${!unreadOnly} OR t.read_at IS NULL)
+      AND (${!unreadOnly} OR (t.read_at IS NULL AND ((${authorization.isRequest}) IS NOT TRUE OR ${authorization.pending})))
       ${
 				attentionOnly
 					? sql`AND (
-        t.read_at IS NULL OR ${pendingDecision}
+        CASE WHEN ${authorization.isRequest} THEN ${authorization.pending}
+          ELSE t.read_at IS NULL OR ${pendingDecision} END
       )`
 					: sql``
 			}
@@ -1553,13 +1591,17 @@ export async function getUnreadCount(
 	userId: string,
 ): Promise<number> {
 	const sql = getDb();
+	const authorization = connectionAuthorizationSql(sql, userId);
 	const rows = (await sql`
     SELECT COUNT(*)::int AS count
     FROM notification_targets t
     JOIN events e ON e.id = t.event_id
+    ${authorization.join}
     WHERE e.organization_id = ${organizationId}
       AND t.user_id = ${userId}
       AND t.read_at IS NULL
+      AND (${authorization.visible})
+      AND ((${authorization.isRequest}) IS NOT TRUE OR ${authorization.pending})
   `) as unknown as Array<{ count: number }>;
 	return rows[0].count;
 }

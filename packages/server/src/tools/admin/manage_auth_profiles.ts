@@ -25,6 +25,7 @@ import {
   UpdateAuthProfileAction,
   type ManageAuthProfilesResult,
 } from '@lobu/core/contracts/tools/manage-auth-profiles';
+import { oauthAccountOwnershipError } from '../../authz/oauth-account-ownership';
 import { getDb } from '../../db/client';
 import {
   type AuthProfileKind,
@@ -44,16 +45,13 @@ import {
   updateAuthProfile,
 } from '../../utils/auth-profiles';
 import { recordToolConfigChange } from "./helpers/config-audit";
-import { createConnectToken } from '../../utils/connect-tokens';
 import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
 import { getScopedConnectorDefinition } from "../../catalog/connector-definitions";
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import { callerIsAdmin } from './helpers/db-helpers';
 import {
-  buildOAuthConnectConfig,
   getBrowserMethods,
-  getConnectBaseUrl,
   getEnvKeyMethods,
   getOAuthCredentialKeys,
   getOAuthMethods,
@@ -413,7 +411,6 @@ async function handleCreateAuthProfile(
     const appSelection = await resolveOAuthProfileApp({ ctx, connectorKey, method: oauthMethod,
       appAuthProfileSlug: args.app_auth_profile_slug, authProfile: existing ?? undefined });
     if ('error' in appSelection) return appSelection;
-    const appAuthProfileId = appSelection.appAuthProfile?.id;
     if (existing) {
       if (existing.profile_kind !== 'oauth_account' || existing.connector_key !== connectorKey) {
         return {
@@ -424,7 +421,7 @@ async function handleCreateAuthProfile(
       // otherwise a member who knows another member's pending profile slug
       // could mint a fresh connect token for it and complete OAuth into a
       // profile already referenced by someone else's connections.
-      if (!(await callerIsAdmin(getDb(), ctx)) && existing.created_by !== ctx.userId) {
+      if (oauthAccountOwnershipError(existing, ctx.userId)) {
         return {
           error: `Auth profile '${existing.slug}' belongs to another user. Choose a different slug.`,
         };
@@ -432,24 +429,14 @@ async function handleCreateAuthProfile(
       if (existing.status === 'active') {
         return { action: 'create_auth_profile', auth_profile: serializeAuthProfile(existing) };
       }
-      const requestedScopes = resolveRequestedOAuthScopes(oauthMethod, args.requested_scopes);
-      const connectToken = await createConnectToken({
-        organizationId: ctx.organizationId,
-        connectorKey,
-        authType: 'oauth',
-        authProfileId: existing.id,
-        authConfig: {
-          ...buildOAuthConnectConfig(oauthMethod, requestedScopes),
-          ...(appAuthProfileId ? { appAuthProfileId } : {}),
-          requestedScopes,
-        },
-        createdBy: ctx.userId,
-      });
+      const reconnect = await issueOAuthReconnectLink({ authProfile: existing, ctx,
+        requestedScopes: args.requested_scopes, appAuthProfileSlug: args.app_auth_profile_slug });
+      if ('error' in reconnect) return reconnect;
       return {
         action: 'create_auth_profile',
         auth_profile: serializeAuthProfile(existing),
-        connect_url: `${getConnectBaseUrl(ctx)}/connect/${connectToken.token}/oauth/start`,
-        connect_token: connectToken.token,
+        connect_url: reconnect.connectUrl,
+        connect_token: reconnect.connectToken,
       };
     }
 
@@ -480,25 +467,15 @@ async function handleCreateAuthProfile(
       throw err;
     }
 
-    const requestedScopes = resolveRequestedOAuthScopes(oauthMethod, args.requested_scopes);
-    let connectToken: Awaited<ReturnType<typeof createConnectToken>>;
+    let reconnect: Awaited<ReturnType<typeof issueOAuthReconnectLink>>;
     try {
-      connectToken = await createConnectToken({
-        organizationId: ctx.organizationId,
-        connectorKey,
-        authType: 'oauth',
-        authProfileId: authProfile.id,
-        authConfig: {
-          ...buildOAuthConnectConfig(oauthMethod, requestedScopes),
-          ...(appAuthProfileId ? { appAuthProfileId } : {}),
-          requestedScopes,
-        },
-        createdBy: ctx.userId,
-      });
+      reconnect = await issueOAuthReconnectLink({ authProfile, ctx,
+        requestedScopes: args.requested_scopes, appAuthProfileSlug: args.app_auth_profile_slug });
+      if ('error' in reconnect) {
+        await deleteAuthProfile(ctx.organizationId, authProfile.slug);
+        return reconnect;
+      }
     } catch (err) {
-      // Best-effort cleanup so a token-insert failure doesn't orphan a
-      // `pending_auth` profile. (The orphan is self-healing — a retry reuses
-      // the row and issues a fresh token — but cleaning up keeps state tidy.)
       await deleteAuthProfile(ctx.organizationId, authProfile.slug).catch(() => undefined);
       throw err;
     }
@@ -513,8 +490,8 @@ async function handleCreateAuthProfile(
     return {
       action: 'create_auth_profile',
       auth_profile: serializeAuthProfile(authProfile),
-      connect_url: `${getConnectBaseUrl(ctx)}/connect/${connectToken.token}/oauth/start`,
-      connect_token: connectToken.token,
+      connect_url: reconnect.connectUrl,
+      connect_token: reconnect.connectToken,
     };
   }
 
@@ -633,15 +610,8 @@ async function handleUpdateAuthProfile(
         error: `Only admins can modify ${existingForRoleCheck.profile_kind} auth profiles.`,
       };
     }
-    if (
-      !isAdmin &&
-      existingForRoleCheck.profile_kind === 'oauth_account' &&
-      existingForRoleCheck.created_by !== ctx.userId
-    ) {
-      return {
-        error: `You can only update OAuth account profiles you created. Ask an admin if you need to manage another member's profile.`,
-      };
-    }
+    const ownershipError = oauthAccountOwnershipError(existingForRoleCheck, ctx.userId);
+    if (ownershipError) return { error: ownershipError };
 
   }
 
@@ -667,6 +637,10 @@ async function handleUpdateAuthProfile(
 
   // The grant's app binding is callback-owned, including when raw profile data is patched.
   if (updateAuthDataPayload && existingForRoleCheck?.profile_kind === 'oauth_account') {
+    delete updateAuthDataPayload.identity;
+    if (existingForRoleCheck.auth_data?.identity !== undefined) {
+      updateAuthDataPayload.identity = existingForRoleCheck.auth_data.identity;
+    }
     delete updateAuthDataPayload.app_auth_profile_id;
     if (existingForRoleCheck.auth_data?.app_auth_profile_id !== undefined) {
       updateAuthDataPayload.app_auth_profile_id = existingForRoleCheck.auth_data.app_auth_profile_id;
@@ -814,6 +788,9 @@ async function handleDeleteAuthProfile(
   if (!existing) {
     return authProfileNotFound(args.auth_profile_slug);
   }
+
+  const ownershipError = oauthAccountOwnershipError(existing, ctx.userId);
+  if (ownershipError) return { error: ownershipError };
 
   // Check if active connections reference this profile
   const usageRows = await sql`

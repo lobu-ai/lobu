@@ -342,36 +342,36 @@ export async function fetchUserInfoWithRaw(params: {
   return { raw, normalized: normalizeUserInfo(params.provider, raw) };
 }
 
-function normalizeUserInfo(provider: string, data: Record<string, unknown>): OAuthUserInfo | null {
+export function normalizeUserInfo(provider: string, data: Record<string, unknown>): OAuthUserInfo | null {
+  const id = data.id ?? data.sub;
+  if ((typeof id !== 'string' && typeof id !== 'number') || !String(id).trim()) return null;
   try {
     switch (provider) {
       case 'google':
         return {
-          id: String(data.id),
+          id: String(id),
           email: (data.email as string) ?? null,
           name: (data.name as string) ?? null,
         };
       case 'github':
         return {
-          id: String(data.id),
+          id: String(id),
           email: (data.email as string) ?? null,
           name: (data.name as string) ?? (data.login as string) ?? null,
         };
       case 'microsoft':
         return {
-          id: String(data.id),
+          id: String(id),
           email: (data.mail as string) ?? (data.userPrincipalName as string) ?? null,
           name: (data.displayName as string) ?? null,
         };
       case 'reddit':
         return {
-          id: String(data.id),
+          id: String(id),
           email: null,
           name: (data.name as string) ?? null,
         };
       default: {
-        const id = data.id ?? data.sub;
-        if (id === undefined || id === null) return null;
         return {
           id: String(id),
           email: (data.email as string) ?? null,

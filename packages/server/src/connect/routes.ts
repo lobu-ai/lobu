@@ -35,7 +35,7 @@ import {
 } from '../utils/auth-credential-secrets';
 import { type ConnectTokenRow, resolveConnectToken } from '../utils/connect-tokens';
 import logger from '../utils/logger';
-import { lockOAuthAppBinding, syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
+import { lockOAuthAccountBinding, syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
 import {
   isPersonalCredentialKind,
   resolveOAuthAppClientCredentials,
@@ -60,6 +60,7 @@ import {
   buildAuthorizationUrl,
   exchangeCodeForTokens,
   fetchUserInfoWithRaw,
+  normalizeUserInfo,
 } from './oauth-providers';
 import { resolveSession } from '../auth/resolve-session';
 
@@ -828,20 +829,30 @@ async function handleOAuthCallback(
     `;
     if (pending.length !== 1) return false;
     if (tokenRow.auth_profile_id) {
-      if (!(await lockOAuthAppBinding(tx, tokenRow.organization_id,
-        tokenRow.auth_profile_id, appAuthProfileId ?? null))) return false;
+      if (!(await lockOAuthAccountBinding(tx, {
+        organizationId: tokenRow.organization_id, authProfileId: tokenRow.auth_profile_id,
+        appAuthProfileId: appAuthProfileId ?? null, ownerUserId: actorUserId,
+      }))) return false;
     }
     if (tokenRow.connection_id) {
       const [target] = await tx`
-        SELECT app_auth_profile_id, auth_profile_id, account_id FROM connections
+        SELECT app_auth_profile_id, auth_profile_id, account_id, created_by FROM connections
         WHERE id = ${tokenRow.connection_id} AND organization_id = ${tokenRow.organization_id}
           AND deleted_at IS NULL FOR UPDATE
       `;
-      if (!target || target.auth_profile_id !== tokenRow.auth_profile_id ||
+      if (!target || target.created_by !== actorUserId || target.auth_profile_id !== tokenRow.auth_profile_id ||
           (!tokenRow.auth_profile_id && target.account_id) ||
           (target.app_auth_profile_id && target.app_auth_profile_id !== appAuthProfileId)) return false;
     }
     const tokenTarget = tokenRow.connection_id ?? tokenRow.auth_profile_id ?? tokenRow.id;
+    if (resolvedAuthProfileId) {
+      const [profile] = await tx`SELECT auth_data FROM auth_profiles WHERE id = ${resolvedAuthProfileId} AND organization_id = ${tokenRow.organization_id}`;
+      const previousIdentity = profile?.auth_data?.identity;
+      const previousUser = previousIdentity && normalizeUserInfo(authConfig!.provider, previousIdentity);
+      // The connection identity is stable across reconnect. A failed identity
+      // lookup cannot authorize replacing a previously identified account.
+      if (previousUser && (!userInfo || previousUser.id !== userInfo.id)) return false;
+    }
     const generatedAccountId = `connect_${tokenTarget}_${Date.now()}`;
     const expiresAt = tokens.expiresIn
       ? new Date(Date.now() + tokens.expiresIn * 1000).toISOString()
@@ -892,8 +903,10 @@ async function handleOAuthCallback(
         "accessTokenExpiresAt" = EXCLUDED."accessTokenExpiresAt",
         scope = EXCLUDED.scope,
         "updatedAt" = NOW()
+      WHERE account."userId" = EXCLUDED."userId"
       RETURNING id
     `;
+    if (upsertResult.length !== 1) return false;
     const resolvedAccountId = (upsertResult[0] as { id: string }).id;
 
     // Resolve or create the auth profile.

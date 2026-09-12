@@ -5,6 +5,7 @@
  */
 
 import { getScopedConnectorDefinition } from '../../../catalog/connector-definitions';
+import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
 import { getDb } from '../../../db/client';
 import {
   type AuthProfileKind,
@@ -557,10 +558,13 @@ export async function issueOAuthReconnectLink(params: {
   | {
       authProfile: AuthProfileRow;
       connectUrl: string;
+      connectToken: string;
       expiresAt: string;
     }
 > {
   const { authProfile, ctx } = params;
+  const ownershipError = oauthAccountOwnershipError(authProfile, ctx.userId);
+  if (ownershipError) return { error: ownershipError };
   if (
     authProfile.profile_kind !== 'oauth_account' ||
     !authProfile.provider ||
@@ -597,6 +601,7 @@ export async function issueOAuthReconnectLink(params: {
       SELECT 1 FROM connections
       WHERE organization_id = ${ctx.organizationId} AND id = ${params.connectionId}
         AND auth_profile_id = ${authProfile.id} AND deleted_at IS NULL
+        AND created_by = ${ctx.userId}
     `;
     if (owned.length !== 1) {
       return { error: 'Connection does not use this OAuth account profile.' };
@@ -637,6 +642,7 @@ export async function issueOAuthReconnectLink(params: {
   return {
     authProfile,
     connectUrl: `${getConnectBaseUrl(ctx)}/connect/${connectToken.token}/oauth/start`,
+    connectToken: connectToken.token,
     expiresAt: new Date(connectToken.expires_at).toISOString(),
   };
 }
