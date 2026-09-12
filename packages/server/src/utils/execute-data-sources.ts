@@ -379,6 +379,8 @@ export function validateAndScopeQuery(
      * running query_sql / client.query must not surface them.
      */
     excludeWorkspaceAudit?: boolean;
+    /** Verified Automation window; supplied by the token resolver, never raw SQL. */
+    window?: Pick<DataSourceContext, 'windowStart' | 'windowEnd' | 'entityIds' | 'excludeProducedByAutomationId'>;
   }
 ): { sql: string; params: unknown[]; tableRefs: string[] } {
   const trimmed = rawSql.trim();
@@ -426,7 +428,7 @@ export function validateAndScopeQuery(
     ...buildScopedQuery(
       trimmed,
       tableRefs,
-      { organizationId, userId: options?.userId ?? null },
+      { ...options?.window, organizationId, userId: options?.userId ?? null },
       options
     ),
     tableRefs,
@@ -628,6 +630,60 @@ export function buildScopedQuery(
       .join(', ');
   };
 
+  // The event and classification CTEs must agree on both versions and access.
+  const eventTable = context.windowStart && context.windowEnd
+    ? 'public.events' : 'public.current_event_records';
+  const eventReadPredicate = (alias: string): string => {
+    let predicate = '';
+    // Workspace-identity audit rows are owner/admin-only; ordinary members
+    // running raw SQL must not surface them.
+    if (options?.excludeWorkspaceAudit) {
+      predicate += ` AND NOT (${alias}.metadata ? '_lobu_workspace_audit')`;
+    }
+
+    // Entity scoping: filter events to the automation's entities
+    if (context.entityIds && context.entityIds.length > 0) {
+      const placeholders = context.entityIds.map((id) => {
+        idx++;
+        params.push(id);
+        return `$${idx}`;
+      });
+      predicate += ` AND ${alias}.entity_ids && ARRAY[${placeholders.join(',')}]::bigint[]`;
+    }
+
+    // Stable version at the exclusive window end. Later successors must not
+    // erase rows between a source summary, pagination, and a detail query.
+    if (context.windowStart && context.windowEnd) {
+      idx++;
+      params.push(context.windowStart);
+      const windowStartP = `$${idx}`;
+      idx++;
+      params.push(context.windowEnd);
+      const windowEndP = `$${idx}`;
+      predicate += ` AND ${alias}.created_at >= ${windowStartP}::timestamptz AND ${alias}.created_at < ${windowEndP}::timestamptz`;
+      predicate += ` AND NOT EXISTS (SELECT 1 FROM public.events successor WHERE successor.id = ${alias}.superseded_by AND successor.created_at < ${windowEndP}::timestamptz)`;
+    }
+
+    // An Automation never reads what it wrote itself. This used to be bought by
+    // stamping outputs at `window_end` so they fell outside their own window
+    // — which also made them future-dated and invisible everywhere else. Now
+    // that outputs are stamped truthfully they land inside their own window,
+    // and only this predicate stops an hourly Automation compounding on itself.
+    //
+    // Self-scoped: one Automation refining another's output is ordinary
+    // composition, so this drops rows from THIS Automation only.
+    if (context.excludeProducedByAutomationId != null) {
+      idx++;
+      params.push(context.excludeProducedByAutomationId);
+      predicate += ` AND (${alias}.automation_id IS NULL OR ${alias}.automation_id <> $${idx})`;
+    }
+
+    predicate += eventConnVisibility(alias);
+    predicate += eventResourceVisibility(alias);
+
+    return predicate;
+  };
+
   // security-allowed: every `${safeName}` below is a QUERYABLE_TABLE_NAMES-whitelisted
   // identifier that's been double-quote-escaped; every `${orgP}` is a $N parameter
   // placeholder; `sel()` / `selEntitiesJoined()` return validated column expressions.
@@ -651,52 +707,10 @@ export function buildScopedQuery(
       // query_sql consistent with what search_memory/get_content surface.
       // security-allowed: see block comment above the for-loop
       let eventsCte =
-        `"${safeName}" AS (SELECT ${sel(table, 'ev')} FROM public.current_event_records ev ` +
+        `"${safeName}" AS (SELECT ${sel(table, 'ev')} FROM ${eventTable} ev ` +
         `WHERE ${eventOrgScope('ev')}`;
 
-      // Workspace-identity audit rows are owner/admin-only; ordinary members
-      // running raw SQL must not surface them.
-      if (options?.excludeWorkspaceAudit) {
-        eventsCte += ` AND NOT (ev.metadata ? '_lobu_workspace_audit')`;
-      }
-
-      // Entity scoping: filter events to the automation's entities
-      if (context.entityIds && context.entityIds.length > 0) {
-        const placeholders = context.entityIds.map((id) => {
-          idx++;
-          params.push(id);
-          return `$${idx}`;
-        });
-        eventsCte += ` AND ev.entity_ids && ARRAY[${placeholders.join(',')}]::bigint[]`;
-      }
-
-      // Arrival-window scoping (Automation mode): rows stored in the window.
-      if (context.windowStart && context.windowEnd) {
-        idx++;
-        params.push(context.windowStart);
-        const windowStartP = `$${idx}`;
-        idx++;
-        params.push(context.windowEnd);
-        const windowEndP = `$${idx}`;
-        eventsCte += ` AND ev.created_at >= ${windowStartP}::timestamptz AND ev.created_at < ${windowEndP}::timestamptz`;
-      }
-
-      // An Automation never reads what it wrote itself. This used to be bought by
-      // stamping outputs at `window_end` so they fell outside their own window
-      // — which also made them future-dated and invisible everywhere else. Now
-      // that outputs are stamped truthfully they land inside their own window,
-      // and only this predicate stops an hourly Automation compounding on itself.
-      //
-      // Self-scoped: one Automation refining another's output is ordinary
-      // composition, so this drops rows from THIS Automation only.
-      if (context.excludeProducedByAutomationId != null) {
-        idx++;
-        params.push(context.excludeProducedByAutomationId);
-        eventsCte += ` AND (ev.automation_id IS NULL OR ev.automation_id <> $${idx})`;
-      }
-
-      eventsCte += eventConnVisibility('ev');
-      eventsCte += eventResourceVisibility('ev');
+      eventsCte += eventReadPredicate('ev');
 
       eventsCte += ')';
       ctes.push(eventsCte);
@@ -739,18 +753,12 @@ export function buildScopedQuery(
       // the EXISTS must apply per-user connection visibility on `ev` — otherwise
       // any member reads classifications of another user's private-connection
       // events (the same leak the events CTE closes, on the joined table).
-      // Use current_event_records (not public.events) for tombstone parity with
-      // the events CTE — a superseded event's classifications shouldn't surface.
-      // security-allowed: see block comment above the for-loop
+      // security-allowed: eventTable is an internal fixed table name.
       ctes.push(
         `"${safeName}" AS (SELECT ${sel(table, 'ec')} FROM public.event_classifications ec WHERE EXISTS (` +
-          'SELECT 1 FROM public.current_event_records ev ' +
+          `SELECT 1 FROM ${eventTable} ev ` +
           `WHERE ev.id = ec.event_id AND ${eventOrgScope('ev')}` +
-          (options?.excludeWorkspaceAudit
-            ? ` AND NOT (ev.metadata ? '_lobu_workspace_audit')`
-            : '') +
-          eventConnVisibility('ev') +
-          eventResourceVisibility('ev') +
+          eventReadPredicate('ev') +
           '))'
       );
     } else if (table === 'automation_versions') {

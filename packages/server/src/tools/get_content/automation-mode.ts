@@ -7,12 +7,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { loadBoundAutomationRun } from '../../automations/window-read-context';
 import { readSourceFeedPage } from '../../lib/source-feed-page';
 import { generateWindowToken, verifyWindowToken, type SourceWindowPage } from '../../utils/jwt';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
-  automationTriggerSignals,
-  isWorkspaceEventTriggerSignal,
   MAX_COALESCED_AUTOMATION_EVENT_INPUTS,
 } from '../../automations/workspace-event-contract';
 import { type DbClient, parsePgNumberArray } from '../../db/client';
@@ -554,84 +553,6 @@ export async function fingerprintAutomationSources(args: {
 // ============================================
 // Automation Mode Handler
 // ============================================
-
-interface BoundAutomationRun {
-  versionId: number | null;
-  windowStart: Date;
-  windowEnd: Date;
-  triggerContentIds: number[];
-}
-
-/**
- * Resolve execution inputs already snapshotted on a durable run.
- *
- * In Automation mode the existing run_id argument binds the read to the queued
- * run instead of recomputing the live cursor or current version.
- */
-async function loadBoundAutomationRun(
-  sql: DbClient,
-  organizationId: string,
-  automationId: number,
-  runId: number
-): Promise<BoundAutomationRun> {
-  const rows = await sql<{ approved_input: unknown }>`
-    SELECT approved_input
-    FROM runs
-    WHERE id = ${runId}
-      AND organization_id = ${organizationId}
-      AND automation_id = ${automationId}
-      AND run_type IN ('automation', 'automation_eval')
-    LIMIT 1
-  `;
-  if (rows.length === 0) {
-    throw new ToolUserError(
-      `Automation run ${runId} does not belong to Automation ${automationId}.`,
-      404
-    );
-  }
-
-  const raw = rows[0].approved_input;
-  const input =
-    raw && typeof raw === 'object' && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : {};
-  const windowStart = new Date(
-    typeof input.window_start === 'string' ? input.window_start : ''
-  );
-  const windowEnd = new Date(
-    typeof input.window_end === 'string' ? input.window_end : ''
-  );
-  if (
-    Number.isNaN(windowStart.getTime()) ||
-    Number.isNaN(windowEnd.getTime()) ||
-    windowEnd.getTime() <= windowStart.getTime()
-  ) {
-    throw new ToolUserError(
-      `Automation run ${runId} is missing a valid queued window snapshot.`,
-      409
-    );
-  }
-  const rawVersionId = input.version_id;
-  const parsedVersionId =
-    typeof rawVersionId === 'number'
-      ? rawVersionId
-      : typeof rawVersionId === 'string' && rawVersionId.trim()
-        ? Number(rawVersionId)
-        : Number.NaN;
-  const versionId =
-    Number.isSafeInteger(parsedVersionId) && parsedVersionId > 0
-      ? parsedVersionId
-      : null;
-
-  return {
-    versionId,
-    windowStart,
-    windowEnd,
-    triggerContentIds: automationTriggerSignals(input)
-      .filter(isWorkspaceEventTriggerSignal)
-      .map((signal) => signal.event_id),
-  };
-}
 
 export async function handleAutomationMode(
   args: GetContentArgs,

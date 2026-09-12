@@ -1165,8 +1165,9 @@ export default async (_ctx, client) => {
 
 	// top-level
 	query: {
+		signature: "query(sql: string, options?: { window_token?: string }): Promise<unknown[]>",
 		summary:
-			"Run a simple read-only SQL string scoped to the org (member-safe column allowlist). For pagination or connection pushdown use the `query_sql` MCP tool; query source-backed feeds explicitly with feeds.readMany. Prefer `client.metrics.query` for declared measures.",
+			"Run a simple read-only SQL string scoped to the org (member-safe column allowlist). Pass options.window_token from the latest run-bound Automation page to use the same stored event versions and arrival bounds as its sources. Entities and classifications remain current, and the token does not grant additional access. For pagination or connection pushdown use the `query_sql` MCP tool; query source-backed feeds explicitly with feeds.readMany. Prefer `client.metrics.query` for declared measures.",
 		access: "read",
 		example:
 			"const rows = await client.query(\"SELECT id, name FROM entities WHERE entity_type = 'company' LIMIT 10\");",
