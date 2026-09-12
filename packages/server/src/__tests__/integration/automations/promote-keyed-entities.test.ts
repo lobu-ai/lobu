@@ -308,6 +308,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     `;
     expect(childTypes).toHaveLength(2);
     expect(childTypes.every((r) => String(r.slug) === 'topic')).toBe(true);
+    expect(childTypes.every((r) => r.source === null)).toBe(true);
 
     // Origin provenance lives on the entity itself — each promoted child carries
     // its run_id / stable_key in metadata (no separate observation event).
@@ -1067,6 +1068,19 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     expect(appCrashes?.run_id).toBe((completion as { run_id: number }).run_id);
     // …while the untouched entity has no owned fields.
     expect(slowLoading?.field_controls).toEqual({});
+
+    await sql`
+      UPDATE entity_identities
+      SET deleted_at = NOW()
+      WHERE organization_id = ${workspace.org.id}
+        AND namespace = 'automation_key'
+        AND identifier = ${topicIdentity(automationId, SLOW_LOADING_KEY)}
+    `;
+    const afterRetraction = (await workspace.owner.automations.manage({
+      action: 'list_promoted',
+      automation_id: String(automationId),
+    })) as { entities: Array<{ id: number }> };
+    expect(afterRetraction.entities.map((entity) => entity.id)).toEqual([entityId]);
   });
 
   it('approve (affirm_fields) locks a value as-is so a later Automation change is blocked', async () => {

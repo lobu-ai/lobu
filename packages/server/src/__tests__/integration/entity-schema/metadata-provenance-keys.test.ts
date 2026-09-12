@@ -2,8 +2,8 @@
  * Automation-promotion provenance keys must survive metadata round-trips.
  *
  * `promote-keyed-entities.ts` stamps `automation_id` / `stable_key` / `run_id`
- * / `automation_output` (plus `source`) onto promoted entity metadata via raw SQL — outside
- * schema validation. Under an `additionalProperties: false` entity-type schema
+ * / `automation_output` onto promoted entity metadata outside schema validation.
+ * Under an `additionalProperties: false` entity-type schema
  * that meant a promoted entity's metadata could never be written back through
  * `entities.update`: reading the metadata, editing one domain field, and
  * saving rejected with an unknown platform property. Validation now exempts
@@ -16,7 +16,7 @@ import {
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { TestApiClient } from '../../setup/test-mcp-client';
 
 describe('entity metadata validation > automation provenance keys', () => {
@@ -98,9 +98,189 @@ describe('entity metadata validation > automation provenance keys', () => {
     expect(err?.message).toContain("unknown property 'bogus_field'");
   });
 
+  it('validates a partial patch against the merged entity metadata', async () => {
+    const created = (await owner.entities.create({
+      type: 'strict-task',
+      name: 'Partial edit',
+      metadata: { action: 'Preserve the required action', status: 'backlog' },
+    })) as { entity: { id: number } };
+
+    await owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { status: 'active' },
+    });
+    const got = (await owner.entities.get({ entity_id: created.entity.id })) as {
+      entity: { metadata: Record<string, unknown> };
+    };
+    expect(got.entity.metadata).toMatchObject({
+      action: 'Preserve the required action',
+      status: 'active',
+    });
+    await expect(
+      owner.entities.update({
+        entity_id: created.entity.id,
+        metadata: { status: 'not-a-state' },
+      })
+    ).rejects.toThrow();
+  });
+
+  it('initializes metadata when a stored row has null metadata', async () => {
+    const created = (await owner.entities.create({
+      type: 'strict-task',
+      name: 'Initialize null metadata',
+      metadata: { action: 'Initial content' },
+    })) as { entity: { id: number } };
+    await getTestDb()`UPDATE entities SET metadata = NULL WHERE id = ${created.entity.id}`;
+    await owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { action: 'Initialized content' },
+    });
+    const got = (await owner.entities.get({ entity_id: created.entity.id })) as {
+      entity: { metadata: Record<string, unknown> };
+    };
+    expect(got.entity.metadata.action).toBe('Initialized content');
+  });
+
+  it('edits a legacy promoted row when the strict schema has no source field', async () => {
+    await owner.entity_schema.createType({
+      slug: 'strict-no-source',
+      name: 'Strict without source',
+      metadata_schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { action: { type: 'string' }, status: { type: 'string' } },
+        required: ['action'],
+      },
+    } as never);
+    const created = (await owner.entities.create({
+      type: 'strict-no-source',
+      name: 'Legacy promotion',
+      metadata: { action: 'Keep required content', status: 'backlog' },
+    })) as { entity: { id: number } };
+    const sql = getTestDb();
+    // Reproduce the historical promotion shape, which bypassed schema validation.
+    await sql`
+      UPDATE entities
+      SET metadata = metadata || ${sql.json({
+        source: 'automation_promotion',
+        automation_id: 7,
+        automation_output: 'items',
+        run_id: 9,
+        stable_key: 'synthetic-legacy',
+      })}
+      WHERE id = ${created.entity.id}
+    `;
+    await expect(owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { status: 'done' },
+    })).rejects.toThrow("unknown property 'source'");
+    await sql`
+      INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier)
+      SELECT organization_id, id, 'automation_key', 'synthetic-legacy'
+      FROM entities
+      WHERE id = ${created.entity.id}
+    `;
+    await owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { status: 'done' },
+    });
+    const got = (await owner.entities.get({ entity_id: created.entity.id })) as {
+      entity: { metadata: Record<string, unknown> };
+    };
+    expect(got.entity.metadata).toMatchObject({
+      action: 'Keep required content', status: 'done', source: 'automation_promotion',
+    });
+    await expect(owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { source: 'https://example.invalid/domain-value' },
+    })).rejects.toThrow("unknown property 'source'");
+    await expect(owner.entities.create({
+      type: 'strict-no-source',
+      name: 'Spoofed provenance metadata',
+      metadata: {
+        action: 'Stay strict',
+        source: 'automation_promotion',
+        automation_id: 7,
+        automation_output: 'items',
+        run_id: 9,
+        stable_key: 'not-an-identity',
+      },
+    })).rejects.toThrow("unknown property 'source'");
+  });
+
+  it.each([
+    ['property', {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string' },
+        source: { enum: ['verified'] },
+      },
+      required: ['action'],
+    }],
+    ['pattern', {
+      type: 'object',
+      additionalProperties: false,
+      properties: { action: { type: 'string' } },
+      patternProperties: { '^source$': { enum: ['verified'] } },
+      required: ['action'],
+    }],
+    ['composition', {
+      anyOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: { action: { type: 'string' } },
+          required: ['action'],
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            action: { type: 'string' },
+            source: { enum: ['verified'] },
+          },
+          required: ['action', 'source'],
+        },
+      ],
+    }],
+  ])('validates a domain source declared by %s', async (kind, metadataSchema) => {
+    await owner.entity_schema.createType({
+      slug: `strict-domain-source-${kind}`,
+      name: 'Strict domain source',
+      metadata_schema: metadataSchema,
+    } as never);
+    const created = (await owner.entities.create({
+      type: `strict-domain-source-${kind}`,
+      name: `Declared source validation ${kind}`,
+      metadata: { action: 'Stay strict', source: 'verified' },
+    })) as { entity: { id: number } };
+    const sql = getTestDb();
+    await sql`
+      UPDATE entities
+      SET metadata = metadata || ${sql.json({
+        source: 'automation_promotion',
+        automation_id: 7,
+        automation_output: 'items',
+        run_id: 9,
+        stable_key: 'declared-source',
+      })}
+      WHERE id = ${created.entity.id}
+    `;
+    await sql`
+      INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier)
+      SELECT organization_id, id, 'automation_key', ${`declared-source-${kind}`}
+      FROM entities
+      WHERE id = ${created.entity.id}
+    `;
+    await expect(owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { action: 'Still strict' },
+    })).rejects.toThrow();
+  });
+
   /**
-   * The entity form sends the whole object, because the server validates the
-   * patch as a document rather than the merge (owletto#845). So a cleared
+   * The entity form can send the whole object (owletto#845). A cleared
    * optional field arrives as `status: null` alongside its surviving siblings —
    * and the schema types `status` as a string enum, which the raw patch fails.
    */

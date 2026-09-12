@@ -7,6 +7,7 @@ import {
   defineConfig,
   defineConnection,
   defineEntityType,
+  rulesFromFile,
   defineRelationshipType,
   defineSkill,
   every,
@@ -26,6 +27,7 @@ import type SpotifyConnector from "./spotify.connector.ts";
 import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
 import type TaskBuilderReaction from "./task-builder.reaction.ts";
+import type TaskRules from "./task.rules.ts";
 import type TwitterTakeoutConnector from "./twitter-takeout.connector.ts";
 
 const hourlyTaskCollaboratorSkill = defineSkill({
@@ -382,6 +384,7 @@ const task = defineEntityType({
   description:
     "An actionable item collaboratively managed by Burak and his personal agent.",
   metadata: { icon: "check-square", color: "#10B981" },
+  rules: rulesFromFile<typeof TaskRules>("./task.rules.ts"),
   properties: {
     action: field("Action", {
       minLength: 1,

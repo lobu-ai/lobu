@@ -765,11 +765,11 @@ export async function promoteAutomationEntityOutput(
       }
     }
     const metadata: Record<string, unknown> = {
+      // Domain source evidence is preserved; provenance has its own keys below.
       ...fieldValues,
       automation_id: automationId,
       automation_output: outputName,
       stable_key: stableKey,
-      source: 'automation_promotion',
       // Origin provenance lives on the entity itself — the run that first
       // produced it. (No separate append-only observation event in phase 1;
       // the entity is upserted once, so this is its origin, not a time series.)

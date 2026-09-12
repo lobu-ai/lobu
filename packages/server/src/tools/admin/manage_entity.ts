@@ -645,12 +645,21 @@ async function handleUpdate(
 		 * AJV mutates the copy; propagate its coercions without dropping sentinels.
 		 */
 		const metadataForValidation = Object.fromEntries(
-			Object.entries(args.metadata).filter(([, value]) => value !== null),
+			Object.entries({ ...before.metadata, ...args.metadata }).filter(
+				([, value]) => value !== null,
+			),
 		);
 		const validation = await validateEntityMetadata(
 			before.entity_type as string,
 			metadataForValidation,
 			ctx,
+			{
+				legacyAutomationEntityId:
+					(before.metadata as Record<string, unknown> | null)?.source ===
+					'automation_promotion'
+						? entityId
+						: undefined,
+			},
 		);
 		if (!validation.valid) {
 			const errorMessages =
@@ -658,7 +667,12 @@ async function handleUpdate(
 				"Invalid metadata";
 			throw new ToolUserError(`Metadata validation failed: ${errorMessages}`, 400);
 		}
-		Object.assign(args.metadata, metadataForValidation);
+		// Coerce only the submitted patch. Copying the saved siblings back into
+		// the patch would claim human ownership of fields the caller never edited
+		// and could overwrite a concurrent update before the locked write.
+		for (const key of Object.keys(args.metadata)) {
+			if (args.metadata[key] !== null) args.metadata[key] = metadataForValidation[key];
+		}
 	}
 
 	// Build update data (only include fields that are present)
@@ -682,7 +696,7 @@ async function handleUpdate(
 	// Content body
 	if (args.content !== undefined) updateData.content = args.content;
 
-	// Metadata (replaces entire object)
+	// Metadata patch (merged with the locked current row in updateEntity)
 	if (args.metadata !== undefined) updateData.metadata = args.metadata;
 
 	// Human-correction note: annotates the field_controls marker for the fields
