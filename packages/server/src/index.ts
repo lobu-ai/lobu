@@ -61,6 +61,7 @@ import {
 	getMaxReservedLocks,
 	getReservedLockCount,
 } from "./gateway/orchestration/deployment-manager";
+import { inputFileRoutes } from "./http/input-file-routes";
 import { REST_TOOL_GET_ROUTES } from "./http/rest-tool-routes";
 import { isExcludedSpaPath } from "./http/spa-route-filter";
 import { isShuttingDown } from "./lifecycle-state";
@@ -1058,6 +1059,8 @@ app.get("/api/organizations", async (c) => {
 
 // Preview: mint a link code for an agent on a hosted preview bot (Slack,
 // Telegram, …). The code is redeemed by DMing that bot — no relay endpoint here.
+app.route("/api/:orgSlug/files", inputFileRoutes);
+
 app.post("/api/:orgSlug/preview/claims", mcpAuth, createPreviewClaim);
 
 // Notifications

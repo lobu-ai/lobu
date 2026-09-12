@@ -21,6 +21,7 @@ import type { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { createChatReply } from "../commands/command-reply-adapters.js";
 import { normalizeStatefulChatCommand } from "../commands/command-spelling.js";
 import type { ArtifactStore } from "../files/artifact-store.js";
+import { ingestAttachments, type AttachmentSource } from "../files/attachment-ingestion.js";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import type { CoreServices } from "../platform.js";
 import {
@@ -293,16 +294,6 @@ function isAudioAttachment(mime: string | undefined): boolean {
   return AUDIO_MIMES_PREFIX.some((p) => mime.startsWith(p));
 }
 
-function deriveFilename(
-  attachment: { name?: string; mimeType?: string; type?: string },
-  index: number
-): string {
-  if (attachment.name?.trim()) return attachment.name.trim();
-  const ext = attachment.mimeType?.split("/")[1]?.split(";")[0];
-  const stem = attachment.type || "attachment";
-  return ext ? `${stem}-${index + 1}.${ext}` : `${stem}-${index + 1}`;
-}
-
 /**
  * Detect a preview-link redemption in plain message text. Slack blocks slash
  * commands in an "Agents & AI Apps" DM, so `lobu run`'s `/lobu link <code>`
@@ -332,14 +323,7 @@ export function parsePreviewLinkCode(
  * Defined here so that this module — and its tests — don't have to take a
  * runtime dependency on the chat SDK.
  */
-export interface InboundAttachmentLike {
-  data?: Buffer | Blob;
-  fetchData?: () => Promise<Buffer>;
-  mimeType?: string;
-  name?: string;
-  size?: number;
-  type?: string;
-}
+export type InboundAttachmentLike = AttachmentSource;
 
 /**
  * Fetch every inbound attachment via the chat SDK's auth-aware
@@ -357,59 +341,25 @@ export async function ingestInboundAttachments(
   files: IngestedFile[];
   audioBytes: Array<{ buffer: Buffer; mimeType: string }>;
 }> {
-  if (!attachments?.length) return { files: [], audioBytes: [] };
-
-  const files: IngestedFile[] = [];
   const audioBytes: Array<{ buffer: Buffer; mimeType: string }> = [];
-
-  for (let i = 0; i < attachments.length; i++) {
-    const att = attachments[i]!;
-    try {
-      let buffer: Buffer | undefined;
-      if (att.data) {
-        buffer = Buffer.isBuffer(att.data)
-          ? att.data
-          : Buffer.from(await (att.data as Blob).arrayBuffer());
-      } else if (att.fetchData) {
-        buffer = await att.fetchData();
-      }
-      if (!buffer || buffer.length === 0) {
-        logger.warn(
-          { mimeType: att.mimeType, type: att.type, name: att.name },
-          "Skipping inbound attachment with no fetchable data"
-        );
-        continue;
-      }
-      const mimeType = att.mimeType || "application/octet-stream";
-      if (isAudioAttachment(mimeType)) {
-        audioBytes.push({ buffer, mimeType });
-      }
-      const filename = deriveFilename(att, i);
-      const published = await artifactStore.publish({
-        buffer,
-        filename,
-        contentType: mimeType,
-        publicGatewayUrl,
-      });
-      files.push({
-        id: published.artifactId,
-        name: published.filename,
-        mimetype: published.contentType,
-        size: published.size,
-        downloadUrl: published.downloadUrl,
-      });
-    } catch (error) {
+  const artifacts = await ingestAttachments(attachments ?? [], artifactStore, publicGatewayUrl, {
+    onBytes: (buffer, mimeType) => {
+      if (isAudioAttachment(mimeType)) audioBytes.push({ buffer, mimeType });
+    },
+    onError: (error, attachment) => {
       logger.error(
-        {
-          error: String(error),
-          mimeType: att.mimeType,
-          type: att.type,
-          name: att.name,
-        },
+        { error: String(error), mimeType: attachment.mimeType, type: attachment.type, name: attachment.name },
         "Failed to ingest inbound attachment"
       );
-    }
-  }
+    },
+  });
+  const files = artifacts.map((artifact) => ({
+    id: artifact.artifactId,
+    name: artifact.filename,
+    mimetype: artifact.contentType,
+    size: artifact.size,
+    downloadUrl: artifact.downloadUrl,
+  }));
 
   return { files, audioBytes };
 }

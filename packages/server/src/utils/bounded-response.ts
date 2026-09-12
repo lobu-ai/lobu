@@ -17,30 +17,39 @@ export async function readResponseTextWithLimit(
   maxBytes: number,
   tooLargeLabel: string
 ): Promise<string> {
+  return (await readResponseBytesWithLimit(response, maxBytes, tooLargeLabel)).toString('utf-8');
+}
+
+/** The same bounded body reader serves binary attachments and text responses. */
+export async function readResponseBytesWithLimit(
+  response: Response,
+  maxBytes: number,
+  tooLargeLabel: string
+): Promise<Buffer> {
   const declaredLength = Number(response.headers.get('content-length') ?? '0');
   if (!Number.isNaN(declaredLength) && declaredLength > maxBytes) {
     await cancelResponseBody(response);
-    throw new Error(`${tooLargeLabel} (max ${maxBytes} bytes).`);
+    throw new RangeError(`${tooLargeLabel} (max ${maxBytes} bytes).`);
   }
 
   const reader = response.body?.getReader();
-  if (!reader) return '';
+  if (!reader) return Buffer.alloc(0);
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      try {
-        await reader.cancel();
-      } catch {
-        // Preserve the deterministic size error.
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        throw new RangeError(`${tooLargeLabel} (max ${maxBytes} bytes).`);
       }
-      throw new Error(`${tooLargeLabel} (max ${maxBytes} bytes).`);
+      chunks.push(value);
     }
-    chunks.push(value);
+    return Buffer.concat(chunks, total);
+  } finally {
+    try { await reader.cancel(); } catch { /* Preserve the primary read error. */ }
+    reader.releaseLock();
   }
-  return Buffer.concat(chunks).toString('utf-8');
 }

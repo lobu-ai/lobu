@@ -1,3 +1,4 @@
+import { resolveOperationFiles } from "../operations/file-inputs";
 /**
  * POST /api/workers/poll
  *
@@ -1915,7 +1916,16 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       ? resolvedPreviousCredentials
       : undefined;
 
-  const selectedActionInput = row.approved_input ?? row.action_input ?? undefined;
+  let selectedActionInput = row.approved_input ?? row.action_input ?? undefined;
+  if (row.run_type === 'action' && selectedActionInput) {
+    try {
+      selectedActionInput = await resolveOperationFiles(selectedActionInput, row.run_metadata);
+    } catch (error) {
+      const message = errorMessage(error);
+      await failClaimedWorkerRun({ runId: row.run_id, workerId: worker_id, errorMessage: message });
+      return c.json({ ...pollMetadata, next_poll_seconds: 1, skipped_run_id: row.run_id, error: message });
+    }
+  }
   const isChromeAction =
     row.run_type === 'action' &&
     (row.connector_key === 'chrome' || row.connector_key?.startsWith('chrome.'));

@@ -24,11 +24,13 @@ import { withValidatedArgs } from "./validate-args";
 import { mcpResourceLinksForSdkReturnValue } from "../mcp-media-resources";
 import { attachMcpResultContent } from "./mcp-result-content";
 import { attachMcpResultMeta } from "./mcp-result-meta";
+import { ingestMcpFiles, McpHostFilesSchema, StoredInputFileSchema } from "../mcp-file-inputs";
+import { ToolUserError } from "../utils/errors";
 
 const SCRIPT_FIELDS = {
   script: Type.String({
     description:
-      "TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.",
+      "TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.",
     minLength: 1,
     maxLength: 100_000,
   }),
@@ -51,6 +53,12 @@ const SCRIPT_FIELDS = {
 
 export const RunSchema = Type.Object({
   ...SCRIPT_FIELDS,
+  files: Type.Optional(McpHostFilesSchema),
+  file_organization: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 255,
+    description: "Workspace slug or ID that will own attached files. Required with files on an account-scoped MCP connection. Files become ctx.files; pass a file directly to a connector field declaring x-lobu-file. Existing references need no re-upload.",
+  })),
   dry_run: Type.Optional(
     Type.Boolean({
       description:
@@ -119,6 +127,7 @@ const StartedSideEffectSchema = Type.Object({
  * is being asked to review.
  */
 export const SdkScriptResultSchema = Type.Object({
+  files: Type.Optional(Type.Array(StoredInputFileSchema)),
   title: Type.Optional(
     Type.String({
       description: "The caller-supplied human-friendly heading for this result, echoed back for the UI.",
@@ -284,6 +293,8 @@ export function toMcpPublicSdkScriptResult(result: unknown): unknown {
     out.title = row.title.trim();
   }
 
+  if (Array.isArray(row.files)) out.files = row.files;
+
   if (Object.hasOwn(row, "return_value") && row.return_value !== undefined) {
     out.return_value = row.return_value;
   }
@@ -410,6 +421,20 @@ async function runSandbox(
     sdkMode: mode,
     agentDryRun,
   });
+  const startedAt = Date.now();
+  const timeoutMs = args.timeout_ms ?? 60_000;
+  const hostFiles = "files" in args ? args.files : undefined;
+  if (hostFiles?.length && dryRun) {
+    throw new ToolUserError('File uploads cannot run in preview mode. Upload once, then reuse the returned file references in dry-run scripts.', 400);
+  }
+  const files = hostFiles?.length
+    ? await ingestMcpFiles(hostFiles, "file_organization" in args ? args.file_organization : undefined, {
+        ...ctx,
+        abortSignal: ctx.abortSignal
+          ? AbortSignal.any([ctx.abortSignal, AbortSignal.timeout(timeoutMs)])
+          : AbortSignal.timeout(timeoutMs),
+      })
+    : [];
   const sdkContext = {
     ...ctx,
     sdkBrowserInvocation: { nonce: randomUUID(), title: args.title ?? "" },
@@ -434,8 +459,9 @@ async function runSandbox(
       organization_id: ctx.organizationId,
       user_id: ctx.userId,
       mode: mode === "read" ? "query_sdk" : "run_sdk",
+      files,
     },
-    limits: args.timeout_ms ? { timeoutMs: args.timeout_ms } : undefined,
+    limits: { timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)) },
   });
   if (ctx.executionMode === "capture" && result.skippedCalls > 0) {
     await captureEffect(ctx.captureIdentity, "sdk.run", {
@@ -455,6 +481,7 @@ async function runSandbox(
     : result.error;
   const title = args.title?.trim() || undefined;
   const output = {
+    ...(files.length > 0 ? { files } : {}),
     ...(title ? { title } : {}),
     success: result.success,
     return_value: result.returnValue,
