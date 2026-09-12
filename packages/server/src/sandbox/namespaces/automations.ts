@@ -114,7 +114,9 @@ export type AutomationClaimNextWindowInput = Input<
 	| "limit"
 	| "run_id"
 	| "before_occurred_at"
-	| "before_id",
+	| "before_id"
+	| "source_name"
+	| "source_cursor",
 	"automation_id"
 >;
 

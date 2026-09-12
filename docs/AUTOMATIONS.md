@@ -112,6 +112,22 @@ while (page.has_more) {
   page = continuation.context.page;
 }
 
+for (const [source_name, firstPage] of Object.entries(claim.context.sources_page ?? {})) {
+  let source_cursor = firstPage.next_cursor;
+  while (source_cursor) {
+    const continuation = await client.automations.claimNextWindow({
+      automation_id: "42",
+      run_id: claim.run_id,
+      source_name,
+      source_cursor,
+      limit: 100,
+    });
+    // Process/reduce continuation.context.sources[source_name] in code.
+    tokens.push(continuation.context.window_token);
+    source_cursor = continuation.context.sources_page[source_name].next_cursor;
+  }
+}
+
 await client.automations.completeWindow({
   automation_id: "42",
   run_id: claim.run_id,
@@ -128,6 +144,24 @@ the next claim — indefinitely. Submit the completion with whatever the extract
 contract allows for an empty result rather than dropping the lease; nothing is
 lost by completing an empty window, because the mark only ever moves forward over
 arrivals the run was actually shown.
+
+A feed with `readWindowAxis` uses its live reader for `@feed` sources. Other
+sync-capable feeds retain their stored-arrival read. Read-only feeds must support
+the window contract or fail explicitly. Live rows are not copied into `events`
+and their provider IDs are never treated as stored event IDs. The connector
+receives the fixed `[start, end)` bounds and acknowledges its source timestamp
+axis in `sources_page[name].window_axis`. This describes source time, not Lobu
+arrival time: for example, Gmail uses message receipt time and Drive uses file
+modification time. It does not promise deletion history or delayed-import
+coverage. Readers needing those guarantees must use provider change tracking.
+
+Each live source has an independent cursor chain. All required chains must be
+complete before checkpoint advancement, even when a page is empty. The chain
+also binds the feed configuration and connector version; changes mid-read fail
+instead of combining different queries. SQL summaries remain ordinary context
+sources. A processor can reduce pages in code and return only a summary to the
+model. Automatic unchanged-source skipping is disabled for live sources because
+an unqueried or partial source cannot prove an unchanged window.
 
 The database serializes claims per Automation. The signed tokens bind the exact
 window, run attempt, lease, source IDs, and page chain. A stale attempt cannot

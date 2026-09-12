@@ -148,6 +148,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
           eventKinds: feed.eventKinds,
           sync: feed.sync,
           read: feed.read,
+          readWindowAxis: feed.readWindowAxis,
         },
       ]),
     );

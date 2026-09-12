@@ -1,4 +1,4 @@
-import type { FeedReadResult } from '@lobu/connector-sdk';
+import type { FeedReadResult, FeedReadWindow } from '@lobu/connector-sdk';
 import {
   ATLASSIAN_JIRA_ISSUES_FEED_KEY,
   isAtlassianMcpConfig,
@@ -16,6 +16,7 @@ export interface SourceFeedAdapterParams {
   connectionConfig: Record<string, unknown>;
   query?: string;
   cursor?: string;
+  window?: FeedReadWindow;
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
@@ -53,6 +54,7 @@ const atlassianMcpAdapter: SourceFeedAdapter = {
       baseQuery: storedQuery,
       query: params.query,
       cursor: params.cursor,
+      window: params.window,
       limit: params.limit,
       offset: params.offset,
       sort: params.sort,

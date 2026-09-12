@@ -224,3 +224,17 @@ browser-auth or live `cdp`). Full schemas are in the SDK reference.
 - Seeds: `examples/lobu-crm/npm-downloads.connector.ts` (minimal, no auth),
   `examples/brand-intelligence/*.connector.ts` (richer: auth, actions, per-feed
   `eventKinds`).
+
+### Windowed source reads
+
+Feeds that can apply fixed source-time bounds declare `readWindowAxis` alongside
+`read`. An Automation `@feed` source then uses the existing live reader without
+persisting rows. `FeedReadContext.window` carries `{ start, end }`, a half-open
+range fixed for the run. Compose it with configured filters on every page; do
+not substitute a moving lookback or guess a timestamp column. Return
+`window: { ...ctx.window, axis: 'updated_at' }` using the declared timestamp,
+`hasMore`, and the native `nextCursor` when more pages remain. Empty pages may
+still have a cursor. Propagate missing metadata, provider failures and capacity
+limits; they must never certify an exhausted window. A reader that cannot honor
+these bounds must reject the request. Time-based reads cover the declared source
+timestamp, not all possible edits, deletions or late imports.

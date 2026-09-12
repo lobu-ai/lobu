@@ -9,6 +9,9 @@
  */
 
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
+import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadWindow, type FeedReadWindowCoverage } from '@lobu/connector-sdk';
+import { createHash } from 'node:crypto';
+import { stableJson } from '../utils/insert-event';
 import {
   classifyToolError,
   getErrorMessage,
@@ -184,6 +187,9 @@ export interface ReadSourceFeedParams {
   query?: string;
   /** Source-native continuation token recovered from the public cursor envelope. */
   cursor?: string;
+  window?: FeedReadWindow;
+  /** A continuation may not silently read a changed feed configuration/version. */
+  sourceRevision?: string;
   /** Row cap pushed down to the source (connector clamps it). */
   limit?: number;
   offset?: number;
@@ -201,6 +207,8 @@ export interface ReadSourceFeedResult {
   total?: number;
   nextCursor?: string;
   hasMore?: boolean;
+  window?: FeedReadWindowCoverage;
+  sourceRevision?: string;
 }
 
 function deadlineError(feedId: number): Error & { exitReason: 'timeout' } {
@@ -243,6 +251,7 @@ export function classifyPushdownFailure(err: unknown): ToolErrorCode {
  * per-request read with all state in Postgres, runnable on any replica.
  */
 export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourceFeedResult> {
+  if (p.window) validateFeedReadWindow(p.window);
   remainingReadMs(p);
   const sql = getDb();
 
@@ -256,7 +265,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
             c.device_worker_id,
             COALESCE(pinned_dw.user_id, (o.metadata::jsonb)->>'personal_org_for_user_id') AS device_owner_user_id,
             COALESCE(c.config, '{}'::jsonb) AS connection_config,
-            cd.version AS definition_version, cd.feed_operations,
+            cd.version AS definition_version, cd.feed_operations, cd.read_window_axis,
             cd.mcp_config, cd.runtime, cd.required_capability,
             cd.has_compiled_code, cd.selected_artifact_hash
      FROM feeds f
@@ -267,6 +276,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
        SELECT cd0.version, cd0.mcp_config, cd0.runtime, cd0.required_capability,
               COALESCE(cd0.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb)
                 AS feed_operations,
+              cd0.feeds_schema -> f.feed_key ->> 'readWindowAxis' AS read_window_axis,
               (
                 SELECT cv.compiled_code_hash
                 FROM connector_versions cv
@@ -343,6 +353,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     feed_status: string;
     definition_version: string | null;
     feed_operations: unknown;
+    read_window_axis: string | null;
     connection_id: number;
     connector_key: string;
     auth_profile_id: number | null;
@@ -365,10 +376,32 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   }
   const feed = feedRows[0];
   const feedOperations = Array.isArray(feed.feed_operations) ? feed.feed_operations : [];
+  const readWindowAxis = feed.read_window_axis?.trim() || undefined;
+  const sourceRevision = createHash('sha256').update(stableJson({
+    feedId: feed.id, feedKey: feed.feed_key, connectionId: feed.connection_id,
+    connectorKey: feed.connector_key, config: feed.config,
+    connectionConfig: feed.connection_config, version: feed.pinned_version ?? feed.definition_version,
+    artifact: feed.selected_artifact_hash, mcpConfig: feed.mcp_config, device: feed.device_worker_id,
+    authProfile: feed.auth_profile_id, appAuthProfile: feed.app_auth_profile_id,
+    operations: feedOperations, readWindowAxis,
+  })).digest('hex');
+  if (p.sourceRevision && p.sourceRevision !== sourceRevision) {
+    throw new ToolError('VALIDATION', 'Source configuration changed during the window read; restart the window.');
+  }
+  const finish = (result: ReadSourceFeedResult): ReadSourceFeedResult => {
+    assertFeedReadWindow(result, p.window, readWindowAxis);
+    return { ...result, sourceRevision };
+  };
   if (!feedOperations.includes('read')) {
     throw new ToolError(
       'VALIDATION',
       `feed '${p.feedId}' does not support source reads`,
+    );
+  }
+  if (p.window && !readWindowAxis) {
+    throw new ToolError(
+      'VALIDATION',
+      `feed '${p.feedId}' does not declare a source-time window axis`,
     );
   }
 
@@ -396,6 +429,9 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   }
 
   if (metadataOnlyDeviceConnector) {
+    if (p.window) {
+      throw new ToolError('VALIDATION', 'This device reader does not support source-time windows.');
+    }
     remainingReadMs(p);
     return readDeviceFeed({
       organizationId: p.scope.organizationId,
@@ -433,6 +469,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     connectionConfig: feed.connection_config,
     query: p.query,
     cursor: p.cursor,
+    window: p.window,
     limit: p.limit,
     offset: p.offset,
     sort: p.sort,
@@ -440,7 +477,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     deadlineAt: p.deadlineAt,
   });
   if (adapterResult) {
-    return { ...adapterResult, columns: adapterResult.columns ?? [] };
+    return finish({ ...adapterResult, columns: adapterResult.columns ?? [] });
   }
 
   const compiledCode = await resolveConnectorCodeForKey(
@@ -476,6 +513,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
       feedKey: feed.feed_key,
       query: p.query,
       cursor: p.cursor,
+      window: p.window,
       config,
       env: dbEgressConfig(),
       sessionState,
@@ -490,11 +528,12 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   if (result.mode !== 'read') {
     throw new Error(`Expected read result, got mode=${result.mode}`);
   }
-  return {
+  return finish({
     rows: result.rows,
     columns: result.columns ?? [],
     total: result.total,
     nextCursor: result.nextCursor,
     hasMore: result.hasMore,
-  };
+    window: result.window,
+  });
 }

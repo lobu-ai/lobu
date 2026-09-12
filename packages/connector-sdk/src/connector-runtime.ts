@@ -22,6 +22,7 @@ import type {
   WebhookRegistration,
   WebhookRegistrationContext,
 } from './connector-types.js';
+import { assertFeedReadWindow, validateFeedReadWindow } from './feed-read-window.js';
 
 /**
  * ConnectorRuntime is the base class for all connectors.
@@ -81,13 +82,17 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
    * kind or persistence flag.
    */
   async read(ctx: FeedReadContext<F>): Promise<FeedReadResult> {
-    const handler = this.definition.feeds?.[ctx.feedKey]?.read;
+    if (ctx.window) validateFeedReadWindow(ctx.window);
+    const feed = this.definition.feeds?.[ctx.feedKey];
+    const handler = feed?.read;
     if (!handler) {
       throw new Error(
         `${this.definition.key} feed '${ctx.feedKey}' does not support source reads`
       );
     }
-    return handler(ctx);
+    const result = await handler(ctx);
+    assertFeedReadWindow(result, ctx.window, feed.readWindowAxis);
+    return result;
   }
 
   /**

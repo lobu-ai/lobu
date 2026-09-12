@@ -22,6 +22,16 @@ export function deriveJwtSecret(encryptionKey: string): string {
     .digest('base64');
 }
 
+export interface SourceWindowPage {
+  name: string;
+  feed_id: number;
+  revision: string;
+  axis: string;
+  before_cursor?: string;
+  next_cursor?: string;
+  returned: number;
+}
+
 interface WindowTokenPayload {
   automation_id: number;
   /** Durable Automation run this read was bound to. Omitted on legacy/preview reads. */
@@ -38,6 +48,8 @@ interface WindowTokenPayload {
   page_next_id?: number;
   page_has_more?: boolean;
   truncated_source_names?: string[];
+  required_sources?: Array<{ name: string; feed_id: number }>;
+  source_pages?: SourceWindowPage[];
   iat: number; // issued at - returned to caller for staleness detection
   exp: number; // expiration
 }
@@ -48,16 +60,6 @@ interface WindowTokenPayload {
 function base64urlEncode(str: string): string {
   const base64 = btoa(str);
   return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-/**
- * Base64url decode a string
- */
-function base64urlDecode(str: string): string {
-  const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  const padding = str.length % 4;
-  const padded = padding ? base64 + '='.repeat(4 - padding) : base64;
-  return atob(padded);
 }
 
 /**
@@ -125,8 +127,8 @@ export async function generateWindowToken(
   };
 
   const header = { alg: 'HS256', typ: 'JWT' };
-  const headerEncoded = base64urlEncode(JSON.stringify(header));
-  const payloadEncoded = base64urlEncode(JSON.stringify(fullPayload));
+  const headerEncoded = Buffer.from(JSON.stringify(header), 'utf8').toString('base64url');
+  const payloadEncoded = Buffer.from(JSON.stringify(fullPayload), 'utf8').toString('base64url');
   const dataToSign = `${headerEncoded}.${payloadEncoded}`;
   const signature = await createSignature(dataToSign, secret);
 
@@ -164,7 +166,7 @@ export async function verifyWindowToken(
   // Decode payload
   let payload: WindowTokenPayload;
   try {
-    payload = JSON.parse(base64urlDecode(payloadEncoded));
+    payload = JSON.parse(Buffer.from(payloadEncoded, 'base64url').toString('utf8'));
   } catch {
     throw new Error('Invalid token payload');
   }

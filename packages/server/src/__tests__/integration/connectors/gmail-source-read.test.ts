@@ -144,7 +144,7 @@ describe('Gmail feed source read', () => {
 
     expect(cap.listQueries).toEqual(['in:inbox newer_than:30d']);
     expect(res.columns.map((col) => col.name)).toEqual([
-      'id', 'thread_id', 'subject', 'from', 'from_name', 'from_email', 'date', 'snippet', 'url',
+      'id', 'thread_id', 'subject', 'from', 'from_name', 'from_email', 'date', 'received_at', 'snippet', 'url',
     ]);
     expect(res.rows).toHaveLength(3);
     expect(res.rows[0]).toMatchObject({
@@ -234,11 +234,10 @@ describe('Gmail feed source read', () => {
     expect(ok.rows.length).toBeGreaterThan(0);
   });
 
-  it('skips a single unreadable message instead of failing the batch', async () => {
+  it('rejects an unreadable message so a partial page cannot be certified', async () => {
     const cap: Capture = { listQueries: [], listMaxResults: [] };
     const c = connectorWith(cap, { unreadable: new Set(['m2']) });
-    const res = await readThreads(c, { ...CREDS, query: 'in:inbox', config: {}, limit: 10 });
-    expect(res.rows.map((r) => r.id)).toEqual(['m1', 'm3']); // m2 skipped
+    await expect(readThreads(c, { ...CREDS, query: 'in:inbox', config: {}, limit: 10 })).rejects.toThrow(/404/);
   });
 
   it('throws without credentials', async () => {

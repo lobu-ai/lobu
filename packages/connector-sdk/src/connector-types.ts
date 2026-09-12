@@ -518,6 +518,8 @@ export interface FeedDefinition {
    * it because their implementation is remote. Users never select a feed mode.
    */
   operations?: FeedOperation[];
+  /** Declares that live reads can honor fixed windows on this source timestamp. */
+  readWindowAxis?: string;
   /**
    * Routes inbound app-webhook deliveries to this feed. Lives on the feed (not
    * the connector's webhook schema) because feeds_schema is the persisted,
@@ -994,6 +996,17 @@ export interface WebhookRegistration {
 
 export type FeedOperation = 'sync' | 'read';
 
+/** Fixed half-open source-time bounds, preserved across every page of a read. */
+export interface FeedReadWindow {
+  start: string;
+  end: string;
+}
+
+/** The connector explicitly acknowledges the bounds and names its time axis. */
+export interface FeedReadWindowCoverage extends FeedReadWindow {
+  axis: string;
+}
+
 /**
  * A source read for one configured feed. The connector interprets `query` in
  * its native vocabulary and pushes pagination/sort into the source. Results are
@@ -1005,6 +1018,7 @@ export interface FeedReadContext<F = Record<string, unknown>> {
   query?: string;
   /** Source-native continuation token from the previous page, when supported. */
   cursor?: string;
+  window?: FeedReadWindow;
   config: F;
   credentials: SyncCredentials | null;
   sessionState?: Record<string, unknown> | null;
@@ -1022,6 +1036,8 @@ export interface FeedReadResult {
   nextCursor?: string;
   /** Explicit page exhaustion signal for sources without a continuation token. */
   hasMore?: boolean;
+  /** Required for a windowed read; absence means the reader cannot honor it. */
+  window?: FeedReadWindowCoverage;
 }
 
 export type FeedSyncHandler<C = Record<string, unknown>, F = Record<string, unknown>> = (

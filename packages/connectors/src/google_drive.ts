@@ -336,7 +336,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     name: 'Google Drive',
     description:
       'Syncs Google Drive file metadata and text content, and reads a file on demand.',
-    version: '1.0.0',
+    version: '1.0.1',
     faviconDomain: 'drive.google.com',
     authSchema: {
       methods: [
@@ -364,6 +364,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
           'Google Drive files can sync into memory and be read directly from Drive.',
         sync: (ctx) => this.syncFeed(ctx),
         read: (ctx) => this.readFeed(ctx),
+        readWindowAxis: 'modified_at',
         configSchema: {
           type: 'object',
           properties: {
@@ -476,16 +477,22 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     const http = this.client(token);
     const config = (ctx.config ?? {}) as DriveConfig;
 
+    if ((ctx.offset ?? 0) > 0) throw new Error('Drive source reads paginate with a cursor, not an offset.');
+    if (ctx.sort && !(ctx.sort.column === 'modified_at' && ctx.sort.order === 'desc')) {
+      throw new Error('Drive source reads support modified_at descending sort only.');
+    }
+    const query = [buildListQuery(config), ctx.query].filter(Boolean).map((q) => `(${q})`);
+    if (ctx.window) query.push(`modifiedTime >= '${new Date(ctx.window.start).toISOString()}' AND modifiedTime < '${new Date(ctx.window.end).toISOString()}'`);
     const params = new URLSearchParams({
       // Nothing materialises configSchema defaults, so the fallback here is
       // what `max_results` actually defaults to and must match what the schema
       // advertises. 1000 is Drive's own pageSize ceiling.
-      pageSize: String(Math.max(1, Math.min(config.max_results ?? 500, 1000))),
+      pageSize: String(Math.max(1, Math.min(ctx.limit ?? config.max_results ?? 500, 1000))),
       fields: `files(${FILE_FIELDS}),nextPageToken,incompleteSearch`,
       orderBy: 'modifiedTime desc',
       supportsAllDrives: 'true',
       includeItemsFromAllDrives: 'true',
-      q: buildListQuery(config),
+      q: query.join(' AND '),
     });
     if (ctx.cursor) params.set('pageToken', ctx.cursor);
 
@@ -497,11 +504,16 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     }
 
     const data = (await response.json()) as DriveFileListResponse;
+    if (data.incompleteSearch) throw new Error('Drive returned an incomplete search; the window was not processed.');
+    if (ctx.window && (data.files ?? []).some((file) => !file.id || !Number.isFinite(Date.parse(file.modifiedTime ?? '')))) {
+      throw new Error('Drive returned malformed file identity or modified timestamp.');
+    }
     const rows = (data.files ?? []).map((file) => this.driveFileToRow(file));
 
     return {
       rows,
       columns: [...DRIVE_FILE_COLUMNS],
+      ...(ctx.window ? { window: { ...ctx.window, axis: 'modified_at' } } : {}),
       nextCursor: data.nextPageToken,
       hasMore: Boolean(data.nextPageToken),
     };

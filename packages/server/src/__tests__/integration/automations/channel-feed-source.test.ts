@@ -367,30 +367,45 @@ describe("channel feed as an automation @feed source", () => {
     expect(rows[0].text).toBe("inside window");
   });
 
-  it("rejects a source-read-only @feed instead of compiling it to an empty events read", async () => {
+  it.each([
+    { operations: ["read"], axis: undefined, kind: "feed" },
+    { operations: ["read", "sync"], axis: "source_at", kind: "feed" },
+    { operations: ["read", "sync"], axis: undefined, kind: "event" },
+  ])("routes $operations with window axis $axis through $kind", async ({ operations, axis, kind }) => {
     const sql = getTestDb();
+    const key = `source_${operations.join("_")}_${axis ?? "unbounded"}`;
     await createTestConnectorDefinition({
-      key: "readonly_src",
+      key,
       name: "Read Only Source",
       organization_id: orgId,
-      feeds_schema: { items: { name: "Items", operations: ["read"] } },
+      feeds_schema: { items: { name: "Items", operations, ...(axis ? { readWindowAxis: axis } : {}) } },
     });
     const conn = await createTestConnection({
       organization_id: orgId,
-      connector_key: "readonly_src",
+      connector_key: key,
       createDefaultFeed: false,
     });
-    await sql`
+    const [feed] = await sql`
       INSERT INTO feeds (organization_id, connection_id, feed_key, status, created_at, updated_at)
       VALUES (${orgId}, ${conn.id}, 'items', 'active', NOW(), NOW())
+      RETURNING id
     `;
 
-    // A read-only feed never persists events, so an events SELECT over it would
-    // silently return nothing forever. The reference must fail loudly instead.
+    const sources = await normalizeAutomationSources(sql as unknown as DbClient, orgId, [
+      { name: "items", query: `@feed:${feed.id}` },
+    ]);
+    expect(sources[0].kind).toBe(kind);
+    if (kind === "feed") expect(sources[0].query).toBe(`@feed:${feed.id}`);
+    else expect(sources[0].query).toContain("feed_id IN");
+  });
+
+  it("rejects duplicate source names before one source can overwrite another", async () => {
+    const sql = getTestDb();
     await expect(
       normalizeAutomationSources(sql as unknown as DbClient, orgId, [
-        { name: "items", query: "@feed:items" },
-      ])
-    ).rejects.toThrow(/source-read-only/i);
+        { name: "items", query: "SELECT id FROM events" },
+        { name: "items", query: "SELECT id FROM events" },
+      ]),
+    ).rejects.toThrow(/source names must be unique/);
   });
 });

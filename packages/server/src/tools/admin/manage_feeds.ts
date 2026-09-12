@@ -13,7 +13,6 @@
  * - trigger_feed: Trigger an immediate sync for a feed
  */
 
-import { createHash } from 'node:crypto';
 import {
   getErrorMessage,
   isRetryable,
@@ -38,6 +37,7 @@ import {
   feedLinkedToBusinessEntitySql,
 } from '../../authz/channel-about';
 import { compileConnectionRowVisibility } from '../../authz/connection-visibility';
+import { readSourceFeedPage, SourceCursorError } from '../../lib/source-feed-page';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { reconcileAtlassianMcpJiraSite } from '../../connect/atlassian-mcp-site';
 import { deriveFeedHealthSemantics, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
@@ -45,7 +45,6 @@ import { getDb, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
 import {
   classifyPushdownFailure,
-  readSourceFeed,
 } from '../../lib/connector-pushdown';
 import {
   ATLASSIAN_JIRA_ISSUES_FEED_KEY,
@@ -602,179 +601,9 @@ async function handleReadFeed(
   return { action: 'read_feed', feed, recent_runs: runs };
 }
 
-interface SourceCursor {
-  v: 1;
-  feed_id: number;
-  position: number;
-  source_cursor?: string;
-  request_hash: string;
-}
-
-function sourceRequestHash(
-  query: string | undefined,
-  sort: { column: string; order: 'asc' | 'desc' } | undefined,
-): string {
-  return createHash('sha256')
-    .update(JSON.stringify({ query: query?.trim() ?? '', sort: sort ?? null }))
-    .digest('base64url')
-    .slice(0, 16);
-}
-
-/**
- * A caller-supplied cursor that does not decode, or does not belong to this
- * (feed, query, sort) request. Marked structurally rather than by message text so the
- * classifier never confuses it with a connector error that merely mentions a
- * cursor.
- */
-class SourceCursorError extends Error {}
-
-function decodeSourceCursor(
-  cursor: string | undefined,
-  feedId: number,
-  query: string | undefined,
-  sort: { column: string; order: 'asc' | 'desc' } | undefined,
-): { position: number; sourceCursor?: string } {
-  if (!cursor) return { position: 0 };
-  let parsed: SourceCursor;
-  try {
-    parsed = JSON.parse(
-      Buffer.from(cursor, 'base64url').toString('utf8'),
-    ) as SourceCursor;
-  } catch {
-    throw new SourceCursorError('Invalid source cursor');
-  }
-  if (
-    parsed.v !== 1 ||
-    parsed.feed_id !== feedId ||
-    !Number.isSafeInteger(parsed.position) ||
-    parsed.position < 0 ||
-    (parsed.source_cursor !== undefined &&
-      (typeof parsed.source_cursor !== 'string' ||
-        parsed.source_cursor.length === 0)) ||
-    parsed.request_hash !== sourceRequestHash(query, sort)
-  ) {
-    throw new SourceCursorError(
-      'Source cursor does not match this feed read request',
-    );
-  }
-  return {
-    position: parsed.position,
-    ...(parsed.source_cursor ? { sourceCursor: parsed.source_cursor } : {}),
-  };
-}
-
-function encodeSourceCursor(
-  feedId: number,
-  position: number,
-  query: string | undefined,
-  sort: { column: string; order: 'asc' | 'desc' } | undefined,
-  sourceCursor?: string,
-): string {
-  const payload: SourceCursor = {
-    v: 1,
-    feed_id: feedId,
-    position,
-    request_hash: sourceRequestHash(query, sort),
-    ...(sourceCursor ? { source_cursor: sourceCursor } : {}),
-  };
-  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
-}
-
-function sourceReadError(message: string): Error & { exitReason: 'timeout' } {
-  return Object.assign(new Error(message), { exitReason: 'timeout' as const });
-}
-
-/**
- * Faults this handler owns are recognised structurally; everything else is a
- * connector/source failure, including typed resolution failures owned by
- * readSourceFeed, goes to the shared pushdown classifier.
- */
 function sourceErrorCode(err: unknown): ToolErrorCode {
   if (err instanceof SourceCursorError) return 'VALIDATION';
   return classifyPushdownFailure(err);
-}
-
-async function readSourceWithinDeadline(
-  read: Static<typeof ReadFeedsAction>['reads'][number],
-  timeoutMs: number,
-  ctx: ToolContext,
-) {
-  const controller = new AbortController();
-  const deadlineAt = Date.now() + timeoutMs;
-  const onCallerAbort = () => controller.abort(ctx.abortSignal?.reason);
-  ctx.abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
-  if (ctx.abortSignal?.aborted) onCallerAbort();
-  const page = decodeSourceCursor(
-    read.cursor,
-    read.feed_id,
-    read.query,
-    read.sort,
-  );
-  const offset = page.sourceCursor ? 0 : page.position;
-  const limit = Math.max(1, Math.min(500, Math.trunc(read.limit ?? 50)));
-  const pending = readSourceFeed({
-    scope: authzScopeFromToolContext(ctx),
-    feedId: read.feed_id,
-    query: read.query,
-    cursor: page.sourceCursor,
-    limit,
-    offset,
-    sort: read.sort,
-    signal: controller.signal,
-    deadlineAt,
-  });
-  pending.catch(() => {});
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(
-        sourceReadError(
-          `source read ${read.feed_id} timed out after ${timeoutMs}ms`,
-        ),
-      );
-    }, timeoutMs);
-  });
-  try {
-    const result = await Promise.race([pending, deadline]);
-    const nextPosition = page.position + result.rows.length;
-    // Once a source has selected token pagination, absence of a replacement
-    // token means exhaustion. Never downgrade that traversal to an offset
-    // cursor: token-only providers reject offsets and cannot resume that page.
-    let hasMore: boolean;
-    if (result.nextCursor !== undefined) {
-      hasMore = true;
-    } else if (page.sourceCursor !== undefined) {
-      hasMore = false;
-    } else if (result.hasMore !== undefined) {
-      hasMore = result.hasMore;
-    } else if (result.total !== undefined) {
-      hasMore = nextPosition < result.total;
-    } else {
-      hasMore = result.rows.length >= limit;
-    }
-    return {
-      feed_id: read.feed_id,
-      ok: true as const,
-      rows: result.rows,
-      columns: result.columns,
-      ...(result.total === undefined ? {} : { total: result.total }),
-      ...(hasMore
-        ? {
-            next_cursor: encodeSourceCursor(
-              read.feed_id,
-              nextPosition,
-              read.query,
-              read.sort,
-              result.nextCursor,
-            ),
-          }
-        : {}),
-    };
-  } finally {
-    if (timer) clearTimeout(timer);
-    ctx.abortSignal?.removeEventListener('abort', onCallerAbort);
-  }
 }
 
 async function handleReadFeeds(
@@ -791,7 +620,9 @@ async function handleReadFeeds(
   const results = await Promise.all(
     args.reads.slice(0, 10).map(async (read) => {
       try {
-        return await readSourceWithinDeadline(read, timeoutMs, ctx);
+        const { window: _window, sourceRevision: _revision, ...result } =
+          await readSourceFeedPage(read, timeoutMs, authzScopeFromToolContext(ctx), ctx.abortSignal);
+        return result;
       } catch (err) {
         const error_code = sourceErrorCode(err);
         return {

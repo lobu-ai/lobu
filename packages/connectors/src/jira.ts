@@ -231,6 +231,7 @@ function buildJiraJql(args: {
   query?: string;
   sort?: { column: string; order: 'asc' | 'desc' };
   defaultWhenEmpty?: string;
+  window?: { start: string; end: string };
 }): string {
   const trimmed = args.baseQuery.trim();
   // Keep an omitted scope bounded instead of scanning the whole site.
@@ -255,8 +256,13 @@ function buildJiraJql(args: {
     }
   }
 
+  if (args.window) {
+    const bounds = `updated >= ${Date.parse(args.window.start)} AND updated < ${Date.parse(args.window.end)}`;
+    body = body ? `(${body}) AND (${bounds})` : bounds;
+  }
+
   // `body` is non-empty from here on: an empty base fell back to
-  // `defaultWhenEmpty`, and the caller query can only widen it.
+  // `defaultWhenEmpty`, and the caller query can further restrict it.
   if (orderBy) {
     if (args.sort) {
       throw new Error(
@@ -291,7 +297,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     name: 'Jira',
     description:
       'Syncs and live-reads Jira Cloud issues via JQL, and receives real-time issue/comment webhooks.',
-    version: '1.1.3',
+    version: '1.1.4',
     faviconDomain: 'atlassian.com',
     webhook: {
       // Jira Connect app webhooks HMAC-sign the raw body with the installation
@@ -369,6 +375,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
           'Jira issues can sync into memory and be read directly from Jira via JQL.',
         sync: (ctx) => this.syncFeed(ctx),
         read: (ctx) => this.readFeed(ctx),
+        readWindowAxis: 'updated_at',
         configSchema: {
           type: 'object',
           properties: {
@@ -453,6 +460,8 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     const jql = buildJiraJql({
       baseQuery,
       query: asString(ctx.query),
+      window: ctx.window,
+      ...(ctx.window ? { defaultWhenEmpty: '' } : {}),
       sort: ctx.sort,
     });
 
@@ -482,14 +491,25 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
       `${base}/search/jql?${params.toString()}`,
       { method: 'GET', headers: { Accept: 'application/json' } },
     );
-    const rows = (data.issues ?? [])
+    if (!Array.isArray(data.issues) ||
+        (ctx.window && typeof data.isLast !== 'boolean') ||
+        (data.isLast === false && !data.nextPageToken) ||
+        (ctx.window && data.isLast === true && Boolean(data.nextPageToken))) {
+      throw new Error('Jira did not return a valid page cursor/exhaustion state.');
+    }
+    const rows = data.issues
       .map((issue) => this.issueRow(issue, ctx.config))
       .filter((row) => row !== null);
+
+    if (ctx.window && (rows.length !== data.issues.length || rows.some((row) => !Number.isFinite(Date.parse(String(row.updated_at ?? '')))))) {
+      throw new Error('Jira returned malformed issue identity or updated timestamp.');
+    }
 
     // No reliable total from /search/jql — omit rather than lie with page length.
     return {
       rows,
       columns: [...JIRA_ISSUE_COLUMNS],
+      ...(ctx.window ? { window: { ...ctx.window, axis: 'updated_at' } } : {}),
       nextCursor: data.nextPageToken,
       hasMore: Boolean(data.nextPageToken),
     };

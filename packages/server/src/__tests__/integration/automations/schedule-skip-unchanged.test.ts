@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
 import { manageAutomations } from "../../../tools/admin/manage_automations";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
@@ -59,7 +60,27 @@ describe("scheduled Automation unchanged gate", () => {
 			WHERE id = ${automationId}
 		`;
 
-		const result = await materializeDueAutomationRuns({} as Env, sql);
+		// A skip must book the exact database horizon inspected before source execution.
+		let inspectedHorizon: string | undefined;
+		const observe = (client: DbClient): DbClient => new Proxy(client, {
+			apply(target, self, args) {
+				const query = Reflect.apply(target, self, args);
+				const text = Array.isArray(args[0]) ? args[0].join('') : '';
+				if (!inspectedHorizon && /AS\s+db_now/.test(text) && text.includes('FROM automations')) {
+					return query.then(async (rows: Array<{ db_now: string | Date }>) => {
+						inspectedHorizon = new Date(rows[0].db_now).toISOString();
+						await sql`SELECT pg_sleep(0.02)`;
+						return rows;
+					});
+				}
+				return query;
+			},
+			get(target, key) {
+				if (key === 'begin') return (callback: (tx: DbClient) => Promise<unknown>) => target.begin((tx) => callback(observe(tx)));
+				return Reflect.get(target, key);
+			},
+		});
+		const result = await materializeDueAutomationRuns({} as Env, observe(sql));
 
 		expect(result).toMatchObject({
 			dueAutomations: 1,
@@ -74,6 +95,8 @@ describe("scheduled Automation unchanged gate", () => {
 			WHERE automation_id = ${automationId} AND run_type = 'automation'
 		`;
 		expect(runs).toHaveLength(1);
+		expect(inspectedHorizon).toBeDefined();
+		expect(new Date(runs[0].window_end as string).toISOString()).toBe(inspectedHorizon);
 		expect(runs[0]).toMatchObject({
 			status: "completed",
 			outcome: "scoreable",

@@ -185,6 +185,6 @@ describe('Linear feed source read', () => {
     const c = new LinearConnector();
     expect(typeof c.definition.feeds?.issues?.sync).toBe('function');
     expect(typeof c.definition.feeds?.issues?.read).toBe('function');
-    expect(c.definition.version).toBe('1.1.0');
+    expect(c.definition.version).toBe('1.1.1');
   });
 });

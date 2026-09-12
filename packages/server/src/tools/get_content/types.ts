@@ -115,7 +115,7 @@ export const GetContentResultSchema = Type.Object({
    * Per-source page state, keyed by source name. Every SQL-backed source is
    * capped at the request's `limit`; this is how a caller distinguishes a
    * fully-read source from a truncated one. Only the primary event source
-   * carries a cursor (see `page.next_cursor`); the rest report `has_more` alone.
+   * carries an event cursor (see `page.next_cursor`); live sources carry their own next_cursor.
    */
   sources_page: Type.Optional(
     Type.Record(
@@ -124,6 +124,9 @@ export const GetContentResultSchema = Type.Object({
         returned: Type.Integer(),
         limit: Type.Integer(),
         has_more: Type.Boolean(),
+        next_cursor: Type.Optional(Type.String()),
+        window_axis: Type.Optional(Type.String()),
+        feed_id: Type.Optional(Type.Integer()),
       })
     )
   ),

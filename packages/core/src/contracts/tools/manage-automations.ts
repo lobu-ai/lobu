@@ -551,6 +551,18 @@ export const ManageAutomationsSchema = Type.Object(
           "[claim_next_window] Lease duration in seconds (default 900).",
       })
     ),
+    source_name: Type.Optional(
+      Type.String({
+        description:
+          "Automation source name to continue; pair with source_cursor and the same run_id.",
+      })
+    ),
+    source_cursor: Type.Optional(
+      Type.String({
+        description:
+          "Signed window_token from the preceding page of this source. Retain every returned window_token for completeWindow.",
+      })
+    ),
     before_occurred_at: Type.Optional(
       Type.String({
         description:
@@ -1050,6 +1062,9 @@ export const AutomationClaimNextWindowContextSchema = Type.Object({
         returned: Type.Integer(),
         limit: Type.Integer(),
         has_more: Type.Boolean(),
+        next_cursor: Type.Optional(Type.String()),
+        window_axis: Type.Optional(Type.String()),
+        feed_id: Type.Optional(Type.Integer()),
       })
     )
   ),

@@ -297,12 +297,14 @@ const GUEST_RUNNER = String.raw`
     if (job.mode === 'read') {
       var readResult = await instance.read({
         feedId: job.feedId === null ? undefined : job.feedId, feedKey: job.feedKey, query: job.query, cursor: job.cursor,
+        window: job.window,
         config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState,
         limit: job.limit, offset: job.offset, sort: job.sort
       });
       return {
         mode: 'read', rows: (readResult && readResult.rows) || [], columns: readResult && readResult.columns,
-        total: readResult && readResult.total, nextCursor: readResult && readResult.nextCursor, hasMore: readResult && readResult.hasMore
+        total: readResult && readResult.total, nextCursor: readResult && readResult.nextCursor, hasMore: readResult && readResult.hasMore,
+        window: readResult && readResult.window
       };
     }
 

@@ -8,6 +8,7 @@ import {
 } from '../../../runs/queue-service';
 import { classifyRunOutcome, SUPERSEDED_BY_ARRIVAL_MARK } from '../../../runs/run-outcome';
 import { ToolUserError } from '../../../utils/errors';
+import { verifyWindowToken } from '../../../utils/jwt';
 import {
   automationArrivalSettleMs,
   computePendingWindow,
@@ -105,6 +106,10 @@ export async function handleClaimNextWindow(
       400
     );
   }
+  if (Boolean(args.source_name) !== Boolean(args.source_cursor) ||
+      (args.source_cursor && (args.run_id == null || args.before_occurred_at != null || args.before_id != null))) {
+    throw new ToolUserError('Source continuations require source_name, source_cursor and run_id; do not mix event cursors.', 400);
+  }
   const hasBeforeOccurredAt = args.before_occurred_at != null;
   const hasBeforeId = args.before_id != null;
   if (hasBeforeOccurredAt !== hasBeforeId) {
@@ -118,6 +123,14 @@ export async function handleClaimNextWindow(
       'Automation source-page cursors require run_id from the active window claim.',
       400
     );
+  }
+
+  if (args.source_cursor) {
+    const cursor = await verifyWindowToken(args.source_cursor, env);
+    if (cursor.automation_id !== automationId || cursor.run_id !== args.run_id ||
+        !cursor.source_pages?.some((page) => page.name === args.source_name && page.next_cursor)) {
+      throw new ToolUserError('Source cursor does not continue this Automation run/source.', 409);
+    }
   }
 
   const sql = getDb();
@@ -293,6 +306,8 @@ export async function handleClaimNextWindow(
         limit: args.limit,
         before_occurred_at: args.before_occurred_at,
         before_id: args.before_id,
+        source_name: args.source_name,
+        source_cursor: args.source_cursor,
       },
       env,
       sql,

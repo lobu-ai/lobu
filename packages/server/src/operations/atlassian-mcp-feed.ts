@@ -1,3 +1,4 @@
+import type { FeedReadResult, FeedReadWindow } from '@lobu/connector-sdk';
 /**
  * Atlassian Rovo MCP feed-read adapter.
  *
@@ -58,6 +59,7 @@ export const ATLASSIAN_MCP_FEEDS = {
 		description:
 			"Live Jira issues via JQL. Reads call Rovo searchJiraIssuesUsingJql; signed Jira issue/comment webhooks are copied into events.",
 		operations: ["read"],
+		readWindowAxis: "updated_at",
 		configSchema: {
 			type: "object",
 			properties: {
@@ -242,15 +244,20 @@ function splitTrailingOrderBy(jql: string): { body: string; orderBy: string | nu
 
 export function buildAtlassianMcpJql(args: {
 	baseQuery: string;
+	window?: FeedReadWindow;
 	query?: string;
 	sort?: { column: string; order: "asc" | "desc" };
 }): string {
 	const trimmed = args.baseQuery.trim();
-	const jql = trimmed.length > 0 ? trimmed : "updated >= -90d";
+	const jql = trimmed.length > 0 ? trimmed : (args.window ? "" : "updated >= -90d");
 	let { body, orderBy } = splitTrailingOrderBy(jql);
-	if (!body && orderBy) body = "updated >= -90d";
+	if (!body && orderBy) body = args.window ? "" : "updated >= -90d";
 
 	const callerQuery = args.query?.trim() ?? "";
+	if (args.window) {
+		const bounds = `updated >= ${Date.parse(args.window.start)} AND updated < ${Date.parse(args.window.end)}`;
+		body = body ? `(${body}) AND (${bounds})` : bounds;
+	}
 	if (callerQuery) {
 		const caller = splitTrailingOrderBy(callerQuery);
 		if (caller.body) {
@@ -363,48 +370,66 @@ function tryParseJson(text: string): unknown {
 	}
 }
 
-function collectIssues(value: unknown, into: unknown[]): void {
-	if (!value) return;
-	if (Array.isArray(value)) {
-		for (const item of value) collectIssues(item, into);
-		return;
-	}
+function collectIssues(value: unknown, into: unknown[], requirePage = false): number {
 	if (typeof value === "string") {
-		collectIssues(tryParseJson(value), into);
-		return;
+		return collectIssues(tryParseJson(value), into, requirePage);
 	}
-	if (typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		return value.reduce(
+			(count, item) => count + collectIssues(item, into, requirePage),
+			0,
+		);
+	}
+	if (!value || typeof value !== "object") return 0;
 	const record = value as Record<string, unknown>;
 	if (record.type === "text" && typeof record.text === "string") {
-		collectIssues(tryParseJson(record.text), into);
-		return;
+		return collectIssues(tryParseJson(record.text), into, requirePage);
 	}
-	if (Array.isArray(record.issues)) {
-		into.push(...record.issues);
-		return;
-	}
-	if (Array.isArray(record.values)) {
-		into.push(...record.values);
-		return;
+	const issues = Array.isArray(record.issues)
+		? record.issues
+		: Array.isArray(record.values)
+			? record.values
+			: null;
+	if (issues) {
+		const cursor = parseAtlassianMcpNextPageToken(record);
+		if (
+			requirePage &&
+			((record.isLast !== true && !cursor) ||
+				(record.isLast === true && Boolean(cursor)))
+		) {
+			throw new Error("Jira MCP returned an ambiguous page cursor/exhaustion state.");
+		}
+		into.push(...issues);
+		return 1;
 	}
 	if (Array.isArray(record.content)) {
-		collectIssues(record.content, into);
-		return;
+		return collectIssues(record.content, into, requirePage);
 	}
-	if (asString(record.id) || asString(record.key)) {
+	if (!requirePage && (asString(record.id) || asString(record.key))) {
 		into.push(record);
 	}
+	return 0;
 }
 
 export function parseAtlassianMcpIssues(
 	payload: unknown,
 	config: Record<string, unknown> = {},
+	requirePage = false,
 ): Record<string, unknown>[] {
 	const collected: unknown[] = [];
-	collectIssues(payload, collected);
+	const pages = collectIssues(payload, collected, requirePage);
+	if (requirePage && pages !== 1) {
+		throw new Error("Jira MCP did not return one recognizable result page.");
+	}
 	const rows: Record<string, unknown>[] = [];
 	for (const item of collected) {
 		const row = mapAtlassianIssueToRow(item, config);
+		if (
+			requirePage &&
+			(!row || !Number.isFinite(Date.parse(String(row.updated_at ?? ""))))
+		) {
+			throw new Error("Jira MCP returned a malformed issue or updated timestamp.");
+		}
 		if (row) rows.push(row);
 	}
 	return rows;
@@ -569,18 +594,13 @@ export async function readAtlassianMcpFeed(params: {
 	baseQuery: string;
 	query?: string;
 	cursor?: string;
+	window?: FeedReadWindow;
 	limit?: number;
 	offset?: number;
 	sort?: { column: string; order: "asc" | "desc" };
 	signal?: AbortSignal;
 	deadlineAt?: number;
-}): Promise<{
-	rows: Record<string, unknown>[];
-	columns: { name: string; type: string }[];
-	total?: number;
-	nextCursor?: string;
-	hasMore?: boolean;
-}> {
+}): Promise<FeedReadResult> {
 	const config = { ...params.connectionConfig, ...params.feedConfig };
 	let cloudId = asString(config.cloud_id) ?? asString(config.cloudId);
 	if (!cloudId) {
@@ -603,6 +623,7 @@ export async function readAtlassianMcpFeed(params: {
 
 	const jql = buildAtlassianMcpJql({
 		baseQuery: params.baseQuery,
+		window: params.window,
 		query: params.query,
 		sort: params.sort,
 	});
@@ -632,12 +653,13 @@ export async function readAtlassianMcpFeed(params: {
 	if (result.isError) {
 		throw new Error(mcpTextError(result.content, "searchJiraIssuesUsingJql failed"));
 	}
-	const rows = parseAtlassianMcpIssues(result.content, config);
+	const rows = parseAtlassianMcpIssues(result.content, config, Boolean(params.window));
 	const nextCursor = parseAtlassianMcpNextPageToken(result.content);
 
 	return {
 		rows,
 		columns: [...ATLASSIAN_JIRA_ISSUE_COLUMNS],
+		...(params.window ? { window: { ...params.window, axis: "updated_at" } } : {}),
 		nextCursor,
 		hasMore: Boolean(nextCursor),
 	};

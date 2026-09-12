@@ -1,3 +1,7 @@
+import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
+import { compileConnectorSource } from '../../../utils/connector-compiler';
+import { generateWindowToken, verifyWindowToken } from '../../../utils/jwt';
+import { fingerprintAutomationSources } from '../../../tools/get_content/automation-mode';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { clearAuthCacheForTests } from '../../../auth';
 import { closeDbSingleton, type DbClient } from '../../../db/client';
@@ -11,6 +15,8 @@ import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   createTestAgent,
+  createTestConnectorDefinition,
+  createTestConnection,
   createTestEntity,
   createTestEvent,
   seedOwnerContext,
@@ -31,7 +37,8 @@ type ClaimContext = {
   extraction_schema?: {
     properties?: Record<string, unknown>;
   };
-  sources_page?: Record<string, { returned: number; limit: number; has_more: boolean }>;
+  sources?: Record<string, Array<Record<string, unknown>>>;
+  sources_page?: Record<string, { returned: number; limit: number; has_more: boolean; next_cursor?: string; window_axis?: string }>;
   window_start: string;
   window_end: string;
   window_token: string;
@@ -138,6 +145,208 @@ describe('Automation window claim and recovery', () => {
     `;
     return run.runId;
   }
+
+  async function addLiveSources(failAt?: number) {
+    const key = 'window.read.fixture';
+    const sourceCode = `
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({
+        key: '${key}', name: 'Window reader fixture', version: '1.0.0',
+        authSchema: { methods: [{ type: 'none' }] },
+        feeds: { items: { name: 'Items', readWindowAxis: 'source_at', read: async (ctx) => {
+          const offset = Number(ctx.cursor ?? 0);
+          if (ctx.config.fail_at === offset) throw new Error('Synthetic page failure');
+          const count = Math.min(ctx.limit, ctx.config.count - offset);
+          const rows = Array.from({length: count}, (_, i) => ({id: String(offset + i + 1), source_at: ctx.window.start}));
+          const next = offset + count;
+          return { rows, hasMore: next < ctx.config.count,
+            nextCursor: next < ctx.config.count ? String(next) : undefined,
+            window: {...ctx.window, axis: 'source_at'} };
+        } } }
+      });
+    `;
+    const compiled = await compileConnectorSource(sourceCode);
+    await createTestConnectorDefinition({ key, name: 'Window fixture', organization_id: orgId,
+      feeds_schema: { items: { operations: ['read'], readWindowAxis: 'source_at' } } });
+    await sql`UPDATE connector_versions SET compiled_code = ${compiled.compiledCode},
+      compiled_code_hash = ${compiled.compiledCodeHash}, compile_config_hash = ${COMPILE_CONFIG_HASH},
+      source_code = ${sourceCode} WHERE connector_key = ${key} AND version = '1.0.0'`;
+    const connection = await createTestConnection({ organization_id: orgId, connector_key: key,
+      createDefaultFeed: false, created_by: userId, visibility: 'private' });
+    const feeds: number[] = [];
+    for (const count of [3, 5]) {
+      const config = { count, ...(count === 5 && failAt !== undefined ? { fail_at: failAt } : {}) };
+      const [feed] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, config, status)
+        VALUES (${orgId}, ${connection.id}, 'items', ${sql.json(config)}, 'active') RETURNING id`;
+      feeds.push(Number(feed.id));
+    }
+    await api.automations.createVersion({
+      automation_id: String(automationId), prompt: 'Extract signals using complete source windows.',
+      sources: [
+        { name: 'content', query: "SELECT id, occurred_at, payload_text FROM events WHERE semantic_type = 'content' ORDER BY occurred_at DESC, id DESC" },
+        { name: 'alpha', query: `@feed:${feeds[0]}` },
+        { name: 'İşler 🌍', query: `@feed:${feeds[1]}` },
+        { name: 'summary', context: true, query: 'SELECT COUNT(*)::int AS count FROM events' },
+      ],
+    });
+    return feeds;
+  }
+
+  it('completes mixed live sources, stored events and SQL aggregates with interleaved cursors', async () => {
+    const feeds = await addLiveSources();
+    for (let index = 0; index < 3; index++) {
+      await createTestEvent({ entity_id: entityId, organization_id: orgId,
+        content: `Mixed source ${index}`, occurred_at: dayStart(1) });
+    }
+    const first = await claim({ limit: 2 });
+    expect(first.context.sources?.alpha).toHaveLength(2);
+    expect(first.context.sources?.summary).toHaveLength(1);
+    expect(first.context.sources_page?.alpha.window_axis).toBe('source_at');
+    expect((await verifyWindowToken(first.context.window_token, ENV)).content_ids).toHaveLength(2);
+    const complete = (tokens: string[]) => api.automations.completeWindow({
+      automation_id: String(automationId), run_id: first.run_id,
+      window_tokens: tokens, extracted_data: { signals: [] },
+    });
+    const local = await claim({ run_id: first.run_id, limit: 2,
+      before_occurred_at: first.context.page.next_cursor?.occurred_at,
+      before_id: first.context.page.next_cursor?.id });
+    await expect(complete([first.context.window_token, local.context.window_token])).rejects.toThrow(/missing|Incomplete/);
+    const alpha = await claim({ run_id: first.run_id, limit: 2, source_name: 'alpha', source_cursor: first.context.window_token });
+    const beta = await claim({ run_id: first.run_id, limit: 2, source_name: 'İşler 🌍', source_cursor: first.context.window_token });
+    const betaEnd = await claim({ run_id: first.run_id, limit: 2, source_name: 'İşler 🌍', source_cursor: beta.context.window_token });
+    expect(alpha.context.content).toEqual([]);
+    expect(alpha.context.sources?.alpha).toHaveLength(1);
+    expect(betaEnd.context.sources?.['İşler 🌍']).toHaveLength(1);
+    expect((await verifyWindowToken(betaEnd.context.window_token, ENV)).content_ids).toEqual([]);
+    const tokens = [betaEnd.context.window_token, first.context.window_token, alpha.context.window_token, local.context.window_token, beta.context.window_token];
+    await expect(complete(tokens)).resolves.toMatchObject({ completed_now: true, content_linked: 3 });
+    await sql`UPDATE feeds SET deleted_at = NOW() WHERE id IN (${feeds[0]}, ${feeds[1]})`;
+    await expect(complete(tokens)).resolves.toMatchObject({ completed_now: false, content_linked: 0 });
+    const [row] = await sql`SELECT a.next_window_start, r.run_metadata FROM automations a JOIN runs r ON r.id = ${first.run_id} WHERE a.id = ${automationId}`;
+    expect(new Date(row.next_window_start).toISOString()).toBe(first.context.window_end);
+    expect(row.run_metadata.source_coverage).toEqual([
+      { name: 'alpha', feed_id: feeds[0], axis: 'source_at', rows: 3 },
+      { name: 'İşler 🌍', feed_id: feeds[1], axis: 'source_at', rows: 5 },
+    ]);
+    const [persisted] = await sql`SELECT count(*)::int AS n FROM events WHERE feed_id IN (${feeds[0]}, ${feeds[1]})`;
+    expect(persisted.n).toBe(0);
+  }, 30_000);
+
+  async function queuedLiveRun() {
+    await addLiveSources();
+    const pending = await computePendingWindow(sql, automationId);
+    const run = await createAutomationRun({ organizationId: orgId, automationId, agentId,
+      windowStart: pending.windowStart.toISOString(), windowEnd: pending.windowEnd.toISOString(), dispatchSource: 'scheduled' });
+    await sql`UPDATE runs SET status = 'running' WHERE id = ${run.runId}`;
+    return { runId: run.runId, windowStart: pending.windowStart.toISOString(), windowEnd: pending.windowEnd.toISOString() };
+  }
+
+  it('pages a queued agent run through knowledge.read and completes all live sources', async () => {
+    const run = await queuedLiveRun();
+    const first = await api.knowledge.read({ automation_id: automationId, run_id: run.runId, limit: 2 }) as ClaimContext;
+    const tokens = [first.window_token];
+    for (const name of ['alpha', 'İşler 🌍']) {
+      let cursor = first.sources_page?.[name].next_cursor;
+      while (cursor) {
+        const page = await api.knowledge.read({ automation_id: automationId, run_id: run.runId,
+          source_name: name, source_cursor: cursor, limit: 2 }) as ClaimContext;
+        tokens.push(page.window_token);
+        cursor = page.sources_page?.[name].next_cursor;
+      }
+    }
+    await expect(api.automations.completeWindow({ automation_id: String(automationId), run_id: run.runId,
+      window_tokens: tokens, extracted_data: { signals: [] } })).resolves.toMatchObject({ completed_now: true });
+  }, 30_000);
+
+  it('rejects a legacy unbound receipt that omits a queued run live sources', async () => {
+    const run = await queuedLiveRun();
+    // A valid receipt from an earlier, event-only read of the same range must
+    // not substitute for the current run's required live source traversal.
+    const token = await generateWindowToken({ automation_id: automationId, window_start: run.windowStart,
+      window_end: run.windowEnd, content_count: 0, content_ids: [], page_has_more: false }, ENV);
+    await expect(api.automations.completeWindow({ automation_id: String(automationId), run_id: run.runId,
+      window_token: token, extracted_data: { signals: [] } })).rejects.toThrow(/run-bound|source/i);
+    const [after] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
+    expect(new Date(after.next_window_start).toISOString()).toBe(run.windowStart);
+  }, 30_000);
+
+  it('does not materialize a scheduler window after its arrival mark advanced', async () => {
+    const [before] = await sql`
+      SELECT next_window_start FROM automations WHERE id = ${automationId}
+    `;
+    const observedStart = new Date(before.next_window_start).toISOString();
+    await sql`
+      UPDATE automations
+      SET next_window_start = next_window_start + interval '1 hour'
+      WHERE id = ${automationId}
+    `;
+
+    const result = await createAutomationRun({
+      organizationId: orgId,
+      automationId,
+      agentId,
+      windowStart: observedStart,
+      windowEnd: new Date(new Date(observedStart).getTime() + DAY_MS).toISOString(),
+      dispatchSource: 'scheduled',
+      expectedWindowStart: observedStart,
+    });
+
+    expect(result).toEqual({ runId: 0, status: 'superseded', created: false });
+    const [runs] = await sql`
+      SELECT count(*)::int AS count FROM runs WHERE automation_id = ${automationId}
+    `;
+    expect(runs.count).toBe(0);
+  });
+
+  it('leaves the checkpoint unchanged after page failure and succeeds on a fresh retry', async () => {
+    const feeds = await addLiveSources(2);
+    const first = await claim({ limit: 2 });
+    await expect(claim({ run_id: first.run_id, limit: 2, source_name: 'İşler 🌍', source_cursor: first.context.window_token })).rejects.toThrow(/Synthetic page failure/);
+    const [failed] = await sql`SELECT a.next_window_start, r.status FROM automations a JOIN runs r ON r.id = ${first.run_id} WHERE a.id = ${automationId}`;
+    expect(new Date(failed.next_window_start).toISOString()).toBe(first.context.window_start);
+    expect(failed.status).toBe('failed');
+    await sql`UPDATE feeds SET config = config - 'fail_at' WHERE id = ${feeds[1]}`;
+    const retry = await claim({ limit: 10 });
+    expect(retry.run_id).not.toBe(first.run_id);
+    expect(retry.context.window_start).toBe(first.context.window_start);
+    await expect(api.automations.completeWindow({ automation_id: String(automationId), run_id: retry.run_id,
+      window_token: retry.context.window_token, extracted_data: { signals: [] } })).resolves.toMatchObject({ completed_now: true, content_linked: 0 });
+    const fingerprint = await fingerprintAutomationSources({ sql, automationId,
+      windowStart: retry.context.window_start, windowEnd: retry.context.window_end });
+    expect(fingerprint).toEqual({ fingerprint: undefined, empty: false });
+  }, 30_000);
+
+  it('rejects changed feed configuration and malformed source cursors without booking data', async () => {
+    const feeds = await addLiveSources();
+    const first = await claim({ limit: 2 });
+    await expect(claim({ run_id: first.run_id, source_name: 'other', source_cursor: first.context.window_token })).rejects.toThrow(/Source cursor/);
+    const [healthy] = await sql`SELECT status FROM runs WHERE id = ${first.run_id}`;
+    expect(healthy.status).toBe('running');
+    await sql`UPDATE feeds SET config = config || '{"count":8}'::jsonb WHERE id = ${feeds[0]}`;
+    await expect(claim({ run_id: first.run_id, source_name: 'alpha', source_cursor: first.context.window_token })).rejects.toThrow(/configuration changed/);
+    const [after] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
+    expect(new Date(after.next_window_start).toISOString()).toBe(first.context.window_start);
+  }, 30_000);
+
+  it('rejects a source cursor from an expired run before touching the new claim', async () => {
+    await addLiveSources();
+    const stale = await claim({ limit: 2 });
+    await sql`UPDATE runs SET expires_at = NOW() - INTERVAL '1 second' WHERE id = ${stale.run_id}`;
+    const current = await claim({ limit: 2 });
+    expect(current.run_id).not.toBe(stale.run_id);
+    await expect(claim({ run_id: current.run_id, source_name: 'alpha', source_cursor: stale.context.window_token })).rejects.toThrow(/cursor|run/i);
+    const [run] = await sql`SELECT status FROM runs WHERE id = ${current.run_id}`;
+    expect(run.status).toBe('running');
+  }, 30_000);
+
+  it('rechecks private-source ownership on continuation and books no progress after revocation', async () => {
+    const feeds = await addLiveSources();
+    const first = await claim({ limit: 2 });
+    await sql`UPDATE connections SET created_by = NULL WHERE id = (SELECT connection_id FROM feeds WHERE id = ${feeds[0]})`;
+    await expect(claim({ run_id: first.run_id, source_name: 'alpha', source_cursor: first.context.window_token })).rejects.toThrow(/accessible|access|permission|found/i);
+    const [after] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
+    expect(new Date(after.next_window_start).toISOString()).toBe(first.context.window_start);
+  }, 30_000);
 
   it('recovers a first-ever failed assigned-agent window before any external claim', async () => {
     const failedStart = dayStart(4);
@@ -407,11 +616,15 @@ describe('Automation window claim and recovery', () => {
     `;
     expect(Number(edited.current_version_id)).not.toBe(Number(snapshot.version_id));
 
+
     const claimed = await claim();
     expect(claimed.run_id).toBe(pending.runId);
     expect(claimed.context.window_axis).toBe('created_at');
     expect(claimed.context.extraction_schema?.properties).toHaveProperty('signals');
     expect(claimed.context.extraction_schema?.properties).not.toHaveProperty('findings');
+    await expect(api.automations.completeWindow({ automation_id: String(automationId), run_id: claimed.run_id,
+      template_version_id: Number(edited.current_version_id), window_token: claimed.context.window_token, extracted_data: { signals: [] }
+    })).rejects.toThrow(/version pinned/);
     await expect(
       api.automations.completeWindow({
         automation_id: String(automationId),

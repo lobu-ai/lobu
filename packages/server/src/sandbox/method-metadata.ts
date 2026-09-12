@@ -584,7 +584,7 @@ export default async (_ctx, client) => {
 	},
 	"automations.create": {
 		summary:
-			"Create an Automation. Successful creates return the canonical `{ action: 'create', automation_id, version, status }` receipt; policy-gated creates return a pending approval receipt with `run_id`. Requires slug and managed_agent_id; window/manual Automations also need prompt, skills, or a reaction script. Use device_worker_id to pin execution to a registered device and agent_kind to select its interchangeable local CLI. Declare named outputs as `{ entity, key, name? }` or `{ event }`, or omit outputs for a run-result/reaction-only Automation. Event output rows are standard drafts with required content and optional title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, and idempotency_key. Outputs require window execution. Each sources[] entry requires `name` and a read-only SELECT/WITH `query` projecting an `id` column; optional `context: true` marks the source as context-only. entity_id is optional for an org-scoped Automation.",
+			"Create an Automation. Successful creates return the canonical `{ action: 'create', automation_id, version, status }` receipt; policy-gated creates return a pending approval receipt with `run_id`. Requires slug and managed_agent_id; window/manual Automations also need prompt, skills, or a reaction script. Use device_worker_id to pin execution to a registered device and agent_kind to select its interchangeable local CLI. Declare named outputs as `{ entity, key, name? }` or `{ event }`, or omit outputs for a run-result/reaction-only Automation. Event output rows are standard drafts with required content and optional title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, and idempotency_key. Outputs require window execution. Each sources[] entry requires `name` and `query`: an @feed reference for a configured feed, or read-only SELECT/WITH SQL. Event SQL projects an `id` column; `context: true` permits aggregate context without event IDs. Window-capable live feeds use their existing reader and report per-source pagination. entity_id is optional for an org-scoped Automation.",
 		access: "admin",
 		throws: ["EntityNotFound"],
 		signature:
@@ -666,10 +666,10 @@ export default async (_ctx, client) => {
 	},
 	"automations.claimNextWindow": {
 		summary:
-			"Atomically claim the Automation unclaimed arrival window and return bounded source context plus a fenced window_token. The window is [arrival mark, now - settle) over events.created_at, not a calendar period. The caller MUST finish the claim with completeWindow, even for an empty or non-actionable window. Pass run_id and context.page.next_cursor to continue a multi-page claim.",
+			"Atomically claim the Automation unclaimed arrival window and return bounded source context plus a fenced window_token. The window is [arrival mark, now - settle) over events.created_at, not a calendar period. The caller MUST finish the claim with completeWindow, even for an empty or non-actionable window. Continue event pages with run_id and context.page.next_cursor. Continue each live source with run_id, source_name and sources_page[name].next_cursor as source_cursor. Keep every window_token for completeWindow; code may aggregate rows before returning results to the model. Each live source reports its own window_axis.",
 		access: "write",
 		signature:
-			"automations.claimNextWindow(input: { automation_id: string; lease_seconds?: number; limit?: number; run_id?: number; before_occurred_at?: string; before_id?: number }): Promise<AutomationClaimNextWindowResult>",
+			"automations.claimNextWindow(input: { automation_id: string; lease_seconds?: number; limit?: number; run_id?: number; before_occurred_at?: string; before_id?: number; source_name?: string; source_cursor?: string }): Promise<AutomationClaimNextWindowResult>",
 		example:
 			"const claim = await client.automations.claimNextWindow({ automation_id: '42' });",
 	},
