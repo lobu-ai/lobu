@@ -1037,7 +1037,8 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     const persistedMedia = Object.entries(nextMedia).slice(0, MAX_MEDIA_RECORDS_PERSISTED);
     nextCheckpoint.media = persistedMedia.length > 0 ? Object.fromEntries(persistedMedia) : undefined;
     return {
-      events: messages.map((message) => toEventEnvelope(message, media.get(message.id), message.timestamp >= checkpoint.live_since!)),
+      events: messages.map((message) => toEventEnvelope(message, media.get(message.id),
+        message.observed_live === true || message.timestamp >= checkpoint.live_since!)),
       checkpoint: nextCheckpoint,
     };
   }
@@ -1108,7 +1109,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       op: "listen", bridge_id: observed.bridge_id, token: observed.token,
       chat_filter: request.chat_filter,
       minimum_timestamp: request.minimum_timestamp,
-      recent_since: request.recent_since ?? Math.floor(Date.now() / 1000) - 15 * 60,
+      recent_since: checkpoint.live_since,
     });
     else if (sourceErrors.length > 0) {
       throw new Error(String(sourceErrors[0].payload.source_error));
@@ -1143,6 +1144,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       !sourceErrors.includes(row) && inScope(row.payload)
     );
     const bufferedIds = new Set(buffered.map((row) => row.payload.id));
+    const liveBufferedIds = new Set(buffered.filter((row) => row.payload.observed_live === true).map((row) => row.payload.id));
     const messages = mergeCollectedMessages(
       [...(result.messages ?? []), ...historyMessages],
       buffered.map((row) => row.payload),
@@ -1167,7 +1169,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     );
 
     const events: EventEnvelope[] = messages.map((message) =>
-      toEventEnvelope(message, media.get(message.id), message.timestamp >= checkpoint.live_since!)
+      toEventEnvelope(message, media.get(message.id), liveBufferedIds.has(message.id) || message.timestamp >= checkpoint.live_since!)
     );
 
     const nextCheckpoint = mergeBrowserCheckpoint(

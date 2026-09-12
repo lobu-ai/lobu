@@ -1491,6 +1491,21 @@ describe("live delivered message batches", () => {
     expect(result.checkpoint?.backfill.complete).toBe(true);
   });
 
+  it('does not lose a buffered live activation when the initial run failed before saving its boundary', async () => {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    const earlier = checkpoint.live_since! - 60;
+    const buffered = message('first-attempt-arrival', { timestamp: earlier, observed_live: true });
+    const result = await messagesFeed().sync(syncCtx(checkpoint, makeDispatcher({
+      probe: READY,
+      feed_listen: { bridge_id: 'synthetic-feed', binding_id: 'synthetic-feed', epoch: 'synthetic-epoch', token: 'synthetic-token',
+        records: [{ revision: 1, payload: buffered }] },
+      collect: collectResponse([message('first-attempt-arrival', { timestamp: earlier })]),
+    }).dispatcher));
+    expect(result.events[0].automation_signals).toMatchObject([{ event_type: 'message' }]);
+    const pushed = delivered([{ revision: 1, payload: buffered }]);
+    expect((await connector.onDelivery(pushed)).events[0].automation_signals).toMatchObject([{ event_type: 'message' }]);
+  });
+
   it("acknowledges excluded records but leaves records outside the processing budget buffered", async () => {
     const result = await connector.onDelivery(delivered([
       { revision: 1, payload: message("excluded") },
