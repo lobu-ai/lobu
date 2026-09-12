@@ -4767,6 +4767,14 @@ export type ManageAutomationsData = {
      */
     lease_seconds?: number;
     /**
+     * Automation source name to continue; pair with source_cursor and the same run_id.
+     */
+    source_name?: string;
+    /**
+     * Signed window_token from the preceding page of this source. Retain every returned window_token for completeWindow.
+     */
+    source_cursor?: string;
+    /**
      * [claim_next_window continuation] Cursor timestamp from context.page.next_cursor.
      */
     before_occurred_at?: string;
@@ -5242,6 +5250,9 @@ export type ManageAutomationsResponses = {
                   returned: number;
                   limit: number;
                   has_more: boolean;
+                  next_cursor?: string;
+                  window_axis?: string;
+                  feed_id?: number;
                 };
           };
           extraction_schema?: {
@@ -5845,6 +5856,14 @@ export type ReadKnowledgeData = {
      */
     offset?: number;
     /**
+     * Automation source name to continue; pair with source_cursor and the same run_id.
+     */
+    source_name?: string;
+    /**
+     * Signed window_token from the preceding page of this source. Retain every returned window_token for completeWindow.
+     */
+    source_cursor?: string;
+    /**
      * Chronological cursor anchor for older results. Pair with before_id. Only used when sort_by=date and sort_order=desc.
      */
     before_occurred_at?: string;
@@ -5991,6 +6010,9 @@ export type ReadKnowledgeResponses = {
             returned: number;
             limit: number;
             has_more: boolean;
+            next_cursor?: string;
+            window_axis?: string;
+            feed_id?: number;
           };
     };
     entities?: Array<unknown>;
