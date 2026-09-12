@@ -180,4 +180,33 @@ describe("check-mac-bundle-ids", () => {
       )
     ).toEqual([{ configuration: "Release", bundleId: "com.owletto.mac" }]);
   });
+
+  // The README download link, the attached release asset, and the appcast
+  // dmg-url must name the same file, or the documented Mac download 404s
+  // after the next release. Fails closed when any of the three is missing.
+  it("keeps the README Mac download pointed at the published DMG", () => {
+    const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+    const workflow = readFileSync(
+      join(REPO_ROOT, ".github/workflows/mac-release.yml"),
+      "utf8"
+    );
+    const readmeMatch = readme.match(/releases\/latest\/download\/([^)\s]+)/);
+    if (!readmeMatch) {
+      throw new Error("README has no releases/latest/download link");
+    }
+    const attachMatch = workflow.match(
+      /\$\{\{\s*runner\.temp\s*\}\}\/(\S+\.dmg)/
+    );
+    if (!attachMatch) {
+      throw new Error("release workflow attaches no DMG");
+    }
+    const appcastMatch = workflow.match(
+      /--dmg-url "https:\/\/github\.com\/[^"]+\/releases\/download\/[^/]+\/([^"]+)"/
+    );
+    if (!appcastMatch) {
+      throw new Error("release workflow publishes no appcast dmg-url");
+    }
+    expect(attachMatch[1]).toBe(readmeMatch[1]);
+    expect(appcastMatch[1]).toBe(readmeMatch[1]);
+  });
 });
