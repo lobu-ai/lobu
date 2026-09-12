@@ -105,9 +105,18 @@ codesign --verify --deep --strict "$APP"
 echo ">> Built: $APP"
 
 if [ "${INSTALL:-}" = "1" ]; then
-  echo ">> Installing to /Applications/Lobu.app (quit Lobu first if it's running)"
+  # Cutover from the pre-rename bundle: Owletto.app and Lobu.app share the
+  # bundle identifier, so a leftover Owletto.app would collide with the new
+  # install (LaunchServices + the single-instance guard). Retire it first.
+  # Login Items registration is per bundle ID, so it carries over untouched.
+  echo ">> Quitting running copies (Lobu and legacy Owletto)..."
   osascript -e 'tell application "Lobu" to quit' 2>/dev/null || true
+  osascript -e 'tell application "Owletto" to quit' 2>/dev/null || true
   sleep 1
+  if [ -d /Applications/Owletto.app ]; then
+    echo ">> Retiring legacy /Applications/Owletto.app (superseded by Lobu.app)"
+    rm -rf /Applications/Owletto.app
+  fi
   rm -rf /Applications/Lobu.app
   cp -R "$APP" /Applications/Lobu.app
   echo ">> Installed: /Applications/Lobu.app"
