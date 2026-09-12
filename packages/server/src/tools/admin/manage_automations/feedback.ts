@@ -284,8 +284,8 @@ export async function handleGetFeedback(
  * field values) plus `field_controls` (which fields a human already owns).
  * The web activity view uses only the count + entity_type for its outputs
  * strip; field ownership/corrections live on the entity page. Promoted
- * children stamp `metadata.automation_id` / `source='automation_promotion'` at
- * promotion time.
+ * children stamp `metadata.automation_id` and hold an `automation_key` identity.
+ * `source` is a domain field and can contain the original evidence URL.
  *
  * Org-scoped so a member of org A can't enumerate org B's promoted entities by
  * passing an automation_id (auth also gates on requireAutomationAccess 'read').
@@ -306,8 +306,14 @@ export async function handleListPromoted(
     JOIN entity_types et ON et.id = e.entity_type_id
     WHERE e.organization_id = ${ctx.organizationId}
       AND e.deleted_at IS NULL
-      AND e.metadata->>'source' = 'automation_promotion'
       AND e.metadata->>'automation_id' = ${automationId}
+      AND EXISTS (
+        SELECT 1 FROM entity_identities ei
+        WHERE ei.organization_id = e.organization_id
+          AND ei.entity_id = e.id
+          AND ei.namespace = 'automation_key'
+          AND ei.deleted_at IS NULL
+      )
     ORDER BY e.name
     LIMIT ${limit}
   `;

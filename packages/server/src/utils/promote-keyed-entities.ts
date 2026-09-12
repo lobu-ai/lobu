@@ -765,11 +765,13 @@ export async function promoteAutomationEntityOutput(
       }
     }
     const metadata: Record<string, unknown> = {
+      // `source` can be a declared domain field (for example an evidence URL).
+      // Origin attribution is already carried by automation_id/automation_output/run_id.
+      source: 'automation_promotion',
       ...fieldValues,
       automation_id: automationId,
       automation_output: outputName,
       stable_key: stableKey,
-      source: 'automation_promotion',
       // Origin provenance lives on the entity itself — the run that first
       // produced it. (No separate append-only observation event in phase 1;
       // the entity is upserted once, so this is its origin, not a time series.)

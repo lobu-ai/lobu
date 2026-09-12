@@ -2,8 +2,8 @@
  * Automation-promotion provenance keys must survive metadata round-trips.
  *
  * `promote-keyed-entities.ts` stamps `automation_id` / `stable_key` / `run_id`
- * / `automation_output` (plus `source`) onto promoted entity metadata via raw SQL — outside
- * schema validation. Under an `additionalProperties: false` entity-type schema
+ * / `automation_output` onto promoted entity metadata outside schema validation.
+ * Under an `additionalProperties: false` entity-type schema
  * that meant a promoted entity's metadata could never be written back through
  * `entities.update`: reading the metadata, editing one domain field, and
  * saving rejected with an unknown platform property. Validation now exempts
@@ -98,9 +98,34 @@ describe('entity metadata validation > automation provenance keys', () => {
     expect(err?.message).toContain("unknown property 'bogus_field'");
   });
 
+  it('validates a partial patch against the merged entity metadata', async () => {
+    const created = (await owner.entities.create({
+      type: 'strict-task',
+      name: 'Partial edit',
+      metadata: { action: 'Preserve the required action', status: 'backlog' },
+    })) as { entity: { id: number } };
+
+    await owner.entities.update({
+      entity_id: created.entity.id,
+      metadata: { status: 'active' },
+    });
+    const got = (await owner.entities.get({ entity_id: created.entity.id })) as {
+      entity: { metadata: Record<string, unknown> };
+    };
+    expect(got.entity.metadata).toMatchObject({
+      action: 'Preserve the required action',
+      status: 'active',
+    });
+    await expect(
+      owner.entities.update({
+        entity_id: created.entity.id,
+        metadata: { status: 'not-a-state' },
+      })
+    ).rejects.toThrow();
+  });
+
   /**
-   * The entity form sends the whole object, because the server validates the
-   * patch as a document rather than the merge (owletto#845). So a cleared
+   * The entity form can send the whole object (owletto#845). A cleared
    * optional field arrives as `status: null` alongside its surviving siblings —
    * and the schema types `status` as a string enum, which the raw patch fails.
    */

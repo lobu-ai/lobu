@@ -24,7 +24,12 @@ export default defineConfig({
     },
     // Integration tests need a DB ready before any test file starts. Unit tests
     // don't touch the DB, so they run fast regardless.
-    include: ["src/**/*.test.ts"],
+    include: [
+      "src/**/*.test.ts",
+      // Example-owned lifecycle fixtures share this isolated Postgres harness.
+      // The suffix keeps them out of examples' separate bun:test unit run.
+      "../../examples/*/evals/*.integration.ts",
+    ],
     // bun:test-style unit tests live alongside vitest integration tests — skip
     // those for vitest. They run via `bun test` (see the existing CI command).
     // Anything under `src/gateway/**/__tests__` is bun:test-style (carried over

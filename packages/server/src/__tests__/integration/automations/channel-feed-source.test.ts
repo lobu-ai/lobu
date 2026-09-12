@@ -59,17 +59,24 @@ describe("channel feed as an automation @feed source", () => {
     await withAclEdgeWrite(sql, async (tx) => {
       await tx`DELETE FROM entity_relationships WHERE organization_id = ${orgId}`;
     });
-    await sql`DELETE FROM entity_identities WHERE organization_id = ${orgId}`;
     await sql`DELETE FROM feeds WHERE organization_id = ${orgId}`;
     await sql`DELETE FROM connections WHERE organization_id = ${orgId}`;
-    // Keep the workspace's own $member/entities intact; only clear source state.
+    // `source` is a domain field, so identify promoted rows by their stable-key
+    // identity. Entity deletion cascades those claims; clear the remaining graph
+    // identities afterwards while keeping ordinary workspace entities intact.
     await sql`
-      DELETE FROM entities
-      WHERE organization_id = ${orgId}
-        AND (metadata->>'source' = 'automation_promotion' OR entity_type_id IN (
+      DELETE FROM entities e
+      WHERE e.organization_id = ${orgId}
+        AND (EXISTS (
+          SELECT 1 FROM entity_identities ei
+          WHERE ei.organization_id = e.organization_id
+            AND ei.entity_id = e.id
+            AND ei.namespace = 'automation_key'
+        ) OR e.entity_type_id IN (
           SELECT id FROM entity_types WHERE organization_id = ${orgId} AND slug IN ('$resource', '$member')
         ))
     `;
+    await sql`DELETE FROM entity_identities WHERE organization_id = ${orgId}`;
   });
 
   /** A chat (slack, managed) connection carrying the team id. Returns the id, the
