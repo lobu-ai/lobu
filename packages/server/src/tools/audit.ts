@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { REDACTED_SENTINEL } from '@lobu/core';
 import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
@@ -8,8 +9,8 @@ import { getTool, type ToolContext } from './registry';
 
 const MAX_PREVIEW_CHARS = 500;
 const MAX_REQUEST_BYTES = 256 * 1024;
-// These tools retain their exact request on the audit event. Other tools
-// retain only the sanitized summary below.
+// These tools retain their request, except host file capabilities, on the
+// audit event. Other tools retain only the sanitized summary below.
 const REQUEST_EVENT_TOOLS = new Set(['run_sdk', 'query_sdk', 'query_sql']);
 const KNOWN_SECRET_SHAPE_RE =
   /\b(?:sk[-_][a-z0-9_-]{8,}|xox[baprs]-[a-z0-9-]{8,}|gh[pousr]_[a-z0-9_]{12,}|AKIA[A-Z0-9]{16}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/gi;
@@ -46,14 +47,23 @@ function captureRequest(params: ToolInvocationAuditParams): Record<string, unkno
   if (!REQUEST_EVENT_TOOLS.has(params.toolName)) return null;
 
   try {
-    const serialized = JSON.stringify(params.args);
+    const request = { ...params.args };
+    // Host attachment fields contain signed download URLs. Use the tool's
+    // declaration, including on validation failure, and never retain them.
+    const fileParams = getTool(params.toolName)?.mcpMeta?.['openai/fileParams'];
+    if (Array.isArray(fileParams)) {
+      for (const key of fileParams) {
+        if (typeof key === 'string' && Object.hasOwn(request, key)) request[key] = REDACTED_SENTINEL;
+      }
+    }
+    const serialized = JSON.stringify(request);
     const bytes = Buffer.byteLength(serialized, 'utf8');
     if (bytes > MAX_REQUEST_BYTES) {
       return { request_status: 'too_large', request_bytes: bytes };
     }
     return {
       request_status: 'complete',
-      request: params.args,
+      request,
     };
   } catch (error) {
     logger.warn({ error, toolName: params.toolName }, 'Failed to capture tool request');
@@ -194,7 +204,7 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
   // free-text values (and an unsalted credential-derived digest) whenever a
   // secret hides in a shape no pattern enumerates. These two fields record the
   // call shape and its declared discriminators; request-bearing tools
-  // additionally retain their exact args below.
+  // additionally retain their request below, excluding host file capabilities.
   const sanitizedArgsJson = JSON.stringify(
     sanitizeAuditArgs(params.args, getTool(params.toolName)?.inputSchema)
   );

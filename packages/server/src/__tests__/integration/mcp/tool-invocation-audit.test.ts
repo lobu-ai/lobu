@@ -493,6 +493,28 @@ describe('tool invocation audit coverage', () => {
     }
   );
 
+  it.each([true, false])('omits host file capabilities from persisted requests (valid: %s)', async (valid) => {
+    const downloadUrl = 'https://files.example.test/photo?signature=synthetic-private-file-capability';
+    const args = {
+      script: 'export default async (ctx) => ctx.files.length',
+      files: valid ? [{ download_url: downloadUrl, file_id: 'synthetic-private-file-id' }] : downloadUrl,
+    };
+    await recordToolInvocationAudit({
+      toolName: 'run_sdk', args,
+      result: { success: valid },
+      error: valid ? undefined : new Error('Invalid attachment input'),
+      durationMs: 1, ctx: authCtxFor('pat') as never,
+    });
+    const row = await latestAuditRow(orgId, 'run_sdk');
+    expect(row!.payload_data.request).toEqual({ script: args.script, files: REDACTED_SENTINEL });
+    expect(JSON.stringify(row)).not.toContain('synthetic-private-file');
+    expect(await readAuditEvent(row!.id, authCtxFor('pat'))).toMatchObject({
+      request: { script: args.script, files: REDACTED_SENTINEL },
+    });
+    // Audit redaction must not mutate the live tool's intake arguments.
+    expect(JSON.stringify(args.files)).toContain(downloadUrl);
+  });
+
   it('bounds large requests directly on their audit event', async () => {
     const script = 'x'.repeat(300 * 1024);
     await recordToolInvocationAudit({
