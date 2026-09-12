@@ -24,8 +24,9 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
   - `events.id` — the stored-version id of a row. A resync that supersedes the
     prior row allocates a new `events.id`. Never use it as source identity.
   - `supersedes_event_id` — points at the event a new event replaces. The old
-    row stays in history but is hidden from normal reads; automations read the
-    masked `current_event_records` projection, not `public.events`.
+    row stays in history but is hidden from normal reads. Automation windows
+    and SQL using their `window_token` select event versions as of the window
+    end; ordinary reads use the masked `current_event_records` projection.
 - **Automations turn events into work.** An Automation is a versioned task owned by
   an agent: a trigger decides when a run starts, prompt/skills decide what the
   agent does, sources bound what it may read, outputs declare what a completed

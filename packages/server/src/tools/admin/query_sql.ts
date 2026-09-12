@@ -9,6 +9,8 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { getDb } from '../../db/client';
+import type { Env } from '../../index';
+import { resolveWindowQueryContext } from '../../automations/window-read-context';
 import { classifyPushdownFailure, runConnectorQuery } from '../../lib/connector-pushdown';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
 import logger from '../../utils/logger';
@@ -38,6 +40,10 @@ export const QuerySqlSchema = Type.Object({
     description:
       'Base SELECT query. Table references are auto-scoped to your organization. It is wrapped as a subquery, so ORDER BY / LIMIT / window functions inside it are fine; pagination + sort are added on the outside via sort_by/limit/offset.',
   }),
+  window_token: Type.Optional(Type.String({
+    minLength: 1,
+    description: 'Run-bound Automation window_token. Select stored event versions as of its window end, applying its arrival bounds, entity scope and self-output exclusion. Use the latest page token after lease renewal. Current access checks still apply; not supported with connection pushdown.',
+  })),
   connection: Type.Optional(
     Type.String({
       description:
@@ -321,7 +327,7 @@ export const querySql = withValidatedArgs('query_sql', QuerySqlSchema, querySqlI
 
 export async function querySqlImpl(
   args: QuerySqlArgs,
-  _env: unknown,
+  env: unknown,
   ctx: ToolContext,
   options?: {
     maxSerializedResultBytes?: number;
@@ -376,6 +382,9 @@ export async function querySqlImpl(
   // connection's database via its connector (no internal org-scoping — it's the
   // org's own DB, read-only). The connection is resolved org-scoped inside
   // runConnectorQuery; access is bounded by the connection's read-only DB role.
+  if (args.connection && args.window_token) {
+    throw new ToolUserError('window_token cannot be combined with external connection SQL.', 400);
+  }
   if (args.connection) {
     if (args.search_term) {
       return fail(
@@ -426,12 +435,17 @@ export async function querySqlImpl(
     }
   }
 
+  const window = args.window_token
+    ? await resolveWindowQueryContext(args.window_token, env as Env, ctx, getDb())
+    : undefined;
+
   // Validate, parse, and org-scope the query
   let scopedSql: string;
   let params: unknown[];
   let tableRefs: string[];
   try {
     const scoped = validateAndScopeQuery(baseSql, targetOrgId, {
+      window,
       safeColumns: SAFE_COLUMN_DEFS,
       restrictedTables: callerIsAdmin ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
       // Per-user connection visibility: even an admin sees another user's

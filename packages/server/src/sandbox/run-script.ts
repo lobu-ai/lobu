@@ -1253,7 +1253,7 @@ export async function runScript(
 							args: traceArgs(args),
 							skipped: false,
 						});
-						return target.query(args[0] as string);
+						return target.query(args[0] as string, args[1] as Parameters<ClientSDK["query"]>[1]);
 					}
 					const [ns, method] = path.split(".");
 					// `__sdk_dispatch` is a guest-visible global, so a malicious script

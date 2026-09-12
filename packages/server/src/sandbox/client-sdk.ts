@@ -5,6 +5,9 @@
  */
 
 import type { Env } from "../index";
+import { getDb } from "../db/client";
+import { validateAndScopeQuery } from "../utils/execute-data-sources";
+import { resolveWindowQueryContext } from "../automations/window-read-context";
 import { isAdminOrOwnerRole, isInProcessSystemCall, isSystemContext, requireWorkspaceContext } from "../tools/access-control";
 import {
 	ADMIN_ONLY_QUERYABLE_TABLES,
@@ -90,7 +93,7 @@ export interface ClientSDK {
 	schedules: SchedulesNamespace;
 
 	org(slugOrId: string): Promise<ClientSDK>;
-	query(sql: string): Promise<unknown[]>;
+	query(sql: string, options?: { window_token?: string }): Promise<unknown[]>;
 	log(message: string, data?: Record<string, unknown>): void;
 }
 
@@ -246,16 +249,21 @@ export function buildClientSDK(
 			});
 		},
 
-		async query(querySql) {
+		async query(querySql, options) {
 			const workspaceCtx = requireWorkspaceContext(ctx);
 			// Read-tier parity with `query_sql` / `metric_series`: members may query
 			// operational tables; auth/identity tables stay admin-only per-query.
 			const isAdmin = isAdminOrOwnerRole(workspaceCtx.memberRole);
-			const [{ getDb }, { validateAndScopeQuery }] = await Promise.all([
-				import("../db/client"),
-				import("../utils/execute-data-sources"),
-			]);
+			if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options) ||
+				Object.keys(options).some((key) => key !== "window_token") ||
+				(options.window_token !== undefined && (typeof options.window_token !== "string" || !options.window_token)))) {
+				throw new Error("client.query options must contain a non-empty window_token string.");
+			}
+			const window = options?.window_token
+				? await resolveWindowQueryContext(options.window_token, env, workspaceCtx, getDb())
+				: undefined;
 			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
+				window,
 				userId: workspaceCtx.userId,
 				safeColumns: isSystemContext(workspaceCtx) ? undefined : SAFE_COLUMN_DEFS,
 				restrictedTables:
