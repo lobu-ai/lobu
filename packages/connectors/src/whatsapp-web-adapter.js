@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 14;
+  const ADAPTER_VERSION = 15;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -116,6 +116,11 @@ export function whatsAppWebAdapterProgram() {
         const previous = state.pending.get(record.id);
         const seen = state.fingerprints.get(record.id);
         if (seen && seen.sequence >= sequence) return;
+        // Keep live provenance with the durable record if its first sync
+        // fails before committing the baseline. Later edits and rebinds must
+        // not turn that unacknowledged arrival into historical backfill.
+        record.observed_live = previous?.record.observed_live === true || seen?.live === true ||
+          (kind === "add" && record.timestamp >= state.request.recent_since);
         const fingerprint = JSON.stringify(record);
         if (seen?.fingerprint === fingerprint) { seen.sequence = sequence; return; }
         const bytes = new TextEncoder().encode(fingerprint).length;
@@ -129,7 +134,7 @@ export function whatsAppWebAdapterProgram() {
         state.pending.set(record.id, entry);
         state.fingerprintBytes += bytes - (seen?.bytes ?? 0);
         state.fingerprints.delete(record.id);
-        state.fingerprints.set(record.id, { fingerprint, sequence, bytes });
+        state.fingerprints.set(record.id, { fingerprint, sequence, bytes, live: record.observed_live });
         while (state.fingerprints.size > 10_000 || state.fingerprintBytes > 16 * 1024 * 1024) {
           const oldest = state.fingerprints.keys().next().value;
           state.fingerprintBytes -= state.fingerprints.get(oldest).bytes;

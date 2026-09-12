@@ -931,6 +931,7 @@ describe("WhatsApp source observation", () => {
     source.emit("change", "edited history", 900);
     await settle();
     expect(source.posts[0].record.body).toBe("edited history");
+    expect(source.posts[0].record.observed_live).toBe(false);
     source.emit("change", "edited history", 900);
     await settle();
     expect(source.posts).toHaveLength(1);
@@ -952,6 +953,18 @@ describe("WhatsApp source observation", () => {
     source.emit("change", "after stop");
     await settle();
     expect(source.posts).toHaveLength(2);
+  });
+
+  it('retains live provenance when a failed initial sync rebinds with a later baseline', async () => {
+    const source = install();
+    await source.listen();
+    source.emit('add', 'arrived during first sync', 1100);
+    await settle();
+    expect(source.posts[0].record.observed_live).toBe(true);
+    await source.listen('replacement-token', { recent_since: 1200 });
+    source.emit('change', 'edited before successful ingestion', 1100);
+    await settle();
+    expect(source.posts.at(-1).record.observed_live).toBe(true);
   });
 
   it("does not revive an older async revision after the newer one is acknowledged", async () => {
