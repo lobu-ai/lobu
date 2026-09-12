@@ -402,6 +402,59 @@ describe("durable notification delivery", () => {
     });
   });
 
+  it.each([
+    "ready", "activated", "running", "timeout", "expired",
+    "approval-required", "lost-identity", "not-page-activated",
+    "ready-with-approval", "resolved-separate-approval",
+  ])("checks current browser handoff readiness: %s", async (state) => {
+    const h = await setup();
+    const sql = getTestDb();
+    let activatedBy: string | null = null;
+    if (state === "activated") {
+      const [device] = await sql`
+        INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, last_seen_at, app_version)
+        VALUES (${h.user.id}, 'synthetic-draft-device', 'chrome-extension', '[]'::jsonb, ${h.org.id}, NOW(), '0.6.1')
+        RETURNING id
+      `;
+      activatedBy = device.id;
+    }
+    const [run] = await sql`
+      INSERT INTO runs (
+        organization_id, run_type, action_key, approval_status, status,
+        activation_kind, activation_target_urls, run_metadata, expires_at,
+        activated_at, activated_by_device_worker_id, activation_tab_id
+      ) VALUES (
+        ${h.org.id}, 'action', 'synthetic-browser-draft',
+        ${state === "approval-required" ? "pending" : "auto"},
+        ${state === "running" || state === "timeout" ? state : "pending"},
+        ${state === "not-page-activated" ? null : "page_visit"},
+        CASE WHEN ${state === "not-page-activated"} THEN NULL ELSE ARRAY['https://example.test/draft']::text[] END,
+        ${sql.json(state === "lost-identity" ? {} : { page_activation_identity: "exact" })},
+        ${new Date(Date.now() + (state === "expired" ? -60000 : 60000))},
+        ${state === "activated" ? new Date() : null},
+        ${activatedBy}::uuid, ${state === "activated" ? 42 : null}
+      ) RETURNING id
+    `;
+    let decisionRunId: number | undefined;
+    if (state === "ready-with-approval" || state === "resolved-separate-approval") {
+      const [approval] = await sql`
+        INSERT INTO runs (organization_id, run_type, action_key, approval_status, status)
+        VALUES (${h.org.id}, 'internal', 'synthetic-separate-approval',
+          ${state === "resolved-separate-approval" ? "approved" : "pending"}, 'pending')
+        RETURNING id
+      `;
+      decisionRunId = Number(approval.id);
+    }
+    const event = await createNotificationForUsers([h.user.id], {
+      ...h.params,
+      browserRunId: Number(run.id),
+      browserUrl: "https://example.test/draft",
+      decisionRunId,
+    });
+    await deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) });
+    expect(h.post).toHaveBeenCalledTimes(state.startsWith("ready") ? 2 : 0);
+  });
+
   it("does not treat a post without a message id as delivered", async () => {
     const h = await setup();
     const event = await createNotificationForUsers([h.user.id], h.params);

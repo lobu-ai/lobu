@@ -1209,15 +1209,37 @@ export async function deliverNotificationTask(
 				const browserRunId = typeof row.metadata.browser_handoff_run_id === "number"
 					? row.metadata.browser_handoff_run_id : null;
 				if (decisionRunId != null || browserRunId != null) {
-					const [decision] = await tx<{ approval_status: string; status: string }>`
-						SELECT approval_status, status FROM runs
-						WHERE organization_id = ${input.organizationId} AND id = ${decisionRunId ?? browserRunId}
+					const runIds = [decisionRunId, browserRunId].filter(
+						(id): id is number => id != null,
+					);
+					// Match the inbox and page-activation endpoint's ready contract.
+					// A browser handoff and an approval can reference different runs.
+					const states = await tx<{
+						id: number;
+						approval_status: string;
+						browser_ready: boolean;
+					}>`
+						SELECT id, approval_status, COALESCE(
+							run_type = 'action' AND status = 'pending'
+							AND approval_status = 'auto'
+							AND activation_kind = 'page_visit'
+							AND run_metadata->>'page_activation_identity' = 'exact'
+							AND activated_at IS NULL
+							AND expires_at > current_timestamp,
+							false
+						) AS browser_ready
+						FROM runs
+						WHERE organization_id = ${input.organizationId}
+						  AND id = ANY(${pgBigintArray(runIds)}::bigint[])
 					`;
-					if (!decision) throw new Error("Notification decision run is unavailable");
+					const decision = states.find((state) => Number(state.id) === decisionRunId);
+					const browser = states.find((state) => Number(state.id) === browserRunId);
+					if ((decisionRunId != null && !decision) || (browserRunId != null && !browser)) {
+						throw new Error("Notification decision run is unavailable");
+					}
 					if (
-						(decisionRunId != null && decision.approval_status !== "pending") ||
-						(browserRunId != null &&
-							["completed", "failed", "cancelled"].includes(decision.status))
+						(decisionRunId != null && decision?.approval_status !== "pending") ||
+						(browserRunId != null && !browser?.browser_ready)
 					) {
 						return;
 					}
