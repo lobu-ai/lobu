@@ -234,13 +234,13 @@ RE_MINT="$(grep -E '^\{' "$OUT" | tail -1 | node -pe 'JSON.parse(require("fs").r
 
 # Chrome native-messaging bridge (Debug build + worktree CLI)
 OWLETTO_BIN="$(
-  find "$REAL_HOME/Library/Developer/Xcode/DerivedData" -path "*Owletto*Debug/Owletto.app/Contents/MacOS/Owletto" 2>/dev/null \
+  find "$REAL_HOME/Library/Developer/Xcode/DerivedData" -path "*Owletto*Debug/Lobu.app/Contents/MacOS/Lobu" 2>/dev/null \
     | while read -r f; do stat -f "%m %N" "$f"; done \
     | sort -rn | head -1 | cut -d' ' -f2-
 )"
 [ -x "$OWLETTO_BIN" ] || OWLETTO_BIN=""
 if [ -z "$OWLETTO_BIN" ]; then
-  fail "Owletto Debug binary not found (run xcodebuild first)"
+  fail "Lobu Debug binary not found (run xcodebuild first)"
 else
   runlobu "$PROJ" context use local
   runlobu "$PROJ" whoami --json -c local

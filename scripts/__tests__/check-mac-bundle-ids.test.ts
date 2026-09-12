@@ -180,4 +180,78 @@ describe("check-mac-bundle-ids", () => {
       )
     ).toEqual([{ configuration: "Release", bundleId: "com.owletto.mac" }]);
   });
+
+  // The DMG filename the release publishes (attached asset and appcast
+  // dmg-url must agree). Every user-facing Mac download link must name that
+  // same file, or it 404s after the next release. Fails closed when any
+  // source is missing.
+  function publishedMacDmg(): string {
+    const workflow = readFileSync(
+      join(REPO_ROOT, ".github/workflows/mac-release.yml"),
+      "utf8"
+    );
+    const attachMatch = workflow.match(
+      /\$\{\{\s*runner\.temp\s*\}\}\/(\S+\.dmg)/
+    );
+    if (!attachMatch) {
+      throw new Error("release workflow attaches no DMG");
+    }
+    const appcastMatch = workflow.match(
+      /--dmg-url "https:\/\/github\.com\/[^"]+\/releases\/download\/[^/]+\/([^"]+)"/
+    );
+    if (!appcastMatch) {
+      throw new Error("release workflow publishes no appcast dmg-url");
+    }
+    expect(attachMatch[1]).toBe(appcastMatch[1]);
+    return attachMatch[1];
+  }
+
+  it("keeps the README Mac download pointed at the published DMG", () => {
+    const dmg = publishedMacDmg();
+    const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+    const readmeMatch = readme.match(/releases\/latest\/download\/([^)\s]+)/);
+    if (!readmeMatch) {
+      throw new Error("README has no releases/latest/download link");
+    }
+    expect(readmeMatch[1]).toBe(dmg);
+  });
+
+  it("keeps the extension and catalog Mac downloads pointed at the published DMG", () => {
+    const dmg = publishedMacDmg();
+    const linked: Array<[string, string]> = [
+      ["README.md", readFileSync(join(REPO_ROOT, "README.md"), "utf8")],
+    ];
+    if (!owlettoSubmoduleStubbed) {
+      linked.push(
+        [
+          "packages/owletto/apps/chrome/sidepanel.html",
+          readFileSync(
+            join(REPO_ROOT, "packages/owletto/apps/chrome/sidepanel.html"),
+            "utf8"
+          ),
+        ],
+        [
+          "packages/owletto/src/lib/connectors/app-catalog.tsx",
+          readFileSync(
+            join(
+              REPO_ROOT,
+              "packages/owletto/src/lib/connectors/app-catalog.tsx"
+            ),
+            "utf8"
+          ),
+        ]
+      );
+    }
+    for (const [path, source] of linked) {
+      const hrefs = [
+        ...source.matchAll(/releases\/latest\/download\/([^)"'\s]+)/g),
+      ].map((match) => match[1]);
+      if (hrefs.length === 0) {
+        throw new Error(`${path} has no Mac download link`);
+      }
+      for (const href of hrefs) {
+        expect({ file: path, href }).toEqual({ file: path, href: dmg });
+      }
+    }
+  });
 });

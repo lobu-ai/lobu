@@ -7,7 +7,7 @@
 # chrome.storage.local (gateway URL + access/refresh tokens + workerId) lives
 # in the profile dir and survives restarts — and carries across worktrees,
 # because the ID never changes. So you pair once and reuse forever, exactly
-# like installing Owletto.app once.
+# like installing Lobu.app once.
 #
 # Chrome is launched directly (agent-browser is retired). Driving it
 # afterwards — navigate, snapshot, click, screenshot — goes through the
@@ -28,7 +28,7 @@
 #
 # After editing extension source, reload it (chrome://extensions -> reload) or
 # re-run with --restart (--load-extension only applies at browser launch).
-# Mac e2e needs no equivalent: the installed Owletto.app reads
+# Mac e2e needs no equivalent: the installed Lobu.app reads
 # ~/.config/lobu/config.json on every popover, so worktree Lobu contexts
 # registered by task-setup show up in its picker automatically.
 
