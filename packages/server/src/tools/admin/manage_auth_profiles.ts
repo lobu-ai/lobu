@@ -417,8 +417,8 @@ async function handleCreateAuthProfile(
           error: `Auth profile '${existing.slug}' already exists with a different kind/connector (${existing.profile_kind} / ${existing.connector_key}) — use a new slug`,
         };
       }
-      // Non-admins reusing an existing oauth_account slug must own it —
-      // otherwise a member who knows another member's pending profile slug
+      // Callers reusing an existing oauth_account slug must own it —
+      // otherwise a caller who knows another member's pending profile slug
       // could mint a fresh connect token for it and complete OAuth into a
       // profile already referenced by someone else's connections.
       if (oauthAccountOwnershipError(existing, ctx.userId)) {
@@ -597,8 +597,7 @@ async function handleUpdateAuthProfile(
 ): Promise<ManageAuthProfilesResult> {
   // Mirror create gating: only oauth_account profiles are member-editable.
   // env / oauth_app / browser_session are org-shared credentials — admin only.
-  // For oauth_account, non-admins can only touch a profile they created — the
-  // slug alone shouldn't let one member rotate another member's tokens.
+  // Personal OAuth grants remain owner-only even for workspace administrators.
   const existingForRoleCheck = await getAuthProfileBySlug(
     ctx.organizationId,
     args.auth_profile_slug
@@ -635,7 +634,7 @@ async function handleUpdateAuthProfile(
         ? normalizeAuthValues(args.credentials)
         : undefined;
 
-  // The grant's app binding is callback-owned, including when raw profile data is patched.
+  // The grant's identity and app binding are callback-owned, including raw profile patches.
   if (updateAuthDataPayload && existingForRoleCheck?.profile_kind === 'oauth_account') {
     delete updateAuthDataPayload.identity;
     if (existingForRoleCheck.auth_data?.identity !== undefined) {

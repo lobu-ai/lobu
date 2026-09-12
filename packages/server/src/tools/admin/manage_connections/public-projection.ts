@@ -30,7 +30,7 @@ const PUBLIC_CONNECTION_FIELDS: ReadonlySet<string> = new Set([
 /**
  * True for an in-process system call — an automation reaction and friends, which
  * run with `userId: null` + `isAuthenticated: true` + `tokenType: 'session'`
- * (automations/reaction-executor.ts). Those keep full-row access: they read
+ * (automations/reaction-executor.ts). Those keep operational metadata: they read
  * `credential_mode` / `error_message` / device fields to decide what to do,
  * and narrowing them would break reactions silently rather than loudly.
  *

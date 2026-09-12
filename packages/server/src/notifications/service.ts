@@ -1310,8 +1310,7 @@ function connectionAuthorizationSql(sql: DbClient, userId: string) {
 				)) IS TRUE AS pending
 			FROM connections c
 			LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id AND ap.organization_id = c.organization_id
-			WHERE c.id = CASE WHEN e.metadata->>'resource_id' ~ '^[0-9]{1,18}$'
-				THEN (e.metadata->>'resource_id')::bigint END
+			WHERE c.id::text = e.metadata->>'resource_id'
 				AND c.organization_id = e.organization_id
 		) auth_request ON (${isRequest})`,
 		visible: sql`(${isRequest}) IS NOT TRUE OR auth_request.owner_user_id = ${userId}`,

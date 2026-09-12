@@ -562,7 +562,6 @@ export async function notifyConnectionPermissionRequest(params: {
 	orgId: string;
 	connectionId: number;
 	connectorKey: string;
-	connectUrl?: string;
 }): Promise<void> {
 	const sql = getDb();
 	const [connection] = await sql`
@@ -574,27 +573,23 @@ export async function notifyConnectionPermissionRequest(params: {
 	if (!connection?.created_by) return;
 	const orgSlug = await getOrgSlug(params.orgId);
 	await sendNotification(params.orgId, [connection.created_by], {
-		// No "Authorize: <url>" line glued into the body any more: the card
-		// carries the destination as a link button, and the inbox has the
-		// resource URL, so interpolating it here only duplicated it as prose.
-			type: "connection_permission_request",
-			title: `Connection "${connection.display_name ?? params.connectorKey}" needs authorization`,
-			body: "Connect your account to finish setting up this connection.",
-			ownerUserId: connection.created_by,
-			deliveryScope: "targeted",
-			semanticType: CONNECTION_AUTHORIZATION_KIND,
-			payloadData: {
-				connector: params.connectorKey,
-				status: "Waiting for OAuth authorization",
-			},
-			resourceType: "connection",
-			resourceId: String(params.connectionId),
-			// Land on the connection that needs OAuth — not the bare connectors index.
-			resourceUrl: connectionDetailUrl(
-				orgSlug,
-				params.connectorKey,
-				params.connectionId,
-			),
+		type: "connection_permission_request",
+		title: `Connection "${connection.display_name ?? params.connectorKey}" needs authorization`,
+		body: "Connect your account to finish setting up this connection.",
+		ownerUserId: connection.created_by,
+		deliveryScope: "targeted",
+		semanticType: CONNECTION_AUTHORIZATION_KIND,
+		payloadData: {
+			connector: params.connectorKey,
+			status: "Waiting for OAuth authorization",
+		},
+		resourceType: "connection",
+		resourceId: String(params.connectionId),
+		resourceUrl: connectionDetailUrl(
+			orgSlug,
+			params.connectorKey,
+			params.connectionId,
+		),
 	});
 }
 

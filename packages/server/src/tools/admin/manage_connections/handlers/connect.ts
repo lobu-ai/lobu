@@ -962,7 +962,6 @@ async function handleConnectImpl(
     orgId: organizationId,
     connectionId: connection.id,
     connectorKey: args.connector_key,
-    connectUrl,
 	}).catch((err) =>
 		logger.error(err, "Failed to send connection permission notification"),
 	);
