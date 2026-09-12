@@ -80,10 +80,10 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
   beforeAll(async () => { await cleanupTestDatabase(); await initWorkspaceProvider(); });
   afterEach(() => { globalThis.fetch = originalFetch; });
 
-  it('reuses an active connection for the selected personal account on repeated connect', async () => {
+  it.each([undefined, {}])('reuses an active connection for the selected personal account with config %j', async (config) => {
     const s = await seed();
     const before = await state(s.connection.id);
-    const result = await s.client.connect({ connector_key: KEY, auth_profile_slug: s.profile.slug, app_auth_profile_slug: s.app.slug }) as { connection_id: number };
+    const result = await s.client.connect({ connector_key: KEY, auth_profile_slug: s.profile.slug, app_auth_profile_slug: s.app.slug, config }) as { connection_id: number };
     expect(result.connection_id).toBe(s.connection.id);
     expect(await state(s.connection.id)).toEqual(before);
     const [count] = await getTestDb()`SELECT COUNT(*)::int AS count FROM connections WHERE organization_id = ${s.org.id} AND deleted_at IS NULL`;

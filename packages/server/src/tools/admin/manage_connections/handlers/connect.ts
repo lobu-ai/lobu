@@ -251,7 +251,7 @@ async function handleConnectImpl(
       AND c.deleted_at IS NULL
 			${requireManaged ? sql`AND c.config->>'consent_only' = 'true'` : sql``}
       ${explicitSlug ? sql`AND c.slug = ${explicitSlug}` : sql``}
-      ${args.config ? sql`AND c.config @> ${sql.json(args.config)}::jsonb` : sql``}
+      ${args.config ? sql`AND COALESCE(c.config, '{}'::jsonb) @> ${sql.json(args.config)}::jsonb` : sql``}
       ${args.auth_profile_slug ? sql`AND c.auth_profile_id = (SELECT id FROM auth_profiles WHERE organization_id = ${organizationId} AND slug = ${args.auth_profile_slug})` : sql``}
       ${deviceBinding.deviceWorkerId ? sql`AND c.device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}
       ${userId ? sql`AND c.created_by = ${userId}` : sql``}
@@ -453,7 +453,7 @@ async function handleConnectImpl(
         AND app_auth_profile_id IS NOT DISTINCT FROM ${authSelection.appAuthProfile?.id ?? null}::bigint
         AND deleted_at IS NULL
         ${explicitSlug ? sql`AND slug = ${explicitSlug}` : sql``}
-        ${args.config ? sql`AND config @> ${sql.json(args.config)}::jsonb` : sql``}
+        ${args.config ? sql`AND COALESCE(config, '{}'::jsonb) @> ${sql.json(args.config)}::jsonb` : sql``}
         ${deviceBinding.deviceWorkerId ? sql`AND device_worker_id = ${deviceBinding.deviceWorkerId}` : sql``}
       ORDER BY id LIMIT 2
     `;
