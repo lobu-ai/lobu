@@ -387,6 +387,7 @@ async function executeSyncRun(
       executor: laneExecutor,
       job: {
         mode: 'sync',
+        delivery: job.delivery,
         config: mergeEnv(env, job.connection_credentials, feedConfig),
         checkpoint: checkpoint as Record<string, unknown> | null,
         env,
@@ -398,19 +399,16 @@ async function executeSyncRun(
       },
       hooks: {
         onCheckpointUpdate: async (nextCheckpoint) => {
-          lastCheckpoint = nextCheckpoint;
-          if (!lastCheckpoint) return;
-          try {
+          // Commit preceding events before advancing their checkpoint. A failed
+          // stream must fail the run, preserving the source backlog for retry.
+          await flushBatch();
+          if (nextCheckpoint) {
             await client.stream({
-              type: 'batch',
-              run_id,
-              worker_id: client.id,
-              items: [],
-              checkpoint: lastCheckpoint,
+              type: 'batch', run_id, worker_id: client.id,
+              items: [], checkpoint: nextCheckpoint,
             });
-          } catch (err) {
-            log.debug('[executor] Checkpoint flush failed:', err);
           }
+          lastCheckpoint = nextCheckpoint;
         },
         onEventChunk: async (events) => {
           const contentItems = await processEventChunk(events, cfg.generateEmbeddings);

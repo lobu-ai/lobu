@@ -222,6 +222,35 @@ describe('feed dry run persists nothing', () => {
     expect(preview.truncated).toBe(true);
   });
 
+  it('does not release the active run before its feed checkpoint commits', async () => {
+    const sql = getTestDb();
+    const { feedId, runId } = await seed(false);
+    const checkpoint = { source_ack: { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-item', revision: 1 }] } };
+    await sql.unsafe(`
+      CREATE FUNCTION synthetic_reject_feed_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.checkpoint ? 'source_ack' THEN RAISE EXCEPTION 'synthetic checkpoint failure'; END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER synthetic_reject_feed_checkpoint BEFORE UPDATE ON feeds
+      FOR EACH ROW EXECUTE FUNCTION synthetic_reject_feed_checkpoint();
+    `);
+    try {
+      const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'success', checkpoint });
+      await completeWorkerJob(completion.ctx);
+      expect(completion.result().status).toBe(500);
+      expect((await sql`SELECT status FROM runs WHERE id = ${runId}`)[0].status).toBe('running');
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
+    } finally {
+      await sql.unsafe('DROP TRIGGER synthetic_reject_feed_checkpoint ON feeds; DROP FUNCTION synthetic_reject_feed_checkpoint();');
+    }
+    const retry = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'success', checkpoint });
+    await completeWorkerJob(retry.ctx);
+    expect(retry.result().status).toBe(200);
+    expect((await sql`SELECT status FROM runs WHERE id = ${runId}`)[0].status).toBe('completed');
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(checkpoint);
+  });
+
   it('keeps source acknowledgments at the last successful completion during streaming and failure', async () => {
     const sql = getTestDb();
     const { feedId, runId } = await seed(false);

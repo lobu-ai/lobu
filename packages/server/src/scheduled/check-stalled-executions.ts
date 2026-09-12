@@ -425,17 +425,17 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           FROM stale_candidates c
           WHERE r.id = c.id
           RETURNING r.id, r.run_type, r.feed_id, r.connection_id, r.connector_key,
-                    r.connector_version, r.organization_id, r.dry_run, r.created_at,
+                    r.connector_version, r.organization_id, r.dry_run, r.created_at, r.action_input,
                     c.stale_status
         ),
         retries AS (
           INSERT INTO public.runs (
             organization_id, run_type, feed_id, connection_id,
-            connector_key, connector_version, status, approval_status, created_at
+            connector_key, connector_version, status, approval_status, created_at, action_input
           )
           SELECT
             t.organization_id, 'sync', t.feed_id, t.connection_id,
-            t.connector_key, t.connector_version, 'pending', 'auto', current_timestamp
+            t.connector_key, t.connector_version, 'pending', 'auto', current_timestamp, t.action_input
           FROM timed_out t
           WHERE t.run_type = 'sync'
             AND t.stale_status IN ('claimed', 'running')

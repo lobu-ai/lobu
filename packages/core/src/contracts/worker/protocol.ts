@@ -140,6 +140,27 @@ export function defaultBackendCapacity(): Record<string, number> {
   return { [EXECUTION_BACKENDS.compiledConnector]: 1 };
 }
 
+/** Raw connector input carried by the existing sync-run envelope. */
+export const FeedDeliverySchema = Type.Object({
+  id: Type.String({ minLength: 1, maxLength: 200 }),
+  event: Type.String({ minLength: 1, maxLength: 200 }),
+  payload: Type.Unknown(),
+});
+
+/** Bounded snapshot; the source retains records until exact checkpoint ACK. */
+export const FeedSourceBatchSchema = Type.Object({
+  binding_id: Type.String({ minLength: 1, maxLength: 200 }),
+  epoch: Type.String({ minLength: 1, maxLength: 200 }),
+  recovery: Type.Optional(Type.Boolean()),
+  records: Type.Array(
+    Type.Object({
+      revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+      payload: Type.Record(Type.String(), Type.Unknown()),
+    }),
+    { maxItems: 1000 }
+  ),
+});
+
 /** Bounded source-activity hint included in a worker poll. */
 export const FeedNotificationSchema = Type.Object({
   feed_id: Type.Integer({ minimum: 1 }),
@@ -147,6 +168,7 @@ export const FeedNotificationSchema = Type.Object({
   feed_key: Type.String({ minLength: 1, maxLength: 200 }),
   notification_id: Type.String({ minLength: 1, maxLength: 200 }),
   changed: Type.Boolean(),
+  batch: Type.Optional(FeedSourceBatchSchema),
 });
 
 /** `POST /api/workers/poll` request body. */
@@ -172,7 +194,7 @@ export const PollRequestSchema = Type.Object({
    */
   label: Type.Optional(Type.String()),
   connector_manifests: Type.Optional(Type.Unknown()),
-  /** Connector feed wake hints. Records still travel through normal sync. */
+  /** Connector source activity and optional bounded delivery batches. */
   feed_notifications: Type.Optional(
     Type.Array(FeedNotificationSchema, { maxItems: 64 })
   ),
@@ -715,6 +737,7 @@ export const PollResponseSchema = Type.Object({
   ),
   connector_key: Type.Optional(Type.String()),
   feed_key: Type.Optional(Type.String()),
+  delivery: Type.Optional(FeedDeliverySchema),
   /**
    * Contract identity of the pinned manifest artifact, so a device can refuse
    * a manifest it does not implement at that exact hash.
