@@ -52,7 +52,7 @@ async function validateCustomSqlSource(
 // is prompt CONTEXT, not events: its rows must never be signed as event
 // content_ids (channel_messages.id is not an events.id — complete_window links
 // content_ids into automation_run_events.event_id, an FK to events).
-export type AutomationSourceKind = 'event' | 'entity' | 'metric' | 'channel';
+export type AutomationSourceKind = 'event' | 'entity' | 'metric' | 'channel' | 'feed';
 
 export type AutomationSourceRef =
   | { type: 'feed'; value: string }
@@ -65,6 +65,7 @@ export type AutomationSourceRef =
 export interface NormalizedAutomationSource extends AutomationSource {
   kind: AutomationSourceKind;
   ref?: AutomationSourceRef;
+  feedId?: number;
   /**
    * This ref-backed source has the canonical event projection and can be
    * bounded in SQL after paging.
@@ -228,6 +229,7 @@ interface ResolvedFeed {
   feedKey: string;
   /** Declared feed capabilities; empty when no definition resolved. */
   operations: string[];
+  readWindowAxis?: string;
 }
 
 async function resolveFeeds(
@@ -242,14 +244,16 @@ async function resolveFeeds(
     feed_key: string;
     connection_slug: string;
     operations: unknown;
+    read_window_axis: string | null;
   }>`
     SELECT f.id, f.config ->> 'store' AS store, f.feed_key, c.slug AS connection_slug,
-           COALESCE(cd.feed_operations, '[]'::jsonb) AS operations
+           COALESCE(cd.feed_operations, '[]'::jsonb) AS operations, cd.read_window_axis
     FROM feeds f
     JOIN connections c ON c.id = f.connection_id
     LEFT JOIN LATERAL (
       SELECT connector_definitions.feeds_schema -> f.feed_key -> 'operations'
-        AS feed_operations
+        AS feed_operations,
+        connector_definitions.feeds_schema -> f.feed_key ->> 'readWindowAxis' AS read_window_axis
       FROM connector_definitions
       WHERE connector_definitions.key = c.connector_key
         AND connector_definitions.organization_id = f.organization_id
@@ -287,6 +291,7 @@ async function resolveFeeds(
       connectionSlug: String(r.connection_slug),
       feedKey: String(r.feed_key),
       operations: Array.isArray(r.operations) ? r.operations.map(String) : [],
+      readWindowAxis: r.read_window_axis ?? undefined,
     }))
     .filter((r) => Number.isSafeInteger(r.id) && r.id > 0);
 }
@@ -350,6 +355,7 @@ async function compileRefToQuery(
 ): Promise<{
   query: string | null;
   kind: AutomationSourceKind;
+  feedId?: number;
   controlledEventProjection?: boolean;
 }> {
   switch (ref.type) {
@@ -358,18 +364,11 @@ async function compileRefToQuery(
       if (feeds.length === 0) throw new Error(`@feed:${ref.value} did not match any feed`);
       const eventFeeds = feeds.filter((f) => f.store === 'events');
       const channelFeeds = feeds.filter((f) => f.store === 'channel_messages');
-      // A source-only feed never persists events, so compiling it to an
-      // `events` SELECT would silently yield zero rows forever. Reject it loudly
-      // instead. A feed whose definition did not resolve keeps the events read:
-      // that is the uninstalled-connector case, not a declared capability gap.
-      const sourceOnly = eventFeeds.find(
-        (f) => f.operations.length > 0 && !f.operations.includes('sync')
-      );
-      if (sourceOnly) {
-        throw new Error(
-          `@feed:${ref.value} is a source-read-only feed and stores no events; ` +
-            'read it with feeds.readMany instead of an @feed source'
-        );
+      if (eventFeeds.some((f) => f.operations.includes('read') && (f.readWindowAxis || !f.operations.includes('sync')))) {
+        if (feeds.length !== 1) {
+          throw new Error(`@feed:${ref.value} matches multiple feeds; reference one feed for a live source.`);
+        }
+        return { query: null, kind: 'feed', feedId: feeds[0].id };
       }
       // Don't mix storage planes in one source: a single SELECT cannot span
       // both `events` and `channel_messages`.
@@ -535,6 +534,14 @@ export async function normalizeAutomationSources(
   organizationId: string,
   sources: AutomationSource[]
 ): Promise<NormalizedAutomationSource[]> {
+  const seenNames = new Set<string>();
+  for (const source of sources) {
+    if (seenNames.has(source.name)) {
+      throw new Error(`Automation source name "${source.name}" is duplicated; source names must be unique`);
+    }
+    seenNames.add(source.name);
+  }
+
   const normalized: NormalizedAutomationSource[] = [];
   for (const source of sources) {
     const ref = parseAutomationSourceRef(source.query);
@@ -553,7 +560,7 @@ export async function normalizeAutomationSources(
       });
       continue;
     }
-    const { query, kind, controlledEventProjection } = await compileRefToQuery(
+    const { query, kind, controlledEventProjection, feedId } = await compileRefToQuery(
       sql,
       organizationId,
       ref
@@ -564,6 +571,7 @@ export async function normalizeAutomationSources(
       kind,
       ref,
       controlledEventProjection,
+      feedId,
     });
   }
   return normalized;

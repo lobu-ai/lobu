@@ -7,6 +7,8 @@
  */
 
 import Ajv from 'ajv';
+import { assertCompleteSourceWindowPages } from '../../../automations/source-window-pages';
+import { normalizeAutomationSources } from '../../../automations/source-refs';
 import addFormats from 'ajv-formats';
 import {
   enqueueWorkspaceEventActivations,
@@ -267,13 +269,7 @@ export async function handleCompleteWindow(
       throw new ToolUserError('All window_tokens must belong to the same Automation run/window.', 400);
     }
   }
-  const terminalPageToken = assertCompleteWindowPageChain(tokenPayloads);
-  const leaseFenceToken =
-    terminalPageToken?.run_id != null
-      ? terminalPageToken
-      : tokenRunId !== null
-        ? firstToken
-        : undefined;
+  assertCompleteWindowPageChain(tokenPayloads);
 
   const pgSql = createDbClientFromEnv(env);
   await requireAutomationAccess(pgSql, [String(automationId)], ctx, 'write');
@@ -304,7 +300,7 @@ export async function handleCompleteWindow(
   let runTriggerSignals: unknown[] = [];
   const runRows = await sql`
     SELECT (r.approved_input->>'version_id')::bigint AS version_id,
-           r.approved_input
+           r.status, r.approved_input
     FROM runs r
     JOIN automations a
       ON a.id = r.automation_id
@@ -338,6 +334,9 @@ export async function handleCompleteWindow(
       : '';
   const manualOpenRun = !assignedAgentId && !assignedDeviceWorkerId;
 
+  if (snapshotVersionId != null && runRows[0].version_id != null && snapshotVersionId !== Number(runRows[0].version_id)) {
+    throw new ToolUserError('Completion must use the version pinned to the Automation run.', 409);
+  }
   if (snapshotVersionId == null && runRows[0].version_id != null) {
     snapshotVersionId = Number(runRows[0].version_id);
   }
@@ -359,7 +358,9 @@ export async function handleCompleteWindow(
       i.organization_id,
       i.created_by,
       wv.id as version_id,
-      wv.outputs
+      wv.outputs,
+      i.sources,
+      wv.version_sources
     FROM automations i
     LEFT JOIN automation_versions wv
       ON wv.id = COALESCE(${snapshotVersionId}::bigint, i.current_version_id)
@@ -375,6 +376,23 @@ export async function handleCompleteWindow(
       404
     );
   }
+
+  // New completions must cover the pinned version's live sources, even if a
+  // caller submits a legacy token without a roster. A completed run already
+  // holds its durable coverage; replay must not depend on a feed still existing.
+  const versionSources = parseJson(automationRows[0].version_sources) || [];
+  const sources = versionSources.length > 0 ? versionSources : parseJson(automationRows[0].sources) || [];
+  const requiredSources = runRows[0].status === 'completed'
+    ? firstToken.required_sources ?? []
+    : (await normalizeAutomationSources(sql, String(automationRows[0].organization_id), sources))
+      .filter((source) => source.kind === 'feed')
+      .map((source) => ({ name: source.name, feed_id: source.feedId! }));
+  if (requiredSources.length && tokenRunId !== runId) {
+    throw new ToolUserError('Live source completion requires run-bound window tokens.', 409);
+  }
+  const sourceCoverage = assertCompleteSourceWindowPages(tokenPayloads, requiredSources);
+  delete provenanceMetadata.source_coverage;
+  if (sourceCoverage.length) provenanceMetadata.source_coverage = sourceCoverage;
 
   // Fetch classifiers separately
   const classifierRows = await sql`
@@ -687,7 +705,7 @@ export async function handleCompleteWindow(
     }
     if (lockedRun.expires_at != null) {
       const leaseExpiresAt = new Date(lockedRun.expires_at).toISOString();
-      if (!leaseFenceToken?.lease_expires_at || leaseFenceToken.lease_expires_at !== leaseExpiresAt) {
+      if (!tokenPayloads.some((token) => token.run_id === runId && token.lease_expires_at === leaseExpiresAt)) {
         throw new ToolUserError('window_token does not own the current Automation lease.', 409);
       }
       if (new Date(lockedRun.expires_at).getTime() <= Date.now()) {

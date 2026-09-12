@@ -211,7 +211,7 @@ describe('Gmail replied signal (promote-on-interaction)', () => {
 
 describe('Gmail person attribution rule', () => {
   test('bumps the connector version for the changed sync contract', () => {
-    expect(new GmailConnector().definition.version).toBe('1.0.6');
+    expect(new GmailConnector().definition.version).toBe('1.0.7');
   });
 
   test('autoCreate is gated on person_relevant, with a legacy replied rule for pre-refresh payloads', () => {

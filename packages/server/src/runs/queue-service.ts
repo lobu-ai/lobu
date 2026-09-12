@@ -653,6 +653,8 @@ async function createAutomationRunWithClient(
     deviceWorkerId?: string | null;
     agentKind?: string | null;
     sourceFingerprint?: string;
+    /** Scheduler-only fence against materializing an arrival window whose mark already advanced. */
+    expectedWindowStart?: string;
   }
 ): Promise<{ runId: number; status: string; created: boolean }> {
   const existing = await findActiveAutomationRun(sql, params.automationId);
@@ -663,14 +665,33 @@ async function createAutomationRunWithClient(
     return { runId: existing.id, status: existing.status, created: false };
   }
 
-  // Snapshot the automation's current_version_id at run-creation time so the
-  // entire run uses a fixed version even if the group is edited mid-run.
-  const versionRows = await sql`
-    SELECT current_version_id
-    FROM automations
-    WHERE id = ${params.automationId}
-    LIMIT 1
-  `;
+  // Snapshot the version and, for a scheduler observation made before this
+  // transaction, lock and verify the arrival mark. Without the fence another
+  // replica can complete that window after fingerprinting but before this
+  // INSERT, allowing the old range to be materialized again.
+  const versionRows = params.expectedWindowStart
+    ? await sql<{ current_version_id: unknown; next_window_start: string | Date | null }>`
+        SELECT current_version_id, next_window_start
+        FROM automations
+        WHERE id = ${params.automationId}
+        FOR UPDATE
+      `
+    : await sql<{ current_version_id: unknown; next_window_start: string | Date | null }>`
+        SELECT current_version_id, next_window_start
+        FROM automations
+        WHERE id = ${params.automationId}
+        LIMIT 1
+      `;
+  const currentWindowStart = versionRows[0]?.next_window_start == null
+    ? null
+    : new Date(versionRows[0].next_window_start).toISOString();
+  if (params.expectedWindowStart && currentWindowStart !== params.expectedWindowStart) {
+    logger.info(
+      { automationId: params.automationId },
+      '[queue] Skipping stale automation window after its arrival mark advanced'
+    );
+    return { runId: 0, status: 'superseded', created: false };
+  }
   const snapshotVersionId =
     versionRows.length > 0 && versionRows[0].current_version_id != null
       ? Number(versionRows[0].current_version_id)
@@ -754,6 +775,8 @@ interface CreateAutomationRunParams {
   deviceWorkerId?: string | null;
   agentKind?: string | null;
   sourceFingerprint?: string;
+  /** Scheduler-only fence against materializing an arrival window whose mark already advanced. */
+  expectedWindowStart?: string;
 }
 
 async function createAutomationRunInternal(

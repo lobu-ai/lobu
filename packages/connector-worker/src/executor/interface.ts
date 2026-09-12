@@ -65,6 +65,7 @@ export type ExecutorJob =
       feedId?: number | null;
       query?: string;
       cursor?: string;
+      window?: { start: string; end: string };
       config: Record<string, unknown>;
       credentials: SyncCredentials | null;
       sessionState: Record<string, unknown> | null;
@@ -144,6 +145,7 @@ export type ExecutorResult =
       total?: number;
       nextCursor?: string;
       hasMore?: boolean;
+      window?: { start: string; end: string; axis: string };
     }
   | {
       mode: 'webhook_register';

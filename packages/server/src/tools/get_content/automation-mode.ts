@@ -7,6 +7,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { readSourceFeedPage } from '../../lib/source-feed-page';
+import { generateWindowToken, verifyWindowToken, type SourceWindowPage } from '../../utils/jwt';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
   automationTriggerSignals,
@@ -52,6 +54,8 @@ import { stableJson } from '../../utils/insert-event';
 
 interface ContentQueryParams {
   sources: AutomationSource[];
+  /** Already-resolved source set when the caller must make one atomic routing decision. */
+  normalizedSources?: NormalizedAutomationSource[];
   window_start: string;
   window_end: string;
   organizationId: string;
@@ -73,6 +77,7 @@ interface ContentQueryParams {
   throwOnSourceError?: boolean;
   /** Preserve the pre-bounds source row shape used by skip_if_unchanged. */
   fingerprintMode?: boolean;
+  sourcePage?: SourceWindowPage;
   /** Exclude workspace-identity audit rows for ordinary-member reads. */
   excludeWorkspaceAudit?: boolean;
   page?: {
@@ -155,7 +160,9 @@ async function queryContentData(
   eventSourceNames: ReadonlySet<string>;
   allContent: unknown[];
   page?: { has_more: boolean; next_cursor?: { occurred_at: string; id: number } };
-  sourcesPage: Record<string, { returned: number; limit: number; has_more: boolean }>;
+  sourcesPage: Record<string, { returned: number; limit: number; has_more: boolean; next_cursor?: string; window_axis?: string; feed_id?: number }>;
+  sourcePages: SourceWindowPage[];
+  requiredSources: Array<{ name: string; feed_id: number }>;
   totalCount: number;
   totalCountChars: number;
   exceedsRowLimit: boolean;
@@ -170,7 +177,7 @@ async function queryContentData(
     windowEnd: params.window_end,
     excludeProducedByAutomationId: params.automationId,
   };
-  const normalizedSources = await normalizeAutomationSources(
+  const normalizedSources = params.normalizedSources ?? await normalizeAutomationSources(
     sql,
     params.organizationId,
     params.sources
@@ -193,10 +200,16 @@ async function queryContentData(
       .map((source) => source.name)
   );
   const sqlSources = normalizedSources
-    .filter((source) => source.kind !== 'metric')
+    .filter((source) => source.kind !== 'metric' && source.kind !== 'feed' && !params.sourcePage)
     .map(({ name, query }) => ({ name, query }));
   const pagedSourceNames = new Set(sqlSources.map((source) => source.name));
-  const metricSources = normalizedSources.filter(isMetricSource);
+  const metricSources = params.sourcePage ? [] : normalizedSources.filter(isMetricSource);
+  const feedSources = normalizedSources.filter((source) => source.kind === 'feed');
+  const requiredSources = feedSources.map((source) => ({ name: source.name, feed_id: source.feedId! }));
+  const sourcePages: SourceWindowPage[] = [];
+  if (params.sourcePage && !requiredSources.some((source) => source.name === params.sourcePage!.name && source.feed_id === params.sourcePage!.feed_id)) {
+    throw new ToolUserError('Source continuation no longer matches this Automation source.', 409);
+  }
 
   const results = await executeDataSources(sqlSources, queryContext, sql, {
     throwOnError: params.throwOnSourceError,
@@ -345,7 +358,7 @@ async function queryContentData(
   // read that column directly instead of serializing every row (a 5MB
   // payload_text included) through to_jsonb. Custom SQL keeps the to_jsonb
   // shape, which safely counts 0 when the source projects no payload_text.
-  const statsEventSources = normalizedSources.filter((source) => source.kind === 'event');
+  const statsEventSources = normalizedSources.filter((source) => source.kind === 'event' && !params.sourcePage);
   let totalCount = 0;
   let totalCountChars = 0;
   if (statsEventSources.length > 0) {
@@ -382,7 +395,35 @@ async function queryContentData(
   // to detect overflow. Context sources have no event cursor, but sources_page
   // still reports that they were capped instead of silently injecting the full
   // result set into the model turn.
-  const sourcesPage: Record<string, { returned: number; limit: number; has_more: boolean }> = {};
+  const sourcesPage: Record<string, { returned: number; limit: number; has_more: boolean; next_cursor?: string; window_axis?: string; feed_id?: number }> = {};
+  if (!params.fingerprintMode && !page?.beforeOccurredAt) {
+    const livePages = await Promise.all(feedSources
+      .filter((source) => !params.sourcePage || params.sourcePage.name === source.name)
+      .map(async (source) => ({
+        source,
+        result: await readSourceFeedPage({
+          feed_id: source.feedId!,
+          limit: Math.min(page?.limit ?? 100, 500),
+          window: { start: params.window_start, end: params.window_end },
+          cursor: params.sourcePage?.next_cursor,
+          sourceRevision: params.sourcePage?.revision,
+        }, 30_000, { organizationId: params.organizationId, principal: params.userId }),
+      })));
+    for (const { source, result } of livePages) {
+      results[source.name] = result.rows;
+      const receipt: SourceWindowPage = {
+        name: source.name, feed_id: source.feedId!, revision: result.sourceRevision!,
+        axis: result.window!.axis, returned: result.rows.length,
+        ...(params.sourcePage?.next_cursor ? { before_cursor: params.sourcePage.next_cursor } : {}),
+        ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}),
+      };
+      sourcePages.push(receipt);
+      sourcesPage[source.name] = {
+        returned: result.rows.length, limit: Math.min(page?.limit ?? 100, 500),
+        has_more: Boolean(result.next_cursor), window_axis: receipt.axis, feed_id: receipt.feed_id,
+      };
+    }
+  }
   if (page) {
     for (const sourceName of pagedSourceNames) {
       if (sourceName === page.sourceName && eventSourceNames.has(sourceName)) continue;
@@ -404,7 +445,7 @@ async function queryContentData(
     // Automations deliberately name their primary event source something other
     // than "content"; those sources are still bounded above and report
     // sources_page.has_more, but no fake cursor row is synthesized.
-    if (eventSourceNames.has(page.sourceName)) {
+    if (!params.sourcePage && eventSourceNames.has(page.sourceName)) {
       const rows = results[page.sourceName] ?? [];
       const trimmed = rows.slice(0, page.limit);
       const hasMore = rows.length > page.limit;
@@ -437,6 +478,8 @@ async function queryContentData(
     sourcesContent: results as Record<string, unknown[]>,
     eventSourceNames,
     sourcesPage,
+    sourcePages,
+    requiredSources,
     allContent,
     page: pageResult,
     totalCount,
@@ -470,8 +513,12 @@ export async function fingerprintAutomationSources(args: {
   const sources = (
     versionSources.length > 0 ? versionSources : parseJson(row.sources) || []
   ) as AutomationSource[];
+  const normalized = await normalizeAutomationSources(args.sql, String(row.organization_id), sources);
+  // An unqueried or partial live source never proves an unchanged window.
+  if (normalized.some((source) => source.kind === 'feed')) return { fingerprint: undefined, empty: false };
   const result = await queryContentData(args.sql, {
     sources,
+    normalizedSources: normalized,
     window_start: args.windowStart,
     window_end: args.windowEnd,
     organizationId: String(row.organization_id),
@@ -606,7 +653,6 @@ export async function handleAutomationMode(
     throwOnSourceError?: boolean;
   }
 ): Promise<GetContentResult> {
-  const { generateWindowToken } = await import('../../utils/jwt');
 
   const automationId = args.automation_id!;
   if (
@@ -839,9 +885,25 @@ export async function handleAutomationMode(
   // reads keep the verified caller's own connection visibility.
   const visibilityUserId = context.userId ?? (automation.created_by as string);
 
+  let sourceContinuation: SourceWindowPage | undefined;
+  if (args.source_cursor || args.source_name) {
+    if (!args.source_cursor || !args.source_name || args.before_occurred_at || args.before_id) {
+      throw new ToolUserError('Pair source_name with source_cursor; do not mix source and event cursors.', 400);
+    }
+    const cursor = await verifyWindowToken(args.source_cursor, env);
+    const expectedRunId = context.claimedWindow?.runId ?? (boundRun ? Number(args.run_id) : undefined);
+    if (!expectedRunId || cursor.run_id !== expectedRunId || cursor.automation_id !== automationId ||
+        cursor.window_start !== windowStartIso || cursor.window_end !== windowEndIso) {
+      throw new ToolUserError('Source cursor does not belong to this Automation run/window.', 409);
+    }
+    sourceContinuation = cursor.source_pages?.find((page) => page.name === args.source_name);
+    if (!sourceContinuation?.next_cursor) throw new ToolUserError('Source cursor has no next page for this source.', 409);
+  }
+
   // Run content query and total stats in parallel
   const contentData = await queryContentData(sql, {
     sources,
+    sourcePage: sourceContinuation,
     window_start: windowStartIso,
     window_end: windowEndIso,
     organizationId: automation.organization_id as string,
@@ -914,17 +976,25 @@ export async function handleAutomationMode(
             page_next_id: contentPage.next_cursor.id,
           }
         : {}),
-      page_has_more: contentPage?.has_more ?? false,
+      ...(!sourceContinuation ? { page_has_more: contentPage?.has_more ?? false } : {}),
+      required_sources: contentData.requiredSources,
+      source_pages: contentData.sourcePages,
       truncated_source_names: Object.entries(sourcesPage)
         .filter(
           ([sourceName, page]) =>
-            page.has_more && (sourceName !== 'content' || !contentPage)
+            page.has_more && !contentData.requiredSources.some((source) => source.name === sourceName) && (sourceName !== 'content' || !contentPage)
         )
         .map(([sourceName]) => sourceName),
     },
     env
   );
   let windowToken = await signWindow();
+  const setSourceCursors = () => {
+    for (const receipt of contentData.sourcePages) {
+      if (receipt.next_cursor) sourcesPage[receipt.name].next_cursor = windowToken;
+    }
+  };
+  setSourceCursors();
 
   // Bound entities ride the payload as structured rows (id, name, type,
   // metadata, field_controls) — field_controls marks human-owned field values
@@ -1060,7 +1130,7 @@ export async function handleAutomationMode(
   // Reserve the entire fixed envelope before admitting primary event rows.
   // Context sources have no cursor: never trim them to make a response fit.
   // Include their normalized event representations as well as their raw rows.
-  const primaryRows = sourcesContent.content ?? [];
+  const primaryRows = eventSourceNames.has('content') ? sourcesContent.content ?? [] : [];
   const auxiliarySources = { ...sourcesContent, content: [] };
   const auxiliaryContent = normalizeEventSources(auxiliarySources, eventSourceNames);
   const fixedEnvelope = { ...initial, sources: auxiliarySources, content: auxiliaryContent };
@@ -1118,6 +1188,7 @@ export async function handleAutomationMode(
   };
   // Sign precisely the retained IDs and cursor, never the byte-omitted suffix.
   windowToken = await signWindow();
+  setSourceCursors();
   const bounded = response();
   if (serializedBytes(bounded) > AUTOMATION_READ_MAX_BYTES) throw cannotFit();
   return bounded;

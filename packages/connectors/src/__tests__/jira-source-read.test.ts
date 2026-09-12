@@ -466,7 +466,7 @@ describe('Jira feed source read', () => {
     const c = new JiraConnector();
     expect(typeof c.definition.feeds?.issues?.sync).toBe('function');
     expect(typeof c.definition.feeds?.issues?.read).toBe('function');
-    expect(c.definition.version).toBe('1.1.3');
+    expect(c.definition.version).toBe('1.1.4');
   });
 
   test('offers every scope Jira requires to deliver issue and comment webhooks', () => {

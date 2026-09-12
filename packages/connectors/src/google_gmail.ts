@@ -133,6 +133,7 @@ const GMAIL_SEARCH_COLUMNS = [
   { name: 'from_name', type: 'string' },
   { name: 'from_email', type: 'string' },
   { name: 'date', type: 'string' },
+  { name: 'received_at', type: 'string' },
   { name: 'snippet', type: 'string' },
   { name: 'url', type: 'string' },
 ];
@@ -147,7 +148,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     name: 'Gmail',
     description:
       'Syncs Gmail threads, live-reads matching messages, and supports sending, drafts, and replies.',
-    version: '1.0.6',
+    version: '1.0.7',
     faviconDomain: 'mail.google.com',
     authSchema: {
       methods: [
@@ -183,6 +184,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           'Gmail threads can sync into memory for attribution and Automations, and be read directly from Gmail.',
         sync: (ctx) => this.syncFeed(ctx),
         read: (ctx) => this.readFeed(ctx),
+        readWindowAxis: 'received_at',
         configSchema: {
           type: 'object',
           properties: {
@@ -418,20 +420,12 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       throw new Error('Gmail requires Google OAuth credentials.');
     }
 
-    const label = ctx.config.label || 'INBOX';
-    const labels = Array.isArray(ctx.config.labels)
-      ? ctx.config.labels
-          .filter((l) => typeof l === 'string' && l.trim().length > 0)
-          .map((l) => l.trim())
-      : [];
     const maxResults = Math.min(ctx.config.max_results ?? 50, 500);
     const lookbackDays = ctx.config.lookback_days ?? 30;
     const humanSendersOnly = ctx.config.human_senders_only === true;
 
     const checkpoint = ctx.checkpoint ?? {};
-    const scope = ctx.config.query?.trim() || (labels.length > 0
-      ? `{${labels.map((l) => `label:${l}`).join(' ')}}`
-      : `label:${label}`);
+    const scope = this.feedScope(ctx.config);
     const scopeKey = JSON.stringify([scope, humanSendersOnly]);
     // Older checkpoints predate full-body or readable-HTML ingestion. Revisit
     // the configured lookback when upgrading or changing the source filter;
@@ -621,7 +615,13 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     // (config.query) with the caller's terms as raw Gmail search syntax — each
     // feed read owns its query semantics; we do not escape Gmail operators here.
     // An empty string means no `q` filter — list the authenticated mailbox.
-    const parts = [ctx.config.query, ctx.query].map((part) => part?.trim()).filter(Boolean);
+    const parts = [ctx.window ? this.feedScope(ctx.config) : ctx.config.query, ctx.query]
+      .map((part) => part?.trim()).filter(Boolean)
+      .map((part) => ctx.window ? `(${part})` : part);
+    if (ctx.window) {
+      // Gmail search uses whole seconds. Widen, then enforce exact internalDate bounds below.
+      parts.push(`after:${Math.floor(Date.parse(ctx.window.start) / 1000) - 1} before:${Math.ceil(Date.parse(ctx.window.end) / 1000)}`);
+    }
     const q = parts.join(' ');
 
     // Gmail search has no arbitrary sort — results are always reverse-chronological
@@ -640,14 +640,38 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
 
     const http = this.createClient(token);
     const page = await this.listMessagePage(http, q, limit, ctx.cursor);
-    const rows = await this.fetchMessageRows(http, page.messages);
+    const fetched = await this.fetchMessageRows(http, page.messages);
+    let rows = ctx.window ? fetched.filter((row) => {
+      const timestamp = Date.parse(String(row.received_at ?? ''));
+      if (!Number.isFinite(timestamp)) throw new Error('Gmail message has no valid internalDate for window processing.');
+      return timestamp >= Date.parse(ctx.window!.start) && timestamp < Date.parse(ctx.window!.end);
+    }) : fetched;
+
+    if (ctx.window && ctx.config.human_senders_only) {
+      // Person relevance depends on the conversation (sent/draft/list headers),
+      // so reuse sync's attribution with metadata only, never message bodies.
+      const relevant = new Set<string>();
+      const threadIds = [...new Set(rows.map((row) => String(row.thread_id)))];
+      for (const threadId of threadIds) {
+        const params = new URLSearchParams({ format: 'metadata' });
+        for (const header of ['From', 'To', 'Cc', 'List-Id', 'Precedence']) params.append('metadataHeaders', header);
+        const response = await http.raw(`${this.BASE_URL}/threads/${threadId}?${params}`);
+        if (!response.ok) throw new Error(`Gmail threads.get error (${response.status}): ${await response.text()}`);
+        const thread = await response.json() as GmailThreadGetResponse;
+        if (!thread.messages?.length) throw new Error('Gmail returned a thread without messages');
+        const messages = [...thread.messages].sort((a, b) => Number(a.internalDate) - Number(b.internalDate));
+        if (this.resolvePersonAttribution(messages, true).personRelevant) relevant.add(threadId);
+      }
+      rows = rows.filter((row) => relevant.has(String(row.thread_id)));
+    }
 
     // No `total`: Gmail's list endpoint returns no reliable match count, and
     // `resultSizeEstimate` is a coarse estimate — reporting the page length as a
-    // total would be wrong. Callers page until a short page.
+    // total would be wrong. Callers follow the cursor, including empty filtered pages.
     return {
       rows,
       columns: GMAIL_SEARCH_COLUMNS,
+      ...(ctx.window ? { window: { ...ctx.window, axis: 'received_at' } } : {}),
       nextCursor: page.nextPageToken,
       hasMore: Boolean(page.nextPageToken),
     };
@@ -684,8 +708,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     for (const m of ids) {
       const url = `${this.BASE_URL}/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
       const res = await http.raw(url);
-      if (!res.ok) continue; // skip a single unreachable message, keep the batch reliable
+      if (!res.ok) throw new Error(`Gmail messages.get error (${res.status}): ${await res.text()}`);
       const msg = (await res.json()) as GmailMessage;
+      if (!msg.id || !msg.threadId) throw new Error('Gmail returned malformed message identity.');
       const rawFrom = this.getHeader(msg, 'From') || 'Unknown';
       const { name, email } = this.parseFromHeader(rawFrom);
       rows.push({
@@ -696,6 +721,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         from_name: name,
         from_email: email,
         date: this.getHeader(msg, 'Date') || '',
+        received_at: Number.isFinite(Number(msg.internalDate)) ? new Date(Number(msg.internalDate)).toISOString() : null,
         snippet: msg.snippet || '',
         url: `https://mail.google.com/mail/u/0/#inbox/${msg.threadId}`,
       });
@@ -952,6 +978,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         id: msg.id,
         from: this.getHeader(msg, 'From') || 'Unknown',
         date: this.getHeader(msg, 'Date') || '',
+        received_at: Number.isFinite(Number(msg.internalDate)) ? new Date(Number(msg.internalDate)).toISOString() : null,
         snippet: msg.snippet,
         body: await this.extractBody(msg.payload, http, msg.id),
       });
@@ -971,6 +998,15 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
+
+  private feedScope(config: GmailConfig): string {
+    const labels = Array.isArray(config.labels)
+      ? config.labels.filter((label) => typeof label === 'string' && label.trim()).map((label) => label.trim())
+      : [];
+    return config.query?.trim() || (labels.length
+      ? `{${labels.map((label) => `label:${label}`).join(' ')}}`
+      : `label:${config.label || 'INBOX'}`);
+  }
 
   private resolvePersonAttribution(
     messages: GmailMessage[],

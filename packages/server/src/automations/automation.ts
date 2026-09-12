@@ -255,6 +255,7 @@ async function enqueueAutomationRunForRecord(
 	dispatchSource: AutomationRunPayload["dispatch_source"],
 	sourceFingerprint?: string,
 	tx?: DbClient,
+	inspectedWindow?: { windowStart: Date; windowEnd: Date },
 ): Promise<QueueAutomationRunResult> {
 	if ((automation.status ?? "active") !== "active") {
 		throw new Error(`Automation ${automation.id} is not active.`);
@@ -280,7 +281,7 @@ async function enqueueAutomationRunForRecord(
 	// mark was seeded at cutover. The scheduled path checks for that before it
 	// gets here and waits a tick; a manual trigger gets a clear answer instead
 	// of a run that reads nothing.
-	const { windowStart, windowEnd } = await computePendingWindow(sql, automation.id);
+	const { windowStart, windowEnd } = inspectedWindow ?? await computePendingWindow(sql, automation.id);
 	if (windowEnd <= windowStart) {
 		throw new ToolUserError(
 			`Automation ${automation.id} has nothing new to run yet: rows stored after ` +
@@ -301,6 +302,7 @@ async function enqueueAutomationRunForRecord(
 			agentKind:
 				executor?.kind === "device" ? executor.agentKind : null,
 			sourceFingerprint,
+			expectedWindowStart: inspectedWindow?.windowStart.toISOString(),
 		};
 	const queued = tx
 		? await createAutomationRunInTransaction(runParams, tx)
@@ -912,13 +914,14 @@ export async function materializeDueAutomationRuns(
 						automation,
 						"scheduled",
 						sourceFingerprint,
+						undefined,
+						pending,
 					);
 					// `created: false` means this reused an already-active run that a
 					// concurrent replica materialized for real work. Completing that
 					// row as "skipped" would silently kill a live dispatch.
 					if (skippedRun.created) {
-						// Book the range the RUN recorded, not the one fingerprinted a
-						// moment earlier: the horizon moved in between.
+						// The run and fingerprint share exactly the same inspected range.
 						await completeSkippedAutomationRun(
 							sql,
 							automation.id,
@@ -927,7 +930,11 @@ export async function materializeDueAutomationRuns(
 							skippedRun.runId,
 						);
 					}
-					await advanceAutomationScheduleAfterSuccessfulWindow(sql, automation.id);
+					// A superseded observation means another completion already moved the
+					// arrival mark and owns schedule advancement for that window.
+					if (skippedRun.status !== "superseded") {
+						await advanceAutomationScheduleAfterSuccessfulWindow(sql, automation.id);
+					}
 					logger.info(
 						{ automationId: automation.id, empty: sourceState.empty },
 						"[automation] Skipped unchanged Automation sources before agent dispatch"
@@ -939,7 +946,9 @@ export async function materializeDueAutomationRuns(
 				sql,
 				automation,
 				"scheduled",
-				sourceFingerprint
+				sourceFingerprint,
+				undefined,
+				pending,
 			);
 			return result.created ? "created" : "skipped";
 		},
@@ -1137,7 +1146,7 @@ export function buildDispatchMessage(params: {
 		"",
 		"Required steps:",
 		`1. Call query_sdk with a script that runs client.knowledge.read({ automation_id: ${params.automationId}, run_id: ${params.runId}, limit: 25 }). The run ID binds the queued version, window, and trigger inputs. Keep the returned window_token from every page you actually analyze.`,
-		`2. Follow the Automation instructions above against the returned payload — content, sources, entities, extraction_schema, reactions_guidance, past_reactions, and past_feedback. If page.has_more is true and you need more evidence, call knowledge.read again with the same automation_id and run_id plus page.next_cursor as before_occurred_at/before_id. Collect that page's window_token too; do this for every additional page you actually analyze.`,
+		`2. Follow the Automation instructions above against the returned payload — content, sources, entities, extraction_schema, reactions_guidance, past_reactions, and past_feedback. While page.has_more is true, call knowledge.read again with the same automation_id and run_id plus page.next_cursor as before_occurred_at/before_id. Collect that page's window_token too. For each live sources_page entry with has_more and next_cursor, call knowledge.read with the same automation_id and run_id plus source_name and source_cursor from that entry's next_cursor. Follow each source to exhaustion, including empty pages with a continuation. Reduce pages in code and return compact evidence to the model; keep exactly one window_token for every analyzed page. Completion requires all source chains, not only the primary event page. A context source with has_more but no next_cursor is truncated: retry the initial read with a larger limit and replace its first-page token, or report the source limit if it still cannot fit. Live rows may be metadata/snippets; use connector reads for needed detail.`,
 		`3. Call run_sdk with a script that runs client.automations.completeWindow({ window_tokens: [all window_token values from pages you actually analyzed], extracted_data, run_id: ${params.runId} }). Pass exactly one token per page you actually analyzed, including the first page.`,
 		"4. Include this run_metadata object in complete_window exactly, and add any extra provider/job fields you know:",
 		JSON.stringify(
@@ -1157,7 +1166,7 @@ export function buildDispatchMessage(params: {
 					`This run was activated by durable workspace event id${workspaceContentIds.length === 1 ? "" : "s"} ${workspaceContentIds.join(", ")}. Lobu includes ${workspaceContentIds.length === 1 ? "it" : "them"} in the top-level content and signs ${workspaceContentIds.length === 1 ? "its" : "their"} exact id${workspaceContentIds.length === 1 ? "" : "s"} into the window_token. Analyze each trigger input exactly once.`,
 				]
 			: []),
-		"Treat the Automation as having no data only when `content` and every array in `sources` are empty. In that case, do not fabricate results.",
+		"Treat the Automation as having no data only when `content` and every array in `sources` are empty. Check that every page and source is exhausted before declaring the window empty. In that case, do not fabricate results.",
 	].join("\n");
 }
 

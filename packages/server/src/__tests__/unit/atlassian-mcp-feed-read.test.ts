@@ -5,7 +5,7 @@ const calls: Array<{
 	args: Record<string, unknown>;
 }> = [];
 
-let responseMode: "normal" | "ambiguous-sites" = "normal";
+let responseMode: "normal" | "ambiguous-sites" | "malformed" | "missing-cursor" | "missing-exhaustion" = "normal";
 
 mock.module("../../mcp-proxy/client", () => ({
 	discoverTools: async () => [],
@@ -44,6 +44,12 @@ mock.module("../../mcp-proxy/client", () => ({
 				],
 			};
 		}
+		if (responseMode === "malformed" || responseMode === "missing-cursor" || responseMode === "missing-exhaustion") {
+			const text = responseMode === "malformed"
+				? "Try again later"
+				: JSON.stringify(responseMode === "missing-cursor" ? { issues: [], isLast: false } : { issues: [] });
+			return { content: [{ type: "text", text }] };
+		}
 		const token = typeof toolArgs.nextPageToken === "string" ? toolArgs.nextPageToken : undefined;
 		if (!token) {
 			return {
@@ -53,10 +59,11 @@ mock.module("../../mcp-proxy/client", () => ({
 						type: "text",
 						text: JSON.stringify({
 							issues: [
-								{ id: "1", key: "KAN-1", summary: "one" },
-								{ id: "2", key: "KAN-2", summary: "two" },
+								{ id: "1", key: "KAN-1", summary: "one", updated: "2026-01-01T12:00:00Z" },
+								{ id: "2", key: "KAN-2", summary: "two", updated: "2026-01-01T12:00:00Z" },
 							],
 							nextPageToken: "page-2",
+							isLast: false,
 						}),
 					},
 				],
@@ -72,6 +79,7 @@ mock.module("../../mcp-proxy/client", () => ({
 							{ id: "3", key: "KAN-3", summary: "three" },
 							{ id: "4", key: "KAN-4", summary: "four" },
 						],
+						isLast: true,
 					}),
 				},
 			],
@@ -86,6 +94,25 @@ beforeAll(async () => {
 });
 
 describe("readAtlassianMcpFeed", () => {
+  const windowParams = {
+    organizationId: "org-window", connectionId: 1, connectorKey: "mcp.atlassian",
+    mcpConfig: { upstream_url: "https://mcp.atlassian.com/v1/mcp", tool_prefix: "atlassian" },
+    feedConfig: { cloud_id: "cloud-window" }, connectionConfig: {}, baseQuery: "project = KAN",
+    window: { start: "2026-01-01T00:00:00Z", end: "2026-01-02T00:00:00Z" },
+  };
+  it.each(["malformed", "missing-cursor", "missing-exhaustion"] as const)("rejects %s window results", async (mode) => {
+    responseMode = mode;
+    await expect(readAtlassianMcpFeed(windowParams)).rejects.toThrow(/page|cursor|malformed/i);
+  });
+  it("binds fixed Jira bounds and returns source coverage", async () => {
+    responseMode = "normal";
+    calls.length = 0;
+    const result = await readAtlassianMcpFeed(windowParams);
+    expect(result.window).toEqual({ ...windowParams.window, axis: "updated_at" });
+    expect(calls[0].args.jql).toContain(`updated >= ${Date.parse(windowParams.window.start)}`);
+    expect(calls[0].args.jql).toContain(`updated < ${Date.parse(windowParams.window.end)}`);
+    expect(result.hasMore).toBe(true);
+  });
 	it("returns nextPageToken and passes it to the next source request", async () => {
 		calls.length = 0;
 		responseMode = "normal";

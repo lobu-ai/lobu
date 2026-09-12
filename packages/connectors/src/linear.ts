@@ -110,6 +110,7 @@ function buildLinearIssueFilter(args: {
   teamKey?: string;
   textTerms?: string[];
   updatedAfterIso?: string;
+  updatedBeforeIso?: string;
 }): string {
   const parts: string[] = [];
   if (args.teamKey) {
@@ -117,6 +118,9 @@ function buildLinearIssueFilter(args: {
   }
   if (args.updatedAfterIso) {
     parts.push(`{ updatedAt: { gte: ${JSON.stringify(args.updatedAfterIso)} } }`);
+  }
+  if (args.updatedBeforeIso) {
+    parts.push(`{ updatedAt: { lt: ${JSON.stringify(args.updatedBeforeIso)} } }`);
   }
   const terms = (args.textTerms ?? []).map((t) => t.trim()).filter(Boolean);
   for (const term of terms) {
@@ -140,7 +144,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
     name: 'Linear',
     description:
       'Syncs and live-reads Linear issues via GraphQL, and receives real-time issue/comment webhooks.',
-    version: '1.1.0',
+    version: '1.1.1',
     faviconDomain: 'linear.app',
     webhook: {
       signatureHeader: 'linear-signature',
@@ -180,6 +184,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
           'Linear issues can sync into memory and be read directly from Linear.',
         sync: (ctx) => this.syncFeed(ctx),
         read: (ctx) => this.readFeed(ctx),
+        readWindowAxis: 'updated_at',
         configSchema: {
           type: 'object',
           properties: {
@@ -261,7 +266,8 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
     const filter = buildLinearIssueFilter({
       teamKey: asString(ctx.config.team_key),
       textTerms,
-      updatedAfterIso: updatedAfter,
+      updatedAfterIso: ctx.window?.start ?? updatedAfter,
+      updatedBeforeIso: ctx.window?.end,
     });
 
     const requestedLimit = Math.min(Math.max(Math.trunc(ctx.limit ?? 50), 1), 500);
@@ -297,10 +303,17 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
       .map((node) => this.issueRow(node))
       .filter((row) => row !== null);
     const pageInfo = response.issues?.pageInfo;
-    const nextCursor = pageInfo?.hasNextPage ? pageInfo.endCursor ?? undefined : undefined;
+    if (!Array.isArray(response.issues?.nodes) || typeof pageInfo?.hasNextPage !== 'boolean' || (pageInfo.hasNextPage && !pageInfo.endCursor)) {
+      throw new Error('Linear did not return a valid page cursor/exhaustion state.');
+    }
+    if (ctx.window && (rows.length !== response.issues!.nodes!.length || rows.some((row) => !Number.isFinite(Date.parse(String(row.updated_at ?? '')))))) {
+      throw new Error('Linear returned malformed issue identity or updated timestamp.');
+    }
+    const nextCursor = pageInfo.hasNextPage ? pageInfo.endCursor ?? undefined : undefined;
     return {
       rows,
       columns: [...LINEAR_ISSUE_COLUMNS],
+      ...(ctx.window ? { window: { ...ctx.window, axis: 'updated_at' } } : {}),
       nextCursor,
       hasMore: Boolean(nextCursor),
     };

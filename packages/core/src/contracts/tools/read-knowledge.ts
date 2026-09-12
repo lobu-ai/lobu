@@ -143,6 +143,18 @@ export const GetContentSchema = Type.Object({
       default: 0,
     })
   ),
+  source_name: Type.Optional(
+    Type.String({
+      description:
+        "Automation source name to continue; pair with source_cursor and the same run_id.",
+    })
+  ),
+  source_cursor: Type.Optional(
+    Type.String({
+      description:
+        "Signed window_token from the preceding page of this source. Retain every returned window_token for completeWindow.",
+    })
+  ),
   before_occurred_at: Type.Optional(
     Type.String({
       description:

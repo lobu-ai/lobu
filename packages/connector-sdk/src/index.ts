@@ -93,6 +93,8 @@ export type {
   FeedReadContext,
   FeedReadHandler,
   FeedReadResult,
+  FeedReadWindow,
+  FeedReadWindowCoverage,
   FeedSyncHandler,
   EntityTypeContribution,
   QueryContext,
@@ -280,3 +282,4 @@ export type {
   SocketAddress,
   SocketOptions,
 } from './net.js';
+export { assertFeedReadWindow, validateFeedReadWindow } from './feed-read-window.js';
