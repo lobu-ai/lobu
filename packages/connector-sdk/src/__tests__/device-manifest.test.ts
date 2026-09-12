@@ -97,6 +97,15 @@ describe('defineDeviceConnector', () => {
     ).toThrow("invalid action inputSchema 'run'");
   });
 
+  for (const handler of ['read', 'onDelivery']) {
+    test(`rejects an executable ${handler} handler in a metadata-only device manifest`, () => {
+      expect(() => defineDeviceConnector({
+        ...validSpec(),
+        feeds: { events: { ...validSpec().feeds.events, [handler]: async () => ({}) } },
+      } as never)).toThrow(`${handler} handler`);
+    });
+  }
+
   test('rejects duplicate keys in a registry batch', () => {
     expect(() => defineDeviceConnector([validSpec(), validSpec()])).toThrow(
       "duplicate device connector key 'apple.test'",

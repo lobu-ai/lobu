@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getTestDb } from '../setup/test-db';
 import { notifyWorkerWork, waitForWorkerWork } from '../../runs/worker-wakeup';
 
@@ -8,7 +8,10 @@ function signal() {
   controllers.push(controller);
   return controller;
 }
-afterEach(() => { for (const controller of controllers.splice(0)) controller.abort(); });
+afterEach(() => {
+  for (const controller of controllers.splice(0)) controller.abort();
+  vi.unstubAllEnvs();
+});
 
 describe('Postgres worker wake hints', () => {
   it('does not lose a notification arriving between an empty claim and its wait', async () => {
@@ -53,6 +56,7 @@ describe('Postgres worker wake hints', () => {
   });
 
   it('rechecks durable work without a notification and expires empty waits', async () => {
+    vi.stubEnv('EMBEDDED_WORKER_POLL_INTERVAL_MS', '100');
     let attempts = 0;
     expect(await waitForWorkerWork({ waitMs: 2000, signal: signal().signal,
       claim: async () => ++attempts === 2 ? 'scheduled' : null,

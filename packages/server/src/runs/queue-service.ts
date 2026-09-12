@@ -16,7 +16,7 @@ import {
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
 } from '@lobu/core/contracts/tools/manage-automations';
-import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
+import type { ConnectorTriggerSignal, FeedDelivery } from '@lobu/connector-sdk';
 import {
   claimAutomationCooldown,
   lockAutomationForActivation,
@@ -409,10 +409,11 @@ export function describeSyncRunSkip(reason: SyncRunSkipReason): string {
  * nothing runnable — the connector cases also soft-delete the feed (see
  * softDeleteOrphanFeed).
  */
-async function createSyncRunWithClient(
+export async function createSyncRunWithClient(
   sql: DbClient,
   feedId: number,
-  dryRun = false
+  dryRun = false,
+  delivery?: FeedDelivery
 ): Promise<CreateSyncRunResult> {
   // Check if there's already a pending/running run for this feed
   const existing = await sql`
@@ -484,7 +485,7 @@ async function createSyncRunWithClient(
   if (
     feed.definition_id != null &&
     (!Array.isArray(feed.feed_operations) ||
-      !feed.feed_operations.includes('sync'))
+      !feed.feed_operations.includes(delivery ? 'delivery' : 'sync'))
   ) {
     return { ok: false, reason: 'sync_unsupported' };
   }
@@ -553,11 +554,12 @@ async function createSyncRunWithClient(
     INSERT INTO runs (
       organization_id, run_type, feed_id, connection_id,
       connector_key, connector_version, status, approval_status, created_at,
-      dry_run, target_device_worker_id
+      dry_run, target_device_worker_id, action_input
     ) VALUES (
       ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
       ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
-      true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
+      true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`},
+      ${delivery ? sql.json({ delivery }) : null}
     )
     RETURNING id
   `
@@ -566,11 +568,12 @@ async function createSyncRunWithClient(
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id,
         connector_key, connector_version, status, approval_status, created_at,
-        target_device_worker_id
+        target_device_worker_id, action_input
       ) VALUES (
         ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
         ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
-        ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
+        ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`},
+        ${delivery ? sql.json({ delivery }) : null}
       )
       RETURNING id, feed_id
     )

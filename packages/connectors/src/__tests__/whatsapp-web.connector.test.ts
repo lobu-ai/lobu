@@ -1416,3 +1416,66 @@ describe("buffered source records use normal feed ingestion", () => {
     ]);
   });
 });
+
+
+describe("live delivered message batches", () => {
+  function delivered(records: Array<{ revision: number; payload: Record<string, unknown> }>, config: Record<string, unknown> = {}) {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.backfill.complete = true;
+    return {
+      feedKey: "messages", config, checkpoint, credentials: null, entityIds: [],
+      delivery: { id: "synthetic-delivery", event: "records", payload: {
+        binding_id: "synthetic-binding", epoch: "synthetic-epoch", records,
+      } },
+    };
+  }
+
+  it("normalizes a complete message batch without invoking the browser or source collection", async () => {
+    const result = await connector.onDelivery(delivered([
+      { revision: 1, payload: message("live-one") },
+      { revision: 2, payload: message("live-two", { body: "another message" }) },
+    ]));
+    expect(result.events).toHaveLength(2);
+    expect(result.events.map((event) => event.origin_id)).toEqual(["live-one", "live-two"]);
+    expect(result.checkpoint?.backfill.complete).toBe(true);
+    expect(result.checkpoint?.source_ack).toEqual({
+      binding_id: "synthetic-binding", epoch: "synthetic-epoch",
+      records: [{ id: "live-one", revision: 1 }, { id: "live-two", revision: 2 }],
+    });
+  });
+
+  it("acknowledges excluded records but leaves records outside the processing budget buffered", async () => {
+    const result = await connector.onDelivery(delivered([
+      { revision: 1, payload: message("excluded") },
+      { revision: 2, payload: message("group-one", { chat_jid: "123-456@g.us", is_group: true }) },
+      { revision: 3, payload: message("group-two", { chat_jid: "123-456@g.us", is_group: true }) },
+    ], { chat_filter: "group", max_messages_per_sync: 1 }));
+    expect(result.events).toHaveLength(1);
+    expect(result.checkpoint?.source_ack).toEqual({
+      binding_id: "synthetic-binding", epoch: "synthetic-epoch",
+      records: [{ id: "excluded", revision: 1 }, { id: "group-one", revision: 2 }],
+    });
+  });
+
+  it("retains retryable attachments and honors their backoff without collecting or probing", async () => {
+    const input = delivered([
+      { revision: 1, payload: imageMessages(1, "live-image")[0]! },
+      { revision: 2, payload: message("live-text") },
+    ]);
+    const bridge = makeDispatcher({ probe: READY, download_media: { ok: true, status: "awaiting_primary_device", retryable: true } });
+    const result = await connector.onDelivery({ ...input, sessionState: { chrome_dispatcher: bridge.dispatcher } });
+    expect(result.events).toHaveLength(2);
+    expect(bridge.adapterOps).not.toContain("collect");
+    expect(result.checkpoint?.source_ack?.records).toEqual([{ id: "live-text", revision: 2 }]);
+    expect(result.checkpoint?.media?.["live-image-0"]?.retryable).toBe(true);
+    // No dispatcher is supplied: retry backoff must not even probe the browser.
+    const waiting = await connector.onDelivery({ ...input, checkpoint: result.checkpoint });
+    expect(waiting.checkpoint?.source_ack?.records).toEqual([{ id: "live-text", revision: 2 }]);
+  });
+
+  it("fails closed on malformed delivered messages rather than acknowledging dropped source data", async () => {
+    await expect(connector.onDelivery(delivered([
+      { revision: 1, payload: { id: "malformed", body: "missing source identity" } },
+    ]))).rejects.toThrow(/invalid.*message/i);
+  });
+});

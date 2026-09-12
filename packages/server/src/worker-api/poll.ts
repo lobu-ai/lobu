@@ -324,6 +324,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     connectorManifestsProvided = Object.hasOwn(body, 'connector_manifests');
     connectorManifestsRaw = body.connector_manifests;
     feedNotifications = body.feed_notifications ?? [];
+    if (Buffer.byteLength(JSON.stringify(feedNotifications), 'utf8') > 1024 * 1024) {
+      return c.json({ error: 'Source delivery batches exceed 1 MiB' }, 413);
+    }
     agentKinds = normalizeAgentKinds(body.agent_kinds);
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
@@ -819,6 +822,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             -- (1) Connector-worker lanes: sync / action / auth.
             (
               r.run_type IN ('sync', 'action', 'auth')
+              AND (r.run_type <> 'sync' OR NOT COALESCE(r.action_input ? 'delivery', false)
+                OR ${capabilities.feed_delivery === true})
               AND ${connectorClaimLaneSql(tx, connectorClaimContext, {
                 connectorKey: tx`r.connector_key`,
                 connectorVersion: tx`r.connector_version`,
@@ -1986,6 +1991,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       : {}),
     feed_key: row.feed_key ?? undefined,
     feed_id: row.feed_id ?? undefined,
+    delivery: row.run_type === 'sync' ? row.action_input?.delivery : undefined,
     connection_id: row.connection_id ?? undefined,
     config: mergeExecutionConfig(row.connection_config, row.feed_config),
     // The DB egress boundary (private-IP block + IP pin + forced TLS) is decided

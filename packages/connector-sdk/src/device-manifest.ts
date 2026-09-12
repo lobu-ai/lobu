@@ -233,6 +233,8 @@ function validateAuthSchema(authSchema: DeviceManifestSchema | undefined): void 
 function rejectExecutableHandlers(specification: DeviceConnectorSpec): void {
   const executableNames = [
     'sync',
+    'read',
+    'onDelivery',
     'execute',
     'authenticate',
     'query',
@@ -246,8 +248,10 @@ function rejectExecutableHandlers(specification: DeviceConnectorSpec): void {
     }
   }
   for (const [feedKey, feed] of Object.entries(specification.feeds ?? {})) {
-    if (typeof (feed as unknown as Record<string, unknown>).sync === 'function') {
-      throw new Error(`device connector feed '${feedKey}' cannot contain a sync handler`);
+    for (const handler of ['sync', 'read', 'onDelivery']) {
+      if (typeof (feed as unknown as Record<string, unknown>)[handler] === 'function') {
+        throw new Error(`device connector feed '${feedKey}' cannot contain a ${handler} handler`);
+      }
     }
   }
   for (const [actionKey, action] of Object.entries(specification.actions ?? {})) {

@@ -308,8 +308,10 @@ export class WorkerClient implements ExecutorClient {
    * Automation's CLI is a separate gate: the `agent_kinds` discovered below.
    */
   private advertisedCapabilities(): WorkerCapabilities {
-    if (this.platform !== 'headless') return this.capabilities;
-    return { ...this.capabilities, 'automations.execute': true };
+    return {
+      ...this.capabilities, feed_delivery: true,
+      ...(this.platform === 'headless' ? { 'automations.execute': true } : {}),
+    };
   }
 
   private authHeaders(): Record<string, string> {

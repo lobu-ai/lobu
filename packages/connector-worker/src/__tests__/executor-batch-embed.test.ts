@@ -154,3 +154,47 @@ describe('sync embedding path batches per chunk (Finding #12)', () => {
     expect(byId.get('c')!.embedding_model).toBeUndefined();
   });
 });
+
+
+describe('delivery checkpoints follow committed event batches', () => {
+  for (const failStreamAt of [0, 1, 2]) {
+    test(`preserves delivery input and fails closed at stream ${failStreamAt}`, async () => {
+      const streams: Array<{ items: ContentItem[]; checkpoint?: unknown }> = [];
+      const completions: unknown[] = [];
+      const delivery = { id: 'synthetic-batch', event: 'records', payload: { records: [{ id: 'a' }] } };
+      const checkpoint = { source_ack: { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'a', revision: 1 }] } };
+      let calls = 0;
+      const client = {
+        ...makeStubClient(),
+        async stream(batch: { items: ContentItem[]; checkpoint?: unknown }) {
+          calls++;
+          if (calls === failStreamAt) throw new Error('synthetic persistence failure');
+          streams.push(batch);
+        },
+        async complete(completion: unknown) { completions.push(completion); },
+      };
+      executeCompiledConnectorMock.mockImplementationOnce(async (args) => {
+        expect(args.job.delivery).toEqual(delivery);
+        await args.hooks.onEventChunk([{ origin_id: 'a', origin_type: 'message', payload_text: 'message', occurred_at: new Date() }]);
+        await args.hooks.onCheckpointUpdate(checkpoint);
+        return { mode: 'sync', checkpoint };
+      });
+      const result = await executeRun(client as never, {
+        run_id: 501, run_type: 'sync', connector_key: 'synthetic.connector',
+        feed_key: 'items', compiled_code: 'compiled-code', delivery,
+      }, {}, { generateEmbeddings: false, batchSize: 10, executor: { execute: executeCompiledConnectorMock } });
+      if (failStreamAt) {
+        expect(result.error).toContain('synthetic persistence failure');
+        expect(completions).toEqual([expect.objectContaining({ status: 'failed' })]);
+        expect(completions[0]).not.toHaveProperty('checkpoint');
+      } else {
+        expect(result).toEqual({ itemsCollected: 1 });
+        expect(streams).toHaveLength(2);
+        expect(streams[0]?.items.map((item) => item.id)).toEqual(['a']);
+        expect(streams[0]?.checkpoint).toBeUndefined();
+        expect(streams[1]).toEqual(expect.objectContaining({ items: [], checkpoint }));
+        expect(completions).toEqual([expect.objectContaining({ status: 'success', checkpoint })]);
+      }
+    });
+  }
+});

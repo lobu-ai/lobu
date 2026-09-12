@@ -15,6 +15,7 @@ import {
   type ChromeActionDispatcher,
   ConnectorRuntime,
   type EventEnvelope,
+  type FeedDeliveryContext,
   type RuntimeConnectorDefinition,
   type SyncContext,
   type SyncResult,
@@ -633,6 +634,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     feeds: {
       messages: {
         sync: (ctx) => this.syncMessages(ctx),
+        onDelivery: (ctx) => this.deliverMessages(ctx),
         webhook: { events: ["message"], mode: "trigger" },
         key: "messages",
         name: "Messages",
@@ -934,6 +936,88 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       },
     },
   };
+
+  private async deliverMessages(
+    ctx: FeedDeliveryContext<BrowserCheckpoint, WhatsAppWebConfig>
+  ): Promise<SyncResult<BrowserCheckpoint>> {
+    const payload = ctx.delivery.payload as {
+      binding_id?: unknown;
+      epoch?: unknown;
+      recovery?: unknown;
+      records?: Array<{ revision: number; payload: Record<string, unknown> }>;
+    } | null;
+    if (!payload || typeof payload.binding_id !== "string" || !payload.binding_id ||
+      typeof payload.epoch !== "string" || !payload.epoch || !Array.isArray(payload.records)) {
+      throw new Error("Invalid WhatsApp message delivery batch");
+    }
+    // The browser owns the durable backlog. A reset/overflow must re-establish
+    // the observer and reconcile the source; ordinary complete records need no
+    // page round trip. The same pull handler remains available for explicit reads.
+    if (payload.recovery === true || !ctx.checkpoint?.backfill.complete ||
+      payload.records.some((row) => row.payload?.id === SOURCE_OBSERVATION_ERROR_ID)) {
+      return this.syncMessages(ctx);
+    }
+    const { checkpoint, request } = buildCollectionPlan({
+      checkpoint: ctx.checkpoint as unknown as Record<string, unknown>,
+      config: ctx.config as Record<string, unknown>,
+    });
+    const accepted: Array<{ id: string; revision: number }> = [];
+    const messages: WhatsAppMessage[] = [];
+    for (const row of payload.records) {
+      const message = normalizeRelayedMessage(row.payload);
+      if (!message || !Number.isSafeInteger(row.revision) || row.revision < 1) {
+        throw new Error("Invalid WhatsApp message in delivery batch");
+      }
+      const inScope =
+        (request.chat_filter !== "group" || message.is_group) &&
+        (request.chat_filter !== "individual" || !message.is_group) &&
+        (request.minimum_timestamp == null || message.timestamp >= request.minimum_timestamp);
+      if (inScope) {
+        if (messages.length >= request.max_messages) continue;
+        messages.push(message);
+      }
+      accepted.push({ id: message.id, revision: row.revision });
+    }
+    // Only attachments require source access. Text, edits, revokes and reactions
+    // are normalized directly from the observed record through the same helper
+    // used by collection, preserving origin identity and event/Automation dedupe.
+    let media = new Map<string, MediaRecord>();
+    let nextMedia = checkpoint.media ?? {};
+    const dueMedia = messages.some((message) => {
+      if (!isMediaEligible(message)) return false;
+      const prior = nextMedia[message.id];
+      return !prior || prior.revision !== messageRevision(message) ||
+        (prior.next_attempt_at ?? 0) <= Date.now();
+    });
+    if (dueMedia) {
+      const dispatcher = requireExtensionDispatcher(ctx);
+      const tabId = await readyWhatsAppTab(dispatcher);
+      const downloaded = await downloadEligibleMedia(dispatcher, tabId, messages, nextMedia);
+      media = downloaded.results;
+      nextMedia = { ...nextMedia, ...downloaded.nextMedia };
+      for (const message of messages) {
+        if (isMediaEligible(message) && !downloaded.nextMedia[message.id]) delete nextMedia[message.id];
+      }
+    } else {
+      media = new Map(messages.flatMap((message) =>
+        nextMedia[message.id] ? [[message.id, nextMedia[message.id]] as const] : []));
+    }
+    const nextCheckpoint = mergeBrowserCheckpoint(
+      checkpoint as unknown as Record<string, unknown>, null, messages
+    );
+    nextCheckpoint.source_ack = {
+      binding_id: payload.binding_id, epoch: payload.epoch,
+      // Pending attachment work stays in the source buffer, so stopping the
+      // periodic collector cannot silently discard its retry opportunity.
+      records: accepted.filter((record) => media.get(record.id)?.retryable !== true),
+    };
+    const persistedMedia = Object.entries(nextMedia).slice(0, MAX_MEDIA_RECORDS_PERSISTED);
+    nextCheckpoint.media = persistedMedia.length > 0 ? Object.fromEntries(persistedMedia) : undefined;
+    return {
+      events: messages.map((message) => toEventEnvelope(message, media.get(message.id))),
+      checkpoint: nextCheckpoint,
+    };
+  }
 
   private async syncMessages(
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>

@@ -4,6 +4,7 @@ import type { DbClient, DbQuery } from '../db/client';
 import { pgTextArray } from '../db/client';
 import { feedBackoff } from '../connectors/feed-backoff';
 import { notifyWorkerWork } from './worker-wakeup';
+import { createSyncRunWithClient } from './queue-service';
 
 function savedSourceAck(checkpoint: Record<string, unknown> | null) {
   const ack = checkpoint?.source_ack;
@@ -44,7 +45,8 @@ export async function receiveFeedNotifications(
     // notification, its receipt means committed scheduling, not ingestion.
     const received = await sql.begin(async (tx) => {
       const rows = await tx`
-        SELECT f.id, f.checkpoint
+        SELECT f.id, f.checkpoint, f.consecutive_failures, f.last_sync_at,
+               d.feeds_schema->f.feed_key->'operations' AS operations
         FROM feeds f
         JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
         JOIN LATERAL (
@@ -61,19 +63,37 @@ export async function receiveFeedNotifications(
           AND f.status = 'active' AND f.deleted_at IS NULL
           AND f.feed_key = ${notice.feed_key}
           AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
-          AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
-          AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb
+          AND (d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb
+            OR d.feeds_schema->f.feed_key->'operations' @> '["delivery"]'::jsonb)
         FOR UPDATE OF f, c
       `;
       if (rows.length === 0) return { active: false };
-      if (notice.changed) {
-        // Never use a live event to defeat failure backoff. A manual feed that
-        // failed has no cron retry, so retain one bounded retry for its buffer.
-        await requestFeedSync(tx, tx`
-          SELECT id FROM feeds WHERE id = ${notice.feed_id}
-        `);
+      const feed = rows[0];
+      const ack = savedSourceAck(feed.checkpoint);
+      if (notice.changed && Array.isArray(feed.operations) && feed.operations.includes('delivery')) {
+        // The source is the durable owner until successful ingestion ACK. With
+        // one active run per feed, arrivals during execution stay in that source
+        // buffer and are offered again; never overwrite the running snapshot.
+        if (!notice.batch) return { active: true, ack };
+        const batch = notice.batch;
+        const acknowledged = ack?.binding_id === batch.binding_id && ack.epoch === batch.epoch
+          ? new Map(ack.records.map((record) => [record.id, record.revision])) : new Map<string, number>();
+        const records = batch.records.filter((record) =>
+          acknowledged.get(String(record.payload.id)) !== record.revision);
+        const retryDelay = Math.min(feedBackoff.maxMs,
+          feedBackoff.baseMs * 2 ** Math.min(Math.max(Number(feed.consecutive_failures) - 1, 0), 30));
+        const retryReady = Number(feed.consecutive_failures) === 0 || !feed.last_sync_at ||
+          Date.now() >= new Date(feed.last_sync_at).getTime() + retryDelay;
+        if (retryReady && (records.length > 0 || batch.recovery === true)) {
+          await createSyncRunWithClient(tx, notice.feed_id, false, {
+            id: notice.notification_id, event: 'records', payload: { ...batch, records },
+          });
+        }
+      } else if (notice.changed) {
+        // Metadata-only trigger feeds retain their existing pull scheduling.
+        await requestFeedSync(tx, tx`SELECT id FROM feeds WHERE id = ${notice.feed_id}`);
       }
-      return { active: true, ack: savedSourceAck(rows[0].checkpoint) };
+      return { active: true, ack };
     });
     receipts.push({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, ...received });
   }
@@ -108,8 +128,8 @@ export async function sourceFeedContextForRun(
       AND c.status = 'active' AND c.deleted_at IS NULL
       AND (f.status = 'active' OR (r.dry_run AND f.status = 'paused')) AND f.deleted_at IS NULL
       AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
-      AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
-      AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb
+      AND (d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb
+        OR d.feeds_schema->f.feed_key->'operations' @> '["delivery"]'::jsonb)
   `;
   if (!row) return undefined;
   return {
