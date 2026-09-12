@@ -205,10 +205,11 @@ and sign in on the source site in that browser. Browser operations run through
 that paired device; external remote-debugging endpoints and CLI browser-auth
 capture are no longer supported.
 
-To test a configured feed without writing ingested data, run `manage_feeds`
-action `trigger_feed` with `feed_id` and `dry_run: true`, then inspect
-`read_feed` for the completed run's preview. The dry run uses the normal device
-routing and authorization checks.
+To test a configured feed without writing ingested data, discover the current
+feed methods with `search_sdk`, then use `client.feeds.trigger({ feed_id, dry_run: true })`
+through `run_sdk` or `lobu memory exec`. Inspect `client.feeds.get({ feed_id })`
+for the completed run's preview. The dry run uses normal device routing and
+authorization checks and may access the upstream provider, so obtain consent first.
 
 ## Agent-Facing Tool Surface
 

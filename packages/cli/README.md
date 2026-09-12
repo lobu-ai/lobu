@@ -38,10 +38,12 @@ already-claimed run's lease.
 Browser tools use the paired Chrome extension through `extensionNetworkSync`
 and `extensionDomScrape`. The standalone browser SDK, external CDP endpoints,
 `lobu memory browser-auth`, and local `lobu connector run` have been removed.
-For connector tests, use the gateway's existing dry-run path with a configured
-feed: `lobu memory run manage_feeds '{"action":"trigger_feed","feed_id":123,"dry_run":true}'`.
+For connector tests, discover the feed with `search_sdk`, then use the gateway's
+existing dry-run path with its returned id:
+`lobu memory exec 'export default async (_ctx, client) => client.feeds.trigger({ feed_id: 123, dry_run: true });'`.
 The run uses the feed's configured runtime, including its paired extension;
-inspect the preview with `manage_feeds` action `read_feed`.
+inspect the preview with `client.feeds.get({ feed_id: 123 })` through `lobu memory exec`.
+A dry run may access the upstream provider, so obtain consent first.
 
 Lobu boots as a single Node process with embedded Postgres (including pgvector)
 by default. `lobu init` writes `DATABASE_URL=file://.`; `file://` values select

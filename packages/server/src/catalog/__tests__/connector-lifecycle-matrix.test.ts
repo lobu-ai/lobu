@@ -60,7 +60,7 @@ describe("bundled connector lifecycle matrix", () => {
 			}
 		}
 		expect([...representedFamilies].sort()).toEqual(
-			["app_installation", "browser", "env_keys", "none", "oauth"],
+			["app_installation", "env_keys", "none", "oauth"],
 		);
 	});
 
