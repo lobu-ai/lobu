@@ -46,6 +46,26 @@ import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
 const SOURCE_OBSERVATION_ERROR_ID = "whatsapp-web:source-observation-error";
 
+function updateDirtyDiagnostics(checkpoint: BrowserCheckpoint, dirty: DirtyMarker[], requestedCount: number) {
+  checkpoint.dirty = dirty.length > 0 ? dirty : undefined;
+  const diagnostics = { ...checkpoint.diagnostics };
+  delete diagnostics.dirty_reconciliation;
+  if (dirty.length > 0) {
+    const reasons: Record<string, number> = {};
+    for (const marker of dirty) {
+      const reason = marker.reason ?? "unknown";
+      reasons[reason] = (reasons[reason] ?? 0) + 1;
+    }
+    diagnostics.dirty_reconciliation = {
+      pending_count: dirty.length, requested_count: requestedCount,
+      reasons: Object.fromEntries(Object.entries(reasons).slice(0, 10)),
+    };
+  }
+  // Source records that have not acquired a stable timestamp remain visible
+  // diagnostics. They do not represent unfinished history pages.
+  checkpoint.diagnostics = Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
+}
+
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
  *
@@ -623,7 +643,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.4",
+    version: "1.0.5",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -1005,6 +1025,9 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     const nextCheckpoint = mergeBrowserCheckpoint(
       checkpoint as unknown as Record<string, unknown>, null, messages
     );
+    const reconciledIds = new Set(messages.map((message) => message.id));
+    updateDirtyDiagnostics(nextCheckpoint, (checkpoint.dirty ?? []).filter((marker) =>
+      !marker.message_id || !reconciledIds.has(marker.message_id)), 0);
     nextCheckpoint.source_ack = {
       binding_id: payload.binding_id, epoch: payload.epoch,
       // Pending attachment work stays in the source buffer, so stopping the
@@ -1014,7 +1037,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     const persistedMedia = Object.entries(nextMedia).slice(0, MAX_MEDIA_RECORDS_PERSISTED);
     nextCheckpoint.media = persistedMedia.length > 0 ? Object.fromEntries(persistedMedia) : undefined;
     return {
-      events: messages.map((message) => toEventEnvelope(message, media.get(message.id))),
+      events: messages.map((message) => toEventEnvelope(message, media.get(message.id), message.timestamp >= checkpoint.live_since!)),
       checkpoint: nextCheckpoint,
     };
   }
@@ -1144,7 +1167,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     );
 
     const events: EventEnvelope[] = messages.map((message) =>
-      toEventEnvelope(message, media.get(message.id))
+      toEventEnvelope(message, media.get(message.id), message.timestamp >= checkpoint.live_since!)
     );
 
     const nextCheckpoint = mergeBrowserCheckpoint(
@@ -1165,7 +1188,8 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       binding_id: observed.binding_id,
       epoch: observed.epoch,
       records: observed.records
-        .filter((row) => sourceErrors.includes(row) || emittedIds.has(String(row.payload.id)) || !inScope(row.payload))
+        .filter((row) => sourceErrors.includes(row) ||
+          (emittedIds.has(String(row.payload.id)) && media.get(String(row.payload.id))?.retryable !== true) || !inScope(row.payload))
         .map((row) => ({ id: String(row.payload.id), revision: row.revision })),
     };
 
@@ -1186,27 +1210,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       0,
       MAX_DIRTY_MARKERS_PERSISTED
     );
-    // `mergeBrowserCheckpoint` spreads the prior checkpoint forward, so every
-    // one of these fields must be REPLACED, not conditionally set: a marker
-    // the adapter just reconciled has to leave the checkpoint, or the next run
-    // re-requests it and the list never empties.
     const diagnostics: Record<string, unknown> = {};
-    if (dirty.length > 0) {
-      nextCheckpoint.dirty = dirty;
-      nextCheckpoint.backfill.complete = false;
-      const reasons: Record<string, number> = {};
-      for (const marker of dirty) {
-        const reason = marker.reason ?? "unknown";
-        reasons[reason] = (reasons[reason] ?? 0) + 1;
-      }
-      diagnostics.dirty_reconciliation = {
-        pending_count: dirty.length,
-        requested_count: dirtyBatch.length,
-        reasons: Object.fromEntries(Object.entries(reasons).slice(0, 10)),
-      };
-    } else {
-      nextCheckpoint.dirty = undefined;
-    }
 
     const persistedMedia = Object.entries(nextMedia).slice(
       0,
@@ -1227,8 +1231,11 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     }
     nextCheckpoint.diagnostics =
       Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
+    updateDirtyDiagnostics(nextCheckpoint, dirty, dirtyBatch.length);
 
-    return { events, checkpoint: nextCheckpoint };
+    return { events, checkpoint: nextCheckpoint,
+      ...(!nextCheckpoint.backfill.complete ? { next_sync_after_seconds: 1 } : {}),
+    };
   }
 
   async execute(ctx: ActionContext): Promise<ActionResult> {

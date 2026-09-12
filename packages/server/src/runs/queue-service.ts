@@ -413,7 +413,8 @@ export async function createSyncRunWithClient(
   sql: DbClient,
   feedId: number,
   dryRun = false,
-  delivery?: FeedDelivery
+  delivery?: FeedDelivery,
+  feedDue = false
 ): Promise<CreateSyncRunResult> {
   // Check if there's already a pending/running run for this feed
   const existing = await sql`
@@ -568,12 +569,13 @@ export async function createSyncRunWithClient(
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id,
         connector_key, connector_version, status, approval_status, created_at,
-        target_device_worker_id, action_input
+        target_device_worker_id, action_input, run_metadata
       ) VALUES (
         ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
         ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
         ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`},
-        ${delivery ? sql.json({ delivery }) : null}
+        ${delivery ? sql.json({ delivery }) : null},
+        ${feedDue ? sql.json({ feed_due: true }) : null}
       )
       RETURNING id, feed_id
     )
@@ -600,18 +602,18 @@ export async function createSyncRun(
   // Defaults false so all four existing call sites (connect/routes, app-install,
   // check-due-feeds, manage_feeds) keep persisting. Only an explicit opt-in is
   // dry — a flag that defaulted the other way would silently stop real syncs.
-  opts?: { dryRun?: boolean }
+  opts?: { dryRun?: boolean; feedDue?: boolean }
 ): Promise<CreateSyncRunResult> {
   const sql = db ?? getDb();
   const dryRun = opts?.dryRun === true;
 
   try {
     if (db) {
-      return await createSyncRunWithClient(sql, feedId, dryRun);
+      return await createSyncRunWithClient(sql, feedId, dryRun, undefined, opts?.feedDue);
     }
 
     return await sql.begin(async (tx) =>
-      createSyncRunWithClient(tx, feedId, dryRun)
+      createSyncRunWithClient(tx, feedId, dryRun, undefined, opts?.feedDue)
     );
   } catch (error) {
     if (isUniqueViolation(error, 'idx_runs_active_sync_per_feed')) {

@@ -453,6 +453,7 @@ async function executeSyncRun(
       items_collected: itemsCollectedSoFar,
       checkpoint: lastCheckpoint ?? undefined,
       auth_update: result.auth_update ?? undefined,
+      next_sync_after_seconds: result.next_sync_after_seconds,
       error_message: partialFetchFailureMessage(result.metadata),
     });
 

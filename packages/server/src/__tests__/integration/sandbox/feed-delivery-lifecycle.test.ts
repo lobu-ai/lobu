@@ -17,6 +17,13 @@ export default defineConnector({
   key: '${connectorKey}', name: 'External batch', version: '1.0.0',
   authSchema: { methods: [{ type: 'none' }] },
   feeds: { items: { name: 'Items', webhook: { events: ['records'] },
+    eventKinds: { item: { description: 'An item' } },
+    sync: async (ctx) => {
+      const page = (ctx.checkpoint?.page ?? 0) + 1;
+      return { events: [{ origin_id: 'history-' + page, origin_type: 'item',
+        payload_text: 'Historical page ' + page, occurred_at: new Date('2020-01-01'), automation_signals: [] }],
+        checkpoint: { page }, ...(page < 2 ? { next_sync_after_seconds: 1 } : {}) };
+    },
     onDelivery: async (ctx) => {
       const batch = ctx.delivery.payload;
       await ctx.emitEvents(batch.records.map(({ payload: item }) => ({
@@ -49,7 +56,7 @@ describe('source batch through HTTP, durable run, isolate, events and Automation
     await createTestConnectorDefinition({
       key: connectorKey, name: 'External batch', organization_id: org.id,
       auth_schema: { methods: [{ type: 'none' }] },
-      feeds_schema: { items: { operations: ['delivery'], webhook: { events: ['records'] } } },
+      feeds_schema: { items: { operations: ['sync', 'delivery'], eventKinds: { item: { description: 'An item' } }, webhook: { events: ['records'] } } },
       automation_events: [{ key: 'item.created', label: 'New item' }],
     });
     await sql`UPDATE connector_versions SET compiled_code = ${compiledCode} WHERE connector_key = ${connectorKey}`;
@@ -113,5 +120,25 @@ describe('source batch through HTTP, durable run, isolate, events and Automation
     expect(await client.poll(1)).not.toHaveProperty('run_id');
     expect((await sql`SELECT id FROM runs WHERE run_type = 'automation' AND organization_id = ${org.id}`)).toHaveLength(2);
     expect((await sql`SELECT schedule, next_run_at FROM feeds WHERE id = ${feed.id}`)[0]).toEqual({ schedule: null, next_run_at: null });
+
+    // A connector installed from outside core can page through history using
+    // the same worker and scheduler, then return to idle without a cron. An
+    // explicit empty signal list also suppresses baseline activation after a
+    // successful earlier run, when automatic derivation would otherwise fire.
+    await sql`UPDATE feeds SET checkpoint = ${sql.json({ page: 0 })}, next_run_at = now() WHERE id = ${feed.id}`;
+    const firstPage = await client.poll(1);
+    expect(firstPage).toHaveProperty('run_id');
+    await executeRun(client, firstPage, {}, { generateEmbeddings: false });
+    expect((await sql`SELECT checkpoint, next_run_at IS NOT NULL AS continuing FROM feeds WHERE id = ${feed.id}`)[0])
+      .toEqual({ checkpoint: { page: 1 }, continuing: true });
+    await sql`UPDATE feeds SET next_run_at = now() WHERE id = ${feed.id}`;
+    const lastPage = await client.poll(1);
+    expect((await sql`SELECT run_metadata FROM runs WHERE id = ${lastPage.run_id!}`)[0].run_metadata).toMatchObject({ feed_due: true });
+    await executeRun(client, lastPage, {}, { generateEmbeddings: false });
+    expect((await sql`SELECT checkpoint, schedule, next_run_at FROM feeds WHERE id = ${feed.id}`)[0])
+      .toEqual({ checkpoint: { page: 2 }, schedule: null, next_run_at: null });
+    expect(await client.poll(1)).not.toHaveProperty('run_id');
+    expect(await sql`SELECT id FROM events WHERE connection_id = ${connection.id}`).toHaveLength(4);
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'automation' AND organization_id = ${org.id}`).toHaveLength(2);
   });
 });

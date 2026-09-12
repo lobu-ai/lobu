@@ -328,6 +328,7 @@ const GUEST_RUNNER = String.raw`
     return {
       mode: 'sync',
       checkpoint: syncResult && syncResult.checkpoint !== undefined ? syncResult.checkpoint : null,
+      next_sync_after_seconds: syncResult && syncResult.next_sync_after_seconds,
       auth_update: syncResult && syncResult.auth_update !== undefined ? syncResult.auth_update : null,
       metadata: Object.assign({
         items_found: typeof meta.items_found === 'number' ? meta.items_found : trailingEvents.length,
