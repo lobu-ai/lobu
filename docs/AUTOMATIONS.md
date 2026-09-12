@@ -171,6 +171,46 @@ bound, completion fails closed and the Automation source must be narrowed. An
 assigned `managed_agent_id` does not exclude external claiming; ordinary
 internal dispatch through that agent continues to use the same run lifecycle.
 
+### Consistent SQL drill-downs
+
+Stored event sources select the versions that existed at the exclusive window
+end. A refresh after that end cannot remove an earlier version between the
+source summary and a later query. A successor stored before the end replaces
+its predecessor; a successor stored exactly at the end belongs to the next
+window. Tombstones follow the same rule.
+
+Use the latest page token when querying the window in SQL. For a run-bound
+knowledge read, the token is on the full response:
+
+```ts
+const windowRead = await client.knowledge.read({
+  automation_id: 42,
+  run_id: runId,
+  limit: 25,
+});
+const rows = await client.query(
+  "SELECT connector_key, COUNT(*)::int AS count FROM events GROUP BY connector_key",
+  { window_token: windowRead.window_token },
+);
+```
+
+The `query_sql` tool accepts the same `window_token` argument. Both paths reuse
+the source query compiler's arrival bounds, entity scope, self-output exclusion,
+and event-version selection. Apply any additional authored source filters in
+the drill-down query. Retain every analyzed page token for `completeWindow`;
+SQL does not itself add event citations or discharge source pagination.
+
+Only run-bound tokens are accepted. The signature, owning workspace, queued
+bounds, run state and lease are validated. External claim continuations renew
+the lease, so use the newest returned token for subsequent SQL. Tokens cannot
+be combined with external-database connection pushdown.
+
+This is stored event-version consistency, not a frozen database: entity fields,
+classifications, authorization and remote providers can change. Current access
+permissions are checked on every read. Ordinary SQL and search still select
+current events. The existing arrival settlement delay still applies to writers
+that have not committed.
+
 ## Activation types
 
 The `triggers` array is an OR: any matching trigger may start the Automation. If

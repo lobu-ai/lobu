@@ -100,6 +100,8 @@ describe("automation dispatch message", () => {
 		);
 		expect(message).toContain("source_name and source_cursor");
 		expect(message).toContain("empty pages with a continuation");
+		expect(message).toContain("pass the latest returned window_token to query_sql or client.query(sql, { window_token })");
+		expect(message).toContain("Add the source's own filters to your SQL");
 		expect(message).toContain(
 			"Reduce pages in code",
 		);

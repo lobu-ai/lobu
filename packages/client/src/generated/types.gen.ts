@@ -620,6 +620,10 @@ export type QuerySqlData = {
      */
     sql: string;
     /**
+     * Run-bound Automation window_token. Select stored event versions as of its window end, applying its arrival bounds, entity scope and self-output exclusion. Use the latest page token after lease renewal. Current access checks still apply; not supported with connection pushdown.
+     */
+    window_token?: string;
+    /**
      * Optional connection slug. When set, `sql` runs LIVE (read-only) against that connection’s external database via its connector (pushdown), and the internal org-scoping is skipped. When unset, the query runs over your org’s internal tables.
      */
     connection?: string;
