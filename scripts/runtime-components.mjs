@@ -79,7 +79,7 @@ export function runtimeVerificationSource(key, component) {
       "  try {",
       '    if (name === "worker") {',
       // The worker is an executable; importing it runs main and exits.
-      '      const child = spawnSync(process.execPath, [fileURLToPath(url), "--help"], { stdio: "inherit", timeout: 30000 });',
+      '      const child = spawnSync(process.execPath, [fileURLToPath(url), "--help"], { stdio: ["ignore", "ignore", "inherit"], timeout: 30000 });',
       "      if (child.error) throw child.error;",
       '      if (child.status !== 0) throw new Error("worker --help exited " + (child.status ?? child.signal));',
       "    } else await import(url);",

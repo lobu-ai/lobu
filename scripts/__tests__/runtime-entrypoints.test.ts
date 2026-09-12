@@ -105,7 +105,7 @@ test.each([
           source =
             scenario === "worker-exit"
               ? "process.exit(17);"
-              : 'if (process.argv[2] !== "--help") throw new Error("Expected worker --help"); process.exit(0);';
+              : 'if (process.argv[2] !== "--help") throw new Error("Expected worker --help"); console.log("fixture worker usage"); process.exit(0);';
         await file(join(directory, entry), source);
       }
       const worker = join(directory, "node_modules/@lobu/connector-worker");
@@ -141,6 +141,15 @@ test.each([
   });
   if (scenario === "valid") {
     const installed = await installation;
+    for (const runtime of ["node", process.execPath]) {
+      const result = spawnSync(runtime, [join(installed, component.verify)], {
+        encoding: "utf8",
+        cwd: installed,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("");
+    }
     await expect(
       ensureComponent(component, { cacheRoot, offline: true })
     ).resolves.toBe(installed);
