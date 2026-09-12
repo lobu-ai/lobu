@@ -1,8 +1,8 @@
 # Realtime feed dispatch: current architecture and consolidation proposal
 
-Code snapshot: Lobu `a8e677aa0eb0d41069eb1fc0978403c0cea71235`, with Owletto `41de0c560165793a02985192ef2798552b22a061`, inspected on 2026-09-12.
+Baseline snapshot: Lobu `a8e677aa0eb0d41069eb1fc0978403c0cea71235`, with Owletto `41de0c560165793a02985192ef2798552b22a061`. Draft implementation audited at Lobu `678c6bbc0` and Owletto `63cbc7a0` on 2026-09-12; the cleanup below is additional working-tree work. The baseline inventory and historical sequence diagrams are labelled separately from this draft.
 
-The WhatsApp live-source transport was already implemented. Consolidation is in draft [PR #3519](https://github.com/lobu-ai/lobu/pull/3519), with foundation commit `8da05bee9` and additional local changes. Nothing from this consolidation has merged or deployed. The live WhatsApp feed still advertises only `sync` and has a five-minute schedule; it does not yet meet the requested result.
+The WhatsApp live-source transport was already implemented. Consolidation is in draft [PR #3519](https://github.com/lobu-ai/lobu/pull/3519), with browser changes in [Owletto PR #1090](https://github.com/lobu-ai/owletto/pull/1090). Nothing from these drafts has merged or deployed. The last live inspection found the WhatsApp feed advertising only `sync` with a five-minute schedule; that is not the requested result or a fresh provider test.
 
 The local implementation adds `onDelivery` inside the existing isolate executor, batches browser records into the existing `runs.action_input`, and preserves the one-active-sync-run-per-feed constraint. Arrivals while a run executes stay in the browser's durable buffer. Complete WhatsApp text batches normalize without a browser/source read. Only exact successfully ingested revisions are acknowledged. Idle source checks and empty worker claims create no runs. A lone message can form a one-message batch; an Automation and its output actions have their own existing runs.
 
@@ -28,7 +28,9 @@ The target is an integration implemented entirely in a connector package: its lo
 
 ### Agreed layering rule
 
-Each higher-level feature composes the existing lower-level primitives. Source adapters may differ because a webhook, browser observer and scheduled API read receive data differently; execution, capability authorization, event output and ingestion must converge.
+Everything is expressed through connectors and Automations. Consolidation is the architecture, not an optional layer. Optional capabilities describe what a connector supports: pull, push, conversation context, replies, drafts, or other actions. Server, browser and device are execution placements, not separate integration models.
+
+Each higher-level feature composes the existing lower-level primitives. Source adapters may differ because a webhook, browser observer and scheduled API read receive data differently; execution, capability authorization, event output and ingestion must converge. Conversation handling must reuse the existing routing, transcript and turn machinery, with outbound actions using the existing authorization and approval decisions.
 
 | Layer | Owns | Reuses |
 | --- | --- | --- |
@@ -116,7 +118,7 @@ Use separate reviewable PRs for the generic contract/runtime, WhatsApp adapter/e
 
 Remove a legacy path only after the replacement covers its production entry points and recovery processing. End with an ownership audit: a new external connector using supported host capabilities must implement installation/authentication, pull, push, browser actions and teardown through the SDK without a provider-specific server or extension edit. Record remaining native capability or provider lifecycle gaps explicitly; two passing providers do not prove every possible integration already works.
 
-## 2. Current architecture
+## 2. Baseline architecture before the draft
 
 This diagram focuses on trigger-based feeds. GitHub's direct-store exception appears separately below.
 
@@ -291,9 +293,42 @@ Before calling the change complete:
 5. Prove source hints during held polls, busy workers, overlapping source changes, disconnects, lost notifications, reconnects, and stale revision acknowledgments recover correctly.
 6. Test both GitHub trigger and direct-store ingestion parity, and repeat the real WhatsApp self-message-to-visible-notification flow after deployment.
 
-## Current connector inventory and routes
+## Remaining gaps and deletion gates
 
-This is an inspection of bundled source, the pinned Owletto manifests/handlers, and named example/remote paths. It is not a live connection or provider-health audit. There are 23 bundled definitions and 13 device manifests; installed custom versions require their own inspection. No current generic SDK push handler is implied by a source listener or streaming transport.
+The audit covered the 23 bundled definitions and the existing server conversation path. The common delivery hook is implemented in the draft; it does not yet provide a universal bot flow.
+
+| Gap | Reuse / implement | Remove after the replacement passes |
+| --- | --- | --- |
+| Separate webhook ingestion | Invoke connector-owned delivery mapping through the existing isolate, event writer and Automation activation. Cover both GitHub app-installation and registered-connection routes, plus durable arrivals while busy. | `landGithubStarEvent` direct writer and superseded provider branches in generic routing. Keep provider signature/auth adapters connector-owned. |
+| WhatsApp still depends on scheduled work to finish backfill | A connector requests another bounded run while history or required media remains. Commit its checkpoint before advancing; stop when complete. Keep observer recovery and explicit pulls. | The recurring WhatsApp source schedule and complete-message browser rereads. Do not remove recovery or media retry work. |
+| Feed messages cannot yet use the existing bot conversation path | Connector-declared stable message/conversation identity, direction, context access and reply/draft action mapping. Reuse Automation activation planning, conversation turns and action approval. | A manually maintained provider registry in generic core once connector adapters can supply the same capabilities; provider-specific routing and reply glue superseded by that contract. Keep useful adapter implementations. |
+| New activity is confused with stored-event changes | Distinguish live messages from historical backfill and outbound echoes. Derive stable activation identity from source messages; preserve Gmail's thread storage identity while emitting a signal for a new message within a thread. | The prior-successful-sync heuristic as a proxy for completed backfill, and any duplicated activation logic replaced by the shared path. |
+| Chat capability declarations are inconsistent | Use the existing event catalog and Automation editor across all six current chat integrations. Slack alone declares `message.created` and reply/steering capabilities in the inspected bundled definitions. | Slack-only shared catalog assumptions and hardcoded Slack wording in the generic conversation UI. |
+| Connector tests duplicate the SDK | Use the actual SDK runtime, schemas, pagination and checkpoint helpers. Keep controlled external-I/O fixtures. | Removed the duplicate runtime classes and pure helpers: 109 deleted lines, 8 added. The whole connector suite reproduced four `onDelivery` failures before the change and passes all 512 tests afterward. |
+
+Two current code paths explain the activation gap. `deriveConnectorActivationSignals` activates only inserted source records after any prior successful sync: a later backfill page can activate historical records, while a new Gmail message updating an existing thread does not count as inserted. Also, an empty `automation_signals` array currently falls back to derived activation; it cannot explicitly suppress backfill or echo activation. These are code-path findings, not live-message evidence.
+
+The intended conversation flow is:
+
+```mermaid
+flowchart LR
+  Source[Webhook / browser observer / pull] --> Connector[Connector normalizes source events]
+  Connector --> Ingest[Shared persistence and stable dedupe]
+  Ingest --> Match[Automation matching]
+  Match --> Turn[Existing conversation and agent turn]
+  Turn --> Action[Connector reply or draft action]
+  Action --> Policy[Existing authorization and approval]
+  Policy --> Runtime[Server / browser / device execution]
+  Runtime --> Receipt[Source receipt and conversation history]
+```
+
+Not every connector needs conversation capabilities: RSS can feed an Automation, GitHub can update an issue, Gmail can reply to a thread, and WhatsApp can reply to a conversation through the same composition. Interactive browser drafts remain user-activated. A bot is a configured Automation and agent, not another integration subsystem.
+
+Finish the delivery foundation first, then the bounded backfill lifecycle, shared activation/conversation contract, and webhook cutover in separate reviewable changes. Delete each old path in the change that proves its replacement. Required final proof is a real WhatsApp self-message through the deployed extension, isolate, stored event, Automation and visible reply/notification, plus GitHub delivery parity. Neither has been newly demonstrated by these drafts.
+
+## Baseline connector inventory and routes
+
+This table describes the baseline snapshot, before the draft delivery implementation. It is an inspection of bundled source, the pinned Owletto manifests/handlers, and named example/remote paths, not a live connection or provider-health audit. There are 23 bundled definitions and 13 device manifests; installed custom versions require their own inspection. A source listener or streaming transport alone does not establish SDK push support.
 
 | Connector | Scope | Current delivery | Runs where | Output |
 | --- | --- | --- | --- | --- |
