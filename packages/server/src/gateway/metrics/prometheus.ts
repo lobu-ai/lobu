@@ -207,6 +207,12 @@ function initializeMetrics() {
     "gauge"
   );
 
+  registerMetric(
+    "lobu_legacy_compat_hits_total",
+    "Legacy compatibility path executions, by path. Sunset signal for old-client support: quiet on every path is the deletion gate. Do not add new uses.",
+    "counter"
+  );
+
   setGaugeInternal("lobu_process_start_time_seconds", Math.floor(Date.now() / 1000));
   logger.info("Prometheus metrics initialized");
 }

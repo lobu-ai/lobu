@@ -6,6 +6,7 @@ import {
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "hono";
 import { getDb } from "../db/client";
+import { incrementCounter } from "../gateway/metrics/prometheus";
 import {
 	insertThreadResponseRow,
 	notifyThreadResponse,
@@ -74,6 +75,7 @@ function stampExecutionTarget(
 		}
 	} catch {
 		// A malformed legacy prefix remains readable after a fresh session header.
+		incrementCounter('lobu_legacy_compat_hits_total', { path: 'legacy_session_prefix' });
 	}
 	return `${deviceSessionHeader(payload, now)}\n${prefix}`;
 }
