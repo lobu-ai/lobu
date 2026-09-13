@@ -342,6 +342,55 @@ describe('feed dry run persists nothing', () => {
     });
   });
 
+  it('rejects an all-invalid connector batch without advancing its checkpoint', async () => {
+    const sql = getTestDb();
+    const { orgId, feedId, runId } = await seed(false);
+    await createTestConnectorDefinition({
+      key: 'rss',
+      name: 'Kind-restricted feed',
+      organization_id: orgId,
+      feeds_schema: {
+        items: {
+          eventKinds: {
+            story: {},
+          },
+        },
+      },
+    });
+
+    const streamed = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      checkpoint: { cursor: 'after-rejected-page' },
+      items: [
+        {
+          id: 'invalid-kind-item',
+          origin_type: 'hn_story',
+          title: 'This event kind was never declared',
+          payload_text: 'A connector author used hn_story while declaring story.',
+          payload_type: 'text',
+          occurred_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    await streamContent(streamed.ctx);
+
+    // A rejected page is not successful ingestion. A non-2xx response forces
+    // the worker to fail the run instead of reporting the offered item count as
+    // collected and committing the cursor that made this page unreachable.
+    expect(streamed.result().status).toBeGreaterThanOrEqual(400);
+    expect(streamed.result().body).toMatchObject({
+      rejected_items: [
+        expect.objectContaining({ id: 'invalid-kind-item', semantic_type: 'hn_story' }),
+      ],
+    });
+
+    expect((await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId}`)[0].count).toBe(0);
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
+    expect((await sql`SELECT checkpoint FROM runs WHERE id = ${runId}`)[0].checkpoint).toBeNull();
+  });
+
   const feedSyncState = (feedId: number) => {
     const sql = getTestDb();
     return sql`
