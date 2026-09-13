@@ -148,7 +148,13 @@ timeout, and one failure does not discard successful results from the others.
   it only when source identity genuinely changes.
 - **Checkpointing.** Return `checkpoint` (timestamp- or id-based) for incremental
   sync; use `ctx.emitEvents` / `ctx.updateCheckpoint` mid-sync for long runs so a
-  crash resumes from the last saved point.
+  crash resumes from the last saved point. The checkpoint is stored on the
+  configured feed and is **not** invalidated by bumping the connector's
+  `version` — updating connector source leaves feed state, checkpoints, and
+  collected data untouched. If you change the event or checkpoint shape, handle
+  old checkpoints in the connector itself: carry a schema/scope version inside
+  the checkpoint and reset when it mismatches, the way the shipped Google
+  connectors do (`google_calendar.ts`, `google_gmail.ts`).
 - **`eventKinds`.** Declare the event types the feed can emit. A feed's
   `eventKinds` are also the default Automation trigger catalog: each kind becomes
   a subscribable event type. The first successful non-dry sync establishes the
