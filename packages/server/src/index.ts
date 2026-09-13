@@ -1054,6 +1054,11 @@ app.get("/api/organizations", async (c) => {
 	}
 
 	const orgs = await provider.listOrganizations(search, userId);
+	// Membership is per-user authorization state: a cached `is_member: false`
+	// from the seconds after signup (before the member row commits) must never
+	// be replayed by a browser or intermediary cache — the client treats this
+	// payload as the membership gate for agent management.
+	c.header("Cache-Control", "no-store");
 	return c.json({ organizations: orgs });
 });
 
