@@ -15,9 +15,10 @@
 
 import { readFile } from "node:fs/promises";
 
+import { resolveApiClient } from "../internal/api-client.js";
 import { printJson } from "../internal/output.js";
 import { parseJsonObject, ValidationError } from "./memory/_lib/errors.js";
-import { restGet, restToolCall } from "./memory/_lib/mcp.js";
+import { restToolCall } from "./memory/_lib/mcp.js";
 import {
   getSessionForOrg,
   mcpUrlForOrg,
@@ -190,13 +191,14 @@ export async function callCommand(
 ): Promise<void> {
   const json = options.json === true;
   const raw = options.raw === true;
-  const mcpUrl = await resolveCallEndpoint(options);
-
   if (options.list || !tool) {
-    const result = await restGet<{ tools: ToolListEntry[] }>(
-      mcpUrl,
-      "tools",
-      options.context
+    const { client, orgSlug } = await resolveApiClient({
+      context: options.context,
+      org: options.org,
+      apiUrl: options.url,
+    });
+    const result = await client.get<{ tools: ToolListEntry[] }>(
+      `/api/${encodeURIComponent(orgSlug)}/tools`
     );
     const tools = Array.isArray(result?.tools) ? result.tools : [];
     printToolList(tools, {
@@ -207,6 +209,7 @@ export async function callCommand(
     return;
   }
 
+  const mcpUrl = await resolveCallEndpoint(options);
   const args = await buildArgs(options);
   const result = await restToolCall<unknown>(
     mcpUrl,
