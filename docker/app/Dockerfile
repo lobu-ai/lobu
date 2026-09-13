@@ -168,6 +168,11 @@ RUN if [ "$SKIP_WEB_BUILD" = "false" ] && [ -f packages/owletto/package.json ]; 
       mkdir -p /app/packages/owletto/dist; \
     fi
 
+# Keep browser automation available while building/testing, then remove its
+# installed packages by manifest identity before copying the production graph.
+COPY scripts/image-browser-tooling.mjs scripts/image-browser-tooling.mjs
+RUN node scripts/image-browser-tooling.mjs --prune /app
+
 # ===========================================
 # Runtime
 # ===========================================
@@ -215,6 +220,8 @@ COPY --from=builder /app/packages/server ./packages/server
 COPY --from=builder /app/packages/cli ./packages/cli
 RUN ln -s /app/packages/cli/bin/lobu.js /usr/local/bin/lobu
 COPY --from=builder /app/packages/owletto ./packages/owletto
+COPY --from=builder /app/scripts/image-browser-tooling.mjs ./scripts/image-browser-tooling.mjs
+RUN node scripts/image-browser-tooling.mjs --check /app
 
 # Database migrations (+ statement-at-a-time runner for transaction:false)
 COPY db/migrations ./db/migrations
