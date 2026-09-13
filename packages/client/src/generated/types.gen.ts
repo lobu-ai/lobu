@@ -522,13 +522,6 @@ export type QuerySdkResponses = {
    * Successful response
    */
   200: {
-    files?: Array<{
-      $file: string;
-      filename: string;
-      content_type: string;
-      size_bytes: number;
-      sha256: string;
-    }>;
     /**
      * The caller-supplied human-friendly heading for this result, echoed back for the UI.
      */
@@ -792,13 +785,6 @@ export type RunSdkResponses = {
    * Successful response
    */
   200: {
-    files?: Array<{
-      $file: string;
-      filename: string;
-      content_type: string;
-      size_bytes: number;
-      sha256: string;
-    }>;
     /**
      * The caller-supplied human-friendly heading for this result, echoed back for the UI.
      */
@@ -881,6 +867,13 @@ export type RunSdkResponses = {
       count: number;
     }>;
     dry_run: boolean;
+    files?: Array<{
+      $file: string;
+      filename: string;
+      content_type: string;
+      size_bytes: number;
+      sha256: string;
+    }>;
   };
 };
 

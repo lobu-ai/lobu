@@ -19,7 +19,7 @@ export interface FileInputOptions {
   contentTypes?: string[];
 }
 
-/** Base64 expands this to the isolate's existing 16 MiB string-message cap. */
+/** Base64 encoding expands this raw-byte limit to 16 MiB. */
 export const MAX_CONNECTOR_FILE_BYTES = 12 * 1024 * 1024;
 
 /**

@@ -7,6 +7,10 @@ describe("MCP attachment input", () => {
   it("advertises native attachment transfer on run_sdk", () => {
     const tool = getMcpTools().find((item) => item.name === "run_sdk");
     expect(tool?._meta?.["openai/fileParams"]).toEqual(["files"]);
+    expect(tool?.outputSchema.properties.files).toBeDefined();
+    expect(
+      getMcpTools().find((item) => item.name === "query_sdk")?.outputSchema.properties.files,
+    ).toBeUndefined();
     const schema = RunSchema.properties.files;
     expect(schema).toBeDefined();
     expect(schema.items.required).toEqual(["download_url", "file_id"]);

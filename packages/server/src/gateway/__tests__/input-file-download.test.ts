@@ -19,6 +19,16 @@ describe('host download adapter', () => {
     expect(JSON.stringify(files)).not.toContain('secret-test');
   });
 
+  test('rejects response-derived MIME metadata outside the reusable file contract', async () => {
+    fetch.mockResolvedValueOnce(new Response('bytes', { headers: { 'content-type': `image/${'x'.repeat(100)}` } }));
+    await expect(ingestInputFiles(
+      [attachmentFromUrl('https://files.example.test/photo', {})],
+      { isAuthenticated: true, organizationId: 'org-download-test', userId: 'user-download-test' },
+      env.artifactStore,
+      TEST_GATEWAY_URL,
+    )).rejects.toThrow('invalid media type metadata');
+  });
+
   test('hides signed URLs on fetch and parsing errors', async () => {
     fetch.mockRejectedValueOnce(new Error('Failed https://files.example.test/?token=secret-test'));
     for (const url of ['https://files.example.test/?token=secret-test', 'invalid-secret-test']) {

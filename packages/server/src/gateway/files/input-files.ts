@@ -89,9 +89,14 @@ export async function fetchInputFile(url: string, signal?: AbortSignal): Promise
       await cancelResponseBody(response);
       throw new ToolUserError(`File download returned HTTP ${response.status}. Upload the file again.`, 422);
     }
+    const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+    if (contentType && (contentType.length > 100 || /[\r\n\0]/.test(contentType))) {
+      await cancelResponseBody(response);
+      throw new ToolUserError('Downloaded file has invalid media type metadata.', 422);
+    }
     return {
       bytes: await readResponseBytesWithLimit(response, MAX_ARTIFACT_BYTES, 'File exceeds the upload size limit'),
-      contentType: response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase(),
+      contentType: contentType || undefined,
     };
   } catch (error) {
     if (error instanceof ToolUserError) throw error;

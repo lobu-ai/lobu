@@ -41,7 +41,19 @@ describe('connector file authorization and resolution', () => {
     const prepared = await prepareOperationFiles({ images: [file] }, schema, owner, env.artifactStore);
     await expect(prepareOperationFiles({ image: file }, {}, owner, env.artifactStore)).rejects.toThrow('must declare');
     await expect(resolveOperationFiles(prepared.input, {}, env.artifactStore)).rejects.toThrow('changed after authorization');
+    await expect(resolveOperationFiles({ images: [] }, { input_files: prepared.claims }, env.artifactStore)).rejects.toThrow('changed after authorization');
+    const pair = await prepareOperationFiles({ images: [file, replacement] }, schema, owner, env.artifactStore);
+    await expect(resolveOperationFiles({ images: [file] }, { input_files: pair.claims }, env.artifactStore)).rejects.toThrow('changed after authorization');
     await expect(resolveOperationFiles({ images: [replacement] }, { input_files: prepared.claims }, env.artifactStore)).rejects.toThrow('changed after authorization');
+    await expect(resolveOperationFiles(
+      { images: [{
+        base64: Buffer.from('replacement').toString('base64'),
+        filename: 'replacement.png',
+        content_type: 'image/png',
+      }] },
+      { input_files: prepared.claims },
+      env.artifactStore,
+    )).rejects.toThrow('changed after authorization');
     await env.artifactStore.delete(inputArtifactId(file)!);
     await expect(resolveOperationFiles(prepared.input, { input_files: prepared.claims }, env.artifactStore)).rejects.toThrow('missing or changed');
   });

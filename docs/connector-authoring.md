@@ -214,11 +214,11 @@ are also returned when the script fails, so retry with those references.
 
 Ingestion uses the shared artifact store and accepts up to 10 files, 50 MiB per
 file and 100 MiB per batch. Connector execution accepts at most 12 MiB of file
-data per operation, or the connector's smaller declared limit; the current
-isolate bridge caps each base64 string at 16 MiB. References are bound to the uploading user,
-workspace, and any agent or Automation identity. The existing operation queue
-records file authorization before approval and resolves the same stored bytes
-at execution; missing or substituted files fail before connector dispatch.
+data per operation, or the connector's smaller declared limit. References are
+bound to the uploading user, workspace, and any agent or Automation identity.
+The existing operation queue records file authorization before approval and
+resolves the same stored bytes at execution; missing or substituted files fail
+before connector dispatch.
 
 ### Auth methods
 

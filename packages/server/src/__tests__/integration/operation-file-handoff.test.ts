@@ -196,11 +196,14 @@ describe('multipart file → operation approval → connector execution', () => 
     expect(await completed.json()).toMatchObject({ success: true });
   });
 
-  it.each(['missing', 'substituted'])('fails a %s file before handing the approved run to a worker', async (condition) => {
+  it.each(['missing', 'substituted', 'inline-replaced'])('fails a %s file before handing the approved run to a worker', async (condition) => {
     const { files } = await (await upload()).json() as { files: Record<string, unknown>[] };
     const queued = await manageOperations({ action: 'execute', connection_id: connectionId, operation_key: 'upload', input: { image: files[0] } }, {} as Env, ctx) as { run_id: number };
     let replacement: Record<string, unknown> | undefined;
     if (condition === 'missing') await store.delete(inputArtifactId(files[0])!);
+    else if (condition === 'inline-replaced') replacement = {
+      base64: Buffer.from('replacement').toString('base64'), filename: 'replacement.png', content_type: 'image/png',
+    };
     else replacement = ((await (await upload()).json()) as { files: Record<string, unknown>[] }).files[0];
     const approval = await post(`/api/${orgSlug}/manage_operations`, {
       cookie, body: { action: 'approve', run_id: queued.run_id, ...(replacement ? { input: { image: replacement } } : {}) },

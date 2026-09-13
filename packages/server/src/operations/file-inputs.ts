@@ -127,19 +127,25 @@ export async function resolveOperationFiles(
   metadata: Record<string, unknown> | null | undefined,
   store?: ArtifactStore,
 ): Promise<Record<string, unknown>> {
-  if (!hasFiles(input)) return input;
   const claims = Array.isArray(metadata?.input_files) ? metadata.input_files as FileClaim[] : [];
+  const changed = () => new ToolUserError('Operation file changed after authorization. Create a new operation with the intended file.', 422);
+  if (!hasFiles(input)) {
+    if (claims.length > 0) throw changed();
+    return input;
+  }
   const artifacts = storeOrThrow(store);
+  const unresolvedClaims = new Set(claims);
   let totalBytes = 0;
-  return rewriteFiles(input, {}, async (value, path) => {
+  const resolved = await rewriteFiles(input, {}, async (value, path) => {
     const artifactId = inputArtifactId(value);
     const claim = claims.find((item) => JSON.stringify(item.path) === JSON.stringify(path));
     if (!artifactId || !claim || claim.artifactId !== artifactId ||
         typeof claim.binding !== 'string' || !/^input:[0-9a-f]{64}$/.test(claim.binding) ||
         !Number.isSafeInteger(claim.maxBytes) || claim.maxBytes <= 0 || claim.maxBytes > MAX_CONNECTOR_FILE_BYTES ||
         typeof claim.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(claim.sha256)) {
-      throw new ToolUserError('Operation file changed after authorization. Create a new operation with the intended file.', 422);
+      throw changed();
     }
+    unresolvedClaims.delete(claim);
     const file = await artifacts.read(artifactId, { binding: claim.binding, maxBytes: claim.maxBytes });
     if (!file || file.metadata.sha256 !== claim.sha256) {
       throw new ToolUserError('An authorized operation file is missing or changed. Upload it again and create a new operation.', 422);
@@ -148,10 +154,13 @@ export async function resolveOperationFiles(
     if (totalBytes > MAX_CONNECTOR_FILE_BYTES) throw new ToolUserError('Operation files exceed the 12 MiB connector execution limit. Use smaller files or separate operations.', 413);
     return { base64: file.bytes.toString('base64'), filename: file.metadata.filename, content_type: file.metadata.contentType };
   });
+  if (unresolvedClaims.size > 0) throw changed();
+  return resolved;
 }
 
 export async function resolveRunFiles(runId: number, organizationId: string, input: Record<string, unknown>) {
-  if (!hasFiles(input)) return input;
+  // Approval can remove or inline a stored reference, so claims must be loaded
+  // before resolveOperationFiles decides that the input contains no references.
   const [run] = await getDb()<{ run_metadata: Record<string, unknown> | null }>`
     SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${organizationId} AND run_type = 'action'
   `;

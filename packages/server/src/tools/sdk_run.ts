@@ -127,7 +127,6 @@ const StartedSideEffectSchema = Type.Object({
  * is being asked to review.
  */
 export const SdkScriptResultSchema = Type.Object({
-  files: Type.Optional(Type.Array(StoredInputFileSchema)),
   title: Type.Optional(
     Type.String({
       description: "The caller-supplied human-friendly heading for this result, echoed back for the UI.",
@@ -186,6 +185,11 @@ export const SdkScriptResultSchema = Type.Object({
   ),
   dry_run: Type.Boolean(),
 });
+
+export const RunSdkScriptResultSchema = Type.Composite([
+  SdkScriptResultSchema,
+  Type.Object({ files: Type.Optional(Type.Array(StoredInputFileSchema)) }),
+]);
 
 type PublicSideEffectPreviewEntry = Static<typeof PublicSideEffectPreviewEntrySchema>;
 
