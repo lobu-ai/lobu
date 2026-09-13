@@ -50,6 +50,15 @@ export async function orgSetCommand(
   options?: { context?: string }
 ): Promise<void> {
   const target = await resolveContext(options?.context);
+  const orgs = await listOrganizations({ context: target.name });
+  if (!orgs.some((org) => org.slug === slug)) {
+    const available = orgs.map((org) => org.slug).join(", ");
+    throw new Error(
+      available
+        ? `Organization "${slug}" is not available for this login. Available: ${available}`
+        : `Organization "${slug}" is not available for this login.`
+    );
+  }
   await setActiveOrg(slug, target.name);
   console.log(
     chalk.green(`\n  Active org for context ${target.name} set to ${slug}\n`)
