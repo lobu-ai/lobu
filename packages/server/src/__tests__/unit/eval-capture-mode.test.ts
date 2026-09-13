@@ -62,6 +62,38 @@ describe("buildWorkerTokenClaims — executionMode", () => {
 	});
 });
 
+describe("buildWorkerTokenClaims — chat dry-run", () => {
+	// `lobu chat --dry-run`: the CLI sets dryRun on its own session, the gateway
+	// stamps it onto the enqueue's platformMetadata, and it must mint the same
+	// capture claim an eval run gets — otherwise the flag is carried all the
+	// way to the queue and silently dropped, and the turn writes for real.
+	test("a dry-run chat session mints the capture claim", () => {
+		const claims = buildWorkerTokenClaims({
+			...base,
+			platformMetadata: { dryRun: true },
+		});
+		expect(claims.executionMode).toBe("capture");
+	});
+
+	test.each([
+		["false", false],
+		["string", "true"],
+		["null", null],
+	])("%s dryRun stays live", (_label, value) => {
+		const claims = buildWorkerTokenClaims({
+			...base,
+			platformMetadata: { dryRun: value },
+		});
+		expect(claims.executionMode).toBeUndefined();
+	});
+
+	test("an absent dryRun stays live", () => {
+		expect(
+			buildWorkerTokenClaims({ ...base, platformMetadata: {} }).executionMode,
+		).toBeUndefined();
+	});
+});
+
 describe("buildWorkerTokenClaims — automationRunId", () => {
 	// The claim addresses the row the internal-route guard writes its capture
 	// record onto. It rides the token so the guard never has to re-derive a run

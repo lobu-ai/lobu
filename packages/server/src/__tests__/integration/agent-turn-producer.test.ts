@@ -336,6 +336,46 @@ describe('agent turn producer', () => {
     }
   });
 
+  it('CAPTURES side effects for a dry-run chat turn instead of performing them', async () => {
+    // `lobu chat --dry-run` (lobu issue: dry-run created a real entity): the
+    // session flag rides platformMetadata.dryRun, and the turn credential must
+    // carry it as a capture claim — otherwise the flag survives the whole
+    // enqueue path and is dropped exactly where it could have been enforced.
+    const org = await createTestOrganization();
+    const message = { ...messageFor(org.id), platformMetadata: { dryRun: true } } as MessagePayload;
+    await enqueueMessage(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    expect(verifyWorkerToken(run.action_input.credential as string)).toMatchObject({
+      runId: run.id,
+      organizationId: org.id,
+      executionMode: 'capture',
+    });
+    const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
+    const app = createInteractionRoutes({ postLinkButton } as never);
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
+    try {
+      if (!server.listening) await new Promise<void>((resolve) => server.once('listening', resolve));
+      const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/internal/interactions/create`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${run.action_input.credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ interactionType: 'link_button', url: 'https://example.invalid', label: 'Interaction attempt' }),
+      });
+      expect(response.status).toBe(200);
+      // The mirror of the live-turn assertion above: captured, NOT performed,
+      // and the attempt is recorded on the turn run for the dry-run preview.
+      expect(postLinkButton).not.toHaveBeenCalled();
+      const [captured] = await getTestDb()`SELECT dry_run_preview FROM runs WHERE id = ${run.id}`;
+      const sideEffects = (captured?.dry_run_preview as { side_effects?: Array<{ action: string }> } | null)?.side_effects ?? [];
+      expect(sideEffects.map((entry) => entry.action)).toContain('interactions.create');
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it.each(['compatible', 'codex'])('executes a %s tool round trip through worker HTTP and an isolate', async (protocol) => {
     const requests: Array<Record<string, any>> = [];
     const serverErrors: string[] = [];
