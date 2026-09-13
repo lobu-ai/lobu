@@ -7,21 +7,22 @@
  * is: announce a floor → wait out the grace window (store review + stragglers)
  * → set MIN_CLIENT_VERSION → delete the legacy arms once enforcement holds.
  *
- * This module is the ENFORCING gate, and it is the strong one. Legacy-compat
- * telemetry going quiet is a statement about observed traffic in a window, not
- * an invariant — a device asleep for 15 days re-enters a legacy arm the moment
- * it wakes. A floor, by contrast, makes a version-gated precondition
- * unreachable by construction, so deleting the arm behind it is provable by
- * reading code. Treat the counters as corroboration, never as the gate.
+ * This module is the ENFORCING gate, and it is the strong one. Counting how
+ * many old clients still call is a statement about observed traffic in a
+ * window, not an invariant — a device asleep for the whole window re-enters a
+ * legacy arm the moment it wakes. A floor, by contrast, makes a version-gated
+ * precondition unreachable by construction, so deleting the arm behind it is
+ * provable by reading code. Such a counter is corroboration, never the gate.
  *
  * Floors are PER PLATFORM because the clients ship independent version lines:
  * a single global value cannot gate one line without rejecting or ignoring the
  * others. Critically, those lines DO NOT SHARE A SCALE — `chrome-extension`
  * reports its extension manifest version (0.x) while `macos` and `headless`
- * both report the daemon/monorepo line (19.x). A macOS floor written against
- * the Mac app's MARKETING_VERSION sits below every real row and enforces
- * nothing. Read the values off `device_workers` before setting them; never
- * invent them (see .env.example for the query).
+ * both report the monorepo release line (`lobu-vN`, majors in the tens). A
+ * macOS floor written against the Mac app's MARKETING_VERSION (0.x) therefore
+ * sits below every real row and enforces nothing. Read the values off
+ * `device_workers` before setting them; never invent them (see .env.example
+ * for the query).
  *
  * MIN_CLIENT_VERSION is a comma-separated `platform=version` map, e.g.
  * `chrome-extension=0.6.0,macos=19.2.0,headless=19.0.0`. Unset/empty disables
@@ -44,10 +45,11 @@ const logger = createLogger('client-version-floor');
  *
  * Ignoring them silently is the dangerous half: a typo (`macos=19.2`, two
  * parts) drops that platform's floor while the variable still *looks* set, so
- * the operator believes they are enforcing and nothing is. Warn once per
- * distinct value — this runs on every device poll, so the parse is memoized on
- * the raw string (which also re-parses correctly the moment the env changes,
- * as tests do).
+ * the operator believes they are enforcing and nothing is. So warn, naming the
+ * entries. This runs on every device poll, so the parse is memoized on the raw
+ * string — that bounds the warn to once per process for a stable value, and
+ * re-parses the moment the env changes (as tests do). The cache is
+ * process-local, which is correct: `process.env` is too.
  */
 let floorCache: { raw: string; floors: Map<string, string> } | null = null;
 
@@ -63,16 +65,19 @@ function envFloors(): Map<string, string> {
     const cut = trimmed.indexOf('=');
     const platform = cut > 0 ? trimmed.slice(0, cut).trim() : '';
     const version = cut > 0 ? trimmed.slice(cut + 1).trim() : '';
-    if (platform !== '' && parseClientVersion(version) != null) {
-      floors.set(platform, version);
-    } else {
+    if (platform === '' || parseClientVersion(version) == null) {
       ignored.push(trimmed);
+      continue;
     }
+    floors.set(platform, version);
   }
   if (ignored.length > 0) {
+    // Message first, details in a trailing arg: the console logger (the default
+    // transport) drops a LEADING metadata object, and which entries were
+    // ignored is the whole point of this warn.
     logger.warn(
-      { ignored, enforcing: [...floors.keys()] },
-      '[clientVersionFloor] ignoring malformed MIN_CLIENT_VERSION entries — those platforms enforce NO floor'
+      'MIN_CLIENT_VERSION: ignoring malformed entries — those platforms enforce NO floor',
+      { ignored, enforcing: [...floors.keys()] }
     );
   }
 

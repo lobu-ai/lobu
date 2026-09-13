@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
 	clientFloorMessage,
 	meetsClientVersionFloor,
@@ -74,6 +74,26 @@ describe("client version floor", () => {
 		expect(meetsClientVersionFloor("chrome-extension", "0.5.9")).toBe(false);
 		expect(meetsClientVersionFloor("headless", "18.0.0")).toBe(false);
 		expect(meetsClientVersionFloor("macos", "0.0.1")).toBe(true);
+	});
+
+	test("the warn names the dropped entries in the rendered line", () => {
+		// The default console transport DROPS a leading metadata object, so the
+		// entries have to reach the rendered line. An operator who is told "some
+		// entry dropped" without being told WHICH is back at the silent
+		// misconfiguration this warn exists to break.
+		const lines: string[] = [];
+		const spy = spyOn(console, "warn").mockImplementation((line: unknown) => {
+			lines.push(String(line));
+		});
+		try {
+			process.env.MIN_CLIENT_VERSION = "macos=19.2,headless=19.0.0";
+			expect(meetsClientVersionFloor("macos", "0.0.1")).toBe(true);
+		} finally {
+			spy.mockRestore();
+		}
+		const rendered = lines.join("\n");
+		expect(rendered).toContain("macos=19.2");
+		expect(rendered).toContain("headless");
 	});
 
 	test("a changed value takes effect immediately despite the parse cache", () => {
