@@ -49,6 +49,24 @@ function job(): ExecutorJob & { mode: 'sync' } {
 }
 
 describe('installed connector delivery in a real isolate', () => {
+  it.each([undefined, null, { next_sync_after_seconds: null }, { next_sync_after_seconds: 1 }, { next_sync_after_seconds: 'invalid' }])('preserves the optional continuation boundary for sync result %j', async (syncResult) => {
+    // Deliberately return raw plugin values to exercise the executor boundary,
+    // independently of the SDK's handler-result normalization.
+    const { compiledCode: rawCode } = await compileConnectorSource(`
+      export default class {
+        async sync(ctx) { return ctx.config.result; }
+        async execute() { return { success: true }; }
+      }
+    `);
+    const input = job();
+    delete input.delivery;
+    input.config = { result: syncResult };
+    const result = await executeCompiledConnector({ compiledCode: rawCode, job: input });
+    const expected = syncResult?.next_sync_after_seconds;
+    expect((result as { next_sync_after_seconds?: unknown }).next_sync_after_seconds).toBe(expected);
+    if (expected === undefined) expect(JSON.stringify(result)).not.toContain('next_sync_after_seconds');
+  });
+
   it('publishes push-only and hybrid capabilities without serializing handlers', async () => {
     const metadata = await extractConnectorMetadata(compiledCode);
     expect(metadata.feeds?.items).toEqual({ key: 'items', name: 'Items', operations: ['sync', 'delivery'] });

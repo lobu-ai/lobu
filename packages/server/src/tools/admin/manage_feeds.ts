@@ -1,4 +1,3 @@
-import type { FeedOperation } from '@lobu/connector-sdk';
 /**
  * Tool: manage_feeds
  *
@@ -14,6 +13,7 @@ import type { FeedOperation } from '@lobu/connector-sdk';
  * - trigger_feed: Trigger an immediate sync for a feed
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
 import {
   getErrorMessage,
   isRetryable,

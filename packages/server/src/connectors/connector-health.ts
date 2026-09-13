@@ -1,4 +1,3 @@
-import type { FeedOperation } from '@lobu/connector-sdk';
 /**
  * Connector-health alerter.
  *
@@ -85,6 +84,7 @@ import type { FeedOperation } from '@lobu/connector-sdk';
  * at `classifyFeed` for why that stays a separate, evidence-backed decision.
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
 import { type DbClient, getDb, tsTimeOrNull } from '../db/client';
 import { notifyBrowserAuthExpired } from '../notifications/triggers';
 import logger from '../utils/logger';

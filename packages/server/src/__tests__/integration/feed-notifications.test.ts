@@ -203,4 +203,58 @@ describe('buffered delivery admission through existing sync runs', () => {
     await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
     expect((await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`)).toHaveLength(1);
   });
+
+  it.each(['manifest admission', 'insert conflict'])('retains an unacknowledged batch after %s failure without blocking other notices', async (failure) => {
+    const { sql, org, device, feeds, notice } = await deliveryFixture();
+    await createTestConnectorDefinition({
+      key: 'synthetic.healthy', name: 'Healthy source', organization_id: org.id,
+      feeds_schema: { items: { operations: ['delivery'], webhook: { events: ['records'] } } },
+    });
+    const [healthy] = await sql`
+      INSERT INTO connections (organization_id, connector_key, slug, status, device_worker_id, visibility)
+      VALUES (${org.id}, 'synthetic.healthy', 'healthy-source', 'active', ${device.id}::uuid, 'org') RETURNING id
+    `;
+    await sql`UPDATE feeds SET connection_id = ${healthy.id} WHERE id = ${feeds[1].id}`;
+    const other = { ...notice, feed_id: Number(feeds[1].id), connection_id: Number(healthy.id) };
+    const ack = { ...notice.batch, records: [{ id: 'one', revision: 1 }] };
+    const [artifact] = await sql`SELECT compiled_code, compile_config_hash FROM connector_versions WHERE connector_key = 'synthetic.source'`;
+    await sql`UPDATE feeds SET checkpoint = ${sql.json({ source_ack: ack })} WHERE id = ${notice.feed_id}`;
+    if (failure === 'manifest admission') {
+      await sql`UPDATE connector_versions SET compiled_code = NULL, compile_config_hash = NULL,
+        source_path = 'device-manifest://headless/synthetic.source@1.0.0',
+        compiled_code_hash = 'synthetic-unavailable-manifest' WHERE connector_key = 'synthetic.source'`;
+    } else {
+      // A PostgreSQL error aborts the transaction, unlike a JavaScript throw.
+      // Exercise the same SQLSTATE/constraint as a raced active-run insert.
+      await sql`CREATE FUNCTION synthetic_reject_source_run() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.connector_key = 'synthetic.source' THEN
+            RAISE EXCEPTION 'synthetic active-run conflict'
+              USING ERRCODE = '23505', CONSTRAINT = 'idx_runs_active_sync_per_feed';
+          END IF;
+          RETURN NEW;
+        END $$`;
+      await sql`CREATE TRIGGER synthetic_reject_source_run BEFORE INSERT ON runs
+        FOR EACH ROW EXECUTE FUNCTION synthetic_reject_source_run()`;
+    }
+    try {
+      const receipts = await receiveFeedNotifications(sql, [notice, other], device.id, [org.id]);
+      expect(receipts).toEqual([expect.objectContaining({ feed_id: other.feed_id, active: true, ack: null })]);
+      expect(await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`).toHaveLength(0);
+      expect(await sql`SELECT id FROM runs WHERE feed_id = ${other.feed_id}`).toHaveLength(1);
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint.source_ack).toEqual(ack);
+    } finally {
+      if (failure === 'insert conflict') {
+        await sql`DROP TRIGGER synthetic_reject_source_run ON runs`;
+        await sql`DROP FUNCTION synthetic_reject_source_run()`;
+      } else {
+        await sql`UPDATE connector_versions SET compiled_code = ${artifact.compiled_code}, compile_config_hash = ${artifact.compile_config_hash},
+          source_path = NULL, compiled_code_hash = NULL WHERE connector_key = 'synthetic.source'`;
+      }
+    }
+    const [retry] = await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect(retry).toMatchObject({ active: true, ack });
+    const [run] = await sql`SELECT action_input FROM runs WHERE feed_id = ${notice.feed_id}`;
+    expect(run.action_input.delivery.payload.records).toEqual([notice.batch.records[1]]);
+  });
 });

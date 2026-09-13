@@ -165,7 +165,7 @@ describe('bounded connector continuation', () => {
     expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feedId}`)[0].due).toBe(true);
   });
 
-  it.each([0, -1, 1.5, 86401, '2'])('rejects invalid continuation %s without finalizing the run', async (delay) => {
+  it.each([null, 0, -1, 1.5, 86401, '2'])('rejects invalid continuation %s without finalizing the run', async (delay) => {
     const { runId } = await seed(false);
     const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
       status: 'success', next_sync_after_seconds: delay });
