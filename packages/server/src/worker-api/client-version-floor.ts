@@ -4,16 +4,27 @@
  * Old clients must fail LOUD ("update and retry"), never silent: a worker
  * whose version predates a capability silently misbehaves (empty claim lanes,
  * unservable runs) with nothing anywhere reporting why. The operational flow
- * is: announce a floor → watch legacy-compat telemetry go quiet for the
- * 14-day grace window (store review + stragglers) → set MIN_CLIENT_VERSION →
- * delete the legacy arms once enforcement holds. (Telemetry lives with the
- * legacy arms on their own change; this module only enforces.)
+ * is: announce a floor → wait out the grace window (store review + stragglers)
+ * → set MIN_CLIENT_VERSION → delete the legacy arms once enforcement holds.
  *
- * Floors are PER PLATFORM because the clients ship independent version lines
- * (extension manifest, Mac marketing version, CLI package version): a single
- * global value cannot gate one line without rejecting or ignoring the others.
+ * This module is the ENFORCING gate, and it is the strong one. Legacy-compat
+ * telemetry going quiet is a statement about observed traffic in a window, not
+ * an invariant — a device asleep for 15 days re-enters a legacy arm the moment
+ * it wakes. A floor, by contrast, makes a version-gated precondition
+ * unreachable by construction, so deleting the arm behind it is provable by
+ * reading code. Treat the counters as corroboration, never as the gate.
+ *
+ * Floors are PER PLATFORM because the clients ship independent version lines:
+ * a single global value cannot gate one line without rejecting or ignoring the
+ * others. Critically, those lines DO NOT SHARE A SCALE — `chrome-extension`
+ * reports its extension manifest version (0.x) while `macos` and `headless`
+ * both report the daemon/monorepo line (19.x). A macOS floor written against
+ * the Mac app's MARKETING_VERSION sits below every real row and enforces
+ * nothing. Read the values off `device_workers` before setting them; never
+ * invent them (see .env.example for the query).
+ *
  * MIN_CLIENT_VERSION is a comma-separated `platform=version` map, e.g.
- * `chrome-extension=0.9.0,macos=0.2.0,headless=20.1.0`. Unset/empty disables
+ * `chrome-extension=0.6.0,macos=19.2.0,headless=19.0.0`. Unset/empty disables
  * enforcement entirely; a platform with no entry is allowed. A SET floor for
  * a platform fails closed: a missing or unparseable client version cannot
  * prove compliance. Fleet (non-user) workers ship with the server and are
@@ -24,19 +35,48 @@
  * dotted numerics `major.minor.patch[.build]`, compared numerically.
  */
 
-/** Parse `platform=version` pairs; malformed entries are ignored (permissive). */
+import { createLogger } from '@lobu/core';
+
+const logger = createLogger('client-version-floor');
+
+/**
+ * Parse `platform=version` pairs; malformed entries are ignored (permissive).
+ *
+ * Ignoring them silently is the dangerous half: a typo (`macos=19.2`, two
+ * parts) drops that platform's floor while the variable still *looks* set, so
+ * the operator believes they are enforcing and nothing is. Warn once per
+ * distinct value — this runs on every device poll, so the parse is memoized on
+ * the raw string (which also re-parses correctly the moment the env changes,
+ * as tests do).
+ */
+let floorCache: { raw: string; floors: Map<string, string> } | null = null;
+
 function envFloors(): Map<string, string> {
-  const floors = new Map<string, string>();
   const raw = process.env.MIN_CLIENT_VERSION ?? '';
+  if (floorCache?.raw === raw) return floorCache.floors;
+
+  const floors = new Map<string, string>();
+  const ignored: string[] = [];
   for (const entry of raw.split(',')) {
-    const cut = entry.indexOf('=');
-    if (cut <= 0) continue;
-    const platform = entry.slice(0, cut).trim();
-    const version = entry.slice(cut + 1).trim();
+    const trimmed = entry.trim();
+    if (trimmed === '') continue;
+    const cut = trimmed.indexOf('=');
+    const platform = cut > 0 ? trimmed.slice(0, cut).trim() : '';
+    const version = cut > 0 ? trimmed.slice(cut + 1).trim() : '';
     if (platform !== '' && parseClientVersion(version) != null) {
       floors.set(platform, version);
+    } else {
+      ignored.push(trimmed);
     }
   }
+  if (ignored.length > 0) {
+    logger.warn(
+      { ignored, enforcing: [...floors.keys()] },
+      '[clientVersionFloor] ignoring malformed MIN_CLIENT_VERSION entries — those platforms enforce NO floor'
+    );
+  }
+
+  floorCache = { raw, floors };
   return floors;
 }
 

@@ -64,6 +64,32 @@ describe("client version floor", () => {
 		expect(meetsClientVersionFloor("macos", null)).toBe(true);
 	});
 
+	test("one malformed entry does not disarm the valid ones", () => {
+		// The dangerous shape: the variable looks set for three platforms, but
+		// `macos=19.2` is two parts and drops out. chrome-extension must still
+		// enforce, and macos must be reported as enforcing nothing rather than
+		// quietly appearing covered.
+		process.env.MIN_CLIENT_VERSION =
+			"chrome-extension=0.6.0,macos=19.2,headless=19.0.0";
+		expect(meetsClientVersionFloor("chrome-extension", "0.5.9")).toBe(false);
+		expect(meetsClientVersionFloor("headless", "18.0.0")).toBe(false);
+		expect(meetsClientVersionFloor("macos", "0.0.1")).toBe(true);
+	});
+
+	test("a changed value takes effect immediately despite the parse cache", () => {
+		// envFloors() memoizes on the raw string because it runs on every device
+		// poll. Keyed on anything coarser (a boolean "parsed once") a floor change
+		// would never take effect until restart.
+		process.env.MIN_CLIENT_VERSION = "macos=19.2.0";
+		expect(meetsClientVersionFloor("macos", "19.0.0")).toBe(false);
+
+		process.env.MIN_CLIENT_VERSION = "macos=18.0.0";
+		expect(meetsClientVersionFloor("macos", "19.0.0")).toBe(true);
+
+		delete process.env.MIN_CLIENT_VERSION;
+		expect(meetsClientVersionFloor("macos", "0.0.1")).toBe(true);
+	});
+
 	test("messages name the client when known", () => {
 		expect(clientFloorMessage("chrome-extension")).toContain("Chrome extension");
 		expect(clientFloorMessage("macos")).toContain("Mac app");
