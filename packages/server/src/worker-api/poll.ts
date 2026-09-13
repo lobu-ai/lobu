@@ -78,6 +78,10 @@ import {
 } from './device-manifests';
 import type { RunOutcome } from '../runs/run-outcome';
 import {
+  clientFloorMessage,
+  meetsClientVersionFloor,
+} from './client-version-floor';
+import {
   type ConnectorClaimContext,
   connectorClaimLaneSql,
 } from './connector-claim-lanes';
@@ -324,6 +328,23 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     agentKinds = normalizeAgentKinds(body.agent_kinds);
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
+  }
+
+  // First-party client version floor (see client-version-floor.ts). Fleet
+  // workers ship with the server and are never gated; user devices below the
+  // announced floor fail LOUD here, before any DB work, so an outdated client
+  // can never silently misbehave in the claim lanes.
+  if (
+    c.var.workerAuthMode === 'user' &&
+    !meetsClientVersionFloor(app_version)
+  ) {
+    return c.json(
+      {
+        error: 'upgrade_required',
+        error_description: clientFloorMessage(platform),
+      },
+      409
+    );
   }
 
   // postgres.js renders a bound JS array as a bare comma list, which Postgres
