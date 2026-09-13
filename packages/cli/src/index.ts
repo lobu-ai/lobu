@@ -193,6 +193,10 @@ Memory:
       "Bootstrap a re-appliable project from an existing org (defaults to active session)"
     )
     .option("--url <url>", "Server URL override (with --from-org)")
+    .option(
+      "--skip-install",
+      "Scaffold files without installing dependencies (run npm install or bun install later)"
+    )
     .action(
       async (
         name: string | undefined,
