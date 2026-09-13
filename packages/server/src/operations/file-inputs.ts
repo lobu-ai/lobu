@@ -1,5 +1,4 @@
 import { type FileInputOptions, MAX_CONNECTOR_FILE_BYTES } from '@lobu/connector-sdk';
-import { getDb } from '../db/client';
 import type { ArtifactStore } from '../gateway/files/artifact-store';
 import { inputArtifactId, inputFileBinding, MAX_INPUT_FILES, storedInputFile } from '../gateway/files/input-files';
 import { getLobuCoreServices } from '../lobu/gateway';
@@ -59,9 +58,14 @@ async function rewriteFiles(
     const entries: [string, unknown][] = [];
     for (const [key, child] of Object.entries(value)) {
       const childSchemas = expanded.flatMap((item) => {
-        const candidate = Array.isArray(value)
-          ? Array.isArray(item.items) ? item.items[Number(key)] : item.items
-          : object(item.properties) && Object.hasOwn(item.properties, key) ? item.properties[key] : item.additionalProperties;
+        let candidate: unknown;
+        if (Array.isArray(value)) {
+          candidate = Array.isArray(item.items) ? item.items[Number(key)] : item.items;
+        } else if (object(item.properties) && Object.hasOwn(item.properties, key)) {
+          candidate = item.properties[key];
+        } else {
+          candidate = item.additionalProperties;
+        }
         return object(candidate) ? [candidate] : [];
       });
       entries.push([key, await visit(child, [...path, key], childSchemas)]);
@@ -69,6 +73,16 @@ async function rewriteFiles(
     return Array.isArray(value) ? entries.map(([, child]) => child) : Object.fromEntries(entries);
   }
   return await visit(input, [], [schema]) as Record<string, unknown>;
+}
+
+function readInlineFile(value: Schema, maxBytes: number) {
+  if (typeof value.base64 !== 'string' || typeof value.filename !== 'string' || typeof value.content_type !== 'string') return null;
+  const bytes = Buffer.from(value.base64, 'base64');
+  if (!bytes.length || bytes.length > maxBytes || bytes.toString('base64') !== value.base64) return null;
+  return {
+    bytes,
+    metadata: { artifactId: '', filename: value.filename, contentType: value.content_type, size: bytes.length, sha256: '' },
+  };
 }
 
 /** Authorize files before queuing; persist claims with the existing operation run. */
@@ -97,13 +111,9 @@ export async function prepareOperationFiles(
       maxBytes = Math.min(maxBytes, Number(declaration.maxBytes));
     }
     const binding = artifactId ? inputFileBinding(ctx) : undefined;
-    const inlineBytes = !artifactId && typeof value.base64 === 'string' ? Buffer.from(value.base64, 'base64') : undefined;
     const file = artifactId
       ? await storeOrThrow(store).read(artifactId, { binding, maxBytes })
-      : inlineBytes?.length && inlineBytes.length <= maxBytes && inlineBytes.toString('base64') === value.base64 &&
-          typeof value.filename === 'string' && typeof value.content_type === 'string'
-        ? { bytes: inlineBytes, metadata: { artifactId: '', filename: value.filename, contentType: value.content_type, size: inlineBytes.length, sha256: '' } }
-        : null;
+      : readInlineFile(value, maxBytes);
     if (!file) throw new ToolUserError('File is unavailable, outside this caller’s scope, or exceeds the connector limit. Upload it again in this workspace.', 422);
     for (const declaration of declarations) {
       const contentTypes = (declaration as unknown as FileInputOptions).contentTypes;
@@ -156,14 +166,4 @@ export async function resolveOperationFiles(
   });
   if (unresolvedClaims.size > 0) throw changed();
   return resolved;
-}
-
-export async function resolveRunFiles(runId: number, organizationId: string, input: Record<string, unknown>) {
-  // Approval can remove or inline a stored reference, so claims must be loaded
-  // before resolveOperationFiles decides that the input contains no references.
-  const [run] = await getDb()<{ run_metadata: Record<string, unknown> | null }>`
-    SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${organizationId} AND run_type = 'action'
-  `;
-  if (!run) throw new ToolUserError('Operation run is unavailable.', 404);
-  return resolveOperationFiles(input, run.run_metadata);
 }

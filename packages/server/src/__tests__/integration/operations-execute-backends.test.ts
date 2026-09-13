@@ -1,11 +1,15 @@
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
+import { fileInputSchema } from "@lobu/connector-sdk";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MCP_PROTOCOL_VERSION, REDACTED_SENTINEL } from "@lobu/core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
+import * as dbClient from "../../db/client";
 import { createAutomationRun } from "../../runs/queue-service";
 import { BROWSER_GROUP_TITLE_PREFIX } from "../../worker-api/browser-action-context";
 import { manageOperations } from "../../tools/admin/manage_operations";
-import { runSdkScript } from "../../tools/sdk_run";
 import type { ToolContext } from "../../tools/registry";
 import { createAuthProfile } from "../../utils/auth-profiles";
 import { initWorkspaceProvider } from "../../workspace";
@@ -18,6 +22,9 @@ import {
 	createTestUser,
 	seedOwnerContext,
 } from "../setup/test-fixtures";
+import * as gateway from "../../lobu/gateway";
+import { ArtifactStore } from "../../gateway/files/artifact-store";
+import { ingestInputFiles } from "../../gateway/files/input-files";
 
 const LOCAL = "demo.ops.backend.local";
 const MCP = "demo.ops.backend.mcp";
@@ -254,7 +261,7 @@ describe("operations.execute backend lifecycle", () => {
 									requestBody: {
 										content: {
 											"application/json": {
-												schema: { type: "object" },
+												schema: { type: "object", properties: { image: fileInputSchema({ maxBytes: 1024 }) } },
 											},
 										},
 									},
@@ -421,7 +428,78 @@ describe("operations.execute backend lifecycle", () => {
 		expect(Date.now() - started).toBeLessThan(10_000);
 	});
 
+	it("executes an inline action without rereading its run metadata", async () => {
+		const metadataReads: string[] = [];
+		const sql = getTestDb();
+		const trackedSql = new Proxy(sql, {
+			apply(target, thisArg, args) {
+				if (Array.isArray(args[0])) {
+					const query = args[0].join("?").replace(/\s+/g, " ").trim();
+					if (/^SELECT run_metadata FROM runs WHERE id =/i.test(query)) {
+						metadataReads.push(query);
+					}
+				}
+				return Reflect.apply(target, thisArg, args);
+			},
+		});
+		const getDb = vi.spyOn(dbClient, "getDb").mockReturnValue(trackedSql);
+		try {
+			const result = await manageOperations({
+				action: "execute", connection_id: localConnectionId,
+				operation_key: "echo", input: { value: "no-metadata-reread" },
+			}, {} as Env, ctx);
+			expect(result).toMatchObject({ status: "completed" });
+			expect(metadataReads).toEqual([]);
+		} finally {
+			getDb.mockRestore();
+		}
+	});
+
+	it.each(["auto", "approval", "substituted", "removed"])("preserves file authorization through %s inline execution", async (mode) => {
+		const directory = await mkdtemp(join(tmpdir(), "lobu-inline-files-test-"));
+		const store = new ArtifactStore(directory);
+		const services = vi.spyOn(gateway, "getLobuCoreServices").mockReturnValue({ getArtifactStore: () => store });
+		const sql = getTestDb();
+		const [{ config }] = await sql`SELECT config FROM connections WHERE id = ${httpConnectionId}`;
+		try {
+			const files = await ingestInputFiles([
+				{ name: "photo.png", mimeType: "image/png", data: Buffer.from("photo") },
+				{ name: "other.png", mimeType: "image/png", data: Buffer.from("other") },
+			], ctx, store, "https://gateway.test/lobu");
+			if (mode !== "auto") {
+				await sql`UPDATE connections SET config = ${sql.json({ ...config, action_modes: { create_item: "approval" } })} WHERE id = ${httpConnectionId}`;
+			}
+			const queued = await manageOperations({
+				action: "execute", connection_id: httpConnectionId, operation_key: "create_item",
+				input: { body: { image: files[0] } },
+			}, {} as Env, ctx) as { status: string; run_id: number };
+			if (mode !== "auto") {
+				expect(queued.status).toBe("pending_approval");
+				await manageOperations({
+					action: "approve", run_id: queued.run_id,
+					...(mode === "substituted" ? { input: { body: { image: files[1] } } } : {}),
+					...(mode === "removed" ? { input: { body: {} } } : {}),
+				}, {} as Env, ctx);
+			}
+			const [run] = await sql`SELECT status, action_output, error_message FROM runs WHERE id = ${queued.run_id}`;
+			if (mode === "removed" || mode === "substituted") {
+				expect(run).toMatchObject({ status: "failed", error_message: expect.stringContaining("changed after authorization") });
+			} else {
+				expect(run).toMatchObject({ status: "completed", action_output: { body: { body: { image: {
+					base64: Buffer.from("photo").toString("base64"), filename: "photo.png", content_type: "image/png",
+				} } } } });
+			}
+		} finally {
+			services.mockRestore();
+			await sql`UPDATE connections SET config = ${sql.json(config)} WHERE id = ${httpConnectionId}`;
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("carries one SDK invocation owner through real sandbox calls without sharing across invocations", async () => {
+		// Import after fixtures: loading this handler eagerly leaves undefined MCP
+		// registry entries when Vitest 4 runs this suite before the handoff/audit suites.
+		const { runSdkScript } = await import("../../tools/sdk_run");
 		const script = `export default async (ctx, client) => {
 			return await Promise.all(['first', 'second'].map(value => client.operations.execute({
 				connection_id: ${localConnectionId}, operation_key: 'echo',

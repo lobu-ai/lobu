@@ -27,7 +27,7 @@ import { resolveActionMode } from "../../../../operations/action-modes";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import { LOST_LEASE_MESSAGE, runLeaseFence } from "../../../../runs/run-lease";
 import { executeHttpOperation } from "../../../../operations/execute-http-operation";
-import { prepareOperationFiles, resolveRunFiles } from "../../../../operations/file-inputs";
+import { prepareOperationFiles, resolveOperationFiles } from "../../../../operations/file-inputs";
 import { validateOperationInput } from "../../../../operations/input-validation";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { OperationDescriptor } from "../../../../operations/types";
@@ -356,6 +356,8 @@ async function executeMcpToolInline(
  * Options for {@link executeOperationInline}.
  */
 interface InlineExecutionOptions {
+	/** Server-stamped metadata from the created or claimed run, even when input has no file references. */
+	runMetadata: Record<string, unknown> | null | undefined;
 	/**
 	 * Skip the executor's terminal `runs` write. Used by approve's phase 2:
 	 * the terminal run state and its card event must commit together, so the
@@ -383,7 +385,7 @@ export async function executeOperationInline(
 ): Promise<InlineExecutionResult> {
 	const deferTerminalWrite = options.deferTerminalWrite ?? false;
 	try {
-		actionInput = await resolveRunFiles(runId, organizationId, actionInput);
+		actionInput = await resolveOperationFiles(actionInput, options.runMetadata);
 	} catch (error) {
 		return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
 	}
@@ -999,7 +1001,7 @@ export async function handleExecute(
 		input,
 		visibilityUserId,
 		ctx.abortSignal,
-		{ claimedBy: claim.claimedBy },
+		{ claimedBy: claim.claimedBy, runMetadata },
 	);
 	await trackOperationReaction(runId);
 	if (result.status === "completed") {

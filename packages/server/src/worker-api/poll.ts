@@ -1,4 +1,3 @@
-import { resolveOperationFiles } from "../operations/file-inputs";
 /**
  * POST /api/workers/poll
  *
@@ -40,6 +39,7 @@ import {
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
+import { resolveOperationFiles } from '../operations/file-inputs';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
 import { withDbRetry } from '../db/with-retry';
