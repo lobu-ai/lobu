@@ -964,8 +964,8 @@ async function generateLobuConfig(
   }
 
   const imports = options.enableHostedSlack
-    ? 'import { defineAgent, defineConfig, defineConnection, secret } from "@lobu/cli/config";'
-    : 'import { defineAgent, defineConfig, secret } from "@lobu/cli/config";';
+    ? 'import { connectorFromFile, defineAgent, defineConfig, defineConnection, secret } from "@lobu/cli/config";'
+    : 'import { connectorFromFile, defineAgent, defineConfig, secret } from "@lobu/cli/config";';
 
   const lines = [
     "// lobu.config.ts — Lobu project configuration",
@@ -982,8 +982,12 @@ async function generateLobuConfig(
     "});",
     ...(connectionDecls.length > 0 ? ["", ...connectionDecls] : []),
     "",
+    "// Add a connector implementation under connectors/, then uncomment:",
+    '// const exampleConnector = connectorFromFile("./connectors/example.connector.ts");',
+    "",
     "export default defineConfig({",
     ...configFields,
+    "  // connectors: [exampleConnector],",
     "});",
     "",
   ];

@@ -117,6 +117,10 @@ describe("lobu init --yes", () => {
         readFileSync(join(proj, "tsconfig.json"), "utf-8")
       );
       expect(tsconfig.include).toContain("lobu.config.ts");
+      const config = readFileSync(join(proj, "lobu.config.ts"), "utf-8");
+      expect(config).toContain("connectorFromFile");
+      expect(config).toContain('"./connectors/example.connector.ts"');
+      expect(config).toContain("connectors: [exampleConnector]");
     },
     INIT_TIMEOUT
   );
