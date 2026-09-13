@@ -648,6 +648,38 @@ export async function updateInstalledConnectorSource(params: {
 		versionScope: "organization",
 	});
 
+	// A version bump means the connector's emission contract may have changed
+	// (fixed validation, new eventKinds, different cursors). Per-feed
+	// checkpoints from the OLD version must not gate what the NEW version
+	// collects — a cursor committed over rejected/malformed items otherwise
+	// makes that page unreachable forever. Clear them so the next sync
+	// re-collects under the new code; insert-time (connection_id, origin_id)
+	// dedup makes the re-offer idempotent. Same-version source refreshes keep
+	// their checkpoints.
+	if (resolved.metadata.version !== def.version) {
+		const cleared = await sql`
+			UPDATE feeds f
+			SET checkpoint = NULL, updated_at = current_timestamp
+			FROM connections c
+			WHERE f.connection_id = c.id
+				AND c.connector_key = ${params.connectorKey}
+				AND f.organization_id = ${params.organizationId}
+				AND f.checkpoint IS NOT NULL
+			RETURNING f.id
+		`;
+		if (cleared.length > 0) {
+			logger.info(
+				{
+					connector_key: params.connectorKey,
+					previous_version: def.version,
+					version: resolved.metadata.version,
+					feeds_reset: cleared.length,
+				},
+				"Connector version bump invalidated per-feed checkpoints",
+			);
+		}
+	}
+
 	logger.info(
 		{
 			connector_key: params.connectorKey,

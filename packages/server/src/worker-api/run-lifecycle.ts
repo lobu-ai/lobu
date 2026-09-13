@@ -551,6 +551,19 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				acceptedItems.push(item);
 			}
 
+			// Any rejection fails the WHOLE batch before a single write or
+			// checkpoint advance. Splitting the batch (ingest the valid items,
+			// report the rejected ones) looks friendlier but is the silent
+			// data-loss path: the cursor the worker commits next describes the
+			// page as consumed, so the rejected items are never offered again
+			// even after the connector is fixed. A failed batch advances nothing;
+			// the run fails loudly with rejected_items on the response, the
+			// author fixes their eventKinds, and the next sync re-collects the
+			// page in full.
+			if (rejectedItems.length > 0) {
+				return { totalItems: 0, rejectedItems, rejected: true };
+			}
+
 			// Resolve or create entities declared via eventKinds[kind].attributions
 			// before inserting events. One query per (entityType, matchField) per
 			// batch — cheap compared to the per-event inserts that follow.
@@ -992,11 +1005,25 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
     `;
 		}
 
+		if (rejectedItems.length > 0) {
+			// Non-2xx: the worker must fail the run, not report the offered item
+			// count as collected. Nothing was written and no checkpoint moved, so
+			// a corrected connector re-collects this page on its next sync.
+			return c.json(
+				{
+					error: "batch_rejected",
+					error_description:
+						"Every offered item failed validation; the batch was not ingested and no checkpoint was advanced. Fix the connector's declared eventKinds and re-sync.",
+					rejected_items: rejectedItems,
+				},
+				422
+			);
+		}
+
 		return c.json({
 			batches_received: 1,
 			total_items: totalItems,
 			...(isDry && { dry_run: true }),
-			...(rejectedItems.length > 0 && { rejected_items: rejectedItems }),
 		});
 	} catch (err: unknown) {
 		const rawMessage = errorMessage(err);
