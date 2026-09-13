@@ -43,7 +43,7 @@
 #
 # Env:
 #   LOBU_VERSION   npm version/tag to install (default "latest")
-#   PUBLISH_WAIT   seconds to keep retrying an unresolvable version while the
+#   PUBLISH_WAIT   seconds to keep retrying unresolvable CLI/runtime versions while the
 #                  registry propagates (default 600; 0 = single attempt)
 #   SMOKE_AS_USER  unprivileged username to drop to (default: run as-is)
 #   GW_PORT        gateway port (default 8799)
@@ -69,6 +69,8 @@ case "$PUBLISH_WAIT" in
     exit 1
     ;;
 esac
+# Bash arithmetic treats leading zeros as octal; validated seconds are decimal.
+PUBLISH_WAIT=$((10#$PUBLISH_WAIT))
 PUBLISH_POLL=10
 MOCK_REPLY="ARTIFACT_SMOKE_OK"
 
@@ -115,8 +117,8 @@ note "install @lobu/cli@$LOBU_VERSION from npm"
 INSTALL_DIR="$WORK/install"; mkdir -p "$INSTALL_DIR"
 INSTALL_LOG="$WORK/npm-install.log"
 ( cd "$INSTALL_DIR" && npm init -y >/dev/null 2>&1 )
-# A release publishes all eight @lobu/* packages, then this gate installs one
-# of them and lets the resolver pull the other seven. Registry visibility is
+# A release publishes the CLI and its @lobu/* dependencies, then this gate
+# installs the CLI and lets the resolver pull its dependencies. Visibility is
 # not atomic across them, so for the first minutes after a publish the resolver
 # can report ETARGET for a sibling that is already published -- 18.0.0 failed
 # all four legs on "No matching version found for @lobu/embeddings@18.0.0"
@@ -144,8 +146,11 @@ while :; do
     break
   fi
   [ "$waited" -ge "$PUBLISH_WAIT" ] && { echo "gave up after ${waited}s waiting for the registry" >&2; break; }
-  sleep "$PUBLISH_POLL"
-  waited=$((waited + PUBLISH_POLL))
+  pause=$PUBLISH_POLL
+  remaining=$((PUBLISH_WAIT - waited))
+  [ "$pause" -gt "$remaining" ] && pause=$remaining
+  sleep "$pause"
+  waited=$((waited + pause))
 done
 tail -5 "$INSTALL_LOG"
 LOBU_BIN="$INSTALL_DIR/node_modules/.bin/lobu"
@@ -158,6 +163,21 @@ pass "installed, bin present"
 RESOLVED="$("$LOBU_BIN" --version 2>&1 | tr -d '[:space:]')"
 printf '%s\n' "$RESOLVED" > "$WORK/version.txt"
 if [ -n "$RESOLVED" ]; then pass "lobu --version -> $RESOLVED"; else fail "lobu --version produced nothing"; fi
+
+# Lazy runtime packages are outside npm's CLI dependency graph and can remain
+# invisible after the CLI resolves. Inspect every exact installed descriptor
+# before the first component-using command, sharing the existing wait budget.
+# This only reads registry metadata; the commands below still install and
+# verify the actual published components themselves.
+note "wait for published runtime versions"
+if node "$REPO_ROOT/scripts/lib/published-runtime-readiness.mjs" \
+  "$INSTALL_DIR/node_modules/@lobu/cli/dist/runtime-components.json" \
+  "$((PUBLISH_WAIT - waited))" "$PUBLISH_POLL"; then
+  pass "published runtime versions available"
+else
+  fail "published runtime versions unavailable"
+  echo "RESULT: published-artifact smoke FAILED (runtime publication)"; exit 1
+fi
 
 # Run from a directory that is deliberately outside the npm install tree. A
 # compiled connector must load the SDK from connector-worker's package graph,
