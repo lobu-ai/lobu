@@ -42,7 +42,7 @@
  */
 
 import { ACL_RESOURCE_TYPE_SLUG } from '@lobu/connector-sdk';
-import { aclStateExistsSelectSql, enforcedConnectionsSelectSql } from './acl-state.js';
+import { enforcedConnectionsSelectSql } from './acl-state.js';
 import { aclConnectionIdSql } from './acl-observability.js';
 import type { AuthzScope } from './scope.js';
 import {
@@ -148,10 +148,30 @@ export function compileResourceVisibility(
       )`;
 
   // `events.connection_id` is the bigint `connections.id`, but
-  // `authz_source_acl_state.connection_id` is text — the ACL sync stamps it as
-  // `String(connections.id)` (see `github-acl-sync` → `buildAccessGraph`). Cast
-  // `events.connection_id::text` so the "was this connection ever graphed?"
-  // check compares on the SAME key.
+  // `authz_source_acl_state.connection_id` is the RUNTIME id
+  // (`connections.id::text` for data connectors, the `slackinst-…` /
+  // `agentconn-…` slug for chat) — so the "was this connection ever graphed?"
+  // check resolves through the `connections` row with the same
+  // `aclConnectionIdSql` expression the sync stamps. A NULL connection (a
+  // server-authored save) takes the legacy path.
+  const neverGraphed = `(${tableAlias}.connection_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1
+          FROM public.connections c
+          WHERE c.organization_id = ${orgParam}
+            AND c.deleted_at IS NULL
+            AND c.id = ${tableAlias}.connection_id
+            AND EXISTS (
+              SELECT 1
+              FROM public.authz_source_acl_state s
+              WHERE s.organization_id = ${orgParam}
+                AND s.connection_id = ${aclConnectionIdSql('c')}
+            )
+        ))`;
+
+  // Ordinary content (no linked resource) keeps the never-graphed legacy
+  // path; stamped content faces the all-required envelope. One `EXISTS` over
+  // the linked set decides which arm applies, so the unnest runs once per row.
   const sql = `AND (
       (${tableAlias}.interaction_type <> 'none'
       AND EXISTS (
@@ -160,15 +180,14 @@ export function compileResourceVisibility(
         WHERE om."organizationId" = ${orgParam}
           AND om."userId" = ${userParam}
       ))
-      OR (NOT EXISTS (${linkedResources})
-      AND (${tableAlias}.connection_id IS NULL
-        OR ${tableAlias}.connection_id::text NOT IN (${aclStateExistsSelectSql(orgParam)})))
-      OR (EXISTS (${linkedResources})
-      AND (NOT EXISTS (
-        SELECT 1
-        FROM (${linkedResources}) AS lr
-        WHERE NOT (${resourceSatisfied})
-      )))
+      OR (CASE WHEN EXISTS (${linkedResources})
+        THEN (NOT EXISTS (
+          SELECT 1
+          FROM (${linkedResources}) AS lr
+          WHERE NOT (${resourceSatisfied})
+        ))
+        ELSE ${neverGraphed}
+      END)
     )`;
   return { sql, params: [scope.organizationId, scope.principal] };
 }
