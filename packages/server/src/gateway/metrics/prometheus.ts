@@ -34,42 +34,6 @@ interface Metric {
 const metrics: Map<string, Metric> = new Map();
 
 function initializeMetrics() {
-  registerMetric(
-    "lobu_worker_deployments_total",
-    "Total number of worker deployments created",
-    "counter"
-  );
-  registerMetric(
-    "lobu_worker_deployments_failed_total",
-    "Total number of failed worker deployments",
-    "counter"
-  );
-  registerMetric(
-    "lobu_worker_deployments_active",
-    "Current number of active worker deployments",
-    "gauge"
-  );
-  registerMetric(
-    "lobu_messages_received_total",
-    "Total number of messages received",
-    "counter"
-  );
-  registerMetric(
-    "lobu_messages_processed_total",
-    "Total number of messages processed",
-    "counter"
-  );
-  registerMetric("lobu_queue_length", "Current message queue length", "gauge");
-  registerMetric(
-    "lobu_proxy_requests_total",
-    "Total number of HTTP proxy requests",
-    "counter"
-  );
-  registerMetric(
-    "lobu_proxy_requests_blocked_total",
-    "Total number of blocked proxy requests",
-    "counter"
-  );
   // Terminal run failures (exhausted retries) by run_type + queue. A
   // user-facing reply (run_type='chat_message') that lands here was dropped —
   // alert on rate(lobu_runs_failed_total{run_type="chat_message"}[5m]). The
