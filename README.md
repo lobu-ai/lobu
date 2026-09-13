@@ -73,9 +73,11 @@ To test changes merged to `main`, run `bunx @lobu/cli@canary --help`. The
 `canary` tag moves only when a maintainer runs **Publish Packages** from `main`
 in GitHub Actions with channel `canary`; that run requires the commit's CI and
 image checks and smokes the packed CLI before publishing. The published version
-is then exercised in four Linux environments, so check the run's result before
+is then exercised across the Linux runtime matrix, so check the run's result before
 depending on it. Use `@latest` for stable releases. Canary versions include the
-full commit SHA so you can pin a preview when reproducing a bug.
+full commit SHA so you can pin a preview when reproducing a bug. Package managers
+can cache the moving tag: copy the exact version from the successful workflow run,
+use it in place of `canary`, and confirm the installed version with `lobu --version`.
 
 ### Recall what the company knows
 
@@ -165,6 +167,10 @@ npx @lobu/cli@latest chat -c local "hello"
 
 `lobu run` starts the local stack with an embedded Postgres database by default and opens the web UI on `:8787`. It applies the project's `lobu.config.ts` automatically only in embedded mode. To use external Postgres, set `DATABASE_URL`, ensure pgvector is available, then authenticate and apply the project to that runtime separately.
 
+The current canary CLI downloads the required runtime components on first use and caches them for later runs. `--help`, `--version`, and commands that only connect to a remote runtime do not install the local stack. Docker images include their runtime dependencies at build time and start directly; local embedding model weights can still download on first use. See [Docker deployment](docs/DOCKER.md) for the separate database and service configuration.
+
+`lobu init`, including `init -y`, generates `ENCRYPTION_KEY` in the project's `.env`. A manual setup must supply this key before starting: generate a 32-byte base64 value with `openssl rand -base64 32`. Keep the same key with the persistent database; replacing it makes previously encrypted secrets unreadable.
+
 Docs: [Getting started](https://lobu.ai/getting-started/) · [Agent workspace](https://lobu.ai/guides/agent-prompts/) · [Skills](https://lobu.ai/getting-started/skills/) · [Slack](https://lobu.ai/platforms/slack/)
 
 ### 3. Build with the CLI and TypeScript SDK
@@ -215,6 +221,8 @@ A Lobu specialist has a stable role, instructions, memory, tools, and conversati
 Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.md`, and `USER.md`. Guardrails can inspect input, output, and tool calls. Destructive MCP calls require in-thread approval unless they are explicitly pre-approved through `defineAgent({ tools: { preApproved } })` in `lobu.config.ts`; action results return to the shared event log.
 
 External agents do not ask users to write delegation code. They pass scripts like these to Lobu's `query_sdk` and `run_sdk` MCP tools:
+
+Scripts must default-export an async function. Lobu passes the execution context as the first argument and the ClientSDK as the second; keep `await` and `return` inside that function. A bare top-level `await` or `return` fails compilation. The same function format works with `lobu memory exec`.
 
 ```ts
 // Discover specialists through query_sdk.
