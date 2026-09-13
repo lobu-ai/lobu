@@ -21,6 +21,7 @@ import { Hono } from "hono";
 import { pinoLogger } from "hono-pino";
 import { closeDbSingleton } from "./db/client";
 import { mountViteDev } from "./dev-vite";
+import { mountPublicApps } from "./http/api-route-mounts";
 import { markShuttingDown } from "./lifecycle-state";
 import type { Env } from "./index";
 import { app as mainApp } from "./index";
@@ -283,12 +284,9 @@ export function buildWrapperApp(
 		return c.json({ error: "Internal server error" }, 500);
 	});
 
-	// Route mounts. `/lobu` is the public Agent API + bundled docs; without
-	// it `/lobu/api/v1/agents/*` returns 404 (this was the gap behind #940).
-	if (lobuApp) {
-		wrapper.route("/lobu", lobuApp);
-	}
-	wrapper.route("/", mountedMainApp);
+	// Public route precedence is isolated and regression-tested: /api/v1 must
+	// reach the Agent API before /api/:orgSlug routes in the main app.
+	mountPublicApps(wrapper, lobuApp, mountedMainApp);
 
 	return wrapper;
 }
