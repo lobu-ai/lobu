@@ -1571,9 +1571,12 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 		} else if (workerUserId && pinnedDeviceWorkerId) {
 			// Legacy/admin path: no worker-bound token. Fall back to the
 			// (user_id, body.worker_id) lookup; this is weaker than the bound path
-			// but still gates on user ownership. Emit a warning so prod telemetry
-			// can flag if any non-Mac caller hits this branch.
-			incrementCounter('lobu_legacy_compat_hits_total', { path: 'legacy_token_fallback' });
+			// but still gates on user ownership. The counter is the durable sunset
+			// signal — quiet means nothing reaches this branch any more; the warn
+			// below carries the caller detail needed to identify what still does.
+			incrementCounter("lobu_legacy_compat_hits_total", {
+				path: "legacy_token_fallback",
+			});
 			logger.warn(
 				{
 					run_id: runId,

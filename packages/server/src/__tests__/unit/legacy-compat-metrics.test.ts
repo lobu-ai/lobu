@@ -1,9 +1,10 @@
 /**
- * `incrementCounter` is a silent no-op for a name that was never registered
- * (`metrics.get(name)` misses and it returns), so an unregistered sunset
- * counter reads exactly like a quiet one — and "quiet" is what the deletion
- * gate acts on. This module also shipped once registered-but-never-incremented,
- * so pin both halves: the series exists, and a hit actually renders.
+ * `incrementCounter` records nothing for a name that was never registered
+ * (`metrics.get(name)` misses, it warns and returns), so an unregistered
+ * sunset counter scrapes exactly like a quiet one — and "quiet" is what the
+ * deletion gate acts on. This module also carries counters that were
+ * registered and never incremented, so pin both halves: the series exists,
+ * and a hit actually renders.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -26,13 +27,17 @@ describe("legacy compat sunset counter", () => {
 	});
 
 	test("renders one labelled series per legacy path", () => {
+		// Read deltas rather than asserting a literal 1: bun runs every test
+		// file in one process, so this module-global registry is shared with
+		// whatever else imported it first.
+		const before = getMetricsText();
 		for (const path of LEGACY_PATHS) {
 			incrementCounter(SERIES, { path });
 		}
 
-		const text = getMetricsText();
+		const after = getMetricsText();
 		for (const path of LEGACY_PATHS) {
-			expect(text).toContain(`${SERIES}{path="${path}"} 1`);
+			expect(readSeries(after, path)).toBe(readSeries(before, path) + 1);
 		}
 	});
 

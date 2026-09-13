@@ -75,8 +75,15 @@ function stampExecutionTarget(
 		}
 	} catch {
 		// A malformed legacy prefix remains readable after a fresh session header.
-		incrementCounter('lobu_legacy_compat_hits_total', { path: 'legacy_session_prefix' });
 	}
+	// Both ways of reaching here — an unparseable first line and a parsed one
+	// that is not a v3 session header — are the same compat: a stored prefix
+	// kept readable under a freshly prepended header. Count the fallback, not
+	// just the throwing arm, or the sunset gate reads quiet while the other
+	// arm is still being taken.
+	incrementCounter("lobu_legacy_compat_hits_total", {
+		path: "legacy_session_prefix",
+	});
 	return `${deviceSessionHeader(payload, now)}\n${prefix}`;
 }
 

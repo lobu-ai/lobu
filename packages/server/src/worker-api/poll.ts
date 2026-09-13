@@ -1303,16 +1303,18 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // legacy hashless arm in connectorClaimLaneSql. Quiet on this series is the
   // deletion gate for that arm.
   if (
-    pending.connector_manifest_backed === true &&
-    connectorClaimContext.allowLegacyManifestCapabilityClaims === true &&
-    !manifestClaimAuthorizations.some(
+    row.connector_manifest_backed &&
+    connectorClaimContext.allowLegacyManifestCapabilityClaims &&
+    !connectorClaimContext.manifestClaimAuthorizations.some(
       (auth) =>
-        auth.connectorKey === pending.connector_key &&
-        auth.connectorVersion === pending.connector_version &&
-        auth.manifestHash === pending.connector_manifest_hash
+        auth.connectorKey === row.connector_key &&
+        auth.connectorVersion === row.connector_version &&
+        auth.manifestHash === row.connector_manifest_hash
     )
   ) {
-    incrementCounter('lobu_legacy_compat_hits_total', { path: 'hashless_manifest_claim' });
+    incrementCounter('lobu_legacy_compat_hits_total', {
+      path: 'hashless_manifest_claim',
+    });
   }
 
   // The device implements a manifest-backed connector itself: the artifact
