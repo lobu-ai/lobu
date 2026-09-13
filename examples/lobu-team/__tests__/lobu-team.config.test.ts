@@ -96,7 +96,7 @@ describe("Lobu Team configuration", () => {
     expect(digest?.triggers).toEqual([
       {
         kind: "schedule",
-        cron: "5,25,45 * * * *",
+        cron: "6,26,46 * * * *",
         skip_if_unchanged: false,
       },
     ]);
