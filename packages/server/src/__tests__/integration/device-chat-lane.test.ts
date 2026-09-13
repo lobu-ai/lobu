@@ -8,6 +8,7 @@ import { createTestAgent } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
 import { TestWorkspace } from "../setup/test-mcp-client";
 import { sweepStaleDeviceChatRuns } from "../../worker-api/device-chat";
+import { getMetricsText } from "../../gateway/metrics/prometheus";
 
 async function createWorkerPat(
 	userId: string,
@@ -118,6 +119,14 @@ async function poll(
 	});
 	expect(response.status).toBe(200);
 	return response.json();
+}
+
+/** Current value of the legacy session-prefix sunset counter. */
+function readLegacyPrefixHits(): number {
+	const match = getMetricsText().match(
+		/^lobu_legacy_compat_hits_total\{path="legacy_session_prefix"\} (\d+)$/m,
+	);
+	return match ? Number(match[1]) : 0;
 }
 
 describe("device chat execution lane", () => {
@@ -473,5 +482,96 @@ describe("device chat execution lane", () => {
 			},
 		]);
 		expect(await sweepStaleDeviceChatRuns(60)).toBe(0);
+	});
+	it("counts the legacy session-prefix fallback when a stored prefix is not a session header", async () => {
+		// Pins the call site, not just the registry: the sunset gate reads this
+		// series as "quiet = safe to delete", so a deleted or mislabelled
+		// increment has to fail a test rather than look like good news. The
+		// sibling test above seeds a real `type: "session"` header and takes the
+		// stamp path, so it must NOT move the counter — that contrast is the
+		// assertion that matters.
+		const sql = getTestDb();
+		const workspace = await TestWorkspace.create({ name: "Legacy Prefix Org" });
+		const userId = workspace.users.owner.id;
+		const organizationId = workspace.org.id;
+		const agent = await createTestAgent({
+			organizationId,
+			ownerUserId: userId,
+			agentId: "legacy-prefix-agent",
+			name: "Legacy Prefix Agent",
+		});
+		const device = await insertDevice({
+			userId,
+			organizationId,
+			workerId: "legacy-prefix-device",
+			kinds: ["pi"],
+		});
+		const conversationId = buildApiConversationId({
+			agentId: agent.agentId,
+			userId,
+			organizationId,
+			threadId: "legacy-prefix-thread",
+		});
+		const priorTimestamp = new Date(Date.now() - 60_000).toISOString();
+		// A first line that is valid JSON but carries no `type: "session"`. This
+		// is the arm the increment originally missed by sitting inside the catch.
+		const legacySnapshot = `${JSON.stringify({
+			role: "assistant",
+			text: "Reply stored before session headers existed.",
+		})}\n`;
+		const [priorRun] = await sql<{ id: number }>`
+      INSERT INTO runs (run_type, status, organization_id, created_at, completed_at, run_at)
+      VALUES ('chat_message', 'completed', ${organizationId}, ${priorTimestamp}, ${priorTimestamp}, ${priorTimestamp})
+      RETURNING id
+    `;
+		if (!priorRun) throw new Error("Failed to seed prior transcript");
+		await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status, created_at)
+      VALUES (
+        ${organizationId}, ${agent.agentId}, ${conversationId}, ${priorRun.id},
+        ${legacySnapshot}, ${Buffer.byteLength(legacySnapshot)}, 'completed', ${priorTimestamp}
+      )
+    `;
+
+		const runId = await enqueueDeviceChat({
+			organizationId,
+			agentId: agent.agentId,
+			userId,
+			conversationId,
+			messageId: "legacy-prefix-message",
+			message: "Does the old prefix survive?",
+			deviceWorkerId: device.id,
+			agentKind: "pi",
+		});
+		expect(await poll(device.token, "legacy-prefix-device", ["pi"])).toHaveProperty(
+			"run_id",
+			runId,
+		);
+
+		const before = readLegacyPrefixHits();
+		const completed = await post(`/api/workers/me/runs/${runId}/complete-chat`, {
+			token: await createWorkerPat(userId, organizationId, null),
+			body: {
+				worker_id: "legacy-prefix-device",
+				output: "It survives under a fresh header.",
+				exit_code: 0,
+				exit_reason: "ok",
+			},
+		});
+		expect(completed.status, JSON.stringify(await completed.json())).toBe(200);
+
+		expect(readLegacyPrefixHits()).toBe(before + 1);
+
+		// And the compat path itself: the unreadable prefix is preserved
+		// below a freshly prepended session header rather than discarded.
+		const [snapshot] = await sql<{ snapshot_jsonl: string }>`
+      SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}
+    `;
+		const lines = snapshot.snapshot_jsonl.split("\n");
+		expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ type: "session" });
+		expect(snapshot.snapshot_jsonl).toContain(
+			"Reply stored before session headers existed.",
+		);
 	});
 });
