@@ -1571,9 +1571,19 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 		} else if (workerUserId && pinnedDeviceWorkerId) {
 			// Legacy/admin path: no worker-bound token. Fall back to the
 			// (user_id, body.worker_id) lookup; this is weaker than the bound path
-			// but still gates on user ownership. The counter is the durable sunset
-			// signal — quiet means nothing reaches this branch any more; the warn
-			// below carries the caller detail needed to identify what still does.
+			// but still gates on user ownership.
+			//
+			// The counter corroborates; it does not gate deletion, and quiet does
+			// NOT mean the branch is unreachable. `mcpAuthInfo.workerId` is
+			// populated from the PAT row and nowhere else (auth/tokens.ts), so
+			// every OAuth access token arrives here unbound — including a
+			// first-party device grant carrying `device_worker:run` that has not
+			// swapped itself for a child PAT. The worker-auth middleware also
+			// admits `mcp:write` and `mcp:admin` tokens (server/src/index.ts),
+			// which the other mint paths issue unbound. Removing the fallback is
+			// therefore a 403 on a reachable caller, not a no-op — it needs its
+			// own decision, not a quiet window. The warn below carries the caller
+			// detail needed to identify what still does.
 			incrementCounter("lobu_legacy_compat_hits_total", {
 				path: "legacy_token_fallback",
 			});

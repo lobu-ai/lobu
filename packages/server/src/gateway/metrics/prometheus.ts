@@ -209,7 +209,7 @@ function initializeMetrics() {
 
   registerMetric(
     "lobu_legacy_compat_hits_total",
-    "Legacy compatibility path executions, by path. Sunset signal for old-client support: quiet on every path is the deletion gate. Do not add new uses.",
+    "Legacy compatibility path executions, by path. Corroborating sunset signal only: a quiet path is NOT a deletion gate, because every path here is reachable by construction rather than by client age (see each call site). Do not add new uses.",
     "counter"
   );
 

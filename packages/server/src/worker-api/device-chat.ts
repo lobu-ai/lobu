@@ -79,8 +79,16 @@ function stampExecutionTarget(
 	// Both ways of reaching here — an unparseable first line and a parsed one
 	// whose type is not "session" — are the same compat: a stored prefix
 	// kept readable under a freshly prepended header. Count the fallback, not
-	// just the throwing arm, or the sunset gate reads quiet while the other
-	// arm is still being taken.
+	// just the throwing arm, or the series reads quiet while the other arm is
+	// still being taken.
+	//
+	// Quiet is not a deletion gate here either, and this path is the least
+	// like client debt of the three: it parses data AT REST — whatever
+	// `snapshot_jsonl` any earlier lane left on this conversation — so no
+	// client release and no version floor ever drains it, and a stored prefix
+	// is re-read every time its device chat is resumed. Deleting the fallback
+	// strands those rows: the unparseable arm would throw out of `JSON.parse`,
+	// and the parsed non-session arm would have no prefix-preserving return.
 	incrementCounter("lobu_legacy_compat_hits_total", {
 		path: "legacy_session_prefix",
 	});

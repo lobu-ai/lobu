@@ -9,7 +9,10 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { WorkerClient } from "../daemon/client";
+import {
+  MutableWorkerAdvertisementProvider,
+  WorkerClient,
+} from "../daemon/client";
 
 type Captured = { url: string; body: Record<string, unknown> };
 
@@ -193,5 +196,65 @@ describe("device worker poll body", () => {
       "os.files": true,
       "os.shell": false,
     });
+  });
+
+  // Whether the body carries `connector_manifests` AT ALL is what the
+  // gateway's legacy hashless-manifest claim arm keys on
+  // (`allowLegacyManifestCapabilityClaims` in server/src/worker-api/poll.ts is
+  // `!Object.hasOwn(body, 'connector_manifests')` for a user-scoped worker on
+  // a non-headless, non-extension platform). So "the field is always sent" is
+  // a load-bearing belief, and it is false — which is why that arm is
+  // reachable by CONSTRUCTION rather than by client age, no MIN_CLIENT_VERSION
+  // floor closes it, and a quiet
+  // `lobu_legacy_compat_hits_total{path="hashless_manifest_claim"}` is not a
+  // deletion gate. Pin the omission so the day it stops being true is a
+  // failing test and not an inference nobody re-checked.
+  test("a macOS daemon with no advertisement provider and no manifests omits the field", async () => {
+    // The Mac app drives `lobu-device-daemon --supervised-stdio`, which has an
+    // advertisement provider; the same binary launched without that flag is
+    // built by `createMacDeviceDaemon(validated)` with none, and still reports
+    // platform `macos` — exactly the shape below.
+    const { calls } = capturePoll();
+    await new WorkerClient({
+      apiUrl: "https://app.example.com",
+      workerId: "macos:test",
+      capabilities: { "automations.execute": true },
+      platform: "macos",
+    }).poll();
+
+    expect(Object.hasOwn(calls[0].body, "connector_manifests")).toBe(false);
+    expect(calls[0].body.platform).toBe("macos");
+  });
+
+  test("an advertisement provider makes the field explicit even when empty", async () => {
+    const { calls } = capturePoll();
+    await new WorkerClient({
+      apiUrl: "https://app.example.com",
+      workerId: "macos:test",
+      capabilities: { "automations.execute": true },
+      platform: "macos",
+      advertisementProvider: new MutableWorkerAdvertisementProvider({
+        capabilities: {},
+        manifests: [],
+        generation: 1,
+      }),
+    }).poll();
+
+    expect(Object.hasOwn(calls[0].body, "connector_manifests")).toBe(true);
+    expect(calls[0].body.connector_manifests).toEqual([]);
+  });
+
+  test("static manifests alone also make the field explicit", async () => {
+    const { calls } = capturePoll();
+    await new WorkerClient({
+      apiUrl: "https://app.example.com",
+      workerId: "macos:test",
+      capabilities: { "automations.execute": true },
+      platform: "macos",
+      manifests: [{ key: "os.shell" }],
+    }).poll();
+
+    expect(Object.hasOwn(calls[0].body, "connector_manifests")).toBe(true);
+    expect(calls[0].body.connector_manifests).toEqual([{ key: "os.shell" }]);
   });
 });

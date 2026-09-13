@@ -1,10 +1,13 @@
 /**
  * `incrementCounter` records nothing for a name that was never registered
  * (`metrics.get(name)` misses, it warns and returns), so an unregistered
- * sunset counter scrapes exactly like a quiet one — and "quiet" is what the
- * deletion gate acts on. This module also carries counters that were
- * registered and never incremented, so pin both halves: the series exists,
- * and a hit actually renders.
+ * sunset counter scrapes exactly like a quiet one. Quiet does not gate any
+ * deletion here (every legacy path is reachable by construction, not by
+ * client age — see the call sites), but it is still read as corroboration,
+ * and corroboration from a series that silently does not exist is worse than
+ * none. This module also carries counters that were registered and never
+ * incremented, so pin both halves: the series exists, and a hit actually
+ * renders.
  */
 import { describe, expect, test } from "bun:test";
 import {

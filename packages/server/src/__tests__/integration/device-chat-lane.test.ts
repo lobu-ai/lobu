@@ -484,8 +484,8 @@ describe("device chat execution lane", () => {
 		expect(await sweepStaleDeviceChatRuns(60)).toBe(0);
 	});
 	it("counts the legacy session-prefix fallback when a stored prefix is not a session header", async () => {
-		// Pins the call site, not just the registry: the sunset gate reads this
-		// series as "quiet = safe to delete", so a deleted or mislabelled
+		// Pins the call site, not just the registry: this series is read as
+		// corroboration that the fallback is idle, so a deleted or mislabelled
 		// increment has to fail a test rather than look like good news. The
 		// sibling test above seeds a real `type: "session"` header and takes the
 		// stamp path, so it must NOT move the counter — that contrast is the
