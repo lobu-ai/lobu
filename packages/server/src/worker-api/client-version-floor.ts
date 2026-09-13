@@ -7,22 +7,17 @@
  * is: announce a floor → wait out the grace window (store review + stragglers)
  * → set MIN_CLIENT_VERSION → delete the legacy arms once enforcement holds.
  *
- * This module is the ENFORCING gate, and it is the strong one. Counting how
- * many old clients still call is a statement about observed traffic in a
- * window, not an invariant — a device asleep for the whole window re-enters a
- * legacy arm the moment it wakes. A floor, by contrast, makes a version-gated
- * precondition unreachable by construction, so deleting the arm behind it is
- * provable by reading code. Such a counter is corroboration, never the gate.
+ * This is the ENFORCING gate, and it is the strong one: it makes a
+ * version-gated precondition unreachable by construction, so deleting the arm
+ * behind it is provable by reading code. Counting how many old clients still
+ * call describes one window, not an invariant — a device asleep through it
+ * re-enters the arm on wake — so such a counter corroborates, never gates.
  *
- * Floors are PER PLATFORM because the clients ship independent version lines:
- * a single global value cannot gate one line without rejecting or ignoring the
- * others. Critically, those lines DO NOT SHARE A SCALE — `chrome-extension`
- * reports its extension manifest version (0.x) while `macos` and `headless`
- * both report the monorepo release line (`lobu-vN`, majors in the tens). A
- * macOS floor written against the Mac app's MARKETING_VERSION (0.x) therefore
- * sits below every real row and enforces nothing. Read the values off
- * `device_workers` before setting them; never invent them (see .env.example
- * for the query).
+ * Floors are PER PLATFORM, and the lines DO NOT SHARE A SCALE:
+ * `chrome-extension` reports its manifest version (0.x) while `macos` and
+ * `headless` report the monorepo release line (majors in the tens), so a macOS
+ * floor written against the Mac app's MARKETING_VERSION never binds. Read the
+ * values off `device_workers`; never invent them (.env.example has the query).
  *
  * MIN_CLIENT_VERSION is a comma-separated `platform=version` map, e.g.
  * `chrome-extension=0.6.0,macos=19.2.0,headless=19.0.0`. Unset/empty disables
@@ -44,12 +39,10 @@ const logger = createLogger('client-version-floor');
  * Parse `platform=version` pairs; malformed entries are ignored (permissive).
  *
  * Ignoring them silently is the dangerous half: a typo (`macos=19.2`, two
- * parts) drops that platform's floor while the variable still *looks* set, so
- * the operator believes they are enforcing and nothing is. So warn, naming the
- * entries. This runs on every device poll, so the parse is memoized on the raw
- * string — that bounds the warn to once per process for a stable value, and
- * re-parses the moment the env changes (as tests do). The cache is
- * process-local, which is correct: `process.env` is too.
+ * parts) drops that platform's floor while the variable still *looks* set. So
+ * warn, naming the entries. Memoized on the raw string because this runs on
+ * every device poll — that bounds the warn to once per value and still
+ * re-parses the moment the env changes.
  */
 let floorCache: { raw: string; floors: Map<string, string> } | null = null;
 
