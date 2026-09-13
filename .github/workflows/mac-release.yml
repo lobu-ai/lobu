@@ -32,7 +32,7 @@ name: mac-release
 #
 # ── Optional: when shipping a restricted entitlement (e.g. HealthKit) ───────
 #   APPLE_PROVISION_PROFILE_BASE64   base64 of a Developer ID .provisionprofile
-#                                    issued for com.owletto.mac, carrying the
+#                                    issued for ai.lobu.mac, carrying the
 #                                    restricted capability
 #   APPLE_PROVISION_PROFILE_NAME     the profile's exact name as shown in the
 #                                    Apple Developer portal (Profiles list).
@@ -113,8 +113,8 @@ jobs:
       #      an app that cannot launch its worker runtime.
       #   4-7. The scheme name, app display name, bundle identifier, and
       #      Sparkle public key must match what the rest of the workflow and
-      #      installed apps depend on. A rename inside owletto (e.g. scheme
-      #      target renames, bundle id `com.owletto.mac` drift)
+          #      installed apps depend on. A rename inside owletto (e.g. scheme
+          #      target renames, bundle id `ai.lobu.mac` drift)
       #      would pass the path checks above but break the build or, worse,
       #      silently break auto-update for installed users.
       - name: Verify release contract (submodule + Mac source layout)
@@ -180,8 +180,8 @@ jobs:
           done
 
           # 6. PRODUCT_BUNDLE_IDENTIFIER is pinned PER BUILD CONFIGURATION:
-          #    Release must be com.owletto.mac, Debug may additionally be the
-          #    build-scoped com.owletto.mac.debug. The bundle id is the app's
+          #    Release must be ai.lobu.mac, Debug may additionally be the
+          #    build-scoped ai.lobu.mac.debug. The bundle id is the app's
           #    identity to macOS, so a release shipped under a different id
           #    installs a second copy beside the existing app rather than
           #    upgrading it, stranding every install with no update path.

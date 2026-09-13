@@ -62,12 +62,12 @@ describe("check-mac-bundle-ids", () => {
 
   it("accepts Release pinned with a build-scoped Debug identity", () => {
     const source = pbxproj([
-      { name: "Debug", bundleId: "com.owletto.mac.debug" },
-      { name: "Release", bundleId: "com.owletto.mac" },
+      { name: "Debug", bundleId: "ai.lobu.mac.debug" },
+      { name: "Release", bundleId: "ai.lobu.mac" },
     ]);
     expect(parseBundleIdsByConfiguration(source)).toEqual([
-      { configuration: "Debug", bundleId: "com.owletto.mac.debug" },
-      { configuration: "Release", bundleId: "com.owletto.mac" },
+      { configuration: "Debug", bundleId: "ai.lobu.mac.debug" },
+      { configuration: "Release", bundleId: "ai.lobu.mac" },
     ]);
     expect(checkBundleIds(source)).toEqual([]);
   });
@@ -76,8 +76,8 @@ describe("check-mac-bundle-ids", () => {
     expect(
       checkBundleIds(
         pbxproj([
-          { name: "Debug", bundleId: "com.owletto.mac" },
-          { name: "Release", bundleId: "com.owletto.mac" },
+          { name: "Debug", bundleId: "ai.lobu.mac" },
+          { name: "Release", bundleId: "ai.lobu.mac" },
         ])
       )
     ).toEqual([]);
@@ -89,13 +89,13 @@ describe("check-mac-bundle-ids", () => {
   it("rejects swapped Release and Debug identities", () => {
     const problems = checkBundleIds(
       pbxproj([
-        { name: "Debug", bundleId: "com.owletto.mac" },
-        { name: "Release", bundleId: "com.owletto.mac.debug" },
+        { name: "Debug", bundleId: "ai.lobu.mac" },
+        { name: "Release", bundleId: "ai.lobu.mac.debug" },
       ])
     );
     expect(problems).toHaveLength(1);
     expect(problems[0]).toContain(
-      "Release PRODUCT_BUNDLE_IDENTIFIER is 'com.owletto.mac.debug'"
+      "Release PRODUCT_BUNDLE_IDENTIFIER is 'ai.lobu.mac.debug'"
     );
   });
 
@@ -110,21 +110,21 @@ describe("check-mac-bundle-ids", () => {
   it("rejects an unexpected Debug identity", () => {
     const problems = checkBundleIds(
       pbxproj([
-        { name: "Debug", bundleId: "com.owletto.mac.staging" },
-        { name: "Release", bundleId: "com.owletto.mac" },
+        { name: "Debug", bundleId: "ai.lobu.mac.staging" },
+        { name: "Release", bundleId: "ai.lobu.mac" },
       ])
     );
     expect(problems).toHaveLength(1);
     expect(problems[0]).toContain(
-      "Debug PRODUCT_BUNDLE_IDENTIFIER is 'com.owletto.mac.staging'"
+      "Debug PRODUCT_BUNDLE_IDENTIFIER is 'ai.lobu.mac.staging'"
     );
   });
 
   it("rejects a new configuration name rather than ignoring it", () => {
     const problems = checkBundleIds(
       pbxproj([
-        { name: "Release", bundleId: "com.owletto.mac" },
-        { name: "Beta", bundleId: "com.owletto.mac.beta" },
+        { name: "Release", bundleId: "ai.lobu.mac" },
+        { name: "Beta", bundleId: "ai.lobu.mac.beta" },
       ])
     );
     expect(problems).toHaveLength(1);
@@ -141,7 +141,7 @@ describe("check-mac-bundle-ids", () => {
 
   it("fails closed when no Release configuration sets an identity", () => {
     const problems = checkBundleIds(
-      pbxproj([{ name: "Debug", bundleId: "com.owletto.mac" }])
+      pbxproj([{ name: "Debug", bundleId: "ai.lobu.mac" }])
     );
     expect(problems).toHaveLength(1);
     expect(problems[0]).toContain("no Release build configuration");
@@ -157,7 +157,7 @@ describe("check-mac-bundle-ids", () => {
       "\t\tBA0000000000000000000001 /* Release */ = {",
       "\t\t\tisa = XCBuildConfiguration;",
       "\t\t\tbuildSettings = {",
-      "\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.owletto.mac.debug;",
+      "\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ai.lobu.mac.debug;",
       "\t\t\t};",
       "\t\t};",
       "\t\tBA0000000000000000000002 /* Debug */ = {",
@@ -175,11 +175,11 @@ describe("check-mac-bundle-ids", () => {
     expect(
       parseBundleIdsByConfiguration(
         pbxproj([
-          { name: "Release", bundleId: "com.owletto.mac" },
+          { name: "Release", bundleId: "ai.lobu.mac" },
           { name: "Debug" },
         ])
       )
-    ).toEqual([{ configuration: "Release", bundleId: "com.owletto.mac" }]);
+    ).toEqual([{ configuration: "Release", bundleId: "ai.lobu.mac" }]);
   });
 
   // The DMG filename the release publishes (attached asset and appcast

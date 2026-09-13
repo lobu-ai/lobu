@@ -105,10 +105,13 @@ codesign --verify --deep --strict "$APP"
 echo ">> Built: $APP"
 
 if [ "${INSTALL:-}" = "1" ]; then
-  # Cutover from the pre-rename bundle: Owletto.app and Lobu.app share the
-  # bundle identifier, so a leftover Owletto.app would collide with the new
-  # install (LaunchServices + the single-instance guard). Retire it first.
-  # Login Items registration is per bundle ID, so it carries over untouched.
+  # Cutover from the retired com.owletto.mac identity: the old Lobu.app at
+  # this path carries a different bundle identifier, so it would linger as a
+  # separate app (LaunchServices + the single-instance guard key on the id).
+  # Retire it first, then install the ai.lobu.mac build at the same path.
+  # Login Items registration and TCC grants are per bundle ID, so they do NOT
+  # carry over: the new app re-prompts for Open at Login once, and macOS
+  # re-prompts for each privacy permission on first use.
   echo ">> Quitting running copies (Lobu and legacy Owletto)..."
   osascript -e 'tell application "Lobu" to quit' 2>/dev/null || true
   osascript -e 'tell application "Owletto" to quit' 2>/dev/null || true

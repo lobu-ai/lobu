@@ -64,10 +64,12 @@ Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https:
 
 Download Lobu: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/download/Lobu.dmg) · [Chrome extension](https://chromewebstore.google.com/detail/jhgcecbdpnoehfnhpdfihlchjddapepi)
 
-> Upgrading from the Owletto-named Mac build? Delete `/Applications/Owletto.app`
-> after installing. Both names share one app identity, and the old bundle would
-> otherwise linger beside the new one (in-app updates replace it in place, so
-> this is only for manual DMG installs).
+> Upgrading from a Mac build older than the `ai.lobu.mac` app identity? Delete
+> `/Applications/Lobu.app` (and `/Applications/Owletto.app` if still present)
+> after installing. The old bundle carries a different app identity, so it
+> would otherwise linger beside the new one — and its Login Items entry and
+> privacy grants do not transfer (the new app re-prompts once; in-app updates
+> replace it in place, so this is only for manual DMG installs).
 
 To test changes merged to `main`, run `bunx @lobu/cli@canary --help`. The
 `canary` tag moves only when a maintainer runs **Publish Packages** from `main`
