@@ -104,6 +104,20 @@ describe("assertAutomationInstructions", () => {
 		).toThrow(/needs instructions/);
 	});
 
+	test("accepts a script executor as the sole instruction source", () => {
+		const script = "export default async () => ({ ok: true });";
+		for (const triggers of [
+			[schedule],
+			[eventWindow],
+			[workspaceEventDefault],
+			[] as AutomationTrigger[],
+		]) {
+			expect(() =>
+				assertAutomationInstructions(triggers, undefined, null, null, script)
+			).not.toThrow();
+		}
+	});
+
 	test("still rejects the empty schedule/window/manual shape with a reaction absent", () => {
 		for (const triggers of [
 			[schedule],

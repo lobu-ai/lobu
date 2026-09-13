@@ -169,7 +169,9 @@ export async function handleCreateVersion(
   // entity_ids so {{entityId}} validates as it runs.
   const versionOrganizationId = automationRows[0].organization_id as string | null;
   const siblingRows = await sql`
-    SELECT id, triggers, entity_ids, execution_config, managed_agent_id, device_worker_id::text AS device_worker_id, execution_config->'executor'->>'source' AS executor_source
+    SELECT id, triggers, entity_ids, execution_config, managed_agent_id,
+           device_worker_id::text AS device_worker_id,
+           execution_config->'executor'->>'source' AS executor_source
     FROM automations
     WHERE automation_group_id = ${groupId}
   `;
@@ -269,14 +271,42 @@ export async function handleCreateVersion(
         Number(sibling.id) === Number(args.automation_id)
           ? triggerWrite.triggers
           : ((sibling.triggers ?? []) as typeof triggerWrite.triggers);
-      assertAutomationInstructions(siblingTriggers, prompt, skills, reactionScript, sibling.executor_source as string | null);
-      await assertAutomationScriptExecutor({ executionConfig: sibling.execution_config, triggers: siblingTriggers, agentId: sibling.managed_agent_id as string | null, deviceWorkerId: sibling.device_worker_id as string | null, skills, outputs, validateSource: false });
+      assertAutomationInstructions(
+        siblingTriggers,
+        prompt,
+        skills,
+        reactionScript,
+        sibling.executor_source as string | null
+      );
+      await assertAutomationScriptExecutor({
+        executionConfig: sibling.execution_config,
+        triggers: siblingTriggers,
+        agentId: sibling.managed_agent_id as string | null,
+        deviceWorkerId: sibling.device_worker_id as string | null,
+        skills,
+        outputs,
+        validateSource: false,
+      });
       assertAutomationOutputsUseWindowExecution(siblingTriggers, outputs);
     }
   } else {
     // Draft version only — triggers on the live row do not change.
-    assertAutomationInstructions(previousTriggers, prompt, skills, reactionScript, automationRows[0].executor_source as string | null);
-    await assertAutomationScriptExecutor({ executionConfig: automationRows[0].execution_config, triggers: previousTriggers, agentId: automationRows[0].managed_agent_id as string | null, deviceWorkerId: automationRows[0].device_worker_id as string | null, skills, outputs, validateSource: false });
+    assertAutomationInstructions(
+      previousTriggers,
+      prompt,
+      skills,
+      reactionScript,
+      automationRows[0].executor_source as string | null
+    );
+    await assertAutomationScriptExecutor({
+      executionConfig: automationRows[0].execution_config,
+      triggers: previousTriggers,
+      agentId: automationRows[0].managed_agent_id as string | null,
+      deviceWorkerId: automationRows[0].device_worker_id as string | null,
+      skills,
+      outputs,
+      validateSource: false,
+    });
     assertAutomationOutputsUseWindowExecution(previousTriggers, outputs);
   }
   // Both branches above write the SAME resolved prompt+skills pair, so the

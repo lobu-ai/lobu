@@ -265,8 +265,20 @@ export async function handleCreate(
       )
     : null;
   const skills = args.skills ?? [];
-  await assertAutomationScriptExecutor({ executionConfig: args.execution_config, ...executorDefaults, triggers: triggerWrite.triggers, skills, outputs });
-  assertAutomationInstructions(triggerWrite.triggers, args.prompt, skills, args.reaction_script, automationScriptExecutor(args.execution_config)?.source);
+  await assertAutomationScriptExecutor({
+    executionConfig: args.execution_config,
+    ...executorDefaults,
+    triggers: triggerWrite.triggers,
+    skills,
+    outputs,
+  });
+  assertAutomationInstructions(
+    triggerWrite.triggers,
+    args.prompt,
+    skills,
+    args.reaction_script,
+    automationScriptExecutor(args.execution_config)?.source
+  );
   assertPromptSkillTokensPinned(args.prompt, skills);
   // v1 constraint: skill bodies resolve against ONE agent library at save
   // time — the Automation-level default executor when it is an agent.
@@ -556,7 +568,10 @@ export async function handleUpdate(
         : currentRow.device_worker_id != null,
     applyId: ctx.applyId,
   });
-  const effectiveExecutionConfig = args.execution_config !== undefined ? args.execution_config : currentRow.execution_config;
+  const effectiveExecutionConfig =
+    args.execution_config !== undefined
+      ? args.execution_config
+      : currentRow.execution_config;
   const triggerWrite = resolveAutomationTriggerWrite({
     triggers: args.triggers,
     currentTriggers: currentRow.triggers ?? [],
@@ -618,7 +633,13 @@ export async function handleUpdate(
   });
   // Clearing a sole script executor must not leave an instruction-free job.
   if (args.execution_config !== undefined) {
-    assertAutomationInstructions(triggerWrite.triggers, currentRow.current_prompt, currentRow.current_skills, currentRow.reaction_script, automationScriptExecutor(effectiveExecutionConfig)?.source);
+    assertAutomationInstructions(
+      triggerWrite.triggers,
+      currentRow.current_prompt,
+      currentRow.current_skills,
+      currentRow.reaction_script,
+      automationScriptExecutor(effectiveExecutionConfig)?.source
+    );
   }
 
   let normalizedDeliveryTarget = args.delivery_target ?? null;
@@ -1015,7 +1036,8 @@ export async function handleCreateFromVersion(
         // cloneTriggers is computed once above (it does not depend on entity).
         // After stripping, the residual trigger shape must still satisfy the
         // instruction rule (chat-link-only sources become manual/empty triggers
-        // and require a non-empty prompt, a pinned skill, or a reaction script).
+        // and require a non-empty prompt, a pinned skill, a reaction script, or
+        // a script executor).
         // The clone SHARES the source's automation_versions row, so its pinned
         // skills come along with it — they satisfy the rule here exactly as they
         // will at dispatch.
