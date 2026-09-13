@@ -165,6 +165,22 @@ describe("createWorkspace tools", () => {
     const second = toolMap(createWorkspace(["ls"]).tools);
     expect(await run(second.ls, {})).toBe("(empty directory)");
   });
+
+  test("write enforces the turn workspace byte budget, counting overwrites as deltas", async () => {
+    const t = toolMap(createWorkspace(["write"]).tools);
+    const chunk = "x".repeat(32 * 1024 * 1024);
+    await run(t.write, { file_path: "a.bin", content: chunk });
+    await run(t.write, { file_path: "b.bin", content: chunk });
+    // 64MB held: a third 32MB file would exceed the 64MB budget and is refused.
+    await expect(run(t.write, { file_path: "c.bin", content: chunk })).rejects.toThrow("limited to 64.0MB");
+    // A same-size overwrite is a delta of zero, not a fresh allocation.
+    await run(t.write, { file_path: "a.bin", content: chunk });
+    // Growing a file counts only the growth, and even that must fit.
+    await expect(run(t.write, { file_path: "a.bin", content: `${chunk}x` })).rejects.toThrow("limited to 64.0MB");
+    // Shrinking a file frees its bytes for later writes.
+    await run(t.write, { file_path: "a.bin", content: "freed" });
+    expect(await run(t.write, { file_path: "small.txt", content: "ok" })).toBe("Successfully wrote 2 bytes to small.txt");
+  }, 120000);
 });
 
 describe("edit and grep — pi's two remaining builtins, inside the isolate", () => {

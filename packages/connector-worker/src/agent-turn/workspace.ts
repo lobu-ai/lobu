@@ -32,6 +32,13 @@ import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, Run
 export const WORKSPACE_ROOT = '/workspace';
 
 /**
+ * Total bytes the write and edit tools may place in one turn's workspace.
+ * Far above real workloads (the largest measured transcript is ~633KB) and
+ * far below the isolate memory ceiling that would otherwise kill the turn.
+ */
+export const WORKSPACE_WRITE_BUDGET_BYTES = 64 * 1024 * 1024;
+
+/**
  * Where the turn's own attachments are seeded. The name is part of the
  * agent-visible contract: the system prompt lists each upload by this path.
  */
@@ -288,9 +295,30 @@ export function createWorkspace(
   };
   // Pi owns mutation ordering, matching, cancellation, and result formatting.
   // Only filesystem access changes: every operation stays in this turn's tree.
+  // The budget below is the only bound on the write/edit tools: without it a
+  // write loop runs until the isolate's own memory ceiling kills the whole
+  // turn as MemoryLimitExceeded, instead of refusing with an error the model
+  // can read and act on. An overwrite counts as a delta, so rewriting one
+  // file in a loop does not accumulate. bash redirection goes through
+  // just-bash's own filesystem and is not intercepted at this layer, so the
+  // isolate memory limit stays the backstop there. Host-placed seed files
+  // also bypass this accounting; they are bounded by the host, not the model.
+  const writeSizes = new Map<string, number>();
+  let writtenBytes = 0;
   const writeFile = async (path: string, content: string): Promise<void> => {
     await ready;
-    await fs.writeFile(resolve(path), content);
+    const absolute = resolve(path);
+    const newSize = Buffer.byteLength(content);
+    const previousSize = writeSizes.get(absolute) ?? 0;
+    const projected = writtenBytes - previousSize + newSize;
+    if (projected > WORKSPACE_WRITE_BUDGET_BYTES) {
+      throw new Error(
+        `Refusing to write ${formatSize(newSize)} to ${path}: this turn's workspace is limited to ${formatSize(WORKSPACE_WRITE_BUDGET_BYTES)} total and already holds ${formatSize(writtenBytes)}. Write smaller content or split it across turns.`
+      );
+    }
+    await fs.writeFile(absolute, content);
+    writeSizes.set(absolute, newSize);
+    writtenBytes = projected;
   };
   // Host-placed files. Bytes go in as a Uint8Array rather than a string: a
   // decoded-to-UTF-8 round trip would corrupt every attachment that is not
