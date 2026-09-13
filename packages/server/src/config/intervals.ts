@@ -141,6 +141,19 @@ export const intervals = {
     return parseEnvInt('RUNS_POLL_INTERVAL_MS', 200);
   },
 
+  /** Recheck cadence inside a HELD worker claim, deliberately coarser than
+   *  `runsPollIntervalMs`. That 200ms is sized for ONE in-process queue loop
+   *  per replica; a held claim applies its cadence per in-flight HTTP request,
+   *  and each empty attempt opens a transaction that takes the due-feeds
+   *  advisory lock and materializes due feeds. At 200ms a single idle worker
+   *  would run ~125 of those per 25s hold, multiplied by fleet size. NOTIFY
+   *  already covers the real-time path, so this fallback only has to cover
+   *  missed notifications, scheduled work and producers older than the
+   *  notifying build. */
+  get workerHoldRecheckMs(): number {
+    return parseEnvInt('WORKER_HOLD_RECHECK_MS', 2000);
+  },
+
   /** Long-horizon TTL (days) after which a run still sitting at
    *  `approval_status='pending'` is expired.
    *

@@ -6,6 +6,7 @@
  * injected so the device build does not import fleet connector machinery.
  */
 
+import { WORKER_POLL_MAX_WAIT_SECONDS } from '@lobu/core/contracts/worker/protocol';
 import { type PollResponse, WorkerHttpError, type WorkerClient } from './client.js';
 import { log } from './log.js';
 
@@ -51,6 +52,7 @@ export class WorkerPollLoop {
   private activeJobs = 0;
   private capacityVersion = 0;
   private wakePoll?: (capacityReleased?: boolean) => void;
+  private pendingPoll?: AbortController;
 
   constructor(options: WorkerPollLoopOptions) {
     this.client = options.client;
@@ -86,6 +88,7 @@ export class WorkerPollLoop {
       try {
         nextDelayMs = await this.pollAndExecute();
       } catch (err) {
+        if (!this.running) break;
         // Server errors retain their retry backoff even if a slot opens.
         capacityVersion = undefined;
         if (
@@ -112,6 +115,7 @@ export class WorkerPollLoop {
     log.info('[daemon] Stopping...');
     this.running = false;
     this.admittingJobs = false;
+    this.pendingPoll?.abort();
     this.wakePoll?.();
   }
 
@@ -138,12 +142,24 @@ export class WorkerPollLoop {
   private async pollAndExecute(): Promise<number | undefined> {
     if (!this.admittingJobs) return undefined;
     const capacityAvailable = Math.max(0, this.maxConcurrentJobs - this.activeJobs);
-    const job = await this.client.poll(capacityAvailable);
+    const controller = new AbortController();
+    this.pendingPoll = controller;
+    let job: PollResponse;
+    try {
+      job = await this.client.poll(capacityAvailable, {
+        // A worker with no free slot must not hold the request: it cannot take
+        // the run the hold would return.
+        waitSeconds: capacityAvailable > 0 ? WORKER_POLL_MAX_WAIT_SECONDS : 0,
+        signal: controller.signal,
+      });
+    } finally {
+      this.pendingPoll = undefined;
+    }
     if (!job.run_id) {
       if (!this.admittingJobs) return undefined;
       const nextPoll = job.next_poll_seconds ?? 30;
       log.debug(`[daemon] No runs available, next poll in ${nextPoll}s`);
-      return Number.isFinite(nextPoll) && nextPoll > 0 ? nextPoll * 1000 : 1000;
+      return Number.isFinite(nextPoll) && nextPoll >= 0 ? nextPoll * 1000 : 1000;
     }
 
     // A zero-capacity response should be impossible: the server must not enter

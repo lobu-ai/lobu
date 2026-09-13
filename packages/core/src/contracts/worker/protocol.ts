@@ -149,9 +149,21 @@ export const FeedNotificationSchema = Type.Object({
   changed: Type.Boolean(),
 });
 
+/**
+ * Ceiling on how long the gateway holds an empty claim request. A client that
+ * asks for more is rejected, so the client's own hold MUST be read from here
+ * rather than restated: the two are one contract, and a client-side literal
+ * above the schema maximum 400s every poll — a total dispatch outage.
+ */
+export const WORKER_POLL_MAX_WAIT_SECONDS = 25;
+
 /** `POST /api/workers/poll` request body. */
 export const PollRequestSchema = Type.Object({
   worker_id: Type.String(),
+  /** Maximum time to hold an empty claim request; available work returns immediately. */
+  wait_seconds: Type.Optional(
+    Type.Integer({ minimum: 0, maximum: WORKER_POLL_MAX_WAIT_SECONDS })
+  ),
   capabilities: Type.Optional(Type.Record(Type.String(), Type.Boolean())),
   /** Number of additional runs the worker can accept at this instant. */
   capacity_available: Type.Optional(
