@@ -52,7 +52,10 @@ describe("published artifact portability", () => {
   it.each([
     "/Users/synthetic-builder/project/source.ts",
     "file:///Users/synthetic-builder/project/source.ts",
+    "file://localhost/Users/synthetic-builder/project/source.ts",
     "file:%2F%2F%2FUsers%2Fsynthetic-builder%2Fproject%2Fsource.ts",
+    "file:%2F%2Flocalhost%2FUsers%2Fsynthetic-builder%2Fproject%2Fsource.ts",
+    String.raw`file:\x2f\x2f\x2fUsers\x2fsynthetic-builder\x2fproject\x2fsource.ts`,
     "C:\\Users\\synthetic-builder\\project\\source.ts",
     "file:///C:/Users/synthetic-builder/project/source.ts",
     "file:%2F%2F%2FC%3A%2FUsers%2Fsynthetic-builder%2Fproject%2Fsource.ts",
@@ -99,6 +102,22 @@ describe("published artifact portability", () => {
       '"C:\\\\Users\\\\synthetic-builder\\\\source.ts"'
     );
     expect(() => assertPortableArtifact(artifact, builder)).not.toThrow();
+  });
+  it.each([
+    "fixtures",
+    "__fixtures__",
+    "__tests__",
+  ])("scans artifacts beneath a builder directory named %s", (parent) => {
+    const { artifact, builder } = fixture();
+    const nestedArtifact = join(artifact, parent, "package");
+    file(
+      nestedArtifact,
+      "dist/index.js",
+      JSON.stringify(join(builder, "source.ts"))
+    );
+    expect(() => assertPortableArtifact(nestedArtifact, builder)).toThrow(
+      "Build-machine path"
+    );
   });
   it.each([
     {

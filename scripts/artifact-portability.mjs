@@ -21,7 +21,7 @@ export function assertPortableArtifact(
       const path = join(folder, entry.name);
       if (
         /(?:^|\/)(?:__tests__|__fixtures__|fixtures)(?:\/|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(
-          path
+          relative(directory, path).replaceAll("\\", "/")
         )
       )
         continue;
@@ -35,7 +35,7 @@ export function assertPortableArtifact(
           .replace(/%([0-9a-f]{2})/gi, (_, hex) =>
             String.fromCharCode(Number.parseInt(hex, 16))
           )
-          .replace(/\\u00([0-9a-f]{2})/gi, (_, hex) =>
+          .replace(/\\(?:u00|x)([0-9a-f]{2})/gi, (_, hex) =>
             String.fromCharCode(Number.parseInt(hex, 16))
           )
           .replace(/\\\//g, "/")
@@ -46,7 +46,7 @@ export function assertPortableArtifact(
               bytes.includes(marker) ||
               normalized.includes(marker.replaceAll("\\", "/"))
           ) ||
-          /(?:^|[\s"'`([{=:])(?:file:\/\/)?\/Users\/[^/\r\n"'`<>]+(?:\/|(?=[\s"'`),;]|$))/m.test(
+          /(?:^|[\s"'`([{=:])(?:file:\/\/(?:localhost)?)?\/Users\/[^/\r\n"'`<>]+(?:\/|(?=[\s"'`),;]|$))/m.test(
             normalized
           ) ||
           /(?:^|[\s"'`([{=:])(?:file:\/\/\/)?[a-z]:\/(?:Users|Documents and Settings)\/[^/\r\n"'`<>]+(?:\/|(?=[\s"'`),;]|$))/im.test(
