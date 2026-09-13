@@ -415,6 +415,52 @@ export default class ActionProbeConnector {
     }
   }, 120_000);
 
+  it('clears per-feed checkpoints on a version bump and keeps them without one', async () => {
+    const sql = getTestDb();
+    const KEY2 = 'zz.checkpointprobe';
+    const src = (version: string, marker: string) =>
+      probeSource(version, marker).replaceAll(KEY, KEY2);
+
+    const installed = await manageConnections(
+      { action: 'install_connector', source_code: src('1.0.0', 'C1') },
+      TEST_ENV,
+      ctx,
+    );
+    expect('error' in installed ? installed.error : undefined).toBeUndefined();
+
+    // A connection + feed of this connector carrying a committed checkpoint.
+    const [conn] = await sql`
+      INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
+      VALUES (${orgId}, ${KEY2}, 'Checkpoint Probe Conn', 'zz-checkpoint-probe-conn', 'active')
+      RETURNING id
+    `;
+    const [feed] = await sql`
+      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
+      VALUES (${orgId}, ${conn.id}, 'items', 'active', ${sql.json({ cursor: 'old-cursor' })})
+      RETURNING id
+    `;
+
+    // Same-version refresh with identical code: checkpoint must survive.
+    const refresh = await manageConnections(
+      { action: 'update_connector_source', connector_key: KEY2, source_code: src('1.0.0', 'C1') },
+      TEST_ENV,
+      ctx,
+    );
+    expect('error' in refresh ? refresh.error : undefined).toBeUndefined();
+    const [kept] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+    expect(kept.checkpoint).toEqual({ cursor: 'old-cursor' });
+
+    // Version bump: the old cursor must not gate what the new code collects.
+    const bumped = await manageConnections(
+      { action: 'update_connector_source', connector_key: KEY2, source_code: src('1.0.1', 'C2') },
+      TEST_ENV,
+      ctx,
+    );
+    expect('error' in bumped ? bumped.error : undefined).toBeUndefined();
+    const [cleared] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+    expect(cleared.checkpoint).toBeNull();
+  }, 120_000);
+
   it('refuses to update a connector that is not installed', async () => {
     const result = await manageConnections(
       {
