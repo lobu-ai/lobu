@@ -435,10 +435,10 @@ const productActivityDigest = defineAutomation({
   description:
     "Every 20 minutes, summarize new signups, logins, connections, MCP clients, and Kubernetes log activity; stay silent when nothing happened.",
   triggers: [
-    // Re-anchored +1 minute on 2026-09-13: a changed schedule is the designed
-    // operator recovery that clears the Sep 9 auto-pause (byte-identical
+    // Shifted one minute off the natural :5 anchor: only a changed schedule
+    // clears schedule_auto_paused_at after an auto-pause (byte-identical
     // triggers and prompt-only versions deliberately do not). Same 20-minute
-    // rhythm as before.
+    // rhythm, still 3-4 minutes after both feeds sync.
     every("6,26,46 * * * *", {
       skip_if_unchanged: false,
     }),

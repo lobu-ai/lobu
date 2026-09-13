@@ -9,7 +9,7 @@ const LOG_ACTIVITY_CONNECTION = "lobu-production-logs";
 const CARD_TEXT_LIMIT = 2_800;
 const LOG_WINDOW_MS = 20 * 60 * 1000;
 const LOG_INGESTION_LAG_MS = 2 * 60 * 1000;
-// Both feeds are scheduled 2–3 minutes before this digest. Ten minutes allows
+// Both feeds are scheduled 3–4 minutes before this digest. Ten minutes allows
 // normal run delay without treating a missed 20-minute cycle as current.
 const FEED_FRESHNESS_MS = 10 * 60 * 1000;
 
