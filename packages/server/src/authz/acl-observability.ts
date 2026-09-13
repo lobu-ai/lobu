@@ -188,12 +188,10 @@ export async function deleteConnectionAclRow(
  * or by any tick before the exclusion existed — stays on a healthy row forever.
  *
  * Deliberately does NOT touch `authz_source_acl_state`. Dropping that row moves
- * a graphed connection to `not-graphed`, which is the PASSTHROUGH branch of
- * `compileResourceVisibility` — so its already-synced resource-linked events
- * would go from fail-closed to readable. `resource-visibility.ts` states the
- * invariant directly: once a connection is graphed it never falls back to the
- * legacy per-connection fence, because a stalled sync must hide data rather
- * than leak it. Retaining a `failed` row keeps exactly that fail-closed
+ * a graphed connection to `not-graphed`, which is the legacy path of
+ * `compileResourceVisibility` for its UNSTAMPED rows — while its
+ * resource-stamped rows stay fail-closed with no enforced authority to
+ * satisfy them. Retaining a `failed` row keeps exactly that fail-closed
  * posture; only the operator-facing message is stale, and only it is cleared.
  *
  * Only `acl:`-prefixed text is cleared, so another subsystem's error message

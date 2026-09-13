@@ -308,14 +308,17 @@ describe('github repo visibility gate (e2e via search_memory content)', () => {
     expect(ids.has(event.id)).toBe(true);
   });
 
-  it('no regression: WITHOUT a graph the connection stays on legacy connection-visibility (both visible)', async () => {
+  it('fails closed WITHOUT a graph: stamped events need a fresh authority, not the legacy fence', async () => {
     const { org, alice, eventAId, eventBId } = await setupWorkspace();
-    // Drop the ACL state → connection no longer enforced → repo gate is inert,
-    // both org-visible events recall.
+    // Drop the ACL state → no enforced authority owns the membership edges, so
+    // the stamped events recall for NOBODY — the stamp is a requirement that no
+    // fresh graph satisfies. Unstamped org-visible content on the same
+    // never-graphed connection keeps the legacy fence (see the approval
+    // permalink suite); stamped content never falls back to it.
     const sql = getTestDb();
     await sql`DELETE FROM authz_source_acl_state WHERE organization_id = ${org.id}`;
     const ids = await recallContentIds(ctxFor(org.id, alice.id));
-    expect(ids.has(eventAId)).toBe(true);
-    expect(ids.has(eventBId)).toBe(true);
+    expect(ids.has(eventAId)).toBe(false);
+    expect(ids.has(eventBId)).toBe(false);
   });
 });
