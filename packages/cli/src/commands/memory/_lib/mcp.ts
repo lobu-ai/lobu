@@ -244,8 +244,7 @@ export async function mcpRpc(
  * the raw handler result as parsed JSON (no MCP envelope). Throws `ApiError` on
  * non-2xx, surfacing the server's `{ error }` message when present.
  *
- * `restToolCall` (POST) and `restGet` (GET) are thin wrappers — they differ only
- * in HTTP method/body and the labels used in the no-org and failure messages.
+ * `restToolCall` is a thin POST wrapper used by the CLI call path.
  */
 async function restCall<T>(
   mcpUrl: string,
@@ -329,29 +328,6 @@ export function restToolCall<T = unknown>(
       failureLabel: toolName,
       noOrgMessage: (url) =>
         `Cannot call ${toolName}: no org slug on MCP URL ${url}. Use --org or run: lobu memory org set <org>`,
-    },
-    contextName
-  );
-}
-
-/**
- * GET sibling of `restToolCall` — fetches `${origin}/api/${orgSlug}/${path}`.
- * Used by `lobu call --list` to hit `GET /api/<org>/tools` without spinning up
- * an MCP session for discovery.
- */
-export function restGet<T = unknown>(
-  mcpUrl: string,
-  path: string,
-  contextName?: string
-): Promise<T> {
-  return restCall<T>(
-    mcpUrl,
-    path,
-    {
-      method: "GET",
-      failureLabel: `GET ${path}`,
-      noOrgMessage: (url) =>
-        `Cannot GET ${path}: no org slug on MCP URL ${url}. Use --org or run: lobu org set <slug>`,
     },
     contextName
   );

@@ -104,7 +104,7 @@ grep -qi "Apply complete" "$RUN_LOG" || die "lobu run did not auto-apply"
 pass "lobu run booted on :$GW_PORT"
 
 # local-init via whoami --json
-runlobu "$PROJ" whoami --json -c local
+runlobu "$PROJ" whoami --json --include-tokens -c local
 [ "$RC" -eq 0 ] || fail "whoami --json exit $RC"
 JSON="$(grep -E '^\{' "$OUT" | tail -1)"
 WHOAMI="$(
@@ -150,11 +150,12 @@ printf '%s' "$JSON" | swift -e '
 import Foundation
 struct Whoami: Decodable {
   let loggedIn: Bool; let context: String; let apiUrl: String; let local: Bool
+  let hasAccessToken: Bool; let hasWorkerToken: Bool
   let accessToken: String?; let workerToken: String?
 }
 let data = FileHandle.standardInput.readDataToEndOfFile()
 let w = try JSONDecoder().decode(Whoami.self, from: data)
-precondition(w.loggedIn && w.local && w.workerToken != nil)
+precondition(w.loggedIn && w.local && w.hasAccessToken && w.hasWorkerToken && w.workerToken != nil)
 print("swift-decode-ok")
 ' >"$OUT" 2>&1
 grep -q swift-decode-ok "$OUT" && pass "Swift JSONDecoder matches whoami --json" \
@@ -227,7 +228,7 @@ process.stdout.write(!entry || t === "" ? "cleared" : "still-has-token");
 )"
 [ "$CREDS_CLEARED" = "cleared" ] && pass "logout cleared credentials.json for local" \
   || fail "logout did not clear credentials.json ($CREDS_CLEARED)"
-runlobu "$PROJ" whoami --json -c local
+runlobu "$PROJ" whoami --json --include-tokens -c local
 RE_MINT="$(grep -E '^\{' "$OUT" | tail -1 | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).loggedIn' 2>/dev/null)"
 [ "$RE_MINT" = "true" ] && pass "loopback whoami re-mints after logout (local-init)" \
   || fail "loopback whoami did not re-mint after logout ($(grep -E '^\{' "$OUT" | tail -1))"
@@ -243,7 +244,7 @@ if [ -z "$OWLETTO_BIN" ]; then
   fail "Lobu Debug binary not found (run xcodebuild first)"
 else
   runlobu "$PROJ" context use local
-  runlobu "$PROJ" whoami --json -c local
+  runlobu "$PROJ" whoami --json --include-tokens -c local
   BRIDGE_TOKEN="$(grep -E '^\{' "$OUT" | tail -1 | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).workerToken' 2>/dev/null)"
   [ -n "$BRIDGE_TOKEN" ] || fail "bridge prep: no workerToken from whoami"
   REQ='{"op":"pair","platform":"chrome-extension"}'

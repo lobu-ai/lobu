@@ -90,6 +90,24 @@ describe("whoamiCommand --json", () => {
     expect(result.organizations).toEqual([{ slug: "acme", name: "Acme Inc" }]);
   });
 
+  test("emits raw tokens only when explicitly requested", async () => {
+    spyOn(internal, "refreshCredentials").mockResolvedValue({
+      accessToken: "session-token",
+      localWorkerToken: "worker-pat",
+      oauth: {
+        clientId: "client-id",
+        tokenEndpoint: "https://issuer.example.com/token",
+      },
+    });
+    spyOn(internal, "getAgentApiToken").mockResolvedValue("worker-pat");
+
+    await whoamiCommand({ json: true, includeTokens: true });
+
+    const result = parseJsonOutput();
+    expect(result.accessToken).toBe("session-token");
+    expect(result.workerToken).toBe("worker-pat");
+  });
+
   test("uses worker PAT on loopback and marks local=true", async () => {
     spyOn(internal, "resolveContext").mockResolvedValue({
       name: "local",

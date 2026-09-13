@@ -459,10 +459,20 @@ Memory:
       .command("whoami")
       .description("Show current user and linked agent")
       .option("--json", "Emit machine-readable session JSON (for Owletto Mac)")
-  ).action(async (options: { context?: string; json?: boolean }) => {
-    const { whoamiCommand } = await import("./commands/whoami.js");
-    await whoamiCommand(options);
-  });
+      .option(
+        "--include-tokens",
+        "Include raw auth tokens (trusted local clients only)"
+      )
+  ).action(
+    async (options: {
+      context?: string;
+      json?: boolean;
+      includeTokens?: boolean;
+    }) => {
+      const { whoamiCommand } = await import("./commands/whoami.js");
+      await whoamiCommand(options);
+    }
+  );
 
   // ─── token ──────────────────────────────────────────────────────────
   const token = withCommonOpts(

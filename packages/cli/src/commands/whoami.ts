@@ -11,9 +11,9 @@ import {
 /**
  * Machine-readable identity for the active (or `--context`) session, emitted by
  * `lobu whoami --json`. This is the contract the Owletto Mac app reads to drive
- * its menu bar (identity row, org, worker poll token) — it delegates all auth to
- * the CLI instead of keeping a parallel native session. Keep additive: the app
- * tolerates extra fields, but renamed/removed ones break it.
+ * its menu bar identity and org state. Raw tokens are omitted unless the trusted
+ * native client explicitly requests them with `--include-tokens`. Keep additive:
+ * the app tolerates extra fields, but renamed/removed ones break it.
  */
 interface WhoamiJson {
   loggedIn: boolean;
@@ -25,10 +25,14 @@ interface WhoamiJson {
   email?: string;
   name?: string;
   userId?: string;
-  /** True when a refreshed access token is available. Raw tokens are never printed. */
+  /** True when a refreshed access token is available. */
   hasAccessToken: boolean;
-  /** True when a device-worker token is available. Raw tokens are never printed. */
+  /** Raw refreshed session token, only with `--include-tokens`. */
+  accessToken?: string;
+  /** True when a device-worker token is available. */
   hasWorkerToken: boolean;
+  /** Raw worker token, only with `--include-tokens`. */
+  workerToken?: string;
   /** Epoch ms when `accessToken` expires, when known. */
   expiresAt?: number;
   /** Active org slug bound to this context, when set. */
@@ -56,6 +60,7 @@ function isLoopbackUrl(url: string): boolean {
 export async function whoamiCommand(options?: {
   context?: string;
   json?: boolean;
+  includeTokens?: boolean;
 }): Promise<void> {
   const target = await resolveContext(options?.context);
   const creds = await refreshCredentials(
@@ -64,7 +69,7 @@ export async function whoamiCommand(options?: {
   );
 
   if (options?.json) {
-    await emitJson(target, creds);
+    await emitJson(target, creds, options.includeTokens ?? false);
     return;
   }
 
@@ -103,7 +108,8 @@ export async function whoamiCommand(options?: {
 
 async function emitJson(
   target: { name: string; url: string },
-  creds: Awaited<ReturnType<typeof refreshCredentials>>
+  creds: Awaited<ReturnType<typeof refreshCredentials>>,
+  includeTokens: boolean
 ): Promise<void> {
   const local = isLoopbackUrl(target.url);
 
@@ -144,6 +150,12 @@ async function emitJson(
     userId: effective?.userId,
     hasAccessToken: Boolean(effective?.accessToken),
     hasWorkerToken: Boolean(workerToken ?? effective?.accessToken),
+    ...(includeTokens
+      ? {
+          accessToken: effective?.accessToken,
+          workerToken: workerToken ?? effective?.accessToken,
+        }
+      : {}),
     expiresAt: effective?.expiresAt,
     orgSlug,
     personalOrgSlug,

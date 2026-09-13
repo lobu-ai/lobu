@@ -59,7 +59,9 @@ async function runMacAuthCli(
     .option("-c, --context <name>", "Use a named context")
     .option("--json", "Emit machine-readable session JSON")
     .action(async (options: { context?: string; json?: boolean }) => {
-      await whoamiCommand(options);
+      // This entrypoint is bundled inside Owletto and is the trusted native
+      // credential bridge. The general `lobu whoami --json` stays token-free.
+      await whoamiCommand({ ...options, includeTokens: true });
     });
 
   try {
