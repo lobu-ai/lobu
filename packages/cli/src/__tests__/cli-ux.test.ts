@@ -121,6 +121,14 @@ describe("lobu init --yes", () => {
     INIT_TIMEOUT
   );
 
+  test("--skip-install scaffolds without creating node_modules", async () => {
+    await initCommand(cwd, "no-install", { yes: true, skipInstall: true });
+    const proj = join(cwd, "no-install");
+    expect(existsSync(join(proj, "lobu.config.ts"))).toBe(true);
+    expect(existsSync(join(proj, "package.json"))).toBe(true);
+    expect(existsSync(join(proj, "node_modules"))).toBe(false);
+  });
+
   test(
     "scaffolded lobu.config.ts loads into desired state",
     async () => {

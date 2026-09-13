@@ -46,6 +46,8 @@ export interface InitOptions {
   noSentry?: boolean;
   hostedSlack?: boolean;
   listProviders?: boolean;
+  /** Scaffold files without installing project dependencies. */
+  skipInstall?: boolean;
   /**
    * Bootstrap a complete, re-appliable project from an existing Lobu Cloud org
    * (the inverse of `lobu apply`) instead of scaffolding a blank project. Never
@@ -369,12 +371,17 @@ export async function initCommand(
     // Same package.json/tsconfig the blank scaffold writes, so the bootstrapped
     // lobu.config.ts can resolve @lobu/cli/config + re-apply outside this monorepo.
     await scaffoldProjectPackaging(projectDir, projectName, cliVersion);
-    const depsSpinner = ora("Installing project dependencies...").start();
-    const depsWarning = installScaffoldedProjectDeps(projectDir);
-    if (depsWarning) {
-      depsSpinner.warn(depsWarning);
+    if (options.skipInstall) {
+      console.log(
+        chalk.yellow(
+          "\nSkipped dependency installation. Run `npm install` (or `bun install`) before `lobu apply`."
+        )
+      );
     } else {
-      depsSpinner.succeed("Project dependencies installed");
+      console.log(chalk.dim("\nInstalling project dependencies (this may take a few minutes)..."));
+      const depsWarning = installScaffoldedProjectDeps(projectDir, "inherit");
+      if (depsWarning) console.log(chalk.yellow(`\n⚠ ${depsWarning}`));
+      else console.log(chalk.green("✓ Project dependencies installed"));
     }
     if (!here) {
       console.log(chalk.cyan(`\n  Next: cd ${projectName}\n`));
@@ -752,13 +759,6 @@ export async function initCommand(
     await mkdir(join(projectDir, "connectors"), { recursive: true });
     await writeFile(join(projectDir, "connectors", ".gitkeep"), "");
 
-    // Install the freshly-declared devDependencies now so the runtime can
-    // resolve @lobu/connector-sdk from the project and editor types work
-    // out of the box. Warn-don't-fail (printed after the spinner settles).
-    spinner.text = "Installing project dependencies...";
-    const depsWarning = installScaffoldedProjectDeps(projectDir);
-    spinner.text = "Creating Lobu project...";
-
     await renderTemplate(
       "AGENTS.md.tmpl",
       variables,
@@ -770,10 +770,29 @@ export async function initCommand(
       join(projectDir, "TESTING.md")
     );
 
-    spinner.succeed("Project created successfully!");
+    // Keep the potentially long install visible. Hiding installer output behind
+    // the scaffold spinner makes a healthy first run look wedged on small hosts.
+    spinner.succeed("Project files created");
+    let depsWarning: string | null = null;
+    if (options.skipInstall) {
+      console.log(
+        chalk.yellow(
+          "\nSkipped dependency installation. Run `npm install` (or `bun install`) before `lobu apply`."
+        )
+      );
+    } else {
+      console.log(
+        chalk.dim(
+          "\nInstalling project dependencies (this may take a few minutes)..."
+        )
+      );
+      depsWarning = installScaffoldedProjectDeps(projectDir, "inherit");
+    }
 
     if (depsWarning) {
       console.log(chalk.yellow(`\n⚠ ${depsWarning}`));
+    } else if (!options.skipInstall) {
+      console.log(chalk.green("✓ Project dependencies installed"));
     }
 
     const gatewayUrl = `http://localhost:${gatewayPort}`;
@@ -1001,10 +1020,11 @@ async function generateLobuConfig(
  * the failure is returned as a warning string for the caller to print.
  */
 export function installScaffoldedProjectDeps(
-  projectDir: string
+  projectDir: string,
+  stdio: "inherit" | "pipe" = "pipe"
 ): string | null {
   try {
-    installProjectDeps(projectDir, { stdio: "pipe" });
+    installProjectDeps(projectDir, { stdio });
     return null;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
