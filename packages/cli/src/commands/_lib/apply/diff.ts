@@ -108,6 +108,8 @@ export interface AutomationDiffRow
    * True when the desired automation declares a `reaction_script` — server stores
    * it write-only, so the diff can't tell whether it changed; apply always
    * re-pushes (idempotent). Matches the auth-profile credentials pattern.
+   * An explicit `null` (reaction removal) also counts as declared; apply
+   * clears it via `set_reaction_script`.
    */
   reactionScriptDeclared?: boolean;
 }
@@ -1563,7 +1565,8 @@ function diffAutomationWithBaseline(
  * The diff returns both lists; apply-cmd routes accordingly.
  *
  * Reaction scripts aren't returned by Automation lists (write-only on the row),
- * so we can't compare them — apply always re-pushes when declared (idempotent).
+ * so we can't compare them — apply always re-pushes when declared (idempotent),
+ * and an explicit `null` is a declared removal routed to `set_reaction_script`.
  * Remote automations without a desired model are reported as drift, never deleted.
  */
 function diffAutomation(

@@ -1005,10 +1005,12 @@ export function mapProjectToDesiredState(
     // The config's `reaction` marker (from `reactionFromFile(path)`) drives the
     // instruction-presence preflight — the reaction SOURCE is only resolved
     // later by the loader. `automations` is index-aligned with
-    // `project.automations` (the mapper maps in order).
+    // `project.automations` (the mapper maps in order). An explicit
+    // `reaction: null` is a removal, not an instruction source.
     assertAutomationSkills(
       automation,
-      project.automations?.[i]?.reaction !== undefined ||
+      (project.automations?.[i]?.reaction !== undefined &&
+        project.automations?.[i]?.reaction !== null) ||
         (project.automations?.[i]?.executor !== undefined &&
           project.automations?.[i]?.executor !== "agent")
     );

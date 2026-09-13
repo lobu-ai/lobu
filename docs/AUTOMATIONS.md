@@ -58,7 +58,9 @@ Event scripts use silent triggers and send any desired replies through the SDK;
 
 `lobu apply` preserves an omitted executor; `executor: "agent"` explicitly removes
 a stored script executor. Switching an existing reaction-driven job requires
-removing its old reaction so the same work is not performed twice.
+removing its old reaction so the same work is not performed twice: declare
+`reaction: null` and apply clears it via `set_reaction_script` after installing
+the executor. Omitting `reaction` preserves whatever is installed.
 
 ## Scheduling and admission
 

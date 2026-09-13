@@ -102,7 +102,7 @@ describe("Lobu Team configuration", () => {
     ]);
     expect(digest?.sources).toBeUndefined();
     expect(digest?.prompt).toBeUndefined();
-    expect(digest?.reaction).toBeUndefined();
+    expect(digest?.reaction).toBeNull();
     expect(digest?.agent).toMatchObject({
       id: "product-ops",
       providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
