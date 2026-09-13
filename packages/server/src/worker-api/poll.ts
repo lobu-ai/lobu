@@ -1298,6 +1298,23 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     auth_profile_auth_data: Record<string, unknown> | null;
   };
 
+  // Legacy sunset signal (metrics only): a manifest-backed run claimed
+  // with no exact manifest-hash authorization could only have matched the
+  // legacy hashless arm in connectorClaimLaneSql. Quiet on this series is the
+  // deletion gate for that arm.
+  if (
+    pending.connector_manifest_backed === true &&
+    connectorClaimContext.allowLegacyManifestCapabilityClaims === true &&
+    !manifestClaimAuthorizations.some(
+      (auth) =>
+        auth.connectorKey === pending.connector_key &&
+        auth.connectorVersion === pending.connector_version &&
+        auth.manifestHash === pending.connector_manifest_hash
+    )
+  ) {
+    incrementCounter('lobu_legacy_compat_hits_total', { path: 'hashless_manifest_claim' });
+  }
+
   // The device implements a manifest-backed connector itself: the artifact
   // carries no code and its identity is the contract hash the device
   // advertised. HOW it runs there — a native bridge, an in-process built-in —

@@ -38,6 +38,7 @@ import { feedBackoff } from "../connectors/feed-backoff";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { maybeEmitFeedAutoPausedAfterFailure } from "../automations/platform-events";
 import { getDb, parsePgNumberArray } from "../db/client";
+import { incrementCounter } from "../gateway/metrics/prometheus";
 import { eventArtifactBinding } from "../gateway/files/artifact-store";
 import { emit } from "../events/emitter";
 import { parseJsonBody } from "../gateway/routes/shared/helpers";
@@ -1572,6 +1573,7 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 			// (user_id, body.worker_id) lookup; this is weaker than the bound path
 			// but still gates on user ownership. Emit a warning so prod telemetry
 			// can flag if any non-Mac caller hits this branch.
+			incrementCounter('lobu_legacy_compat_hits_total', { path: 'legacy_token_fallback' });
 			logger.warn(
 				{
 					run_id: runId,
