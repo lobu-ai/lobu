@@ -16,8 +16,15 @@ import { manageOperations } from '../../tools/admin/manage_operations';
 import type { ToolContext } from '../../tools/registry';
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestConnection, createTestConnectorDefinition, createTestSession, seedOwnerContext } from '../setup/test-fixtures';
-import { post } from '../setup/test-helpers';
+import {
+  createTestAccessToken,
+  createTestConnection,
+  createTestConnectorDefinition,
+  createTestOAuthClient,
+  createTestSession,
+  seedOwnerContext,
+} from '../setup/test-fixtures';
+import { mcpToolsCall, post } from '../setup/test-helpers';
 
 const CONNECTOR = 'demo.file.handoff';
 
@@ -26,6 +33,8 @@ describe('multipart file → operation approval → connector execution', () => 
   let orgSlug: string;
   let connectionId: number;
   let cookie: string;
+  let token: string;
+  let deviceToken: string;
   let directory: string;
   let store: ArtifactStore;
   let receiver: Server;
@@ -40,6 +49,11 @@ describe('multipart file → operation approval → connector execution', () => 
     ctx = seeded.ctx;
     orgSlug = seeded.org.slug;
     cookie = (await createTestSession(ctx.userId!)).cookieHeader;
+    const oauthClient = await createTestOAuthClient();
+    token = (await createTestAccessToken(ctx.userId!, ctx.organizationId, oauthClient.client_id)).token;
+    deviceToken = (await createTestAccessToken(ctx.userId!, ctx.organizationId, oauthClient.client_id, {
+      scope: 'device_worker:run mcp:read mcp:write mcp:admin',
+    })).token;
     directory = await mkdtemp(join(tmpdir(), 'lobu-file-handoff-test-'));
     store = new ArtifactStore(directory);
     vi.spyOn(gateway, 'getLobuCoreServices').mockReturnValue({ getArtifactStore: () => store });
@@ -104,6 +118,26 @@ describe('multipart file → operation approval → connector execution', () => 
     }), { ENVIRONMENT: 'test', BETTER_AUTH_SECRET: 'test-auth-secret-for-testing-only', RATE_LIMIT_ENABLED: 'false' } as Env);
   }
 
+  async function completeUpload(runId: number) {
+    const approval = await post(`/api/${orgSlug}/manage_operations`, { cookie, body: { action: 'approve', run_id: runId } });
+    expect(await approval.json()).toMatchObject({ approved: true });
+    const workerId = 'file-handoff-test-worker';
+    const job = await (await post('/api/workers/poll', { body: { worker_id: workerId, capabilities: {} } })).json();
+    expect(job.run_id).toBe(runId);
+    const executed = await executeCompiledConnector({
+      compiledCode: job.compiled_code,
+      job: { mode: 'action', actionKey: job.action_key, actionInput: job.action_input, config: job.config ?? {}, env: {}, credentials: {} },
+      allowedDomains: [],
+    });
+    expect(executed.mode).toBe('action');
+    if (executed.mode !== 'action') throw new Error('Expected connector action');
+    const completed = await post('/api/workers/complete-action', { body: {
+      run_id: runId, worker_id: workerId, status: 'success', action_output: executed.output,
+    } });
+    expect(await completed.json()).toMatchObject({ success: true });
+    return executed;
+  }
+
   it('uploads once, queues reusable metadata, and resolves bytes only when a human approves', async () => {
     const response = await upload();
     expect(response.status).toBe(201);
@@ -152,6 +186,41 @@ describe('multipart file → operation approval → connector execution', () => 
   it('refuses anonymous multipart uploads', async () => {
     const response = await upload('');
     expect([401, 403]).toContain(response.status);
+  });
+
+  it.each(['human', 'device'])('imports host attachments for %s callers through MCP run_sdk ctx.files and an actual connector', async (principal) => {
+    const download = vi.spyOn(egress, 'fetchPublicUrl').mockImplementation(async () => new Response('host-photo', { headers: { 'content-type': 'image/png' } }));
+    try {
+      const result = await mcpToolsCall('run_sdk', {
+        files: [{ download_url: 'https://files.example.test/photo.png', file_id: 'file-handoff-fixture', file_name: 'host.png' }],
+        file_organization: orgSlug,
+        script: `export default async (ctx, client) => ({ file: ctx.files[0], operation: await client.operations.execute({ connection_id: ${connectionId}, operation_key: 'upload', input: { image: ctx.files[0] } }) })`,
+      }, { token: principal === 'device' ? deviceToken : token, orgSlug });
+      expect(result.success).toBe(true);
+      expect(result.return_value.file).toEqual(result.files[0]);
+      const runId = result.return_value.operation.run_id;
+      const [run] = await getTestDb()`SELECT action_input, run_metadata FROM runs WHERE id = ${runId}`;
+      expect(run.action_input.image).toEqual(result.files[0]);
+      expect(run.run_metadata.input_files).toHaveLength(1);
+      expect(await completeUpload(runId)).toMatchObject({ mode: 'action', output: {
+        image: { base64: Buffer.from('host-photo').toString('base64'), filename: 'host.png', content_type: 'image/png' },
+      } });
+    } finally { download.mockRestore(); }
+  });
+
+  it('denies a device-worker token access to human uploads while preserving session-to-OAuth reuse', async () => {
+    const { files } = await (await upload()).json();
+    const args = { script: `export default async (ctx, client) => await client.operations.execute(${JSON.stringify({
+      connection_id: connectionId, operation_key: 'upload', input: { image: files[0] },
+    })})` };
+    const denied = await mcpToolsCall('run_sdk', args, { token: deviceToken, orgSlug });
+    expect(denied.success).toBe(false);
+    expect(denied.error.message).toContain('outside this caller');
+    const allowed = await mcpToolsCall('run_sdk', args, { token, orgSlug });
+    expect(allowed.success).toBe(true);
+    expect(await completeUpload(allowed.return_value.run_id)).toMatchObject({ mode: 'action', output: {
+      image: { base64: Buffer.from('photo-bytes').toString('base64') },
+    } });
   });
 
   it('accepts the current workspace slug and granted account targets without widening scoped access', async () => {

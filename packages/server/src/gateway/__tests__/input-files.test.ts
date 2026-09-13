@@ -23,10 +23,12 @@ describe("required input attachments", () => {
     expect(file?.sha256).toBe(createHash("sha256").update("image-bytes").digest("hex"));
     expect(JSON.stringify(file)).not.toContain("token=");
     expect((await env.artifactStore.read(id, { binding }))?.bytes.toString()).toBe("image-bytes");
+    expect(inputFileBinding({ ...owner, scopes: ["mcp:read", "mcp:write"] })).toBe(binding);
     for (const other of [
       { ...owner, userId: "other-user-test" },
       { ...owner, organizationId: "other-org-test" },
       { ...owner, agentId: "agent-files-test" },
+      { ...owner, scopes: ["device_worker:run", "mcp:read", "mcp:write", "mcp:admin"] },
     ]) {
       expect(await env.artifactStore.read(id, { binding: inputFileBinding(other) })).toBeNull();
     }

@@ -30,7 +30,12 @@ describe('connector file authorization and resolution', () => {
 
   test('denies other users, workspaces, and bound agents before queuing', async () => {
     const [file] = await upload();
-    for (const other of [{ ...owner, userId: 'other-user-test' }, { ...owner, organizationId: 'other-org-test' }, { ...owner, agentId: 'other-agent-test' }]) {
+    for (const other of [
+      { ...owner, userId: 'other-user-test' },
+      { ...owner, organizationId: 'other-org-test' },
+      { ...owner, agentId: 'other-agent-test' },
+      { ...owner, scopes: ['device_worker:run', 'mcp:write'] },
+    ]) {
       await expect(prepareOperationFiles({ images: [file] }, schema, other, env.artifactStore)).rejects.toThrow('outside this caller');
     }
   });

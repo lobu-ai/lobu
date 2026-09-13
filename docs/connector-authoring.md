@@ -216,6 +216,8 @@ Ingestion uses the shared artifact store and accepts up to 10 files, 50 MiB per
 file and 100 MiB per batch. Connector execution accepts at most 12 MiB of file
 data per operation, or the connector's smaller declared limit. References are
 bound to the uploading user, workspace, and any agent or Automation identity.
+Within the same identity, human sessions and ordinary OAuth callers share a
+file binding; device-worker grants use a separate binding.
 The existing operation queue records file authorization before approval and
 resolves the same stored bytes at execution; missing or substituted files fail
 before connector dispatch.

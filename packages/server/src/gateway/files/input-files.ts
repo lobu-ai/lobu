@@ -10,9 +10,10 @@ import { cancelResponseBody, readResponseBytesWithLimit } from '../../utils/boun
 export const MAX_INPUT_FILES = 10;
 export const MAX_INPUT_TOTAL_BYTES = 100 * 1024 * 1024;
 
-export type InputFileOwner = Pick<AccountToolContext,
-  'organizationId' | 'userId' | 'agentId' | 'actingAutomationId' | 'isAuthenticated'>;
-
+export type InputFileOwner = Pick<
+  AccountToolContext,
+  'organizationId' | 'userId' | 'agentId' | 'actingAutomationId' | 'isAuthenticated' | 'scopes'
+>;
 
 export interface StoredInputFile extends FileReference {
   filename: string;
@@ -25,9 +26,11 @@ export function inputFileBinding(owner: InputFileOwner): string {
   if (!owner.isAuthenticated || !owner.organizationId || !owner.userId) {
     throw new ToolUserError('File input requires an authenticated user and a selected workspace.', 403);
   }
-  // A device/agent token must not inherit its human owner's private uploads.
+  // Human sessions and ordinary OAuth callers share files within an identity;
+  // agent, Automation, and device-worker callers use separate namespaces.
   const principal = JSON.stringify([
     owner.organizationId, owner.userId, owner.agentId ?? null, owner.actingAutomationId ?? null,
+    owner.scopes?.includes('device_worker:run') ? 'device-worker' : 'user',
   ]);
   return `input:${createHash('sha256').update(principal).digest('hex')}`;
 }
