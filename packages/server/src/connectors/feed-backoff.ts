@@ -8,7 +8,10 @@
  *
  * The policy lives here so completion (run-lifecycle.ts), source wake
  * scheduling (runs/feed-notifications.ts), and the `feed.auto_paused` signal
- * (automations/platform-events.ts) read the same numbers. It applies ONLY once
+ * (automations/platform-events.ts) read the same numbers. requestFeedSync
+ * transcribes the delay below into SQL; feedBackoffDelayMs() is its JS twin
+ * for checks that run outside a scheduling statement. The two formulas are
+ * pinned together by feed-failure-backoff.test.ts — change both, not one. It applies ONLY once
  * connector code has actually executed and reported an outcome. A never-claimed
  * run is a dispatch failure — the connector never ran — so
  * check-stalled-executions.ts deliberately does not consume this source-health

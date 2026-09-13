@@ -14,7 +14,29 @@ function savedSourceAck(checkpoint: Record<string, unknown> | null) {
 
 type FeedNotification = NonNullable<PollRequest['feed_notifications']>[number];
 
-/** Caller owns source routing; this is the single scheduling mutation. */
+/**
+ * Shared eligibility join: resolves the single connector definition row that
+ * is capability truth for a feed's connection (active, else the feed's pinned
+ * version). Used by both the device-poll receipt query and the parent-run
+ * context query below — the ORDER BY decides which definition wins, so it
+ * must not drift between the two.
+ */
+function connectorDefinitionLateral(tag: DbClient) {
+  return tag`
+    JOIN LATERAL (
+      SELECT feeds_schema FROM connector_definitions d
+      WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
+        AND (d.status = 'active' OR d.version = f.pinned_version)
+      ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC
+      LIMIT 1
+    ) d ON true
+  `;
+}
+
+/** Caller owns source routing; this is the single scheduling mutation.
+ * The exponential backoff here intentionally mirrors feedBackoffDelayMs()
+ * (same feedBackoff constants); the delivery-retry check below reuses that JS
+ * twin, and feed-failure-backoff.test.ts pins the two together. */
 export async function requestFeedSync(sql: DbClient, selection: DbQuery) {
   const updated = await sql`
     UPDATE feeds f
@@ -50,13 +72,7 @@ export async function receiveFeedNotifications(
                d.feeds_schema->f.feed_key->'operations' AS operations
         FROM feeds f
         JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-        JOIN LATERAL (
-          SELECT feeds_schema FROM connector_definitions d
-          WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-            AND (d.status = 'active' OR d.version = f.pinned_version)
-          ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC
-          LIMIT 1
-        ) d ON true
+        ${connectorDefinitionLateral(tx)}
         WHERE f.id = ${notice.feed_id} AND c.id = ${notice.connection_id}
           AND c.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
           AND c.device_worker_id = ${deviceWorkerId}::uuid
@@ -81,8 +97,9 @@ export async function receiveFeedNotifications(
           ? new Map(ack.records.map((record) => [record.id, record.revision])) : new Map<string, number>();
         const records = batch.records.filter((record) =>
           acknowledged.get(String(record.payload.id)) !== record.revision);
-        // Same backoff as the SQL in requestFeedSync, measured from the last
-        // executed run rather than from next_run_at, which a delivery feed lacks.
+        // Backoff twin of the SQL in requestFeedSync, measured from the last
+        // executed run rather than from next_run_at, which a delivery feed
+        // lacks. feed-failure-backoff.test.ts pins the two formulas together.
         const retryReady = !feed.last_sync_at || Date.now() >=
           new Date(feed.last_sync_at).getTime() + feedBackoffDelayMs(Number(feed.consecutive_failures));
         if (retryReady && (records.length > 0 || batch.recovery === true)) {
@@ -121,13 +138,7 @@ export async function sourceFeedContextForRun(
     FROM runs r
     JOIN feeds f ON f.id = r.feed_id AND f.organization_id = r.organization_id
     JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (
-      SELECT feeds_schema FROM connector_definitions d
-      WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-        AND (d.status = 'active' OR d.version = f.pinned_version)
-      ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC
-      LIMIT 1
-    ) d ON true
+    ${connectorDefinitionLateral(sql)}
     WHERE r.id = ${parentRunId} AND r.organization_id = ${organizationId}
       AND r.run_type = 'sync' AND r.status = 'running'
       AND r.connection_id = c.id

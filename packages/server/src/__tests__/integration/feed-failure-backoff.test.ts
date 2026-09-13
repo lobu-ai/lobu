@@ -22,7 +22,9 @@ import {
   emitFeedAutoPaused,
   retryPendingFeedAutoPausedSignals,
 } from '../../automations/platform-events';
+import { feedBackoffDelayMs } from '../../connectors/feed-backoff';
 import type { Env } from '../../index';
+import { requestFeedSync } from '../../runs/feed-notifications';
 import { manageAutomations } from '../../tools/admin/manage_automations';
 import { manageFeeds } from '../../tools/admin/manage_feeds';
 import { completeWorkerJob } from '../../worker-api';
@@ -722,5 +724,33 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     // Plain 1-minute cron cadence — next run is <= ~60s out, NOT backed off.
     expect(after[0].next_run_at).not.toBeNull();
     expect(Number(after[0].seconds_out)).toBeLessThanOrEqual(61);
+  });
+
+  it('keeps the requestFeedSync SQL backoff identical to feedBackoffDelayMs', async () => {
+    const org = await createTestOrganization();
+    const connId = await insertConnection(org.id);
+    const sql = getTestDb();
+    // Failure counts spanning healthy, doubling, capped, and clamped-exponent
+    // regimes. next_run_at starts NULL so the SQL must compute the full delay.
+    for (const failures of [0, 1, 2, 3, 5, 10, 30, 35]) {
+      const feedId = await insertFeed(org.id, connId, failures);
+      await requestFeedSync(sql, sql`SELECT id FROM feeds WHERE id = ${feedId}`);
+      const [feed] = (await sql`
+        SELECT next_run_at,
+               EXTRACT(EPOCH FROM (next_run_at - current_timestamp)) AS seconds_out
+        FROM feeds WHERE id = ${feedId}
+      `) as Array<{ next_run_at: Date | string | null; seconds_out: number | string | null }>;
+      const expectedMs = feedBackoffDelayMs(failures);
+      if (expectedMs === 0) {
+        // Healthy feed: no backoff, stays due (fresh rows default near now).
+        expect(feed.next_run_at).not.toBeNull();
+        expect(Number(feed.seconds_out)).toBeLessThanOrEqual(61);
+      } else {
+        expect(feed.next_run_at).not.toBeNull();
+        // Wall-clock slop between the UPDATE and this read: generous bounds.
+        expect(Number(feed.seconds_out)).toBeGreaterThan(expectedMs / 1000 - 15);
+        expect(Number(feed.seconds_out)).toBeLessThanOrEqual(expectedMs / 1000 + 15);
+      }
+    }
   });
 });
