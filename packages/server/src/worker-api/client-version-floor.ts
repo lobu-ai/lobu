@@ -3,11 +3,11 @@
  *
  * Old clients must fail LOUD ("update and retry"), never silent: a worker
  * whose version predates a capability silently misbehaves (empty claim lanes,
- * unservable runs) with nothing anywhere reporting why. The legacy-compat
- * paths this replaces are counted by `lobu_legacy_compat_hits_total`; the
- * operational flow is: announce a floor → watch that series go quiet for the
+ * unservable runs) with nothing anywhere reporting why. The operational flow
+ * is: announce a floor → watch legacy-compat telemetry go quiet for the
  * 14-day grace window (store review + stragglers) → set MIN_CLIENT_VERSION →
- * delete the legacy arm once enforcement holds.
+ * delete the legacy arms once enforcement holds. (Telemetry lives with the
+ * legacy arms on their own change; this module only enforces.)
  *
  * Unset/empty MIN_CLIENT_VERSION disables enforcement entirely (every client
  * allowed, including ones that never report a version). A SET floor fails
