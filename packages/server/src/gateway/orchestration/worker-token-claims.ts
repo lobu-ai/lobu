@@ -126,6 +126,15 @@ export function buildWorkerTokenClaims(args: WorkerTokenClaimsArgs): {
 		// Only the literal 'capture' is honoured, and it originates server-side
 		// from the run row (automation-run-intent.ts) — never from a caller.
 		//
+		// A chat session's own `dryRun` flag maps onto the same claim. Its
+		// provenance differs — the caller set it on their OWN session at create
+		// time (`POST /api/v1/agents`), the gateway stored it and stamped it
+		// onto every enqueue — but the direction is the same restrictive one:
+		// capture can only suppress that session's own writes, so honouring it
+		// here cannot launder a privilege. Without this mapping the flag was
+		// carried all the way from the CLI to the queue payload and then
+		// silently dropped, so a `--dry-run` chat turn wrote for real.
+		//
 		// An absent claim means live. That direction is deliberate: making
 		// "absent" mean capture would, for the length of a rollout, silence
 		// every real Automation still running on a token minted before this
@@ -133,7 +142,8 @@ export function buildWorkerTokenClaims(args: WorkerTokenClaimsArgs): {
 		// cannot obtain a session without `verifyAutomationRunIntent` deriving
 		// its mode from `runs.run_type` — and that chain is covered by tests.
 		executionMode:
-			args.platformMetadata?.executionMode === "capture"
+			args.platformMetadata?.executionMode === "capture" ||
+			args.platformMetadata?.dryRun === true
 				? "capture"
 				: undefined,
 		// Capture only: nothing reads it on a live run, and leaving live tokens
