@@ -92,6 +92,11 @@ RUN cd packages/core && bunx tsc \
     && cd ../embeddings && bunx tsc \
     && cd ../connector-worker && bun run build
 
+# Enforce the same production policy even if a future build dependency adds a
+# browser engine through an alias or nested package-manager store.
+COPY scripts/image-browser-tooling.mjs scripts/image-browser-tooling.mjs
+RUN node scripts/image-browser-tooling.mjs --prune /app
+
 # ===========================================
 # Runtime
 # ===========================================
@@ -126,6 +131,8 @@ COPY --from=builder --chown=worker:worker /app/packages/connector-sdk ./packages
 COPY --from=builder --chown=worker:worker /app/packages/connectors ./packages/connectors
 COPY --from=builder --chown=worker:worker /app/packages/embeddings ./packages/embeddings
 COPY --from=builder --chown=worker:worker /app/packages/connector-worker ./packages/connector-worker
+COPY --from=builder --chown=worker:worker /app/scripts/image-browser-tooling.mjs ./scripts/image-browser-tooling.mjs
+RUN node scripts/image-browser-tooling.mjs --check /app
 
 USER 1001
 
