@@ -44,9 +44,8 @@ export function meetsClientVersionFloor(
   if (floor == null) return true;
   const have = parseClientVersion(version);
   const want = parseClientVersion(floor);
-  // An unparseable floor is operator misconfiguration: refuse nothing, so a
-  // typo cannot brick the fleet. (The floor value itself is validated at
-  // announcement time, not here.)
+  // An unparseable floor refuses nothing, so a typo cannot brick the fleet.
+  // Validate the value when announcing it; this path stays permissive.
   if (want == null) return true;
   if (have == null) return false;
   for (let i = 0; i < 3; i++) {

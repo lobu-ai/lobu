@@ -330,23 +330,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
   }
 
-  // First-party client version floor (see client-version-floor.ts). Fleet
-  // workers ship with the server and are never gated; user devices below the
-  // announced floor fail LOUD here, before any DB work, so an outdated client
-  // can never silently misbehave in the claim lanes.
-  if (
-    c.var.workerAuthMode === 'user' &&
-    !meetsClientVersionFloor(app_version)
-  ) {
-    return c.json(
-      {
-        error: 'upgrade_required',
-        error_description: clientFloorMessage(platform),
-      },
-      409
-    );
-  }
-
   // postgres.js renders a bound JS array as a bare comma list, which Postgres
   // rejects for text[]; the repo's array params go through pgTextArray. NULL
   // must stay NULL — that's the "never advertised" case the lane keys on.
@@ -394,6 +377,34 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // below, so platform binding / capability authorization / org-scoped claiming
   // all apply exactly as for a signed-in device.
   const isUserScopedWorker = c.var.workerAuthMode === 'user' || anonLocalUserId != null;
+  // First-party client version floor (see client-version-floor.ts). Same
+  // user-scoped predicate as every check below, so re-anchored anonymous
+  // local polls are gated too; fleet workers are never gated. Below-floor
+  // user devices fail LOUD here, before claiming anything, so an outdated
+  // client can never silently misbehave in the claim lanes.
+  if (isUserScopedWorker && !meetsClientVersionFloor(app_version)) {
+    return c.json(
+      {
+        error: 'upgrade_required',
+        error_description: clientFloorMessage(platform),
+      },
+      409
+    );
+  }
+  // First-party client version floor (see client-version-floor.ts). Same
+  // user-scoped predicate as every check below, so re-anchored anonymous
+  // local polls are gated too; fleet workers are never gated. Below-floor
+  // user devices fail LOUD here, before claiming anything, so an outdated
+  // client can never silently misbehave in the claim lanes.
+  if (isUserScopedWorker && !meetsClientVersionFloor(app_version)) {
+    return c.json(
+      {
+        error: 'upgrade_required',
+        error_description: clientFloorMessage(platform),
+      },
+      409
+    );
+  }
   // Effective device identity: the token's user/org when user-scoped, else the
   // re-anchored local owner.
   const effectiveWorkerUserId = c.var.workerUserId ?? anonLocalUserId;
