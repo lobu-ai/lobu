@@ -10,6 +10,7 @@ import type {
   AuthResult,
   ConnectorWebhookSchema,
   EventEnvelope,
+  FeedDelivery,
   SyncCredentials,
   WebhookRegistration,
 } from '@lobu/connector-sdk';
@@ -22,6 +23,8 @@ import type {
 export type ExecutorJob =
   | {
       mode: 'sync';
+      /** Delivered input selects onDelivery within the same ingestion lifecycle. */
+      delivery?: FeedDelivery;
       feedKey?: string | null;
       /** Feed-instance id (feeds.id) — namespaces emitted origin_ids per feed. */
       feedId?: number | null;

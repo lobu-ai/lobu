@@ -10,6 +10,7 @@ import type {
   ActionResult,
   AuthContext,
   AuthResult,
+  FeedDeliveryContext,
   FeedReadContext,
   FeedReadResult,
   QueryContext,
@@ -71,6 +72,17 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
     if (!handler) {
       throw new Error(
         `${this.definition.key} feed '${ctx.feedKey}' does not support sync`
+      );
+    }
+    return handler(ctx);
+  }
+
+  /** Process delivered source data; the handler decides whether a fetch is needed. */
+  async onDelivery(ctx: FeedDeliveryContext<C, F>): Promise<SyncResult<C>> {
+    const handler = this.definition.feeds?.[ctx.feedKey]?.onDelivery;
+    if (!handler) {
+      throw new Error(
+        `${this.definition.key} feed '${ctx.feedKey}' does not support delivery`
       );
     }
     return handler(ctx);

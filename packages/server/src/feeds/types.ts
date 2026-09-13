@@ -1,7 +1,8 @@
 // Shape returned by manage_feeds(action='list_feeds'). A projection of the
 // `feeds` table into the camelCase the frontend consumes.
 
-export type FeedOperation = "sync" | "read";
+import type { FeedOperation } from "@lobu/connector-sdk";
+export type { FeedOperation };
 export type FeedStore = "events" | "channel_messages";
 export type FeedStatus = "active" | "paused" | "error";
 

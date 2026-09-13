@@ -36,6 +36,7 @@ import type {
   AuthResult,
   ConnectorDefinition,
   FeedDefinition,
+  FeedDeliveryHandler,
   FeedReadHandler,
   FeedSyncHandler,
   QueryContext,
@@ -59,10 +60,17 @@ export type ConnectorFeedSpec<
     | {
         sync: FeedSyncHandler<C, F>;
         read?: FeedReadHandler<F>;
+        onDelivery?: FeedDeliveryHandler<C, F>;
       }
     | {
         sync?: FeedSyncHandler<C, F>;
         read: FeedReadHandler<F>;
+        onDelivery?: FeedDeliveryHandler<C, F>;
+      }
+    | {
+        sync?: FeedSyncHandler<C, F>;
+        read?: FeedReadHandler<F>;
+        onDelivery: FeedDeliveryHandler<C, F>;
       }
   );
 
@@ -148,6 +156,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
           eventKinds: feed.eventKinds,
           sync: feed.sync,
           read: feed.read,
+          onDelivery: feed.onDelivery,
           readWindowAxis: feed.readWindowAxis,
         },
       ]),

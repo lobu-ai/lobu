@@ -3,6 +3,7 @@ import { Value } from '@sinclair/typebox/value';
 import type { DbClient, DbQuery } from '../db/client';
 import { pgTextArray } from '../db/client';
 import { feedBackoff } from '../connectors/feed-backoff';
+import { notifyWorkerWork } from './worker-wakeup';
 
 function savedSourceAck(checkpoint: Record<string, unknown> | null) {
   const ack = checkpoint?.source_ack;
@@ -13,7 +14,7 @@ type FeedNotification = NonNullable<PollRequest['feed_notifications']>[number];
 
 /** Caller owns source routing; this is the single scheduling mutation. */
 export async function requestFeedSync(sql: DbClient, selection: DbQuery) {
-  return await sql`
+  const updated = await sql`
     UPDATE feeds f
     SET next_run_at = CASE
           WHEN f.consecutive_failures = 0 THEN LEAST(f.next_run_at, current_timestamp)
@@ -26,6 +27,8 @@ export async function requestFeedSync(sql: DbClient, selection: DbQuery) {
     WHERE f.id IN (${selection}) AND f.status = 'active' AND f.deleted_at IS NULL
     RETURNING f.id
   `;
+  if (updated.length > 0) await notifyWorkerWork(sql);
+  return updated;
 }
 
 /** Device notifications and provider webhooks wake the same existing feeds. */
