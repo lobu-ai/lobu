@@ -408,6 +408,40 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
+  test("loads an explicit reaction removal alongside a script executor", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "reaction-null-"));
+    writeFileSync(join(dir, "job.ts"), "export default async () => ({});\n");
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: scriptFromFile("./job.ts"), reaction: null
+      })] });
+    `
+    );
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.automations[0]?.reactionScript).toBeNull();
+  });
+
+  test("rejects an explicit reaction removal with no other instruction source", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "reaction-null-bare-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", reaction: null
+      })] });
+    `
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /needs instructions/
+    );
+  });
+
   test("loads an automation reaction script (raw source) referenced by path", async () => {
     dir = mkdtempSync(join(import.meta.dir, "reaction-"));
     mkdirSync(join(dir, "reactions"));

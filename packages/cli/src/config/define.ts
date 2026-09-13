@@ -769,8 +769,12 @@ export interface Automation {
    * client, params?) => …` ({@link ReactionHandler}). Kept in its own file (not
    * inline) so your IDE type-checks it; the path must stay under the config
    * directory.
+   *
+   * Omit to preserve a previously installed reaction. Set explicitly to `null`
+   * to remove it — required when switching a reaction-driven Automation to a
+   * script executor so the same work is not performed twice.
    */
-  reaction?: ReactionSource;
+  reaction?: ReactionSource | null;
 }
 
 export function defineAutomation(config: Omit<Automation, "kind">): Automation {

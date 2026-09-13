@@ -141,8 +141,10 @@ export interface DesiredAutomation {
    * automation-firing time. Authored as a sibling `.ts` file referenced by
    * `defineAutomation({ reaction: reactionFromFile("./reactions/foo.reaction.ts") })`;
    * the CLI reads it and pushes raw source via `set_reaction_script`.
+   * Omitted preserves a previously installed reaction; explicit `null`
+   * (from `defineAutomation({ reaction: null })`) removes it.
    */
-  reactionScript?: { sourcePath: string; sourceCode: string };
+  reactionScript?: { sourcePath: string; sourceCode: string } | null;
   /** LLM guidance for the automation's downstream reaction agent. */
   reactionsGuidance?: string;
   /** UUID of a device worker to pin this automation's runs to (see `device_workers.id`). */
@@ -1228,6 +1230,14 @@ export async function loadDesiredStateFromConfig(
     if (automation.reaction === undefined) return;
     const dw = state.automations[i];
     if (!dw) return;
+    // Explicit `null` removes a previously installed reaction. Carried through
+    // the diff as declared and applied via set_reaction_script("") AFTER the
+    // executor install, so a reaction-driven job switching to a script
+    // executor never runs both paths. Omitted (`undefined`) preserves.
+    if (automation.reaction === null) {
+      dw.reactionScript = null;
+      return;
+    }
     // `reaction` is typed ReactionSource, but jiti evaluates the config without
     // typechecking, so a stale `reaction: "./x.reaction.ts"` string slips
     // through and would read `.path` as undefined. Reject it with a clear

@@ -445,6 +445,9 @@ const productActivityDigest = defineAutomation({
     "./product-activity-digest.script.ts",
     { exclude_email: "emrekabakci@gmail.com" }
   ),
+  // Explicit removal: apply clears the previously installed reaction AFTER
+  // installing the executor above, so the digest never runs twice.
+  reaction: null,
 });
 
 const lobuTeamSlack = defineConnection({

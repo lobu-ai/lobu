@@ -39,6 +39,98 @@ function snapshot(automation: RemoteAutomation): RemoteSnapshot {
 }
 
 describe("Automation execution config", () => {
+  test("clears an explicitly removed reaction after installing a script executor", async () => {
+    const executor = {
+      kind: "script" as const,
+      source: "export default async () => ({});",
+    };
+    const state = emptyState();
+    state.automations = [
+      {
+        slug: "digest",
+        agent: "worker",
+        prompt: "",
+        executor,
+        reactionScript: null,
+      },
+    ];
+    const remote = snapshot({
+      automation_id: "42",
+      slug: "digest",
+      managed_agent_id: "worker",
+      prompt: "",
+      execution_config: { model: "old/model" },
+    });
+    const plan = computeDiff(state, remote);
+    expect(
+      plan.rows.some(
+        (row) =>
+          row.verb === "update" &&
+          row.changedFields?.includes("execution_config") &&
+          row.changedFields?.includes("reaction_script")
+      )
+    ).toBe(true);
+    const calls: string[] = [];
+    const updateAutomation = mock(async () => {
+      calls.push("executor");
+    });
+    const setReactionScript = mock(async () => {
+      calls.push("reaction");
+    });
+    await executePlan(
+      {
+        state,
+        remote,
+        plan,
+        client: {
+          updateAutomation,
+          setReactionScript,
+        } as unknown as ApplyClient,
+      },
+      []
+    );
+    expect(updateAutomation).toHaveBeenCalledWith({
+      automation_id: "42",
+      execution_config: { executor },
+    });
+    expect(setReactionScript).toHaveBeenCalledWith("42", "");
+    expect(calls).toEqual(["executor", "reaction"]);
+  });
+
+  test("an omitted reaction is preserved, never cleared", async () => {
+    const state = emptyState();
+    state.automations = [
+      { slug: "digest", agent: "worker", prompt: "Summarize." },
+    ];
+    const remote = snapshot({
+      automation_id: "42",
+      slug: "digest",
+      managed_agent_id: "worker",
+      prompt: "Summarize.",
+    });
+    const plan = computeDiff(state, remote);
+    expect(
+      plan.rows.every(
+        (row) =>
+          row.verb === "noop" || !row.changedFields?.includes("reaction_script")
+      )
+    ).toBe(true);
+    const setReactionScript = mock(async () => undefined);
+    await executePlan(
+      {
+        state,
+        remote,
+        plan,
+        client: {
+          updateAutomation: mock(async () => undefined),
+          setReactionScript,
+        } as unknown as ApplyClient,
+      },
+      []
+    );
+    expect(setReactionScript).not.toHaveBeenCalled();
+  });
+
   test("applies script changes and records the executor for a stable second apply", async () => {
     const executor = {
       kind: "script" as const,
