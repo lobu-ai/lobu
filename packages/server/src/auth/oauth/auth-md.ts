@@ -44,9 +44,11 @@ agent-attested (ID-JAG) zero-touch flow; do not attempt one.
    POST ${baseUrl}/oauth/device_authorization
    Content-Type: application/json
 
-   { "client_id": "<client_id>", "scope": "mcp:read mcp:write" }
+   { "client_id": "<client_id>", "scope": "mcp:read mcp:write", "resource": "${baseUrl}/mcp" }
    \`\`\`
-   Response includes \`device_code\`, \`user_code\`, and a poll \`interval\`.
+   \`resource\` (RFC 8707) is required for MCP device grants and binds the
+   token's audience to that MCP endpoint. Response includes \`device_code\`,
+   \`user_code\`, and a poll \`interval\`.
 
 3. Deliver the request to the user by email:
    \`\`\`http
@@ -67,8 +69,10 @@ agent-attested (ID-JAG) zero-touch flow; do not attempt one.
    POST ${baseUrl}/oauth/token
    Content-Type: application/json
 
-   { "grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": "<device_code>", "client_id": "<client_id>" }
+   { "grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": "<device_code>", "client_id": "<client_id>", "resource": "${baseUrl}/mcp" }
    \`\`\`
+   The \`resource\` must repeat the exact value sent to
+   \`/oauth/device_authorization\`; a mismatch is rejected.
    While pending you get \`{ "error": "authorization_pending" }\` (back off on
    \`slow_down\`). On approval you get \`access_token\` (+ \`refresh_token\`),
    scoped to what the user granted.
