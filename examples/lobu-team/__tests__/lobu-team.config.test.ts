@@ -100,21 +100,20 @@ describe("Lobu Team configuration", () => {
         skip_if_unchanged: false,
       },
     ]);
-    expect(digest?.sources).toEqual({
-      reaction_window: "SELECT * FROM events WHERE FALSE",
-    });
+    expect(digest?.sources).toBeUndefined();
+    expect(digest?.prompt).toBeUndefined();
+    expect(digest?.reaction).toBeNull();
     expect(digest?.agent).toMatchObject({
       id: "product-ops",
       providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
       tools: {
         allowed: [],
         strict: true,
-        preApproved: ["/mcp/lobu-memory/tools/run_sdk"],
       },
     });
-    expect(digest?.reaction).toMatchObject({
-      kind: "reactionSource",
-      path: "./product-activity-digest.reaction.ts",
+    expect(digest?.executor).toMatchObject({
+      kind: "scriptSource",
+      path: "./product-activity-digest.script.ts",
     });
   });
 });

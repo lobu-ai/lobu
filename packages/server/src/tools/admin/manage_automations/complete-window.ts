@@ -324,6 +324,12 @@ export async function handleCompleteWindow(
     approvedInput && typeof approvedInput === 'object' && !Array.isArray(approvedInput)
       ? (approvedInput as Record<string, unknown>)
       : {};
+  if ((approvedInputRecord.executor as { kind?: string } | undefined)?.kind === 'script') {
+    throw new ToolUserError(
+      'The runtime completes script Automations after the script succeeds; completeWindow cannot finalize them.',
+      409
+    );
+  }
   const assignedAgentId =
     typeof approvedInputRecord.agent_id === 'string'
       ? approvedInputRecord.agent_id.trim()

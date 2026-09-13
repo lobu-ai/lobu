@@ -108,6 +108,8 @@ export interface AutomationDiffRow
    * True when the desired automation declares a `reaction_script` — server stores
    * it write-only, so the diff can't tell whether it changed; apply always
    * re-pushes (idempotent). Matches the auth-profile credentials pattern.
+   * An explicit `null` (reaction removal) also counts as declared; apply
+   * clears it via `set_reaction_script`.
    */
   reactionScriptDeclared?: boolean;
 }
@@ -1363,6 +1365,7 @@ function remoteOnlyDefinitionRow(
 // remote-moved drift and permanently block re-apply.
 
 interface AutomationProjection {
+  executor?: unknown;
   agent?: string | null;
   name?: string | null;
   description?: string | null;
@@ -1391,6 +1394,10 @@ export const projectDesiredAutomation = (
   d: DesiredAutomation,
   remote?: RemoteAutomation
 ): AutomationProjection => ({
+  executor:
+    d.executor !== undefined
+      ? d.executor
+      : (remote?.execution_config?.executor ?? null),
   agent: d.agent ?? null,
   // Name/description are optional in config; the server defaults name to the
   // slug. Inherit live remote when omitted so a second apply does not
@@ -1435,6 +1442,7 @@ export const projectDesiredAutomation = (
 const projectRemoteAutomation = (
   w: RemoteAutomation
 ): AutomationProjection => ({
+  executor: w.execution_config?.executor ?? null,
   agent: w.managed_agent_id ?? null,
   // `?? null` mirrors projectDesiredAutomation: an unnamed remote Automation must
   // compare EQUAL to the desired side that inherited it, or deepEqual(null,
@@ -1557,7 +1565,8 @@ function diffAutomationWithBaseline(
  * The diff returns both lists; apply-cmd routes accordingly.
  *
  * Reaction scripts aren't returned by Automation lists (write-only on the row),
- * so we can't compare them — apply always re-pushes when declared (idempotent).
+ * so we can't compare them — apply always re-pushes when declared (idempotent),
+ * and an explicit `null` is a declared removal routed to `set_reaction_script`.
  * Remote automations without a desired model are reported as drift, never deleted.
  */
 function diffAutomation(
@@ -1607,8 +1616,10 @@ function diffAutomation(
     scalar.push("agent_kind");
   }
   if (
-    desired.model !== undefined &&
-    desired.model !== (remote.execution_config?.model ?? null)
+    (desired.model !== undefined &&
+      desired.model !== (remote.execution_config?.model ?? null)) ||
+    (desired.executor !== undefined &&
+      !deepEqual(desired.executor, remote.execution_config?.executor ?? null))
   ) {
     scalar.push("execution_config");
   }

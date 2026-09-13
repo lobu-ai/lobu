@@ -20,6 +20,7 @@ import type {
   EventSet,
   Measure,
   ReactionClient,
+  AutomationScriptContext,
   ReactionContext,
   Segment,
 } from "@lobu/connector-sdk";
@@ -596,6 +597,25 @@ export type ReactionHandler = (
   params?: Record<string, unknown>
 ) => Promise<unknown>;
 
+export type AutomationScriptHandler = (
+  ctx: AutomationScriptContext,
+  client: ReactionClient,
+  params?: Record<string, unknown>
+) => Promise<unknown>;
+
+export interface ScriptSource {
+  readonly kind: "scriptSource";
+  path: string;
+  params?: Record<string, unknown>;
+}
+
+/** Execute a local TypeScript job directly, with the owning agent's SDK permissions. */
+export function scriptFromFile<
+  _Handler extends AutomationScriptHandler = AutomationScriptHandler,
+>(path: string, params?: Record<string, unknown>): ScriptSource {
+  return { kind: "scriptSource", path, ...(params ? { params } : {}) };
+}
+
 /**
  * A local reaction source file to compile + run in a sandboxed isolate when the
  * Automation fires. Built with {@link reactionFromFile} and set on
@@ -675,6 +695,8 @@ export interface Automation {
   slug: string;
   /** Owning agent (handle or id). Every Automation belongs to exactly one agent. */
   agent: Agent | string;
+  /** Script job or agent execution. Omitted preserves the stored executor; "agent" clears a script executor. */
+  executor?: ScriptSource | "agent";
   name?: string;
   description?: string;
   /**
@@ -701,11 +723,12 @@ export interface Automation {
    * Automation until the next `lobu apply`; re-applying is the explicit upgrade
    * action for a declarative project.
    *
-   * Supply {@link Automation.prompt}, `skills`, or a {@link Automation.reaction}
-   * script. Any one of the three is required for schedule triggers, event
+   * Supply {@link Automation.prompt}, `skills`, a {@link Automation.reaction}
+   * script, or an {@link Automation.executor} script. Any one is required for schedule triggers, event
    * triggers with execution `"window"`, and Automations with no triggers
-   * (manual runs); an event trigger with execution `"turn"` may omit all three,
-   * since the incoming event is the content and a built-in default applies.
+   * (manual runs); an event trigger with execution `"turn"` may omit all
+   * instruction sources, since the incoming event is the content and a built-in
+   * default applies.
    */
   skills?: string[];
   /**
@@ -747,8 +770,12 @@ export interface Automation {
    * client, params?) => …` ({@link ReactionHandler}). Kept in its own file (not
    * inline) so your IDE type-checks it; the path must stay under the config
    * directory.
+   *
+   * Omit to preserve a previously installed reaction. Set explicitly to `null`
+   * to remove it — required when switching a reaction-driven Automation to a
+   * script executor so the same work is not performed twice.
    */
-  reaction?: ReactionSource;
+  reaction?: ReactionSource | null;
 }
 
 export function defineAutomation(config: Omit<Automation, "kind">): Automation {

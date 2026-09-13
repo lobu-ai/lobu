@@ -353,6 +353,95 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
+  test("loads a script executor without importing or executing the job", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "script-"));
+    const source =
+      'throw new Error("must not execute at apply time"); export default async () => ({ ok: true });';
+    writeFileSync(join(dir, "job.ts"), source);
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: scriptFromFile("./job.ts")
+      })] });
+    `
+    );
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.automations[0]?.executor).toEqual({ kind: "script", source });
+    expect(state.automations[0]?.prompt).toBe("");
+  });
+
+  test("rejects a malformed script executor with actionable guidance", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "badscript-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: null
+      })] });
+    `
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /scriptFromFile/
+    );
+  });
+
+  test("rejects non-object script executor params", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "badscriptparams-"));
+    writeFileSync(join(dir, "job.ts"), "export default async () => {};\n");
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: scriptFromFile("./job.ts", [])
+      })] });
+    `
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /params must be an object, not an array/
+    );
+  });
+
+  test("loads an explicit reaction removal alongside a script executor", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "reaction-null-"));
+    writeFileSync(join(dir, "job.ts"), "export default async () => ({});\n");
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation, scriptFromFile } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", executor: scriptFromFile("./job.ts"), reaction: null
+      })] });
+    `
+    );
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.automations[0]?.reactionScript).toBeNull();
+  });
+
+  test("rejects an explicit reaction removal with no other instruction source", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "reaction-null-bare-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      `
+      import { defineAgent, defineConfig, defineAutomation } from "@lobu/cli/config";
+      const agent = defineAgent({ id: "script-owner" });
+      export default defineConfig({ agents: [agent], automations: [defineAutomation({
+        agent, slug: "script-job", reaction: null
+      })] });
+    `
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /needs instructions/
+    );
+  });
+
   test("loads an automation reaction script (raw source) referenced by path", async () => {
     dir = mkdtempSync(join(import.meta.dir, "reaction-"));
     mkdirSync(join(dir, "reactions"));

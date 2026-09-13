@@ -960,8 +960,8 @@ export async function executePlan(
           tags: w.tags,
           agent_kind: w.agentKind,
           execution_config:
-            w.model !== undefined
-              ? automationExecutionConfig(w.model)
+            w.model !== undefined || w.executor !== undefined
+              ? automationExecutionConfig(w.model, undefined, w.executor)
               : undefined,
           outputs: w.outputs,
           classifiers: w.classifiers,
@@ -995,7 +995,8 @@ export async function executePlan(
         //    (no prompt/skills) must install the reaction before the trigger
         //    update reaches the server. Push first (idempotent, no drift signal
         //    because it's not returned by Automation lists) so the rule sees it.
-        //    Reaction removal is never pushed — apply only ever sets scripts.
+        //    Removal (`reaction: null`) is handled in step (b2) below, after the
+        //    executor install — never here.
         if (w.reactionScript) {
           await ctx.client.setReactionScript(
             automationId,
@@ -1029,11 +1030,21 @@ export async function executePlan(
               ? {
                   execution_config: automationExecutionConfig(
                     w.model,
-                    remote?.execution_config
+                    remote?.execution_config,
+                    w.executor
                   ),
                 }
               : {}),
           });
+        }
+        // b2) Reaction removal — AFTER the scalar updates above so a stored
+        //     script executor is installed first. An explicit `reaction: null`
+        //     clears the row via set_reaction_script(""), so a reaction-driven
+        //     job switching to a script executor never runs both paths.
+        //     Omitted reactions are never touched: the diff only reports
+        //     `reaction_script` when declared.
+        if (changed.has("reaction_script") && w.reactionScript === null) {
+          await ctx.client.setReactionScript(automationId, "");
         }
         // c) Version-bound fields → manage_automations create_version (server
         //    inherits unset fields from the previous version row, but we always

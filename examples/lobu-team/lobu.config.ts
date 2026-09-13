@@ -11,6 +11,7 @@ import {
   every,
   field,
   reactionFromFile,
+  scriptFromFile,
   secret,
   skillFromFile,
   Type,
@@ -18,7 +19,7 @@ import {
 import type DeliverooConnector from "./deliveroo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
-import type productActivityDigestReaction from "./product-activity-digest.reaction.ts";
+import type productActivityDigestScript from "./product-activity-digest.script.ts";
 
 const lunchOpenSkill = defineSkill({
   name: "lunch-open",
@@ -272,13 +273,9 @@ const productOps = defineAgent({
     "Summarizes Lobu production activity from organization-owned read-only feeds",
   providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
   tools: {
-    // Keep the headless lockdown (no native worker tools) and pre-approve the
-    // one MCP write the Automation needs: run_sdk carries completeWindow, is not
-    // read-only, and would otherwise stall an unattended run on an approval
-    // card. query_sdk is non-destructive and needs no grant.
+    // Script execution uses SDK permissions directly; interactive turns stay tool-free.
     allowed: [],
     strict: true,
-    preApproved: ["/mcp/lobu-memory/tools/run_sdk"],
   },
 });
 
@@ -442,19 +439,15 @@ const productActivityDigest = defineAutomation({
       skip_if_unchanged: false,
     }),
   ],
-  // An empty source list falls back to all workspace content. This explicit
-  // empty input lets the reaction own the windowed query without duplicating
-  // the backlog in the model context or hitting non-pageable source limits.
-  sources: { reaction_window: "SELECT * FROM events WHERE FALSE" },
   minCooldownSeconds: 60,
   tags: ["product-ops", "production", "slack"],
-  prompt:
-    'Read this Automation window to obtain its window_token, then call client.automations.completeWindow with extracted_data {"run":true,"exclude_email":"emrekabakci@gmail.com"} — the digest excludes this operator email from presence counts. The reaction queries and formats all activity itself; do not fetch activity rows, send a separate message, or stop after printing JSON.',
-  reactionsGuidance:
-    "Send one rich digest containing every user email and activity detail in the window. Send nothing when both sources are empty.",
-  reaction: reactionFromFile<typeof productActivityDigestReaction>(
-    "./product-activity-digest.reaction.ts"
+  executor: scriptFromFile<typeof productActivityDigestScript>(
+    "./product-activity-digest.script.ts",
+    { exclude_email: "emrekabakci@gmail.com" }
   ),
+  // Explicit removal: apply clears the previously installed reaction AFTER
+  // installing the executor above, so the digest never runs twice.
+  reaction: null,
 });
 
 const lobuTeamSlack = defineConnection({

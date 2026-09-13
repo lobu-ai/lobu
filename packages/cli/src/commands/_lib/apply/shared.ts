@@ -37,15 +37,26 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** A model declaration owns only the model key, preserving other execution options. */
+/** Apply declared model/executor fields while preserving unmanaged execution options. */
 export function automationExecutionConfig(
   model: string | null | undefined,
-  remote?: Record<string, unknown> | null
+  remote?: Record<string, unknown> | null,
+  executor?: {
+    kind: "script";
+    source: string;
+    params?: Record<string, unknown>;
+  } | null
 ): Record<string, unknown> | null {
-  if (model === undefined) return remote ?? null;
+  if (executor) {
+    if (model != null)
+      throw new Error("Script Automations do not use a model override.");
+    return { executor };
+  }
+  if (model === undefined && executor === undefined) return remote ?? null;
   const config = { ...remote };
+  if (executor === null) delete config.executor;
   if (model === null) delete config.model;
-  else config.model = model;
+  else if (model !== undefined) config.model = model;
   return Object.keys(config).length > 0 ? config : null;
 }
 

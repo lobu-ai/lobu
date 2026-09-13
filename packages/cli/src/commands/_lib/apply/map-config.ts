@@ -574,7 +574,7 @@ const MAX_AUTOMATION_SKILLS = 5;
  * content (the incoming message/event), so it may run with zero instructions on
  * the built-in default. Everything else — schedule triggers, event triggers with
  * execution "window", and Automations with no triggers at all (manual runs) —
- * needs a prompt, at least one skill, or a reaction script.
+ * needs a prompt, at least one skill, a reaction script, or a script executor.
  *
  * This CLI preflight mirrors the server rule, catching the error against the
  * config file (naming the slug) rather than as a 422 mid-apply. When both
@@ -583,7 +583,7 @@ const MAX_AUTOMATION_SKILLS = 5;
  */
 function assertAutomationSkills(
   automation: DesiredAutomation,
-  reactionDeclared: boolean
+  instructionSourceDeclared: boolean
 ): void {
   const skills = automation.skills ?? [];
   const duplicates = skills.filter((name, i) => skills.indexOf(name) !== i);
@@ -618,22 +618,22 @@ function assertAutomationSkills(
         (trigger.kind === "event" &&
           resolvedEventExecution(trigger) === "window")
     );
-  // Any one of the three instruction sources satisfies the rule. An Automation
+  // Any instruction source satisfies the rule. An Automation
   // whose whole job is "run this skill" has no task statement to write, one
   // that spells its task out inline needs no skill, and one that runs entirely
-  // as a reaction script needs neither — demanding two would be stricter than
-  // the server and would reject configs the API accepts. The mapper runs
-  // BEFORE the loader reads the reaction file, so `reactionDeclared` is the
-  // config marker (present for `reactionFromFile(path)`); the loader validates
-  // the file and the server enforces the final rule on its source.
+  // as a reaction or executor script needs neither — demanding two would be
+  // stricter than the server and would reject configs the API accepts. The
+  // mapper runs BEFORE the loader reads either file, so this boolean is the
+  // config marker; the loader validates the file and the server enforces the
+  // final rule on its source.
   if (
     requiresSkills &&
     skills.length === 0 &&
     !automation.prompt.trim() &&
-    !reactionDeclared
+    !instructionSourceDeclared
   ) {
     throw new ValidationError(
-      `Automation "${automation.slug}" needs instructions: schedule triggers, event triggers with execution "window", and Automations with no triggers run on stored instructions alone, so give it a "prompt", at least one skill, or a reaction script. Only event triggers with execution "turn" may omit all three.`
+      `Automation "${automation.slug}" needs instructions: schedule triggers, event triggers with execution "window", and Automations with no triggers run on stored instructions alone, so give it a "prompt", at least one skill, a reaction script, or a script executor. Only event triggers with execution "turn" may omit all instruction sources.`
     );
   }
 }
@@ -717,6 +717,7 @@ function mapAutomation(automation: Automation): DesiredAutomation {
   return {
     slug: automation.slug,
     agent: agentId(automation.agent),
+    ...(automation.executor === "agent" ? { executor: null } : {}),
     // The author's task statement, carried straight through. Skill BODIES are
     // no longer folded in here — the loader resolves them into `skillSnapshots`
     // (see `resolveAutomationSkills` in desired-state.ts), because the mapper is
@@ -1004,10 +1005,14 @@ export function mapProjectToDesiredState(
     // The config's `reaction` marker (from `reactionFromFile(path)`) drives the
     // instruction-presence preflight — the reaction SOURCE is only resolved
     // later by the loader. `automations` is index-aligned with
-    // `project.automations` (the mapper maps in order).
+    // `project.automations` (the mapper maps in order). An explicit
+    // `reaction: null` is a removal, not an instruction source.
     assertAutomationSkills(
       automation,
-      project.automations?.[i]?.reaction !== undefined
+      (project.automations?.[i]?.reaction !== undefined &&
+        project.automations?.[i]?.reaction !== null) ||
+        (project.automations?.[i]?.executor !== undefined &&
+          project.automations?.[i]?.executor !== "agent")
     );
     for (const trigger of automation.triggers ?? []) {
       if (

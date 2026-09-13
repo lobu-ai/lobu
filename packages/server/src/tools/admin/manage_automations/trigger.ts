@@ -45,6 +45,7 @@ async function loadTriggerExecution(
 ): Promise<{
   execution: AutomationTriggerExecution;
   shouldDispatch: boolean;
+  requiresGateway: boolean;
 }> {
   const [run] = await sql<{
     approved_input: unknown;
@@ -112,7 +113,11 @@ async function loadTriggerExecution(
   }
 
   if (run.status === "pending") {
-    return { execution: persistedExecution, shouldDispatch: true };
+    return {
+      execution: persistedExecution,
+      shouldDispatch: true,
+      requiresGateway: executor?.kind === "agent" && payload.executor == null,
+    };
   }
   if (run.status !== "claimed" && run.status !== "running") {
     throw new ToolUserError(
@@ -149,6 +154,7 @@ async function loadTriggerExecution(
           },
         },
         shouldDispatch: false,
+        requiresGateway: false,
       };
     }
     return {
@@ -158,21 +164,28 @@ async function loadTriggerExecution(
         next_action: { kind: "handled_elsewhere" },
       },
       shouldDispatch: false,
+      requiresGateway: false,
     };
   }
 
+  const nativeScriptClaim =
+    payload.executor?.kind === "script" && claimedBy === "automation-script";
   const nativeManagedClaim =
     executor?.kind === "agent" &&
     (claimedBy === "lobu-dispatcher" || claimedBy === `lobu:${executor.agentId}`);
   const nativeDeviceClaim =
     executor?.kind === "device" && claimedBy === run.device_claimed_by;
-  if (!nativeManagedClaim && !nativeDeviceClaim) {
+  if (!nativeScriptClaim && !nativeManagedClaim && !nativeDeviceClaim) {
     throw new ToolUserError(
       `Automation run ${runId} has no recognized active claimant.`,
       409,
     );
   }
-  return { execution: persistedExecution, shouldDispatch: false };
+  return {
+    execution: persistedExecution,
+    shouldDispatch: false,
+    requiresGateway: false,
+  };
 }
 
 // ============================================
@@ -211,7 +224,7 @@ export async function handleTrigger(
     );
     if (
       loaded.shouldDispatch &&
-      loaded.execution.lane === "managed_agent" &&
+      loaded.requiresGateway &&
       !isLobuGatewayRunning()
     ) {
       throw new Error("Embedded Lobu is not available.");
@@ -282,7 +295,7 @@ export async function handleSetReactionScript(
     // the current version) and reject the clear if it would leave any
     // assignment invalid.
     const groupState = await sql`
-      SELECT w.id, w.triggers, cv.prompt, cv.skills
+      SELECT w.id, w.triggers, cv.prompt, cv.skills, w.execution_config->'executor'->>'source' AS executor_source
       FROM automations w
       LEFT JOIN automation_versions cv ON cv.id = w.current_version_id
       WHERE w.automation_group_id = ${groupId}
@@ -293,7 +306,8 @@ export async function handleSetReactionScript(
           (assignment.triggers ?? []) as AutomationTrigger[],
           assignment.prompt as string | null | undefined,
           (assignment.skills ?? null) as Array<{ name: string; content: string }> | null,
-          null
+          null,
+          assignment.executor_source as string | null,
         );
       } catch (err) {
         if (err instanceof ToolUserError) {

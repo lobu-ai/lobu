@@ -1,6 +1,14 @@
+import type {
+  AutomationExecutionConfig,
+  AutomationScriptExecutor,
+} from '@lobu/core/contracts/tools/manage-automations';
 import { listOrgModelProviderSlugs } from '../../lobu/model-config';
 import { ToolUserError } from '../../utils/errors';
 import { isAdminOrOwnerRole } from '../access-control';
+
+export function automationScriptExecutor(config: unknown): AutomationScriptExecutor | undefined {
+  return (config as AutomationExecutionConfig | null | undefined)?.executor;
+}
 
 /**
  * execution_config keys that are SERVER-ONLY and must never reach a
@@ -8,7 +16,7 @@ import { isAdminOrOwnerRole } from '../access-control';
  * would reject an unknown field and brick every run of that automation. Stripped
  * at the device boundary (worker-api/poll.ts) via stripServerOnlyExecutionConfig.
  */
-export const SERVER_ONLY_EXECUTION_CONFIG_KEYS = ['finalize_nudges'] as const;
+export const SERVER_ONLY_EXECUTION_CONFIG_KEYS = ['finalize_nudges', 'executor'] as const;
 
 /**
  * Remove SERVER_ONLY_EXECUTION_CONFIG_KEYS from an execution_config before it

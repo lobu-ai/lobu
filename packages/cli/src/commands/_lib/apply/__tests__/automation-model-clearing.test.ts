@@ -38,7 +38,161 @@ function snapshot(automation: RemoteAutomation): RemoteSnapshot {
   };
 }
 
-describe("Automation model overrides", () => {
+describe("Automation execution config", () => {
+  test("clears an explicitly removed reaction after installing a script executor", async () => {
+    const executor = {
+      kind: "script" as const,
+      source: "export default async () => ({});",
+    };
+    const state = emptyState();
+    state.automations = [
+      {
+        slug: "digest",
+        agent: "worker",
+        prompt: "",
+        executor,
+        reactionScript: null,
+      },
+    ];
+    const remote = snapshot({
+      automation_id: "42",
+      slug: "digest",
+      managed_agent_id: "worker",
+      prompt: "",
+      execution_config: { model: "old/model" },
+    });
+    const plan = computeDiff(state, remote);
+    expect(
+      plan.rows.some(
+        (row) =>
+          row.verb === "update" &&
+          row.changedFields?.includes("execution_config") &&
+          row.changedFields?.includes("reaction_script")
+      )
+    ).toBe(true);
+    const calls: string[] = [];
+    const updateAutomation = mock(async () => {
+      calls.push("executor");
+    });
+    const setReactionScript = mock(async () => {
+      calls.push("reaction");
+    });
+    await executePlan(
+      {
+        state,
+        remote,
+        plan,
+        client: {
+          updateAutomation,
+          setReactionScript,
+        } as unknown as ApplyClient,
+      },
+      []
+    );
+    expect(updateAutomation).toHaveBeenCalledWith({
+      automation_id: "42",
+      execution_config: { executor },
+    });
+    expect(setReactionScript).toHaveBeenCalledWith("42", "");
+    expect(calls).toEqual(["executor", "reaction"]);
+  });
+
+  test("an omitted reaction is preserved, never cleared", async () => {
+    const state = emptyState();
+    state.automations = [
+      { slug: "digest", agent: "worker", prompt: "Summarize." },
+    ];
+    const remote = snapshot({
+      automation_id: "42",
+      slug: "digest",
+      managed_agent_id: "worker",
+      prompt: "Summarize.",
+    });
+    const plan = computeDiff(state, remote);
+    expect(
+      plan.rows.every(
+        (row) =>
+          row.verb === "noop" || !row.changedFields?.includes("reaction_script")
+      )
+    ).toBe(true);
+    const setReactionScript = mock(async () => undefined);
+    await executePlan(
+      {
+        state,
+        remote,
+        plan,
+        client: {
+          updateAutomation: mock(async () => undefined),
+          setReactionScript,
+        } as unknown as ApplyClient,
+      },
+      []
+    );
+    expect(setReactionScript).not.toHaveBeenCalled();
+  });
+
+  test("applies script changes and records the executor for a stable second apply", async () => {
+    const executor = {
+      kind: "script" as const,
+      source: "export default async () => ({ ok: true });",
+      params: { first: 1, second: 2 },
+    };
+    const state = emptyState();
+    state.automations = [
+      { slug: "digest", agent: "worker", prompt: "", executor },
+    ];
+    const remote = snapshot({
+      automation_id: "42",
+      slug: "digest",
+      managed_agent_id: "worker",
+      prompt: "",
+      execution_config: { model: "old/model" },
+    });
+    const plan = computeDiff(state, remote);
+    const updateAutomation = mock(async () => undefined);
+    await executePlan(
+      {
+        state,
+        remote,
+        plan,
+        client: { updateAutomation } as unknown as ApplyClient,
+      },
+      []
+    );
+    expect(updateAutomation).toHaveBeenCalledWith({
+      automation_id: "42",
+      execution_config: { executor },
+    });
+    const recorded = buildAttributionAndOwned(state, remote);
+    expect(recorded.attribution.automations[0]?.execution_config).toEqual({
+      executor,
+    });
+    const remoteAutomation = remote.automations[0];
+    const desiredAutomation = state.automations[0];
+    if (!remoteAutomation || !desiredAutomation) {
+      throw new Error("Expected the Automation fixtures to exist.");
+    }
+    remoteAutomation.execution_config = {
+      executor: { ...executor, params: { second: 2, first: 1 } },
+    };
+    expect(
+      computeDiff(state, remote, { baseline: toBaseline(recorded) }).rows.every(
+        (row) => row.verb === "noop"
+      )
+    ).toBe(true);
+    desiredAutomation.executor = null;
+    const update = computeDiff(state, remote, {
+      baseline: toBaseline(recorded),
+    });
+    expect(
+      update.rows.some(
+        (row) =>
+          row.verb === "update" &&
+          row.changedFields?.includes("execution_config")
+      )
+    ).toBe(true);
+  });
+
   test("maps explicit model removal from declarative config", () => {
     const agent = defineAgent({ id: "worker" });
     const state = mapProjectToDesiredState(

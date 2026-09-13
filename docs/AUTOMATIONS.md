@@ -12,6 +12,7 @@ jobs:
 | Primitive | What it decides | What it does not decide |
 |---|---|---|
 | Trigger | When a run starts | What durable context the run may read |
+| Executor | Whether a managed agent, device CLI, or sandboxed script runs the job | When it starts |
 | Prompt and skills | What the agent should do | When it starts |
 | Sources | What additional governed data a window reads | Whether new data activates it |
 | Outputs | Which entity rows or append-only events a completed window persists | External side effects |
@@ -23,6 +24,43 @@ SQL sources are reads. An Automation does not gain an ungoverned database-write
 escape hatch by declaring SQL. Persisted changes go through declared outputs,
 the ClientSDK, reactions, connector actions, and their existing ACL or approval
 rails.
+
+## Script execution
+
+A deterministic job can use `executor: scriptFromFile("./digest.script.ts", params)`
+in `defineAutomation`. The API form is
+`execution_config: { executor: { kind: "script", source, params? } }`.
+`managed_agent_id` remains the owning agent for SDK permissions. No model turn,
+MCP completion handshake, or dummy extraction object is required.
+
+The module exports `default async (ctx, client, params?)`. `ctx.window` contains
+its durable run ID and pinned bounds; scheduled and manual windows use arrival
+time (`events.created_at`), while event activations carry their signal bounds
+and `ctx.trigger_signals`. The script owns its SDK reads and writes and may
+return a JSON object for the run result, or return no value.
+
+Activation freezes the code, parameters, version, and window on the run. A durable
+sandbox task executes it with the same scoped SDK and autonomous approval rules
+as a reaction. The sandbox has a 60-second attempt limit and up to three attempts;
+classified deterministic failures stop immediately. A successful script commits
+its result and advances a scheduled/manual arrival window. Failure never advances
+the arrival mark. Task exhaustion is reconciled into a failed Automation run.
+External effects are at-least-once: use `ctx.window.run_id` in idempotency keys.
+Scripts must handle gated or pending SDK results before returning success.
+
+Script jobs cannot use device pins, agent skills, extraction outputs, or model/
+CLI settings; those require agent execution. Scripted eval capture is currently
+unavailable and fails explicitly. An optional reaction still runs after the
+script's successful completion, through the existing durable reaction queue.
+For agent Automations, completion still precedes their reaction.
+Event scripts use silent triggers and send any desired replies through the SDK;
+`reply_to_source` is reserved for agent responses.
+
+`lobu apply` preserves an omitted executor; `executor: "agent"` explicitly removes
+a stored script executor. Switching an existing reaction-driven job requires
+removing its old reaction so the same work is not performed twice: declare
+`reaction: null` and apply clears it via `set_reaction_script` after installing
+the executor. Omitting `reaction` preserves whatever is installed.
 
 ## Scheduling and admission
 
@@ -168,8 +206,10 @@ window, run attempt, lease, source IDs, and page chain. A stale attempt cannot
 complete after a newer claim, while retrying an already committed completion is
 idempotent even after its lease expires. If a non-pageable source exceeds its
 bound, completion fails closed and the Automation source must be narrowed. An
-assigned `managed_agent_id` does not exclude external claiming; ordinary
-internal dispatch through that agent continues to use the same run lifecycle.
+assigned `managed_agent_id` does not by itself exclude external claiming;
+ordinary internal dispatch through that agent continues to use the same run
+lifecycle. A script executor is different: its runs are pinned to the sandbox
+lane and cannot be claimed or completed by an external processor.
 
 ### Consistent SQL drill-downs
 
