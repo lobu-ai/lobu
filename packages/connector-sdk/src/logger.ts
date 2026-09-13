@@ -67,8 +67,11 @@ function formatMessage(level: string, serviceName: string, message: unknown, arg
   // pino-style: logger.info({ meta }, 'message')
   if (typeof message === 'object' && message !== null && !Array.isArray(message) && !(message instanceof Error)) {
     if (rest.length > 0 && typeof rest[0] === 'string') {
+      // Keep the metadata object as a trailing arg so it still renders.
+      // Slicing it away accepted the signature and then dropped the payload,
+      // leaving a connector diagnostic with its message but no fields.
       msgStr = rest[0];
-      rest = rest.slice(1);
+      rest = [message, ...rest.slice(1)];
     } else {
       msgStr = safeStringify(message);
     }

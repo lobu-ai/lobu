@@ -77,9 +77,8 @@ describe("client version floor", () => {
 	});
 
 	test("the warn names the dropped entries in the rendered line", () => {
-		// The default console transport DROPS a leading metadata object, so the
-		// entries have to reach the rendered line. An operator who is told "some
-		// entry dropped" without being told WHICH is back at the silent
+		// The entries have to reach the rendered line. An operator who is told
+		// "some entry dropped" without being told WHICH is back at the silent
 		// misconfiguration this warn exists to break.
 		const lines: string[] = [];
 		const spy = spyOn(console, "warn").mockImplementation((line: unknown) => {

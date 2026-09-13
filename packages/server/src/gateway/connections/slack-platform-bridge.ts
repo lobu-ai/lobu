@@ -491,8 +491,6 @@ async function publishHome(
     const blocks = await buildSlackHomeBlocks(params);
     await adapter.publishHomeView(params.userId, { type: "home", blocks });
   } catch (error) {
-    // Message-first: the console logger drops the metadata object for
-    // pino-style `logger.warn({...}, "msg")` calls, so inline the detail here.
     logger.warn(
       `Failed to publish Slack home tab (conn=${params.connection.id} user=${params.userId}); falling back: ${JSON.stringify(errorDetail(error))}`,
     );

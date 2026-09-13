@@ -71,9 +71,11 @@ function createConsoleLogger(serviceName: string): Logger {
       !(message instanceof Error)
     ) {
       if (args.length > 0 && typeof args[0] === "string") {
-        // First arg is metadata object, second arg is the actual message
+        // Keep the metadata object as a trailing arg so it still renders.
+        // Slicing it away accepted the signature and then dropped the payload,
+        // emptying every structured diagnostic that uses this call shape.
         msgStr = args[0];
-        args = args.slice(1);
+        args = [message, ...args.slice(1)];
       } else {
         // Just an object, stringify it
         msgStr = safeStringify(message);

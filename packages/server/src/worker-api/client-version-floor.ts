@@ -65,9 +65,9 @@ function envFloors(): Map<string, string> {
     floors.set(platform, version);
   }
   if (ignored.length > 0) {
-    // Message first, details in a trailing arg: the console logger (the default
-    // transport) drops a LEADING metadata object, and which entries were
-    // ignored is the whole point of this warn.
+    // Which entries were ignored is the whole point of this warn: an operator
+    // told that "some entry" dropped, but not which, is back at the silent
+    // misconfiguration this exists to break.
     logger.warn(
       'MIN_CLIENT_VERSION: ignoring malformed entries — those platforms enforce NO floor',
       { ignored, enforcing: [...floors.keys()] }
