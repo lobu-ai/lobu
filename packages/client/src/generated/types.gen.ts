@@ -478,7 +478,7 @@ export type SearchSdkResponse = SearchSdkResponses[keyof SearchSdkResponses];
 export type QuerySdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
      */
     script: string;
     /**
@@ -724,7 +724,7 @@ export type QuerySqlResponse = QuerySqlResponses[keyof QuerySqlResponses];
 export type RunSdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
      */
     script: string;
     /**
@@ -735,6 +735,19 @@ export type RunSdkData = {
      * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
      */
     title?: string;
+    /**
+     * Files supplied by the chat host. The server imports bytes before running the script; ctx.files contains reusable Lobu file references. Do not invent download URLs, file IDs, or local paths.
+     */
+    files?: Array<{
+      download_url: string;
+      file_id: string;
+      mime_type?: string;
+      file_name?: string;
+    }>;
+    /**
+     * Workspace slug or ID that will own attached files. Required with files on an account-scoped MCP connection. Files become ctx.files; pass a file directly to a connector field declaring x-lobu-file. Existing references need no re-upload.
+     */
+    file_organization?: string;
     /**
      * Preview mode. Read SDK calls still execute, but write/admin/external SDK calls are canonicalized and validated, then skipped and returned in side_effect_preview without executing their handlers.
      */
@@ -854,6 +867,13 @@ export type RunSdkResponses = {
       count: number;
     }>;
     dry_run: boolean;
+    files?: Array<{
+      $file: string;
+      filename: string;
+      content_type: string;
+      size_bytes: number;
+      sha256: string;
+    }>;
   };
 };
 

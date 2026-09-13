@@ -20,6 +20,8 @@ export {
   IntegrationConnector,
 } from './connector-runtime.js';
 export { defineConnector } from './define-connector.js';
+export { fileInputSchema, MAX_CONNECTOR_FILE_BYTES } from './file-input.js';
+export type { ConnectorFile, FileInputOptions, FileReference } from './file-input.js';
 export {
   canonicalDeviceManifestJson,
   defineDeviceConnector,

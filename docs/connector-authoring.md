@@ -198,6 +198,30 @@ Declare `actions` with an `inputSchema`, `requiresApproval`, and annotations
 (`destructiveHint`, `openWorldHint`, `idempotentHint`); handle them in
 `execute(ctx)`. Omit it entirely if the connector has no actions.
 
+For binary inputs, use `fileInputSchema` from `@lobu/connector-sdk` on the
+file-valued field, for example `image: fileInputSchema({ maxBytes: 5 * 1024 *
+1024, contentTypes: ["image/png", "image/jpeg"] })`. Callers pass a reusable
+`{ $file: "lobu://file/<id>", ... }` reference; `execute(ctx)` receives
+`{ base64, filename, content_type }` at that field. Existing inline base64 inputs
+also work and obey the declared size and media-type limits.
+
+Clients can upload repeated multipart `files` fields to
+`POST /api/<workspace>/files` using their normal authenticated API session and
+write scope. The response contains a `files` array of references. ChatGPT can
+instead attach files directly to `run_sdk`; select `file_organization` on an
+account-scoped connection, then use `ctx.files` in the script. Upload references
+are also returned when the script fails, so retry with those references.
+
+Ingestion uses the shared artifact store and accepts up to 10 files, 50 MiB per
+file and 100 MiB per batch. Connector execution accepts at most 12 MiB of file
+data per operation, or the connector's smaller declared limit. References are
+bound to the uploading user, workspace, and any agent or Automation identity.
+Within the same identity, human sessions and ordinary OAuth callers share a
+file binding; device-worker grants use a separate binding.
+The existing operation queue records file authorization before approval and
+resolves the same stored bytes at execution; missing or substituted files fail
+before connector dispatch.
+
 ### Auth methods
 
 `none`, `env_keys` (scope `connection` or `organization`), `oauth` (built-in or

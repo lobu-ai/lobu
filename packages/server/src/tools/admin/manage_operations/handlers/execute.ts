@@ -27,6 +27,7 @@ import { resolveActionMode } from "../../../../operations/action-modes";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import { LOST_LEASE_MESSAGE, runLeaseFence } from "../../../../runs/run-lease";
 import { executeHttpOperation } from "../../../../operations/execute-http-operation";
+import { prepareOperationFiles, resolveRunFiles } from "../../../../operations/file-inputs";
 import { validateOperationInput } from "../../../../operations/input-validation";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { OperationDescriptor } from "../../../../operations/types";
@@ -381,6 +382,11 @@ export async function executeOperationInline(
 	options: InlineExecutionOptions,
 ): Promise<InlineExecutionResult> {
 	const deferTerminalWrite = options.deferTerminalWrite ?? false;
+	try {
+		actionInput = await resolveRunFiles(runId, organizationId, actionInput);
+	} catch (error) {
+		return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
+	}
 	if (operation.backend === "local_action") {
 		return executeLocalActionInline(
 			runId,
@@ -495,7 +501,7 @@ export async function handleExecute(
 	const sdkBrowserContext = browserContext
 		? undefined
 		: deriveSdkBrowserActionContext(ctx);
-	const runMetadata = browserContext
+	let runMetadata: Record<string, unknown> | undefined = browserContext
 		? { browser_context: browserContext }
 		: undefined;
 	if (
@@ -567,7 +573,7 @@ export async function handleExecute(
 		}
 	}
 
-	const input = args.input ?? {};
+	let input = args.input ?? {};
 	// A caller-provided automation_source is only an attribution hint. Durable
 	// feedback must follow the server-stamped Automation execution context.
 	const reactionAutomationId = ctx.actingAutomationId ?? null;
@@ -645,6 +651,13 @@ export async function handleExecute(
 		return {
 			error: `Policy denies '${operation.operation_key}' for this principal.`,
 		};
+	}
+	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
+	input = preparedFiles.input;
+	if (preparedFiles.claims.length > 0) {
+		const fileValidationError = validateOperationInput(operation, input);
+		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
+		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
 	}
 	const shouldQueue =
 		mode === "approval" || policyDecision === "require_approval";
