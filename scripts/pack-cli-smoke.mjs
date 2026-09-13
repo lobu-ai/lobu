@@ -28,6 +28,21 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const destination = resolve(process.argv[2] ?? "");
 if (!process.argv[2])
   throw new Error("Usage: pack-cli-smoke.mjs <empty-directory>");
+const repository = JSON.parse(
+  readFileSync(join(root, "packages/cli/package.json"), "utf8")
+).repository;
+assert.ok(repository?.url, "CLI source repository metadata is required");
+// npm provenance rejects generated artifacts without their source repository.
+for (const [key, component] of Object.entries(COMPONENTS)) {
+  const pkg = JSON.parse(
+    readFileSync(join(runtimeRoot, key, "package.json"), "utf8")
+  );
+  assert.equal(
+    pkg.repository?.url,
+    repository.url,
+    `${component.name} must declare its source repository for npm provenance`
+  );
+}
 mkdirSync(destination); // Refuse to overwrite an existing installation.
 const staging = join(destination, "packages");
 mkdirSync(staging);
