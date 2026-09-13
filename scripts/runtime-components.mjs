@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -407,6 +407,37 @@ export async function buildRuntimeComponents() {
   }
 }
 
+function completeLocalPackageNames(directory) {
+  const path = join(directory, "package-lock.json");
+  const lock = JSON.parse(readFileSync(path, "utf8"));
+  const root = realpathSync(directory);
+  for (const entry of Object.values(lock.packages ?? {})) {
+    if (!entry.link) continue;
+    const target = realpathSync(resolve(root, entry.resolved));
+    const within = relative(root, target);
+    if (within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within))
+      throw new Error(
+        "Runtime lock contains a local package outside its artifact"
+      );
+    const metadata = lock.packages[entry.resolved];
+    const { name } = JSON.parse(
+      readFileSync(join(target, "package.json"), "utf8")
+    );
+    if (
+      !metadata ||
+      typeof name !== "string" ||
+      !name ||
+      (metadata.name && metadata.name !== name)
+    )
+      throw new Error("Runtime lock has inconsistent local package metadata");
+    // npm omits names matching the folder basename. Bun 1.3's npm-lock
+    // migration reconstructs those as /name, which Bun 1.4 rejects. Restore
+    // the optional canonical metadata without changing any resolved edge.
+    metadata.name ??= name;
+  }
+  writeJson(path, lock);
+}
+
 /** Release artifacts carry both managers' frozen dependency trees. */
 export function lockRuntimeComponent(directory) {
   // Resolve in an isolated project: package managers must never discover or
@@ -438,6 +469,7 @@ export function lockRuntimeComponent(directory) {
         throw new Error(
           `Failed to freeze runtime dependencies in ${directory}`
         );
+      if (command === "npm") completeLocalPackageNames(temporary);
     }
     copy(
       join(temporary, "package-lock.json"),
