@@ -1794,6 +1794,23 @@ async function queryEntities(
   // Embedding param — only push when we have an embedding (avoids null::vector type error)
   const embeddingParamIdx = embedding?.length ? addParam(toVectorLiteral(embedding)) : null;
 
+  // Org param is bound up front (not at the org-filter block below) because the
+  // identifier arm of the query match condition also needs it. Placeholder
+  // indices all reference these variables, so the order shift is safe.
+  const orgParamIdx = addParam(scope.organizationId);
+
+  // Exact-identifier arm: a query that IS one of the entity's claimed
+  // identifiers (email, phone, ...) matches that entity at full score.
+  // Without this, an exact-email query only trigram-matched other members'
+  // NAMES ("instinct-agent-test2@mail.instinct.com" ranked "Instinct Agent"
+  // above the email's actual owner). Identity rows are tenant-private, so the
+  // EXISTS is scoped to the caller's org - cross-org public entities never
+  // match it, which is correct: their identifiers aren't the caller's to query.
+  const identifierExactSql =
+    queryParamIdx !== null
+      ? `EXISTS (SELECT 1 FROM entity_identities ei WHERE ei.entity_id = e.id AND ei.organization_id = $${orgParamIdx} AND lower(ei.identifier) = lower($${queryParamIdx}) AND ei.deleted_at IS NULL)`
+      : 'FALSE';
+
   // Query match condition: text match OR vector match
   if (query) {
     if (fuzzyEnabled) {
@@ -1820,12 +1837,14 @@ async function queryEntities(
         ? Math.max(0, Math.min(1, rawMinSimilarity))
         : 0.3;
       const minSimParamIdx = addParam(nameSimFloor);
-      const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR similarity(LOWER(e.name), LOWER($${queryParamIdx})) > $${minSimParamIdx}::numeric OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}))`;
+      const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR similarity(LOWER(e.name), LOWER($${queryParamIdx})) > $${minSimParamIdx}::numeric OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}) OR ${identifierExactSql})`;
       conditions.push(
         hasEmbedding ? `(${textCondition} OR e.embedding IS NOT NULL)` : textCondition
       );
     } else {
-      conditions.push(`LOWER(e.name) = LOWER($${queryParamIdx})`);
+      conditions.push(
+        `(LOWER(e.name) = LOWER($${queryParamIdx}) OR ${identifierExactSql})`
+      );
     }
   } else if (hasEmbedding) {
     conditions.push('e.embedding IS NOT NULL');
@@ -1839,7 +1858,6 @@ async function queryEntities(
   // operational counts (events, connections, automations) on caller-org rows
   // so cross-org public results don't leak other tenants' activity.
   const includePublic = args.include_public_catalogs ?? true;
-  const orgParamIdx = addParam(scope.organizationId);
   if (includePublic) {
     conditions.push(
       `(e.organization_id = $${orgParamIdx} OR EXISTS (SELECT 1 FROM organization o WHERE o.id = e.organization_id AND o.visibility = 'public'))`
@@ -1892,11 +1910,11 @@ async function queryEntities(
         : '0';
     const nameSimExpr =
       queryParamIdx !== null ? `similarity(LOWER(e.name), LOWER($${queryParamIdx}))` : '0';
-    scoreExpr = `(${vectorSimExpr}) * 0.6 + (${textRankExpr}) * 0.3 + (${nameSimExpr}) * 0.1`;
+    scoreExpr = `CASE WHEN ${identifierExactSql} THEN 1.0 ELSE (${vectorSimExpr}) * 0.6 + (${textRankExpr}) * 0.3 + (${nameSimExpr}) * 0.1 END`;
     matchReason = 'vector_blend';
   } else if (fuzzyEnabled && queryParamIdx !== null) {
     vectorSimExpr = 'NULL';
-    scoreExpr = `CASE WHEN LOWER(e.name) = LOWER($${queryParamIdx}) THEN 1.0 ELSE similarity(LOWER(e.name), LOWER($${queryParamIdx})) END`;
+    scoreExpr = `CASE WHEN LOWER(e.name) = LOWER($${queryParamIdx}) OR ${identifierExactSql} THEN 1.0 ELSE similarity(LOWER(e.name), LOWER($${queryParamIdx})) END`;
     matchReason = 'fuzzy_match';
   } else {
     vectorSimExpr = 'NULL';
