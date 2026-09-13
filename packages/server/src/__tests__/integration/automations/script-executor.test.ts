@@ -227,9 +227,60 @@ describe('Automation script executor', () => {
     await expect(
       assertAutomationScriptExecutor({
         ...base,
+        outputs: { summary: { entity: 'note' } },
+      })
+    ).rejects.toThrow('cannot use agent skills');
+    await expect(
+      assertAutomationScriptExecutor({
+        ...base,
+        classifiers: [
+          {
+            slug: 'topic',
+            attribute_key: 'topic',
+            attribute_values: { billing: {}, support: {} },
+          },
+        ],
+      })
+    ).rejects.toThrow('or classifiers');
+    await expect(
+      assertAutomationScriptExecutor({
+        ...base,
         deviceWorkerId: 'synthetic-device',
       })
     ).rejects.toThrow('cannot be pinned');
+  });
+
+  it('rejects classifiers on a script job instead of silently skipping extraction', async () => {
+    const workspace = await TestWorkspace.create({ name: 'Script Executor Org' });
+    const agent = await createTestAgent({
+      organizationId: workspace.org.id,
+      ownerUserId: workspace.users.owner.id,
+      agentId: 'script-owner',
+      name: 'Script Owner',
+    });
+    await expect(
+      workspace.owner.automations.create({
+        slug: 'script-classified',
+        managed_agent_id: agent.agentId,
+        triggers: [
+          {
+            kind: 'schedule',
+            cron: '*/20 * * * *',
+            execution: 'window',
+            active_run: 'coalesce',
+            skip_if_unchanged: false,
+          },
+        ],
+        execution_config: { executor: { kind: 'script', source: SOURCE } },
+        classifiers: [
+          {
+            slug: 'topic',
+            attribute_key: 'topic',
+            attribute_values: { billing: {}, support: {} },
+          },
+        ],
+      } as never)
+    ).rejects.toThrow('or classifiers');
   });
 
   it('prevents a script from completing itself before its handler succeeds', async () => {
