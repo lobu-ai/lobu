@@ -70,10 +70,7 @@ import { clientRoutes } from "./lobu/client-routes";
 import { clientActivityScopeRoutes } from "./lobu/client-activity-scope-routes";
 import { deploymentRoutes } from "./lobu/deployment-routes";
 import { sandboxRoutes } from "./lobu/sandbox-routes";
-import {
-	getLobuCoreServices,
-	isLobuGatewayRunning,
-} from "./lobu/gateway";
+import { getLobuCoreServices, isLobuGatewayRunning } from "./lobu/gateway";
 import {
 	claimSlackPendingInstall,
 	resolveSlackActiveBindingElsewhere,
@@ -606,9 +603,10 @@ app.on(["GET", "POST"], "/api/auth/*", async (c) => {
 		request = new Request(request.url, {
 			method: request.method,
 			headers: collapsed,
-			body: request.method === "GET" || request.method === "HEAD"
-				? undefined
-				: await request.blob(),
+			body:
+				request.method === "GET" || request.method === "HEAD"
+					? undefined
+					: await request.blob(),
 		});
 	}
 	const response = await auth.handler(request);
@@ -844,7 +842,9 @@ app.use("/api/workers/*", async (c, next) => {
 			// `authorizeRunForWorker` claim-ownership check, so an org-scope
 			// gate here would just block legitimate posts from the bound device.
 			const isAutomationCompleteSubpath =
-				/^\/api\/workers\/me\/runs\/\d+\/complete-automation$/.test(requestPath);
+				/^\/api\/workers\/me\/runs\/\d+\/complete-automation$/.test(
+					requestPath,
+				);
 			// Device chat uses the same user-scoped daemon and performs exact run,
 			// claimant, and pinned-device authorization in its handler.
 			const isDeviceChatCompleteSubpath =
@@ -935,11 +935,14 @@ app.post("/api/workers/complete-agent-turn", completeAgentTurnRun);
 // against a paired Owletto extension. See dispatch-chrome-action.ts.
 import { dispatchChromeAction } from "./worker-api/dispatch-chrome-action";
 import { stampSlackIdentityForUser } from "./auth/subject-identities";
-import { collapseSessionCookies, resolveSession } from './auth/resolve-session';
+import { collapseSessionCookies, resolveSession } from "./auth/resolve-session";
 
 app.post("/api/workers/dispatch-chrome-action", dispatchChromeAction);
 app.post("/api/workers/complete-embeddings", completeEmbeddings);
-app.post("/api/workers/me/runs/:runId/complete-automation", completeAutomationRun);
+app.post(
+	"/api/workers/me/runs/:runId/complete-automation",
+	completeAutomationRun,
+);
 app.post("/api/workers/me/runs/:runId/complete-chat", completeDeviceChatRun);
 app.post(
 	"/api/workers/me/automations/:automation_id/trigger",
@@ -1174,7 +1177,7 @@ app.get(
 // middleware checks is the one the handler actually runs.
 for (const route of REST_TOOL_GET_ROUTES) {
 	app.get(route.routePath, mcpAuth, async (c) =>
-		restToolAction(c, route.tool, route.action, route.args(c))
+		restToolAction(c, route.tool, route.action, route.args(c)),
 	);
 }
 
@@ -1298,9 +1301,7 @@ app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 	// Agent rows: this agent only.
 	const agent = all.filter(
 		(p) =>
-			p.principalKind === "agent" &&
-			p.principalId === agentId &&
-			typeScoped(p),
+			p.principalKind === "agent" && p.principalId === agentId && typeScoped(p),
 	);
 	// Types the org can create/update entities for: its own PLUS any public-catalog
 	// org's (visibility='public') — the same local-or-public resolution entity
@@ -1404,14 +1405,17 @@ app.put("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 	// object so we return the intended 400.
 	if (typeof body !== "object" || body === null || Array.isArray(body)) {
 		return c.json(
-			{ error: "invalid_request", message: "Request body must be a JSON object." },
+			{
+				error: "invalid_request",
+				message: "Request body must be a JSON object.",
+			},
 			400,
 		);
 	}
 
 	const resourceClass = isWriteResourceClass(body.resource_class)
-			? body.resource_class
-			: null;
+		? body.resource_class
+		: null;
 	if (!resourceClass) {
 		return c.json(
 			{
@@ -1513,8 +1517,7 @@ app.put("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 	}
 	if (
 		opKeyPresent &&
-		(typeof body.operation_key !== "string" ||
-			body.operation_key.trim() === "")
+		(typeof body.operation_key !== "string" || body.operation_key.trim() === "")
 	) {
 		return c.json(
 			{
@@ -1616,7 +1619,10 @@ app.put("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
   `;
 	if (!agentExists[0]) {
 		return c.json(
-			{ error: "not_found", message: `Agent '${agentId}' not found in this workspace.` },
+			{
+				error: "not_found",
+				message: `Agent '${agentId}' not found in this workspace.`,
+			},
 			404,
 		);
 	}
@@ -1649,8 +1655,8 @@ app.delete("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 	const agentId = c.req.param("agentId");
 	const resourceClassRaw = c.req.query("resource_class")?.trim();
 	const resourceClass = isWriteResourceClass(resourceClassRaw)
-			? resourceClassRaw
-			: null;
+		? resourceClassRaw
+		: null;
 	if (!resourceClass) {
 		return c.json(
 			{ error: "invalid_request", message: "resource_class is required." },
@@ -1708,7 +1714,9 @@ app.delete("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 		);
 	}
 	const operationKey =
-		resourceClass === "connector_action" ? (opKeyRaw?.trim() ?? null) || null : null;
+		resourceClass === "connector_action"
+			? (opKeyRaw?.trim() ?? null) || null
+			: null;
 	const targetRaw = c.req.query("target_agent_id");
 	if (
 		targetRaw !== undefined &&
@@ -1733,7 +1741,9 @@ app.delete("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 		);
 	}
 	const targetAgentId =
-		resourceClass === "agent_config" ? (targetRaw?.trim() ?? null) || null : null;
+		resourceClass === "agent_config"
+			? (targetRaw?.trim() ?? null) || null
+			: null;
 	const deleted = await deleteEntityApprovalPolicy({
 		organizationId,
 		resourceClass,
@@ -1860,14 +1870,17 @@ app.put("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 	}
 	if (typeof body !== "object" || body === null || Array.isArray(body)) {
 		return c.json(
-			{ error: "invalid_request", message: "Request body must be a JSON object." },
+			{
+				error: "invalid_request",
+				message: "Request body must be a JSON object.",
+			},
 			400,
 		);
 	}
 
 	const resourceClass = isWriteResourceClass(body.resource_class)
-			? body.resource_class
-			: null;
+		? body.resource_class
+		: null;
 	if (!resourceClass) {
 		return c.json(
 			{
@@ -1952,8 +1965,7 @@ app.put("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 	}
 	if (
 		opKeyPresent &&
-		(typeof body.operation_key !== "string" ||
-			body.operation_key.trim() === "")
+		(typeof body.operation_key !== "string" || body.operation_key.trim() === "")
 	) {
 		return c.json(
 			{
@@ -2065,8 +2077,8 @@ app.delete("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 	}
 	const resourceClassRaw = c.req.query("resource_class")?.trim();
 	const resourceClass = isWriteResourceClass(resourceClassRaw)
-			? resourceClassRaw
-			: null;
+		? resourceClassRaw
+		: null;
 	if (!resourceClass) {
 		return c.json(
 			{ error: "invalid_request", message: "resource_class is required." },
@@ -2118,7 +2130,9 @@ app.delete("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 		);
 	}
 	const operationKey =
-		resourceClass === "connector_action" ? (opKeyRaw?.trim() ?? null) || null : null;
+		resourceClass === "connector_action"
+			? (opKeyRaw?.trim() ?? null) || null
+			: null;
 	const targetRaw = c.req.query("target_agent_id");
 	if (
 		targetRaw !== undefined &&
@@ -2143,7 +2157,9 @@ app.delete("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 		);
 	}
 	const targetAgentId =
-		resourceClass === "agent_config" ? (targetRaw?.trim() ?? null) || null : null;
+		resourceClass === "agent_config"
+			? (targetRaw?.trim() ?? null) || null
+			: null;
 
 	// Unscoped entity floor delete is blocked inside deleteEntityApprovalPolicy
 	// (returns false). Blanket agent_config / connector_action floor rows may clear.
@@ -2653,10 +2669,7 @@ app.get("/mcp-apps/:app/index.html", async (c) => {
 	// Only serve a bundle the MCP App registry declares — never an arbitrary
 	// path param.
 	if (!MCP_APP_DIRS.has(app_)) return c.notFound();
-	const html = await renderMcpAppTemplate(
-		app_,
-		resolvePublicOrigin(c.req.url),
-	);
+	const html = await renderMcpAppTemplate(app_, resolvePublicOrigin(c.req.url));
 	if (html == null) return c.notFound();
 	c.header("Content-Type", "text/html; charset=utf-8");
 	c.header("Cache-Control", "no-cache");
