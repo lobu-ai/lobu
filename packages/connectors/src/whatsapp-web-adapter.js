@@ -998,11 +998,29 @@ export function whatsAppWebAdapterProgram() {
               },
             };
           }
-          updates[entry.jid] = {
-            ...(backfill.chats?.[entry.jid] ?? {}),
-            error: String(error),
-            has_more: true,
-          };
+          // As with repeated no-progress outcomes, a chat whose history read
+          // fails every run (including deadline aborts the page never gets to
+          // attempt) must not hold backfill open forever. Count consecutive
+          // failing runs in the persisted per-chat state and finish the chat
+          // as stalled at the same bound; the recorded error says why, and a
+          // fresh backfill retries from scratch.
+          const errorStallRuns = (Number(backfill.chats?.[entry.jid]?.history_stall_runs) || 0) + 1;
+          if (errorStallRuns >= MAX_HISTORY_STALL_RUNS) {
+            updates[entry.jid] = {
+              ...(backfill.chats?.[entry.jid] ?? {}),
+              error: String(error),
+              history_stall_runs: errorStallRuns,
+              has_more: false,
+              history_stalled: true,
+            };
+          } else {
+            updates[entry.jid] = {
+              ...(backfill.chats?.[entry.jid] ?? {}),
+              error: String(error),
+              history_stall_runs: errorStallRuns,
+              has_more: true,
+            };
+          }
         }
       }
     }

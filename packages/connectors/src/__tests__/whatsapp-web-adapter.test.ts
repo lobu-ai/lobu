@@ -935,6 +935,24 @@ describe("whatsAppWebAdapterProgram backfill progress", () => {
     expect(third.backfill.complete).toBe(true);
   });
 
+  it("finishes a chat whose history read aborts three runs in a row", async () => {
+    const adapter = install(async () => {
+      throw new DOMException("history read aborted", "AbortError");
+    }, { chatIds: ["a@c.us"] });
+    await adapter.ready();
+    const first = await adapter.collect();
+    expect(first.ok).toBe(true);
+    expect(first.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    expect(first.backfill.chats["a@s.whatsapp.net"].history_stalled).toBeUndefined();
+    const second = await adapter.collect(first.backfill);
+    expect(second.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    const third = await adapter.collect(second.backfill);
+    expect(third.backfill.chats["a@s.whatsapp.net"].has_more).toBe(false);
+    expect(third.backfill.chats["a@s.whatsapp.net"].history_stalled).toBe(true);
+    expect(third.backfill.chats["a@s.whatsapp.net"].error).toContain("AbortError");
+    expect(third.backfill.complete).toBe(true);
+  });
+
   it("resets the stall count when history advances again", async () => {
     let calls = 0;
     const adapter = install(async ({ chat }) => {
