@@ -23,6 +23,15 @@ describe("orgSetCommand", () => {
     expect(set).toHaveBeenCalledWith("acme", "cloud");
   });
 
+  test("keeps the active local-install org when memberships are omitted", async () => {
+    context();
+    spyOn(internal, "listOrganizations").mockResolvedValue([]);
+    spyOn(internal, "getActiveOrg").mockResolvedValue("local-install");
+    const set = spyOn(internal, "setActiveOrg").mockResolvedValue({} as never);
+    await orgSetCommand("local-install", { context: "cloud" });
+    expect(set).toHaveBeenCalledWith("local-install", "cloud");
+  });
+
   test("rejects an arbitrary org slug that is not available", async () => {
     context();
     spyOn(internal, "listOrganizations").mockResolvedValue([

@@ -51,7 +51,8 @@ export async function orgSetCommand(
 ): Promise<void> {
   const target = await resolveContext(options?.context);
   const orgs = await listOrganizations({ context: target.name });
-  if (!orgs.some((org) => org.slug === slug)) {
+  const current = await getActiveOrg(target.name);
+  if (current !== slug && !orgs.some((org) => org.slug === slug)) {
     const available = orgs.map((org) => org.slug).join(", ");
     throw new Error(
       available
