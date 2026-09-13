@@ -182,6 +182,7 @@ export async function buildRuntimeComponents() {
       version: component.version,
       type: "module",
       license: "BUSL-1.1",
+      repository: { type: cli.repository.type, url: cli.repository.url },
       files: ["dist", "vendor", "prebuilt", "npm-shrinkwrap.json"],
       engines: cli.engines,
       overrides: rootManifest.overrides,
