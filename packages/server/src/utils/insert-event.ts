@@ -375,12 +375,31 @@ async function findCurrentEventByOrigin(
   return rows[0] as any;
 }
 
+/**
+ * Browser tabs fold their unread count into the document title, so a
+ * page_visit's title is volatile in exactly the way `metadata` already is:
+ * the badge moving in and out ("(3) WhatsApp" vs "WhatsApp") made one feed
+ * supersede 93.6% of everything it wrote over a measured 3-day prod window
+ * (#3328). Compare page_visit titles badge-normalized — the URL is the
+ * identity, and a genuine title change still mints a new version.
+ */
+const UNREAD_BADGE_PREFIX = /^\(\d+\)\s+/;
+function semanticEventTitle(
+  title: string | null | undefined,
+  semanticType: string | null | undefined
+): string | null {
+  const value = title ?? null;
+  if (value === null || semanticType !== 'page_visit') return value;
+  return value.replace(UNREAD_BADGE_PREFIX, '');
+}
+
 function isSemanticallyEqual(
   existing: NonNullable<Awaited<ReturnType<typeof findCurrentEventByOrigin>>>,
   params: InsertEventParams
 ): boolean {
   return (
-    (existing.title ?? null) === (params.title ?? null) &&
+    semanticEventTitle(existing.title, params.semanticType) ===
+      semanticEventTitle(params.title, params.semanticType) &&
     (existing.payload_text ?? null) === (params.content ?? null) &&
     existing.payload_type === (params.payloadType ?? 'text') &&
     stableJson(existing.payload_data ?? {}) === stableJson(params.payloadData ?? {}) &&
