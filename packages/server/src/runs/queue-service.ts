@@ -412,9 +412,9 @@ export function describeSyncRunSkip(reason: SyncRunSkipReason): string {
 export async function createSyncRunWithClient(
   sql: DbClient,
   feedId: number,
-  dryRun = false,
-  delivery?: FeedDelivery,
-  feedDue = false
+  { dryRun = false, delivery, feedDue = false }: {
+    dryRun?: boolean; delivery?: FeedDelivery; feedDue?: boolean;
+  } = {}
 ): Promise<CreateSyncRunResult> {
   // Check if there's already a pending/running run for this feed
   const existing = await sql`
@@ -609,11 +609,11 @@ export async function createSyncRun(
 
   try {
     if (db) {
-      return await createSyncRunWithClient(sql, feedId, dryRun, undefined, opts?.feedDue);
+      return await createSyncRunWithClient(sql, feedId, { dryRun, feedDue: opts?.feedDue });
     }
 
     return await sql.begin(async (tx) =>
-      createSyncRunWithClient(tx, feedId, dryRun, undefined, opts?.feedDue)
+      createSyncRunWithClient(tx, feedId, { dryRun, feedDue: opts?.feedDue })
     );
   } catch (error) {
     if (isUniqueViolation(error, 'idx_runs_active_sync_per_feed')) {

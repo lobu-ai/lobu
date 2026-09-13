@@ -5,6 +5,7 @@ import { pgTextArray } from '../db/client';
 import { feedBackoff, feedBackoffDelayMs } from '../connectors/feed-backoff';
 import { notifyWorkerWork } from './worker-wakeup';
 import { createSyncRunWithClient } from './queue-service';
+import logger from '../utils/logger';
 
 function savedSourceAck(checkpoint: Record<string, unknown> | null) {
   const ack = checkpoint?.source_ack;
@@ -85,8 +86,8 @@ export async function receiveFeedNotifications(
         const retryReady = !feed.last_sync_at || Date.now() >=
           new Date(feed.last_sync_at).getTime() + feedBackoffDelayMs(Number(feed.consecutive_failures));
         if (retryReady && (records.length > 0 || batch.recovery === true)) {
-          await createSyncRunWithClient(tx, notice.feed_id, false, {
-            id: notice.notification_id, event: 'records', payload: { ...batch, records },
+          await createSyncRunWithClient(tx, notice.feed_id, {
+            delivery: { id: notice.notification_id, event: 'records', payload: { ...batch, records } },
           });
         }
       } else if (notice.changed) {
@@ -94,7 +95,13 @@ export async function receiveFeedNotifications(
         await requestFeedSync(tx, tx`SELECT id FROM feeds WHERE id = ${notice.feed_id}`);
       }
       return { active: true, ack };
+    }).catch((error) => {
+      // Roll back this notice before continuing the device poll. No receipt
+      // means no acknowledgment: the source retains the batch for retry.
+      logger.warn({ error, feedId: notice.feed_id }, 'Source notification deferred; retaining unacknowledged batch');
+      return null;
     });
+    if (!received) continue;
     receipts.push({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, ...received });
   }
   return receipts;

@@ -1,4 +1,3 @@
-import type { FeedOperation } from '@lobu/connector-sdk';
 /**
  * Derived feed-health semantics.
  *
@@ -19,7 +18,8 @@ import type { FeedOperation } from '@lobu/connector-sdk';
  *
  * - `executionMode` — what the row says about how this feed runs:
  *   - `source_only` — a feed that supports direct reads but not sync.
- *   - `streaming` — a chat channel populated by incoming messages.
+ *   - `streaming` — a chat channel populated by incoming messages, or a
+ *     delivery-only feed whose source pushes bounded batches (no cron, no sync).
  *   - `scheduled` — a syncable feed with a cron in `feeds.schedule`.
  *   - `no_schedule` — a syncable feed with no cron. This says the feed has
  *     no cron and NOTHING MORE. It was called `manual` until 2026-08-12, which
@@ -80,6 +80,8 @@ import type { FeedOperation } from '@lobu/connector-sdk';
  * reintroduce a second copy here without a stored signal that distinguishes an
  * unattended event-driven feed from a human-triggered one.
  */
+
+import type { FeedOperation } from '@lobu/connector-sdk';
 
 /**
  * SQL for the `webhook_driven` input below — the single definition of what
