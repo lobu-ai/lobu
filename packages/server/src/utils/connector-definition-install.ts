@@ -1,15 +1,10 @@
-import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { COMPILE_CONFIG_HASH, flattenConnectorSourceFromFile } from '@lobu/connector-worker/compile';
 import type { getDb } from '../db/client';
 import { computeCodeHash } from './compiler-core';
 import { cancelResponseBody, readResponseTextWithLimit } from './bounded-response';
 import {
   compileConnectorForIsolateFromFile,
-  getDefaultConnectorCatalogDir,
-  normalizeFileSourceUri,
   resolveFileSourcePath,
 } from './connector-catalog';
 import {
@@ -86,25 +81,6 @@ function isPreCompiledJs(code: string): boolean {
   }
 
   return false;
-}
-
-export function connectorSourcePathToUri(sourcePath?: string | null): string | null {
-  if (!sourcePath) return null;
-
-  if (sourcePath.includes('://')) {
-    return normalizeFileSourceUri(sourcePath);
-  }
-
-  if (isAbsolute(sourcePath) && existsSync(sourcePath)) {
-    return pathToFileURL(sourcePath).toString();
-  }
-
-  const bundledSourcePath = resolve(getDefaultConnectorCatalogDir(), sourcePath);
-  if (existsSync(bundledSourcePath)) {
-    return pathToFileURL(bundledSourcePath).toString();
-  }
-
-  return null;
 }
 
 // Hosts a connector's `source_url` may be fetched from out of the box. Installing

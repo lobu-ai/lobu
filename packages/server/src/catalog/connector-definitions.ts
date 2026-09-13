@@ -11,6 +11,7 @@ import {
 } from "../mcp-proxy/client";
 import { computeCodeHash } from "../utils/compiler-core";
 import {
+	connectorSourcePathToUri,
 	getCatalogConnectorInstallability,
 	resolveFileSourcePath,
 } from "../utils/connector-catalog";
@@ -20,7 +21,6 @@ import {
 } from "../utils/connector-compiler";
 import {
 	type ConnectorInstallResult,
-	connectorSourcePathToUri,
 	resolveConnectorInstallSource,
 	upsertConnectorDefinitionRecords,
 } from "../utils/connector-definition-install";

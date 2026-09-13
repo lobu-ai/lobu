@@ -3,10 +3,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { getDefaultCatalogUris } from "../../catalog/uris";
 import {
+	connectorSourcePathToUri,
 	findBundledConnectorFile,
 	normalizeFileSourceUri,
 } from "../connector-catalog";
-import { connectorSourcePathToUri } from "../connector-definition-install";
 
 describe("connector-catalog helpers", () => {
 	it("defaults LOBU catalog URIs to dist/catalogs manifests or bundled connectors", () => {

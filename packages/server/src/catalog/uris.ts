@@ -49,6 +49,8 @@ export function getDefaultCatalogDir(): string {
 	const here =
 		import.meta.dirname ?? fileURLToPath(new URL(".", import.meta.url));
 	const candidates = [
+		// Published runtime: catalogs are siblings of server.bundle.mjs.
+		resolve(here, "catalogs"),
 		resolve(here, "../../dist/catalogs"),
 		resolve(here, "../../../dist/catalogs"),
 		resolve(process.cwd(), "packages/server/dist/catalogs"),

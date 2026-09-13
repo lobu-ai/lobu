@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
 	generateCatalogManifest,
 	getDefaultConnectorCatalogDir,
@@ -60,14 +60,14 @@ export async function generateConnectorsManifest(): Promise<CatalogManifest> {
 	for (const [sourcePath, metadata] of Object.entries(built.entries)) {
 		if (!metadata || seen.has(metadata.key)) continue;
 		seen.add(metadata.key);
-		const filePath = join(dirPath, sourcePath);
 		entries.push({
 			id: metadata.key,
 			name: metadata.name,
 			version: metadata.version,
 			description: metadata.description,
 			detail: {
-				source_uri: pathToFileURL(filePath).toString(),
+				// Runtime loading resolves this against the installed bundle. An
+				// absolute URI here would capture the build machine's checkout.
 				source_path: sourcePath,
 				auth_schema: metadata.auth_schema,
 				webhook: metadata.webhook,

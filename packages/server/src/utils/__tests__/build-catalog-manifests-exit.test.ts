@@ -67,6 +67,14 @@ describe('catalog manifest build process', () => {
             throw new Error(`${kind}.json entries must be an array`);
           }
           expect(manifest.entries.length).toBeGreaterThan(0);
+          expect(JSON.stringify(manifest).includes(REPO_ROOT)).toBe(false);
+          if (kind === 'connectors') {
+            for (const entry of manifest.entries) {
+              expect(entry.detail.source_uri).toBeUndefined();
+              expect(entry.detail.source_path).toMatch(/^[^/\\][^:]*\.ts$/);
+              expect(entry.detail.source_path.split('/')).not.toContain('..');
+            }
+          }
         }
       } finally {
         if (deadline) clearTimeout(deadline);

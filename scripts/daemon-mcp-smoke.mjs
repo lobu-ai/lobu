@@ -18,9 +18,9 @@ import { cp, mkdtemp, realpath, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const cliPath = resolve(process.argv[2] ?? "");
 if (!process.argv[2] || !existsSync(cliPath)) {
@@ -68,6 +68,7 @@ let connection;
 let mcp;
 let org;
 let daemon;
+let serverComponentDirectory;
 let failed = false;
 const overall = setTimeout(() => {
   console.error("Daemon MCP smoke exceeded its 10 minute deadline");
@@ -174,6 +175,7 @@ async function connect(token) {
       cacheRoot: join(home, ".cache", "lobu", "runtime"),
       offline: true,
     });
+    serverComponentDirectory = serverDirectory;
     requireMcp = createRequire(join(serverDirectory, "package.json"));
   }
   const { Client } = await import(
@@ -313,6 +315,54 @@ async function main() {
       assert.ok(tools.some((tool) => tool.name === name));
     await assert.rejects(() => connect("owl_pat_invalid_smoke_token"));
   });
+  const connectorCatalog = await json("/catalog?kinds=connectors");
+  const catalogEntries = connectorCatalog.catalogs.connectors.entries;
+  await check(
+    "public catalog source URI installs its connector from the relocated artifact",
+    async () => {
+      // Exercise the advertised URI, not connector_id (which bypasses source_uri).
+      // This definition-only install belongs to the disposable local owner and
+      // makes no provider requests or account connections.
+      const entry = catalogEntries.find((entry) => entry.id === "hackernews");
+      assert.ok(
+        entry?.detail.source_uri,
+        "Hacker News catalog source is missing"
+      );
+      const installed = await json(`/api/${org.slug}/manage_connections`, {
+        method: "POST",
+        headers: sessionHeaders,
+        body: {
+          action: "install_connector",
+          source_uri: entry.detail.source_uri,
+        },
+      });
+      assert.equal(installed.installed, true, JSON.stringify(installed));
+      assert.equal(installed.connector_key, entry.id);
+    }
+  );
+  await check(
+    "every public catalog URI resolves inside the installed connector artifact",
+    async () => {
+      assert.ok(catalogEntries.length > 0);
+      for (const entry of catalogEntries) {
+        const source = fileURLToPath(entry.detail.source_uri);
+        assert.ok(
+          existsSync(source),
+          `Catalog source is unavailable for ${entry.id}`
+        );
+        if (serverComponentDirectory) {
+          const connectorRoot = await realpath(
+            join(serverComponentDirectory, "dist/connectors")
+          );
+          assert.ok(
+            (await realpath(source)).startsWith(`${connectorRoot}${sep}`),
+            `Catalog source for ${entry.id} escaped the installed artifact`
+          );
+          assert.equal(source, join(connectorRoot, entry.detail.source_path));
+        }
+      }
+    }
+  );
   const minted = await json("/api/me/devices/mint-child-token", {
     method: "POST",
     headers: { authorization: `Bearer ${bootstrap.device_token}` },
