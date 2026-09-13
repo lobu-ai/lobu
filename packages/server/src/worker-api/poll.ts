@@ -382,7 +382,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // local polls are gated too; fleet workers are never gated. Below-floor
   // user devices fail LOUD here, before claiming anything, so an outdated
   // client can never silently misbehave in the claim lanes.
-  if (isUserScopedWorker && !meetsClientVersionFloor(app_version)) {
+  if (isUserScopedWorker && !meetsClientVersionFloor(platform, app_version)) {
     return c.json(
       {
         error: 'upgrade_required',
