@@ -25,13 +25,10 @@ interface WhoamiJson {
   email?: string;
   name?: string;
   userId?: string;
-  /** Live access token after refresh — the Better Auth session / OAuth token. */
-  accessToken?: string;
-  /**
-   * Token for the device worker API (`/api/workers/*`). On loopback installs
-   * this is the local-init worker PAT; otherwise it equals `accessToken`.
-   */
-  workerToken?: string;
+  /** True when a refreshed access token is available. Raw tokens are never printed. */
+  hasAccessToken: boolean;
+  /** True when a device-worker token is available. Raw tokens are never printed. */
+  hasWorkerToken: boolean;
   /** Epoch ms when `accessToken` expires, when known. */
   expiresAt?: number;
   /** Active org slug bound to this context, when set. */
@@ -145,8 +142,8 @@ async function emitJson(
     email: effective?.email,
     name: effective?.name,
     userId: effective?.userId,
-    accessToken: effective?.accessToken,
-    workerToken: workerToken ?? effective?.accessToken,
+    hasAccessToken: Boolean(effective?.accessToken),
+    hasWorkerToken: Boolean(workerToken ?? effective?.accessToken),
     expiresAt: effective?.expiresAt,
     orgSlug,
     personalOrgSlug,
