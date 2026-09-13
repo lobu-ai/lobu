@@ -1,5 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { setLocalEnvValue } from "../internal/local-env.js";
 import { parseEnvContent } from "../internal/env-file.js";
@@ -9,6 +9,23 @@ const SENTRY_DSN_DEFAULT =
 
 interface TelemetryOptions {
   cwd?: string;
+}
+
+async function findProjectRoot(cwd: string): Promise<string> {
+  let current = resolve(cwd);
+  for (;;) {
+    try {
+      await access(join(current, "lobu.config.ts"));
+      return current;
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  throw new Error(
+    `No Lobu project found from ${resolve(cwd)}. Run this command inside a directory containing lobu.config.ts.`
+  );
 }
 
 async function loadEnv(cwd: string): Promise<Record<string, string>> {
@@ -23,7 +40,7 @@ async function loadEnv(cwd: string): Promise<Record<string, string>> {
 export async function telemetryStatusCommand(
   options: TelemetryOptions = {}
 ): Promise<void> {
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = await findProjectRoot(options.cwd ?? process.cwd());
   const env = await loadEnv(cwd);
   const dsn = env.SENTRY_DSN ?? process.env.SENTRY_DSN;
   if (dsn) {
@@ -38,7 +55,7 @@ export async function telemetryStatusCommand(
 export async function telemetryOnCommand(
   options: TelemetryOptions & { dsn?: string } = {}
 ): Promise<void> {
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = await findProjectRoot(options.cwd ?? process.cwd());
   const dsn = options.dsn ?? SENTRY_DSN_DEFAULT;
   await setLocalEnvValue(cwd, "SENTRY_DSN", dsn);
   // The shared community DSN points at the same Sentry project as the hosted
@@ -55,7 +72,7 @@ export async function telemetryOnCommand(
 export async function telemetryOffCommand(
   options: TelemetryOptions = {}
 ): Promise<void> {
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = await findProjectRoot(options.cwd ?? process.cwd());
   const envPath = join(cwd, ".env");
   let raw = "";
   try {
