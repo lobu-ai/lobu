@@ -737,38 +737,45 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     });
   }
 
-  const pageActivations =
-    isUserScopedWorker && effectivePlatform === 'chrome-extension' && supportsExactPageActivation(app_version)
-      ? (
-          await sql<{ run_id: number; urls: string | string[] }>`
-          SELECT id AS run_id, activation_target_urls AS urls
-          FROM runs
-          WHERE organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
-            AND created_by_user_id = ${effectiveWorkerUserId}
-            AND run_type = 'action'
-            AND status = 'pending'
-            AND approval_status = 'auto'
-            AND activation_kind = 'page_visit'
-            AND run_metadata->>'page_activation_identity' = 'exact'
-            AND activated_at IS NULL
-            AND expires_at > current_timestamp
-          ORDER BY expires_at, id
-          LIMIT 100
-        `
-        ).map((row) => ({
-          run_id: Number(row.run_id),
-          urls: parsePgTextArray(row.urls),
-        }))
-      : // An extension that cannot verify the exact target itself gets an
-        // empty list rather than no field: that is what makes it drop the
-        // hints it already cached from a lossily-normalized target.
-        effectivePlatform === 'chrome-extension'
-        ? []
-        : undefined;
-  const pollMetadata = {
-    ...feedReceiptMetadata,
-    ...(pageActivations === undefined ? {} : { page_activations: pageActivations }),
+  // Rebuildable: a held poll answers up to WORKER_POLL_MAX_WAIT_SECONDS after
+  // this first ran, and page activations created during that hold must not be
+  // missing from the response that ends it — the extension REPLACES its cached
+  // hint list from this field, so a stale list silently drops them.
+  const buildPollMetadata = async () => {
+    const pageActivations =
+      isUserScopedWorker && effectivePlatform === 'chrome-extension' && supportsExactPageActivation(app_version)
+        ? (
+            await sql<{ run_id: number; urls: string | string[] }>`
+            SELECT id AS run_id, activation_target_urls AS urls
+            FROM runs
+            WHERE organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
+              AND created_by_user_id = ${effectiveWorkerUserId}
+              AND run_type = 'action'
+              AND status = 'pending'
+              AND approval_status = 'auto'
+              AND activation_kind = 'page_visit'
+              AND run_metadata->>'page_activation_identity' = 'exact'
+              AND activated_at IS NULL
+              AND expires_at > current_timestamp
+            ORDER BY expires_at, id
+            LIMIT 100
+          `
+          ).map((row) => ({
+            run_id: Number(row.run_id),
+            urls: parsePgTextArray(row.urls),
+          }))
+        : // An extension that cannot verify the exact target itself gets an
+          // empty list rather than no field: that is what makes it drop the
+          // hints it already cached from a lossily-normalized target.
+          effectivePlatform === 'chrome-extension'
+          ? []
+          : undefined;
+    return {
+      ...feedReceiptMetadata,
+      ...(pageActivations === undefined ? {} : { page_activations: pageActivations }),
+    };
   };
+  let pollMetadata = await buildPollMetadata();
 
   const claimNextPendingRun = async () =>
     sql.begin(async (tx) => {
@@ -1252,6 +1259,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     claim: findPending, waitMs: waitSeconds * 1000, signal: c.req.raw.signal,
     stopped: isShuttingDown,
   });
+  // Only a hold can have outrun the snapshot above; a zero-wait poll answers
+  // from the read it already did.
+  if (waitSeconds > 0) {
+    pollMetadata = await buildPollMetadata();
+  }
   if (!pending) {
     // Spend the hint on the budget this request did NOT consume, rather than on
     // the budget the caller asked for. A caller that held its full window should

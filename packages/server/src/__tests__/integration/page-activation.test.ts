@@ -306,6 +306,41 @@ describe("page-activated operation runs", () => {
 		expect(row).toEqual({ status: "pending", claimed_by: null });
 	});
 
+	it("includes a page activation created while the poll was held open", async () => {
+		const seeded = await seed();
+		// The handler reads activations once before it parks. A hold that answers
+		// from that snapshot drops every activation raised during the hold, and
+		// the extension REPLACES its cached hints from this field — so the hint
+		// would be lost entirely rather than merely arriving late.
+		const held = post("/api/workers/poll", {
+			body: {
+				worker_id: "chrome-mini",
+				platform: "chrome-extension",
+				app_version: "0.6.1",
+				capabilities: { "browser.debugger": true },
+				wait_seconds: 3,
+			},
+		});
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		const [late] = await sql<{ id: number }>`
+			INSERT INTO runs (
+				organization_id, run_type, connection_id, connector_key, action_key,
+				action_input, approval_status, status, created_at, expires_at,
+				activation_kind, activation_target_urls, created_by_user_id, run_metadata
+			) VALUES (
+				${seeded.org.id}, 'action', ${seeded.connection.id}, 'x', 'prepare_reply',
+				${sql.json({ body: "raised mid-hold" })}, 'auto', 'pending', NOW(), NOW() + interval '1 day',
+				'page_visit', ARRAY['https://x.com/ada/status/456']::text[], ${seeded.user.id},
+				${sql.json({ page_activation_identity: "exact" })}
+			)
+			RETURNING id
+		`;
+		const body = (await (await held).json()) as {
+			page_activations: Array<{ run_id: number }>;
+		};
+		expect(body.page_activations.map((hint) => hint.run_id)).toContain(late.id);
+	});
+
 	it("runs the activated parent on the fleet without changing the winning device", async () => {
 		const seeded = await seed();
 		const activation = await request(
