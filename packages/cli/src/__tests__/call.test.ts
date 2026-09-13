@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { buildArgs, callCommand, parseArgEntry } from "../commands/call";
 import { ValidationError } from "../commands/memory/_lib/errors";
 import * as memoryAuth from "../commands/memory/_lib/memory-auth";
+import * as apiClient from "../internal/api-client";
 
 const originalFetch = globalThis.fetch;
 const originalStdoutWrite = process.stdout.write.bind(process.stdout);
@@ -123,6 +124,17 @@ describe("callCommand", () => {
       },
       key: "https://example.test/mcp/acme",
     });
+    spyOn(apiClient, "resolveApiClient").mockResolvedValue({
+      client: new apiClient.ApiClient(
+        "https://example.test",
+        "test-token",
+        ((input, init) => globalThis.fetch(input, init)) as typeof fetch
+      ),
+      contextName: "default",
+      apiBaseUrl: "https://example.test",
+      orgSlug: "acme",
+      token: "test-token",
+    });
     spyOn(memoryAuth, "getUsableToken").mockResolvedValue({
       token: "test-token",
       contextName: "default",
@@ -210,6 +222,35 @@ describe("callCommand", () => {
     const parsed = JSON.parse(captured.chunks.join(""));
     expect(parsed.tools).toHaveLength(1);
     expect(parsed.tools[0].name).toBe("search_memory");
+  });
+
+  test("--list uses the explicit/context API origin instead of the marketing host", async () => {
+    stubAuth();
+    const fetchMock = mock(async (url: string) => {
+      expect(url).toBe("https://cloud.example.test/api/acme/tools");
+      return new Response(JSON.stringify({ tools: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    spyOn(apiClient, "resolveApiClient").mockResolvedValue({
+      client: new apiClient.ApiClient(
+        "https://cloud.example.test",
+        "test-token",
+        fetchMock as unknown as typeof fetch
+      ),
+      contextName: "cloud",
+      apiBaseUrl: "https://cloud.example.test",
+      orgSlug: "acme",
+      token: "test-token",
+    });
+
+    await callCommand(undefined, {
+      list: true,
+      context: "cloud",
+      url: "https://cloud.example.test/api/v1",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("dispatches a tool call and prints the JSON result", async () => {
