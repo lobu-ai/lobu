@@ -96,8 +96,12 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     limits: { timeoutMs },
   });
 
-  if (result.success && result.returnTruncated && !('extracted_data' in context)) {
-    return { success: false, error: 'OutputSizeExceeded: Automation script return value exceeds the sandbox output limit.' };
+  if (result.success && result.returnTruncated && executionKind === 'executor') {
+    return {
+      success: false,
+      error:
+        'OutputSizeExceeded: Automation script return value exceeds the sandbox output limit.',
+    };
   }
   if (result.success) {
     logger.info(
@@ -172,7 +176,7 @@ export async function extractReactionInputSchema(
 }
 
 /**
- * Compile a TypeScript reaction script to JavaScript using esbuild.
+ * Compile a TypeScript Automation script to JavaScript using esbuild.
  *
  * Stays exported because `manage_automations` create and set_reaction_script call
  * it at save time to surface compile errors back to the agent. Run-time compile
@@ -198,7 +202,7 @@ export async function compileReactionScript(source: string): Promise<string> {
 }
 
 /**
- * Validate that a compiled reaction module exposes a default handler.
+ * Validate that a compiled Automation script exposes a default handler.
  *
  * `compileReactionScript` only checks syntax; a script with named exports
  * but no default export would pass compilation but fail at runtime inside
@@ -207,6 +211,7 @@ export async function compileReactionScript(source: string): Promise<string> {
  */
 export async function validateReactionDefaultExport(
   compiledScript: string,
+  label = 'Reaction script',
 ): Promise<void> {
   const result = await runScript({
     source: compiledScript,
@@ -221,7 +226,7 @@ export async function validateReactionDefaultExport(
   // export is absent or not a function, so check both conditions.
   if (!result.success || !result.returnValue) {
     throw new Error(
-      'Reaction script must export a default async function. ' +
+      `${label} must export a default async function. ` +
         (result.error?.message ?? 'No default export found.'),
     );
   }

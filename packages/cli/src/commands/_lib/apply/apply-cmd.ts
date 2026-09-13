@@ -995,7 +995,7 @@ export async function executePlan(
         //    (no prompt/skills) must install the reaction before the trigger
         //    update reaches the server. Push first (idempotent, no drift signal
         //    because it's not returned by Automation lists) so the rule sees it.
-        //    Removal (`reaction: null`) is handled in step (c) below, after the
+        //    Removal (`reaction: null`) is handled in step (b2) below, after the
         //    executor install — never here.
         if (w.reactionScript) {
           await ctx.client.setReactionScript(

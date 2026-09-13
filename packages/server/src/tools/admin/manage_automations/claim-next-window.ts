@@ -204,9 +204,6 @@ export async function handleClaimNextWindow(
         WHERE id = ${runId}
       `;
     } else {
-      if (automation.executor_kind === 'script') {
-        throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
-      }
       // The arrival window [mark, horizon). Empty only while the mark is
       // younger than the settle budget (a just-created or just-seeded
       // Automation): nothing stored since it has settled yet.
@@ -264,7 +261,13 @@ export async function handleClaimNextWindow(
           AND (approved_input->>'window_start')::timestamptz = ${windowStart.toISOString()}::timestamptz
         LIMIT 1
       `;
-      if (queued?.executor_kind === 'script') {
+      // An existing run owns the executor snapshot. Only consult the live
+      // Automation when this claim would create a new run; otherwise a config
+      // edit could retroactively move already-queued work between lanes.
+      if (
+        queued?.executor_kind === 'script' ||
+        (!queued && automation.executor_kind === 'script')
+      ) {
         throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
       }
       if (queued) windowEnd = new Date(queued.window_end);

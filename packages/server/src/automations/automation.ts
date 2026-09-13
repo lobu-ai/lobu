@@ -1353,13 +1353,24 @@ async function dispatchAutomationRun(
 
 	if (payload.executor) {
 		const [source] = await sql`SELECT run_type FROM runs WHERE id = ${run.id}`;
-		if (source?.run_type !== 'automation' || payload.executor.kind !== 'script') {
-			await failAutomationRun(sql, run.id, 'Script executors currently support live Automation runs; eval capture is unavailable.');
-			return 'failed';
+		if (
+			source?.run_type !== "automation" ||
+			payload.executor.kind !== "script"
+		) {
+			await failAutomationRun(
+				sql,
+				run.id,
+				"Script executors currently support live Automation runs; eval capture is unavailable."
+			);
+			return "failed";
 		}
-		return await enqueueAutomationScript(sql, {
-			organizationId: run.organization_id, automationId: run.automation_id, sourceRunId: run.id,
-		}) ? 'dispatched' : 'reconciled';
+		return (await enqueueAutomationScript(sql, {
+			organizationId: run.organization_id,
+			automationId: run.automation_id,
+			sourceRunId: run.id,
+		}))
+			? "dispatched"
+			: "reconciled";
 	}
 
 	if (!isLobuGatewayRunning()) {

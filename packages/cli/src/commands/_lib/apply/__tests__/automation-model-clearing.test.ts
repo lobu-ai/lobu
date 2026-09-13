@@ -167,7 +167,12 @@ describe("Automation execution config", () => {
     expect(recorded.attribution.automations[0]?.execution_config).toEqual({
       executor,
     });
-    remote.automations[0]!.execution_config = {
+    const remoteAutomation = remote.automations[0];
+    const desiredAutomation = state.automations[0];
+    if (!remoteAutomation || !desiredAutomation) {
+      throw new Error("Expected the Automation fixtures to exist.");
+    }
+    remoteAutomation.execution_config = {
       executor: { ...executor, params: { second: 2, first: 1 } },
     };
     expect(
@@ -175,7 +180,7 @@ describe("Automation execution config", () => {
         (row) => row.verb === "noop"
       )
     ).toBe(true);
-    state.automations[0]!.executor = null;
+    desiredAutomation.executor = null;
     const update = computeDiff(state, remote, {
       baseline: toBaseline(recorded),
     });

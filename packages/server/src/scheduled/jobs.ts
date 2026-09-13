@@ -482,7 +482,12 @@ function registerMaintenanceTasks(
   // Executor scripts own the parent Automation run, so the child task carries
   // the durable handoff that resumes it after a scheduler restart.
   scheduler.register(AUTOMATION_SCRIPT_TASK, async (ctx) => {
-    await runAutomationScriptTask(ctx.payload as AutomationScriptTaskPayload, env, ctx.taskRunId, ctx.attempt);
+    await runAutomationScriptTask(
+      ctx.payload as AutomationScriptTaskPayload,
+      env,
+      ctx.taskRunId,
+      ctx.attempt
+    );
   });
 
   // The Automation reaction script. Queued inside `complete_window`'s window

@@ -372,7 +372,7 @@ export const AutomationExecutionConfigSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "[create/update] Per-Automation execution settings: device-worker CLI flags plus the server-side finalize-nudge budget. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
+      "[create/update] Per-Automation execution settings: a sandboxed script executor, device-worker CLI flags, or the server-side finalize-nudge budget. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
   }
 );
 export type AutomationExecutionConfig = Static<
@@ -647,7 +647,7 @@ export const ManageAutomationsSchema = Type.Object(
     prompt: Type.Optional(
       Type.String({
         description:
-          "[create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, or both; an event trigger with execution 'turn' may omit both and use the built-in default.",
+          "[create/create_version] Literal LLM instruction text for the Automation — the task statement, frozen into the version. No template expansion happens: the text is delivered to the agent verbatim, and the window's data (content, sources, entities, extraction_schema) arrives alongside it in the knowledge-read payload. Reusable know-how belongs in `skills` instead, which is delivered as readable files rather than pasted in here. A schedule trigger, an event trigger with execution 'window', and an Automation with no triggers each need an instruction source — supply `prompt`, `skills`, a reaction script, or a script executor; an event trigger with execution 'turn' may omit all instruction sources and use the built-in default.",
       })
     ),
     skills: Type.Optional(
