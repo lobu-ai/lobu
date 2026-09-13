@@ -27,27 +27,41 @@ describe("client version floor", () => {
 
 	test("unset floor allows everything, including unknown versions", () => {
 		delete process.env.MIN_CLIENT_VERSION;
-		expect(meetsClientVersionFloor(null)).toBe(true);
-		expect(meetsClientVersionFloor("garbage")).toBe(true);
-		expect(meetsClientVersionFloor("0.0.1")).toBe(true);
+		expect(meetsClientVersionFloor("macos", null)).toBe(true);
+		expect(meetsClientVersionFloor("macos", "garbage")).toBe(true);
+		expect(meetsClientVersionFloor("macos", "0.0.1")).toBe(true);
 	});
 
-	test("a set floor compares numerically and fails closed on unknowns", () => {
-		process.env.MIN_CLIENT_VERSION = "1.4.0";
-		expect(meetsClientVersionFloor("1.4.0")).toBe(true);
-		expect(meetsClientVersionFloor("1.4.1")).toBe(true);
-		expect(meetsClientVersionFloor("1.10.0")).toBe(true);
-		expect(meetsClientVersionFloor("2.0.0")).toBe(true);
-		expect(meetsClientVersionFloor("1.3.9")).toBe(false);
-		expect(meetsClientVersionFloor("0.9.9")).toBe(false);
-		expect(meetsClientVersionFloor(null)).toBe(false);
-		expect(meetsClientVersionFloor("not-a-version")).toBe(false);
+	test("each platform is gated on its own version line", () => {
+		process.env.MIN_CLIENT_VERSION = "macos=1.4.0,headless=20.1.0";
+		expect(meetsClientVersionFloor("macos", "1.4.0")).toBe(true);
+		expect(meetsClientVersionFloor("macos", "1.10.0")).toBe(true);
+		expect(meetsClientVersionFloor("macos", "2.0.0")).toBe(true);
+		expect(meetsClientVersionFloor("macos", "1.3.9")).toBe(false);
+		expect(meetsClientVersionFloor("headless", "20.1.0")).toBe(true);
+		expect(meetsClientVersionFloor("headless", "19.9.9")).toBe(false);
+		// A floor for one line never gates another.
+		expect(meetsClientVersionFloor("headless", "0.9.0")).toBe(false);
+		expect(meetsClientVersionFloor("macos", "20.1.0")).toBe(true);
 	});
 
-	test("an unparseable floor refuses nothing (misconfiguration must not brick the fleet)", () => {
-		process.env.MIN_CLIENT_VERSION = "someday";
-		expect(meetsClientVersionFloor("0.0.1")).toBe(true);
-		expect(meetsClientVersionFloor(null)).toBe(true);
+	test("a platform with no entry is allowed, even with a floor set", () => {
+		process.env.MIN_CLIENT_VERSION = "macos=1.4.0";
+		expect(meetsClientVersionFloor("chrome-extension", "0.1.0")).toBe(true);
+		expect(meetsClientVersionFloor("chrome-extension", null)).toBe(true);
+		expect(meetsClientVersionFloor(null, "0.0.1")).toBe(true);
+	});
+
+	test("a set floor fails closed on missing or unparseable client versions", () => {
+		process.env.MIN_CLIENT_VERSION = "macos=1.4.0";
+		expect(meetsClientVersionFloor("macos", null)).toBe(false);
+		expect(meetsClientVersionFloor("macos", "not-a-version")).toBe(false);
+	});
+
+	test("malformed map entries are ignored, never enforced", () => {
+		process.env.MIN_CLIENT_VERSION = "someday,macos,=1.2.3,macos=bogus";
+		expect(meetsClientVersionFloor("macos", "0.0.1")).toBe(true);
+		expect(meetsClientVersionFloor("macos", null)).toBe(true);
 	});
 
 	test("messages name the client when known", () => {

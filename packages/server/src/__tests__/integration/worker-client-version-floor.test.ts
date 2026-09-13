@@ -13,7 +13,7 @@ import { seedOwnerContext } from '../setup/test-fixtures';
 
 describe('worker client version floor', () => {
   beforeAll(() => {
-    process.env.MIN_CLIENT_VERSION = '1.4.0';
+    process.env.MIN_CLIENT_VERSION = 'macos=1.4.0';
   });
 
   afterAll(() => {
@@ -68,14 +68,14 @@ describe('worker client version floor', () => {
     expect(String(rejected.body.error_description)).toContain('Mac app');
   });
 
-  it('rejects a version-less user device while a floor is set (fail closed, loud)', async () => {
+  it('rejects a version-less user device while its platform has a floor (fail closed, loud)', async () => {
     const { org, user } = await seedOwnerContext({ orgName: 'Version Floor Org' });
     const rejected = await pollAs(org.id, user.id, {
-      platform: 'chrome-extension',
+      platform: 'macos',
     });
     expect(rejected.status).toBe(409);
     expect(rejected.body.error).toBe('upgrade_required');
-    expect(String(rejected.body.error_description)).toContain('Chrome extension');
+    expect(String(rejected.body.error_description)).toContain('Mac app');
   });
 
   it('lets at-floor and above-floor devices poll normally', async () => {
@@ -85,5 +85,12 @@ describe('worker client version floor', () => {
       expect(ok.status).toBe(200);
       expect(ok.body.error).toBeUndefined();
     }
+  });
+
+  it('leaves platforms with no floor entry alone', async () => {
+    const { org, user } = await seedOwnerContext({ orgName: 'Version Floor Org' });
+    const ok = await pollAs(org.id, user.id, { platform: 'chrome-extension', app_version: '0.1.0' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.error).toBeUndefined();
   });
 });

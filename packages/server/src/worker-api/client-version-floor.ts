@@ -9,21 +9,35 @@
  * delete the legacy arms once enforcement holds. (Telemetry lives with the
  * legacy arms on their own change; this module only enforces.)
  *
- * Unset/empty MIN_CLIENT_VERSION disables enforcement entirely (every client
- * allowed, including ones that never report a version). A SET floor fails
- * closed: a missing or unparseable version cannot prove compliance, so it is
- * rejected with the same upgrade message. Fleet (non-user) workers ship with
- * the server and are never gated — enforcement applies to user-scoped device
- * polls only (see pollWorkerJob).
+ * Floors are PER PLATFORM because the clients ship independent version lines
+ * (extension manifest, Mac marketing version, CLI package version): a single
+ * global value cannot gate one line without rejecting or ignoring the others.
+ * MIN_CLIENT_VERSION is a comma-separated `platform=version` map, e.g.
+ * `chrome-extension=0.9.0,macos=0.2.0,headless=20.1.0`. Unset/empty disables
+ * enforcement entirely; a platform with no entry is allowed. A SET floor for
+ * a platform fails closed: a missing or unparseable client version cannot
+ * prove compliance. Fleet (non-user) workers ship with the server and are
+ * never gated — enforcement applies to user-scoped device polls only
+ * (see pollWorkerJob).
  *
  * Version shape follows the existing convention (supportsExactPageActivation):
  * dotted numerics `major.minor.patch[.build]`, compared numerically.
  */
 
-/** Positive string from env (trimmed); falls back when unset/empty. */
-function envFloor(): string | null {
-  const raw = (process.env.MIN_CLIENT_VERSION ?? '').trim();
-  return raw === '' ? null : raw;
+/** Parse `platform=version` pairs; malformed entries are ignored (permissive). */
+function envFloors(): Map<string, string> {
+  const floors = new Map<string, string>();
+  const raw = process.env.MIN_CLIENT_VERSION ?? '';
+  for (const entry of raw.split(',')) {
+    const cut = entry.indexOf('=');
+    if (cut <= 0) continue;
+    const platform = entry.slice(0, cut).trim();
+    const version = entry.slice(cut + 1).trim();
+    if (platform !== '' && parseClientVersion(version) != null) {
+      floors.set(platform, version);
+    }
+  }
+  return floors;
 }
 
 /** Parse `1.2.3[.4]` into numeric parts; null when the shape is unknown. */
@@ -36,22 +50,25 @@ export function parseClientVersion(
   return [major, minor, patch];
 }
 
-/** True when no floor is configured, or the version meets it. */
+/** True when the platform has no floor, or the version meets it. */
 export function meetsClientVersionFloor(
+  platform: string | null | undefined,
   version: unknown,
-  floor: string | null = envFloor()
+  floors: Map<string, string> = envFloors()
 ): boolean {
+  const floor = (platform != null ? floors.get(platform) : undefined) ?? null;
   if (floor == null) return true;
   const have = parseClientVersion(version);
   const want = parseClientVersion(floor);
-  // An unparseable floor refuses nothing, so a typo cannot brick the fleet.
-  // Validate the value when announcing it; this path stays permissive.
+  // floors map values are validated on parse, so an unparseable floor here
+  // cannot happen; stay permissive rather than bricking the fleet on it.
   if (want == null) return true;
   if (have == null) return false;
-  for (let i = 0; i < 3; i++) {
-    if (have[i] !== want[i]) return have[i]! > want[i]!;
-  }
-  return true;
+  const [haveMajor, haveMinor, havePatch] = have;
+  const [wantMajor, wantMinor, wantPatch] = want;
+  if (haveMajor !== wantMajor) return haveMajor > wantMajor;
+  if (haveMinor !== wantMinor) return haveMinor > wantMinor;
+  return havePatch >= wantPatch;
 }
 
 /** Human-facing update message naming the client when we know it. */
