@@ -1,5 +1,115 @@
 # Changelog
 
+## [20.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v19.2.0...lobu-v20.0.0) (2026-09-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** remove the unused browserNetworkSync SDK export; connectors use extensionNetworkSync through the paired Chrome extension.
+* **chrome:** require device-pinned browser execution ([#3480](https://github.com/lobu-ai/lobu/issues/3480))
+* **agent-turn:** `parseBangBashCommand`, `BangBashCommand` and `BashExecutionContent` are gone from `@lobu/core`, and `ParsedMessageType` no longer includes `bashExecution`.
+
+### Features
+
+* cache-bust brand assets with content-hash query tokens ([#3514](https://github.com/lobu-ai/lobu/issues/3514)) ([bf8c5b0](https://github.com/lobu-ai/lobu/commit/bf8c5b05284488014f8220a03f4dab4ec35c029e))
+* **chrome:** mark tab groups with ◆ and retire the legacy-prefix shim ([#3453](https://github.com/lobu-ai/lobu/issues/3453)) ([e832d1f](https://github.com/lobu-ai/lobu/commit/e832d1f5af55c60ea74b75085254f397050aea4f))
+* **cli:** install runtime components on demand ([#3518](https://github.com/lobu-ai/lobu/issues/3518)) ([60ab84b](https://github.com/lobu-ai/lobu/commit/60ab84bcb9de27c353f4e1a507c9cf015eb2e9e3))
+* **connectors:** compose imported reads through the host operation runtime ([#3481](https://github.com/lobu-ai/lobu/issues/3481)) ([edeecca](https://github.com/lobu-ai/lobu/commit/edeecca38e09690bc75eb1b2a4532869b57ef021))
+* **feeds:** consolidate WhatsApp live updates into existing feed sync ([#3511](https://github.com/lobu-ai/lobu/issues/3511)) ([a8a68ca](https://github.com/lobu-ai/lobu/commit/a8a68cab6be4976580c21ade9403051657f59800))
+* **release:** publish verified npm canaries from main ([#3464](https://github.com/lobu-ai/lobu/issues/3464)) ([945959f](https://github.com/lobu-ai/lobu/commit/945959f0ceda6bf8972c889120bb3c6042af0956))
+* rename Mac app Owletto to Lobu and refresh brand mark ([#3507](https://github.com/lobu-ai/lobu/issues/3507)) ([918e44f](https://github.com/lobu-ai/lobu/commit/918e44fc9b9789c5c61b5b00fdf13cab10a3d914))
+* reuse durable Automation windows for direct source reads ([#3510](https://github.com/lobu-ai/lobu/issues/3510)) ([5ee0d63](https://github.com/lobu-ai/lobu/commit/5ee0d63ae5b1c9af7c785bb87eccac5cdc629461))
+* **server:** group standalone browser actions instead of one group per run ([#3443](https://github.com/lobu-ai/lobu/issues/3443)) ([5bd9054](https://github.com/lobu-ai/lobu/commit/5bd905471e8202a7bfb723713c9c3d2355355054))
+
+
+### Bug Fixes
+
+* **activity:** preserve record context and actionable notifications ([#3466](https://github.com/lobu-ai/lobu/issues/3466)) ([913ec55](https://github.com/lobu-ai/lobu/commit/913ec55b8de560cdf923b22dc0822570c4c661c1))
+* **agent-turn:** preserve provider storage compatibility ([#3465](https://github.com/lobu-ai/lobu/issues/3465)) ([ef9269d](https://github.com/lobu-ai/lobu/commit/ef9269d91cc0967d29304fc359239fdd8f0357ca))
+* **agents:** make follow-up suggestions optional ([#3495](https://github.com/lobu-ai/lobu/issues/3495)) ([31bb3a0](https://github.com/lobu-ai/lobu/commit/31bb3a06c6a918f897d3ceebe7312250d4f51d81))
+* **artifacts:** keep connector catalogs portable ([#3526](https://github.com/lobu-ai/lobu/issues/3526)) ([baf7b0f](https://github.com/lobu-ai/lobu/commit/baf7b0fc41f4994e690650bd3353c3bfacedf743))
+* **auth:** explain missing permissions and disable unauthorized entity edits ([#3452](https://github.com/lobu-ai/lobu/issues/3452)) ([9386922](https://github.com/lobu-ai/lobu/commit/93869220502d20274cd40744c62f6dde3937f4ac))
+* **auth:** resolve owner subscriptions for cloud Automations ([#3482](https://github.com/lobu-ai/lobu/issues/3482)) ([f5b7374](https://github.com/lobu-ai/lobu/commit/f5b737452c65eb96636d690521954d671e31b38c))
+* **automations:** bound complete page responses by bytes ([#3501](https://github.com/lobu-ai/lobu/issues/3501)) ([83a99eb](https://github.com/lobu-ai/lobu/commit/83a99eb51f622e8b70ad1d0fd0ce21b5661c5a14))
+* **automations:** credit a reaction's own writes to the acting Automation ([#3492](https://github.com/lobu-ai/lobu/issues/3492)) ([eab0e3f](https://github.com/lobu-ai/lobu/commit/eab0e3f0e38305fa17d03b6960286e7d7cdcb507))
+* **automations:** honor reasoning effort on cloud turns ([#3483](https://github.com/lobu-ai/lobu/issues/3483)) ([6bf4066](https://github.com/lobu-ai/lobu/commit/6bf40668f7695ef08537f948e0ed5d10f5c8a210))
+* **automations:** keep window SQL consistent across event refreshes ([#3512](https://github.com/lobu-ai/lobu/issues/3512)) ([2bf0d85](https://github.com/lobu-ai/lobu/commit/2bf0d853bc3dc60ebc13c7645fe70eed86d86945))
+* **automations:** preserve SQL source coverage before completion ([#3503](https://github.com/lobu-ai/lobu/issues/3503)) ([23f9fcd](https://github.com/lobu-ai/lobu/commit/23f9fcdaf3daf94062ae4cd28f67cb81cb5bf53b))
+* **automations:** ship custom effort editor ([#3478](https://github.com/lobu-ai/lobu/issues/3478)) ([3bd9411](https://github.com/lobu-ai/lobu/commit/3bd9411f0d2d5ec8202849a1bf2b731061465542))
+* **browser:** enforce exact page activation targets ([#3468](https://github.com/lobu-ai/lobu/issues/3468)) ([22cff6f](https://github.com/lobu-ai/lobu/commit/22cff6ff53ab74f7ad020d59b9b716275dd71e18))
+* **browser:** preserve SDK flows and recover extension failures ([#3428](https://github.com/lobu-ai/lobu/issues/3428)) ([4793677](https://github.com/lobu-ai/lobu/commit/4793677513536a1ce93b64a8c9b1429367ca96f7))
+* **chat:** preserve native team identity in interaction tokens ([#3437](https://github.com/lobu-ai/lobu/issues/3437)) ([638b315](https://github.com/lobu-ai/lobu/commit/638b315fecd5a7b7d0065959cb7dbdac24b565ed))
+* **chat:** route authorized links across workspaces ([#3431](https://github.com/lobu-ai/lobu/issues/3431)) ([9b21359](https://github.com/lobu-ai/lobu/commit/9b21359bc7473e42c74cb034cd25d7b8eb59a7ee))
+* **chat:** ship aligned user bubbles and chat anchor styling ([#3472](https://github.com/lobu-ai/lobu/issues/3472)) ([8d719da](https://github.com/lobu-ai/lobu/commit/8d719dad02c2fc1fbcc44a92c213230f233111d5))
+* **chrome:** pick up run fence timer receiver fix ([#3426](https://github.com/lobu-ai/lobu/issues/3426)) ([6ed16eb](https://github.com/lobu-ai/lobu/commit/6ed16eb30d37a53bb8a095b01f28300418beca94))
+* **chrome:** require device-pinned browser execution ([#3480](https://github.com/lobu-ai/lobu/issues/3480)) ([94fd9dd](https://github.com/lobu-ai/lobu/commit/94fd9dd69c7aa88ede1ef4b9bd2ef6c64ca27fe8))
+* **ci:** wait for lazy runtime publication before smoke ([#3530](https://github.com/lobu-ai/lobu/issues/3530)) ([b293f4d](https://github.com/lobu-ai/lobu/commit/b293f4dac2efa0ab05e9d44fd357ba2ddb7fbc9d))
+* **cli:** clear explicit automation model overrides ([#3408](https://github.com/lobu-ai/lobu/issues/3408)) ([99f7c11](https://github.com/lobu-ai/lobu/commit/99f7c11649aa04aac13ffd6f2357a7baad01dfb5))
+* **cli:** correlate chat SSE events with submitted requests ([#3467](https://github.com/lobu-ai/lobu/issues/3467)) ([d3d66ec](https://github.com/lobu-ai/lobu/commit/d3d66ec99f112b0c062a7a8b8b06bf9f1da5676f))
+* **cli:** preserve runtime lock package identities across Bun versions ([#3529](https://github.com/lobu-ai/lobu/issues/3529)) ([e3601ff](https://github.com/lobu-ai/lobu/commit/e3601ff12c9b6b97143b1f60defad330e6a3146e))
+* **cli:** report a stalled chat stream instead of exiting 0 ([#3434](https://github.com/lobu-ai/lobu/issues/3434)) ([96b61da](https://github.com/lobu-ai/lobu/commit/96b61da4c14dae287403523d889bc88a1086306b))
+* **cli:** use external agent engines without duplicate installs ([#3471](https://github.com/lobu-ai/lobu/issues/3471)) ([d6b848a](https://github.com/lobu-ai/lobu/commit/d6b848abc2c174eaac057b3c2d747f936426f0d5))
+* **cli:** verify installed device runtime entrypoints before activation ([#3523](https://github.com/lobu-ai/lobu/issues/3523)) ([e5c20da](https://github.com/lobu-ai/lobu/commit/e5c20da609071b42beebe705e8c3b97d5a66f9ba))
+* **connectors:** discover managed setup across local and cloud runtimes ([#3476](https://github.com/lobu-ai/lobu/issues/3476)) ([9cc6ba2](https://github.com/lobu-ai/lobu/commit/9cc6ba2fcb282a87cc92a424ae99228f26eed978))
+* **connectors:** make OAuth setup and recovery actionable ([#3496](https://github.com/lobu-ai/lobu/issues/3496)) ([d5390e7](https://github.com/lobu-ai/lobu/commit/d5390e765ae9a172ecd086c1b54c7c08e1f22802))
+* **connectors:** persist complete Gmail threads without skipping pages ([#3498](https://github.com/lobu-ai/lobu/issues/3498)) ([d907d79](https://github.com/lobu-ai/lobu/commit/d907d79ab1adbc8cf590398f4b86d66cb22bb3f9))
+* **connectors:** reconnect stalled WhatsApp message streams ([#3494](https://github.com/lobu-ai/lobu/issues/3494)) ([0b557f0](https://github.com/lobu-ai/lobu/commit/0b557f09fa077580302082481ee230331de8f374))
+* **connectors:** resume Calendar bootstrap without losing events ([#3497](https://github.com/lobu-ai/lobu/issues/3497)) ([db1ed9a](https://github.com/lobu-ai/lobu/commit/db1ed9aef899f2273f065844ea8e9fd5e4334c35))
+* **deploy:** promote images only after candidate smoke passes ([#3424](https://github.com/lobu-ai/lobu/issues/3424)) ([4de75bd](https://github.com/lobu-ai/lobu/commit/4de75bd8fab5357ad0aeb1e1380281c61edcd491))
+* **deploy:** validate migration prerequisites before quiescing ([#3418](https://github.com/lobu-ai/lobu/issues/3418)) ([f363824](https://github.com/lobu-ai/lobu/commit/f36382426f79685091863a6db4195164a8df5f5c))
+* **device-chat:** preserve local CLI settings and Slack routing ([#3477](https://github.com/lobu-ai/lobu/issues/3477)) ([84c3c27](https://github.com/lobu-ai/lobu/commit/84c3c27376c7a32cdb87124db7b35639bbf6db8a))
+* **device-daemon:** self-exec the compiled CLI supervisor ([#3479](https://github.com/lobu-ai/lobu/issues/3479)) ([0b45a63](https://github.com/lobu-ai/lobu/commit/0b45a63d5c2eeb0cbb4c1859c2a78580e34560ba))
+* **device-daemon:** upload transcripts through the mounted gateway ([#3499](https://github.com/lobu-ai/lobu/issues/3499)) ([6368533](https://github.com/lobu-ai/lobu/commit/636853386338f218f705288b740369b602b2fa85))
+* **device:** preserve physical pins and fail incompatible runs promptly ([#3429](https://github.com/lobu-ai/lobu/issues/3429)) ([f0c9311](https://github.com/lobu-ai/lobu/commit/f0c931170461c4c5584d8bf9d663c96bac284856))
+* **gmail:** store readable HTML message bodies ([#3502](https://github.com/lobu-ai/lobu/issues/3502)) ([3639619](https://github.com/lobu-ai/lobu/commit/363961986ac43e69916608f3568b1e1dece4cea4))
+* **helm:** wait for migration failure recovery ([#3422](https://github.com/lobu-ai/lobu/issues/3422)) ([5d5a6d0](https://github.com/lobu-ai/lobu/commit/5d5a6d09e4b99bab9e0be4ca475996281ddc7c38))
+* **images:** prune browser test tooling from production ([#3524](https://github.com/lobu-ai/lobu/issues/3524)) ([2926162](https://github.com/lobu-ai/lobu/commit/29261620563d4ace7564ba641cf7f98f51fbf4f6))
+* **lobu-team:** use claimed arrival windows for production digests ([#3430](https://github.com/lobu-ai/lobu/issues/3430)) ([c0d6bb1](https://github.com/lobu-ai/lobu/commit/c0d6bb146e4e0b7288a8419952bbaaa8df660c48))
+* **mcp:** align OAuth scopes and submission metadata ([#3442](https://github.com/lobu-ai/lobu/issues/3442)) ([ed0abd1](https://github.com/lobu-ai/lobu/commit/ed0abd181ded1039a60fe2fea812b501dc9a6578))
+* **mcp:** correct ChatGPT memory lookup and write authorization hints ([#3445](https://github.com/lobu-ai/lobu/issues/3445)) ([8cf66ed](https://github.com/lobu-ai/lobu/commit/8cf66edb9a9ea6669bc7ba2f9ccd9e7f9835b1f6))
+* **mcp:** hand off scoped file references to connector actions ([#3521](https://github.com/lobu-ai/lobu/issues/3521)) ([df34232](https://github.com/lobu-ai/lobu/commit/df342326e0318904dba8b8cf138bae3081b87efb))
+* **mcp:** key activity projections by authenticated user ([#3417](https://github.com/lobu-ai/lobu/issues/3417)) ([de995da](https://github.com/lobu-ai/lobu/commit/de995da8456057318c6e25fd1aa58e6935539607))
+* **mcp:** require explicit targets and surface rejected calls ([#3439](https://github.com/lobu-ai/lobu/issues/3439)) ([9cdd5ac](https://github.com/lobu-ai/lobu/commit/9cdd5acc308c537e0859dc659a8a8a20118f5d52))
+* **members:** apply permission roles through entity hooks ([#3446](https://github.com/lobu-ai/lobu/issues/3446)) ([0ae20d5](https://github.com/lobu-ai/lobu/commit/0ae20d52ca300451e07923c00574338fe18f1969))
+* **memory:** scope schema graph to workspace relationships ([#3432](https://github.com/lobu-ai/lobu/issues/3432)) ([14ab751](https://github.com/lobu-ai/lobu/commit/14ab751eb5ef15de0579addee5956717f967d1e4))
+* **notifications:** retry delivery through the durable task queue ([#3516](https://github.com/lobu-ai/lobu/issues/3516)) ([7f6a61c](https://github.com/lobu-ai/lobu/commit/7f6a61c9cea7cac6afaf58ffba439b6de48bc2ee))
+* **oauth:** consolidate personal account ownership and authorization state ([#3513](https://github.com/lobu-ai/lobu/issues/3513)) ([a8e677a](https://github.com/lobu-ai/lobu/commit/a8e677aa0eb0d41069eb1fc0978403c0cea71235))
+* **operations:** reuse authorized run file metadata ([#3528](https://github.com/lobu-ai/lobu/issues/3528)) ([0955849](https://github.com/lobu-ai/lobu/commit/0955849dc391fef3eab591688c3cf536be29a3e4))
+* **personal-agent:** notify changed task proposals and urgency ([#3517](https://github.com/lobu-ai/lobu/issues/3517)) ([79e0cca](https://github.com/lobu-ai/lobu/commit/79e0cca3712b1ebdbdd3b7be420730e33b4801f8))
+* **personal-agent:** offer help for committed task changes ([#3515](https://github.com/lobu-ai/lobu/issues/3515)) ([52d6bdf](https://github.com/lobu-ai/lobu/commit/52d6bdf642d5b0753ea78b0884964bfb8979ff19))
+* **personal-agent:** preserve task evidence and closed state ([#3520](https://github.com/lobu-ai/lobu/issues/3520)) ([da81fd6](https://github.com/lobu-ai/lobu/commit/da81fd66ff0694e9874f2be05bd1a92c21b77342))
+* **personal-agent:** scope quote retries to the automation run ([#3488](https://github.com/lobu-ai/lobu/issues/3488)) ([eb3b1e9](https://github.com/lobu-ai/lobu/commit/eb3b1e9d4d1100fa83a8686bde2b9cfc7ca46666))
+* preserve ChatGPT credentials across model overrides ([#3416](https://github.com/lobu-ai/lobu/issues/3416)) ([bcc07af](https://github.com/lobu-ai/lobu/commit/bcc07af5586ee1f7821e8633692dfcf5d9bbd5b3))
+* preserve Loki backlog and report digest coverage ([#3506](https://github.com/lobu-ai/lobu/issues/3506)) ([d3131ab](https://github.com/lobu-ai/lobu/commit/d3131ab5095e317f4222788273e39d761ae0474d))
+* **proxy:** strip ingress routing headers from provider requests ([#3474](https://github.com/lobu-ai/lobu/issues/3474)) ([8f72dfd](https://github.com/lobu-ai/lobu/commit/8f72dfdc597e2fd38fa806ecad64aa34e70ef0d1))
+* **release:** preserve runtime package provenance metadata ([#3525](https://github.com/lobu-ai/lobu/issues/3525)) ([9bf35de](https://github.com/lobu-ai/lobu/commit/9bf35de41fd534661b6d00d3a3ca74427decde55))
+* **release:** publish canaries manually with npm OIDC ([#3470](https://github.com/lobu-ai/lobu/issues/3470)) ([6b4516f](https://github.com/lobu-ai/lobu/commit/6b4516fd852039c42fd8663b9c0c9e53c4e670bc))
+* restore remote MCP approval editors in Owletto ([#3420](https://github.com/lobu-ai/lobu/issues/3420)) ([07a2de9](https://github.com/lobu-ai/lobu/commit/07a2de91078122fd9b9b99f55e7edc1de7d0c59d))
+* retain tool audits without a workspace ([#3414](https://github.com/lobu-ai/lobu/issues/3414)) ([4d06dac](https://github.com/lobu-ai/lobu/commit/4d06dac2417fd172dbe5cd24e366edfae4d86377))
+* **runtime:** forward configured tool grants to queued messages ([#3433](https://github.com/lobu-ai/lobu/issues/3433)) ([ac0fb56](https://github.com/lobu-ai/lobu/commit/ac0fb5655f78e1c7b5642418c0290c51ef42a262))
+* **runtime:** preserve cloud turn admission deadlines ([#3485](https://github.com/lobu-ai/lobu/issues/3485)) ([b0123b4](https://github.com/lobu-ai/lobu/commit/b0123b4cb97e35a972241a5a200814ba64b0126a))
+* **runtime:** restore Codex subscription inference in isolates ([#3473](https://github.com/lobu-ai/lobu/issues/3473)) ([80fbd6a](https://github.com/lobu-ai/lobu/commit/80fbd6a26b7eec1767e04d551e9a078a1f19afea))
+* **server:** resolve unknown Codex model capabilities ([#3490](https://github.com/lobu-ai/lobu/issues/3490)) ([5dfb9b2](https://github.com/lobu-ai/lobu/commit/5dfb9b277828161eca8a0f288baf47b3ff7a3135))
+* ship contextual notification filtering in Owletto ([#3423](https://github.com/lobu-ai/lobu/issues/3423)) ([97178ab](https://github.com/lobu-ai/lobu/commit/97178ab7e08e9d19b9c4b45eec1d552189151178))
+* show three contextual activity views ([#3425](https://github.com/lobu-ai/lobu/issues/3425)) ([35bb683](https://github.com/lobu-ai/lobu/commit/35bb683e8b103ddd1b366fc72090e6e69073abd5))
+* **smoke:** decide the guest-bundle expectation from the artifact ([#3462](https://github.com/lobu-ai/lobu/issues/3462)) ([2e28cf5](https://github.com/lobu-ai/lobu/commit/2e28cf571b035b054d5921aeed899de476619db9))
+* **test:** retry live provider turns and report capacity gaps ([#3469](https://github.com/lobu-ai/lobu/issues/3469)) ([2bddbfa](https://github.com/lobu-ai/lobu/commit/2bddbfa7eddbf52631abbfecd48ba34b0e9015b2))
+* **test:** verify Slack API smoke replies ([#3421](https://github.com/lobu-ai/lobu/issues/3421)) ([4dd818e](https://github.com/lobu-ai/lobu/commit/4dd818e5c0473be0516828bc2aa9940bdf226b9b))
+* **ui:** ship stable form drafts and input serialization ([#3458](https://github.com/lobu-ai/lobu/issues/3458)) ([3f5de70](https://github.com/lobu-ai/lobu/commit/3f5de70e3bbe8118a65f285a36239b3c40d344ad))
+* validate effective tools before Automation inference ([#3504](https://github.com/lobu-ai/lobu/issues/3504)) ([80f1ad8](https://github.com/lobu-ai/lobu/commit/80f1ad853f9470410452e76aeb889bf984d4e8a9))
+* **worker:** keep truncated tool traces within wire limits ([#3487](https://github.com/lobu-ai/lobu/issues/3487)) ([81607ef](https://github.com/lobu-ai/lobu/commit/81607ef6bf8682ca29621385b1a7c48a0242e4f9))
+* **worker:** persist answers before threshold compaction ([#3493](https://github.com/lobu-ai/lobu/issues/3493)) ([88a19c3](https://github.com/lobu-ai/lobu/commit/88a19c3902c4c085cb4753786eba96961d5d6f79))
+
+
+### Reverts
+
+* **connectors:** remove imported-read composition feature ([#3486](https://github.com/lobu-ai/lobu/issues/3486)) ([07dd276](https://github.com/lobu-ai/lobu/commit/07dd276dfe46b165316bb719c95b8f1f767cc758))
+
+
+### Code Refactoring
+
+* **agent-turn:** run native Pi sessions in the isolate runtime ([#3402](https://github.com/lobu-ai/lobu/issues/3402)) ([dd7e5ff](https://github.com/lobu-ai/lobu/commit/dd7e5ff80778094da949d6e858a133c3495ad703))
+
 ## [19.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v19.1.0...lobu-v19.2.0) (2026-09-07)
 
 
