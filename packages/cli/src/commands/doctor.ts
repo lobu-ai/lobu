@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import chalk from "chalk";
 import postgres from "postgres";
 import { checkMemoryHealth } from "./memory/_lib/memory-health.js";
@@ -33,6 +34,32 @@ function checkBinaryExists(name: string): Check {
     return { name, status: "ok", detail: first };
   } catch {
     return { name, status: "fail", detail: "not found" };
+  }
+}
+
+const moduleRequire = createRequire(import.meta.url);
+
+export function checkInstalledNativeModule(
+  name: string,
+  resolveModule: (id: string) => string = moduleRequire.resolve,
+  loadModule: (id: string) => unknown = moduleRequire
+): Check | null {
+  try {
+    resolveModule(`${name}/package.json`);
+  } catch {
+    // Newer/minimal distributions may not include this optional dependency.
+    return null;
+  }
+  try {
+    loadModule(name);
+    return { name: `native:${name}`, status: "ok", detail: "loadable" };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      name: `native:${name}`,
+      status: "fail",
+      detail: `installed but not loadable: ${detail}`,
+    };
   }
 }
 
@@ -216,6 +243,8 @@ export async function doctorCommand(
 
   checks.push(checkNodeVersion());
   checks.push(checkBinaryExists("git"));
+  const sharp = checkInstalledNativeModule("sharp");
+  if (sharp) checks.push(sharp);
 
   const databaseUrl = env.DATABASE_URL ?? process.env.DATABASE_URL;
   if (databaseUrl && isExternalDatabaseUrl(databaseUrl)) {
