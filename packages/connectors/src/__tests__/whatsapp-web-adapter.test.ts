@@ -881,15 +881,58 @@ describe("whatsAppWebAdapterProgram backfill progress", () => {
     expect(result.backfill.chats["a@s.whatsapp.net"].history_limited_to_browser).toBe(true);
   });
 
+  for (const empty of [true, false]) {
+    it(`finishes ${empty ? "empty" : "fully loaded"} browser history before a stalled phone-history request`, async () => {
+      const oldest = historyMessage("browser-history-boundary", 1000);
+      let loads = 0;
+      const adapter = install(({ signal }) => {
+        loads += 1;
+        return new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("phone history stalled")), { once: true });
+        });
+      }, { chatIds: ["a@c.us"], readOldest: async () => empty ? null : oldest });
+      if (!empty) adapter.chats[0]!.msgs._models.push(oldest);
+      await adapter.ready();
+      const result = await adapter.collect(undefined, { budget_ms: 10, recent_since: 2000 });
+      expect(result.backfill.complete).toBe(true);
+      expect(loads).toBe(0);
+      expect(ids(result)).toEqual(empty ? [] : ["browser-history-boundary"]);
+    });
+  }
+
+  it("stops loading as soon as a page reaches the browser database boundary", async () => {
+    const oldest = historyMessage("last-browser-page", 1000);
+    let loads = 0;
+    const adapter = install(({ msgCollection, signal }) => {
+      loads += 1;
+      if (loads === 1) {
+        msgCollection._models.push(oldest);
+        return Promise.resolve([oldest]);
+      }
+      return new Promise((_, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("phone history stalled")), { once: true });
+      });
+    }, { chatIds: ["a@c.us"], readOldest: async () => oldest });
+    await adapter.ready();
+    const result = await adapter.collect(undefined, { budget_ms: 10, max_loads_per_chat: 2 });
+    expect(result.backfill.complete).toBe(true);
+    expect(loads).toBe(1);
+    expect(ids(result)).toEqual(["last-browser-page"]);
+  });
+
   it("uses the same collection and chat identity when WhatsApp keeps them in model data", async () => {
     const oldest = historyMessage("model-data-history", 1000);
     let readerId: unknown;
     let loaderCollection: unknown;
-    const adapter = install(async ({ msgCollection }) => { loaderCollection = msgCollection; return []; }, {
+    const adapter = install(async ({ msgCollection }) => {
+      loaderCollection = msgCollection;
+      msgCollection._models.push(oldest);
+      msgCollection.msgLoadState.noEarlierMsgs = true;
+      return [oldest];
+    }, {
       chatIds: ["a@c.us"], modelDataOnly: true,
       readOldest: async (id) => { readerId = id; return oldest; },
     });
-    adapter.chats[0]!.msgs._models.push(oldest);
     await adapter.ready();
     const result = await adapter.collect(undefined, { recent_since: 2000 });
     expect(ids(result)).toEqual(["model-data-history"]);

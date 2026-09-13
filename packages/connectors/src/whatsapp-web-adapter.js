@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 18;
+  const ADAPTER_VERSION = 19;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -783,6 +783,17 @@ export function whatsAppWebAdapterProgram() {
     }
   }
 
+  async function browserHistoryBoundaryReached(chat, deadline) {
+    const boundary = requireFirst(["WAWebNonMessageDataRequestHistorySyncOnDemandUtils"]);
+    if (typeof boundary?.getOldestMsgInChatFromDB !== "function") return null;
+    const oldestStored = await withinHistoryBudget(
+      () => boundary.getOldestMsgInChatFromDB(modelData(chat).id ?? chat?.id), deadline
+    );
+    const oldestStoredId = rawId(modelData(oldestStored).id);
+    return oldestStored == null || Boolean(oldestStoredId &&
+      chatMessages(chat).some((message) => rawId(modelData(message).id ?? message?.id) === oldestStoredId));
+  }
+
   async function loadEarlier(chat, limit, deadline) {
     const loader = requireFirst(["WAWebChatLoadMessages"]);
     if (typeof loader?.loadEarlierMsgs !== "function") {
@@ -791,7 +802,15 @@ export function whatsAppWebAdapterProgram() {
     let loads = 0;
     let previous = oldestMessage(chat);
     let madeProgress = false;
+    let historyLimited = false;
     while (loads < limit && chatHasEarlier(chat)) {
+      // noEarlierMsgs can stay false after browser history is exhausted. Check
+      // before each load: requesting the next phone-only page can hang even
+      // though the browser's oldest stored message is already available.
+      if (await browserHistoryBoundaryReached(chat, deadline)) {
+        historyLimited = true;
+        break;
+      }
       await withinHistoryBudget(
         (signal) => loader.loadEarlierMsgs({ chat, msgCollection: modelData(chat).msgs ?? chat?.msgs, signal }),
         deadline
@@ -802,22 +821,15 @@ export function whatsAppWebAdapterProgram() {
       madeProgress = true;
       previous = next;
     }
-    let hasMore = chatHasEarlier(chat);
-    let historyLimited = false;
+    let hasMore = !historyLimited && chatHasEarlier(chat);
     if (hasMore && !madeProgress) {
       // WhatsApp leaves noEarlierMsgs=false when older history remains on the
       // phone. An empty loader response alone is not proof: it also swallows
       // some transient fetch failures. Verify the browser DB's actual boundary.
-      const boundary = requireFirst(["WAWebNonMessageDataRequestHistorySyncOnDemandUtils"]);
-      if (typeof boundary?.getOldestMsgInChatFromDB !== "function") {
+      const reachedBoundary = await browserHistoryBoundaryReached(chat, deadline);
+      if (reachedBoundary === null) {
         return { available: false, reason: "WhatsApp browser history boundary unavailable", loads };
       }
-      const oldestStored = await withinHistoryBudget(
-        () => boundary.getOldestMsgInChatFromDB(modelData(chat).id ?? chat?.id), deadline
-      );
-      const oldestStoredId = rawId(modelData(oldestStored).id);
-      const reachedBoundary = oldestStored == null || (oldestStoredId &&
-        chatMessages(chat).some((message) => rawId(modelData(message).id ?? message?.id) === oldestStoredId));
       if (reachedBoundary) {
         hasMore = false;
         historyLimited = true;

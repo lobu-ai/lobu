@@ -800,7 +800,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   it("bumps the WhatsApp connector version for page observation semantics", () => {
-    expect(connector.definition.version).toBe("1.0.7");
+    expect(connector.definition.version).toBe("1.0.9");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -1376,7 +1376,7 @@ describe("buffered source records use normal feed ingestion", () => {
 
   it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {
     const checkpoint = initializeBrowserCheckpoint(null);
-    const { dispatcher } = makeDispatcher({
+    const { dispatcher, adapterOps } = makeDispatcher({
       probe: READY,
       feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
       collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
@@ -1387,6 +1387,48 @@ describe("buffered source records use normal feed ingestion", () => {
     expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
     expect(next.backfill).toEqual(checkpoint.backfill);
     expect(next.head).toEqual(checkpoint.head);
+    expect(adapterOps).not.toContain("collect");
+  });
+
+  it("advances bounded history pages while buffered deliveries keep arriving", async () => {
+    let checkpoint = initializeBrowserCheckpoint(null);
+    const history = [3000, 2000, 1000].map((timestamp) => message(`history-${timestamp}`, { timestamp }));
+    let pass = 0;
+    const budgets: number[] = [];
+    const { dispatcher } = makeDispatcher({
+      probe: READY,
+      feed_listen: () => observation([{ revision: ++pass, payload: message(`live-${pass}`) }]),
+      collect: (input: any) => {
+        budgets.push(input.max_messages);
+        const frontier = input.backfill.chats.synthetic?.oldest_timestamp ?? Infinity;
+        const pending = history.filter((row) => row.timestamp < frontier);
+        const page = pending.slice(0, input.max_messages);
+        const state = { oldest_timestamp: page.at(-1)?.timestamp, oldest_id: page.at(-1)?.id, has_more: page.length < pending.length };
+        return { ...collectResponse([]), history_pages: [{ messages: page }], backfill: { complete: !state.has_more, chats: { synthetic: state } } };
+      },
+    });
+    for (const timestamp of [3000, 2000, 1000]) {
+      const result = await messagesFeed().sync(syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 2 }));
+      checkpoint = result.checkpoint as BrowserCheckpoint;
+      expect(result.events).toHaveLength(2);
+      expect(checkpoint.backfill.chats.synthetic?.oldest_timestamp).toBe(timestamp);
+    }
+    expect(budgets).toEqual([1, 1, 1]);
+    expect(checkpoint.backfill.complete).toBe(true);
+  });
+
+  it("keeps completed history idle when buffered recovery fills the batch", async () => {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.backfill.complete = true;
+    const { dispatcher, adapterOps } = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([{ revision: 1, payload: message("recovery-live") }]),
+    });
+    const result = await messagesFeed().sync(syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
+    expect(result.events).toHaveLength(1);
+    expect(result.checkpoint?.backfill.complete).toBe(true);
+    expect(result.next_sync_after_seconds).toBeUndefined();
+    expect(adapterOps).not.toContain("collect");
   });
 
   it("uses the current source model for buffered identity and lets dry runs inspect without installing an observer", async () => {

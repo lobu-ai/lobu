@@ -643,7 +643,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp in the paired Owletto Chrome. Backfills history available to WhatsApp Web, then observes new messages in real time. Older phone-only history requires access through WhatsApp. Supports search, draft, send, edit, react, and revoke actions.",
-    version: "1.0.7",
+    version: "1.0.9",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -1125,17 +1125,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       minimum_timestamp: marker.minimum_timestamp ?? null,
     }));
 
-    const result = await invokeAdapter<CollectResponse>(
-      dispatcher,
-      tabId,
-      request as unknown as Record<string, unknown>
-    );
-
-    // History pages come back separately from the recent window so a backfill
-    // page can advance its chat cursor without competing for the recent slot.
-    const historyMessages = (result.history_pages ?? []).flatMap(
-      (page) => page.messages ?? []
-    );
     const inScope = (row: Record<string, unknown>) =>
       (request.chat_filter !== "group" || row.is_group === true) &&
       (request.chat_filter !== "individual" || row.is_group !== true) &&
@@ -1145,8 +1134,20 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     );
     const bufferedIds = new Set(buffered.map((row) => row.payload.id));
     const liveBufferedIds = new Set(buffered.filter((row) => row.payload.observed_live === true).map((row) => row.payload.id));
+    // Reserve buffered deliveries before collecting a page. Giving both paths
+    // the entire limit makes every full history page lose its checkpoint while
+    // even one unrelated buffered record remains, so backfill repeats forever.
+    const collectionBudget = Math.max(0, request.max_messages - bufferedIds.size);
+    const result = collectionBudget > 0 ? await invokeAdapter<CollectResponse>(
+      dispatcher,
+      tabId,
+      { ...request, max_messages: collectionBudget } as unknown as Record<string, unknown>
+    ) : null;
+    const historyMessages = (result?.history_pages ?? []).flatMap(
+      (page) => page.messages ?? []
+    );
     const messages = mergeCollectedMessages(
-      [...(result.messages ?? []), ...historyMessages],
+      [...(result?.messages ?? []), ...historyMessages],
       buffered.map((row) => row.payload),
       request.minimum_timestamp
     ).sort((a, b) => Number(bufferedIds.has(b.id)) - Number(bufferedIds.has(a.id)) || a.timestamp - b.timestamp || a.id.localeCompare(b.id))
@@ -1154,7 +1155,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
 
     const emittedIds = new Set(messages.map((message) => message.id));
     const reconciledKeys = new Set(
-      (result.dirty_reconciled ?? [])
+      (result?.dirty_reconciled ?? [])
         .filter(
           (marker) => marker.message_id && emittedIds.has(marker.message_id)
         )
@@ -1180,11 +1181,13 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     // A live burst can consume this run's budget. Retain collection cursors
     // when any collected row was deferred, so backfill cannot skip that page.
     const deferredCollection = mergeCollectedMessages(
-      [...(result.messages ?? []), ...historyMessages], [], request.minimum_timestamp
+      [...(result?.messages ?? []), ...historyMessages], [], request.minimum_timestamp
     ).some((row) => !emittedIds.has(row.id));
-    if (deferredCollection) {
+    if (!result || deferredCollection) {
       nextCheckpoint.head = checkpoint.head;
-      nextCheckpoint.backfill = { ...checkpoint.backfill, complete: false };
+      nextCheckpoint.backfill = result
+        ? { ...checkpoint.backfill, complete: false }
+        : checkpoint.backfill;
     }
     nextCheckpoint.source_ack = {
       binding_id: observed.binding_id,
@@ -1201,7 +1204,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     for (const marker of dirtyBefore) {
       if (!reconciledKeys.has(marker.key)) dirtyByKey.set(marker.key, marker);
     }
-    for (const marker of result.quarantined ?? []) {
+    for (const marker of result?.quarantined ?? []) {
       dirtyByKey.set(marker.key, {
         ...marker,
         message_id: marker.message_id ?? null,
