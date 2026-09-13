@@ -216,7 +216,7 @@ export async function materializeDueFeeds(
       logger.info(`[CheckDueFeeds] Found ${feeds.length} due feeds`);
     },
     createRun: async (feed) => {
-      const created = await createSyncRun(feed.id, env, sql);
+      const created = await createSyncRun(feed.id, env, sql, { feedDue: true });
       if (!created.ok) {
         // A skip is no longer necessarily a race: the connector may be
         // cloud-restricted, uninstalled, or have no runnable version.

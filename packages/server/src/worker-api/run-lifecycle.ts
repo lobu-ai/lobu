@@ -579,7 +579,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				run.feed_id != null &&
 				run.feed_key &&
 				acceptedItems.some(
-					(item) => (item.automation_signals?.length ?? 0) === 0
+					(item) => item.automation_signals === undefined
 				)
 			) {
 				deriveContext = await loadConnectorDeriveFeedContext(
@@ -747,7 +747,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 									}
 								}
 								const drafts = item.automation_signals ?? [];
-								if (drafts.length > 0) {
+								if (item.automation_signals !== undefined) {
 									for (const [draftIndex, draft] of drafts.entries()) {
 										const signal = materializeConnectorAutomationSignal({
 											draft,
@@ -1016,6 +1016,10 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 	try {
 		const req = await c.req.json<CompleteRequest>();
+		if (req.next_sync_after_seconds !== undefined &&
+			(!Number.isInteger(req.next_sync_after_seconds) || req.next_sync_after_seconds < 1 || req.next_sync_after_seconds > 86400)) {
+			return c.json({ error: "Invalid connector continuation delay" }, 400);
+		}
 
 		// Strip NUL (0x00) from connector- and worker-supplied payloads before they
 		// hit Postgres (see streamContent). The final checkpoint and refreshed
@@ -1102,33 +1106,167 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		// (rather than read-then-branch in JS) so the guard rides the same atomic
 		// UPDATE as the terminal transition: a dry run or failed stream never
 		// records a new connector checkpoint.
-		const dryGuardedCheckpoint = sql`
-          checkpoint = CASE WHEN dry_run OR ${req.status === "failed"} THEN checkpoint
-                       ELSE COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint) END`;
-		const updatedRuns = (await finalizeRun(sql, {
-			runId: req.run_id,
-			workerId: req.worker_id,
-			status: req.status === "failed" ? "failed" : "completed",
-			extraSet:
-				req.status === "failed"
-					? sql`,
-          items_collected = ${req.items_collected ?? 0},
-          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint},
-          output_tail = ${req.output_tail ?? null},
-          exit_code = ${req.exit_code ?? null},
-          exit_signal = ${req.exit_signal ?? null},
-          exit_reason = ${req.exit_reason ?? null}`
-					: sql`,
-          items_collected = ${req.items_collected ?? 0},
-          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-			returning: sql`feed_id, connection_id, dry_run`,
-		})) as unknown as Array<{
-			feed_id: number | null;
-			connection_id: number | null;
-			dry_run: boolean;
-		}>;
+		// The active-run uniqueness constraint must cover checkpoint persistence
+		// too. Releasing the run in a separate commit lets the next batch claim
+		// the previous cursor (or acknowledge before its feed write survives).
+		let feedFailureSignal: Parameters<typeof maybeEmitFeedAutoPausedAfterFailure>[0] | undefined;
+		const runRows = await sql.begin(async (sql) => {
+			const dryGuardedCheckpoint = sql`
+	          checkpoint = CASE WHEN dry_run OR ${req.status === "failed"} THEN checkpoint
+	                       ELSE COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint) END`;
+			const updatedRuns = (await finalizeRun(sql, {
+				runId: req.run_id,
+				workerId: req.worker_id,
+				status: req.status === "failed" ? "failed" : "completed",
+				extraSet:
+					req.status === "failed"
+						? sql`,
+	          items_collected = ${req.items_collected ?? 0},
+	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint},
+	          output_tail = ${req.output_tail ?? null},
+	          exit_code = ${req.exit_code ?? null},
+	          exit_signal = ${req.exit_signal ?? null},
+	          exit_reason = ${req.exit_reason ?? null}`
+						: sql`,
+	          items_collected = ${req.items_collected ?? 0},
+	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
+				returning: sql`feed_id, connection_id, dry_run, run_metadata`,
+			})) as unknown as Array<{
+				feed_id: number | null;
+				connection_id: number | null;
+				dry_run: boolean;
+				run_metadata: { feed_due?: boolean } | null;
+			}>;
 
-		if (updatedRuns.length === 0) {
+			if (updatedRuns.length === 0) return updatedRuns;
+
+			// Update the feed's sync state
+			const feedId = updatedRuns[0]?.feed_id;
+			const isDry = updatedRuns[0]?.dry_run === true;
+
+			// Never for a dry run: this block stamps last_sync_at/status, resets or
+			// increments consecutive_failures, adds items_collected, ADVANCES THE FEED
+			// CHECKPOINT, and moves next_run_at (with backoff/auto-pause on failure).
+			// Every one of those durably changes what the next REAL sync does or how
+			// the feed reports its last real outcome — exactly the state a dry run
+			// exists to leave untouched.
+			//
+			// Why this stays an explicit guard while streamContent uses a rolled-back
+			// transaction instead. Two reasons, and they are the reasons — not an
+			// oversight to be tidied up later:
+			//
+			//  1. This function's write set is closed and cannot grow the way an
+			//     item-ingest loop grows: it finalizes one run row and stamps one feed
+			//     row. One guard covers one block; there is no open set to lose track of.
+			//  2. The keep/discard sets are INTERLEAVED. A dry run must still finalize
+			//     its own run row — that is real working state, and finalizeRun's whole
+			//     purpose is that the terminal transition is atomic. Rolling back here
+			//     would mean lifting the run update out of the transaction and giving up
+			//     that guarantee to buy uniformity. Not a trade worth making.
+			if (feedId && !isDry) {
+				const feedRows = (await sql`
+	      SELECT schedule, timezone FROM feeds WHERE id = ${feedId}
+	    `) as unknown as Array<{
+					schedule: string | null;
+					timezone: string | null;
+				}>;
+
+				// The connector can continue bounded work without a recurring schedule.
+				const schedule = feedRows[0]?.schedule ?? null;
+				const cronNextRun = schedule
+					? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
+					: null;
+				const isSuccess = req.status === "success";
+				const continuation = isSuccess && req.next_sync_after_seconds !== undefined
+					? new Date(Date.now() + req.next_sync_after_seconds * 1000) : null;
+				// A cron feed keeps its cadence and backoff floor below. Without a
+				// schedule nothing else re-arms the feed, so a failed due run retries here.
+				const retryDue = !isSuccess && cronNextRun === null &&
+					updatedRuns[0]?.run_metadata?.feed_due === true;
+				const nextRun = [cronNextRun ? new Date(cronNextRun) : null, continuation, retryDue ? new Date() : null]
+					.filter((value): value is Date => value !== null)
+					.sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+
+				// A connector that could not reach a required execution dependency never
+				// reached the source. Preserve the last real source-health result, do not
+				// consume the hard-pause budget, and keep the ordinary schedule armed.
+				if (dependencyUnavailable) {
+					await sql`
+	          UPDATE feeds
+	          SET last_error = ${req.error_message ?? null},
+	              next_run_at = ${retryDue ? new Date(Date.now() + feedBackoff.baseMs) : nextRun},
+	              updated_at = current_timestamp
+	          WHERE id = ${feedId}
+	        `;
+				} else {
+
+				// Failure rescheduling (item 5, #2033):
+				//  - On success: reset consecutive_failures to 0 and use the plain cron
+				//    next_run_at so a recovered feed immediately resumes normal cadence.
+				//  - On failure: apply exponential backoff on top of the cron cadence so
+				//    a persistently-failing feed retries progressively less often instead
+				//    of re-enqueueing every plain cadence (which hammered the connector,
+				//    the worker lane, and upstream rate limits). The backoff is computed
+				//    from the NEW consecutive_failures count (post-increment) directly in
+				//    SQL so it stays correct under concurrent completions across replicas.
+				//  - Hard auto-pause: once the NEW count crosses the pause threshold, the
+				//    feed is paused (status='paused'; the DB trigger nulls next_run_at).
+				//    Crossing the threshold emits feed.auto_paused so Automations can react.
+				//    Manual feeds (no schedule) normally remain unscheduled here; a retained
+				//    source wake hint can re-arm one through the shared backoff policy.
+				const backoffBaseMs = feedBackoff.baseMs;
+				const backoffMaxMs = feedBackoff.maxMs;
+				const pauseThreshold = feedBackoff.pauseThreshold;
+
+				const feedUpdate = (await sql`
+	        UPDATE feeds
+	        SET last_sync_at = current_timestamp,
+	            last_sync_status = ${req.status},
+	            last_error = ${isSuccess ? null : (req.error_message ?? null)},
+	            consecutive_failures = ${isSuccess ? sql`0` : sql`consecutive_failures + 1`},
+	            first_failure_at = ${isSuccess ? sql`NULL` : sql`COALESCE(first_failure_at, current_timestamp)`},
+	            items_collected = ${isSuccess ? sql`items_collected + ${req.items_collected ?? 0}` : sql`items_collected`},
+	            checkpoint = ${isSuccess ? sql`COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint)` : sql`checkpoint`},
+	            status = ${
+								isSuccess
+									? sql`status`
+									: sql`CASE WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN 'paused' ELSE status END`
+							},
+	            next_run_at = ${
+								isSuccess
+									// Enqueue consumes the previous due time. A newly-due value
+									// belongs to a notification received during this run; preserve
+									// it under the same row lock as completion/checkpoint commit.
+									? sql`LEAST(next_run_at, ${nextRun}::timestamptz)`
+									: sql`CASE
+	                    WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
+	                    WHEN ${nextRun}::timestamptz IS NULL THEN NULL
+	                    ELSE GREATEST(
+	                      ${nextRun}::timestamptz,
+	                      current_timestamp + (LEAST(
+	                        ${backoffBaseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint,
+	                        ${backoffMaxMs}::bigint
+	                      ) || ' milliseconds')::interval
+	                    )
+	                  END`
+							},
+	            updated_at = current_timestamp
+	        WHERE id = ${feedId}
+	        RETURNING consecutive_failures, status
+	      `) as Array<{ consecutive_failures: number; status: string }>;
+
+				if (!isSuccess) {
+					feedFailureSignal = {
+						feedId, consecutiveFailures: Number(feedUpdate[0]?.consecutive_failures ?? 0),
+						pauseThreshold, runId: req.run_id,
+					};
+				}
+				}
+			}
+			return updatedRuns;
+		});
+
+		if (runRows.length === 0) {
 			// The run was already finalized (timeout race) or this worker isn't the
 			// claimant. Skip all feed/auth bookkeeping and return an idempotent
 			// already-finalized response.
@@ -1143,135 +1281,16 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			return c.json({ success: false, reason: "already_finalized" });
 		}
 
-		// Update the feed's sync state
-		const runRows = updatedRuns;
-		const feedId = runRows[0]?.feed_id;
-		const isDry = runRows[0]?.dry_run === true;
-
-		// Never for a dry run: this block stamps last_sync_at/status, resets or
-		// increments consecutive_failures, adds items_collected, ADVANCES THE FEED
-		// CHECKPOINT, and moves next_run_at (with backoff/auto-pause on failure).
-		// Every one of those durably changes what the next REAL sync does or how
-		// the feed reports its last real outcome — exactly the state a dry run
-		// exists to leave untouched.
-		//
-		// Why this stays an explicit guard while streamContent uses a rolled-back
-		// transaction instead. Two reasons, and they are the reasons — not an
-		// oversight to be tidied up later:
-		//
-		//  1. This function's write set is closed and cannot grow the way an
-		//     item-ingest loop grows: it finalizes one run row and stamps one feed
-		//     row. One guard covers one block; there is no open set to lose track of.
-		//  2. The keep/discard sets are INTERLEAVED. A dry run must still finalize
-		//     its own run row — that is real working state, and finalizeRun's whole
-		//     purpose is that the terminal transition is atomic. Rolling back here
-		//     would mean lifting the run update out of the transaction and giving up
-		//     that guarantee to buy uniformity. Not a trade worth making.
-		if (feedId && !isDry) {
-			const feedRows = (await sql`
-      SELECT schedule, timezone FROM feeds WHERE id = ${feedId}
-    `) as unknown as Array<{
-				schedule: string | null;
-				timezone: string | null;
-			}>;
-
-			// Manual feeds (no schedule) stay unscheduled after completion.
-			const schedule = feedRows[0]?.schedule ?? null;
-			const nextRun = schedule
-				? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
-				: null;
-			const isSuccess = req.status === "success";
-
-			// A connector that could not reach a required execution dependency never
-			// reached the source. Preserve the last real source-health result, do not
-			// consume the hard-pause budget, and keep the ordinary schedule armed.
-			if (dependencyUnavailable) {
-				await sql`
-          UPDATE feeds
-          SET last_error = ${req.error_message ?? null},
-              next_run_at = ${nextRun},
-              updated_at = current_timestamp
-          WHERE id = ${feedId}
-        `;
-			} else {
-
-			// Failure rescheduling (item 5, #2033):
-			//  - On success: reset consecutive_failures to 0 and use the plain cron
-			//    next_run_at so a recovered feed immediately resumes normal cadence.
-			//  - On failure: apply exponential backoff on top of the cron cadence so
-			//    a persistently-failing feed retries progressively less often instead
-			//    of re-enqueueing every plain cadence (which hammered the connector,
-			//    the worker lane, and upstream rate limits). The backoff is computed
-			//    from the NEW consecutive_failures count (post-increment) directly in
-			//    SQL so it stays correct under concurrent completions across replicas.
-			//  - Hard auto-pause: once the NEW count crosses the pause threshold, the
-			//    feed is paused (status='paused'; the DB trigger nulls next_run_at).
-			//    Crossing the threshold emits feed.auto_paused so Automations can react.
-			//    Manual feeds (no schedule) normally remain unscheduled here; a retained
-			//    source wake hint can re-arm one through the shared backoff policy.
-			const backoffBaseMs = feedBackoff.baseMs;
-			const backoffMaxMs = feedBackoff.maxMs;
-			const pauseThreshold = feedBackoff.pauseThreshold;
-
-			const feedUpdate = (await sql`
-        UPDATE feeds
-        SET last_sync_at = current_timestamp,
-            last_sync_status = ${req.status},
-            last_error = ${isSuccess ? null : (req.error_message ?? null)},
-            consecutive_failures = ${isSuccess ? sql`0` : sql`consecutive_failures + 1`},
-            first_failure_at = ${isSuccess ? sql`NULL` : sql`COALESCE(first_failure_at, current_timestamp)`},
-            items_collected = ${isSuccess ? sql`items_collected + ${req.items_collected ?? 0}` : sql`items_collected`},
-            checkpoint = ${isSuccess ? sql`COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint)` : sql`checkpoint`},
-            status = ${
-							isSuccess
-								? sql`status`
-								: sql`CASE WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN 'paused' ELSE status END`
-						},
-            next_run_at = ${
-							isSuccess
-								// Enqueue consumes the previous due time. A newly-due value
-								// belongs to a notification received during this run; preserve
-								// it under the same row lock as completion/checkpoint commit.
-								? sql`CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END`
-								: sql`CASE
-                    WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
-                    WHEN ${nextRun}::timestamptz IS NULL THEN NULL
-                    ELSE GREATEST(
-                      ${nextRun}::timestamptz,
-                      current_timestamp + (LEAST(
-                        ${backoffBaseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint,
-                        ${backoffMaxMs}::bigint
-                      ) || ' milliseconds')::interval
-                    )
-                  END`
-						},
-            updated_at = current_timestamp
-        WHERE id = ${feedId}
-        RETURNING consecutive_failures, status
-      `) as Array<{ consecutive_failures: number; status: string }>;
-
-			if (!isSuccess) {
-				const after = feedUpdate[0];
-				const consec = Number(after?.consecutive_failures ?? 0);
-				// Emit when paused at/above threshold. delivery_id is stable per
-				// failure episode (first_failure_at), so retries after a failed
-				// activation are idempotent and do not double-queue Automations.
-				try {
-					await maybeEmitFeedAutoPausedAfterFailure({
-						feedId,
-						consecutiveFailures: consec,
-						pauseThreshold,
-						runId: req.run_id,
-					});
-				} catch (err) {
-					// Feed is already paused; log hard so we notice lost activation,
-					// but do not fail the worker complete ACK (run is terminal).
-					logger.error(
-						{ feed_id: feedId, error: errorMessage(err) },
-						"[completeWorkerJob] maybeEmitFeedAutoPausedAfterFailure threw"
-					);
-				}
-			}
+		// External activation follows the committed state; it may acquire feed
+		// locks itself and must not run inside the completion transaction.
+		if (feedFailureSignal) {
+			try {
+				await maybeEmitFeedAutoPausedAfterFailure(feedFailureSignal);
+			} catch (err) {
+				logger.error(
+					{ feed_id: feedFailureSignal.feedId, error: errorMessage(err) },
+					"[completeWorkerJob] maybeEmitFeedAutoPausedAfterFailure threw"
+				);
 			}
 		}
 

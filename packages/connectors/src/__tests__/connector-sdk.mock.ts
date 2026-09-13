@@ -1,20 +1,9 @@
-// Shared @lobu/connector-sdk mock for connector unit tests.
-//
-// mock.module replaces the WHOLE module and bun shares the mock registry
-// across files in a run, so every connector test that stubs the SDK must
-// expose the same superset of symbols regardless of file order. This is the
-// single source for that superset — `mock.module('@lobu/connector-sdk',
-// connectorSdkMock)` in each test file.
-//
-// The SDK pulls in playwright; stubbing lets the pure connector logic be
-// imported without the browser stack. The runtime-only symbols throw if a
-// test actually reaches them; extensionDomScrape and the paginateBy* generators
-// are faithfully re-implemented so connectors that delegate their sync loops
-// exercise the real paging semantics (the real helpers have their own tests in
-// packages/connector-sdk). They are re-implemented inline rather than imported
-// from connector-sdk/src because this mock is copied verbatim into the cli's
-// dist/ for the packaged-connector test run, where that cross-package source
-// path does not resolve.
+// Connector tests replace only external I/O and timing. Capture the published
+// SDK before Bun installs any module mock: its runtime, schemas and pure helpers
+// must remain real so new SDK capabilities cannot drift from a second copy here.
+import * as connectorSdk from '@lobu/connector-sdk';
+
+const actualSdk = { ...connectorSdk };
 
 interface DomScrapeOpts {
   dispatcher: {
@@ -27,38 +16,6 @@ interface DomScrapeOpts {
   allowedOrigins: string[];
   persistent?: boolean;
   focus?: boolean;
-}
-
-// Faithful copies of the SDK's pure pagination generators (no browser stack).
-// Kept byte-for-byte in step with packages/connector-sdk/src/pagination.ts.
-async function* paginateByCursor<T, C = string>(
-  fetchPage: (cursor: C | null) => Promise<{ items: T[]; nextCursor: C | null | undefined }>,
-  options: { maxPages?: number; initialCursor?: C | null; delayMs?: number } = {}
-): AsyncGenerator<T[], void, void> {
-  const maxPages = options.maxPages ?? Number.POSITIVE_INFINITY;
-  let cursor: C | null = options.initialCursor ?? null;
-  for (let page = 0; page < maxPages; page++) {
-    if (page > 0 && options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
-    const { items, nextCursor } = await fetchPage(cursor);
-    yield items;
-    if (nextCursor === null || nextCursor === undefined) return;
-    cursor = nextCursor;
-  }
-}
-
-async function* paginateByOffset<T>(
-  fetchPage: (offset: number, pageSize: number) => Promise<{ items: T[]; hasMore: boolean }>,
-  options: { pageSize: number; maxPages?: number; startOffset?: number; delayMs?: number }
-): AsyncGenerator<T[], void, void> {
-  const maxPages = options.maxPages ?? Number.POSITIVE_INFINITY;
-  let offset = options.startOffset ?? 0;
-  for (let page = 0; page < maxPages; page++) {
-    if (page > 0 && options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
-    const { items, hasMore } = await fetchPage(offset, options.pageSize);
-    yield items;
-    if (!hasMore) return;
-    offset += options.pageSize;
-  }
 }
 
 export class HttpStatusError extends Error {
@@ -77,39 +34,6 @@ export function connectorSdkMock() {
   const notUsed = (name: string) => () => {
     throw new Error(`${name} is not used in connector unit tests`);
   };
-  class ConnectorRuntime {
-    definition!: {
-      key: string;
-      feeds?: Record<
-        string,
-        {
-          sync?: (ctx: unknown) => Promise<unknown>;
-          read?: (ctx: unknown) => Promise<unknown>;
-        }
-      >;
-    };
-
-    async sync(ctx: { feedKey: string }): Promise<unknown> {
-      const handler = this.definition.feeds?.[ctx.feedKey]?.sync;
-      if (!handler) {
-        throw new Error(
-          `${this.definition.key} feed '${ctx.feedKey}' does not support sync`,
-        );
-      }
-      return handler(ctx);
-    }
-
-    async read(ctx: { feedKey: string }): Promise<unknown> {
-      const handler = this.definition.feeds?.[ctx.feedKey]?.read;
-      if (!handler) {
-        throw new Error(
-          `${this.definition.key} feed '${ctx.feedKey}' does not support source reads`,
-        );
-      }
-      return handler(ctx);
-    }
-  }
-  class IntegrationConnector extends ConnectorRuntime {}
   // Connectors create their HTTP client as a class field at construction, so a
   // throwing stub would break `new XConnector()`. `get`/`post` are faithful
   // minimal implementations over global fetch (HttpStatusError on non-2xx,
@@ -142,11 +66,7 @@ export function connectorSdkMock() {
   });
 
   return {
-    // Sole platform entity-type slug for ACL-gated resources. Inlined (not
-    // imported from connector-sdk/src) to keep this mock valid when copied
-    // verbatim into the cli's dist/ (see the file header). Must stay in step
-    // with ACL_RESOURCE_TYPE_SLUG in packages/connector-sdk/src/acl-source.ts.
-    ACL_RESOURCE_TYPE_SLUG: '$resource',
+    ...actualSdk,
     HttpStatusError,
     extensionNetworkSync: async (opts: {
       dispatcher: {
@@ -220,20 +140,7 @@ export function connectorSdkMock() {
       };
     },
     createHttpClient,
-    // Faithful copy of connector-sdk checkpoint/timestamp-watermark.ts — must
-    // honor the checkpoint arg; a passthrough stub leaks via Bun's global mock
-    // registry and breaks the SDK's timestamp-watermark.test when connector tests run first.
-    filterByCheckpoint: <T extends { occurred_at: Date }>(
-      events: T[],
-      checkpoint: Record<string, unknown> | null
-    ): T[] => {
-      const lastTimestamp = checkpoint?.last_timestamp as string | undefined;
-      if (!lastTimestamp) return events;
-      const cutoff = new Date(lastTimestamp);
-      return events.filter((e) => e.occurred_at >= cutoff);
-    },
     sleep: async () => {},
-    validatePublicUrl: (url: string) => url,
     // Mirrors the missing-credential throw of connector-sdk/src/http-client.ts
     // `requireBearerClient` — connector tests assert this message, so the label
     // fallback order must stay in step. On the success path it hands back the
@@ -248,15 +155,6 @@ export function connectorSdkMock() {
         throw new Error(`${label} requires OAuth authentication.`);
       }
       return createHttpClient();
-    },
-    paginateByCursor,
-    paginateByOffset,
-    ConnectorRuntime,
-    IntegrationConnector,
-    calculateEngagementScore: () => 0,
-    SubscriptionCandidateSchema: {
-      type: 'object',
-      properties: {},
     },
     extensionDomScrape: async (opts: DomScrapeOpts) => {
       const observation = await opts.dispatcher.dispatch('navigate', {

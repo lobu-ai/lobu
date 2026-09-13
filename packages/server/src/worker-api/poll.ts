@@ -88,6 +88,7 @@ import {
   trustedChromeActionInput,
 } from './browser-action-context';
 import { runLeaseFence } from '../runs/run-lease';
+import { waitForWorkerWork } from '../runs/worker-wakeup';
 import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lockAgentTurnRun, nativeSessionBase, releaseNextAgentTurn } from '../runs/agent-turn-inputs';
 
 // A failure at the DISPATCH stage means the agent never ran: the run is not
@@ -285,6 +286,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let app_version: string | null = null;
   let label: string | null = null;
   let capacityAvailable: number | null = null;
+  let waitSeconds = 0;
   let backendCapacity: Record<string, number> = {};
   let backendCapacityProvided = false;
   let connectorManifestsProvided = false;
@@ -316,11 +318,15 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     app_version = body.app_version ?? null;
     label = body.label ?? null;
     capacityAvailable = body.capacity_available ?? null;
+    waitSeconds = body.wait_seconds ?? 0;
     backendCapacity = body.backend_capacity ?? {};
     backendCapacityProvided = Object.hasOwn(body, 'backend_capacity');
     connectorManifestsProvided = Object.hasOwn(body, 'connector_manifests');
     connectorManifestsRaw = body.connector_manifests;
     feedNotifications = body.feed_notifications ?? [];
+    if (Buffer.byteLength(JSON.stringify(feedNotifications), 'utf8') > 1024 * 1024) {
+      return c.json({ error: 'Source delivery batches exceed 1 MiB' }, 413);
+    }
     agentKinds = normalizeAgentKinds(body.agent_kinds);
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
@@ -816,6 +822,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             -- (1) Connector-worker lanes: sync / action / auth.
             (
               r.run_type IN ('sync', 'action', 'auth')
+              AND (r.run_type <> 'sync' OR NOT COALESCE(r.action_input ? 'delivery', false)
+                OR ${capabilities.feed_delivery === true})
               AND ${connectorClaimLaneSql(tx, connectorClaimContext, {
                 connectorKey: tx`r.connector_key`,
                 connectorVersion: tx`r.connector_version`,
@@ -1172,58 +1180,64 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   };
 
-  let pending = await claimWithDiagnostics();
+  const findPending = async () => {
+    let pending = await claimWithDiagnostics();
 
-  if (!pending) {
-    // Keep the explicit return type: TypeScript cannot infer the assignment
-    // made inside onRunCreated when it narrows the transaction result.
-    const materializedRun = await sql.begin(
-      async (tx): Promise<MaterializedDueFeedRun | null> => {
-        const lockRows = await tx<{ acquired: boolean }>`
-          SELECT pg_try_advisory_xact_lock(${DUE_FEEDS_LOCK_KEY}) AS acquired
-        `;
+    if (!pending) {
+      // Keep the explicit return type: TypeScript cannot infer the assignment
+      // made inside onRunCreated when it narrows the transaction result.
+      const materializedRun = await sql.begin(
+        async (tx): Promise<MaterializedDueFeedRun | null> => {
+          const lockRows = await tx<{ acquired: boolean }>`
+            SELECT pg_try_advisory_xact_lock(${DUE_FEEDS_LOCK_KEY}) AS acquired
+          `;
 
-        if (!lockRows[0]?.acquired) {
-          return null;
+          if (!lockRows[0]?.acquired) {
+            return null;
+          }
+
+          let createdRun: MaterializedDueFeedRun | null = null;
+          await materializeDueFeeds(c.env, tx, {
+            claimContext: connectorClaimContext,
+            // The caller has exactly one free claim slot. Scan past broken or
+            // raced head rows, but stop after filling that one slot.
+            maxRunsCreated: 1,
+            onRunCreated: (run) => {
+              createdRun = run;
+            },
+          });
+          return createdRun;
         }
-
-        let createdRun: MaterializedDueFeedRun | null = null;
-        await materializeDueFeeds(c.env, tx, {
-          claimContext: connectorClaimContext,
-          // The caller has exactly one free claim slot. Scan past broken or
-          // raced head rows, but stop after filling that one slot.
-          maxRunsCreated: 1,
-          onRunCreated: (run) => {
-            createdRun = run;
-          },
-        });
-        return createdRun;
-      }
-    );
-
-    // Production Pino defaults to info. Emit one correlatable event only
-    // when this exact poller actually materialized a scoped sync, after the
-    // transaction committed. Ordinary empty polls stay metric-only, avoiding
-    // per-worker log volume and high-cardinality metric labels.
-    if (materializedRun) {
-      logger.info(
-        {
-          dispatch_event: 'worker_scoped_sync_materialized',
-          run_id: materializedRun.runId,
-          feed_id: materializedRun.feedId,
-          worker_id,
-          device_worker_id: deviceWorkerId,
-          eligibility_lane: materializedRun.eligibilityLane,
-        },
-        '[pollWorkerJob] Materialized due sync for current poller'
       );
+
+      // Production Pino defaults to info. Emit one correlatable event only
+      // when this exact poller actually materialized a scoped sync, after the
+      // transaction committed. Ordinary empty polls stay metric-only, avoiding
+      // per-worker log volume and high-cardinality metric labels.
+      if (materializedRun) {
+        logger.info(
+          {
+            dispatch_event: 'worker_scoped_sync_materialized',
+            run_id: materializedRun.runId,
+            feed_id: materializedRun.feedId,
+            worker_id,
+            device_worker_id: deviceWorkerId,
+            eligibility_lane: materializedRun.eligibilityLane,
+          },
+          '[pollWorkerJob] Materialized due sync for current poller'
+        );
+      }
+
+      pending = await claimWithDiagnostics();
     }
 
-    pending = await claimWithDiagnostics();
-  }
-
+    return pending;
+  };
+  const pending = await waitForWorkerWork({
+    claim: findPending, waitMs: waitSeconds * 1000, signal: c.req.raw.signal,
+  });
   if (!pending) {
-    return c.json({ next_poll_seconds: 10, ...pollMetadata });
+    return c.json({ next_poll_seconds: waitSeconds > 0 ? 0 : 10, ...pollMetadata });
   }
 
   const row = pending as unknown as {
@@ -1977,6 +1991,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       : {}),
     feed_key: row.feed_key ?? undefined,
     feed_id: row.feed_id ?? undefined,
+    delivery: row.run_type === 'sync' ? row.action_input?.delivery : undefined,
     connection_id: row.connection_id ?? undefined,
     config: mergeExecutionConfig(row.connection_config, row.feed_config),
     // The DB egress boundary (private-IP block + IP pin + forced TLS) is decided

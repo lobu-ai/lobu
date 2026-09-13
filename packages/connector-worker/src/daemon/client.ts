@@ -22,7 +22,7 @@ export function trimTrailingSlashes(value: string): string {
  */
 export interface ExecutorClient {
   readonly id: string;
-  poll(capacityAvailable?: number): Promise<PollResponse>;
+  poll(capacityAvailable?: number, options?: { waitSeconds?: number; signal?: AbortSignal }): Promise<PollResponse>;
   /**
    * Beat, and read what the gateway says back. The response is the only channel
    * into a run this worker already holds: `continue: false` means stop.
@@ -308,8 +308,10 @@ export class WorkerClient implements ExecutorClient {
    * Automation's CLI is a separate gate: the `agent_kinds` discovered below.
    */
   private advertisedCapabilities(): WorkerCapabilities {
-    if (this.platform !== 'headless') return this.capabilities;
-    return { ...this.capabilities, 'automations.execute': true };
+    return {
+      ...this.capabilities, feed_delivery: true,
+      ...(this.platform === 'headless' ? { 'automations.execute': true } : {}),
+    };
   }
 
   private authHeaders(): Record<string, string> {
@@ -350,7 +352,7 @@ export class WorkerClient implements ExecutorClient {
   /**
    * Poll for available runs
    */
-  async poll(capacityAvailable?: number): Promise<PollResponse> {
+  async poll(capacityAvailable?: number, options?: { waitSeconds?: number; signal?: AbortSignal }): Promise<PollResponse> {
     const advertisement = this.advertisementProvider?.snapshot();
     const capabilities = advertisement
       ? { ...this.advertisedCapabilities(), ...advertisement.capabilities }
@@ -358,6 +360,7 @@ export class WorkerClient implements ExecutorClient {
     const manifests = advertisement?.manifests ?? this.manifests;
     return this.requestJson<PollResponse>('/api/workers/poll', {
       worker_id: this.workerId,
+      ...(options?.waitSeconds === undefined ? {} : { wait_seconds: options.waitSeconds }),
       capabilities,
       version: this.version,
       ...(capacityAvailable === undefined
@@ -380,7 +383,7 @@ export class WorkerClient implements ExecutorClient {
       ...(this.advertisementProvider || manifests.length > 0
         ? { connector_manifests: manifests }
         : {}),
-    });
+    }, options?.signal);
   }
 
   /**

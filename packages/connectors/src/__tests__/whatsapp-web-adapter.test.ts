@@ -765,6 +765,213 @@ describe("whatsAppWebAdapterProgram version", () => {
   });
 });
 
+describe("whatsAppWebAdapterProgram backfill progress", () => {
+  function install(
+    loadEarlierMsgs: (input: any) => Promise<unknown>,
+    options: { chatIds?: string[]; readOldest?: ((id?: unknown) => Promise<unknown>) | null; modelDataOnly?: boolean } = {},
+  ) {
+    let now = 1_000;
+    const chats = (options.chatIds ?? ["a@c.us", "b@c.us", "c@c.us"]).map((jid) => ({
+      id: { _serialized: jid },
+      msgs: { _models: [] as Record<string, unknown>[], msgLoadState: { noEarlierMsgs: false } },
+    }));
+    const modules: Record<string, unknown> = {
+      WAWebCollections: { Chat: { _models: options.modelDataOnly ? chats.map((attributes) => ({ attributes })) : chats }, Msg: { _models: [] } },
+      WAWebUserPrefsMeUser: { getMaybeMePnUser: () => ({ _serialized: "self@c.us" }) },
+      WAWebSocketModel: { Socket: { state: "CONNECTED", stream: "CONNECTED", hasSynced: true } },
+      WAWebChatLoadMessages: { loadEarlierMsgs },
+      WAWebNonMessageDataRequestHistorySyncOnDemandUtils: options.readOldest === null ? null : {
+        getOldestMsgInChatFromDB: options.readOldest ?? (async () => ({ id: { id: "unloaded-history" }, t: 1 })),
+      },
+    };
+    const globals: Record<string, any> = {};
+    class PageDate extends Date { static now() { return now; } }
+    new Function("globalThis", "window", "document", "Date",
+      `(${whatsAppWebAdapterProgram.toString()})();`)(
+      globals, { require: (name: string) => modules[name] ?? null },
+      { querySelector: () => null }, PageDate,
+    );
+    const invoke = (input: Record<string, unknown>) =>
+      globals.__owlettoWhatsAppAdapterV1.invoke({ adapter_version: WHATSAPP_ADAPTER_VERSION, ...input });
+    return {
+      chats,
+      async ready() { await invoke({ op: "probe" }); now += 501; await invoke({ op: "probe" }); },
+      collect: (backfill?: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+        invoke({ op: "collect", max_chats: 1, backfill, ...extra }),
+    };
+  }
+
+  for (const failure of ["no progress", "loader error"]) {
+    it(`continues to other chats after ${failure} without marking the stalled chat complete`, async () => {
+      const attempted: string[] = [];
+      const adapter = install(async ({ chat }) => {
+        attempted.push(chat.id._serialized);
+        if (failure === "loader error") throw new Error("temporary history failure");
+      });
+      await adapter.ready();
+      const first = await adapter.collect();
+      expect(first.ok).toBe(true);
+      expect(first.backfill.complete).toBe(false);
+      expect(first.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+      expect(first.backfill.chats["a@s.whatsapp.net"].error).toBeDefined();
+      const second = await adapter.collect(first.backfill);
+      expect(second.ok).toBe(true);
+      expect(attempted).toEqual(["a@c.us", "b@c.us"]);
+      expect(second.backfill.complete).toBe(false);
+      expect(second.backfill.chats["b@s.whatsapp.net"].has_more).toBe(true);
+    });
+  }
+  const historyMessage = (id: string, t: number) => ({
+    id: { id }, from: { _serialized: "a@c.us" }, to: { _serialized: "self@c.us" },
+    type: "chat", body: "synthetic history", t,
+  });
+  const ids = (result: any) => [...result.messages,
+    ...result.history_pages.flatMap((page: any) => page.messages)].map((message: any) => message.id);
+
+  it("replays history already loaded into the page when the server retained its checkpoint", async () => {
+    const adapter = install(async ({ chat }) => {
+      chat.msgs._models.push(historyMessage("history", 1000));
+      chat.msgs.msgLoadState.noEarlierMsgs = true;
+    }, { chatIds: ["a@c.us"] });
+    await adapter.ready();
+    const first = await adapter.collect(undefined, { recent_since: 2000 });
+    expect(ids(first)).toEqual(["history"]);
+    await adapter.ready();
+    const retry = await adapter.collect(undefined, { recent_since: 2000 });
+    expect(ids(retry)).toEqual(["history"]);
+  });
+
+  it("bounds history plus recent rows and checkpoints only the emitted history frontier", async () => {
+    const adapter = install(async ({ chat }) => {
+      chat.msgs._models.push(historyMessage("old", 1000), historyMessage("middle", 1001), historyMessage("new", 1002));
+      chat.msgs.msgLoadState.noEarlierMsgs = true;
+    }, { chatIds: ["a@c.us"] });
+    await adapter.ready();
+    const first = await adapter.collect(undefined, { max_messages: 1, recent_since: 0 });
+    expect(ids(first)).toEqual(["new"]);
+    expect(first.backfill.complete).toBe(false);
+    expect(first.backfill.chats["a@s.whatsapp.net"].oldest_id).toBe("new");
+    await adapter.ready();
+    const retry = await adapter.collect(undefined, { max_messages: 1, recent_since: 0 });
+    expect(ids(retry)).toEqual(["new"]);
+    const second = await adapter.collect(first.backfill, { max_messages: 1, recent_since: 2000 });
+    expect(ids(second)).toEqual(["middle"]);
+    expect(second.backfill.complete).toBe(false);
+    const third = await adapter.collect(second.backfill, { max_messages: 1, recent_since: 2000 });
+    expect(ids(third)).toEqual(["old"]);
+    expect(third.backfill.complete).toBe(true);
+  });
+
+  it("finishes an empty browser DB even when WhatsApp advertises older phone history", async () => {
+    const adapter = install(async () => [], { chatIds: ["a@c.us"], readOldest: async () => null });
+    await adapter.ready();
+    const result = await adapter.collect();
+    expect(result.backfill.complete).toBe(true);
+    expect(result.backfill.chats["a@s.whatsapp.net"].history_limited_to_browser).toBe(true);
+  });
+
+  it("finishes only after the browser DB's oldest message is available to emit", async () => {
+    const oldest = historyMessage("oldest", 1000);
+    const adapter = install(async () => [], { chatIds: ["a@c.us"], readOldest: async () => oldest });
+    adapter.chats[0]!.msgs._models.push(oldest);
+    await adapter.ready();
+    const result = await adapter.collect(undefined, { recent_since: 2000 });
+    expect(ids(result)).toEqual(["oldest"]);
+    expect(result.backfill.complete).toBe(true);
+    expect(result.backfill.chats["a@s.whatsapp.net"].history_limited_to_browser).toBe(true);
+  });
+
+  for (const empty of [true, false]) {
+    it(`finishes ${empty ? "empty" : "fully loaded"} browser history before a stalled phone-history request`, async () => {
+      const oldest = historyMessage("browser-history-boundary", 1000);
+      let loads = 0;
+      const adapter = install(({ signal }) => {
+        loads += 1;
+        return new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("phone history stalled")), { once: true });
+        });
+      }, { chatIds: ["a@c.us"], readOldest: async () => empty ? null : oldest });
+      if (!empty) adapter.chats[0]!.msgs._models.push(oldest);
+      await adapter.ready();
+      const result = await adapter.collect(undefined, { budget_ms: 10, recent_since: 2000 });
+      expect(result.backfill.complete).toBe(true);
+      expect(loads).toBe(0);
+      expect(ids(result)).toEqual(empty ? [] : ["browser-history-boundary"]);
+    });
+  }
+
+  it("stops loading as soon as a page reaches the browser database boundary", async () => {
+    const oldest = historyMessage("last-browser-page", 1000);
+    let loads = 0;
+    const adapter = install(({ msgCollection, signal }) => {
+      loads += 1;
+      if (loads === 1) {
+        msgCollection._models.push(oldest);
+        return Promise.resolve([oldest]);
+      }
+      return new Promise((_, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("phone history stalled")), { once: true });
+      });
+    }, { chatIds: ["a@c.us"], readOldest: async () => oldest });
+    await adapter.ready();
+    const result = await adapter.collect(undefined, { budget_ms: 10, max_loads_per_chat: 2 });
+    expect(result.backfill.complete).toBe(true);
+    expect(loads).toBe(1);
+    expect(ids(result)).toEqual(["last-browser-page"]);
+  });
+
+  it("uses the same collection and chat identity when WhatsApp keeps them in model data", async () => {
+    const oldest = historyMessage("model-data-history", 1000);
+    let readerId: unknown;
+    let loaderCollection: unknown;
+    const adapter = install(async ({ msgCollection }) => {
+      loaderCollection = msgCollection;
+      msgCollection._models.push(oldest);
+      msgCollection.msgLoadState.noEarlierMsgs = true;
+      return [oldest];
+    }, {
+      chatIds: ["a@c.us"], modelDataOnly: true,
+      readOldest: async (id) => { readerId = id; return oldest; },
+    });
+    await adapter.ready();
+    const result = await adapter.collect(undefined, { recent_since: 2000 });
+    expect(ids(result)).toEqual(["model-data-history"]);
+    expect(result.backfill.complete).toBe(true);
+    expect(loaderCollection).toBe(adapter.chats[0]!.msgs);
+    expect(readerId).toBe(adapter.chats[0]!.id);
+  });
+
+  it("does not equate a failed boundary read with exhausted browser history", async () => {
+    const adapter = install(async () => [], { chatIds: ["a@c.us"], readOldest: async () => {
+      throw new Error("temporary browser DB read failure");
+    } });
+    await adapter.ready();
+    const result = await adapter.collect();
+    expect(result.backfill.complete).toBe(false);
+    expect(result.backfill.chats["a@s.whatsapp.net"].error).toContain("browser DB read failure");
+  });
+
+  it("fails explicitly when the browser cannot establish its history boundary", async () => {
+    const adapter = install(async () => [], { chatIds: ["a@c.us"], readOldest: null });
+    await adapter.ready();
+    const result = await adapter.collect();
+    expect(result.ok).toBe(false);
+    expect(result.error.state).toBe("capability_unavailable");
+  });
+
+  it("aborts a stalled provider loader within the collection budget", async () => {
+    let aborted = false;
+    const adapter = install(({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => { aborted = true; reject(new Error("source aborted")); }, { once: true });
+    }), { chatIds: ["a@c.us"] });
+    await adapter.ready();
+    const result = await adapter.collect(undefined, { budget_ms: 10 });
+    expect(aborted).toBe(true);
+    expect(result.backfill.complete).toBe(false);
+    expect(result.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+  });
+});
+
 describe("whatsAppWebAdapterProgram collect scaling", () => {
   function installWithStore(contactCount: number) {
     // Count property reads on each contact id: the linear scan touches every
@@ -931,6 +1138,7 @@ describe("WhatsApp source observation", () => {
     source.emit("change", "edited history", 900);
     await settle();
     expect(source.posts[0].record.body).toBe("edited history");
+    expect(source.posts[0].record.observed_live).toBe(false);
     source.emit("change", "edited history", 900);
     await settle();
     expect(source.posts).toHaveLength(1);
@@ -952,6 +1160,18 @@ describe("WhatsApp source observation", () => {
     source.emit("change", "after stop");
     await settle();
     expect(source.posts).toHaveLength(2);
+  });
+
+  it('retains live provenance when a failed initial sync rebinds with a later baseline', async () => {
+    const source = install();
+    await source.listen();
+    source.emit('add', 'arrived during first sync', 1100);
+    await settle();
+    expect(source.posts[0].record.observed_live).toBe(true);
+    await source.listen('replacement-token', { recent_since: 1200 });
+    source.emit('change', 'edited before successful ingestion', 1100);
+    await settle();
+    expect(source.posts.at(-1).record.observed_live).toBe(true);
   });
 
   it("does not revive an older async revision after the newer one is acknowledged", async () => {

@@ -159,6 +159,12 @@ function messagesFeed() {
 // ── canonical identity and cutover (verbatim from the extension suite) ──
 
 describe("canonical WhatsApp identity and cutover", () => {
+  it('backfills a fresh connection whose cutover is null', () => {
+    const { request } = buildCollectionPlan({});
+    expect(request.backfill_disabled).toBe(false);
+    expect(request.minimum_timestamp).toBeNull();
+    expect(request.recent_since).toBeNull();
+  });
   it("uses raw key.id and never the serialized compound key", () => {
     expect(
       rawMessageId({ id: "3EB0ABC", _serialized: "false_123@c.us_3EB0ABC_in" })
@@ -794,7 +800,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   it("bumps the WhatsApp connector version for page observation semantics", () => {
-    expect(connector.definition.version).toBe("1.0.4");
+    expect(connector.definition.version).toBe("1.0.9");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -1272,9 +1278,8 @@ describe("quarantined messages", () => {
    * Two fields do that work, and both have to arrive: `key` is what
    * `reconciledKeys` matches to DROP a marker, and `message_id` is what the
    * adapter filters `dirty_ranges` on to look one up. A marker missing either
-   * is not "slightly wrong" — it is permanently stuck, and because `dirty`
-   * being non-empty pins `backfill.complete = false`, the backfill never
-   * finishes either.
+   * is permanently stuck. Diagnostics survive collection completion without
+   * holding history open or causing an endless continuation loop.
    */
   it("carries a quarantined message forward with a reconcilable identity", async () => {
     const dispatcher = makeDispatcher({
@@ -1303,6 +1308,16 @@ describe("quarantined messages", () => {
     const marker = dirty[0] as Record<string, unknown>;
     expect(marker.message_id).toBe("QUARANTINED-1");
     expect(marker.key).toBe("111@s.whatsapp.net:QUARANTINED-1");
+    expect((checkpoint as BrowserCheckpoint).backfill.complete).toBe(true);
+  });
+
+  it('continues incomplete history and stops requesting work when history is exhausted', async () => {
+    const run = (complete: boolean) => messagesFeed().sync(syncCtx(
+      initializeBrowserCheckpoint({}), makeDispatcher({ probe: READY,
+        collect: { ok: true, messages: [], backfill: { complete } },
+      }).dispatcher));
+    expect((await run(false)).next_sync_after_seconds).toBe(1);
+    expect((await run(true)).next_sync_after_seconds).toBeUndefined();
   });
 
   it("does not accumulate a duplicate when the same message is re-quarantined", async () => {
@@ -1361,7 +1376,7 @@ describe("buffered source records use normal feed ingestion", () => {
 
   it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {
     const checkpoint = initializeBrowserCheckpoint(null);
-    const { dispatcher } = makeDispatcher({
+    const { dispatcher, adapterOps } = makeDispatcher({
       probe: READY,
       feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
       collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
@@ -1372,6 +1387,48 @@ describe("buffered source records use normal feed ingestion", () => {
     expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
     expect(next.backfill).toEqual(checkpoint.backfill);
     expect(next.head).toEqual(checkpoint.head);
+    expect(adapterOps).not.toContain("collect");
+  });
+
+  it("advances bounded history pages while buffered deliveries keep arriving", async () => {
+    let checkpoint = initializeBrowserCheckpoint(null);
+    const history = [3000, 2000, 1000].map((timestamp) => message(`history-${timestamp}`, { timestamp }));
+    let pass = 0;
+    const budgets: number[] = [];
+    const { dispatcher } = makeDispatcher({
+      probe: READY,
+      feed_listen: () => observation([{ revision: ++pass, payload: message(`live-${pass}`) }]),
+      collect: (input: any) => {
+        budgets.push(input.max_messages);
+        const frontier = input.backfill.chats.synthetic?.oldest_timestamp ?? Infinity;
+        const pending = history.filter((row) => row.timestamp < frontier);
+        const page = pending.slice(0, input.max_messages);
+        const state = { oldest_timestamp: page.at(-1)?.timestamp, oldest_id: page.at(-1)?.id, has_more: page.length < pending.length };
+        return { ...collectResponse([]), history_pages: [{ messages: page }], backfill: { complete: !state.has_more, chats: { synthetic: state } } };
+      },
+    });
+    for (const timestamp of [3000, 2000, 1000]) {
+      const result = await messagesFeed().sync(syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 2 }));
+      checkpoint = result.checkpoint as BrowserCheckpoint;
+      expect(result.events).toHaveLength(2);
+      expect(checkpoint.backfill.chats.synthetic?.oldest_timestamp).toBe(timestamp);
+    }
+    expect(budgets).toEqual([1, 1, 1]);
+    expect(checkpoint.backfill.complete).toBe(true);
+  });
+
+  it("keeps completed history idle when buffered recovery fills the batch", async () => {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.backfill.complete = true;
+    const { dispatcher, adapterOps } = makeDispatcher({
+      probe: READY,
+      feed_listen: observation([{ revision: 1, payload: message("recovery-live") }]),
+    });
+    const result = await messagesFeed().sync(syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
+    expect(result.events).toHaveLength(1);
+    expect(result.checkpoint?.backfill.complete).toBe(true);
+    expect(result.next_sync_after_seconds).toBeUndefined();
+    expect(adapterOps).not.toContain("collect");
   });
 
   it("uses the current source model for buffered identity and lets dry runs inspect without installing an observer", async () => {
@@ -1414,5 +1471,115 @@ describe("buffered source records use normal feed ingestion", () => {
     expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([
       { id: "whatsapp-web:source-observation-error", revision: 9 },
     ]);
+  });
+});
+
+
+describe("live delivered message batches", () => {
+  function delivered(records: Array<{ revision: number; payload: Record<string, unknown> }>, config: Record<string, unknown> = {}) {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.backfill.complete = true;
+    return {
+      feedKey: "messages", config, checkpoint, credentials: null, entityIds: [],
+      delivery: { id: "synthetic-delivery", event: "records", payload: {
+        binding_id: "synthetic-binding", epoch: "synthetic-epoch", records,
+      } },
+    };
+  }
+
+  it("normalizes a complete message batch without invoking the browser or source collection", async () => {
+    const result = await connector.onDelivery(delivered([
+      { revision: 1, payload: message("live-one") },
+      { revision: 2, payload: message("live-two", { body: "another message" }) },
+    ]));
+    expect(result.events).toHaveLength(2);
+    expect(result.events.map((event) => event.origin_id)).toEqual(["live-one", "live-two"]);
+    expect(result.checkpoint?.backfill.complete).toBe(true);
+    expect(result.checkpoint?.source_ack).toEqual({
+      binding_id: "synthetic-binding", epoch: "synthetic-epoch",
+      records: [{ id: "live-one", revision: 1 }, { id: "live-two", revision: 2 }],
+    });
+  });
+
+  it('activates a fresh message during backfill and suppresses historical pages across runs', async () => {
+    const boundary = Math.floor(Date.now() / 1000);
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.live_since = boundary;
+    const rows = [message('old-history', { timestamp: boundary - 1000 }),
+      message('new-arrival', { timestamp: boundary + 1 })];
+    const first = await messagesFeed().sync(syncCtx(checkpoint, makeDispatcher({
+      probe: READY, collect: { ...collectResponse(rows), backfill: { complete: false } },
+    }).dispatcher));
+    expect(first.events[0].automation_signals).toEqual([]);
+    expect(first.events[1].automation_signals).toMatchObject([{ event_type: 'message' }]);
+    const next = await messagesFeed().sync(syncCtx(first.checkpoint as BrowserCheckpoint, makeDispatcher({
+      probe: READY, collect: collectResponse([message('older-page', { timestamp: boundary - 2000 })]),
+    }).dispatcher));
+    expect(next.events[0].automation_signals).toEqual([]);
+    expect(next.checkpoint?.live_since).toBe(boundary);
+    expect(next.next_sync_after_seconds).toBeUndefined();
+    const pushed = delivered([{ revision: 1, payload: message('pushed-new', { timestamp: boundary + 2 }) }]);
+    pushed.checkpoint = next.checkpoint as BrowserCheckpoint;
+    expect((await connector.onDelivery(pushed)).events[0].automation_signals).toMatchObject([{ event_type: 'message' }]);
+  });
+
+  it('clears an untimestamped diagnostic when the source later delivers its complete record', async () => {
+    const input = delivered([{ revision: 3, payload: message('recovered') }]);
+    input.checkpoint.dirty = [{ key: 'synthetic:recovered', message_id: 'recovered', reason: 'missing_stable_timestamp' }];
+    input.checkpoint.diagnostics = { dirty_reconciliation: { pending_count: 1 } };
+    const result = await connector.onDelivery(input);
+    expect(result.checkpoint?.dirty).toBeUndefined();
+    expect(result.checkpoint?.diagnostics?.dirty_reconciliation).toBeUndefined();
+    expect(result.checkpoint?.backfill.complete).toBe(true);
+  });
+
+  it('does not lose a buffered live activation when the initial run failed before saving its boundary', async () => {
+    const checkpoint = initializeBrowserCheckpoint(null);
+    const earlier = checkpoint.live_since! - 60;
+    const buffered = message('first-attempt-arrival', { timestamp: earlier, observed_live: true });
+    const result = await messagesFeed().sync(syncCtx(checkpoint, makeDispatcher({
+      probe: READY,
+      feed_listen: { bridge_id: 'synthetic-feed', binding_id: 'synthetic-feed', epoch: 'synthetic-epoch', token: 'synthetic-token',
+        records: [{ revision: 1, payload: buffered }] },
+      collect: collectResponse([message('first-attempt-arrival', { timestamp: earlier })]),
+    }).dispatcher));
+    expect(result.events[0].automation_signals).toMatchObject([{ event_type: 'message' }]);
+    const pushed = delivered([{ revision: 1, payload: buffered }]);
+    expect((await connector.onDelivery(pushed)).events[0].automation_signals).toMatchObject([{ event_type: 'message' }]);
+  });
+
+  it("acknowledges excluded records but leaves records outside the processing budget buffered", async () => {
+    const result = await connector.onDelivery(delivered([
+      { revision: 1, payload: message("excluded") },
+      { revision: 2, payload: message("group-one", { chat_jid: "123-456@g.us", is_group: true }) },
+      { revision: 3, payload: message("group-two", { chat_jid: "123-456@g.us", is_group: true }) },
+    ], { chat_filter: "group", max_messages_per_sync: 1 }));
+    expect(result.events).toHaveLength(1);
+    expect(result.checkpoint?.source_ack).toEqual({
+      binding_id: "synthetic-binding", epoch: "synthetic-epoch",
+      records: [{ id: "excluded", revision: 1 }, { id: "group-one", revision: 2 }],
+    });
+  });
+
+  it("retains retryable attachments and honors their backoff without collecting or probing", async () => {
+    const input = delivered([
+      { revision: 1, payload: imageMessages(1, "live-image")[0]! },
+      { revision: 2, payload: message("live-text") },
+    ]);
+    const bridge = makeDispatcher({ probe: READY, download_media: { ok: true, status: "awaiting_primary_device", retryable: true } });
+    const result = await connector.onDelivery({ ...input, sessionState: { chrome_dispatcher: bridge.dispatcher } });
+    expect(result.events).toHaveLength(2);
+    expect(bridge.adapterOps).not.toContain("collect");
+    expect(result.checkpoint?.source_ack?.records).toEqual([{ id: "live-text", revision: 2 }]);
+    expect(result.checkpoint?.media?.["live-image-0"]?.retryable).toBe(true);
+    // No dispatcher is supplied: retry backoff must not even probe the browser.
+    const waiting = await connector.onDelivery({ ...input, checkpoint: result.checkpoint });
+    expect(waiting.checkpoint?.source_ack?.records).toEqual([{ id: "live-text", revision: 2 }]);
+  });
+
+  it("fails closed on malformed delivered messages rather than acknowledging dropped source data", async () => {
+    await expect(connector.onDelivery(delivered([
+      { revision: 1, payload: { id: "malformed", body: "missing source identity" } },
+    ]))).rejects.toThrow(/invalid.*message/i);
   });
 });

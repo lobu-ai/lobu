@@ -16,7 +16,7 @@ import {
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
 } from '@lobu/core/contracts/tools/manage-automations';
-import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
+import type { ConnectorTriggerSignal, FeedDelivery } from '@lobu/connector-sdk';
 import {
   claimAutomationCooldown,
   lockAutomationForActivation,
@@ -51,6 +51,8 @@ import { isUniqueViolation } from '../utils/pg-errors';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { normalizePageActivationUrls } from './page-activation';
 import { AUTOMATION_RUN_TYPES_PG } from "./run-types.js";
+
+import { notifyWorkerWork } from './worker-wakeup';
 
 type AutomationDispatchSource = 'scheduled' | 'manual' | 'event';
 export type AutomationActivationTrigger =
@@ -407,10 +409,12 @@ export function describeSyncRunSkip(reason: SyncRunSkipReason): string {
  * nothing runnable — the connector cases also soft-delete the feed (see
  * softDeleteOrphanFeed).
  */
-async function createSyncRunWithClient(
+export async function createSyncRunWithClient(
   sql: DbClient,
   feedId: number,
-  dryRun = false
+  { dryRun = false, delivery, feedDue = false }: {
+    dryRun?: boolean; delivery?: FeedDelivery; feedDue?: boolean;
+  } = {}
 ): Promise<CreateSyncRunResult> {
   // Check if there's already a pending/running run for this feed
   const existing = await sql`
@@ -482,7 +486,7 @@ async function createSyncRunWithClient(
   if (
     feed.definition_id != null &&
     (!Array.isArray(feed.feed_operations) ||
-      !feed.feed_operations.includes('sync'))
+      !feed.feed_operations.includes(delivery ? 'delivery' : 'sync'))
   ) {
     return { ok: false, reason: 'sync_unsupported' };
   }
@@ -551,11 +555,12 @@ async function createSyncRunWithClient(
     INSERT INTO runs (
       organization_id, run_type, feed_id, connection_id,
       connector_key, connector_version, status, approval_status, created_at,
-      dry_run, target_device_worker_id
+      dry_run, target_device_worker_id, action_input
     ) VALUES (
       ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
       ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
-      true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
+      true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`},
+      ${delivery ? sql.json({ delivery }) : null}
     )
     RETURNING id
   `
@@ -564,11 +569,13 @@ async function createSyncRunWithClient(
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id,
         connector_key, connector_version, status, approval_status, created_at,
-        target_device_worker_id
+        target_device_worker_id, action_input, run_metadata
       ) VALUES (
         ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
         ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
-        ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
+        ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`},
+        ${delivery ? sql.json({ delivery }) : null},
+        ${feedDue ? sql.json({ feed_due: true }) : null}
       )
       RETURNING id, feed_id
     )
@@ -584,6 +591,7 @@ async function createSyncRunWithClient(
   logger.info(
     `[queue] Created sync run ${runId} for feed ${feedId} (${feed.connector_key}, version=${connectorVersion})`
   );
+  await notifyWorkerWork(sql);
   return { ok: true, runId };
 }
 
@@ -594,18 +602,18 @@ export async function createSyncRun(
   // Defaults false so all four existing call sites (connect/routes, app-install,
   // check-due-feeds, manage_feeds) keep persisting. Only an explicit opt-in is
   // dry — a flag that defaulted the other way would silently stop real syncs.
-  opts?: { dryRun?: boolean }
+  opts?: { dryRun?: boolean; feedDue?: boolean }
 ): Promise<CreateSyncRunResult> {
   const sql = db ?? getDb();
   const dryRun = opts?.dryRun === true;
 
   try {
     if (db) {
-      return await createSyncRunWithClient(sql, feedId, dryRun);
+      return await createSyncRunWithClient(sql, feedId, { dryRun, feedDue: opts?.feedDue });
     }
 
     return await sql.begin(async (tx) =>
-      createSyncRunWithClient(tx, feedId, dryRun)
+      createSyncRunWithClient(tx, feedId, { dryRun, feedDue: opts?.feedDue })
     );
   } catch (error) {
     if (isUniqueViolation(error, 'idx_runs_active_sync_per_feed')) {
@@ -762,6 +770,7 @@ async function createAutomationRunWithClient(
     `[queue] Created automation run ${runId} for automation ${params.automationId} (${params.dispatchSource})`
   );
 
+  await notifyWorkerWork(sql);
   return { runId, status, created: true };
 }
 
@@ -1083,6 +1092,7 @@ export async function createAutomationEventRun(
       )
       RETURNING id, status
     `;
+    await notifyWorkerWork(tx);
     return {
       runId: Number(inserted[0]?.id),
       status: String(inserted[0]?.status),
@@ -1173,6 +1183,7 @@ export async function createAuthRun(params: {
     logger.info(
       `[queue] Created auth run ${runId} (${params.connectorKey}, profile=${params.authProfileId})`
     );
+    await notifyWorkerWork(sql);
     return runId;
   } catch (error) {
     if (isUniqueViolation(error, 'idx_runs_active_auth_per_profile')) {
@@ -1530,6 +1541,7 @@ export async function createConnectorOperationRun(params: {
   logger.info(
     `[queue] Created action run ${runId} (${params.connectorKey}/${params.operationKey}, approval=${approvalStatus})`
   );
+  if (row.status === 'pending' && row.approval_status === 'auto') await notifyWorkerWork(sql);
   return {
     runId,
     created: true,

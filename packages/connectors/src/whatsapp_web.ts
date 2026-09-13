@@ -15,6 +15,7 @@ import {
   type ChromeActionDispatcher,
   ConnectorRuntime,
   type EventEnvelope,
+  type FeedDeliveryContext,
   type RuntimeConnectorDefinition,
   type SyncContext,
   type SyncResult,
@@ -44,6 +45,26 @@ import {
 import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
 const SOURCE_OBSERVATION_ERROR_ID = "whatsapp-web:source-observation-error";
+
+function updateDirtyDiagnostics(checkpoint: BrowserCheckpoint, dirty: DirtyMarker[], requestedCount: number) {
+  checkpoint.dirty = dirty.length > 0 ? dirty : undefined;
+  const diagnostics = { ...checkpoint.diagnostics };
+  delete diagnostics.dirty_reconciliation;
+  if (dirty.length > 0) {
+    const reasons: Record<string, number> = {};
+    for (const marker of dirty) {
+      const reason = marker.reason ?? "unknown";
+      reasons[reason] = (reasons[reason] ?? 0) + 1;
+    }
+    diagnostics.dirty_reconciliation = {
+      pending_count: dirty.length, requested_count: requestedCount,
+      reasons: Object.fromEntries(Object.entries(reasons).slice(0, 10)),
+    };
+  }
+  // Source records that have not acquired a stable timestamp remain visible
+  // diagnostics. They do not represent unfinished history pages.
+  checkpoint.diagnostics = Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
+}
 
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
@@ -621,8 +642,8 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     key: "whatsapp.web",
     name: "WhatsApp",
     description:
-      "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.4",
+      "Personal WhatsApp in the paired Owletto Chrome. Backfills history available to WhatsApp Web, then observes new messages in real time. Older phone-only history requires access through WhatsApp. Supports search, draft, send, edit, react, and revoke actions.",
+    version: "1.0.9",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -633,6 +654,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     feeds: {
       messages: {
         sync: (ctx) => this.syncMessages(ctx),
+        onDelivery: (ctx) => this.deliverMessages(ctx),
         webhook: { events: ["message"], mode: "trigger" },
         key: "messages",
         name: "Messages",
@@ -935,6 +957,92 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     },
   };
 
+  private async deliverMessages(
+    ctx: FeedDeliveryContext<BrowserCheckpoint, WhatsAppWebConfig>
+  ): Promise<SyncResult<BrowserCheckpoint>> {
+    const payload = ctx.delivery.payload as {
+      binding_id?: unknown;
+      epoch?: unknown;
+      recovery?: unknown;
+      records?: Array<{ revision: number; payload: Record<string, unknown> }>;
+    } | null;
+    if (!payload || typeof payload.binding_id !== "string" || !payload.binding_id ||
+      typeof payload.epoch !== "string" || !payload.epoch || !Array.isArray(payload.records)) {
+      throw new Error("Invalid WhatsApp message delivery batch");
+    }
+    // The browser owns the durable backlog. A reset/overflow must re-establish
+    // the observer and reconcile the source; ordinary complete records need no
+    // page round trip. The same pull handler remains available for explicit reads.
+    if (payload.recovery === true || !ctx.checkpoint?.backfill.complete ||
+      payload.records.some((row) => row.payload?.id === SOURCE_OBSERVATION_ERROR_ID)) {
+      return this.syncMessages(ctx);
+    }
+    const { checkpoint, request } = buildCollectionPlan({
+      checkpoint: ctx.checkpoint as unknown as Record<string, unknown>,
+      config: ctx.config as Record<string, unknown>,
+    });
+    const accepted: Array<{ id: string; revision: number }> = [];
+    const messages: WhatsAppMessage[] = [];
+    for (const row of payload.records) {
+      const message = normalizeRelayedMessage(row.payload);
+      if (!message || !Number.isSafeInteger(row.revision) || row.revision < 1) {
+        throw new Error("Invalid WhatsApp message in delivery batch");
+      }
+      const inScope =
+        (request.chat_filter !== "group" || message.is_group) &&
+        (request.chat_filter !== "individual" || !message.is_group) &&
+        (request.minimum_timestamp == null || message.timestamp >= request.minimum_timestamp);
+      if (inScope) {
+        if (messages.length >= request.max_messages) continue;
+        messages.push(message);
+      }
+      accepted.push({ id: message.id, revision: row.revision });
+    }
+    // Only attachments require source access. Text, edits, revokes and reactions
+    // are normalized directly from the observed record through the same helper
+    // used by collection, preserving origin identity and event/Automation dedupe.
+    let media = new Map<string, MediaRecord>();
+    let nextMedia = checkpoint.media ?? {};
+    const dueMedia = messages.some((message) => {
+      if (!isMediaEligible(message)) return false;
+      const prior = nextMedia[message.id];
+      return !prior || prior.revision !== messageRevision(message) ||
+        (prior.next_attempt_at ?? 0) <= Date.now();
+    });
+    if (dueMedia) {
+      const dispatcher = requireExtensionDispatcher(ctx);
+      const tabId = await readyWhatsAppTab(dispatcher);
+      const downloaded = await downloadEligibleMedia(dispatcher, tabId, messages, nextMedia);
+      media = downloaded.results;
+      nextMedia = { ...nextMedia, ...downloaded.nextMedia };
+      for (const message of messages) {
+        if (isMediaEligible(message) && !downloaded.nextMedia[message.id]) delete nextMedia[message.id];
+      }
+    } else {
+      media = new Map(messages.flatMap((message) =>
+        nextMedia[message.id] ? [[message.id, nextMedia[message.id]] as const] : []));
+    }
+    const nextCheckpoint = mergeBrowserCheckpoint(
+      checkpoint as unknown as Record<string, unknown>, null, messages
+    );
+    const reconciledIds = new Set(messages.map((message) => message.id));
+    updateDirtyDiagnostics(nextCheckpoint, (checkpoint.dirty ?? []).filter((marker) =>
+      !marker.message_id || !reconciledIds.has(marker.message_id)), 0);
+    nextCheckpoint.source_ack = {
+      binding_id: payload.binding_id, epoch: payload.epoch,
+      // Pending attachment work stays in the source buffer, so stopping the
+      // periodic collector cannot silently discard its retry opportunity.
+      records: accepted.filter((record) => media.get(record.id)?.retryable !== true),
+    };
+    const persistedMedia = Object.entries(nextMedia).slice(0, MAX_MEDIA_RECORDS_PERSISTED);
+    nextCheckpoint.media = persistedMedia.length > 0 ? Object.fromEntries(persistedMedia) : undefined;
+    return {
+      events: messages.map((message) => toEventEnvelope(message, media.get(message.id),
+        message.observed_live === true || message.timestamp >= checkpoint.live_since!)),
+      checkpoint: nextCheckpoint,
+    };
+  }
+
   private async syncMessages(
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>
   ): Promise<SyncResult<BrowserCheckpoint>> {
@@ -1001,7 +1109,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       op: "listen", bridge_id: observed.bridge_id, token: observed.token,
       chat_filter: request.chat_filter,
       minimum_timestamp: request.minimum_timestamp,
-      recent_since: request.recent_since ?? Math.floor(Date.now() / 1000) - 15 * 60,
+      recent_since: checkpoint.live_since,
     });
     else if (sourceErrors.length > 0) {
       throw new Error(String(sourceErrors[0].payload.source_error));
@@ -1017,17 +1125,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       minimum_timestamp: marker.minimum_timestamp ?? null,
     }));
 
-    const result = await invokeAdapter<CollectResponse>(
-      dispatcher,
-      tabId,
-      request as unknown as Record<string, unknown>
-    );
-
-    // History pages come back separately from the recent window so a backfill
-    // page can advance its chat cursor without competing for the recent slot.
-    const historyMessages = (result.history_pages ?? []).flatMap(
-      (page) => page.messages ?? []
-    );
     const inScope = (row: Record<string, unknown>) =>
       (request.chat_filter !== "group" || row.is_group === true) &&
       (request.chat_filter !== "individual" || row.is_group !== true) &&
@@ -1036,8 +1133,21 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       !sourceErrors.includes(row) && inScope(row.payload)
     );
     const bufferedIds = new Set(buffered.map((row) => row.payload.id));
+    const liveBufferedIds = new Set(buffered.filter((row) => row.payload.observed_live === true).map((row) => row.payload.id));
+    // Reserve buffered deliveries before collecting a page. Giving both paths
+    // the entire limit makes every full history page lose its checkpoint while
+    // even one unrelated buffered record remains, so backfill repeats forever.
+    const collectionBudget = Math.max(0, request.max_messages - bufferedIds.size);
+    const result = collectionBudget > 0 ? await invokeAdapter<CollectResponse>(
+      dispatcher,
+      tabId,
+      { ...request, max_messages: collectionBudget } as unknown as Record<string, unknown>
+    ) : null;
+    const historyMessages = (result?.history_pages ?? []).flatMap(
+      (page) => page.messages ?? []
+    );
     const messages = mergeCollectedMessages(
-      [...(result.messages ?? []), ...historyMessages],
+      [...(result?.messages ?? []), ...historyMessages],
       buffered.map((row) => row.payload),
       request.minimum_timestamp
     ).sort((a, b) => Number(bufferedIds.has(b.id)) - Number(bufferedIds.has(a.id)) || a.timestamp - b.timestamp || a.id.localeCompare(b.id))
@@ -1045,7 +1155,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
 
     const emittedIds = new Set(messages.map((message) => message.id));
     const reconciledKeys = new Set(
-      (result.dirty_reconciled ?? [])
+      (result?.dirty_reconciled ?? [])
         .filter(
           (marker) => marker.message_id && emittedIds.has(marker.message_id)
         )
@@ -1060,7 +1170,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     );
 
     const events: EventEnvelope[] = messages.map((message) =>
-      toEventEnvelope(message, media.get(message.id))
+      toEventEnvelope(message, media.get(message.id), liveBufferedIds.has(message.id) || message.timestamp >= checkpoint.live_since!)
     );
 
     const nextCheckpoint = mergeBrowserCheckpoint(
@@ -1071,17 +1181,20 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     // A live burst can consume this run's budget. Retain collection cursors
     // when any collected row was deferred, so backfill cannot skip that page.
     const deferredCollection = mergeCollectedMessages(
-      [...(result.messages ?? []), ...historyMessages], [], request.minimum_timestamp
+      [...(result?.messages ?? []), ...historyMessages], [], request.minimum_timestamp
     ).some((row) => !emittedIds.has(row.id));
-    if (deferredCollection) {
+    if (!result || deferredCollection) {
       nextCheckpoint.head = checkpoint.head;
-      nextCheckpoint.backfill = { ...checkpoint.backfill, complete: false };
+      nextCheckpoint.backfill = result
+        ? { ...checkpoint.backfill, complete: false }
+        : checkpoint.backfill;
     }
     nextCheckpoint.source_ack = {
       binding_id: observed.binding_id,
       epoch: observed.epoch,
       records: observed.records
-        .filter((row) => sourceErrors.includes(row) || emittedIds.has(String(row.payload.id)) || !inScope(row.payload))
+        .filter((row) => sourceErrors.includes(row) ||
+          (emittedIds.has(String(row.payload.id)) && media.get(String(row.payload.id))?.retryable !== true) || !inScope(row.payload))
         .map((row) => ({ id: String(row.payload.id), revision: row.revision })),
     };
 
@@ -1091,7 +1204,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     for (const marker of dirtyBefore) {
       if (!reconciledKeys.has(marker.key)) dirtyByKey.set(marker.key, marker);
     }
-    for (const marker of result.quarantined ?? []) {
+    for (const marker of result?.quarantined ?? []) {
       dirtyByKey.set(marker.key, {
         ...marker,
         message_id: marker.message_id ?? null,
@@ -1102,27 +1215,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       0,
       MAX_DIRTY_MARKERS_PERSISTED
     );
-    // `mergeBrowserCheckpoint` spreads the prior checkpoint forward, so every
-    // one of these fields must be REPLACED, not conditionally set: a marker
-    // the adapter just reconciled has to leave the checkpoint, or the next run
-    // re-requests it and the list never empties.
     const diagnostics: Record<string, unknown> = {};
-    if (dirty.length > 0) {
-      nextCheckpoint.dirty = dirty;
-      nextCheckpoint.backfill.complete = false;
-      const reasons: Record<string, number> = {};
-      for (const marker of dirty) {
-        const reason = marker.reason ?? "unknown";
-        reasons[reason] = (reasons[reason] ?? 0) + 1;
-      }
-      diagnostics.dirty_reconciliation = {
-        pending_count: dirty.length,
-        requested_count: dirtyBatch.length,
-        reasons: Object.fromEntries(Object.entries(reasons).slice(0, 10)),
-      };
-    } else {
-      nextCheckpoint.dirty = undefined;
-    }
 
     const persistedMedia = Object.entries(nextMedia).slice(
       0,
@@ -1143,8 +1236,11 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     }
     nextCheckpoint.diagnostics =
       Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
+    updateDirtyDiagnostics(nextCheckpoint, dirty, dirtyBatch.length);
 
-    return { events, checkpoint: nextCheckpoint };
+    return { events, checkpoint: nextCheckpoint,
+      ...(!nextCheckpoint.backfill.complete ? { next_sync_after_seconds: 1 } : {}),
+    };
   }
 
   async execute(ctx: ActionContext): Promise<ActionResult> {

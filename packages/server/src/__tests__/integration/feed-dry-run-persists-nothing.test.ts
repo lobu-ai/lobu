@@ -128,6 +128,96 @@ function batchFor(runId: number) {
   };
 }
 
+describe('bounded connector continuation', () => {
+  beforeEach(cleanupTestDatabase);
+
+  it('arms an unscheduled feed only when successful completion requests more work', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${feedId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', checkpoint: { page: 1 }, next_sync_after_seconds: 2 });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(200);
+    const [feed] = await sql`SELECT checkpoint, schedule, next_run_at > now() AS future,
+      next_run_at < now() + interval '5 seconds' AS soon FROM feeds WHERE id = ${feedId}`;
+    expect(feed).toEqual({ checkpoint: { page: 1 }, schedule: null, future: true, soon: true });
+  });
+
+  it.each([true, false])('leaves an idle feed unscheduled (dry run: %s)', async (dry) => {
+    const { feedId, runId } = await seed(dry);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${feedId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', ...(dry ? { next_sync_after_seconds: 2 } : {}) });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(200);
+    expect((await sql`SELECT next_run_at FROM feeds WHERE id = ${feedId}`)[0].next_run_at).toBeNull();
+  });
+
+  it('preserves a source wake received during the current run', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = now() WHERE id = ${feedId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', next_sync_after_seconds: 60 });
+    await completeWorkerJob(completion.ctx);
+    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feedId}`)[0].due).toBe(true);
+  });
+
+  it.each([null, 0, -1, 1.5, 86401, '2'])('rejects invalid continuation %s without finalizing the run', async (delay) => {
+    const { runId } = await seed(false);
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', next_sync_after_seconds: delay });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(400);
+    expect((await getTestDb()`SELECT status FROM runs WHERE id = ${runId}`)[0].status).toBe('running');
+  });
+
+  it('backs off a failed due run without requiring a cron schedule', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${feedId}`;
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ feed_due: true })} WHERE id = ${runId}`;
+    const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'failed', error_message: 'temporary failure' });
+    await completeWorkerJob(completion.ctx);
+    expect(completion.result().status).toBe(200);
+    const [feed] = await sql`SELECT consecutive_failures, next_run_at > now() AS retry FROM feeds WHERE id = ${feedId}`;
+    expect(feed).toEqual({ consecutive_failures: 1, retry: true });
+  });
+
+  it.each(['temporary failure', '[lobu:dependency_unavailable:device_offline] Device offline'])(
+    'preserves cron cadence when a due run fails: %s', async (errorMessage) => {
+      const { feedId, runId } = await seed(false);
+      const sql = getTestDb();
+      await sql`UPDATE feeds SET schedule = '0 0 * * *', timezone = 'UTC', next_run_at = NULL WHERE id = ${feedId}`;
+      await sql`UPDATE runs SET run_metadata = ${sql.json({ feed_due: true })} WHERE id = ${runId}`;
+      const now = new Date();
+      const nextMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+      const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+        status: 'failed', error_message: errorMessage });
+      await completeWorkerJob(completion.ctx);
+      expect(completion.result().status).toBe(200);
+      const [feed] = await sql`SELECT next_run_at >= ${nextMidnight} AS preserves_cadence FROM feeds WHERE id = ${feedId}`;
+      expect(feed.preserves_cadence).toBe(true);
+    }
+  );
+
+  it('cannot rearm a paused feed or change a finalized continuation', async () => {
+    const { feedId, runId } = await seed(false);
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET status = 'paused', schedule = NULL WHERE id = ${feedId}`;
+    const complete = () => mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+      status: 'success', next_sync_after_seconds: 1, checkpoint: { finished: true } });
+    await completeWorkerJob(complete().ctx);
+    expect((await sql`SELECT status, next_run_at FROM feeds WHERE id = ${feedId}`)[0])
+      .toEqual({ status: 'paused', next_run_at: null });
+    await sql`UPDATE feeds SET status = 'active' WHERE id = ${feedId}`;
+    await completeWorkerJob(complete().ctx);
+    expect((await sql`SELECT next_run_at FROM feeds WHERE id = ${feedId}`)[0].next_run_at).toBeNull();
+  });
+});
+
 describe('feed dry run persists nothing', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
@@ -220,6 +310,35 @@ describe('feed dry run persists nothing', () => {
     expect(preview.items[49].origin_id).toBe('b2-19');
     expect(preview.total).toBe(60);
     expect(preview.truncated).toBe(true);
+  });
+
+  it('does not release the active run before its feed checkpoint commits', async () => {
+    const sql = getTestDb();
+    const { feedId, runId } = await seed(false);
+    const checkpoint = { source_ack: { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-item', revision: 1 }] } };
+    await sql.unsafe(`
+      CREATE FUNCTION synthetic_reject_feed_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.checkpoint ? 'source_ack' THEN RAISE EXCEPTION 'synthetic checkpoint failure'; END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER synthetic_reject_feed_checkpoint BEFORE UPDATE ON feeds
+      FOR EACH ROW EXECUTE FUNCTION synthetic_reject_feed_checkpoint();
+    `);
+    try {
+      const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'success', checkpoint });
+      await completeWorkerJob(completion.ctx);
+      expect(completion.result().status).toBe(500);
+      expect((await sql`SELECT status FROM runs WHERE id = ${runId}`)[0].status).toBe('running');
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
+    } finally {
+      await sql.unsafe('DROP TRIGGER synthetic_reject_feed_checkpoint ON feeds; DROP FUNCTION synthetic_reject_feed_checkpoint();');
+    }
+    const retry = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID, status: 'success', checkpoint });
+    await completeWorkerJob(retry.ctx);
+    expect(retry.result().status).toBe(200);
+    expect((await sql`SELECT status FROM runs WHERE id = ${runId}`)[0].status).toBe('completed');
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(checkpoint);
   });
 
   it('keeps source acknowledgments at the last successful completion during streaming and failure', async () => {

@@ -376,8 +376,8 @@ describe('native bridge handshake', () => {
       provider.update({ capabilities: { fresh: true }, manifests: [{ key: 'fresh' }], generation: 2 });
       await client.poll();
       expect(calls.map((call) => [call.capabilities, call.connector_manifests])).toEqual([
-        [{ daemon: true, shared: false, old: true }, [{ key: 'old' }]],
-        [{ daemon: true, shared: false, fresh: true }, [{ key: 'fresh' }]],
+        [{ daemon: true, shared: false, old: true, feed_delivery: true }, [{ key: 'old' }]],
+        [{ daemon: true, shared: false, fresh: true, feed_delivery: true }, [{ key: 'fresh' }]],
       ]);
     } finally {
       globalThis.fetch = realFetch;

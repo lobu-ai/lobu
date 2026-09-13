@@ -15,12 +15,12 @@
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-export const WHATSAPP_ADAPTER_VERSION = 14;
+export const WHATSAPP_ADAPTER_VERSION = 19;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_SOURCE = "whatsapp_web";
 const RECENT_OVERLAP_SECONDS = 15 * 60;
 const MAX_MESSAGES_PER_RUN = 1_000;
-const MAX_CHATS_PER_RUN = 6;
+const MAX_CHATS_PER_RUN = 50;
 const MAX_LOADS_PER_CHAT = 2;
 export const MAX_MEDIA_BYTES = 2 * 1024 * 1024;
 export const MAX_MEDIA_PER_RUN = 12;
@@ -79,6 +79,8 @@ export interface WhatsAppMessage {
 }
 
 export interface BackfillChatState {
+  /** Older phone-only history is outside this browser's accessible backfill. */
+  history_limited_to_browser?: boolean;
   oldest_timestamp?: number | null;
   oldest_id?: string | null;
   has_more?: boolean;
@@ -87,6 +89,8 @@ export interface BackfillChatState {
 export interface BrowserCheckpoint {
   schema: "owletto.whatsapp.browser.v1";
   adapter_version: number;
+  /** Fixed baseline boundary: later history pages must not activate Automations. */
+  live_since?: number;
   /**
    * Collect nothing at or before this instant, because another source already
    * ingested it. Nothing in this repo assigns it: an operator writes it into an
@@ -223,6 +227,7 @@ function jidPhone(jid: unknown): string | null {
 }
 
 function finiteSeconds(value: unknown): number | null {
+  if (value == null || value === "") return null;
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
 }
@@ -235,6 +240,7 @@ export function initializeBrowserCheckpoint(
     return {
       ...(raw as BrowserCheckpoint),
       adapter_version: WHATSAPP_ADAPTER_VERSION,
+      live_since: raw.live_since ?? raw.head?.timestamp ?? Math.floor(Date.now() / 1000),
       head: raw.head && typeof raw.head === "object" ? raw.head : {},
       backfill:
         raw.backfill && typeof raw.backfill === "object"
@@ -261,6 +267,7 @@ export function initializeBrowserCheckpoint(
   return {
     schema: "owletto.whatsapp.browser.v1",
     adapter_version: WHATSAPP_ADAPTER_VERSION,
+    live_since: Math.floor(Date.now() / 1000),
     cutover_unix_seconds: null,
     head: {},
     backfill: {
@@ -521,7 +528,8 @@ export function toEventEnvelope(
   mediaResult:
     | MediaRecord
     | { status: MediaStatus; retryable?: boolean }
-    | undefined
+    | undefined,
+  activate?: boolean
 ): EventEnvelope {
   const metadata: Record<string, unknown> = {
     source: WHATSAPP_SOURCE,
@@ -574,6 +582,17 @@ export function toEventEnvelope(
     occurred_at: new Date(message.occurred_at),
     semantic_type: "message",
     metadata,
+    ...(activate === undefined ? {} : { automation_signals: activate ? [{
+      event_type: "message",
+      resource_type: "message",
+      ...(message.id.length <= 500 ? { resource_ref: message.id } : {}),
+      label: messageTitle(message).slice(0, 300),
+      input_text: messagePayloadText(message).slice(0, 32_000),
+      occurred_at: message.occurred_at,
+      attributes: Object.fromEntries(Object.entries(metadata).filter(([, value]) =>
+        value === null || ["string", "number", "boolean"].includes(typeof value)
+      ).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 1_000) : value])) as Record<string, string | number | boolean | null>,
+    }] : [] }),
     ...(attachment ? { attachments: [attachment] } : {}),
   };
 }

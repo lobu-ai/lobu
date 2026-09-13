@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createGithubWebhookDelivery, deliverGithubConnectorConnectionWebhook } from '../../gateway/routes/public/app-webhooks';
 import { receiveFeedNotifications, requestFeedSync, sourceFeedContextForRun } from '../../runs/feed-notifications';
+import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { addUserToOrganization, createTestOrganization, createTestUser } from '../setup/test-fixtures';
+import { addUserToOrganization, createTestOrganization, createTestUser, createTestConnectorDefinition } from '../setup/test-fixtures';
 
 async function fixture() {
   const sql = getTestDb();
@@ -17,11 +18,11 @@ async function fixture() {
     INSERT INTO connections (organization_id, connector_key, slug, status, device_worker_id, visibility)
     VALUES (${org.id}, 'synthetic.source', 'source-notification-test', 'active', ${device.id}::uuid, 'org') RETURNING id
   `;
-  await sql`
-    INSERT INTO connector_definitions (organization_id, key, name, version, status, feeds_schema, auth_schema)
-    VALUES (${org.id}, 'synthetic.source', 'Source', '1.0.0', 'active',
-      ${sql.json({ items: { operations: ['sync'], webhook: { mode: 'trigger', events: ['changed'] } } })}, ${sql.json({ methods: [] })})
-  `;
+  await createTestConnectorDefinition({
+    key: 'synthetic.source', name: 'Source', organization_id: org.id,
+    feeds_schema: { items: { operations: ['sync'], webhook: { mode: 'trigger', events: ['changed'] } } },
+    auth_schema: { methods: [] },
+  });
   const feeds = await sql`
     INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
     VALUES (${org.id}, ${connection.id}, 'items', 'active', '* * * * *', now() + interval '1 hour'),
@@ -127,5 +128,133 @@ describe('source feed notifications', () => {
     `;
     await sql`UPDATE runs SET status = 'completed' WHERE id = ${run.id}`;
     expect(await sourceFeedContextForRun(sql, Number(run.id), device.id, org.id)).toBeUndefined();
+  });
+});
+
+
+describe('buffered delivery admission through existing sync runs', () => {
+  beforeEach(cleanupTestDatabase);
+
+  async function deliveryFixture() {
+    const value = await fixture();
+    const { sql, org, notice } = value;
+    await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL WHERE id = ${notice.feed_id}`;
+    await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({
+      items: { operations: ['delivery'], webhook: { events: ['records'] } },
+    })} WHERE organization_id = ${org.id} AND key = 'synthetic.source'`;
+    return { ...value, notice: { ...notice, batch: {
+      binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [
+        { revision: 1, payload: { id: 'one', body: 'first message' } },
+        { revision: 2, payload: { id: 'two', body: 'second message' } },
+      ],
+    } } };
+  }
+
+  it('persists a whole batch in one run and retains the immutable snapshot during concurrent arrivals', async () => {
+    const { sql, org, device, notice } = await deliveryFixture();
+    const first = await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect(first[0]).toMatchObject({ active: true, ack: null });
+    const [run] = await sql`SELECT id, action_input FROM runs WHERE feed_id = ${notice.feed_id}`;
+    expect(run.action_input.delivery.payload).toEqual(notice.batch);
+    const more = { ...notice, notification_id: 'synthetic-next', batch: {
+      ...notice.batch, records: [...notice.batch.records, { revision: 3, payload: { id: 'three' } }],
+    } };
+    await Promise.all([
+      receiveFeedNotifications(sql, [more], device.id, [org.id]),
+      receiveFeedNotifications(sql, [more], device.id, [org.id]),
+    ]);
+    expect((await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`)).toHaveLength(1);
+    expect((await sql`SELECT action_input FROM runs WHERE id = ${run.id}`)[0].action_input.delivery.payload).toEqual(notice.batch);
+    expect((await sql`SELECT schedule, next_run_at FROM feeds WHERE id = ${notice.feed_id}`)[0])
+      .toMatchObject({ schedule: null, next_run_at: null });
+    await sql`UPDATE runs SET status = 'running', claimed_at = now() - interval '1 day',
+      last_heartbeat_at = now() - interval '1 day' WHERE id = ${run.id}`;
+    expect((await reapStaleRuns()).retriesCreated).toBe(1);
+    const [retry] = await sql`SELECT action_input FROM runs WHERE feed_id = ${notice.feed_id} AND status = 'pending'`;
+    expect(retry.action_input).toEqual(run.action_input);
+  });
+
+  it('admits the remainder after completion without replaying acknowledged revisions or creating idle runs', async () => {
+    const { sql, org, device, notice } = await deliveryFixture();
+    await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    const ack = { ...notice.batch, records: notice.batch.records.map((row) => ({ id: row.payload.id, revision: row.revision })) };
+    await sql`UPDATE runs SET status = 'completed' WHERE feed_id = ${notice.feed_id}`;
+    await sql`UPDATE feeds SET checkpoint = ${sql.json({ source_ack: ack })} WHERE id = ${notice.feed_id}`;
+    await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect((await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`)).toHaveLength(1);
+    const more = { ...notice, notification_id: 'synthetic-third', batch: {
+      ...notice.batch, records: [...notice.batch.records, { revision: 3, payload: { id: 'three', body: 'third message' } }],
+    } };
+    const [receipt] = await receiveFeedNotifications(sql, [more], device.id, [org.id]);
+    expect(receipt.ack).toEqual(ack);
+    const pending = await sql`SELECT action_input FROM runs WHERE feed_id = ${notice.feed_id} AND status = 'pending'`;
+    expect(pending).toHaveLength(1);
+    expect(pending[0].action_input.delivery.payload.records).toEqual([{ revision: 3, payload: { id: 'three', body: 'third message' } }]);
+  });
+
+  it('preserves source failure backoff and rejects foreign scope before admitting payloads', async () => {
+    const { sql, org, device, notice } = await deliveryFixture();
+    const other = await createTestOrganization();
+    expect((await receiveFeedNotifications(sql, [notice], device.id, [other.id]))[0].active).toBe(false);
+    await sql`UPDATE feeds SET consecutive_failures = 2, last_sync_at = now() WHERE id = ${notice.feed_id}`;
+    await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect((await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`)).toHaveLength(0);
+    await sql`UPDATE feeds SET last_sync_at = now() - interval '1 day' WHERE id = ${notice.feed_id}`;
+    await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect((await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`)).toHaveLength(1);
+  });
+
+  it.each(['manifest admission', 'insert conflict'])('retains an unacknowledged batch after %s failure without blocking other notices', async (failure) => {
+    const { sql, org, device, feeds, notice } = await deliveryFixture();
+    await createTestConnectorDefinition({
+      key: 'synthetic.healthy', name: 'Healthy source', organization_id: org.id,
+      feeds_schema: { items: { operations: ['delivery'], webhook: { events: ['records'] } } },
+    });
+    const [healthy] = await sql`
+      INSERT INTO connections (organization_id, connector_key, slug, status, device_worker_id, visibility)
+      VALUES (${org.id}, 'synthetic.healthy', 'healthy-source', 'active', ${device.id}::uuid, 'org') RETURNING id
+    `;
+    await sql`UPDATE feeds SET connection_id = ${healthy.id} WHERE id = ${feeds[1].id}`;
+    const other = { ...notice, feed_id: Number(feeds[1].id), connection_id: Number(healthy.id) };
+    const ack = { ...notice.batch, records: [{ id: 'one', revision: 1 }] };
+    const [artifact] = await sql`SELECT compiled_code, compile_config_hash FROM connector_versions WHERE connector_key = 'synthetic.source'`;
+    await sql`UPDATE feeds SET checkpoint = ${sql.json({ source_ack: ack })} WHERE id = ${notice.feed_id}`;
+    if (failure === 'manifest admission') {
+      await sql`UPDATE connector_versions SET compiled_code = NULL, compile_config_hash = NULL,
+        source_path = 'device-manifest://headless/synthetic.source@1.0.0',
+        compiled_code_hash = 'synthetic-unavailable-manifest' WHERE connector_key = 'synthetic.source'`;
+    } else {
+      // A PostgreSQL error aborts the transaction, unlike a JavaScript throw.
+      // Exercise the same SQLSTATE/constraint as a raced active-run insert.
+      await sql`CREATE FUNCTION synthetic_reject_source_run() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.connector_key = 'synthetic.source' THEN
+            RAISE EXCEPTION 'synthetic active-run conflict'
+              USING ERRCODE = '23505', CONSTRAINT = 'idx_runs_active_sync_per_feed';
+          END IF;
+          RETURN NEW;
+        END $$`;
+      await sql`CREATE TRIGGER synthetic_reject_source_run BEFORE INSERT ON runs
+        FOR EACH ROW EXECUTE FUNCTION synthetic_reject_source_run()`;
+    }
+    try {
+      const receipts = await receiveFeedNotifications(sql, [notice, other], device.id, [org.id]);
+      expect(receipts).toEqual([expect.objectContaining({ feed_id: other.feed_id, active: true, ack: null })]);
+      expect(await sql`SELECT id FROM runs WHERE feed_id = ${notice.feed_id}`).toHaveLength(0);
+      expect(await sql`SELECT id FROM runs WHERE feed_id = ${other.feed_id}`).toHaveLength(1);
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint.source_ack).toEqual(ack);
+    } finally {
+      if (failure === 'insert conflict') {
+        await sql`DROP TRIGGER synthetic_reject_source_run ON runs`;
+        await sql`DROP FUNCTION synthetic_reject_source_run()`;
+      } else {
+        await sql`UPDATE connector_versions SET compiled_code = ${artifact.compiled_code}, compile_config_hash = ${artifact.compile_config_hash},
+          source_path = NULL, compiled_code_hash = NULL WHERE connector_key = 'synthetic.source'`;
+      }
+    }
+    const [retry] = await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
+    expect(retry).toMatchObject({ active: true, ack });
+    const [run] = await sql`SELECT action_input FROM runs WHERE feed_id = ${notice.feed_id}`;
+    expect(run.action_input.delivery.payload.records).toEqual([notice.batch.records[1]]);
   });
 });
