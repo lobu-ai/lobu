@@ -45,6 +45,7 @@ import {
   createTestEvent,
   createTestOrganization,
   createTestUser,
+  insertChatConnectionRow,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 
@@ -198,14 +199,21 @@ describe('derived-event permission envelope', () => {
     const bob = await createTestUser({ email: 'chan-bob@example.com' });
     await addUserToOrganization(alice.id, org.id, 'owner');
     await addUserToOrganization(bob.id, org.id, 'member');
-    const conn = await createTestConnection({
-      organization_id: org.id,
-      connector_key: 'slack',
-      visibility: 'org',
-      createDefaultFeed: false,
-    });
     const TEAM_ID = 'T0ENVELOPE';
     const CHANNEL_ID = 'C0ENG';
+    // Production Slack shape: the ACL sync graphs under the chat RUNTIME id
+    // (`slackinst-…`), the ACL row carries that runtime id, and the
+    // membership edges are claimed under the stored numeric row. A numeric
+    // `String(conn.id)` here would mask a runtime/numeric key mismatch, so
+    // this test uses the runtime path end to end.
+    const RUNTIME_CONN_ID = 'slackinst-T0ENVELOPE';
+    await insertChatConnectionRow({
+      id: RUNTIME_CONN_ID,
+      organizationId: org.id,
+      platform: 'slack',
+      status: 'active',
+      metadata: { teamId: TEAM_ID },
+    });
     // Alice is in #eng; Bob is not. Seed $member entities carrying both claims.
     const sql = getTestDb();
     for (const [user, name, slackUser] of [
@@ -227,7 +235,7 @@ describe('derived-event permission envelope', () => {
     }
     await buildAccessGraph({
       organizationId: org.id,
-      connectionId: String(conn.id),
+      connectionId: RUNTIME_CONN_ID,
       connectorKey: slackAclSource.key,
       resourceNamespace: slackAclSource.resourceNamespace,
       memberIdentities: slackAclSource.memberIdentities,
@@ -235,6 +243,13 @@ describe('derived-event permission envelope', () => {
         { channelId: CHANNEL_ID, name: 'eng', memberSlackUserIds: ['U01ALICE'] },
       ]),
     });
+    // The ACL row must carry the runtime id — the key the gate compares
+    // against after resolving edge claims through their connections row.
+    const aclRows = await sql<{ connection_id: string }[]>`
+      SELECT connection_id FROM authz_source_acl_state
+      WHERE organization_id = ${org.id}
+    `;
+    expect(aclRows.map((r) => r.connection_id)).toContain(RUNTIME_CONN_ID);
 
     const saved = (await saveContent(
       {

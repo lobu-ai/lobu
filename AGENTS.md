@@ -56,7 +56,6 @@
 - One branch = one concern. Never `git stash`; use WIP commits.
 - Prefer `bun`, never npm/yarn/pnpm. Before adding an env var, grep for the one already read, and do not rename existing vars unasked.
 - Block only on irreversible or destructive actions and decisions genuinely the user's; otherwise take the recommended option and flag it in your summary.
-- **Compose before you extend.** Before adding SDK/API/DB surface, prove the need cannot be met by composing existing platform features (Automations, suggestions, approvals, policies, existing tools) — and dogfood that composition first. New surface is a last resort, not a first draft: it needs the Unrecoverables confirmation *plus* that proof.
 - **Batch independent tool calls into one message.** Each call re-reads the current context. Independent greps, a diff plus a file list, a status check plus a log read: send them together. Only genuinely dependent calls go serial.
 - **`make ctx` instead of the git/gh status family.** One call prints branch, working tree, changed-vs-base file list, commits, submodule pointer, and PR + required-check gaps; do not rebuild it by hand.
 - **`make land [N=<pr>]` to merge.** One blocking call: waits for CI, diffs the reported checks against the branch-protection required list, and refuses while anything required has not reported — the `--admin` footgun in step 10. `CHECK_ONLY=1` waits and reports without merging.

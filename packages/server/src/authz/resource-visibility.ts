@@ -43,6 +43,7 @@
 
 import { ACL_RESOURCE_TYPE_SLUG } from '@lobu/connector-sdk';
 import { aclStateExistsSelectSql, enforcedConnectionsSelectSql } from './acl-state.js';
+import { aclConnectionIdSql } from './acl-observability.js';
 import type { AuthzScope } from './scope.js';
 import {
   MANUAL_RELATIONSHIP_CLAIM_KEY,
@@ -108,6 +109,15 @@ export function compileResourceVisibility(
   // connection whose ACL graph is currently enforced. `left(ck, 11)` avoids a
   // LIKE pattern (identifiers may contain `_`/`%`); the connection id is the
   // second `:`-separated segment of `connection:<id>:<owner>`.
+  //
+  // That segment is the STORED numeric row (`connections.id`, written by
+  // `buildAccessGraph` via `identityConnectionId`), while the ACL state is
+  // keyed by the RUNTIME id (`connections.id::text` for data connectors,
+  // the `slackinst-…`/`agentconn-…` slug for chat) — so the segment is
+  // resolved through the `connections` row and compared with the same
+  // `aclConnectionIdSql` expression the sync stamps. Comparing the raw
+  // segment would never match a chat runtime id and would fail closed for
+  // channel members on their own channel-stamped saves.
   const resourceSatisfied = `EXISTS (
         SELECT 1
         FROM public.entity_relationships rr
@@ -125,7 +135,14 @@ export function compileResourceVisibility(
               SELECT 1
               FROM jsonb_object_keys(rr.metadata -> '${RELATIONSHIP_CLAIMS_METADATA_KEY}') AS ck
               WHERE left(ck, 11) = 'connection:'
-                AND split_part(ck, ':', 2) IN (${enforcedConnectionsSelectSql(orgParam)})
+                AND EXISTS (
+                  SELECT 1
+                  FROM public.connections c
+                  WHERE c.organization_id = ${orgParam}
+                    AND c.deleted_at IS NULL
+                    AND c.id::text = split_part(ck, ':', 2)
+                    AND ${aclConnectionIdSql('c')} IN (${enforcedConnectionsSelectSql(orgParam)})
+                )
             )
           )
       )`;
