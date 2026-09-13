@@ -86,6 +86,7 @@ fi
 # contains every one of those in $RUN_DIR so the gate never clobbers the dev's
 # real contexts/login (and gives a fresh DB each run).
 export HOME="$RUN_DIR/home"
+export LOBU_RUNTIME_CACHE_DIR="$HOME/.cache/lobu/runtime"
 
 MOCK_PID=""
 cleanup() {

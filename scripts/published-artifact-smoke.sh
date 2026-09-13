@@ -75,6 +75,7 @@ MOCK_REPLY="ARTIFACT_SMOKE_OK"
 WORK="${SMOKE_WORK:-/tmp/lobu-artifact-smoke}"
 rm -rf "$WORK"; mkdir -p "$WORK"
 export HOME="$WORK/home"; mkdir -p "$HOME"
+export LOBU_RUNTIME_CACHE_DIR="$HOME/.cache/lobu/runtime"
 
 PASSES=0; FAILS=0; SKIPS=0
 pass() { echo "  [OK]   $*"; PASSES=$((PASSES + 1)); }

@@ -8,12 +8,13 @@
 //
 // Local run against the working tree, before publishing:
 //   node scripts/pack-cli-smoke.mjs /tmp/lobu-candidate
-//   node scripts/daemon-mcp-smoke.mjs /tmp/lobu-candidate/node_modules/@lobu/cli/bin/lobu.js
+// To repeat just this smoke using that candidate's verified runtime cache:
+//   node scripts/daemon-mcp-smoke.mjs /tmp/lobu-candidate/node_modules/.bin/lobu /tmp/lobu-candidate/daemon-mcp-logs /tmp/lobu-candidate/runtime
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { cp, mkdtemp, realpath, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -21,23 +22,13 @@ import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-const cli = resolve(process.argv[2] ?? "");
-if (!process.argv[2] || !existsSync(cli)) {
+const cliPath = resolve(process.argv[2] ?? "");
+if (!process.argv[2] || !existsSync(cliPath)) {
   throw new Error(
-    "Usage: daemon-mcp-smoke.mjs <installed-lobu-bin> [failure-log-directory]"
+    "Usage: daemon-mcp-smoke.mjs <installed-lobu-bin> [failure-log-directory] [candidate-runtime-cache]"
   );
 }
-const requireCli = createRequire(cli);
-// Use the actual installed CLI's MCP client dependency, without importing any
-// gateway handlers or source-only test clients.
-const { Client } = await import(
-  pathToFileURL(requireCli.resolve("@modelcontextprotocol/sdk/client/index.js"))
-);
-const { StreamableHTTPClientTransport } = await import(
-  pathToFileURL(
-    requireCli.resolve("@modelcontextprotocol/sdk/client/streamableHttp.js")
-  )
-);
+const cli = await realpath(cliPath);
 // Canonical path: the shell reports its physical cwd, and macOS tmpdirs are
 // symlinks.
 const work = await realpath(await mkdtemp(join(tmpdir(), "lobu-daemon-mcp-")));
@@ -168,6 +159,33 @@ async function json(path, { method = "GET", body, headers = {} } = {}) {
 }
 
 async function connect(token) {
+  // Resolve from the tested artifact, including npm's .bin symlink. New
+  // launchers keep the SDK in the server component that this smoke booted;
+  // older published releases still keep it in the CLI dependency graph.
+  let requireMcp = createRequire(cli);
+  const cliDirectory = resolve(dirname(cli), "..");
+  const catalogPath = join(cliDirectory, "dist/runtime-components.json");
+  if (existsSync(catalogPath)) {
+    const { server } = JSON.parse(readFileSync(catalogPath, "utf8"));
+    const { ensureComponent } = await import(
+      pathToFileURL(join(cliDirectory, "dist/internal/runtime-components.js"))
+    );
+    const serverDirectory = await ensureComponent(server, {
+      cacheRoot: join(home, ".cache", "lobu", "runtime"),
+      offline: true,
+    });
+    requireMcp = createRequire(join(serverDirectory, "package.json"));
+  }
+  const { Client } = await import(
+    pathToFileURL(
+      requireMcp.resolve("@modelcontextprotocol/sdk/client/index.js")
+    )
+  );
+  const { StreamableHTTPClientTransport } = await import(
+    pathToFileURL(
+      requireMcp.resolve("@modelcontextprotocol/sdk/client/streamableHttp.js")
+    )
+  );
   const client = new Client({ name: "lobu-daemon-smoke", version: "1.0.0" });
   clients.push(client);
   await client.connect(
@@ -237,6 +255,19 @@ async function failedCommand(command, input, expectedError) {
 }
 
 async function main() {
+  if (process.argv[4]) {
+    // Pre-publication candidates are not on npm yet. Copy only an explicitly
+    // supplied, already-verified artifact cache into this smoke's private HOME.
+    // Published-artifact runs omit this argument and install from the registry.
+    await cp(
+      resolve(process.argv[4]),
+      join(home, ".cache", "lobu", "runtime"),
+      {
+        recursive: true,
+        verbatimSymlinks: true,
+      }
+    );
+  }
   const server = start("gateway", ["run", "--port", String(port)]);
   await check(
     "installed CLI boots an isolated gateway and Postgres",

@@ -35,10 +35,10 @@ export const COMPONENTS = {
   device: {
     name: "@lobu/runtime-device",
     entries: {
-      daemon: "vendor/cli/dist/commands/daemon.js",
-      automation: "vendor/cli/dist/commands/automation.js",
-      connector: "vendor/cli/dist/commands/connector.js",
-      worker: "vendor/connector-worker/dist/bin.js",
+      daemon: "node_modules/@lobu/cli/dist/commands/daemon.js",
+      automation: "node_modules/@lobu/cli/dist/commands/automation.js",
+      connector: "node_modules/@lobu/cli/dist/commands/connector.js",
+      worker: "node_modules/@lobu/connector-worker/dist/bin.js",
     },
   },
   postgres: {
@@ -59,6 +59,57 @@ export function runtimeCatalog() {
       { ...value, version, verify: "dist/verify.mjs" },
     ])
   );
+}
+
+export function runtimeVerificationSource(key, component) {
+  const verify = [
+    'import { createRequire } from "node:module";',
+    'import { readFileSync } from "node:fs";',
+    "const require = createRequire(import.meta.url);",
+    'const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));',
+  ];
+  if (key === "device")
+    verify.push(
+      'import { spawnSync } from "node:child_process";',
+      'import { fileURLToPath } from "node:url";',
+      `const entries = ${JSON.stringify(component.entries)};`,
+      "// Import installed commands: name resolution alone misses broken transitive imports.",
+      "for (const [name, entry] of Object.entries(entries)) {",
+      '  const url = new URL("../" + entry, import.meta.url);',
+      "  try {",
+      '    if (name === "worker") {',
+      // The worker is an executable; importing it runs main and exits.
+      '      const child = spawnSync(process.execPath, [fileURLToPath(url), "--help"], { stdio: ["ignore", "ignore", "inherit"], timeout: 30000 });',
+      "      if (child.error) throw child.error;",
+      '      if (child.status !== 0) throw new Error("worker --help exited " + (child.status ?? child.signal));',
+      "    } else await import(url);",
+      "  } catch (error) {",
+      '    throw new Error("Cannot load device entry " + name + " (" + entry + "): " + error.message, { cause: error });',
+      "  }",
+      "}"
+    );
+  verify.push(
+    "for (const name of Object.keys(pkg.dependencies ?? {})) {",
+    '  if (name === "@lobu/connector-worker") import.meta.resolve("@lobu/connector-worker/daemon");',
+    "  else import.meta.resolve(name);",
+    "}"
+  );
+  if (key === "postgres")
+    verify.push(
+      'const pg = await import("./index.mjs"); pg.injectPgvector(pg.resolveEmbeddedNativeDir());'
+    );
+  if (key === "embeddings") verify.push('await import("./embeddings.js");');
+  if (key === "device")
+    verify.push(
+      'await import("@lobu/connector-worker/executor/runtime");',
+      'const nativeRequire = createRequire(import.meta.resolve("@lobu/connector-worker/daemon"));'
+    );
+  else verify.push("const nativeRequire = require;");
+  if (key === "server" || key === "device")
+    verify.push(
+      'const major = Number(process.versions.node.split(".")[0]); if (major !== 25) { const ivm = nativeRequire(major >= 26 ? "isolated-vm-next" : "isolated-vm"); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); }'
+    );
+  return `${verify.join("\n")}\n`;
 }
 
 function copy(source, destination) {
@@ -346,32 +397,10 @@ export async function buildRuntimeComponents() {
         writeJson(path, pkg);
       }
     }
-    const verify = [
-      'import { createRequire } from "node:module";',
-      'import { readFileSync } from "node:fs";',
-      "const require = createRequire(import.meta.url);",
-      'const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));',
-      "for (const name of Object.keys(pkg.dependencies ?? {})) {",
-      '  if (name === "@lobu/connector-worker") import.meta.resolve("@lobu/connector-worker/daemon");',
-      "  else import.meta.resolve(name);",
-      "}",
-    ];
-    if (key === "postgres")
-      verify.push(
-        'const pg = await import("./index.mjs"); pg.injectPgvector(pg.resolveEmbeddedNativeDir());'
-      );
-    if (key === "embeddings") verify.push('await import("./embeddings.js");');
-    if (key === "device")
-      verify.push(
-        'await import("@lobu/connector-worker/executor/runtime");',
-        'const nativeRequire = createRequire(import.meta.resolve("@lobu/connector-worker/daemon"));'
-      );
-    else verify.push("const nativeRequire = require;");
-    if (key === "server" || key === "device")
-      verify.push(
-        'const major = Number(process.versions.node.split(".")[0]); if (major !== 25) { const ivm = nativeRequire(major >= 26 ? "isolated-vm-next" : "isolated-vm"); const isolate = new ivm.Isolate({ memoryLimit: 8 }); isolate.dispose(); }'
-      );
-    writeFileSync(join(directory, "dist/verify.mjs"), `${verify.join("\n")}\n`);
+    writeFileSync(
+      join(directory, "dist/verify.mjs"),
+      runtimeVerificationSource(key, component)
+    );
     writeJson(join(directory, "package.json"), manifest);
     writeJson(join(directory, "dist/component.json"), component);
   }

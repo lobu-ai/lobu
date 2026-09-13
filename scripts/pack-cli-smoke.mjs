@@ -204,6 +204,16 @@ run(
   [join(root, "scripts/verify-cli-runtime.mjs"), destination],
   destination
 );
+run(
+  process.execPath,
+  [
+    join(root, "scripts/daemon-mcp-smoke.mjs"),
+    join(destination, "node_modules/.bin/lobu"),
+    join(destination, "daemon-mcp-logs"),
+    cacheRoot,
+  ],
+  destination
+);
 console.log(
   `Candidate CLI: ${join(destination, "node_modules/@lobu/cli/bin/lobu.js")}`
 );
