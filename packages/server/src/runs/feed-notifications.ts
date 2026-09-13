@@ -2,7 +2,7 @@ import { FeedSourceAckSchema, type PollRequest } from '@lobu/core/contracts/work
 import { Value } from '@sinclair/typebox/value';
 import type { DbClient, DbQuery } from '../db/client';
 import { pgTextArray } from '../db/client';
-import { feedBackoff } from '../connectors/feed-backoff';
+import { feedBackoff, feedBackoffDelayMs } from '../connectors/feed-backoff';
 import { notifyWorkerWork } from './worker-wakeup';
 import { createSyncRunWithClient } from './queue-service';
 
@@ -80,10 +80,10 @@ export async function receiveFeedNotifications(
           ? new Map(ack.records.map((record) => [record.id, record.revision])) : new Map<string, number>();
         const records = batch.records.filter((record) =>
           acknowledged.get(String(record.payload.id)) !== record.revision);
-        const retryDelay = Math.min(feedBackoff.maxMs,
-          feedBackoff.baseMs * 2 ** Math.min(Math.max(Number(feed.consecutive_failures) - 1, 0), 30));
-        const retryReady = Number(feed.consecutive_failures) === 0 || !feed.last_sync_at ||
-          Date.now() >= new Date(feed.last_sync_at).getTime() + retryDelay;
+        // Same backoff as the SQL in requestFeedSync, measured from the last
+        // executed run rather than from next_run_at, which a delivery feed lacks.
+        const retryReady = !feed.last_sync_at || Date.now() >=
+          new Date(feed.last_sync_at).getTime() + feedBackoffDelayMs(Number(feed.consecutive_failures));
         if (retryReady && (records.length > 0 || batch.recovery === true)) {
           await createSyncRunWithClient(tx, notice.feed_id, false, {
             id: notice.notification_id, event: 'records', payload: { ...batch, records },

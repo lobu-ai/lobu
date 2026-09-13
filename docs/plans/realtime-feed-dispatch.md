@@ -1,6 +1,6 @@
 # Realtime feed dispatch: current architecture and consolidation proposal
 
-Baseline snapshot: Lobu `a8e677aa0eb0d41069eb1fc0978403c0cea71235`, with Owletto `41de0c560165793a02985192ef2798552b22a061`. Draft implementation audited at Lobu `678c6bbc0` and Owletto `63cbc7a0` on 2026-09-12; the cleanup below is additional working-tree work. The baseline inventory and historical sequence diagrams are labelled separately from this draft.
+Baseline snapshot: Lobu `a8e677aa0eb0d41069eb1fc0978403c0cea71235`, with Owletto `41de0c560165793a02985192ef2798552b22a061`. Draft implementation audited at Lobu `678c6bbc0` and Owletto `63cbc7a0` on 2026-09-12; the cleanup described below landed in later commits on the same branch. The baseline inventory and historical sequence diagrams are labelled separately from this draft.
 
 The WhatsApp live-source transport was already implemented. Consolidation is in draft [PR #3519](https://github.com/lobu-ai/lobu/pull/3519), with browser changes in [Owletto PR #1090](https://github.com/lobu-ai/owletto/pull/1090). Nothing from these drafts has merged or deployed. The last live inspection found the WhatsApp feed advertising only `sync` with a five-minute schedule; that is not the requested result or a fresh provider test.
 
@@ -64,7 +64,7 @@ flowchart TD
 
 A complete WhatsApp message still invokes connector code to interpret the payload. It needs **no additional source collection or browser reread**. This corrects the earlier proposal that placed final normalization in the page and bypassed connector execution. Removing a fetch does not remove isolate execution or its dispatch requirements.
 
-The existing SDK already provides `sync`, `read`, actions, webhook registration, `EventEnvelope` results and a Chrome dispatch host capability. Its executable feed definition currently exposes only `sync` and `read`; the inbound webhook paths use server routing/handling, while browser notifications carry IDs only. The missing seam is a generic, bounded pushed input delivered to connector code with the same event output and host capabilities. The SDK hook is now implemented locally under the instruction to proceed. The storage and acknowledgment refinement is still pending the explicit confirmation noted above.
+The existing SDK already provides `sync`, `read`, actions, webhook registration, `EventEnvelope` results and a Chrome dispatch host capability. At the baseline, executable feeds exposed only `sync` and `read`, and browser notifications carried IDs only. The branch adds generic bounded input delivery with the same event output and host capabilities, using existing run input and exact-revision acknowledgment. Server webhook migration and its separately proposed batching/index refinement remain deferred.
 
 Reuse the existing `store` / `trigger` meanings as processing: emit from complete delivered data, or request collection for incomplete hints. The connector owns that choice; there is no additional user-facing subscription mode. Prefer extending existing execution and delivery primitives over a second source-processing engine. Do not move provider-specific normalization into generic extension or gateway code.
 
@@ -72,7 +72,7 @@ Push inputs must survive disconnects and process restarts. Delivery acceptance m
 
 Initial observer setup, disconnect recovery, history catch-up and required media/details can invoke collection through the connector. The observer lives where the source events occur; it does not require an isolate to run forever. Arbitrary future native device capabilities may still require host work: the goal is zero provider-specific core changes for integrations using supported capabilities.
 
-Prove the boundary with an installed external connector bundle, a real browser-originated WhatsApp message, and a provider webhook. Check complete payload, incomplete hint, scheduled pull, authorized browser action, duplicate/revised delivery and reconnect recovery. Verify the payload handler starts promptly: the measured 10-second worker polling delay must not simply move onto the new push execution path.
+Prove this branch with an installed external connector bundle and a real browser-originated WhatsApp message before merge. Provider-webhook parity belongs to the deferred migration. Check complete payload, incomplete hint, scheduled pull, authorized browser action, duplicate/revised delivery and reconnect recovery. Verify the payload handler starts promptly: the measured 10-second worker polling delay must not simply move onto the new push execution path.
 
 ## Implementation sequence and acceptance gates
 
@@ -252,7 +252,7 @@ flowchart TD
 
 Postgres state is authoritative. A notification is a prompt to check it, and contains no executable authority. Losing a notification must leave durable work recoverable. This works across gateway replicas because notifications cross processes through Postgres; an in-memory callback alone would not.
 
-The proposed worker transport is a bounded held request on the **existing** `POST /api/workers/poll`. The optional `wait_seconds` field is the proposed protocol change awaiting approval. It is not implemented.
+The worker transport is a bounded held request on the **existing** `POST /api/workers/poll`. The optional `wait_seconds` field (0–25) is the protocol change; the draft implements it in `PollRequestSchema`, `pollWorkerJob` and the worker poll loop, which holds a request for 25 seconds only while it has free capacity.
 
 ```mermaid
 sequenceDiagram
@@ -260,7 +260,7 @@ sequenceDiagram
   participant G as Gateway
   participant P as Postgres
   participant E as Extension or webhook sender
-  W->>G: Existing poll request, wait_seconds = 15
+  W->>G: Existing poll request, wait_seconds = 25
   G->>P: Listen, then check existing eligible work
   Note over W,G: Request remains open while no eligible work exists
   E->>G: Source change arrives after 200 ms
@@ -268,7 +268,7 @@ sequenceDiagram
   P-->>G: Wake notification on each listening replica
   G->>P: Recheck eligibility; materialize and atomically claim work
   G-->>W: Return job promptly after arrival and claim
-  Note over W,G: The 15 seconds is a maximum idle wait, not an execution delay
+  Note over W,G: The 25 seconds is a maximum idle wait, not an execution delay
 ```
 
 If no work arrives, the request expires at its bound and the worker opens another one without adding the old idle sleep. New browser source hints must be sent promptly while a job request is held. The existing zero-capacity notification path provides a way to send those hints without accidentally claiming an additional job; the extension still needs the appropriate implementation and race tests.
@@ -304,7 +304,7 @@ The audit covered the 23 bundled definitions and the existing server conversatio
 | Feed messages cannot yet use the existing bot conversation path | Connector-declared stable message/conversation identity, direction, context access and reply/draft action mapping. Reuse Automation activation planning, conversation turns and action approval. | A manually maintained provider registry in generic core once connector adapters can supply the same capabilities; provider-specific routing and reply glue superseded by that contract. Keep useful adapter implementations. |
 | New activity is confused with stored-event changes | Distinguish live messages from historical backfill and outbound echoes. Derive stable activation identity from source messages; preserve Gmail's thread storage identity while emitting a signal for a new message within a thread. | The prior-successful-sync heuristic as a proxy for completed backfill, and any duplicated activation logic replaced by the shared path. |
 | Chat capability declarations are inconsistent | Use the existing event catalog and Automation editor across all six current chat integrations. Slack alone declares `message.created` and reply/steering capabilities in the inspected bundled definitions. | Slack-only shared catalog assumptions and hardcoded Slack wording in the generic conversation UI. |
-| Connector tests duplicate the SDK | Use the actual SDK runtime, schemas, pagination and checkpoint helpers. Keep controlled external-I/O fixtures. | Removed the duplicate runtime classes and pure helpers: 109 deleted lines, 8 added. The whole connector suite reproduced four `onDelivery` failures before the change and passes all 512 tests afterward. |
+| Connector tests duplicate the SDK | Use the actual SDK runtime, schemas, pagination and checkpoint helpers. Keep controlled external-I/O fixtures. | Removed the duplicate runtime classes and pure helpers: 109 deleted lines, 8 added. The whole connector suite reproduced four `onDelivery` failures before the change and passes afterward (518 tests at the audited head). |
 
 The baseline `deriveConnectorActivationSignals` heuristic activates only inserted source records after a prior successful sync. The WhatsApp change now uses its fixed live boundary and explicit signals; `automation_signals: []` suppresses activation and omission retains generic derivation. This prevents historical pages from activating after page one and allows live arrivals during backfill. Gmail thread-update semantics and shared bot conversation/reply mapping remain separate work. These are code-path and integration-test findings, not live-message evidence.
 
