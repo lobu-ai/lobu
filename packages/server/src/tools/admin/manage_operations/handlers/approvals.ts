@@ -1669,7 +1669,7 @@ export async function handleApprove(
 				AND organization_id = ${ctx.organizationId}
 				AND approval_status = 'pending'
 				AND run_type = 'action'
-			RETURNING id, connection_id, action_key, action_input, created_by_user_id, claimed_by
+			RETURNING id, connection_id, action_key, action_input, created_by_user_id, claimed_by, run_metadata
 		`;
 		if (rows.length === 0) return null;
 		// The confirmed card's event id is the run's approval identity for this
@@ -1695,6 +1695,7 @@ export async function handleApprove(
 		action_key: string;
 		action_input: Record<string, unknown> | null;
 		created_by_user_id: string | null;
+		run_metadata: Record<string, unknown> | null;
 	};
 
 	if (resolved.operation.backend === "local_action") {
@@ -1719,7 +1720,7 @@ export async function handleApprove(
 		(run.action_input ?? {}) as Record<string, unknown>,
 		run.created_by_user_id,
 		undefined,
-		{ deferTerminalWrite: true, claimedBy: inlineOwner },
+		{ deferTerminalWrite: true, claimedBy: inlineOwner, runMetadata: run.run_metadata },
 	);
 
 	if (result.status === "completed") {
