@@ -320,7 +320,7 @@ expect_fail_grep "lobu start alias -> run handler" "already in use" "$PROJ" star
 
 # Trigger loopback auth (local-init) + resolve the bootstrap org slug.
 runlobu "$PROJ" whoami -c local
-ORG="$( ( cd "$PROJ" && node "$LOBU_BIN" org list --json -c local 2>/dev/null ) | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const parsed=JSON.parse(s); const orgs=Array.isArray(parsed) ? parsed : parsed.organizations; const org=orgs?.find(o => o.is_member) ?? orgs?.[0]; if (org?.slug) process.stdout.write(org.slug); });' )"
+ORG="$( ( cd "$PROJ" && node "$LOBU_BIN" whoami --json -c local 2>/dev/null ) | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const parsed=JSON.parse(s); const slug=parsed.orgSlug ?? parsed.personalOrgSlug; if (slug) process.stdout.write(slug); });' )"
 [ -n "$ORG" ] || die "could not resolve the local org slug (lobu org current -c local)"
 echo ">> resolved local org: $ORG"
 
