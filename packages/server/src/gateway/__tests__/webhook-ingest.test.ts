@@ -171,19 +171,19 @@ async function seedWebhookEventAutomation({
 			SELECT id, id, ${ORG}, ${AGENT}, ${creatorId},
 			       'Webhook alert processor', 'webhook-alert-' || id, 'active',
 			       ${tx.json([
-					{
-						kind: "event",
-						source: "connector",
-						connector_key: "webhook",
-						connection_id: connectionId,
-						event_types: ["delivery.received"],
-						match: { semantic_type: semanticType },
-						execution: "turn",
-						active_run: "queue",
-						output: "silent",
-						skip_if_unchanged: true,
-					},
-				])}::jsonb
+								{
+									kind: "event",
+									source: "connector",
+									connector_key: "webhook",
+									connection_id: connectionId,
+									event_types: ["delivery.received"],
+									match: { semantic_type: semanticType },
+									execution: "turn",
+									active_run: "queue",
+									output: "silent",
+									skip_if_unchanged: true,
+								},
+							])}::jsonb
 			FROM next_id
 			RETURNING id
 		`;
@@ -366,7 +366,9 @@ describe("handleWebhookIngest signature auth (connector webhooks)", () => {
 			sigRow(githubSigConfig),
 			delivery(null, {
 				raw: tampered,
-				headers: { "x-hub-signature-256": sign(signedOver, { prefix: "sha256=" }) },
+				headers: {
+					"x-hub-signature-256": sign(signedOver, { prefix: "sha256=" }),
+				},
 			}),
 		);
 		expect(res.status).toBe(401);
@@ -375,10 +377,7 @@ describe("handleWebhookIngest signature auth (connector webhooks)", () => {
 
 	test("rejects a missing signature header", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const res = await ingest(
-			sigRow(githubSigConfig),
-			delivery({ issue: 1 }),
-		);
+		const res = await ingest(sigRow(githubSigConfig), delivery({ issue: 1 }));
 		expect(res.status).toBe(401);
 	});
 
@@ -807,7 +806,9 @@ describe("ChatInstanceManager webhook wiring", () => {
 			getPublicGatewayUrl: () => "",
 			getSecretStore: () => secretStore,
 			getConnectionStore: () => connectionStore,
-			getAutomationSubscriptionService: () => ({ resolveForConnection: async () => null }),
+			getAutomationSubscriptionService: () => ({
+				resolveForConnection: async () => null,
+			}),
 			getCommandRegistry: () => undefined,
 		};
 		manager.publicGatewayUrl = "";
@@ -877,8 +878,13 @@ describe("ChatInstanceManager webhook wiring", () => {
 				{} as never,
 				toolContext,
 			);
-			expect("error" in missingSlug ? missingSlug.error : "").toMatch(
-				/non-numeric slug/i,
+			expect(
+				"error" in missingSlug ? missingSlug.error : undefined,
+			).toBeUndefined();
+			if (!("connection" in missingSlug))
+				throw new Error("expected connection");
+			expect((missingSlug.connection as { slug: string }).slug).toMatch(
+				/^agentconn-missing-slug-webhook-[0-9a-f]{6}$/,
 			);
 
 			const missingToken = await manageConnections(
@@ -891,7 +897,9 @@ describe("ChatInstanceManager webhook wiring", () => {
 				{} as never,
 				toolContext,
 			);
-			expect("error" in missingToken ? missingToken.error : "").toMatch(/token/i);
+			expect("error" in missingToken ? missingToken.error : "").toMatch(
+				/token/i,
+			);
 
 			const numericSlug = await manageConnections(
 				{
@@ -921,7 +929,9 @@ describe("ChatInstanceManager webhook wiring", () => {
 			);
 			expect("error" in created ? created.error : undefined).toBeUndefined();
 			if (!("connection" in created)) {
-				throw new Error("Webhook connection creation did not return a connection");
+				throw new Error(
+					"Webhook connection creation did not return a connection",
+				);
 			}
 			const connectionId = Number((created.connection as { id: number }).id);
 			const automation = await manageAutomations(
@@ -949,26 +959,20 @@ describe("ChatInstanceManager webhook wiring", () => {
 				{} as never,
 				toolContext,
 			);
-			if (
-				automation.action !== "create" ||
-				!("automation_id" in automation)
-			) {
+			if (automation.action !== "create" || !("automation_id" in automation)) {
 				throw new Error("Webhook Automation creation did not complete");
 			}
 
 			const response = await manager.handleIngestWebhook(
 				"supported-webhook",
-				new Request(
-					"http://gateway.test/api/v1/webhooks/supported-webhook",
-					{
-						method: "POST",
-						body: JSON.stringify({ version: "2026.08.31" }),
-						headers: {
-							"content-type": "application/json",
-							authorization: `Bearer ${token}`,
-						},
+				new Request("http://gateway.test/api/v1/webhooks/supported-webhook", {
+					method: "POST",
+					body: JSON.stringify({ version: "2026.08.31" }),
+					headers: {
+						"content-type": "application/json",
+						authorization: `Bearer ${token}`,
 					},
-				),
+				}),
 			);
 			expect(response.status).toBe(202);
 			const rows = await eventRows("supported-webhook");
@@ -1051,7 +1055,8 @@ describe("ChatInstanceManager webhook wiring", () => {
 			  AND slug = ${runtimeConnectionIdToSlug(created.id)}
 			LIMIT 1
 		`;
-		if (!connection) throw new Error("Webhook connection projection was not created");
+		if (!connection)
+			throw new Error("Webhook connection projection was not created");
 
 		const automationId = await seedWebhookEventAutomation({
 			connectionId: Number(connection.id),
@@ -1060,7 +1065,10 @@ describe("ChatInstanceManager webhook wiring", () => {
 		const makeRequest = () =>
 			new Request(`http://gateway.test/api/v1/webhooks/${created.id}`, {
 				method: "POST",
-				body: JSON.stringify({ title: "Database unavailable", severity: "critical" }),
+				body: JSON.stringify({
+					title: "Database unavailable",
+					severity: "critical",
+				}),
 				headers: {
 					"content-type": "application/json",
 					authorization: `Bearer ${token}`,
@@ -1078,7 +1086,8 @@ describe("ChatInstanceManager webhook wiring", () => {
 		expect(new Set(concurrentBodies.map((body) => body.id)).size).toBe(1);
 		expect(concurrentBodies.some((body) => body.duplicate === true)).toBe(true);
 		const firstBody = concurrentBodies[0];
-		if (!firstBody) throw new Error("Webhook delivery returned no response body");
+		if (!firstBody)
+			throw new Error("Webhook delivery returned no response body");
 
 		const runs = await sql<{
 			approved_input: Record<string, unknown>;
@@ -1228,7 +1237,9 @@ describe("ChatInstanceManager webhook wiring", () => {
 	// directly). We hold the signing secret, so we compute a real GitHub-style
 	// HMAC — the only thing not covered is the live-OAuth `registerWebhook` call
 	// and the provider's own POST, which need real credentials + a public URL.
-	async function registeredGithubConnection(connectionStore: any): Promise<string> {
+	async function registeredGithubConnection(
+		connectionStore: any,
+	): Promise<string> {
 		const { orgContext } = await import("../../lobu/stores/org-context.js");
 		const id = "whk-gh-e2e";
 		// Simulate a connection AFTER registration stamped the scheme + secret.
@@ -1354,7 +1365,9 @@ describe("connector-connection webhook bridge (connections table)", () => {
 			getPublicGatewayUrl: () => "",
 			getSecretStore: () => secretStore,
 			getConnectionStore: () => connectionStore,
-			getAutomationSubscriptionService: () => ({ resolveForConnection: async () => null }),
+			getAutomationSubscriptionService: () => ({
+				resolveForConnection: async () => null,
+			}),
 			getCommandRegistry: () => undefined,
 		};
 		manager.publicGatewayUrl = "";
@@ -1530,7 +1543,11 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		const raw = JSON.stringify({
 			action: "opened",
 			issue: { number: 7, title: "Bridge works" },
-			repository: { full_name: "lobu-ai/lobu", name: "lobu", owner: { login: "lobu-ai" } },
+			repository: {
+				full_name: "lobu-ai/lobu",
+				name: "lobu",
+				owner: { login: "lobu-ai" },
+			},
 		});
 		const res = await app.fetch(
 			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
