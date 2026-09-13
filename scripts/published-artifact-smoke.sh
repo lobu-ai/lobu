@@ -69,6 +69,8 @@ case "$PUBLISH_WAIT" in
     exit 1
     ;;
 esac
+# Bash arithmetic treats leading zeros as octal; validated seconds are decimal.
+PUBLISH_WAIT=$((10#$PUBLISH_WAIT))
 PUBLISH_POLL=10
 MOCK_REPLY="ARTIFACT_SMOKE_OK"
 

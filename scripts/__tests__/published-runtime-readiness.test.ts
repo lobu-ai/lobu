@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,6 +167,38 @@ describe("published runtime readiness", () => {
     expect(smoke).toContain(
       '"$INSTALL_DIR/node_modules/@lobu/cli/dist/runtime-components.json"'
     );
+  });
+
+  it("uses decimal seconds for validated wait settings, including leading zeros", async () => {
+    const smoke = await Bun.file(
+      new URL("../published-artifact-smoke.sh", import.meta.url)
+    ).text();
+    const configurationStart = smoke.indexOf(
+      'PUBLISH_WAIT="${PUBLISH_WAIT:-600}"'
+    );
+    const configurationEnd = smoke.indexOf("MOCK_REPLY=", configurationStart);
+    expect(configurationStart).toBeGreaterThanOrEqual(0);
+    expect(configurationEnd).toBeGreaterThan(configurationStart);
+    const configuration = smoke.slice(configurationStart, configurationEnd);
+    for (const [input, seconds] of [
+      ["08", 8],
+      ["0010", 10],
+      ["0008", 8],
+      ["0", 0],
+      ["000", 0],
+      ["600", 600],
+    ] as const) {
+      const result = spawnSync(
+        "bash",
+        [
+          "-euc",
+          `${configuration}\nprintf '%s:%s\\n' "$((PUBLISH_WAIT - 0))" "$PUBLISH_POLL"`,
+        ],
+        { encoding: "utf8", env: { ...process.env, PUBLISH_WAIT: input } }
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(`${seconds}:10`);
+    }
   });
 
   it("runs a pinned Bun consumer as nonroot in addition to all four Node environments", async () => {
