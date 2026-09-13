@@ -62,7 +62,7 @@ The same MCP endpoint works with **Claude Code, Codex, OpenCode, Antigravity, Ch
 
 Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/) · [Grok](https://lobu.ai/connect-from/grok/)
 
-Download Lobu: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/download/Lobu.dmg) · [Chrome extension](https://chromewebstore.google.com/detail/jhgcecbdpnoehfnhpdfihlchjddapepi)
+Download Lobu: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/download/Owletto.dmg) · [Chrome extension](https://chromewebstore.google.com/detail/jhgcecbdpnoehfnhpdfihlchjddapepi)
 
 > Upgrading from the Owletto-named Mac build? Delete `/Applications/Owletto.app`
 > after installing. Both names share one app identity, and the old bundle would
