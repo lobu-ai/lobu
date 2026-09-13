@@ -495,6 +495,21 @@ describe('routeAction per-action enforcement', () => {
         }
       )
     ).rejects.toThrow(/requires an MCP session with admin access/i);
+    // The denial must name the remedy, not just the tier (lobu#3449): the
+    // caller re-authorizes with the admin scope, no transport 403 required.
+    await expect(
+      routeAction(
+        'manage_connections',
+        'install_connector',
+        {
+          ...memberWriteCtx,
+          memberRole: 'admin',
+        },
+        {
+          install_connector: async () => ({ ok: true }),
+        }
+      )
+    ).rejects.toThrow(/grant the mcp:admin scope/i);
   });
 
   it('preserves system reaction calls', async () => {
