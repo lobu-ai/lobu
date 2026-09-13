@@ -35,20 +35,6 @@ export function enforcedConnectionsSelectSql(orgParam: string): string {
 }
 
 /**
- * SQL subquery (no leading/trailing space) selecting the `connection_id`s that
- * have ANY `authz_source_acl_state` row — i.e. every connection ONBOARDED into
- * authz, regardless of whether it is currently enforcing. The complement
- * (`NOT IN` this set) is the "never graphed → legacy fence" case; a connection
- * that IS in this set but NOT in {@link enforcedConnectionsSelectSql} is
- * onboarded-but-stale and must fail closed. `orgParam` is an already-bound
- * `$N::text` placeholder. Returns the bare `SELECT …` (caller wraps in IN/NOT IN).
- */
-export function aclStateExistsSelectSql(orgParam: string): string {
-  return `SELECT connection_id FROM public.authz_source_acl_state
-    WHERE organization_id = ${orgParam}`;
-}
-
-/**
  * Per-connection enforcement state, the single shape BOTH the gate
  * (`./channel-visibility`) and the audience read (`./audience`) project from the
  * `authz_source_acl_state` row:
