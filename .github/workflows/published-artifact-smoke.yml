@@ -93,6 +93,14 @@ jobs:
             apt-get install -y --no-install-recommends nodejs
           fi
 
+          # setup-bun downloads bun-linux-x64.zip and shells out to unzip to
+          # extract it, which node:22-bookworm-slim does not ship: the action
+          # aborts before Bun is installed and the leg never reaches its smoke.
+          # Only the bun cells run that action, so only they need the package.
+          if [ -n "${{ matrix.bun }}" ]; then
+            apt-get install -y --no-install-recommends unzip
+          fi
+
           node --version
           getconf GNU_LIBC_VERSION || ldd --version | head -1
 
