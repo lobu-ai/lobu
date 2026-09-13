@@ -172,6 +172,12 @@ export function compileResourceVisibility(
   // Ordinary content (no linked resource) keeps the never-graphed legacy
   // path; stamped content faces the all-required envelope. One `EXISTS` over
   // the linked set decides which arm applies, so the unnest runs once per row.
+  //
+  // Soft-deleted connections are NOT fenced here: `neverGraphed` filters
+  // `c.deleted_at IS NULL`, so an event on a deleted-but-graphed connection
+  // takes the legacy arm. The fence comes from `compileConnectionFkVisibility`
+  // (connection-visibility.ts), which is always composed in front of this
+  // gate at every seam — never use this compiler standalone.
   const sql = `AND (
       (${tableAlias}.interaction_type <> 'none'
       AND EXISTS (
