@@ -1,4 +1,5 @@
 import { ToolUserError } from "../utils/errors";
+import { meetsClientVersionFloor } from "../worker-api/client-version-floor";
 
 export const DEFAULT_PAGE_ACTIVATION_SECONDS = 86_400;
 
@@ -26,9 +27,12 @@ export function normalizePageActivationUrls(values: string[]): string[] {
 }
 
 // Chrome extension 0.6.1 is the first release that verifies the trusted exact
-// target URL itself before acting on an activated tab.
+// target URL itself before acting on an activated tab. This is a client
+// version floor for one feature, so it reuses the shared floor comparator
+// against a floor of its own: the gate tracks the release that added the
+// capability, not whatever MIN_CLIENT_VERSION currently enforces.
+const EXACT_PAGE_ACTIVATION_FLOOR = new Map([["chrome-extension", "0.6.1"]]);
+
 export function supportsExactPageActivation(version: string | null | undefined): boolean {
-	if (!version || !/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(version)) return false;
-	const [major, minor, patch] = version.split(".").map(Number);
-	return major > 0 || minor > 6 || (minor === 6 && patch >= 1);
+	return meetsClientVersionFloor("chrome-extension", version, EXACT_PAGE_ACTIVATION_FLOOR);
 }

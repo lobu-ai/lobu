@@ -27,8 +27,10 @@
  * never gated — enforcement applies to user-scoped device polls only
  * (see pollWorkerJob).
  *
- * Version shape follows the existing convention (supportsExactPageActivation):
- * dotted numerics `major.minor.patch[.build]`, compared numerically.
+ * Version shape is the convention every first-party client already reports:
+ * dotted numerics `major.minor.patch[.build]`, compared numerically. The
+ * per-feature page-activation gate runs on this comparator too, against a
+ * fixed floor of its own rather than MIN_CLIENT_VERSION.
  */
 
 import { createLogger } from '@lobu/core';

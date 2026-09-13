@@ -31,10 +31,13 @@ describe("exact page URL identity on server and Chrome", () => {
     expect(() => normalizePageActivationUrls([])).toThrow();
     expect(() => normalizePageActivationUrls(Array.from({ length: 9 }, (_, i) => `https://example.test/${i}`))).toThrow();
   });
-  it.each([null, "", "garbage", "0.6.0", "0.5.99"])("rejects an incompatible extension %s", (version) => {
+  // The gate now runs on the shared client version floor, so these cases are
+  // the only thing pinning its answers: asserting it agrees with the floor
+  // helper would compare the implementation against itself.
+  it.each([null, undefined, "", "garbage", "1.2", "0.6", "v0.6.1", "0.6.0", "0.5.99"])("rejects an incompatible extension %s", (version) => {
     expect(supportsExactPageActivation(version)).toBe(false);
   });
-  it.each(["0.6.1", "0.6.1.1", "0.7.0", "1.0.0"])("accepts a compatible extension %s", (version) => {
+  it.each(["0.6.1", "0.6.1.1", "0.6.2", "0.7.0", "1.0.0", "10.0.0", "0.60.0"])("accepts a compatible extension %s", (version) => {
     expect(supportsExactPageActivation(version)).toBe(true);
   });
 });
