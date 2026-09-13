@@ -81,12 +81,12 @@ for the predicate string.
 
 The Chrome extension story on macOS is already solved by existing
 infrastructure — no new auth surface needed in this PR. The Mac app
-installs itself as a Chrome native-messaging host (`ai.owletto.bridge`)
+installs itself as a Chrome native-messaging host (`ai.lobu.bridge`)
 at first launch into every Chromium-family browser's
 `NativeMessagingHosts/` directory (see
-`packages/owletto/apps/mac/Lobu/ChromeBridgeHost.swift`). The flow:
+`packages/owletto/apps/mac/Owletto/ChromeBridgeHost.swift`). The flow:
 
-1. Extension calls `chrome.runtime.connectNative("ai.owletto.bridge")`
+1. Extension calls `chrome.runtime.connectNative("ai.lobu.bridge")`
    with `{op: "pair", platform: "chrome-extension"}`.
 2. Chrome spawns the Mac app as a short-lived stdio child, which routes
    to `NativeMessagingLoop.run()`.

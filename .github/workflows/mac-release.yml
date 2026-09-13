@@ -113,9 +113,9 @@ jobs:
       #      an app that cannot launch its worker runtime.
       #   4-7. The scheme name, app display name, bundle identifier, and
       #      Sparkle public key must match what the rest of the workflow and
-          #      installed apps depend on. A rename inside owletto (e.g. scheme
-          #      target renames, bundle id `ai.lobu.mac` drift)
-      #      would pass the path checks above but break the build or, worse,
+      #      installed apps depend on. A rename inside owletto (e.g. scheme
+      #      target renames, bundle id `ai.lobu.mac` drift) would pass the
+      #      path checks above but break the build or, worse,
       #      silently break auto-update for installed users.
       - name: Verify release contract (submodule + Mac source layout)
         shell: bash

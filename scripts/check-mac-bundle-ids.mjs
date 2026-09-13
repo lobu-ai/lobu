@@ -12,10 +12,13 @@
  * app, it installs a second copy beside it and strands the original with no
  * update path. That is the whole reason the Release value is pinned here.
  *
- * (It is NOT what keys the URL scheme or the Keychain: Info.plist registers the
- * static scheme `lobu` and the bundle id appears only as CFBundleURLName,
- * and KeychainTokenStore hardcodes the service `ai.lobu.mac`. Isolating the
- * Debug build's stored secrets is a separate, context-keyed mechanism.)
+ * (It is NOT what keys the URL scheme or the Keychain. The scheme comes from the
+ * separate `LOBU_URL_SCHEME` build setting — `lobu` for Release, `lobu-debug`
+ * for Debug — and the bundle id reaches Info.plist only as CFBundleURLName.
+ * KeychainTokenStore hardcodes its own service literal, isolated by `#if DEBUG`.
+ * Since this cutover those literals read the same as the bundle ids, but neither
+ * derives from the other: renaming the bundle id again would leave the stored
+ * secrets exactly where they are.)
  *
  * The identity is pinned PER BUILD CONFIGURATION rather than globally:
  *
