@@ -696,7 +696,7 @@ async function governEntitySchemaMutation(
       writeRole: 'Entity schema mutations require workspace owner or admin access.',
       readScope: 'Entity schema mutations require MCP admin access.',
       writeScope: 'Entity schema mutations require MCP admin access.',
-      adminScope: 'Entity schema mutations require MCP admin access.',
+      adminScope: 'Entity schema mutations require MCP admin access. Reconnect this client and grant the mcp:admin scope to continue.',
     });
   }
   const sql = getDb();

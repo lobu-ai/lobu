@@ -37,7 +37,7 @@ function enforceActionAccess(toolName: string, action: string, ctx: ToolContext)
     writeRole: `Action ${toolName}.${action} requires workspace membership with write access.`,
     readScope: `Action ${toolName}.${action} requires an MCP session with read access.`,
     writeScope: `Action ${toolName}.${action} requires an MCP session with write access.`,
-    adminScope: `Action ${toolName}.${action} requires an MCP session with admin access.`,
+    adminScope: `Action ${toolName}.${action} requires an MCP session with admin access. Reconnect this client and grant the mcp:admin scope to run it.`,
   });
 }
 

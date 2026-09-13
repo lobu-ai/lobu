@@ -266,7 +266,7 @@ export function checkToolAccess(
     writeScope:
       'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.',
     adminScope:
-      'This MCP session does not include admin access. Reconnect with admin access after an owner grants the role.',
+      'This MCP session does not include admin access. Reconnect this client and grant the mcp:admin scope to continue.',
   });
   return requiredAccess;
 }
