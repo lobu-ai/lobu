@@ -1528,7 +1528,12 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     if (!session.authCtx.organizationId && !session.authCtx.isAuthenticated) {
       const toolCall = req.method === 'POST' ? await readToolCall(req) : null;
       if (req.method === 'GET' || toolCall) {
-        clearSession();
+        // A denied call is not a dead session: the 401 challenge is what makes
+        // the client upgrade its auth, and the retry arrives on THIS session.
+        // Clearing here punished exactly those clients — their first denied
+        // call killed the session, so every follow-up failed with "session
+        // expired" and forced a from-scratch re-initialize (same policy as the
+        // missing-header path above).
         return buildUnauthorizedResponse(
           req,
           req.method === 'GET'
@@ -1547,7 +1552,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     ) {
       const toolCall = await readToolCall(req);
       if (toolCall && !isPublicReadable(toolCall.name, toolCall.args)) {
-        clearSession();
+        // See above: deny the call, keep the session.
         return buildUnauthorizedResponse(req, 'Authentication required for this tool.');
       }
     }
