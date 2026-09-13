@@ -33,7 +33,13 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 19;
+  const ADAPTER_VERSION = 20;
+  // A chat whose loader reports no history progress this many collects in a
+  // row is finished as stalled instead of holding backfill open forever.
+  // Transient fetch failures get retries; a permanently stuck chat (e.g.
+  // phone-only history the browser can never load) must still let the feed
+  // go idle. A fresh backfill retries from scratch.
+  const MAX_HISTORY_STALL_RUNS = 3;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -952,12 +958,25 @@ export function whatsAppWebAdapterProgram() {
           for (const id of pending) backfillMessageIds.add(id);
           historyByChat.set(entry.jid, pending);
           if (loaded.frontier_advanced === false) {
-            updates[entry.jid] = {
-              ...(backfill.chats?.[entry.jid] ?? {}),
-              error: loaded.error,
-              has_more: true,
-              loads: loaded.loads,
-            };
+            const stallRuns = (Number(backfill.chats?.[entry.jid]?.history_stall_runs) || 0) + 1;
+            if (stallRuns >= MAX_HISTORY_STALL_RUNS) {
+              updates[entry.jid] = {
+                ...(backfill.chats?.[entry.jid] ?? {}),
+                error: loaded.error,
+                history_stall_runs: stallRuns,
+                has_more: false,
+                history_stalled: true,
+                loads: loaded.loads,
+              };
+            } else {
+              updates[entry.jid] = {
+                ...(backfill.chats?.[entry.jid] ?? {}),
+                error: loaded.error,
+                history_stall_runs: stallRuns,
+                has_more: true,
+                loads: loaded.loads,
+              };
+            }
             if (backfillMessageIds.size >= maxMessages) break;
             continue;
           }

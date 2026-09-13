@@ -800,7 +800,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   it("bumps the WhatsApp connector version for page observation semantics", () => {
-    expect(connector.definition.version).toBe("1.0.9");
+    expect(connector.definition.version).toBe("1.0.10");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {

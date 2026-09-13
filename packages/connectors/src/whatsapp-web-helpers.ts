@@ -15,7 +15,7 @@
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-export const WHATSAPP_ADAPTER_VERSION = 19;
+export const WHATSAPP_ADAPTER_VERSION = 20;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_SOURCE = "whatsapp_web";
 const RECENT_OVERLAP_SECONDS = 15 * 60;
@@ -81,6 +81,14 @@ export interface WhatsAppMessage {
 export interface BackfillChatState {
   /** Older phone-only history is outside this browser's accessible backfill. */
   history_limited_to_browser?: boolean;
+  /**
+   * The loader reported no history progress this many collects in a row.
+   * At the adapter's bound the chat finishes as `history_stalled` instead
+   * of holding backfill open forever. A fresh backfill retries from scratch.
+   */
+  history_stall_runs?: number;
+  /** History loading stalled repeatedly; the chat no longer blocks completion. */
+  history_stalled?: boolean;
   oldest_timestamp?: number | null;
   oldest_id?: string | null;
   has_more?: boolean;

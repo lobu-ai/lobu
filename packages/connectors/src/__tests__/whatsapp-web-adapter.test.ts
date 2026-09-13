@@ -920,6 +920,47 @@ describe("whatsAppWebAdapterProgram backfill progress", () => {
     expect(ids(result)).toEqual(["last-browser-page"]);
   });
 
+  it("finishes a chat whose loader makes no progress three runs in a row", async () => {
+    const adapter = install(async () => [], { chatIds: ["a@c.us"] });
+    await adapter.ready();
+    const first = await adapter.collect();
+    expect(first.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    expect(first.backfill.chats["a@s.whatsapp.net"].history_stalled).toBeUndefined();
+    const second = await adapter.collect(first.backfill);
+    expect(second.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    expect(second.backfill.chats["a@s.whatsapp.net"].history_stalled).toBeUndefined();
+    const third = await adapter.collect(second.backfill);
+    expect(third.backfill.chats["a@s.whatsapp.net"].has_more).toBe(false);
+    expect(third.backfill.chats["a@s.whatsapp.net"].history_stalled).toBe(true);
+    expect(third.backfill.complete).toBe(true);
+  });
+
+  it("resets the stall count when history advances again", async () => {
+    let calls = 0;
+    const adapter = install(async ({ chat }) => {
+      calls += 1;
+      if (calls === 3) {
+        chat.msgs._models.push(historyMessage("late", 1000));
+      }
+    }, { chatIds: ["a@c.us"] });
+    await adapter.ready();
+    const first = await adapter.collect();
+    expect(first.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    const second = await adapter.collect(first.backfill);
+    expect(second.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    const advanced = await adapter.collect(second.backfill);
+    expect(advanced.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    expect(advanced.backfill.chats["a@s.whatsapp.net"].history_stalled).toBeUndefined();
+    const fourth = await adapter.collect(advanced.backfill);
+    expect(fourth.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    expect(fourth.backfill.chats["a@s.whatsapp.net"].history_stalled).toBeUndefined();
+    const fifth = await adapter.collect(fourth.backfill);
+    expect(fifth.backfill.chats["a@s.whatsapp.net"].has_more).toBe(true);
+    const sixth = await adapter.collect(fifth.backfill);
+    expect(sixth.backfill.chats["a@s.whatsapp.net"].has_more).toBe(false);
+    expect(sixth.backfill.chats["a@s.whatsapp.net"].history_stalled).toBe(true);
+  });
+
   it("uses the same collection and chat identity when WhatsApp keeps them in model data", async () => {
     const oldest = historyMessage("model-data-history", 1000);
     let readerId: unknown;
