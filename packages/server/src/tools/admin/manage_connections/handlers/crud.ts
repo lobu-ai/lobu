@@ -19,6 +19,7 @@ import {
 	type DbClient,
 } from "../../../../db/client";
 import { recordToolConfigChange } from "../../helpers/config-audit";
+import { slugify } from "../../../../auth/personal-org-provisioning";
 import {
 	connectorSecretKeysFromSchemas,
 	loadConnectorSecretKeys,
@@ -771,11 +772,19 @@ export async function handleCreate(
 				"x-lobu-adapterless-platform"
 			]);
 	if (connectionPlatform === args.connector_key) {
-		if (args.connector_key === "webhook" && !args.slug) {
-			return { error: "Webhook connections require a non-numeric slug." };
-		}
 		try {
-			const stableId = args.slug || randomUUID().replace(/-/g, "").slice(0, 16);
+			// The slug is OPTIONAL: the connection create form has no slug input,
+			// so requiring one made inbound-webhook connections impossible to
+			// create from the UI. Derive a readable slug from the display name
+			// with a random suffix against collisions. The embedded hyphen keeps
+			// the result non-numeric even for a numeric display name — numeric
+			// webhook URLs are reserved for provider connector IDs
+			// (upsertByoChatConnection enforces the same rule for explicit slugs).
+			const stableId =
+				args.slug ||
+				`${slugify(args.display_name ?? "") || "hook"}-${randomUUID()
+					.replace(/-/g, "")
+					.slice(0, 6)}`;
 			const created = await upsertByoChatConnection({
 				organizationId,
 				platform: args.connector_key,
