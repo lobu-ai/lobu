@@ -1,7 +1,6 @@
 // Connector tests replace only external I/O and timing. Capture the published
 // SDK before Bun installs any module mock: its runtime, schemas and pure helpers
 // must remain real so new SDK capabilities cannot drift from a second copy here.
-// The package import also works in the CLI packaged-connector test layout.
 import * as connectorSdk from '@lobu/connector-sdk';
 
 const actualSdk = { ...connectorSdk };

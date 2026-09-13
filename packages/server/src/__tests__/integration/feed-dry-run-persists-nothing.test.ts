@@ -186,6 +186,23 @@ describe('bounded connector continuation', () => {
     expect(feed).toEqual({ consecutive_failures: 1, retry: true });
   });
 
+  it.each(['temporary failure', '[lobu:dependency_unavailable:device_offline] Device offline'])(
+    'preserves cron cadence when a due run fails: %s', async (errorMessage) => {
+      const { feedId, runId } = await seed(false);
+      const sql = getTestDb();
+      await sql`UPDATE feeds SET schedule = '0 0 * * *', timezone = 'UTC', next_run_at = NULL WHERE id = ${feedId}`;
+      await sql`UPDATE runs SET run_metadata = ${sql.json({ feed_due: true })} WHERE id = ${runId}`;
+      const now = new Date();
+      const nextMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+      const completion = mockWorkerCtx({ run_id: runId, worker_id: WORKER_ID,
+        status: 'failed', error_message: errorMessage });
+      await completeWorkerJob(completion.ctx);
+      expect(completion.result().status).toBe(200);
+      const [feed] = await sql`SELECT next_run_at >= ${nextMidnight} AS preserves_cadence FROM feeds WHERE id = ${feedId}`;
+      expect(feed.preserves_cadence).toBe(true);
+    }
+  );
+
   it('cannot rearm a paused feed or change a finalized continuation', async () => {
     const { feedId, runId } = await seed(false);
     const sql = getTestDb();
