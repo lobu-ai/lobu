@@ -222,16 +222,20 @@ describe('resource visibility gate — stale ACL fails closed (e2e via search_me
     expect(stale.has(eventBId)).toBe(false);
   });
 
-  it('no regression: WITHOUT any ACL row the connection stays on the legacy fence (both visible)', async () => {
+  it('fails closed when the graph was never built: stamped events are gated by their stamps, not the legacy fence', async () => {
     const { org, alice, eventAId, eventBId } = await setupEnforcedWorkspace();
 
-    // Drop the ACL state entirely → never-graphed → the resource gate is inert and
-    // both org-visible events recall (the not-graphed passthrough, unchanged).
+    // Drop the ACL state entirely → no currently-enforced authority owns the
+    // membership edges, so NEITHER stamped event recalls — not even repo-a for
+    // its own collaborator. A resource stamp is a requirement, not a hint: with
+    // no fresh authority to satisfy it, the gate fails closed rather than
+    // falling back to the legacy fence. (Before the envelope, both rows were
+    // served here; that passthrough is exactly the derived-knowledge leak this gate closes.)
     const sql = getTestDb();
     await sql`DELETE FROM authz_source_acl_state WHERE organization_id = ${org.id}`;
 
     const ids = await recallContentIds(ctxFor(org.id, alice.id));
-    expect(ids.has(eventAId)).toBe(true);
-    expect(ids.has(eventBId)).toBe(true);
+    expect(ids.has(eventAId)).toBe(false);
+    expect(ids.has(eventBId)).toBe(false);
   });
 });

@@ -24,6 +24,8 @@ Mechanical traps (build, SQL, testing, submodule, browser) live in `docs/GOTCHAS
 
 ## Runtime
 
+**Compose-first (dogfood).** Agents default to new surface — a new tool, a new table, a new approval engine — because it looks like progress. It is mostly perimeter: every new read/write path is a gate every future reader must enforce, and the test surface grows faster than the feature. Before proposing surface, write down the composition (which Automation, which suggestion/approval/policy, which existing tool) and why it fails. Precedent: a "publish this insight?" digest automation plus a suggestion card plus the existing mutation gate covers the publication *trigger* with zero new SDK methods; only the boundary-crossing copy needed new surface. If the composition works, ship the composition.
+
 **Dynamic-import exceptions.** Two call sites are grandfathered because they gate on the Node version before loading a large graph, and both must stay dependency-free until their checks pass:
 - `packages/cli/bin/lobu.js` defers the existing CLI graph without duplicating it.
 - `packages/server/src/server-entry.ts` runs the gate before dynamically loading the separate server bundle.
