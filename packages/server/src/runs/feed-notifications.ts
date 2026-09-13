@@ -95,7 +95,12 @@ export async function receiveFeedNotifications(
         const batch = notice.batch;
         const acknowledged = ack?.binding_id === batch.binding_id && ack.epoch === batch.epoch
           ? new Map(ack.records.map((record) => [record.id, record.revision])) : new Map<string, number>();
+        // Records without an id can never be ack-matched (their key would be
+        // the literal "undefined", colliding across records) and would ride
+        // every future batch undelivered-but-unacknowledged. Drop them before
+        // delivery; the source retains them for retry.
         const records = batch.records.filter((record) =>
+          record?.payload?.id != null &&
           acknowledged.get(String(record.payload.id)) !== record.revision);
         // Backoff twin of the SQL in requestFeedSync, measured from the last
         // executed run rather than from next_run_at, which a delivery feed

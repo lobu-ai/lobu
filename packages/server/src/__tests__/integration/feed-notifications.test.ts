@@ -192,6 +192,24 @@ describe('buffered delivery admission through existing sync runs', () => {
     expect(pending[0].action_input.delivery.payload.records).toEqual([{ revision: 3, payload: { id: 'three', body: 'third message' } }]);
   });
 
+  it('drops records without an id before delivery instead of ack-matching "undefined"', async () => {
+    const { sql, org, device, notice } = await deliveryFixture();
+    const mixed = { ...notice, notification_id: 'synthetic-noid', batch: {
+      ...notice.batch, records: [
+        { revision: 1, payload: { id: 'one', body: 'first message' } },
+        { revision: 2, payload: { body: 'missing id' } },
+        { revision: 3, payload: { id: 'three', body: 'third message' } },
+      ],
+    } };
+    const [receipt] = await receiveFeedNotifications(sql, [mixed], device.id, [org.id]);
+    expect(receipt.active).toBe(true);
+    const [run] = await sql`SELECT action_input FROM runs WHERE feed_id = ${notice.feed_id}`;
+    expect(run.action_input.delivery.payload.records).toEqual([
+      { revision: 1, payload: { id: 'one', body: 'first message' } },
+      { revision: 3, payload: { id: 'three', body: 'third message' } },
+    ]);
+  });
+
   it('preserves source failure backoff and rejects foreign scope before admitting payloads', async () => {
     const { sql, org, device, notice } = await deliveryFixture();
     const other = await createTestOrganization();
