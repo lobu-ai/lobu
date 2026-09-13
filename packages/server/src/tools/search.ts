@@ -865,6 +865,11 @@ async function fetchContentSnippets(
         strict_organization_scope: true,
       }),
       ...(excludeWorkspaceAudit && { exclude_workspace_audit: true }),
+      // Recall is a memory surface, not an ops console: internal tool-invocation
+      // audit rows and config/lifecycle state-change rows only title-match into
+      // noise here (duplicate Automation titles, "query_sql completed" for an
+      // unrelated query). Explicit reads via get_content / query_sql unaffected.
+      exclude_internal_ops: true,
       // Enforce the org/private-connection visibility boundary on the recall
       // path, exactly as get_content does. Without visibility_scope the
       // connection-visibility clause is skipped entirely, so search_memory
