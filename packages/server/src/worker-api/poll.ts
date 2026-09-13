@@ -1302,20 +1302,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // with no exact manifest-hash authorization could only have matched the
   // legacy hashless arm in connectorClaimLaneSql.
   //
-  // Quiet here is NOT a deletion gate for that arm, and reading it as one
-  // would delete a live path. The arm keys on `connectorManifestsProvided`
-  // (whether THIS poll body carried `connector_manifests`), which is not a
-  // function of client age, so no MIN_CLIENT_VERSION floor closes it either.
-  // `runMacDeviceDaemon` builds an advertisement provider only on its
-  // `--supervised-stdio` path, the one the Mac app drives; the same
-  // `lobu-device-daemon` binary launched without that flag falls through to
-  // `createMacDeviceDaemon(validated)` with no provider and no static
-  // manifests, and WorkerClient omits the field entirely in that case
-  // (connector-worker/src/daemon/client.ts) — while still reporting platform
-  // `macos`, which is exactly this arm's shape. (`lobu daemon`, the CLI's
-  // terminal daemon, reports `headless` and is excluded above.) Closing the
-  // arm means making the field unconditional on the client, shipping that
-  // release, and only then raising the floor past it.
+  // Not client debt, and quiet is not a deletion gate: the arm's predicate is
+  // `run_cv.artifact_hash IS NULL`, so its population is artifact rows, not
+  // old clients. `attestDeviceManifestArtifacts` drains a row once a device
+  // advertises a matching manifest, but the match is key + version exact, so
+  // rows strand when every device has moved to a newer version. Those strays
+  // are what still reaches here, and they carry live traffic.
   if (
     row.connector_manifest_backed &&
     connectorClaimContext.allowLegacyManifestCapabilityClaims &&

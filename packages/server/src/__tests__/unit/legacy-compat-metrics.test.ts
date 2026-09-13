@@ -20,7 +20,6 @@ const SERIES = "lobu_legacy_compat_hits_total";
 /** Every path the legacy-compat counter is incremented on today. */
 const LEGACY_PATHS = [
 	"hashless_manifest_claim",
-	"legacy_token_fallback",
 	"legacy_session_prefix",
 ] as const;
 

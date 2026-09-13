@@ -83,7 +83,7 @@ function stampExecutionTarget(
 	// still being taken.
 	//
 	// Quiet is not a deletion gate here either, and this path is the least
-	// like client debt of the three: it parses data AT REST — whatever
+	// like client debt of the two: it parses data AT REST — whatever
 	// `snapshot_jsonl` any earlier lane left on this conversation — so no
 	// client release and no version floor ever drains it, and a stored prefix
 	// is re-read every time its device chat is resumed. Deleting the fallback

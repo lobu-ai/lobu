@@ -44,14 +44,16 @@ import { post } from "../../setup/test-helpers";
 import { TestApiClient, TestWorkspace } from "../../setup/test-mcp-client";
 
 /**
- * Mint a PAT bound to a specific device worker_id and `device_worker:run`
- * scope. Mirrors PersonalAccessTokenService.create but inlined so the test
- * can pre-set the binding without going through the route.
+ * Mint a `device_worker:run` PAT, optionally bound to a device worker_id.
+ * Mirrors PersonalAccessTokenService.create but inlined so the test can
+ * pre-set (or omit) the binding without going through the route. A null
+ * `workerId` is the shape every credential except a mint-child-token child
+ * arrives with — OAuth access tokens included.
  */
-async function createWorkerBoundPat(
+async function createWorkerPat(
 	userId: string,
 	organizationId: string,
-	workerId: string,
+	workerId: string | null,
 	scope = "device_worker:run"
 ): Promise<{ token: string }> {
 	const sql = getTestDb();
@@ -64,7 +66,7 @@ async function createWorkerBoundPat(
       created_at, updated_at
     ) VALUES (
       ${tokenHash}, ${tokenPrefix}, ${userId}, ${organizationId},
-      ${`Test worker PAT (${workerId})`}, ${scope}, ${workerId},
+      ${`Test worker PAT (${workerId ?? "unbound"})`}, ${scope}, ${workerId},
       NOW(), NOW()
     )
   `;
@@ -1420,11 +1422,11 @@ describe("automation contract", () => {
 
 		});
 
-		// Pi review round-2 #A: device spoof — a same-user token bound to worker
-		// A cannot complete a run pinned to worker B by lying in body.worker_id.
-		// Previously the binding check was `(user_id, body.worker_id)`, which a
-		// same-user attacker could satisfy by registering worker B and POSTing
-		// worker B's id. The fix anchors on the OAuth-token-bound workerId.
+		// Device spoof: a same-user token bound to worker A cannot complete a run
+		// pinned to worker B by lying in body.worker_id. A check keyed only on
+		// `(user_id, body.worker_id)` would let a same-user attacker satisfy it
+		// by registering worker B and POSTing worker B's id; the bound workerId
+		// off the PAT row is what anchors it.
 		it("rejects device spoof — token bound to worker A cannot complete worker B run", async () => {
 			const { sql, dbClient, workspace, automationId, agent } =
 				await createAutomatedAutomation();
@@ -1446,7 +1448,7 @@ describe("automation contract", () => {
 			void deviceA;
 
 			// Token bound to worker A.
-			const { token: patForA } = await createWorkerBoundPat(
+			const { token: patForA } = await createWorkerPat(
 				ownerUserId,
 				workspace.org.id,
 				"worker-A"
@@ -1490,6 +1492,141 @@ describe("automation contract", () => {
       `;
 			expect(String(run.status)).toBe("running");
 			expect(run.action_output).toBeNull();
+		});
+
+		// The device gate does not depend on the token carrying a worker
+		// binding: `mcpAuthInfo.workerId` is read off the PAT row and nowhere
+		// else, so every OAuth access token — and any mcp:write/mcp:admin PAT
+		// the worker middleware admits — reaches this handler unbound. Such a
+		// caller has no bound id to compare `body.worker_id` against, so the
+		// device-ownership check is the only thing standing between it and
+		// another of its own devices' pinned runs. These two pin that arm:
+		// an unowned pin is rejected, an owned one still completes.
+		it("rejects an unbound token completing a run pinned to another of the user's devices", async () => {
+			const { sql, dbClient, workspace, automationId, agent } =
+				await createAutomatedAutomation();
+
+			const ownerUserId = workspace.users.owner.id;
+			await sql`
+        INSERT INTO device_workers (user_id, worker_id, platform, capabilities, label)
+        VALUES (${ownerUserId}, 'unbound-worker-A', 'macos', ${sql.json({})}, 'Mac A')
+      `;
+			const [deviceB] = await sql`
+        INSERT INTO device_workers (user_id, worker_id, platform, capabilities, label)
+        VALUES (${ownerUserId}, 'unbound-worker-B', 'macos', ${sql.json({})}, 'Mac B')
+        RETURNING id
+      `;
+			const deviceBId = String((deviceB as { id: unknown }).id);
+
+			// No worker binding on the token — the OAuth/mcp:write shape.
+			const { token: unboundPat } = await createWorkerPat(
+				ownerUserId,
+				workspace.org.id,
+				null
+			);
+
+			const { windowStart, windowEnd } = await computePendingWindow(
+				dbClient,
+				automationId
+			);
+			const queued = await createAutomationRun({
+				organizationId: workspace.org.id,
+				automationId,
+				agentId: agent.agentId,
+				windowStart: windowStart.toISOString(),
+				windowEnd: windowEnd.toISOString(),
+				dispatchSource: "scheduled",
+				deviceWorkerId: deviceBId,
+				agentKind: "claude-code",
+			});
+			// Claimed by worker A, so the idempotent claimed_by short-circuit
+			// above lets the request reach the device check.
+			await sql`
+        UPDATE runs
+        SET status = 'running', claimed_at = NOW(), claimed_by = 'unbound-worker-A'
+        WHERE id = ${queued.runId}
+      `;
+
+			const response = await post(
+				`/api/workers/me/runs/${queued.runId}/complete-automation`,
+				{
+					token: unboundPat,
+					body: {
+						worker_id: "unbound-worker-A",
+						output: "spoofed",
+						duration_ms: 1,
+					},
+				}
+			);
+			expect(response.status).toBe(403);
+			expect(((await response.json()) as { error: string }).error).toMatch(
+				/Forbidden/
+			);
+
+			const [run] = await sql`
+        SELECT status, action_output FROM runs WHERE id = ${queued.runId}
+      `;
+			expect(String(run.status)).toBe("running");
+			expect(run.action_output).toBeNull();
+		});
+
+		it("admits an unbound token completing a run pinned to its own device", async () => {
+			const { sql, dbClient, workspace, automationId, agent } =
+				await createAutomatedAutomation();
+
+			const ownerUserId = workspace.users.owner.id;
+			const [device] = await sql`
+        INSERT INTO device_workers (user_id, worker_id, platform, capabilities, label)
+        VALUES (${ownerUserId}, 'unbound-worker-own', 'macos', ${sql.json({})}, 'My Mac')
+        RETURNING id
+      `;
+			const deviceId = String((device as { id: unknown }).id);
+
+			const { token: unboundPat } = await createWorkerPat(
+				ownerUserId,
+				workspace.org.id,
+				null
+			);
+
+			const { windowStart, windowEnd } = await computePendingWindow(
+				dbClient,
+				automationId
+			);
+			const queued = await createAutomationRun({
+				organizationId: workspace.org.id,
+				automationId,
+				agentId: agent.agentId,
+				windowStart: windowStart.toISOString(),
+				windowEnd: windowEnd.toISOString(),
+				dispatchSource: "scheduled",
+				deviceWorkerId: deviceId,
+				agentKind: "claude-code",
+			});
+			await sql`
+        UPDATE runs
+        SET status = 'running', claimed_at = NOW(), claimed_by = 'unbound-worker-own'
+        WHERE id = ${queued.runId}
+      `;
+
+			const response = await post(
+				`/api/workers/me/runs/${queued.runId}/complete-automation`,
+				{
+					token: unboundPat,
+					body: {
+						worker_id: "unbound-worker-own",
+						output: "exited cleanly",
+						duration_ms: 5,
+						exit_code: 0,
+						exit_reason: "ok",
+					},
+				}
+			);
+			// Past the gate: the exit report is processed normally (no
+			// complete_window call, so the finalize nudge asks for a resume).
+			expect(response.status).toBe(200);
+			expect(((await response.json()) as { status: string }).status).toBe(
+				"resume"
+			);
 		});
 	});
 

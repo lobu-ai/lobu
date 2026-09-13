@@ -38,7 +38,6 @@ import { feedBackoff } from "../connectors/feed-backoff";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { maybeEmitFeedAutoPausedAfterFailure } from "../automations/platform-events";
 import { getDb, parsePgNumberArray } from "../db/client";
-import { incrementCounter } from "../gateway/metrics/prometheus";
 import { eventArtifactBinding } from "../gateway/files/artifact-store";
 import { emit } from "../events/emitter";
 import { parseJsonBody } from "../gateway/routes/shared/helpers";
@@ -1501,22 +1500,13 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 	const automationId = Number(run.automation_id);
 	const approved = (run.approved_input ?? {}) as Record<string, unknown>;
 
-	// Fix 2 (pi round-2): device-identity binding pinned to the OAuth token, not
-	// the request body.
-	//
-	// The previous version looked up `(workerUserId, body.worker_id)` in
-	// `device_workers`, but `body.worker_id` is client-supplied. A same-user
-	// token could complete as a different registered worker by posting that
-	// worker's id. The fix is the same trick `pollWorkerJob` already uses: if
-	// the token was minted with a `workerId` binding (`device_worker:run`
-	// PATs/OAuth tokens always are), require `body.worker_id === boundWorkerId`
-	// AND, if the run is pinned to a device, the bound worker's
-	// `device_workers.id` matches `approved_input.device_worker_id`.
-	//
-	// For legacy/admin tokens with no `workerId` binding we fall through to the
-	// old user_id+worker_id lookup, but emit a warning so the audit trail can
-	// catch this path if it ever fires in production (Lobu for Mac always
-	// mints worker-bound tokens via /api/me/devices/mint-child-token).
+	// `body.worker_id` is client-supplied, so on its own it would let a
+	// same-user token complete as any other registered worker by posting that
+	// worker's id. Two checks close that, and only the first depends on how the
+	// token was minted: a `workerId`-bound token (child PATs from
+	// /api/me/devices/mint-child-token — NOT OAuth access tokens, which carry no
+	// binding) must post its own id, and any caller completing a device-pinned
+	// run must own the pinned device. `pollWorkerJob` uses the same pair.
 	if (c.var.workerAuthMode === "user") {
 		const workerUserId = c.var.workerUserId;
 		const boundWorkerId = c.var.mcpAuthInfo?.workerId ?? null;
@@ -1525,76 +1515,28 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 				? approved.device_worker_id
 				: null;
 
-		if (boundWorkerId) {
-			if (boundWorkerId !== body.worker_id) {
-				logger.warn(
-					{
-						run_id: runId,
-						body_worker_id: body.worker_id,
-						bound_worker_id: boundWorkerId,
-					},
-					"[completeAutomationRun] body.worker_id != token-bound worker_id — rejecting"
-				);
-				return c.json(
-					{
-						error: "worker_id_mismatch",
-						error_description: `this token is bound to worker_id '${boundWorkerId}'`,
-					},
-					403
-				);
-			}
-			if (pinnedDeviceWorkerId && workerUserId) {
-				const deviceRows = (await sql`
-          SELECT id
-          FROM device_workers
-          WHERE user_id = ${workerUserId}
-            AND worker_id = ${boundWorkerId}
-          LIMIT 1
-        `) as unknown as Array<{ id: string }>;
-				const callerDeviceWorkerId = deviceRows[0]?.id ?? null;
-				if (
-					!callerDeviceWorkerId ||
-					callerDeviceWorkerId !== pinnedDeviceWorkerId
-				) {
-					logger.warn(
-						{
-							run_id: runId,
-							bound_worker_id: boundWorkerId,
-							caller_device: callerDeviceWorkerId,
-							pinned_device: pinnedDeviceWorkerId,
-						},
-						"[completeAutomationRun] device_worker_id mismatch — rejecting"
-					);
-					return c.json({ error: "Forbidden: device worker mismatch" }, 403);
-				}
-			}
-		} else if (workerUserId && pinnedDeviceWorkerId) {
-			// Legacy/admin path: no worker-bound token. Fall back to the
-			// (user_id, body.worker_id) lookup; this is weaker than the bound path
-			// but still gates on user ownership.
-			//
-			// The counter corroborates; it does not gate deletion, and quiet does
-			// NOT mean the branch is unreachable. `mcpAuthInfo.workerId` is
-			// populated from the PAT row and nowhere else (auth/tokens.ts), so
-			// every OAuth access token arrives here unbound — including a
-			// first-party device grant carrying `device_worker:run` that has not
-			// swapped itself for a child PAT. The worker-auth middleware also
-			// admits `mcp:write` and `mcp:admin` tokens (server/src/index.ts),
-			// which the other mint paths issue unbound. Removing the fallback is
-			// therefore a 403 on a reachable caller, not a no-op — it needs its
-			// own decision, not a quiet window. The warn below carries the caller
-			// detail needed to identify what still does.
-			incrementCounter("lobu_legacy_compat_hits_total", {
-				path: "legacy_token_fallback",
-			});
+		// An unbound token has no id to compare against, so it carries only the
+		// ownership check below.
+		if (boundWorkerId && boundWorkerId !== body.worker_id) {
 			logger.warn(
 				{
 					run_id: runId,
-					worker_user_id: workerUserId,
 					body_worker_id: body.worker_id,
+					bound_worker_id: boundWorkerId,
 				},
-				"[completeAutomationRun] no token-bound workerId — falling back to user_id+worker_id check"
+				"[completeAutomationRun] body.worker_id != token-bound worker_id — rejecting"
 			);
+			return c.json(
+				{
+					error: "worker_id_mismatch",
+					error_description: `this token is bound to worker_id '${boundWorkerId}'`,
+				},
+				403
+			);
+		}
+		// Past the check above `body.worker_id` IS the bound id whenever there is
+		// one, so bound and unbound callers key the same ownership lookup.
+		if (workerUserId && pinnedDeviceWorkerId) {
 			const deviceRows = (await sql`
         SELECT id
         FROM device_workers
@@ -1611,10 +1553,11 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 					{
 						run_id: runId,
 						body_worker_id: body.worker_id,
+						bound_worker_id: boundWorkerId,
 						caller_device: callerDeviceWorkerId,
 						pinned_device: pinnedDeviceWorkerId,
 					},
-					"[completeAutomationRun] device_worker_id mismatch (legacy path) — rejecting"
+					"[completeAutomationRun] device_worker_id mismatch — rejecting"
 				);
 				return c.json({ error: "Forbidden: device worker mismatch" }, 403);
 			}
