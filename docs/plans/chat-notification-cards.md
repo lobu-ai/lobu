@@ -65,7 +65,7 @@ A queued action on Mac Shell is waiting for your review.
 
 Operation    Run shell command
 Connection   Mac Shell
-Input        Command: git status --porcelain; Cwd: /Users/burakemre/Code/lobu
+Input        Command: git status --porcelain; Cwd: /synthetic/project
 
 [Approve] [Reject] [Review in Lobu]
 ```

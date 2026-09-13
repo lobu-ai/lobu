@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	createIsolateConnectorCompiler,
@@ -231,6 +231,18 @@ export function resolveFileSourcePath(value: string): string | null {
 	const normalized = normalizeFileSourceUri(value);
 	if (!normalized) return null;
 	return fileURLToPath(normalized);
+}
+
+export function connectorSourcePathToUri(sourcePath?: string | null): string | null {
+	if (!sourcePath) return null;
+	if (sourcePath.includes("://")) return normalizeFileSourceUri(sourcePath);
+	if (isAbsolute(sourcePath) && existsSync(sourcePath)) {
+		return pathToFileURL(sourcePath).toString();
+	}
+	const bundledSourcePath = resolve(getDefaultConnectorCatalogDir(), sourcePath);
+	return existsSync(bundledSourcePath)
+		? pathToFileURL(bundledSourcePath).toString()
+		: null;
 }
 
 // `compileConnectorForIsolateFromFile` is owned by `@lobu/connector-worker/compile`

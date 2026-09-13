@@ -16,6 +16,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { __testing as publisher } from "./publish-packages.mjs";
+import { assertPortableArtifact } from "./artifact-portability.mjs";
 import {
   COMPONENTS,
   lockRuntimeComponent,
@@ -89,6 +90,7 @@ for (const { dir, transform } of publisher.PACKAGES) {
     `${JSON.stringify(pkg, null, 2)}\n`
   );
   const tarball = join(destination, `${pkg.name.replaceAll("/", "-")}.tgz`);
+  assertPortableArtifact(target, root);
   run("bun", ["pm", "pack", "--filename", tarball], target);
   tarballs.push(tarball);
 }
@@ -152,6 +154,7 @@ for (const [key, component] of Object.entries(COMPONENTS)) {
   for (const lock of ["dist/dependencies.bun.lock", "npm-shrinkwrap.json"])
     cpSync(join(target, lock), join(source, lock));
   const tarball = join(destination, `${key}.tgz`);
+  assertPortableArtifact(target, root);
   run("bun", ["pm", "pack", "--ignore-scripts", "--filename", tarball], target);
   await ensureComponent(catalog[key], {
     cacheRoot,

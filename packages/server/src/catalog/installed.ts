@@ -11,7 +11,7 @@ import {
 } from "../operations/connector-operations";
 import { handleList } from "../tools/admin/manage_automations/list";
 import type { ToolContext } from "../tools/registry";
-import { connectorSourcePathToUri } from "../utils/connector-definition-install";
+import { connectorSourcePathToUri } from "../utils/connector-catalog";
 import { listScopedConnectorDefinitions } from "./connector-definitions";
 import { listCatalogEntries } from "./load";
 import {

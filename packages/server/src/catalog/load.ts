@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { createLogger } from "@lobu/core";
+import { connectorSourcePathToUri } from "../utils/connector-catalog";
 import { generateInMemoryManifests } from "./generate-defaults";
 import type { CatalogEntry, CatalogKind, CatalogManifest } from "./types";
 import { CATALOG_KINDS, CATALOG_MANIFEST_VERSION } from "./types";
@@ -135,7 +136,16 @@ export async function listCatalogEntries(
 		for (const entry of manifest.entries) {
 			if (seen[manifest.kind].has(entry.id)) continue;
 			seen[manifest.kind].add(entry.id);
-			result[manifest.kind].push(entry);
+			// Builtin artifacts store portable source_path values. Resolve them
+			// only on the consuming machine; explicit custom URIs stay intact.
+			const sourceUri = manifest.kind === "connectors" &&
+				typeof entry.detail.source_uri !== "string" &&
+				typeof entry.detail.source_path === "string"
+				? connectorSourcePathToUri(entry.detail.source_path)
+				: null;
+			result[manifest.kind].push(sourceUri
+				? { ...entry, detail: { ...entry.detail, source_uri: sourceUri } }
+				: entry);
 		}
 	}
 
