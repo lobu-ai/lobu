@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 20;
+  const ADAPTER_VERSION = 21;
   // A chat whose loader reports no history progress this many collects in a
   // row is finished as stalled instead of holding backfill open forever.
   // Transient fetch failures get retries; a permanently stuck chat (e.g.

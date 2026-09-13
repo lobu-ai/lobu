@@ -643,7 +643,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp in the paired Owletto Chrome. Backfills history available to WhatsApp Web, then observes new messages in real time. Older phone-only history requires access through WhatsApp. Supports search, draft, send, edit, react, and revoke actions.",
-    version: "1.0.10",
+    version: "1.0.11",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
