@@ -1179,7 +1179,10 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 				const isSuccess = req.status === "success";
 				const continuation = isSuccess && req.next_sync_after_seconds !== undefined
 					? new Date(Date.now() + req.next_sync_after_seconds * 1000) : null;
-				const retryDue = !isSuccess && updatedRuns[0]?.run_metadata?.feed_due === true;
+				// A cron feed keeps its cadence and backoff floor below. Without a
+				// schedule nothing else re-arms the feed, so a failed due run retries here.
+				const retryDue = !isSuccess && cronNextRun === null &&
+					updatedRuns[0]?.run_metadata?.feed_due === true;
 				const nextRun = [cronNextRun ? new Date(cronNextRun) : null, continuation, retryDue ? new Date() : null]
 					.filter((value): value is Date => value !== null)
 					.sort((a, b) => a.getTime() - b.getTime())[0] ?? null;

@@ -15,12 +15,12 @@
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-export const WHATSAPP_ADAPTER_VERSION = 15;
+export const WHATSAPP_ADAPTER_VERSION = 18;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_SOURCE = "whatsapp_web";
 const RECENT_OVERLAP_SECONDS = 15 * 60;
 const MAX_MESSAGES_PER_RUN = 1_000;
-const MAX_CHATS_PER_RUN = 6;
+const MAX_CHATS_PER_RUN = 50;
 const MAX_LOADS_PER_CHAT = 2;
 export const MAX_MEDIA_BYTES = 2 * 1024 * 1024;
 export const MAX_MEDIA_PER_RUN = 12;
@@ -79,6 +79,8 @@ export interface WhatsAppMessage {
 }
 
 export interface BackfillChatState {
+  /** Older phone-only history is outside this browser's accessible backfill. */
+  history_limited_to_browser?: boolean;
   oldest_timestamp?: number | null;
   oldest_id?: string | null;
   has_more?: boolean;

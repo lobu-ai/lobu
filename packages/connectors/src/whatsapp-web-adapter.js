@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 15;
+  const ADAPTER_VERSION = 18;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -727,13 +727,17 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
+  function chatMessages(chat) {
+    return models(modelData(chat).msgs ?? chat?.msgs);
+  }
+
   function oldestMessage(chat) {
     let oldest = null;
-    for (const message of models(modelData(chat).msgs ?? chat?.msgs)) {
+    for (const message of chatMessages(chat)) {
       const row = modelData(message);
       const timestamp = unixSeconds(row);
       const id = rawId(row.id ?? message?.id);
-      if (!id) continue;
+      if (!id || timestamp <= 0) continue;
       if (
         !oldest ||
         timestamp < oldest.timestamp ||
@@ -758,97 +762,86 @@ export function whatsAppWebAdapterProgram() {
     return true;
   }
 
+  async function withinHistoryBudget(work, deadline) {
+    if (!deadline) return work(undefined);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("history deadline budget exhausted");
+    const controller = new AbortController();
+    let timer;
+    try {
+      return await Promise.race([
+        work(controller.signal),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error("history deadline budget exhausted"));
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function loadEarlier(chat, limit, deadline) {
     const loader = requireFirst(["WAWebChatLoadMessages"]);
     if (typeof loader?.loadEarlierMsgs !== "function") {
-      return {
-        available: false,
-        reason: "WAWebChatLoadMessages.loadEarlierMsgs unavailable",
-        loads: 0,
-      };
+      return { available: false, reason: "WAWebChatLoadMessages.loadEarlierMsgs unavailable", loads: 0 };
     }
     let loads = 0;
-    const beforeIds = new Set(
-      models(modelData(chat).msgs ?? chat?.msgs)
-        .map((message) => rawId(modelData(message).id ?? message?.id))
-        .filter(Boolean)
-    );
     let previous = oldestMessage(chat);
     let madeProgress = false;
     while (loads < limit && chatHasEarlier(chat)) {
-      if (deadline && Date.now() >= deadline)
-        throw new Error("history deadline budget exhausted");
-      await loader.loadEarlierMsgs({ chat, msgCollection: chat.msgs });
+      await withinHistoryBudget(
+        (signal) => loader.loadEarlierMsgs({ chat, msgCollection: modelData(chat).msgs ?? chat?.msgs, signal }),
+        deadline
+      );
       loads += 1;
       const next = oldestMessage(chat);
-      if (
-        !next ||
-        (previous &&
-          next.id === previous.id &&
-          next.timestamp === previous.timestamp)
-      )
-        break;
+      if (!next || (previous && next.id === previous.id && next.timestamp === previous.timestamp)) break;
       madeProgress = true;
       previous = next;
     }
     let hasMore = chatHasEarlier(chat);
-    const loadedIds = () =>
-      models(modelData(chat).msgs ?? chat?.msgs)
-        .map((message) => rawId(modelData(message).id ?? message?.id))
-        .filter((id) => id && !beforeIds.has(id));
+    let historyLimited = false;
     if (hasMore && !madeProgress) {
-      return {
-        available: true,
-        loads,
-        has_more: true,
-        loaded_ids: loadedIds(),
-        frontier_advanced: false,
-        error: "WhatsApp history loader made no progress",
-      };
-    }
-    if (hasMore) {
-      const phone =
-        loader.loadEarlierMsgsFromPhone ??
-        loader.requestEarlierMsgsFromPhone ??
-        loader.loadEarlierMsgsFromServer;
-      const state =
-        modelData(chat).msgs?.msgLoadState ?? chat?.msgs?.msgLoadState ?? {};
-      const wantsPhone =
-        state.canRequestFromPhone === true || state.hasMoreFromPhone === true;
-      if (wantsPhone && typeof phone !== "function") {
-        return {
-          available: true,
-          loads,
-          has_more: true,
-          loaded_ids: loadedIds(),
-          frontier_advanced: false,
-          error:
-            "phone-assisted WhatsApp history is advertised but its loader is unavailable",
-        };
+      // WhatsApp leaves noEarlierMsgs=false when older history remains on the
+      // phone. An empty loader response alone is not proof: it also swallows
+      // some transient fetch failures. Verify the browser DB's actual boundary.
+      const boundary = requireFirst(["WAWebNonMessageDataRequestHistorySyncOnDemandUtils"]);
+      if (typeof boundary?.getOldestMsgInChatFromDB !== "function") {
+        return { available: false, reason: "WhatsApp browser history boundary unavailable", loads };
       }
-      if (typeof phone === "function" && wantsPhone) {
-        try {
-          await phone.call(loader, { chat, msgCollection: chat.msgs });
-          hasMore = chatHasEarlier(chat);
-        } catch (error) {
-          return {
-            available: true,
-            loads,
-            has_more: true,
-            loaded_ids: loadedIds(),
-            frontier_advanced: false,
-            error: `phone-assisted history failed: ${String(error)}`,
-          };
-        }
+      const oldestStored = await withinHistoryBudget(
+        () => boundary.getOldestMsgInChatFromDB(modelData(chat).id ?? chat?.id), deadline
+      );
+      const oldestStoredId = rawId(modelData(oldestStored).id);
+      const reachedBoundary = oldestStored == null || (oldestStoredId &&
+        chatMessages(chat).some((message) => rawId(modelData(message).id ?? message?.id) === oldestStoredId));
+      if (reachedBoundary) {
+        hasMore = false;
+        historyLimited = true;
+      } else {
+        return { available: true, loads, has_more: true, frontier_advanced: false,
+          error: "WhatsApp history loader made no progress" };
       }
     }
-    return {
-      available: true,
-      loads,
-      has_more: hasMore,
-      loaded_ids: loadedIds(),
-      frontier_advanced: true,
-    };
+    return { available: true, loads, has_more: hasMore, frontier_advanced: true,
+      ...(historyLimited ? { history_limited_to_browser: true } : {}) };
+  }
+
+  function uncommittedHistoryIds(chat, checkpoint) {
+    const frontier = Number(checkpoint?.oldest_timestamp);
+    const frontierId = checkpoint?.oldest_id;
+    return chatMessages(chat).flatMap((message) => {
+      const row = modelData(message);
+      const id = rawId(row.id ?? message?.id);
+      const timestamp = unixSeconds(row);
+      if (!id || timestamp <= 0) return [];
+      if (Number.isFinite(frontier) && frontier > 0 &&
+        (timestamp > frontier || (timestamp === frontier && frontierId && id >= frontierId))) return [];
+      return [id];
+    });
   }
 
   function uniqueMessageModels(collections) {
@@ -858,7 +851,7 @@ export function whatsAppWebAdapterProgram() {
       if (id) byId.set(id, message);
     }
     for (const chat of models(collections.Chat)) {
-      for (const message of models(modelData(chat).msgs ?? chat?.msgs)) {
+      for (const message of chatMessages(chat)) {
         const id = rawId(modelData(message).id ?? message?.id);
         if (id) byId.set(id, message);
       }
@@ -893,8 +886,9 @@ export function whatsAppWebAdapterProgram() {
     const backfill = request.backfill ?? { complete: false, chats: {} };
     const updates = {};
     let cursor = backfill.cursor_chat_jid ?? null;
-    const loadedByChat = new Map();
+    const historyByChat = new Map();
     const backfillMessageIds = new Set();
+    const maxMessages = Math.max(1, Math.min(Number(request.max_messages) || 1_000, 2_000));
     const eligible = request.backfill_disabled
       ? []
       : chatRows.filter(
@@ -921,12 +915,17 @@ export function whatsAppWebAdapterProgram() {
           : null;
       for (const entry of selected) {
         if (historyDeadline && Date.now() >= historyDeadline) break;
+        // This is a round-robin cursor, not a history watermark. A stalled
+        // chat must remain incomplete without starving every chat after it.
+        cursor = entry.jid;
         try {
-          const loaded = await loadEarlier(
-            entry.chat,
-            Math.max(1, Number(request.max_loads_per_chat) || 1),
-            historyDeadline
-          );
+          // Replay cached but uncommitted history before loading another page.
+          // A failed run or a live burst can leave these rows in the page while
+          // the server correctly retains its previous checkpoint.
+          const cached = uncommittedHistoryIds(entry.chat, backfill.chats?.[entry.jid]);
+          const loaded = cached.length >= maxMessages - backfillMessageIds.size
+            ? { available: true, loads: 0, has_more: chatHasEarlier(entry.chat), frontier_advanced: true }
+            : await loadEarlier(entry.chat, Math.max(1, Number(request.max_loads_per_chat) || 1), historyDeadline);
           if (!loaded.available) {
             return {
               ok: false,
@@ -937,8 +936,9 @@ export function whatsAppWebAdapterProgram() {
             };
           }
           const oldest = oldestMessage(entry.chat);
-          for (const id of loaded.loaded_ids) backfillMessageIds.add(id);
-          loadedByChat.set(entry.jid, loaded.loaded_ids);
+          const pending = uncommittedHistoryIds(entry.chat, backfill.chats?.[entry.jid]);
+          for (const id of pending) backfillMessageIds.add(id);
+          historyByChat.set(entry.jid, pending);
           if (loaded.frontier_advanced === false) {
             updates[entry.jid] = {
               ...(backfill.chats?.[entry.jid] ?? {}),
@@ -946,6 +946,7 @@ export function whatsAppWebAdapterProgram() {
               has_more: true,
               loads: loaded.loads,
             };
+            if (backfillMessageIds.size >= maxMessages) break;
             continue;
           }
           updates[entry.jid] = {
@@ -953,8 +954,9 @@ export function whatsAppWebAdapterProgram() {
             oldest_id: oldest?.id ?? null,
             has_more: loaded.has_more,
             loads: loaded.loads,
+            ...(loaded.history_limited_to_browser ? { history_limited_to_browser: true } : {}),
           };
-          cursor = entry.jid;
+          if (backfillMessageIds.size >= maxMessages) break;
         } catch (error) {
           if (/unavailable/i.test(String(error))) {
             return {
@@ -1023,23 +1025,34 @@ export function whatsAppWebAdapterProgram() {
     normalized.sort(
       (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)
     );
-    const maxMessages = Math.max(
-      1,
-      Math.min(Number(request.max_messages) || 1_000, 2_000)
-    );
     const byId = new Map(normalized.map((message) => [message.id, message]));
     const historyPages = [];
-    for (const [chatJid, ids] of loadedByChat) {
-      historyPages.push({
-        chat_jid: chatJid,
-        ...(updates[chatJid] ?? {}),
-        messages: ids.map((id) => byId.get(id)).filter(Boolean),
-      });
+    let remaining = maxMessages;
+    for (const [chatJid, ids] of historyByChat) {
+      // A history watermark advances from newest to oldest. Never checkpoint
+      // the page's physical frontier beyond messages this batch can emit.
+      const pending = ids.map((id) => byId.get(id)).filter(Boolean).sort(
+        (a, b) => b.timestamp - a.timestamp || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
+      );
+      const messages = pending.slice(0, remaining);
+      remaining -= messages.length;
+      const oldest = messages.at(-1);
+      const state = { ...(updates[chatJid] ?? {}) };
+      if (oldest) {
+        state.oldest_timestamp = oldest.timestamp;
+        state.oldest_id = oldest.id;
+      } else if (pending.length > 0) {
+        state.oldest_timestamp = backfill.chats?.[chatJid]?.oldest_timestamp ?? null;
+        state.oldest_id = backfill.chats?.[chatJid]?.oldest_id ?? null;
+      }
+      if (pending.length > messages.length) state.has_more = true;
+      updates[chatJid] = state;
+      historyPages.push({ chat_jid: chatJid, ...state, messages });
     }
-    const messages = normalized
+    const messages = remaining > 0 ? normalized
       .filter((message) => !backfillMessageIds.has(message.id))
-      .slice(-maxMessages)
-      .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+      .slice(-remaining)
+      .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)) : [];
     const mergedChats = { ...(backfill.chats ?? {}), ...updates };
     return {
       ok: true,
