@@ -1949,3 +1949,16 @@ jobs:
         run: |
           bun run --cwd packages/cli build
           node scripts/pack-cli-smoke.mjs "$RUNNER_TEMP/lazy-runtime-smoke"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Read release locks with consumer Bun
+        # Read the exact 1.3.5-generated release locks, without regenerating
+        # them under the consumer version and hiding migration defects.
+        run: |
+          for component in "$RUNNER_TEMP/lazy-runtime-smoke"/packages/@lobu-runtime-*; do
+            cp "$component/dist/dependencies.bun.lock" "$component/bun.lock"
+            (cd "$component" && bun install --frozen-lockfile --ignore-scripts --lockfile-only --linker=isolated)
+          done
