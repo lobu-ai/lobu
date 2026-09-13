@@ -414,12 +414,8 @@ describe("approval hold vs a frozen-state rule", () => {
 		const { org, user, agent, invoice } = await seed();
 		const agentCtx = ctxFor(org.id, { agentId: agent.agentId });
 
-		// `applyEntityFieldChangeProposal` splits a card in two: metadata goes
-		// through `mergeEntityFields`, reserved `$name`/`$parent_id`/`$content` go
-		// through `patchEntityRows`. Both revalidate, so both need the
-		// approved-write signal — the first cut set it on the metadata half only,
-		// and a card mixing the two rolled back whole (the attribute half threw
-		// inside the same transaction, taking the metadata half with it).
+		// Metadata and reserved attributes share one approved patch so the rule
+		// sees the complete transition and its covered escalation is waived.
 		const result = await updateEntity(
 			invoice.id,
 			{ name: "INV-RENAMED", metadata: { amount: 90000 } },

@@ -86,6 +86,19 @@ describe('member roles through generic entity edits', () => {
       message: "You don't have permission to view this workspace. Ask a workspace owner or admin for access.", httpStatus: 403,
     });
   });
+  it.each([requireReadAccess, requireWriteAccess])('checks entity access inside the supplied transaction (%#)', async (guard) => {
+    const sql = getTestDb();
+    await sql.begin(async (tx) => {
+      const [created] = await tx`
+        INSERT INTO entities (organization_id, entity_type_id, name, slug, created_by)
+        SELECT organization_id, entity_type_id, 'Transactional record', 'transactional-record', created_by
+        FROM entities WHERE id = ${member.entityId}
+        RETURNING id
+      `;
+      await expect(guard(tx, Number(created.id), ownerToolContext(org.id, owner.userId)))
+        .resolves.toBeUndefined();
+    });
+  });
   it('applies the same existing write permission to ordinary entities', async () => {
     const client = await TestApiClient.for({ organizationId: org.id, userId: owner.userId, memberRole: 'owner' });
     await client.entity_schema.createType({ slug: 'contact', name: 'Contact' });

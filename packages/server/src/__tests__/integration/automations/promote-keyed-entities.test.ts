@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
 import type { AuthContext } from '../../../tools/execute';
+import type { EntityOutput } from '../../../types/automations';
 import { executeTool } from '../../../tools/execute';
 import { createAutomationRun } from '../../../runs/queue-service';
 import { computePendingWindow } from '../../../utils/window-utils';
@@ -126,7 +127,7 @@ function ownerAuthCtx(orgId: string, userId: string): AuthContext {
   };
 }
 
-async function setupKeyedAutomation() {
+async function setupKeyedAutomation(outputs: Record<string, EntityOutput> = OUTPUTS) {
   const sql = getTestDb();
   const dbClient = sql as unknown as DbClient;
   const workspace = await TestWorkspace.create({ name: 'Keyed Promotion Org' });
@@ -158,7 +159,7 @@ async function setupKeyedAutomation() {
     slug: 'keyed-automation',
     name: 'Keyed Automation',
     prompt: 'Extract problems for {{entities}}.',
-    outputs: OUTPUTS,
+    outputs,
     triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
     managed_agent_id: agent.agentId,
   })) as { automation_id: string };
@@ -790,6 +791,190 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     `;
     expect(claims).toHaveLength(1);
     expect(Number(claims[0].entity_id)).toBe(Number(rows[0].id));
+  });
+
+  it('updates a derived display name without changing the stable identity or slug', async () => {
+    const ctx = await setupKeyedAutomation({
+      problems: { entity: 'topic', key: ['category'], name: ['name'] },
+    });
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'Investigate the crash' }],
+    });
+    const [before] = await ctx.sql`
+      SELECT e.id, e.name, e.slug, e.metadata, ei.identifier
+      FROM entities e JOIN entity_identities ei ON ei.entity_id = e.id
+      WHERE ei.organization_id = ${ctx.workspace.org.id} AND ei.namespace = 'automation_key'
+    `;
+    expect(before.name).toBe('Investigate the crash');
+
+    const rule = await compileEntityRule(`export default (row) => {
+      if (row.op === "update" && row.next.$name !== row.next.name) {
+        row.deny("display name and extracted name must stay consistent");
+      }
+    };`);
+    await ctx.sql`UPDATE entity_types SET rules_compiled = ${rule}
+      WHERE organization_id = ${ctx.workspace.org.id} AND slug = 'topic'`;
+
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, {
+      problems: [{ category: 'Stability', name: 'Deploy the verified crash fix' }],
+    });
+    const rows = await ctx.sql`
+      SELECT e.id, e.name, e.slug, e.metadata, ei.identifier
+      FROM entities e JOIN entity_identities ei ON ei.entity_id = e.id
+      WHERE ei.organization_id = ${ctx.workspace.org.id} AND ei.namespace = 'automation_key'
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata.name).toBe('Deploy the verified crash fix');
+    expect(rows[0].name).toBe('Deploy the verified crash fix');
+    expect(rows[0].id).toBe(before.id);
+    expect(rows[0].slug).toBe(before.slug);
+    expect(rows[0].identifier).toBe(before.identifier);
+  });
+
+  it.each(['deny', 'escalate'] as const)('leaves an unchanged promotion untouched under an update %s rule', async (verdict) => {
+    const ctx = await setupKeyedAutomation({
+      problems: { entity: 'topic', key: ['category'], name: ['name'] },
+    });
+    const extracted = { problems: [{ category: 'Stability', name: 'Investigate the crash' }] };
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, extracted);
+    const [before] = await ctx.sql`
+      SELECT e.id, e.updated_at FROM entities e
+      JOIN entity_identities ei ON ei.entity_id = e.id
+      WHERE ei.organization_id = ${ctx.workspace.org.id} AND ei.namespace = 'automation_key'
+    `;
+    const rule = await compileEntityRule(`export default (row) => {
+      if (row.op === "update") {
+        ${verdict === 'deny' ? 'row.deny("frozen topic");' : 'row.escalate(["name"], "review topic edits");'}
+      }
+    };`);
+    await ctx.sql`UPDATE entity_types SET rules_compiled = ${rule}
+      WHERE organization_id = ${ctx.workspace.org.id} AND slug = 'topic'`;
+
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, extracted);
+    const [after] = await ctx.sql`SELECT updated_at FROM entities WHERE id = ${before.id}`;
+    expect(after.updated_at).toEqual(before.updated_at);
+    const cards = await ctx.sql`
+      SELECT id FROM runs WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity_field_change' AND approval_status = 'pending'
+    `;
+    expect(cards).toEqual([]);
+    const changes = await ctx.sql`
+      SELECT id FROM current_event_records WHERE organization_id = ${ctx.workspace.org.id}
+        AND run_id = ${next.runId} AND semantic_type = 'change_set'
+    `;
+    expect(changes).toEqual([]);
+  });
+
+  it('preserves a customized display name while updating its extracted fields', async () => {
+    const ctx = await setupKeyedAutomation({
+      problems: { entity: 'topic', key: ['category'], name: ['name'] },
+    });
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'Investigate the crash' }],
+    });
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id} AND namespace = 'automation_key'
+    `;
+    await ctx.workspace.owner.entities.update({ entity_id: Number(created.entity_id), name: 'My custom label' });
+    const [before] = await ctx.sql`SELECT name, slug FROM entities WHERE id = ${created.entity_id}`;
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, {
+      problems: [{ category: 'Stability', name: 'Deploy the crash fix' }],
+    });
+    const [after] = await ctx.sql`SELECT name, slug, metadata FROM entities WHERE id = ${created.entity_id}`;
+    expect(after.metadata.name).toBe('Deploy the crash fix');
+    expect(after.name).toBe('My custom label');
+    expect(after.slug).toBe(before.slug);
+  });
+
+  it('holds a human-owned naming field and applies its name together on approval', async () => {
+    const ctx = await setupKeyedAutomation({
+      problems: { entity: 'topic', key: ['category'], name: ['name'] },
+    });
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'Investigate the crash', severity: 'low' }],
+    });
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id} AND namespace = 'automation_key'
+    `;
+    await ctx.workspace.owner.entities.update({
+      entity_id: Number(created.entity_id), affirm_fields: ['name'], field_note: 'Keep this action until reviewed',
+    });
+    const rule = await compileEntityRule(`export default (row) => {
+      if (row.op === "update" && row.next.$name !== row.next.name) {
+        row.deny("display name and extracted name must stay consistent");
+      }
+    };`);
+    await ctx.sql`UPDATE entity_types SET rules_compiled = ${rule}
+      WHERE organization_id = ${ctx.workspace.org.id} AND slug = 'topic'`;
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, {
+      problems: [{ category: 'Stability', name: 'Deploy the crash fix', severity: 'high' }],
+    });
+    const [held] = await ctx.sql`SELECT name, slug, metadata FROM entities WHERE id = ${created.entity_id}`;
+    expect(held.name).toBe('Investigate the crash');
+    expect(held.metadata.name).toBe('Investigate the crash');
+    expect(held.metadata.severity).toBe('high');
+    const [card] = await ctx.sql`
+      SELECT id, action_input FROM runs WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity_field_change' AND approval_status = 'pending'
+    `;
+    expect(card.action_input.fields).toEqual({ name: 'Deploy the crash fix', $name: 'Deploy the crash fix' });
+    await executeTool('manage_operations', { action: 'approve', run_id: Number(card.id) },
+      TEST_ENV, ownerAuthCtx(ctx.workspace.org.id, ctx.workspace.users.owner.id));
+    const [after] = await ctx.sql`SELECT name, slug, metadata FROM entities WHERE id = ${created.entity_id}`;
+    expect(after.name).toBe('Deploy the crash fix');
+    expect(after.metadata.name).toBe('Deploy the crash fix');
+    expect(after.slug).toBe(held.slug);
+  });
+
+  it.each(['approval', 'deny'] as const)('honors a $name %s policy for derived names', async (effect) => {
+    const ctx = await setupKeyedAutomation({
+      problems: { entity: 'topic', key: ['category'], name: ['name'] },
+    });
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'Investigate the crash' }],
+    });
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id} AND namespace = 'automation_key'
+    `;
+    const [policy] = await ctx.sql`
+      INSERT INTO write_approval_policies
+        (organization_id, resource_class, principal_kind, principal_id, entity_type_slug, field_path)
+      VALUES (${ctx.workspace.org.id}, 'entity', 'agent', ${ctx.agent.agentId}, 'topic', '$name')
+      RETURNING id
+    `;
+    await ctx.sql`INSERT INTO write_policy_action_effects (policy_id, action, effect)
+      VALUES (${policy.id}, 'update', ${effect})`;
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, {
+      problems: [{ category: 'Stability', name: 'Deploy the crash fix' }],
+    });
+    const [after] = await ctx.sql`SELECT name, metadata FROM entities WHERE id = ${created.entity_id}`;
+    expect(after.name).toBe('Investigate the crash');
+    expect(after.metadata.name).toBe(effect === 'approval' ? 'Deploy the crash fix' : 'Investigate the crash');
+    const cards = await ctx.sql`
+      SELECT id, action_input FROM runs WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity_field_change' AND approval_status = 'pending'
+    `;
+    expect(cards).toHaveLength(effect === 'approval' ? 1 : 0);
+    if (effect === 'approval') {
+      expect(cards[0].action_input.fields).toEqual({ $name: 'Deploy the crash fix' });
+      await executeTool('manage_operations', { action: 'approve', run_id: Number(cards[0].id) },
+        TEST_ENV, ownerAuthCtx(ctx.workspace.org.id, ctx.workspace.users.owner.id));
+      const [approved] = await ctx.sql`SELECT name FROM entities WHERE id = ${created.entity_id}`;
+      expect(approved.name).toBe('Deploy the crash fix');
+    }
   });
 
   it('syncs extracted fields into entities and respects a human-owned field on re-run, queuing an approval', async () => {
