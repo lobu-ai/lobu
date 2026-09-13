@@ -10,7 +10,7 @@
  * examples are correct for self-hosted installs, not just lobu.ai.
  */
 export function buildAuthMd(baseUrl: string): string {
-	return `# auth.md
+  return `# auth.md
 
 This document tells an agent how to register on a user's behalf against this
 Lobu deployment. Resource server and authorization server are the same origin:
