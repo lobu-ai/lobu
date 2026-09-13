@@ -285,6 +285,7 @@ export async function handleCreateVersion(
         deviceWorkerId: sibling.device_worker_id as string | null,
         skills,
         outputs,
+        classifiers,
         validateSource: false,
       });
       assertAutomationOutputsUseWindowExecution(siblingTriggers, outputs);
@@ -305,6 +306,7 @@ export async function handleCreateVersion(
       deviceWorkerId: automationRows[0].device_worker_id as string | null,
       skills,
       outputs,
+      classifiers,
       validateSource: false,
     });
     assertAutomationOutputsUseWindowExecution(previousTriggers, outputs);

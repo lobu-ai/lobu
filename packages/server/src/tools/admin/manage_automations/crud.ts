@@ -271,6 +271,7 @@ export async function handleCreate(
     triggers: triggerWrite.triggers,
     skills,
     outputs,
+    classifiers,
   });
   assertAutomationInstructions(
     triggerWrite.triggers,
@@ -529,7 +530,7 @@ export async function handleUpdate(
            w.device_worker_id::text AS device_worker_id, w.agent_kind,
            w.delivery_target, w.reaction_script, w.execution_config,
            cv.prompt AS current_prompt, cv.skills AS current_skills,
-           cv.outputs AS current_outputs
+           cv.outputs AS current_outputs, cv.classifiers AS current_classifiers
     FROM automations w
     LEFT JOIN automation_versions cv ON cv.id = w.current_version_id
     WHERE w.id = ${args.automation_id}
@@ -549,6 +550,7 @@ export async function handleUpdate(
     current_prompt: string | null;
     current_skills: Array<{ name: string; content: string }> | null;
     current_outputs: Record<string, unknown> | null;
+    current_classifiers: unknown[] | null;
   };
   // Judge the model against the lane the Automation will be on AFTER this
   // patch, not the one it is on now: clearing a device pin in the same call
@@ -629,6 +631,7 @@ export async function handleUpdate(
     executionConfig: effectiveExecutionConfig, ...effectiveDefaults,
     triggers: triggerWrite.triggers,
     skills: currentRow.current_skills, outputs: currentRow.current_outputs,
+    classifiers: currentRow.current_classifiers,
     validateSource: args.execution_config !== undefined,
   });
   // Clearing a sole script executor must not leave an instruction-free job.
@@ -1054,7 +1057,8 @@ export async function handleCreateFromVersion(
         );
         await assertAutomationScriptExecutor({ executionConfig: version.execution_config, ...cloneDefaults,
           triggers: cloneTriggers as AutomationTrigger[], skills: version.skills as unknown[] | null,
-          outputs: clonedOutputs, validateSource: false });
+          outputs: clonedOutputs, classifiers: version.classifiers as unknown[] | null,
+          validateSource: false });
         // `tags` is a text[] column read under fetch_types:false, so postgres.js
         // hands back a raw array literal string (e.g. "{}" or "{system:chat-link}"),
         // not a JS array. Parse it before filtering.

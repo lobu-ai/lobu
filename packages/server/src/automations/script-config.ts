@@ -15,6 +15,7 @@ export async function assertAutomationScriptExecutor(params: {
   triggers?: ReadonlyArray<{ kind: string; output?: string }>;
   skills?: ReadonlyArray<unknown> | null;
   outputs?: Record<string, unknown> | null;
+  classifiers?: ReadonlyArray<unknown> | null;
   validateSource?: boolean;
 }): Promise<void> {
   const executor = automationScriptExecutor(params.executionConfig);
@@ -36,10 +37,11 @@ export async function assertAutomationScriptExecutor(params: {
   }
   if (
     params.skills?.length ||
-    (params.outputs && Object.keys(params.outputs).length > 0)
+    (params.outputs && Object.keys(params.outputs).length > 0) ||
+    params.classifiers?.length
   ) {
     throw new ToolUserError(
-      'A script executor cannot use agent skills or extraction outputs. Read and persist data through the SDK in the script.',
+      'A script executor cannot use agent skills, extraction outputs, or classifiers. Read and persist data through the SDK in the script.',
       422
     );
   }
