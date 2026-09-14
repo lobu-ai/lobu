@@ -78,8 +78,11 @@ describe("bundled connector lifecycle matrix", () => {
 			github: 6,
 			"google.calendar": 4,
 			"google.drive": 2,
-			"google.gmail": 5,
+			// +download_attachment; get_thread now names each message's files.
+			"google.gmail": 6,
 			"market.quotes": 1,
+			// outlook's first actions: list_attachments + download_attachment.
+			"microsoft.outlook": 2,
 			"whatsapp.web": 6,
 			x: 1,
 			youtube: 5,
