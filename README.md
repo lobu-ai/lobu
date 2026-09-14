@@ -34,11 +34,11 @@ Each session forgets.                       +-------------------+
 
 ## See it in ChatGPT
 
-The 86-second narrated demo shows ChatGPT using Lobu over MCP to pull connected context and call
+The 86-second muted demo shows ChatGPT using Lobu over MCP to pull connected context and call
 governed tools without leaving the conversation. The same shared context remains available to
 Claude, Codex, and custom agents.
 
-https://github.com/user-attachments/assets/c07e7c23-a29b-4b05-895e-51dcb935bac4
+<video src="docs/assets/chatgpt-demo-muted.mp4" width="100%" controls></video>
 
 ## Start with the agent you already use
 
@@ -60,47 +60,9 @@ Lobu when it needs shared context.
 
 The same MCP endpoint works with **Claude Code, Codex, OpenCode, Antigravity, ChatGPT, Claude Desktop, Cursor**, and custom MCP clients. Run `lobu connect` to detect a client, install the supported MCP and skill bundle, or get the exact native handoff when the host requires UI setup. Authentication happens in that agent on first use.
 
-Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/) · [Grok](https://lobu.ai/connect-from/grok/)
+Setup guides: [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/)
 
 Download Lobu: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/download/Lobu.dmg) · [Chrome extension](https://chromewebstore.google.com/detail/jhgcecbdpnoehfnhpdfihlchjddapepi)
-
-> Upgrading a Mac install made before the `ai.lobu.mac` app identity? Install the
-> DMG by hand — the in-app updater does not carry an install across the bundle
-> identifier change. It replaces `/Applications/Lobu.app` in place; also delete
-> `/Applications/Owletto.app` if a pre-rename build is still there, since that one
-> sits at its own path. From 20.0.1 your settings and the app's device identity
-> carry across the rename, so device-pinned Automations keep running against the
-> same worker. Login Items and privacy grants cannot come with them — macOS keys
-> both to the bundle identifier — so the new app asks about Open at Login once and
-> re-prompts for each permission on first use.
-
-To test changes merged to `main`, run `bunx @lobu/cli@canary --help`. The
-`canary` tag moves only when a maintainer runs **Publish Packages** from `main`
-in GitHub Actions with channel `canary`; that run requires the commit's CI and
-image checks and smokes the packed CLI before publishing. The published version
-is then exercised across the Linux runtime matrix, so check the run's result before
-depending on it. Use `@latest` for stable releases. Canary versions include the
-full commit SHA so you can pin a preview when reproducing a bug. Package managers
-can cache the moving tag: copy the exact version from the successful workflow run,
-use it in place of `canary`, and confirm the installed version with `lobu --version`.
-
-### Recall what the company knows
-
-Ask from Claude Code, Codex, or ChatGPT:
-
-> What did we decide about enterprise onboarding, and what changed since the last release?
-
-Lobu searches shared, durable organizational memory under the caller's permissions, regardless of which agent asks. The answer can combine connected discussions, project activity, customer records, saved decisions, and typed company entities without rebuilding that context from scratch in every chat.
-
-### Hand work to a persistent Lobu specialist
-
-Ask your primary agent:
-
-> Ask our customer-researcher specialist to review the latest feedback and propose the next three interviews.
-
-The agent discovers the specialists available to you, selects the right one, delegates the task, and brings the result back. The specialist has its own identity, instructions, tools, durable conversations, and access policy.
-
-To the user this stays one conversation in their primary agent. The specialist itself persists: it remains available to other authorized people and agents instead of disappearing with the current chat.
 
 ## Why Lobu
 
@@ -122,91 +84,6 @@ flowchart TD
     Actions -->|"action events"| Log
 ```
 
-**MCP is for doing. Lobu's event graph is for knowing.**
-
-## One context layer, personal or company
-
-The primitives don't change between a single person's accounts and an entire company's stack —
-only what's connected does. Identities, entities, events, history, and policy work the same way
-at either scope.
-
-```text
-PERSONAL                               COMPANY
-
-WhatsApp  Gmail  Calendar  Mac        Slack  GitHub  CRM  DB
-    \       |       |      /              \      |     |   /
-     +------+-------+-----+                +------+-----+---+
-                    \                      /
-                     +------- LOBU -------+
-                     | identities         |
-                     | entities + events  |
-                     | history + policy   |
-                     +---------+----------+
-                               |
-                      shared agent context
-                  +------------+------------+
-                  |                         |
-       "When is Alice home?"      "Why is Acme at risk?"
-```
-
-## Three ways to use Lobu
-
-### 1. Add shared context to existing agents
-
-Agents can search and save memory, query structured entities, inspect connected sources, and delegate to Lobu specialists without moving to a new chat interface or adopting Lobu's runtime.
-
-Docs: [Memory](https://lobu.ai/getting-started/memory/) · [Claude](https://lobu.ai/connect-from/claude/) · [ChatGPT](https://lobu.ai/connect-from/chatgpt/) · [Codex](https://lobu.ai/connect-from/codex/)
-
-### 2. Run persistent Lobu specialists
-
-Create a specialist for a durable responsibility: customer research, support triage, release coordination, incident follow-up, or an internal domain. People can talk to it from the Lobu web app or Slack, while other agents can call the same specialist over MCP.
-
-Scaffold and run one locally:
-
-```bash
-npx @lobu/cli@latest init my-specialist
-cd my-specialist
-npx @lobu/cli@latest run
-npx @lobu/cli@latest chat -c local "hello"
-```
-
-`lobu run` starts the local stack with an embedded Postgres database by default and opens the web UI on `:8787`. It applies the project's `lobu.config.ts` automatically only in embedded mode. To use external Postgres, set `DATABASE_URL`, ensure pgvector is available, then authenticate and apply the project to that runtime separately.
-
-The current canary CLI downloads the required runtime components on first use and caches them for later runs. `--help`, `--version`, and commands that only connect to a remote runtime do not install the local stack. Docker images include their runtime dependencies at build time and start directly; local embedding model weights can still download on first use. See [Docker deployment](docs/DOCKER.md) for the separate database and service configuration.
-
-`lobu init`, including `init -y`, generates `ENCRYPTION_KEY` in the project's `.env`. A manual setup must supply this key before starting: generate a 32-byte base64 value with `openssl rand -base64 32`. Keep the same key with the persistent database; replacing it makes previously encrypted secrets unreadable.
-
-Docs: [Getting started](https://lobu.ai/getting-started/) · [Agent workspace](https://lobu.ai/guides/agent-prompts/) · [Skills](https://lobu.ai/getting-started/skills/) · [Slack](https://lobu.ai/platforms/slack/)
-
-### 3. Build with the CLI and TypeScript SDK
-
-The same governed data and operations are available without an agent:
-
-```bash
-npx @lobu/cli@latest memory run                     # list the memory tools
-npx @lobu/cli@latest memory run search_memory '{"query":"onboarding"}'
-npx @lobu/cli@latest memory exec \
-  'export default async (_ctx, client) => client.entities.list({ limit: 5 })'
-```
-
-Or from Node and TypeScript:
-
-```ts
-import { client, searchMemory } from "@lobu/client";
-
-client.setConfig({
-  baseUrl: "https://lobu.ai",
-  headers: { Authorization: `Bearer ${process.env.LOBU_TOKEN}` },
-});
-
-const hits = await searchMemory({
-  path: { orgSlug: "my-org" },
-  body: { query: "onboarding" },
-});
-```
-
-Mint a token with `lobu token create`. The MCP tools and typed SDK operations share the server-side tool registry and access rules; `lobu memory run` and `lobu memory exec` dispatch through the MCP endpoint.
-
 ## Core concepts
 
 ### Shared context
@@ -227,7 +104,7 @@ Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.m
 
 External agents do not ask users to write delegation code. They pass scripts like these to Lobu's `query_sdk` and `run_sdk` MCP tools:
 
-Scripts must default-export an async function. Lobu passes the execution context as the first argument and the ClientSDK as the second; keep `await` and `return` inside that function. A bare top-level `await` or `return` fails compilation. The same function format works with `lobu memory exec`.
+Scripts must default-export an async function receiving `(ctx, client)` — the same shape `lobu memory exec` accepts.
 
 ```ts
 // Discover specialists through query_sdk.
@@ -254,15 +131,13 @@ Docs: [Agent workspace](https://lobu.ai/guides/agent-prompts/) · [Guardrails](h
 
 Automations are versioned background responsibilities activated manually, on a schedule, by a connector event, or by another Automation's durable output. They read governed sources, persist structured results, and can notify Slack, open a ticket, or start agent work while nobody is in chat.
 
-Collection and activation stay independent: connect a source once, keep its durable history useful to every authorized agent, then choose whether a responsibility should run on a schedule or immediately when a matching event arrives. Polling connectors, authenticated webhooks, and Automation outputs use their appropriate ingestion paths but converge on the same durable Automation run lifecycle. Initial syncs establish a baseline without flooding subscribers; repeated deliveries are deduplicated.
+Collection and activation stay independent: polling connectors, authenticated webhooks, and Automation outputs all converge on the same durable run lifecycle. First syncs set a quiet baseline; redeliveries are deduplicated.
 
 See the [activation and chaining model](docs/AUTOMATIONS.md).
 
 ### Optional execution
 
-Shared context and delegation over MCP do not require Lobu to execute code for the calling agent. When a Lobu specialist needs a shell, the built-in runtime provides lightweight `just-bash` execution. Remote sandbox providers such as Vercel Sandbox can be connected for workloads that need stronger isolation or more compute.
-
-Which sandbox runs the code is a deployment choice. Lobu provides the shared context, permissions, and governance around it.
+Shared context and delegation over MCP do not require Lobu to execute code for the calling agent. When a Lobu specialist needs a shell, the built-in runtime provides lightweight `just-bash` execution, or a remote sandbox provider for workloads that need stronger isolation.
 
 ## Channels
 
@@ -277,9 +152,9 @@ Setup: [Slack](https://lobu.ai/platforms/slack/) · [Telegram](https://lobu.ai/p
 - **Agent runtimes** host a particular agent. Lobu lets people keep using Claude Code, Codex, ChatGPT, or their own runtime and add Lobu only where shared context or delegation is useful.
 - **Workflow engines** encode a graph of predetermined steps. Lobu Automations handle durable triggers and background responsibilities, while agents decide how to complete open-ended work.
 
-## Agent configuration
+## Run and configure
 
-Runtime configuration is managed through the web app or the same org-scoped REST API used by the CLI. Local `lobu.config.ts` projects support validation and repeatable apply workflows.
+Use the embedded runtime locally or self-host Lobu with external Postgres. Runtime configuration lives in the web app or the same org-scoped REST API used by the CLI; local `lobu.config.ts` projects support validation and repeatable apply workflows.
 
 ```bash
 npx @lobu/cli@latest login
@@ -287,17 +162,11 @@ npx @lobu/cli@latest org set my-org
 npx @lobu/cli@latest agent list
 ```
 
-Docs: [CLI reference](https://lobu.ai/reference/cli/) · [`lobu apply`](https://lobu.ai/reference/cli/#apply)
-
-## Deployment
-
-Use the embedded runtime locally or self-host Lobu with external Postgres. Production guides: [Docker](https://lobu.ai/deployment/docker/) · [Cloud](https://lobu.ai/deployment/cloud/) · [Kubernetes](https://lobu.ai/deployment/kubernetes/)
+Docs: [CLI reference](https://lobu.ai/reference/cli/) · [`lobu apply`](https://lobu.ai/reference/cli/#apply) · [Docker](https://lobu.ai/deployment/docker/) · [Cloud](https://lobu.ai/deployment/cloud/) · [Kubernetes](https://lobu.ai/deployment/kubernetes/)
 
 ## Security and privacy
 
-Permissions and audit stay on Lobu's gateway. Lobu MCP servers and the credential-brokering layer handle provider and connector credentials, OAuth and token refresh, and third-party API proxying. Workers receive scoped placeholders or short-lived provider-derived access, never OAuth tokens or durable stored credentials. Destructive MCP calls require in-thread approval unless explicitly pre-approved, and connected data remains organization-scoped.
-
-The built-in `just-bash` and embedded execution modes are policy and convenience boundaries, not VMs for hostile code. Use a remote sandbox provider when the workload needs a stronger isolation boundary.
+Permissions and audit stay on Lobu's gateway: credential brokering, OAuth and token refresh, and third-party API proxying are server-side. Workers receive scoped placeholders or short-lived provider-derived access, never OAuth tokens or durable stored credentials. Destructive MCP calls require in-thread approval unless explicitly pre-approved, and connected data remains organization-scoped. The built-in `just-bash` and embedded execution modes are convenience boundaries, not isolation VMs — use a remote sandbox for hostile code.
 
 Docs: [Security](https://lobu.ai/guides/security/) · [Secret proxy](https://lobu.ai/guides/secret-proxy/) · [Guardrails](https://lobu.ai/guides/guardrails/) · [Threat model](docs/SECURITY.md)
 
