@@ -470,6 +470,13 @@ interface PreviewAgent {
  * Resolve the org a preview connection's demo agents live in (the org of its
  * owning agent), plus that owning agent's id (excluded from the demo list).
  * Returns null when the connection or its owning agent can't be resolved.
+ *
+ * The `previewMode` predicate belongs here rather than in the callers. Both of
+ * them — the demo roster and the demo bind — answer whoever can reach the bot,
+ * with no caller identity and no org membership; that trade is sound only for a
+ * hosted trial connection, whose org exists to be tried. Through an ordinary
+ * tenant bot the same surface would let an unlinked sender enumerate the org's
+ * real agents and bind a chat to one.
  */
 async function resolvePreviewConnectionOrg(connectionId: string): Promise<{
 	organizationId: string;
@@ -483,6 +490,7 @@ async function resolvePreviewConnectionOrg(connectionId: string): Promise<{
     WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
       AND credential_mode IS NOT NULL
       AND deleted_at IS NULL
+      AND config->'settings'->'previewMode' = 'true'::jsonb
     LIMIT 1
   `) as Array<{
 		id: number;

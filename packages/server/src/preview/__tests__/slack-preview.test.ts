@@ -506,6 +506,12 @@ describe("Public preview — /lobu try a demo agent", () => {
   const CONCIERGE = "preview-concierge";
   const DEMO_A = "food-ordering";
   const DEMO_B = "lunch-bot";
+  /** Ordinary tenant bots in the SAME org — not hosted trial connections. */
+  const ORDINARY_CONNS = {
+    slack: "conn-ordinary-slack",
+    telegram: "conn-ordinary-telegram",
+    gchat: "conn-ordinary-gchat",
+  } as const;
   let PREVIEW_ORG = "";
   let OTHER_ORG = "";
 
@@ -553,6 +559,19 @@ describe("Public preview — /lobu try a demo agent", () => {
       settings: { previewMode: true },
       status: "active",
     });
+    // The same org also runs ordinary bots. These are NOT hosted trial
+    // connections, so the self-serve demo surface must not read through them.
+    for (const [platform, id] of Object.entries(ORDINARY_CONNS)) {
+      await insertChatConnectionRow({
+        id,
+        organizationId: PREVIEW_ORG,
+        agentId: CONCIERGE,
+        platform,
+        config: { platform },
+        settings: { allowGroups: true },
+        status: "active",
+      });
+    }
   });
 
   beforeEach(async () => {
@@ -569,6 +588,50 @@ describe("Public preview — /lobu try a demo agent", () => {
 
   test("listPreviewAgents returns [] for an unknown connection", async () => {
     expect(await listPreviewAgents("conn-does-not-exist")).toEqual([]);
+  });
+
+  test("an ordinary chat connection offers no demo roster, on any platform", async () => {
+    // The self-serve demo surface answers anyone who can reach the bot — no
+    // caller identity, no org membership. That is deliberate for a hosted trial
+    // connection, where the org exists to be tried. An ordinary tenant bot is
+    // the opposite: its org holds the tenant's real agents, and an unlinked
+    // sender must learn nothing about them. Enumerated per platform because
+    // nothing on this path is platform-specific — `gchat` included, which isn't
+    // even a managed preview platform.
+    const rosters: Record<string, string[]> = {};
+    for (const [platform, id] of Object.entries(ORDINARY_CONNS)) {
+      rosters[platform] = (await listPreviewAgents(id)).map((a) => a.agentId);
+    }
+
+    expect(rosters).toEqual({ slack: [], telegram: [], gchat: [] });
+  });
+
+  test("an ordinary chat connection cannot bind a chat to an org agent", async () => {
+    // The roster read and the bind share one resolver, so scoping the read
+    // without the bind would still let a sender who guesses an agent id attach
+    // their own chat to it.
+    const results: Record<string, unknown> = {};
+    for (const [platform, id] of Object.entries(ORDINARY_CONNS)) {
+      results[platform] = await bindChatToPreviewAgent({
+        connectionId: id,
+        agentId: DEMO_A,
+        platform,
+        // Shaped the way each platform's caller would: only Slack has a team,
+        // and only Slack channel ids are canonicalized.
+        teamId: platform === "slack" ? TEAM_ID : undefined,
+        channelId:
+          platform === "slack"
+            ? canonicalSlackChannelId("Dordinary")
+            : `dm-ordinary-${platform}`,
+      });
+    }
+
+    expect(results).toEqual({
+      slack: { status: "no_connection" },
+      telegram: { status: "no_connection" },
+      gchat: { status: "no_connection" },
+    });
+    expect(await listTestAutomationSubscriptions()).toHaveLength(0);
   });
 
   test("bindChatToPreviewAgent binds a DM to a demo agent in the connection's org", async () => {
