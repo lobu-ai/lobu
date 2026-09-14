@@ -1790,6 +1790,62 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		expect(decoyCount).toBe(0);
 	});
 
+	test("query-string auth honors the connection opt-in, nothing more", async () => {
+		// Documented-schema tokens must not authenticate `?token=` unless the
+		// connection set allowQueryAuth — tokens leak via proxy logs and
+		// browser history, so the default is Bearer-header only.
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { manager } = await buildManager();
+		const { createConnectionWebhookRoutes } = await import(
+			"../routes/public/connections.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		async function seedDocConnection(
+			name: string,
+			config: Record<string, unknown>
+		): Promise<string> {
+			const inserted = (await sql`
+				INSERT INTO connections (organization_id, connector_key, slug, status, config)
+				VALUES (${ORG}, 'webhook', ${`${name}-${Date.now()}-${Math.random()}`},
+					'active', ${sql.json(config)})
+				RETURNING id
+			`) as Array<{ id: number }>;
+			return String(inserted[0].id);
+		}
+		const plainToken = "query-optout-token-0123456789abcdef0123456789";
+		const plainId = await seedDocConnection("query-optout", {
+			token: plainToken,
+			semanticType: "alert",
+		});
+		const optInToken = "query-optin-token-0123456789abcdef0123456789";
+		const optInId = await seedDocConnection("query-optin", {
+			token: optInToken,
+			allowQueryAuth: true,
+			semanticType: "alert",
+		});
+		const app = createConnectionWebhookRoutes(manager);
+		const queryDelivery = (id: string, token: string) =>
+			app.fetch(
+				new Request(
+					`http://gateway.test/api/v1/webhooks/${id}?token=${token}`,
+					{
+						method: "POST",
+						body: JSON.stringify({ hello: "query" }),
+						headers: { "content-type": "application/json" },
+					}
+				)
+			);
+		// No opt-in: query token rejected even though the Bearer token is valid.
+		const denied = await queryDelivery(plainId, plainToken);
+		expect(denied.status).toBe(401);
+		expect(await eventRows(plainId)).toHaveLength(0);
+		// Opted in: query token accepted.
+		const allowed = await queryDelivery(optInId, optInToken);
+		expect(allowed.status).toBe(202);
+		expect(await eventRows(optInId)).toHaveLength(1);
+	});
+
 	test("a grandfathered numeric stable id still resolves via its projection", async () => {
 		// Pre-guard legacy rows can hold a numeric stable id. The legacy caller
 		// passes no automationConnectionId, so ingest must use the

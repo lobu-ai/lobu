@@ -373,7 +373,10 @@ export async function resolveConnectionWebhookConfig(
   // `connectorKey` is required (no permissive default) so a future caller
   // cannot omit it and silently widen the fallback.
   const documentedKeys = connectorKey === 'webhook';
-  const token = c.webhook_callback_token ?? (documentedKeys && typeof c.token === 'string' ? c.token : undefined);
+  const registeredToken = c.webhook_callback_token;
+  const documentedToken =
+    documentedKeys && typeof c.token === 'string' ? c.token : undefined;
+  const token = registeredToken ?? documentedToken;
   const dedupeHeader =
     c.webhook_dedupe_header ?? (documentedKeys && typeof c.dedupeHeader === 'string' ? c.dedupeHeader : undefined);
   if (!c.webhook_signature_secret && !token && !c.webhook_external_id) {
@@ -381,7 +384,18 @@ export async function resolveConnectionWebhookConfig(
   }
   return {
     platform: 'webhook',
-    ...(token ? { token, allowQueryAuth: true } : {}),
+    // Provider-registered webhooks always allow query auth (pre-existing).
+    // Documented-schema tokens carry only the connection's own opt-in —
+    // forcing true would authenticate `?token=` URLs the owner never opted
+    // into (tokens leak via proxy logs and browser history).
+    ...(registeredToken ? { token: registeredToken, allowQueryAuth: true } : {}),
+    ...(!registeredToken && documentedToken
+      ? {
+          token: documentedToken,
+          allowQueryAuth:
+            c.allowQueryAuth === true || c.allowQueryAuth === 'true',
+        }
+      : {}),
     ...(c.webhook_signature_secret ? { signatureSecret: c.webhook_signature_secret } : {}),
     ...(c.webhook_signature_header ? { signatureHeader: c.webhook_signature_header } : {}),
     ...(c.webhook_algorithm ? { algorithm: c.webhook_algorithm } : {}),
