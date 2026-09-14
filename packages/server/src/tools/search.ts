@@ -907,10 +907,9 @@ async function fetchContentSnippets(
     const text = c.payload_text ?? '';
     // `platform` is COALESCE(events.connector_key, connections.connector_key):
     // system rows (e.g. "Connection needs authorization") have neither, so it
-    // can be null. Coalesce to 'lobu' — same as toExactContentSnippet — to keep
-    // the non-nullable schema field honest.
-    const platform =
-      typeof c.platform === 'string' && c.platform.length > 0 ? c.platform : 'lobu';
+    // can be null. Fall back to 'lobu' — same as toExactContentSnippet — to
+    // keep the non-nullable schema field honest.
+    const platform = c.platform || 'lobu';
     return {
       id: c.id,
       title: c.title,
