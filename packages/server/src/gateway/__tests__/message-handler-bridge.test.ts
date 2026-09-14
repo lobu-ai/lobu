@@ -159,7 +159,10 @@ describe("isEarlyDispatchableChatCommand", () => {
   test("early dispatch keeps complete commands but excludes reset placeholders", () => {
     expect(isEarlyDispatchableChatCommand("/link code-123")).toBe(true);
     expect(isEarlyDispatchableChatCommand("/help")).toBe(true);
-    expect(isEarlyDispatchableChatCommand("/lobu agents")).toBe(true);
+    expect(isEarlyDispatchableChatCommand("/lobu status")).toBe(true);
+    // The demo commands are gone; the allowlist must not resurrect them.
+    expect(isEarlyDispatchableChatCommand("/lobu try")).toBe(false);
+    expect(isEarlyDispatchableChatCommand("/agents")).toBe(false);
     expect(isEarlyDispatchableChatCommand("/new")).toBe(false);
     expect(isEarlyDispatchableChatCommand("/lobu clear")).toBe(false);
     expect(isEarlyDispatchableChatCommand("/HELP")).toBe(false);

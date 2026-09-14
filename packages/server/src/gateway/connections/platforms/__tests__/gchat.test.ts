@@ -568,15 +568,15 @@ describe("Google Chat platform compatibility", () => {
       delivered.push(message.text);
       completion.resolve();
     });
-    const event = standardDirectMessage("/lobu try crm");
-    event.message.argumentText = "/lobu try crm";
+    const event = standardDirectMessage("/lobu link crm-ABC123");
+    event.message.argumentText = "/lobu link crm-ABC123";
     event.message.slashCommand = { commandId: "999" };
 
     const response = await chat.webhooks.gchat(webhook(event));
     await waitForDelivery(completion.promise);
 
     expect(response.status).toBe(200);
-    expect(delivered).toEqual(["/lobu try crm"]);
+    expect(delivered).toEqual(["/lobu link crm-ABC123"]);
   });
 
   test("dispatches a standalone annotated slash command without message text", async () => {

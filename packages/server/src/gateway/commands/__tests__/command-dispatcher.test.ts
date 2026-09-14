@@ -45,10 +45,10 @@ describe("CommandDispatcher.tryHandleSlashText", () => {
     expect(calls).toEqual([{ name: "link", args: "crm-ABC123" }]);
   });
 
-  test("unwraps `/lobu try <agentId>` too", async () => {
+  test("unwraps any subcommand, not just `link`", async () => {
     const { dispatcher, calls } = makeDispatcher();
-    await dispatcher.tryHandleSlashText("/lobu try crm", input);
-    expect(calls).toEqual([{ name: "try", args: "crm" }]);
+    await dispatcher.tryHandleSlashText("/lobu status", input);
+    expect(calls).toEqual([{ name: "status", args: "" }]);
   });
 
   test("non-wrapped `/link <code>` still dispatches `link`", async () => {

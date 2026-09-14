@@ -82,12 +82,6 @@ type SurfaceType = "dm" | "channel";
 
 // Slack and Google Chat expose a native `/lobu` wrapper; other chat platforms
 // use bare command spellings.
-function tryCommand(platform: string): string {
-	return formatChatCommand(platform, "try");
-}
-function listCommand(platform: string): string {
-	return formatChatCommand(platform, "agents");
-}
 function linkCommand(platform: string): string {
 	return formatChatCommand(platform, "link");
 }
@@ -485,169 +479,10 @@ export async function consumePreviewClaim(args: {
 	return result;
 }
 
-// ── Public-preview "try a demo agent" ────────────────────────────────────────
-//
-// A `previewMode` connection (the hosted "Lobu" workspace bot) exposes every
-// agent in *its own org* as a self-serve demo: `/lobu try <agentId>` binds the
-// chat to that agent — no claim code, no ownership check, no CLI. "The org" is
-// whatever org owns the preview connection's agent; drop your demo agents in it
-// (via `lobu apply` / the agents UI) and they show up here automatically. The
-// connection's own placeholder/concierge agent is excluded from the list.
-
-interface PreviewAgent {
-	agentId: string;
-	name: string;
-	description: string | null;
-}
-
+// ── Public-preview unlinked-chat notice ──────────────────────────────────────
 /**
- * Resolve the org a preview connection's demo agents live in (the org of its
- * owning agent), plus that owning agent's id (excluded from the demo list).
- * Returns null when the connection or its owning agent can't be resolved.
- *
- * The `previewMode` predicate belongs here rather than in the callers. Both of
- * them — the demo roster and the demo bind — answer whoever can reach the bot,
- * with no caller identity and no org membership; that trade is sound only for a
- * hosted trial connection, whose org exists to be tried. Through an ordinary
- * tenant bot the same surface would let an unlinked sender enumerate the org's
- * real agents and bind a chat to one.
- */
-async function resolvePreviewConnectionOrg(connectionId: string): Promise<{
-	organizationId: string;
-	owningAgentId: string;
-	connectionDatabaseId: number;
-} | null> {
-	const sql = getDb();
-	const rows = (await sql`
-    SELECT id, organization_id, agent_id
-    FROM connections
-    WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
-      AND credential_mode IS NOT NULL
-      AND deleted_at IS NULL
-      AND config->'settings'->'previewMode' = 'true'::jsonb
-    LIMIT 1
-  `) as Array<{
-		id: number;
-		organization_id: string | null;
-		agent_id: string | null;
-	}>;
-	const row = rows[0];
-	if (!row?.organization_id || !row.agent_id) return null;
-	return {
-		organizationId: row.organization_id,
-		owningAgentId: row.agent_id,
-		connectionDatabaseId: row.id,
-	};
-}
-
-/**
- * Demo agents reachable via `/lobu try` through this preview connection. Best
- * effort: returns `[]` (and logs) on any DB error rather than throwing — this
- * runs on the hot path of every unlinked message and the worst case is a
- * fallback notice instead of the menu.
- */
-export async function listPreviewAgents(
-	connectionId: string,
-): Promise<PreviewAgent[]> {
-	try {
-		const org = await resolvePreviewConnectionOrg(connectionId);
-		if (!org) return [];
-		const sql = getDb();
-		const rows = (await sql`
-      SELECT id, name, description
-      FROM agents
-      WHERE organization_id = ${org.organizationId}
-        AND id <> ${org.owningAgentId}
-      ORDER BY name NULLS LAST, id
-    `) as Array<{
-			id: string;
-			name: string | null;
-			description: string | null;
-		}>;
-		return rows.map((r) => ({
-			agentId: r.id,
-			name: r.name ?? r.id,
-			description: r.description ?? null,
-		}));
-	} catch (err) {
-		logger.warn(
-			{ err: errorMessage(err), connectionId },
-			"[preview] listPreviewAgents failed",
-		);
-		return [];
-	}
-}
-
-type BindPreviewAgentResult =
-	| { status: "bound"; agentId: string }
-	| { status: "not_available" }
-	| { status: "no_connection" };
-
-/**
- * Bind a chat to a demo agent for a preview connection. The agent must live in
- * the connection's org — that's the allowlist; there's no per-caller ownership
- * check (that's the whole point: anyone in the hosted workspace can try them).
- * Last bind wins; re-running with another agent just rebinds.
- */
-export async function bindChatToPreviewAgent(args: {
-	connectionId: string;
-	agentId: string;
-	platform: string;
-	/** Workspace id for platforms that have one (Slack); undefined otherwise. */
-	teamId?: string;
-	/** Canonical channel id the message handler looks bindings up by. */
-	channelId: string;
-}): Promise<BindPreviewAgentResult> {
-	const org = await resolvePreviewConnectionOrg(args.connectionId);
-	if (!org) return { status: "no_connection" };
-	const sql = getDb();
-	const agentRows = (await sql`
-    SELECT id FROM agents
-    WHERE id = ${args.agentId} AND organization_id = ${org.organizationId}
-    LIMIT 1
-  `) as Array<{ id: string }>;
-	const target = agentRows[0];
-	if (!target) return { status: "not_available" };
-
-	const { platform, teamId, channelId } = args;
-	// Org-scoped upsert (same dance as `upsertBinding`): another tenant's binding
-	// for the same platform+channel is a different row and cannot be clobbered,
-	// and `organization_id` is never reassigned, so a binding can't change owners.
-	await upsertBinding(
-		sql,
-		platform,
-		channelId,
-		teamId,
-		target.id,
-		org.organizationId,
-		org.connectionDatabaseId,
-	);
-	return { status: "bound", agentId: target.id };
-}
-
-/** The "pick a demo agent" menu — shown on `/lobu try` / `/lobu agents`. */
-export function previewAgentMenu(
-	platform: string,
-	agents: PreviewAgent[],
-): string {
-	if (agents.length === 0) {
-		return "No demo agents are available here yet.";
-	}
-	return [
-		"Demo agents you can try here:",
-		...agents.map(
-			(a) =>
-				`• \`${tryCommand(platform)} ${a.agentId}\` — ${a.description || a.name}`,
-		),
-		"",
-		`Pick one, then just send a message. \`${listCommand(platform)}\` shows this list again.`,
-	].join("\n");
-}
-
-/**
- * Reply for a `previewMode` connection when an unlinked chat arrives. If the
- * connection's org has demo agents, it's the `/lobu try` menu; otherwise it
- * falls back to "wire your own agent" instructions.
+ * Reply for a `previewMode` connection when an unlinked chat arrives: how to
+ * link this chat to an agent you own.
  *
  * Never returns null, on any platform: the caller has no safe fall-through. A
  * hosted bot takes installs and DMs from people who belong to no organization
@@ -657,18 +492,7 @@ export function previewAgentMenu(
  * established this is a `previewMode` connection, and `formatChatCommand`
  * spells the link command for any platform.
  */
-export async function previewUnlinkedNotice(
-	platform: string,
-	connectionId: string,
-): Promise<string> {
-	const agents = await listPreviewAgents(connectionId);
-	if (agents.length > 0) {
-		return [
-			`👋 Welcome! ${previewAgentMenu(platform, agents)}`,
-			"",
-			`(Building your own agent? Run \`lobu run\` and send the \`${linkCommand(platform)} <code>\` it prints.)`,
-		].join("\n");
-	}
+export function previewUnlinkedNotice(platform: string): string {
 	return [
 		"👋 This chat isn't linked to a Lobu agent yet.",
 		"",
@@ -707,8 +531,8 @@ async function listOrgAgentsForNotice(organizationId: string): Promise<{
 /**
  * Reply for a tenant's own workspace bot (a connection with no owning agent)
  * when a non-command message arrives in a chat that isn't bound to one of the
- * tenant's agents yet. Unlike a preview connection there are no demo agents to
- * offer — the tenant links their own agents.
+ * tenant's agents yet. Unlike a hosted preview connection, whose org is not the
+ * sender's, every agent here is a legitimate link target.
  *
  * EVERY chat platform gets the same thing: the org's agents, each deep-linked
  * to its Automations page (where this chat is added as a Listen source) when
