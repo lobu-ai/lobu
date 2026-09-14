@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -375,6 +375,27 @@ describe('adopting a run-produced artifact as connector file input', () => {
     });
     await expect(prepareOperationFiles(fileRef(published.artifactId), schema, ctx, store))
       .rejects.toThrow('outside this caller');
+  });
+
+  // A field gate that rejects must reject BEFORE the copy is published.
+  // Otherwise the caller is left owning an artifact in their own `input:`
+  // namespace that no claim references and no cleanup reaches — storage charged
+  // to them for a file the operation refused.
+  it('publishes no copy when the field rejects the content type', async () => {
+    const { runId, artifactId } = await runWithArtifact(ctx.organizationId!);
+    const before = await readdir(directory);
+
+    const pdfOnly = {
+      type: 'object',
+      properties: { image: fileInputSchema({ maxBytes: 1024, contentTypes: ['application/pdf'] }) },
+    };
+    await expect(prepareOperationFiles(fileRef(artifactId), pdfOnly, ctx, store))
+      .rejects.toThrow('is not accepted by this connector field');
+
+    // No new artifact on disk, and the run's own file is untouched.
+    expect((await readdir(directory)).sort()).toEqual(before.sort());
+    const original = await store.read(artifactId, { binding: `run:${runId}` });
+    expect(original?.bytes).toEqual(BYTES);
   });
 
   // The binding namespace is the boundary; only `run:` is adoptable. An event

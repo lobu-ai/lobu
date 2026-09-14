@@ -90,7 +90,13 @@ function readInlineFile(value: Schema, maxBytes: number) {
 
 
 /** `run:<id>` is the binding `materializeActionOutputAttachments` stamps on an action's output files. */
-const RUN_BINDING = /^run:([1-9][0-9]{0,17})$/;
+// Capped at 15 digits, not 18: the id goes through `Number()`, so anything past
+// Number.MAX_SAFE_INTEGER would round to a DIFFERENT id than the binding names.
+// Defense-in-depth rather than a reachable bug — the writer stamps real run ids,
+// and a rounded id resolves to no run, so both widths end in the same 422 today
+// (a test here would pass either way). Matches mcp-media-resources.ts's
+// `Number.isSafeInteger` guard so the two readers agree on what a run id is.
+const RUN_BINDING = /^run:([1-9][0-9]{0,14})$/;
 
 /**
  * Adopt an artifact a connector action produced into the caller's own input
@@ -124,6 +130,14 @@ async function adoptRunArtifact(params: {
   binding: string;
   maxBytes: number;
   publicGatewayUrl: string;
+  /**
+   * Runs against the SOURCE metadata, before the copy is published. The field's
+   * gates have to be applied here rather than by the caller afterwards: a gate
+   * that rejects after publishing would leave an orphaned artifact sitting in
+   * the caller's own `input:` namespace, charged to them and referenced by
+   * nothing. Throwing from here publishes nothing.
+   */
+  accept: (metadata: { contentType: string; size: number }) => void;
 }): Promise<{ metadata: StoredArtifactMetadata; bytes: Buffer } | null> {
   const stored = await params.store.inspect(params.artifactId);
   const runId = stored?.binding ? RUN_BINDING.exec(stored.binding)?.[1] : undefined;
@@ -140,6 +154,8 @@ async function adoptRunArtifact(params: {
     maxBytes: params.maxBytes,
   });
   if (!source) return null;
+
+  params.accept(source.metadata);
 
   const published = await params.store.publish({
     buffer: source.bytes,
@@ -183,6 +199,20 @@ export async function prepareOperationFiles(
       }
       maxBytes = Math.min(maxBytes, Number(declaration.maxBytes));
     }
+    // One rule for both paths. Adoption applies it BEFORE publishing its copy,
+    // so a rejected file never leaves an orphan behind; the direct path applies
+    // it below, where it has always run.
+    const accept = (metadata: { contentType: string; size: number }) => {
+      for (const declaration of declarations) {
+        const contentTypes = (declaration as unknown as FileInputOptions).contentTypes;
+        if (contentTypes && (!Array.isArray(contentTypes) || !contentTypes.includes(metadata.contentType))) {
+          throw new ToolUserError(`File type ${metadata.contentType} is not accepted by this connector field.`, 422);
+        }
+      }
+      if (totalBytes + metadata.size > MAX_CONNECTOR_FILE_BYTES) {
+        throw new ToolUserError('Operation files exceed the 12 MiB connector execution limit. Use smaller files or separate operations.', 413);
+      }
+    };
     const binding = artifactId ? inputFileBinding(ctx) : undefined;
     let adoptedArtifactId: string | undefined;
     let file = artifactId
@@ -198,6 +228,7 @@ export async function prepareOperationFiles(
         binding: binding!,
         maxBytes,
         publicGatewayUrl: resolvePublicGatewayUrl(),
+        accept,
       });
       if (adopted) {
         adoptedArtifactId = adopted.metadata.artifactId;
@@ -205,14 +236,10 @@ export async function prepareOperationFiles(
       }
     }
     if (!file) throw new ToolUserError('File is unavailable, outside this caller’s scope, or exceeds the connector limit. Upload it again in this workspace.', 422);
-    for (const declaration of declarations) {
-      const contentTypes = (declaration as unknown as FileInputOptions).contentTypes;
-      if (contentTypes && (!Array.isArray(contentTypes) || !contentTypes.includes(file.metadata.contentType))) {
-        throw new ToolUserError(`File type ${file.metadata.contentType} is not accepted by this connector field.`, 422);
-      }
-    }
+    // Idempotent for an adopted file: `accept` ran on the same metadata before
+    // the copy was published, and re-running it changes nothing.
+    accept(file.metadata);
     totalBytes += file.metadata.size;
-    if (totalBytes > MAX_CONNECTOR_FILE_BYTES) throw new ToolUserError('Operation files exceed the 12 MiB connector execution limit. Use smaller files or separate operations.', 413);
     if (!artifactId) return value;
     // The claim names the ADOPTED copy: it is the one bound to this caller, and
     // the one `resolveOperationFiles` will read back under the `input:` binding.
