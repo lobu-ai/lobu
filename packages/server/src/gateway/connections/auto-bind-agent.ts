@@ -8,15 +8,12 @@
  * and sent "hi".
  *
  * The rule is deliberately narrow: bind only when the org's agent is
- * UNAMBIGUOUS. With exactly one agent there is nothing to choose and the notice
- * was pure friction. With several, picking one would be a guess — a DM silently
- * wired to the billing agent instead of the support agent is worse than being
- * asked — so those keep the notice and its per-agent deep links. With none there
- * is nothing to bind to at all.
- *
- * Not a "default agent" concept: nothing is stored, nothing is marked, and the
- * answer changes by itself the moment the org gains a second agent. That is the
- * point — it is a statement about ambiguity, not a setting anyone has to manage.
+ * UNAMBIGUOUS. With several, picking one would be a guess — a DM silently wired
+ * to the billing agent instead of the support agent is worse than being asked —
+ * so those keep the notice and its per-agent deep links. With none there is
+ * nothing to bind to at all. Nothing is stored or marked here, so the answer
+ * changes by itself the moment the org gains a second agent; that is a statement
+ * about ambiguity, not a "default agent" setting anyone has to manage.
  */
 
 import { createLogger } from "@lobu/core";

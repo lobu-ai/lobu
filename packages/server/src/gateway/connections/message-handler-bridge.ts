@@ -577,11 +577,32 @@ export class MessageHandlerBridge {
     agentId: string;
     source: "connection";
     organizationId: string;
-    /** No per-Automation model override exists yet — the agent's own default. */
-    model?: string;
+    /**
+     * Always absent: the link written here carries no per-Automation model
+     * override, so the agent's own default applies. Declared because the
+     * caller reads `resolved.model` across every routing branch.
+     */
+    model?: undefined;
   } | null> {
     const organizationId = this.connection.organizationId;
     if (!organizationId || !automationSubscriptionService) return null;
+
+    // A chat link already covering this DM is NOT a dead end: the planner
+    // rejected THIS message on the trigger's own filters (mention_only, team).
+    // Binding here would answer a message the user's trigger deliberately
+    // excluded — and `materializeConnectionFallbackLink` is create-only, so the
+    // write would be a no-op taking an advisory lock on every message. Leave it
+    // to the subscription check on the unresolved path.
+    if (
+      await automationSubscriptionService.channelHasMessageSubscription(
+        this.connection.id,
+        channelId,
+        organizationId,
+        { teamId }
+      )
+    ) {
+      return null;
+    }
 
     const agentId = await resolveSoleOrgAgent(organizationId);
     if (!agentId) return null;

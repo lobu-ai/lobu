@@ -3,29 +3,40 @@
  * agent (the OAuth-install shape) binds itself to the org's only agent instead
  * of answering with instructions.
  *
- * `resolveSoleOrgAgent` reads the database, so it is mocked here and the module
- * is imported after — what it decides from real rows is pinned separately by
+ * `resolveSoleOrgAgent` reads the database, so it is faked here — what it
+ * decides from real rows is pinned separately by
  * `__tests__/integration/preview/auto-bind-dm.test.ts`. These cases pin the
- * conditions the bridge applies around it, which is where the DM-only and
- * hosted-relay guards live.
+ * conditions the bridge applies around it, which is where the DM-only,
+ * hosted-relay and already-linked guards live.
+ *
+ * Fake it with `spyOn`, restored in afterAll. `mock.module` would also work
+ * today, but it is process-global and `mock.restore()` cannot undo it — and
+ * these gateway suites are not mutually hermetic, which is why
+ * `make test-integration` runs each file in its own process (#1238). A
+ * restorable spy keeps this file safe to co-run either way.
  */
 
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+	afterAll,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	spyOn,
+	test,
+} from "bun:test";
+import * as autoBindAgent from "../connections/auto-bind-agent.js";
+import { ConversationStateStore } from "../connections/conversation-state-store.js";
+import { MessageHandlerBridge } from "../connections/message-handler-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
 let soleAgent: string | null = "sole-agent";
-const resolveSoleOrgAgent = mock(async () => soleAgent);
-mock.module("../connections/auto-bind-agent.js", () => ({
-	resolveSoleOrgAgent,
-}));
-
-const { MessageHandlerBridge } = await import(
-	"../connections/message-handler-bridge.js"
-);
-const { ConversationStateStore } = await import(
-	"../connections/conversation-state-store.js"
-);
+const resolveSoleOrgAgent = spyOn(autoBindAgent, "resolveSoleOrgAgent");
+resolveSoleOrgAgent.mockImplementation(async () => soleAgent);
+afterAll(() => {
+	resolveSoleOrgAgent.mockRestore();
+});
 
 const CONN_ID = "conn-autobind";
 const CHANNEL_ID = "D900";
@@ -40,6 +51,8 @@ function makeHarness(opts: {
 	previewMode?: boolean;
 	/** The connection's owning agent; OAuth installs have none. */
 	agentId?: string;
+	/** A chat link already covers this channel (its filters rejected the message). */
+	alreadyLinked?: boolean;
 }) {
 	const conversationState = new ConversationStateStore(
 		new InMemoryStateAdapter(),
@@ -64,7 +77,9 @@ function makeHarness(opts: {
 		getAutomationSubscriptionService: () => ({
 			resolveForConnection: mock(async () => null),
 			healSubscriptionTeam: mock(async () => undefined),
-			channelHasMessageSubscription: mock(async () => false),
+			channelHasMessageSubscription: mock(
+				async () => opts.alreadyLinked === true,
+			),
 			materializeConnectionFallbackLink,
 		}),
 		getAgentMetadataStore: () => undefined,
@@ -184,6 +199,23 @@ describe("unlinked DM auto-bind", () => {
 
 		expect(resolveSoleOrgAgent).not.toHaveBeenCalled();
 		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+	});
+
+	test("does NOT auto-bind a DM that a chat link already covers", async () => {
+		// The planner rejected THIS message on the link's own filters (mention_only,
+		// team), which is not a dead end — binding would answer a message the
+		// user's trigger deliberately excluded. The unresolved path drops it.
+		const { bridge, enqueueMessage, materializeConnectionFallbackLink } =
+			makeHarness({ agentId: undefined, alreadyLinked: true });
+		const thread = makeThread();
+
+		await bridge.handleMessage(thread, makeMessage(), "dm");
+
+		expect(resolveSoleOrgAgent).not.toHaveBeenCalled();
+		expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
+		expect(enqueueMessage).not.toHaveBeenCalled();
+		// Nor the notice — the channel IS linked, it just filtered this message.
+		expect(thread.post).not.toHaveBeenCalled();
 	});
 
 	test("falls through to the notice when the org's agent is ambiguous", async () => {
