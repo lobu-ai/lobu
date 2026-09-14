@@ -24,7 +24,10 @@ import { extractConnectorMetadata, type ConnectorMetadata } from '../utils/conne
 import { upsertConnectorDefinitionRecords } from '../utils/connector-definition-install';
 import { ensureUniqueConnectionSlug, isConnectionSlugUniqueViolation } from '../utils/connections';
 import { clearDevicePinTombstoneIfPinned } from '../utils/device-pin-tombstones';
-import { DEVICE_AUTOWIRE_SUPPRESSION_KEY } from '../utils/device-autowire-suppression';
+import {
+  DEVICE_AUTOWIRE_SUPPRESSION_KEY,
+  IS_DEVICE_CONNECTOR_SQL,
+} from '../utils/device-autowire-suppression';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import {
@@ -704,6 +707,146 @@ async function pauseStaleDeviceFeeds(userId: string, organizationId: string, con
 }
 
 /**
+ * Keep a manifest-backed device connector's definition current in every org the
+ * device may ALREADY claim runs in, not just its owner's personal org.
+ *
+ * A team org reaches a device by pinning a connection to it, and that pin is
+ * the consent (`resolveDeviceClaimableOrgs`). Claim scope follows the pin, but
+ * the definition refresh above does not: it targets `personalOrgId` only, so a
+ * pinned org kept whatever `connector_definitions` row it happened to be
+ * created with while the fleet moved on. Readiness compares the org's selected
+ * artifact against the exact version/hash the device advertises
+ * (`device-connector-readiness.ts`), so that drift made the pin permanently
+ * unrunnable — every run failed admission with
+ * `DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE` and no self-service path repaired it
+ * (`setup_options` only offers ways to authenticate, and `install_connector`
+ * mints a source-backed artifact, not this identity).
+ *
+ * This mirrors the pin and nothing more: definition + version rows, only for
+ * connector keys the org already pins, and only where the org's active
+ * definition is ALREADY a device connector (`IS_DEVICE_CONNECTOR_SQL`). It
+ * never creates a connection, feed or pin, and never archives — auto-wire and
+ * `archiveVanishedDeviceConnectorDefinitions` stay personal-org-only, so a team
+ * connector a user assembled by hand is still never created or removed for
+ * them. `sources` is the manifest inventory, so a connector the catalog ships
+ * but no device advertises is absent and is never touched; a key that is both
+ * (`os.shell`) is repaired on its manifest identity, which is what readiness
+ * compares, and the write is org-scoped — the shared version row a bundled
+ * connector points at is never mutated.
+ *
+ * Best-effort, and a no-op write-side in the steady state: the read is the one
+ * per poll, and it opens a transaction only for the orgs whose selected
+ * artifact actually differs from what the fleet advertises.
+ */
+async function refreshPinnedOrgDeviceConnectorDefinitions(
+  userId: string,
+  personalOrgId: string,
+  sources: readonly DeviceConnectorSource[]
+): Promise<void> {
+  if (sources.length === 0) return;
+  const sourceByKey = new Map(sources.map((source) => [source.key, source]));
+  const sql = getDb();
+  let pinned: Array<{
+    organization_id: string;
+    connector_key: string;
+    definition_version: string;
+    artifact_hash: string | null;
+  }>;
+  try {
+    pinned = (await sql`
+      SELECT DISTINCT c.organization_id, c.connector_key,
+             cd.version AS definition_version,
+             cv.compiled_code_hash AS artifact_hash
+      FROM connections c
+      JOIN device_workers dw ON dw.id = c.device_worker_id
+      -- The same membership join claim scope uses: leaving the org revokes it.
+      JOIN "member" m
+        ON m."organizationId" = c.organization_id AND m."userId" = ${userId}
+      JOIN connector_definitions cd
+        ON cd.organization_id = c.organization_id
+       AND cd.key = c.connector_key
+       AND cd.status = 'active'
+      -- Resolve the artifact the way execution does, so "stale" here means
+      -- exactly the compare readiness will fail on.
+      LEFT JOIN LATERAL (
+        SELECT v.compiled_code_hash
+        FROM connector_versions v
+        WHERE v.connector_key = cd.key
+          AND v.version = cd.version
+          AND (v.organization_id = cd.organization_id OR v.organization_id IS NULL)
+        ORDER BY v.organization_id NULLS LAST
+        LIMIT 1
+      ) cv ON TRUE
+      WHERE dw.user_id = ${userId}
+        AND c.deleted_at IS NULL
+        AND c.organization_id <> ${personalOrgId}
+        AND c.connector_key = ANY(${pgTextArray([...sourceByKey.keys()])}::text[])
+        -- Repair only what device reconciliation itself installs. A manifest
+        -- key the product also lets an org install with its own code (os.shell,
+        -- apple.*, local.directory -- only chrome.* is reserved) would otherwise
+        -- have those bytes replaced: a device-manifest write replaces the whole
+        -- artifact family rather than merging into it.
+        AND ${sql.unsafe(IS_DEVICE_CONNECTOR_SQL)}
+    `) as unknown as typeof pinned;
+  } catch (err) {
+    logger.warn(
+      { userId, err: errorMessage(err) },
+      '[device-connectors] Failed to read pinned-org device connector definitions'
+    );
+    return;
+  }
+  // Write only where the org is actually behind what the fleet advertises, so a
+  // converged fleet costs one indexed read per poll and opens no transaction.
+  const stale = pinned.flatMap((row) => {
+    const source = sourceByKey.get(row.connector_key);
+    if (!source) return [];
+    const behind =
+      row.definition_version !== source.metadata.version ||
+      row.artifact_hash !== source.manifestHash;
+    return behind ? [{ organizationId: row.organization_id, source }] : [];
+  });
+  if (stale.length === 0) return;
+
+  const results = await Promise.allSettled(
+    stale.map(async ({ organizationId, source }) => {
+      await sql.begin(async (tx) => {
+        // Same per-(user, connector) lock the wire path takes, so a concurrent
+        // poll cannot interleave two versions of the same definition.
+        await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`${userId}:${source.key}`}))`;
+        await upsertConnectorDefinitionRecords({
+          sql: tx,
+          organizationId,
+          metadata: source.metadata,
+          versionRecord: {
+            compiledCode: null,
+            // Device manifests carry no compiled bytes; compiled_code_hash is
+            // the durable slot readiness compares against the device's claim.
+            compiledCodeHash: source.manifestHash,
+            compileConfigHash: null,
+            sourceCode: null,
+            sourcePath: source.sourcePath,
+          },
+          versionScope: 'organization',
+        });
+      });
+    })
+  );
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'rejected') {
+      logger.warn(
+        {
+          userId,
+          organizationId: stale[index]?.organizationId,
+          connectorKey: stale[index]?.source.key,
+          err: errorMessage(result.reason),
+        },
+        '[device-connectors] Failed to refresh a pinned-org device connector definition'
+      );
+    }
+  }
+}
+
+/**
  * Archive unreferenced org-scoped definitions created by device reconciliation
  * that no current connector source still advertises. This includes manifest
  * versions and metadata-only shared pointers left by a formerly bundled device
@@ -953,6 +1096,11 @@ export async function reconcileDeviceCapabilities(
   // user's whole working set.
   if (sourcesReadable) {
     await archiveVanishedDeviceConnectorDefinitions(userId, personalOrgId, [...byKey.keys()]);
+    // Team orgs never auto-wire, but one that already pins a device must not be
+    // left running a definition the fleet has moved past — see the function's
+    // comment. Keyed off manifestSources, not byKey: only a manifest identity
+    // is what readiness compares, and only those get an org-scoped version row.
+    await refreshPinnedOrgDeviceConnectorDefinitions(userId, personalOrgId, manifestSources);
   }
   if (byKey.size === 0) return [];
 
