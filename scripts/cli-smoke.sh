@@ -348,7 +348,10 @@ if [ -n "${CLI_SMOKE_REVOKE_DATABASE_URL:-}" ]; then
   { [ "$RC" -eq 0 ] && grep -qiF "Token revoked" "$OUT"; } && pass "lobu token revoke (external PG)" || softfail "lobu token revoke (expected successful insert, exit=$RC)"
 else
   ( cd "$PROJ" && env -u DATABASE_URL node "$LOBU_BIN" token revoke smoke-jti ) > "$OUT" 2>&1 </dev/null; RC=$?
-  { [ "$RC" -ne 0 ] && grep -qiF "DATABASE_URL is not set" "$OUT"; } && pass "lobu token revoke (graceful: needs external PG)" || softfail "lobu token revoke (expected 'DATABASE_URL is not set', exit=$RC)"
+  # No exported DATABASE_URL here: the scaffolded project .env either has none
+  # ("DATABASE_URL is not set") or the embedded default ("not a connection
+  # string"). Both must fail gracefully with exit != 0.
+  { [ "$RC" -ne 0 ] && grep -qiE "DATABASE_URL is not set|not a connection string" "$OUT"; } && pass "lobu token revoke (graceful: needs external PG)" || softfail "lobu token revoke (expected graceful refusal, exit=$RC)"
 fi
 
 note "org"
