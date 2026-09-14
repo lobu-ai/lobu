@@ -3,7 +3,7 @@
  *
  * WHY AN ALLOWLIST AND NOT A CHECK ON `previewMode`: chat `config` and chat
  * `settings` both end up in the same `connections.config` JSON column —
- * `settings` is folded in at persist time (`connections-projection.ts`,
+ * `settings` is folded in at persist time (`lobu/stores/connections-projection.ts`,
  * `foldedConfig`). Only `config` is validated, by `parseConfig`, whose
  * `Value.Clean` strips unknown keys; that is what keeps `action_modes` out of
  * chat rows. `settings` is typed `Record<string, any>` in the tool contract and
@@ -32,6 +32,12 @@
  * cross-organization routing privilege, and the honest answer to that is no —
  * not yes-and-quietly-ignored. Same reasoning as `action-modes-guard.ts`, which
  * errors rather than dropping the map.
+ *
+ * WHY THE HANDLER AND NOT `upsertByoChatConnection`: the rule is about who is
+ * asking, not about what may be stored. The service is the seam an OPERATOR
+ * provisioning Lobu's own relay would go through, and that row must carry
+ * `previewMode` — enforcing there would refuse the one caller allowed to set it.
+ * `apply_chat_connection` is the tenant-facing door, so the gate belongs on it.
  */
 
 /**
