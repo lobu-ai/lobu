@@ -1790,6 +1790,49 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		expect(decoyCount).toBe(0);
 	});
 
+	test("a grandfathered numeric stable id still resolves via its projection", async () => {
+		// Pre-guard legacy rows can hold a numeric stable id. The legacy caller
+		// passes no automationConnectionId, so ingest must use the
+		// agentconn-<id> slug lookup — never mistake the id for a bridged
+		// connections.id and 500 on `WHERE id = N`.
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { getDb } = await import("../../db/client.js");
+		const { handleWebhookIngest } = await import(
+			"../connections/webhook-ingest.js"
+		);
+		const stableId = "999983";
+		const sql = getDb();
+		const [projected] = (await sql`
+			INSERT INTO connections (organization_id, connector_key, slug, status, config)
+			VALUES (${ORG}, 'webhook', ${`agentconn-${stableId}`},
+				'active', ${sql.json({})})
+			RETURNING id
+		`) as Array<{ id: number }>;
+		const automationId = await seedWebhookEventAutomation({
+			connectionId: Number(projected.id),
+		});
+		const row = storedRow({ id: stableId }, { semanticType: "alert" });
+		const res = await handleWebhookIngest(
+			row as never,
+			delivery({ severity: "critical" }, { headers: bearer }),
+			fakeSecretStore as never,
+			null,
+			{ activateGenericAutomationEvent: true }
+		);
+		expect(res.status).toBe(202);
+		const landed = (await res.json()) as { ok: boolean; id: number };
+		expect(landed.ok).toBe(true);
+		const [runCount] = await sql<{ count: number }>`
+			SELECT count(*)::int AS count FROM runs
+			WHERE automation_id = ${automationId}
+			  AND run_type = 'automation'
+		`;
+		expect(runCount.count).toBeGreaterThan(0);
+		const rows = await eventRows(stableId);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].connection_id).toBe(Number(projected.id));
+	});
+
 	test("an authenticated Jira delivery lands as a structured event on the Atlassian Rovo feed", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const { manager } = await buildManager();

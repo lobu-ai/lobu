@@ -1365,7 +1365,10 @@ export class ChatInstanceManager {
                     },
                   }
                 : bridged.connectorKey === "webhook"
-                  ? { activateGenericAutomationEvent: true }
+                  ? {
+                      activateGenericAutomationEvent: true,
+                      automationConnectionId: Number(bridged.stored.id),
+                    }
                   : undefined,
 					),
         );

@@ -446,6 +446,15 @@ export interface WebhookIngestOverrides {
 	 * webhook connection whose generated slug happens to collide.
 	 */
 	activateGenericAutomationEvent?: boolean;
+	/**
+	 * The already-resolved `connections.id` to activate for. Set ONLY by the
+	 * bridged connector-connection caller, whose stored.id IS that row id.
+	 * Legacy callers omit it and resolve through the slug projection instead.
+	 * Never inferred from the id shape here: a grandfathered legacy generic
+	 * webhook can hold a numeric stable id, and guessing wrong routes its
+	 * delivery at `WHERE id = N` instead of the `agentconn-N` projection.
+	 */
+	automationConnectionId?: number;
 	/** Provider-specific bearer verification (Atlassian OAuth webhook JWTs). */
 	verifyBearerToken?: (token: string) => Promise<boolean>;
 	/**
@@ -683,31 +692,33 @@ export async function handleWebhookIngest(
 		const landed = await getDb().begin(async (tx) => {
 			let automationConnectionId: number | null = null;
 			if (overrides?.activateGenericAutomationEvent) {
-				// A numeric stored.id is always the bridged connections.id (the
-				// route resolves connector rows before legacy lookup), so it goes
-				// direct: a slug lookup first could match an unrelated legacy
-				// projection for a numeric stable id (agentconn-<id>) in the same
-				// org and activate the wrong connection's Automations. Anything
-				// else is a legacy stable id resolved through its projection.
-				const [automationConnection] = /^\d+$/.test(stored.id)
-					? await tx<{ id: number }>`
-						SELECT id
-						FROM connections
-						WHERE id = ${Number(stored.id)}
-						  AND organization_id = ${organizationId}
-						  AND connector_key = 'webhook'
-						  AND deleted_at IS NULL
-						LIMIT 1
-					`
-					: await tx<{ id: number }>`
-						SELECT id
-						FROM connections
-						WHERE organization_id = ${organizationId}
-						  AND slug = ${runtimeConnectionIdToSlug(stored.id)}
-						  AND connector_key = 'webhook'
-						  AND deleted_at IS NULL
-						LIMIT 1
-					`;
+				// Bridged connector-connection deliveries carry their resolved
+				// connections.id in the overrides, so they verify direct: a slug
+				// lookup first could match an unrelated legacy projection for a
+				// numeric stable id (agentconn-<id>) in the same org and activate
+				// the wrong connection's Automations. Legacy stable ids resolve
+				// through their projection. Either way the existence check stays
+				// inside this transaction (fail-closed consistent read).
+				const [automationConnection] =
+					overrides.automationConnectionId != null
+						? await tx<{ id: number }>`
+							SELECT id
+							FROM connections
+							WHERE id = ${overrides.automationConnectionId}
+							  AND organization_id = ${organizationId}
+							  AND connector_key = 'webhook'
+							  AND deleted_at IS NULL
+							LIMIT 1
+						`
+						: await tx<{ id: number }>`
+							SELECT id
+							FROM connections
+							WHERE organization_id = ${organizationId}
+							  AND slug = ${runtimeConnectionIdToSlug(stored.id)}
+							  AND connector_key = 'webhook'
+							  AND deleted_at IS NULL
+							LIMIT 1
+						`;
 				if (!automationConnection) {
 					throw new Error(
 						`Generic webhook connection ${stored.id} has no active projection`,
