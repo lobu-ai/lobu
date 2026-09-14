@@ -29,6 +29,7 @@ import {
 	seedOwnerContext,
 } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
+import { reapStaleRuns } from "../../scheduled/check-stalled-executions";
 
 const CONNECTOR = "demo.ops.auto.ledger";
 
@@ -354,4 +355,105 @@ describe("operation ledger under auto action mode", () => {
 			interaction_status: "pending",
 		});
 	});
+
+	it("supersedes the dispatch card when the reaper times out an auto run", async () => {
+		// A run the executor never finished is the one case where nothing on the
+		// request path can close its card: the gateway call is gone. The reaper
+		// terminalizes the run, so it must terminalize the ledger with it — or
+		// the card reads "dispatched" forever and the audit trail lies about an
+		// operation that actually timed out.
+		delete process.env.WORKER_API_TOKEN;
+		const sql = getTestDb();
+		const workerId = `auto-ledger-reap-${Date.now()}`;
+		const [device] = (await sql`
+			INSERT INTO device_workers (
+				user_id, worker_id, platform, app_version, capabilities, label,
+				organization_id, last_seen_at
+			) VALUES (
+				${userId}, ${workerId}, 'macos', '0.1.0', ${sql.json([])}, 'Auto Ledger Reap',
+				${orgId}, NOW()
+			)
+			RETURNING id
+		`) as unknown as Array<{ id: string }>;
+		const deviceConn = await createTestConnection({
+			organization_id: orgId,
+			connector_key: CONNECTOR,
+			created_by: userId,
+			visibility: "private",
+			config: { action_modes: { echo: "auto" } },
+		});
+		await sql`
+			UPDATE connections SET device_worker_id = ${String(device.id)}::uuid
+			WHERE id = ${deviceConn.id}
+		`;
+		const idempotencyKey = `auto-ledger:reap:${Date.now()}`;
+		// Never awaited to completion before the reap: this run is abandoned on
+		// purpose. The rejection is swallowed so an abandoned wait cannot fail
+		// the suite on an unhandled rejection.
+		const execution = (
+			manageOperations(
+				{
+					action: "execute",
+					connection_id: deviceConn.id,
+					operation_key: "echo",
+					input: { value: "reap-me" },
+					idempotency_key: idempotencyKey,
+				},
+				{} as Env,
+				ctx,
+			) as Promise<{ status: string; run_id: number }>
+		).catch(() => ({ status: "failed", run_id: 0 }));
+
+		const deadline = Date.now() + 5_000;
+		let runId = 0;
+		while (Date.now() < deadline && runId === 0) {
+			const rows = (await sql`
+				SELECT id FROM runs
+				WHERE connection_id = ${deviceConn.id}
+				  AND run_type = 'action'
+				  AND action_idempotency_key = ${idempotencyKey}
+				LIMIT 1
+			`) as unknown as Array<{ id: number }>;
+			if (rows[0]) runId = Number(rows[0].id);
+			else await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(runId).toBeGreaterThan(0);
+
+		const beforeReap = await operationLedger(orgId, runId);
+		expect(beforeReap).toHaveLength(1);
+		expect(beforeReap[0].interaction_status).toBe("approved");
+		expect(beforeReap[0].superseded_by).toBeNull();
+
+		// Age the run past the reaper threshold. `approval_status` stays 'auto',
+		// which is what keeps it inside the bulk sweep — the approval lane is
+		// excluded from it by predicate.
+		await sql`
+			UPDATE runs
+			SET created_at = NOW() - INTERVAL '2 hours',
+			    claimed_at = NULL,
+			    last_heartbeat_at = NULL
+			WHERE id = ${runId}
+		`;
+
+		const result = await reapStaleRuns();
+		expect(result.acquired).toBe(true);
+		expect(result.reaped).toBeGreaterThan(0);
+
+		const [runRow] = (await sql`
+			SELECT status FROM runs WHERE id = ${runId}
+		`) as unknown as Array<{ status: string }>;
+		expect(runRow.status).toBe("timeout");
+
+		const rows = await operationLedger(orgId, runId);
+		expect(rows).toHaveLength(2);
+		expect(rows[0].superseded_by).not.toBeNull();
+		expect(rows[1]).toMatchObject({
+			interaction_status: "failed",
+			superseded_by: null,
+		});
+		expect(Number(rows[1].supersedes_event_id)).toBe(Number(rows[0].id));
+		expect(rows[1].metadata.run_status).toBe("timeout");
+		await execution;
+	});
+
 });
