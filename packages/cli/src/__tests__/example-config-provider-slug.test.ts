@@ -72,35 +72,34 @@ describe("example lobu.config.ts provider refs", () => {
     const lines = source.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] as string;
-      const idMatch = /\bid:\s*["']([^"']*)["']/.exec(line);
-      if (!idMatch) continue;
-      // Scan from the id onward within the same object literal. The first
-      // pass looks at the REMAINDER of the id's own line, so a single-line
-      // `{ id: "gemini", model: "gemini-2.5-flash" }` is paired too — the
-      // closing brace on that same line must not end the scan before the
-      // model on it is read. Line-at-a-time so the scan stays linear.
-      for (let j = i; j < lines.length; j++) {
-        const rest =
-          j === i
-            ? line.slice(idMatch.index + idMatch[0].length)
-            : (lines[j] as string);
-        // A later `id:` opens a different object, so the anchor must not
-        // reach across it — an agent's own `id:` sits a few lines above its
-        // `providers:` array and would otherwise swallow the provider's model.
-        // The id's own line is sliced past its match, so this never self-fires.
-        if (/\bid:\s*["']/.test(rest)) break;
-        const modelMatch = /\bmodel:\s*["']([^"']*)["']/.exec(rest);
-        if (modelMatch) {
-          out.push({
-            id: idMatch[1] as string,
-            model: modelMatch[1] as string,
-          });
-          break;
+      for (const idMatch of line.matchAll(/\bid:\s*["']([^"']*)["']/g)) {
+        const start = (idMatch.index ?? 0) + idMatch[0].length;
+        // Scan from this id onward. Each step looks only at the text BEFORE
+        // the object closes, so a `model:` that belongs to a later sibling on
+        // the same line can never be pulled back onto this id. The first step
+        // is the remainder of the id's own line, which is what lets a
+        // single-line `{ id: "gemini", model: "gemini-2.5-flash" }` pair.
+        // Line-at-a-time so the scan stays linear.
+        for (let j = i; j < lines.length; j++) {
+          const rest = j === i ? line.slice(start) : (lines[j] as string);
+          const closedAt = rest.search(/[}\]]/);
+          const open = closedAt === -1 ? rest : rest.slice(0, closedAt);
+          // A further `id:` opens a different object — an agent's own `id:`
+          // sits a few lines above its `providers:` array and would otherwise
+          // swallow the provider's model.
+          if (/\bid:\s*["']/.test(open)) break;
+          const modelMatch = /\bmodel:\s*["']([^"']*)["']/.exec(open);
+          if (modelMatch) {
+            out.push({
+              id: idMatch[1] as string,
+              model: modelMatch[1] as string,
+            });
+            break;
+          }
+          // The object closed with no sibling `model:`. That is what keeps a
+          // lone Automation `model:` from pairing with an unrelated `id:`.
+          if (closedAt !== -1) break;
         }
-        // No model before the object closed: this `id:` has no sibling
-        // `model:`, which is what keeps a lone Automation `model:` from
-        // pairing with an unrelated `id:` above it.
-        if (/[}\]]/.test(rest)) break;
       }
     }
     return out;
@@ -139,6 +138,18 @@ describe("example lobu.config.ts provider refs", () => {
         ].join("\n")
       )
     ).toEqual([{ id: "claude", model: "claude-sonnet-5" }]);
+    // Two entries on one line: each id takes its OWN model, and neither
+    // reaches past the brace that closed its object.
+    expect(
+      providerEntries(
+        `  providers: [{ id: "a", model: "m-a" }, { id: "c", model: "m-c" }],`
+      )
+    ).toEqual([
+      { id: "a", model: "m-a" },
+      { id: "c", model: "m-c" },
+    ]);
+    // A closed object with no model must not borrow the next object's.
+    expect(providerEntries(`  [{ id: "x" }, { model: "y" }]`)).toEqual([]);
     // An Automation's `model:` is a full ref and has no sibling `id:`; the
     // nearest `id:` above it belongs to a different object.
     expect(
