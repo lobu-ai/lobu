@@ -235,6 +235,11 @@ custom provider with `clientIdKey`/`clientSecretKey`), and `browser` for custom
 cookie-backed sessions. Paired-extension connectors use `none` when the browser
 owns authentication. Full schemas are in the SDK reference.
 
+A local install cannot finish an `oauth` connect flow itself — the connector
+callback `<base>/connect/oauth/callback` is not a registered redirect for any
+localhost port. Use managed auth (`connect_managed` + `config.managedBy`); see
+`docs/managed-auth.md`.
+
 ### Dependencies and environment
 
 - npm deps go in the project/package `package.json` and are bundled by esbuild;

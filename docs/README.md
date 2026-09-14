@@ -22,6 +22,8 @@ docs below for shipped semantics.
 - **`connector-authoring.md`** — when and how to write a custom connector
   (`connectorFromFile`, `defineConnector`, feeds, `eventKinds`, actions, auth).
 - **`database-connectors.md`** — the Postgres connector and governed `query_sql`.
+- **`managed-auth.md`** — how a local install uses a cloud-held OAuth grant
+  (`connect_managed`, `config.managedBy`), and why local connector OAuth 400s.
 
 ## Operate the repo
 
