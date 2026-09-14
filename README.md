@@ -68,9 +68,11 @@ Download Lobu: [Mac app](https://github.com/lobu-ai/lobu/releases/latest/downloa
 > DMG by hand — the in-app updater does not carry an install across the bundle
 > identifier change. It replaces `/Applications/Lobu.app` in place; also delete
 > `/Applications/Owletto.app` if a pre-rename build is still there, since that one
-> sits at its own path. Login Items and privacy grants are keyed to the old
-> identity and do not transfer: the new app asks about Open at Login once, and
-> macOS re-prompts for each permission on first use.
+> sits at its own path. From 20.0.1 your settings and the app's device identity
+> carry across the rename, so device-pinned Automations keep running against the
+> same worker. Login Items and privacy grants cannot come with them — macOS keys
+> both to the bundle identifier — so the new app asks about Open at Login once and
+> re-prompts for each permission on first use.
 
 To test changes merged to `main`, run `bunx @lobu/cli@canary --help`. The
 `canary` tag moves only when a maintainer runs **Publish Packages** from `main`
