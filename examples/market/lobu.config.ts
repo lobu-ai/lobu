@@ -34,8 +34,8 @@ const marketIntelligence = defineAgent({
   dir: ".",
   providers: [
     {
-      id: "anthropic",
-      model: "claude/sonnet-4-5",
+      id: "claude",
+      model: "claude-sonnet-5",
       key: secret("ANTHROPIC_API_KEY"),
     },
   ],

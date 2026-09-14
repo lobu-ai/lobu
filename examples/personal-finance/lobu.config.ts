@@ -26,8 +26,8 @@ const personal_finance = defineAgent({
     "Help individuals capture wages, expenses, savings, dividends, capital gains and pension contributions across the tax year and assemble a UK Self Assessment (SA100) return.",
   providers: [
     {
-      id: "anthropic",
-      model: "claude/sonnet-4-5",
+      id: "claude",
+      model: "claude-sonnet-5",
       key: secret("ANTHROPIC_API_KEY"),
     },
   ],

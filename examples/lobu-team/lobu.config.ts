@@ -46,8 +46,8 @@ const foodOrdering = defineAgent({
   ],
   providers: [
     {
-      id: "anthropic",
-      model: "claude/claude-sonnet-5",
+      id: "claude",
+      model: "claude-sonnet-5",
       key: secret("ANTHROPIC_API_KEY"),
     },
   ],
