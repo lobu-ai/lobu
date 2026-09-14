@@ -147,9 +147,21 @@ const TEXTUAL_MIME_TYPES = new Set([
  * This is NOT the artifact limit — it is an embedding-cost limit. Every event's
  * payload is chunked and embedded, so a 10 MB CSV inlined here would produce
  * hundreds of vectors of almost no retrieval value. Files above the cap sync as
- * metadata and their content is fetched on demand through `get_file_content`.
+ * metadata and their content is fetched on demand through `download_file`.
  */
 const MAX_INLINE_TEXT_BYTES = 256 * 1024;
+
+/**
+ * Default and ceiling for the text `download_file` echoes back inline.
+ *
+ * Inlining is a convenience for the caller that wants to READ a small file
+ * without a second fetch through the artifact's `download_url`. It is not the
+ * transport: the attachment is published either way. The ceiling exists because
+ * inline content lands in an agent's context verbatim, where a multi-megabyte
+ * blob is worse than useless — the `download_url` is the path for anything big.
+ */
+const DEFAULT_INLINE_CONTENT_BYTES = 256 * 1024;
+const MAX_INLINE_CONTENT_BYTES = 1024 * 1024;
 
 /**
  * Grace window subtracted from `last_sync_at` before deciding a file's content
@@ -423,25 +435,27 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       },
     },
     actions: {
-      get_file_content: {
-        key: 'get_file_content',
+      download_file: {
+        key: 'download_file',
         kind: 'read',
         requiresApproval: false,
-        name: 'Get File Content',
+        name: 'Download File',
         description:
-          'Read one Drive file as text. Google Docs/Sheets/Slides are exported (text/plain, CSV); other files are downloaded as-is. Binary files are rejected rather than returned as mojibake.',
+          'Download one Drive file. Google Docs/Sheets/Slides are exported (text/plain, CSV); everything else is downloaded as-is, binary included. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content` so they can be read without a second call.',
         requiredScopes: ['https://www.googleapis.com/auth/drive.readonly'],
         inputSchema: {
           type: 'object',
           required: ['file_id'],
           properties: {
-            file_id: { type: 'string', description: 'Drive file ID to read.' },
-            max_bytes: {
+            file_id: {
+              type: 'string',
+              description: 'Drive file ID to download.',
+            },
+            inline_max_bytes: {
               type: 'integer',
-              minimum: 1,
-              maximum: MAX_EXPORT_BYTES,
-              description:
-                'Truncate the returned text to this many bytes (default 1048576).',
+              minimum: 0,
+              maximum: MAX_INLINE_CONTENT_BYTES,
+              description: `Return text content inline when the file is at most this many bytes (default ${DEFAULT_INLINE_CONTENT_BYTES}, max ${MAX_INLINE_CONTENT_BYTES}). Binary files are never inlined. 0 disables inlining; the attachment is still published.`,
             },
           },
         },
@@ -831,8 +845,8 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       const http = this.client(token);
 
       switch (ctx.actionKey) {
-        case 'get_file_content':
-          return await this.getFileContent(http, ctx.input);
+        case 'download_file':
+          return await this.downloadFile(http, ctx.input);
         case 'get_file':
           return await this.getFile(http, ctx.input);
         default:
@@ -860,16 +874,33 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     return { success: true, output: this.driveFileToRow(file) };
   }
 
-  private async getFileContent(
+  /**
+   * Download a file's bytes and publish them as an attachment.
+   *
+   * The bytes always go out as an attachment, so the gateway stores them and
+   * hands back a `download_url` — that is the path a device or sandbox uses,
+   * and it is why binary is no longer refused here. Inline `content` is an
+   * extra for the small-text case only: a caller that just wants to read a
+   * config file should not have to make a second request for it.
+   *
+   * Nothing here enforces the gateway's attachment size cap. The gateway owns
+   * that limit and reports what it refused in `attachments_rejected`;
+   * duplicating the number on this side of the boundary would just let the two
+   * drift apart.
+   */
+  private async downloadFile(
     http: HttpClient,
     input: Record<string, unknown>
   ): Promise<ActionResult> {
     const fileId = input.file_id as string;
     if (!fileId) return { success: false, error: 'file_id is required.' };
 
-    const maxBytes = Math.min(
-      (input.max_bytes as number) ?? 1024 * 1024,
-      MAX_EXPORT_BYTES
+    const requestedInline = input.inline_max_bytes;
+    const inlineMaxBytes = Math.min(
+      typeof requestedInline === 'number' && Number.isFinite(requestedInline) && requestedInline >= 0
+        ? requestedInline
+        : DEFAULT_INLINE_CONTENT_BYTES,
+      MAX_INLINE_CONTENT_BYTES
     );
 
     const file = await this.fetchFileMetadata(http, fileId);
@@ -877,22 +908,56 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       return { success: false, error: `Drive file not found: ${fileId}` };
     }
 
-    const fetched = await this.fetchTextContent(http, file, maxBytes);
+    const fetched = await this.fetchFileBytes(http, file);
     if (!fetched.ok) {
       return { success: false, error: fetched.error };
     }
+
+    const filename = file.name ?? file.id;
+    // `kind` is deliberately omitted: the gateway infers it from the media type
+    // (`inferKindFromMime`), so there is one rule rather than two that can
+    // disagree about what counts as an image.
+    const attachment = {
+      filename,
+      mime_type: fetched.contentType,
+      data: fetched.bytes.toString('base64'),
+      size_bytes: fetched.bytes.length,
+    };
+
+    // Text is TRUNCATED to the inline budget rather than withheld: an agent
+    // peeking at a large log or CSV is better served by its first page than by
+    // being told to go fetch a URL. The attachment always carries the whole
+    // file, so truncating here loses nothing.
+    const textual =
+      fetched.exportedAs !== undefined || isTextualMimeType(file.mimeType);
+    const inlined = inlineMaxBytes > 0 && textual;
+    const truncated = inlined && fetched.bytes.length > inlineMaxBytes;
+    const content = inlined
+      ? truncated
+        ? decodeTruncated(fetched.bytes, inlineMaxBytes)
+        : fetched.bytes.toString('utf-8')
+      : undefined;
 
     return {
       success: true,
       output: {
         file_id: file.id,
-        name: file.name ?? '',
+        name: filename,
         mime_type: file.mimeType ?? '',
         exported_as: fetched.exportedAs,
-        truncated: fetched.truncated,
-        byte_count: fetched.byteCount,
-        line_count: fetched.text.length === 0 ? 0 : fetched.text.split('\n').length,
-        content: fetched.text,
+        size_bytes: fetched.bytes.length,
+        attachments: [attachment],
+        ...(inlined
+          ? {
+              content,
+              content_truncated: truncated,
+              line_count: content!.length === 0 ? 0 : content!.split('\n').length,
+            }
+          : {
+              content_omitted_reason: textual
+                ? 'inlining disabled'
+                : 'file is binary; fetch it through the attachment download_url',
+            }),
       },
     };
   }
@@ -902,11 +967,105 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
   // -------------------------------------------------------------------------
 
   /**
+   * Decide how a file's content is retrieved: `files.export` for a Google-native
+   * doc, `alt=media` for everything else.
+   *
+   * Shared by the bytes and text paths so the two can never disagree about
+   * which URL a given file needs, or about which items have no content at all.
+   */
+  private contentRequest(
+    file: DriveFile
+  ): { ok: true; url: string; exportMime?: string } | { ok: false; error: string } {
+    const exportMime = exportMimeTypeFor(file.mimeType);
+
+    if (isGoogleNative(file.mimeType) && !exportMime) {
+      return {
+        ok: false,
+        error: `Google Drive item of type ${file.mimeType} has no text export (folders, shortcuts and forms carry no content).`,
+      };
+    }
+
+    return {
+      ok: true,
+      url: exportMime
+        ? `${this.BASE_URL}/files/${encodeURIComponent(file.id)}/export?mimeType=${encodeURIComponent(exportMime)}`
+        : `${this.BASE_URL}/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`,
+      ...(exportMime ? { exportMime } : {}),
+    };
+  }
+
+  /**
+   * Fetch a file's raw bytes, binary included.
+   *
+   * Unlike `fetchTextContent` this never decodes, so a PDF or an image survives
+   * intact on its way to the artifact store. Google-native docs still go through
+   * `files.export`, because their "raw" bytes are not a document.
+   */
+  private async fetchFileBytes(
+    http: HttpClient,
+    file: DriveFile
+  ): Promise<
+    | { ok: true; bytes: Buffer; contentType: string; exportedAs?: string }
+    | { ok: false; error: string }
+  > {
+    const request = this.contentRequest(file);
+    if (!request.ok) return request;
+
+    // Refuse before fetching. The isolate buffers the whole body, then base64s
+    // it to cross the host boundary at 4/3 the size, so an unbounded download
+    // is an out-of-memory kill rather than an error the caller can read.
+    // MAX_EXPORT_BYTES sits above the gateway's own attachment cap on purpose:
+    // the gateway stays the authority on what is too big to store, and this
+    // only stops what cannot physically make the trip.
+    const declaredSize = parseSize(file.size);
+    if (declaredSize !== undefined && declaredSize > MAX_EXPORT_BYTES) {
+      return {
+        ok: false,
+        error: `File ${file.name ?? file.id} is ${declaredSize} bytes, above the ${MAX_EXPORT_BYTES}-byte download limit.`,
+      };
+    }
+
+    const response = await http.raw(request.url);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `Drive ${request.exportMime ? 'files.export' : 'files.get'} error (${response.status}): ${await response.text()}`,
+      };
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > MAX_EXPORT_BYTES) {
+      // Drive omits `size` for native docs, so the export path only learns the
+      // real size here. Same refusal, after the fact.
+      return {
+        ok: false,
+        error: `File ${file.name ?? file.id} returned ${bytes.length} bytes, above the ${MAX_EXPORT_BYTES}-byte download limit.`,
+      };
+    }
+    if (bytes.length === 0) {
+      return { ok: false, error: `Drive file ${file.name ?? file.id} is empty.` };
+    }
+
+    return {
+      ok: true,
+      bytes,
+      contentType:
+        request.exportMime ??
+        response.headers.get('content-type')?.split(';')[0]?.trim() ??
+        file.mimeType ??
+        'application/octet-stream',
+      ...(request.exportMime ? { exportedAs: request.exportMime } : {}),
+    };
+  }
+
+  /**
    * Fetch a file's text, choosing export vs. direct download by MIME type.
    *
    * Binary files are refused rather than decoded: running a PDF through
    * `response.text()` yields replacement characters that look like content to
-   * a model and would be indistinguishable from a genuinely empty file.
+   * a model and would be indistinguishable from a genuinely empty file. This
+   * path feeds the FEED, where the text is embedded; `download_file` uses
+   * `fetchFileBytes` and has no such restriction.
    */
   private async fetchTextContent(
     http: HttpClient,
@@ -922,27 +1081,18 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       }
     | { ok: false; error: string }
   > {
-    const exportMime = exportMimeTypeFor(file.mimeType);
-
-    if (isGoogleNative(file.mimeType) && !exportMime) {
-      return {
-        ok: false,
-        error: `Google Drive item of type ${file.mimeType} has no text export (folders, shortcuts and forms carry no content).`,
-      };
-    }
+    const request = this.contentRequest(file);
+    if (!request.ok) return request;
+    const exportMime = request.exportMime;
 
     if (!exportMime && !isTextualMimeType(file.mimeType)) {
       return {
         ok: false,
-        error: `File ${file.name ?? file.id} is binary (${file.mimeType ?? 'unknown type'}); its bytes are not text and were not decoded.`,
+        error: `File ${file.name ?? file.id} is binary (${file.mimeType ?? 'unknown type'}); its bytes are not text and were not decoded. Use download_file to fetch it.`,
       };
     }
 
-    const url = exportMime
-      ? `${this.BASE_URL}/files/${encodeURIComponent(file.id)}/export?mimeType=${encodeURIComponent(exportMime)}`
-      : `${this.BASE_URL}/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`;
-
-    const response = await http.raw(url);
+    const response = await http.raw(request.url);
     if (!response.ok) {
       return {
         ok: false,
@@ -1076,7 +1226,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     // The failure is RECORDED rather than retried. A file that syncs once and
     // never changes again is never revisited, so a silent miss would be
     // permanent and indistinguishable from "this file has no text by design".
-    // `content_error` makes the two tellable apart, and the `get_file_content`
+    // `content_error` makes the two tellable apart, and the `download_file`
     // action can still fetch on demand — which is the recovery path, not a
     // retry queue whose state would grow without bound.
     if (includeContent && this.shouldInlineContent(file, lastSyncAt)) {

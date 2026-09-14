@@ -23,6 +23,10 @@ interface RouteResponse {
   body?: unknown;
   /** Raw body for media/export routes, which the connector reads via text(). */
   text?: string;
+  /** Raw bytes for a binary media route, which `download_file` reads via arrayBuffer(). */
+  bytes?: Uint8Array;
+  /** Response `content-type`, which the byte path prefers over the metadata MIME. */
+  contentType?: string;
 }
 
 type Route = (url: URL) => RouteResponse | undefined;
@@ -55,11 +59,25 @@ function fakeDrive(routes: Route[]) {
           const hit = route(url);
           if (hit) {
             const status = hit.status ?? 200;
+            // `bytes` lets a route serve a real binary body; otherwise the
+            // text body is encoded, so the byte path sees exactly what the
+            // text path would have decoded.
+            const body =
+              hit.bytes ??
+              new TextEncoder().encode(hit.text ?? JSON.stringify(hit.body ?? {}));
             return {
               ok: status >= 200 && status < 300,
               status,
+              headers: new Headers(
+                hit.contentType ? { 'content-type': hit.contentType } : {}
+              ),
               json: async () => hit.body ?? {},
               text: async () => hit.text ?? JSON.stringify(hit.body ?? {}),
+              arrayBuffer: async () =>
+                body.buffer.slice(
+                  body.byteOffset,
+                  body.byteOffset + body.byteLength
+                ),
             } as unknown as Response;
           }
         }
@@ -362,7 +380,7 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
+      actionKey: 'download_file',
       input: { file_id: 'doc' },
       credentials: { accessToken: 'tok' },
     });
@@ -383,7 +401,7 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
+      actionKey: 'download_file',
       input: { file_id: 'sheet' },
       credentials: { accessToken: 'tok' },
     });
@@ -402,7 +420,7 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
+      actionKey: 'download_file',
       input: { file_id: 'txt' },
       credentials: { accessToken: 'tok' },
     });
@@ -421,7 +439,7 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
+      actionKey: 'download_file',
       input: { file_id: 'folder' },
       credentials: { accessToken: 'tok' },
     });
@@ -430,22 +448,86 @@ describe('GoogleDriveConnector content routing', () => {
     expect(result.error).toMatch(/no text export/);
   });
 
-  test('a binary file is refused rather than decoded into mojibake', async () => {
+  test('a binary file downloads as an attachment instead of being refused', async () => {
+    // The whole point of download_file: a PDF used to be rejected outright, so
+    // no device could ever receive one. The bytes must survive intact — not be
+    // decoded to text and back, which is what produced mojibake before.
     const connector = new GoogleDriveConnector();
+    const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0xfe]);
     const drive = fakeDrive([
-      fileGet(driveFile('pdf', { mimeType: 'application/pdf', name: 'a.pdf' })),
+      fileGet(driveFile('pdf', { mimeType: 'application/pdf', name: 'a.pdf', size: '8' })),
+      (url) =>
+        url.searchParams.get('alt') === 'media'
+          ? { bytes: pdfBytes, contentType: 'application/pdf' }
+          : undefined,
     ]);
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
+      actionKey: 'download_file',
       input: { file_id: 'pdf' },
       credentials: { accessToken: 'tok' },
     });
 
+    expect(result.success).toBe(true);
+    expect(drive.trace).toContain('media');
+
+    const [attachment] = result.output.attachments as Array<Record<string, unknown>>;
+    expect(attachment.filename).toBe('a.pdf');
+    expect(attachment.mime_type).toBe('application/pdf');
+    expect(attachment.size_bytes).toBe(8);
+    // Byte-exact round trip, including the 0x00 and the invalid UTF-8 tail that
+    // a text decode would have replaced with U+FFFD.
+    expect(new Uint8Array(Buffer.from(attachment.data as string, 'base64'))).toEqual(
+      pdfBytes
+    );
+    // `kind` is the gateway's to infer; emitting it here would be a second rule
+    // that can disagree with inferKindFromMime.
+    expect(attachment).not.toHaveProperty('kind');
+    // Binary is never inlined — that is what the download_url is for.
+    expect(result.output.content).toBeUndefined();
+    expect(result.output.content_omitted_reason).toMatch(/binary/);
+  });
+
+  test('a text file is inlined AND published as an attachment', async () => {
+    // Both, not either: the caller can read it without a second request, and a
+    // device can still fetch the stored copy.
+    const connector = new GoogleDriveConnector();
+    const drive = fakeDrive([fileGet(driveFile('notes')), contentBody('alpha\nbeta')]);
+    connector.client = () => drive.client;
+
+    const result = await connector.execute({
+      actionKey: 'download_file',
+      input: { file_id: 'notes' },
+      credentials: { accessToken: 'tok' },
+    });
+
+    expect(result.output.content).toBe('alpha\nbeta');
+    expect(result.output.content_truncated).toBe(false);
+    const [attachment] = result.output.attachments as Array<Record<string, unknown>>;
+    expect(Buffer.from(attachment.data as string, 'base64').toString('utf-8')).toBe(
+      'alpha\nbeta'
+    );
+  });
+
+  test('a file above the download ceiling is refused BEFORE any bytes are fetched', async () => {
+    // Refusing on the declared size matters: the isolate buffers the whole body
+    // and then base64s it, so fetching first would be an OOM kill rather than
+    // an error the caller can read.
+    const connector = new GoogleDriveConnector();
+    const drive = fakeDrive([
+      fileGet(driveFile('huge', { size: String(11 * 1024 * 1024) })),
+    ]);
+    connector.client = () => drive.client;
+
+    const result = await connector.execute({
+      actionKey: 'download_file',
+      input: { file_id: 'huge' },
+      credentials: { accessToken: 'tok' },
+    });
+
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/binary/);
-    // Critically: it never spent a request fetching bytes it cannot use.
+    expect(result.error).toMatch(/download limit/);
     expect(drive.trace).not.toContain('media');
   });
 
@@ -461,12 +543,12 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
-      input: { file_id: 'multi', max_bytes: 11 },
+      actionKey: 'download_file',
+      input: { file_id: 'multi', inline_max_bytes: 11 },
       credentials: { accessToken: 'tok' },
     });
 
-    expect(result.output.truncated).toBe(true);
+    expect(result.output.content_truncated).toBe(true);
     expect(result.output.content).not.toContain('\uFFFD');
     expect(result.output.content).toBe('a'.repeat(10));
   });
@@ -477,9 +559,9 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
+      actionKey: 'download_file',
       // 'ab' (2) + U+FFFD (3 bytes) = 5 bytes, a clean boundary.
-      input: { file_id: 'repl', max_bytes: 5 },
+      input: { file_id: 'repl', inline_max_bytes: 5 },
       credentials: { accessToken: 'tok' },
     });
 
@@ -492,14 +574,20 @@ describe('GoogleDriveConnector content routing', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
-      input: { file_id: 'big', max_bytes: 4 },
+      actionKey: 'download_file',
+      input: { file_id: 'big', inline_max_bytes: 4 },
       credentials: { accessToken: 'tok' },
     });
 
     expect(result.output.content).toBe('abcd');
-    expect(result.output.truncated).toBe(true);
-    expect(result.output.byte_count).toBe(10);
+    expect(result.output.content_truncated).toBe(true);
+    // The INLINE text is truncated; the attachment still carries the whole file,
+    // because a truncated attachment would be a corrupt download.
+    expect(result.output.size_bytes).toBe(10);
+    const [attachment] = result.output.attachments as Array<Record<string, unknown>>;
+    expect(Buffer.from(attachment.data as string, 'base64').toString('utf-8')).toBe(
+      'abcdefghij'
+    );
   });
 });
 
@@ -871,10 +959,13 @@ describe('GoogleDriveConnector get_file metadata action', () => {
 });
 
 describe('GoogleDriveConnector export ceiling', () => {
-  test('max_bytes above the export ceiling is clamped, not honoured', async () => {
+  test('an export past the ceiling is REFUSED, not silently clamped', async () => {
+    // Drive omits `size` for native docs, so the export path only learns the
+    // real size after the fetch. It must still refuse: an attachment holding
+    // the first 10MB of a larger file is a corrupt download, and handing that
+    // back as success is the same class of bug as dropping it silently.
     const EXPORT_CEILING = 10 * 1024 * 1024;
     const connector = new GoogleDriveConnector();
-    // One byte past the ceiling: a caller asking for 50MB must still stop at 10.
     const oversized = 'a'.repeat(EXPORT_CEILING + 1);
     const drive = fakeDrive([
       fileGet(driveFile('huge', { mimeType: DOC_MIME, size: undefined })),
@@ -883,22 +974,36 @@ describe('GoogleDriveConnector export ceiling', () => {
     connector.client = () => drive.client;
 
     const result = await connector.execute({
-      actionKey: 'get_file_content',
-      input: { file_id: 'huge', max_bytes: 50 * 1024 * 1024 },
+      actionKey: 'download_file',
+      input: { file_id: 'huge' },
+      credentials: { accessToken: 'tok' },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/download limit/);
+    expect(result.error).toContain(String(EXPORT_CEILING + 1));
+  });
+
+  test('inline_max_bytes above the inline ceiling is clamped, not honoured', async () => {
+    // The inline budget is separate from the download ceiling and much smaller:
+    // inline text lands in an agent's context verbatim.
+    const INLINE_CEILING = 1024 * 1024;
+    const connector = new GoogleDriveConnector();
+    const body = 'a'.repeat(INLINE_CEILING + 1024);
+    const drive = fakeDrive([fileGet(driveFile('big')), contentBody(body)]);
+    connector.client = () => drive.client;
+
+    const result = await connector.execute({
+      actionKey: 'download_file',
+      input: { file_id: 'big', inline_max_bytes: 50 * 1024 * 1024 },
       credentials: { accessToken: 'tok' },
     });
 
     expect(result.success).toBe(true);
-    expect(result.output.truncated).toBe(true);
-    // The CONTENT is what the ceiling governs: a caller asking for 50MB still
-    // cannot pull more than 10MB into the turn.
-    expect(
-      new TextEncoder().encode(result.output.content as string).byteLength
-    ).toBeLessThanOrEqual(EXPORT_CEILING);
-    // `byte_count` is deliberately the SOURCE size, not the returned size —
-    // it is how a caller learns how much it did not get. Pinned so the two
-    // never quietly collapse into the same number.
-    expect(result.output.byte_count).toBe(EXPORT_CEILING + 1);
+    expect(result.output.content_truncated).toBe(true);
+    expect((result.output.content as string).length).toBe(INLINE_CEILING);
+    // The attachment is unaffected by the inline budget — it carries all of it.
+    expect(result.output.size_bytes).toBe(INLINE_CEILING + 1024);
   });
 });
 

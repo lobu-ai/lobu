@@ -98,6 +98,28 @@ interface AudioTranscriptionCandidate {
   mimeType: string;
 }
 
+/**
+ * One attachment that carried bytes but did not become an artifact.
+ *
+ * A drop used to be a `logger.warn` and nothing else, so a caller that asked
+ * for a file got a successful result with no file in it and no way to tell
+ * that apart from a source that genuinely had no attachment. The stream path
+ * still drops and continues — one oversized image must not fail the message
+ * carrying it — but the outcome is now reported to the caller instead of
+ * swallowed, and `materializeActionOutputAttachments` puts it in the action
+ * output where the requester can see it.
+ */
+export interface RejectedAttachment {
+  /** Stream item the attachment belonged to; `action:<runId>` on the action path. */
+  item_id: string;
+  filename: string;
+  reason: "empty" | "oversize";
+  /** Decoded size; absent when the base64 decoded to nothing. */
+  size_bytes?: number;
+  /** The limit that rejected it, so the message is actionable without the source. */
+  cap?: number;
+}
+
 interface AudioTranscriptionJob extends AudioTranscriptionCandidate {
   /** Connection-scoped source identity of the persisted event. */
   originId: string;
@@ -121,6 +143,11 @@ function publicGatewayUrl(): string {
  * Items without attachments pass through unchanged. Attachments missing
  * `data` are also passed through (a connector may pre-publish and reference
  * an existing artifact).
+ *
+ * Attachments whose bytes are unusable (empty or over the server cap) are
+ * dropped from the rewritten item and reported in `rejected`. Dropping rather
+ * than throwing is deliberate on this path: a batch of chat messages must not
+ * fail because one image was too large.
  */
 export async function materializeInlineAttachments<T extends StreamItemLike>(
   items: T[],
@@ -129,14 +156,21 @@ export async function materializeInlineAttachments<T extends StreamItemLike>(
   items: T[];
   pendingTranscriptions: AudioTranscriptionCandidate[];
   publishedArtifactIds: string[];
+  rejected: RejectedAttachment[];
 }> {
   const coreServices = getLobuCoreServices();
   const artifactStore = coreServices?.getArtifactStore?.();
   if (!artifactStore) {
-    return { items, pendingTranscriptions: [], publishedArtifactIds: [] };
+    return {
+      items,
+      pendingTranscriptions: [],
+      publishedArtifactIds: [],
+      rejected: [],
+    };
   }
 
   const baseUrl = publicGatewayUrl();
+  const rejected: RejectedAttachment[] = [];
   const pendingTranscriptions: AudioTranscriptionCandidate[] = [];
   const publishedArtifactIds: string[] = [];
   const out: T[] = [];
@@ -171,6 +205,7 @@ export async function materializeInlineAttachments<T extends StreamItemLike>(
           { item_id: item.id },
           "[inline-attachments] base64 decoded to 0 bytes — dropping attachment"
         );
+        rejected.push({ item_id: item.id, filename, reason: "empty" });
         continue;
       }
       if (buffer.length > MAX_INLINE_ATTACHMENT_BYTES) {
@@ -182,6 +217,13 @@ export async function materializeInlineAttachments<T extends StreamItemLike>(
           },
           "[inline-attachments] attachment exceeds server cap — dropping attachment"
         );
+        rejected.push({
+          item_id: item.id,
+          filename,
+          reason: "oversize",
+          size_bytes: buffer.length,
+          cap: MAX_INLINE_ATTACHMENT_BYTES,
+        });
         continue;
       }
 
@@ -225,7 +267,7 @@ export async function materializeInlineAttachments<T extends StreamItemLike>(
     out.push({ ...item, attachments: rewritten });
   }
 
-  return { items: out, pendingTranscriptions, publishedArtifactIds };
+  return { items: out, pendingTranscriptions, publishedArtifactIds, rejected };
 }
 
 /** Materialize connector-style attachments returned by a device action. */
@@ -239,12 +281,20 @@ export async function materializeActionOutputAttachments(
   if (!Array.isArray(actionOutput.attachments)) {
     return { output: actionOutput, publishedArtifactIds: [] };
   }
-  const { items, publishedArtifactIds } = await materializeInlineAttachments(
-    [{ id: `action:${runId}`, attachments: actionOutput.attachments }],
-    () => runArtifactBinding(runId)
-  );
+  const { items, publishedArtifactIds, rejected } =
+    await materializeInlineAttachments(
+      [{ id: `action:${runId}`, attachments: actionOutput.attachments }],
+      () => runArtifactBinding(runId)
+    );
   return {
-    output: { ...actionOutput, attachments: items[0]?.attachments ?? [] },
+    output: {
+      ...actionOutput,
+      attachments: items[0]?.attachments ?? [],
+      // An action caller asked for a specific file, so a drop has to be visible
+      // in the result. Without this the run reports success with an empty
+      // `attachments` array, indistinguishable from a source that had none.
+      ...(rejected.length > 0 ? { attachments_rejected: rejected } : {}),
+    },
     publishedArtifactIds,
   };
 }

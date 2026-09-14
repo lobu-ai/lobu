@@ -12,6 +12,7 @@ import * as providerSecrets from '../../lobu/stores/provider-secrets';
 import {
   deleteMaterializedArtifacts,
   materializeActionOutputAttachments,
+  materializeInlineAttachments,
   transcribeOne,
   triggerAudioTranscriptions,
 } from '../inline-attachments';
@@ -146,6 +147,108 @@ describe('materializeActionOutputAttachments', () => {
     expect(attachment.artifact_id).toEqual(expect.any(String));
     const stored = await artifactStore.read(String(attachment.artifact_id));
     expect(stored?.bytes.length).toBe(bytes.length);
+  });
+
+  it('reports an over-cap action attachment instead of dropping it silently', async () => {
+    // The regression this guards: the drop was a logger.warn and nothing else,
+    // so an action that asked for a file returned success with an empty
+    // `attachments` array — indistinguishable from a source that had no file.
+    // A caller must be able to tell "too big" from "there was nothing".
+    const bytes = Buffer.alloc(8 * 1024 * 1024 + 1, 0x41);
+    const { output, publishedArtifactIds } = await materializeActionOutputAttachments(
+      101,
+      {
+        attachments: [
+          {
+            kind: 'file',
+            filename: 'huge.pdf',
+            mime_type: 'application/pdf',
+            data: bytes.toString('base64'),
+          },
+        ],
+      }
+    );
+
+    expect(publishedArtifactIds).toHaveLength(0);
+    expect(output.attachments).toEqual([]);
+    expect(output.attachments_rejected).toEqual([
+      {
+        item_id: 'action:101',
+        filename: 'huge.pdf',
+        reason: 'oversize',
+        size_bytes: bytes.length,
+        cap: 8 * 1024 * 1024,
+      },
+    ]);
+  });
+
+  it('reports an empty-decoding action attachment', async () => {
+    const { output, publishedArtifactIds } = await materializeActionOutputAttachments(
+      102,
+      {
+        attachments: [
+          { kind: 'file', filename: 'junk.bin', mime_type: 'application/pdf', data: '!!!!' },
+        ],
+      }
+    );
+
+    expect(publishedArtifactIds).toHaveLength(0);
+    expect(output.attachments_rejected).toEqual([
+      { item_id: 'action:102', filename: 'junk.bin', reason: 'empty' },
+    ]);
+  });
+
+  it('leaves a clean action output free of the rejected key', async () => {
+    // The key must be ABSENT, not an empty array: every action output carries
+    // attachments through this path, and a noise field on all of them would
+    // reach the model verbatim.
+    const { output } = await materializeActionOutputAttachments(103, {
+      attachments: [
+        {
+          kind: 'image',
+          filename: 'ok.jpg',
+          mime_type: 'image/jpeg',
+          data: Buffer.from('fine').toString('base64'),
+        },
+      ],
+    });
+
+    expect(output).not.toHaveProperty('attachments_rejected');
+  });
+
+  it('still publishes an oversize attachment’s siblings on the stream path', async () => {
+    // Stream semantics are deliberately unchanged: one oversized image must not
+    // fail the message carrying it, nor the good attachment beside it. The only
+    // change is that the drop is now reported rather than swallowed.
+    const huge = Buffer.alloc(8 * 1024 * 1024 + 1, 0x42);
+    const { items, rejected, publishedArtifactIds } = await materializeInlineAttachments([
+      {
+        id: 'WA-9',
+        attachments: [
+          { kind: 'image', filename: 'big.jpg', mime_type: 'image/jpeg', data: huge.toString('base64') },
+          {
+            kind: 'image',
+            filename: 'small.jpg',
+            mime_type: 'image/jpeg',
+            data: Buffer.from('ok').toString('base64'),
+          },
+        ],
+      },
+    ]);
+
+    expect(publishedArtifactIds).toHaveLength(1);
+    const attachments = items[0]?.attachments as Array<Record<string, unknown>>;
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]?.filename).toBe('small.jpg');
+    expect(rejected).toEqual([
+      {
+        item_id: 'WA-9',
+        filename: 'big.jpg',
+        reason: 'oversize',
+        size_bytes: huge.length,
+        cap: 8 * 1024 * 1024,
+      },
+    ]);
   });
 
   it('deletes materialized action artifacts when finalization is abandoned', async () => {
