@@ -15,6 +15,7 @@ import { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
 import { MessageHandlerBridge } from "../connections/message-handler-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
+import { __resetPublicOriginCachesForTests } from "../../utils/public-origin.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import { ensureDbForGatewayTests, seedAgentRow } from "./helpers/db-setup.js";
 
@@ -193,6 +194,143 @@ describe("DM bare-code message → real consume→bind (previewMode)", () => {
 			await sql`DELETE FROM member WHERE id = ${memberId}`;
       await sql`DELETE FROM organization WHERE id = ${organizationId}`;
 			await sql`DELETE FROM "user" WHERE id = ${createdBy}`;
+    }
+  });
+});
+
+/**
+ * The unlinked-chat notice deep-links into the Automation editor, and the
+ * editor resolves its `connection` param by EXACT match against
+ * `connections.slug`. The bridge holds the gateway RUNTIME id instead: for a
+ * BYO connection that is the slug minus its `agentconn-` namespace, so it
+ * matched no connection AND suppressed the editor's connector+team fallback,
+ * leaving the Automation listening across every connection on the platform.
+ *
+ * This is the seam the bug lived on, so the guard belongs here — asserting
+ * against the slug actually stored on the row the editor would list — rather
+ * than on `workspaceUnlinkedNotice`, which is handed the converted value.
+ */
+describe("unlinked DM notice → deep link identifies the connection", () => {
+  test("the notice carries connections.slug, never the runtime id", async () => {
+    const sql = getDb();
+    const stamp = Date.now();
+    const agentId = `agent-notice-e2e-${stamp}`;
+    const organizationId = `org-notice-e2e-${stamp}`;
+    const runtimeConnectionId = `conn-notice-e2e-${stamp}`;
+    const connectionSlug = `agentconn-${runtimeConnectionId}`;
+    const channelId = `D${stamp.toString(36)}`;
+
+    await seedAgentRow(agentId, { organizationId, name: "Planner" });
+    const [connectionRow] = await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        credential_mode, config
+      ) VALUES (
+        ${organizationId}, 'slack', ${connectionSlug}, 'Slack',
+        'active', 'byo', '{}'
+      )
+      RETURNING id
+    `;
+
+    const savedOrigin = process.env.PUBLIC_GATEWAY_URL;
+    process.env.PUBLIC_GATEWAY_URL = "https://app.lobu.ai";
+    __resetPublicOriginCachesForTests();
+
+    try {
+      const conversationState = new ConversationStateStore(
+        new InMemoryStateAdapter(),
+      );
+      const connection: PlatformConnection = {
+        id: runtimeConnectionId,
+        platform: "slack",
+        // No owning agent + no channel Automation = the routing dead end that
+        // posts the notice.
+        agentId: undefined,
+        organizationId,
+        config: { platform: "slack" } as never,
+        settings: { allowGroups: true, previewMode: false },
+        metadata: { botUsername: "bot", botUserId: "U_BOT", teamId: "T_NOTICE" },
+        status: "active",
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const enqueueMessage = mock(async () => undefined);
+      const services = {
+        getArtifactStore: () => null,
+        getPublicGatewayUrl: () => "https://app.lobu.ai",
+        getAutomationSubscriptionService: () => ({
+          resolveForConnection: mock(async () => null),
+          // No Automation covers this channel — the dead end under test.
+          channelHasMessageSubscription: mock(async () => false),
+        }),
+        getAgentMetadataStore: () => undefined,
+        getUserAgentsStore: () => undefined,
+        getTranscriptionService: () => undefined,
+        getAgentSettingsStore: () => undefined,
+        getDeclaredAgentRegistry: () => undefined,
+        getQueueProducer: () => ({ enqueueMessage }),
+      } as never;
+      const manager = {
+        has: () => true,
+        getInstance: () => ({ connection, conversationState }),
+      } as never;
+      const bridge = new MessageHandlerBridge(
+        connection,
+        services,
+        manager,
+        undefined as never,
+      );
+
+      const posts: string[] = [];
+      const thread = {
+        id: channelId,
+        channelId,
+        adapter: undefined,
+        subscribe: mock(async () => undefined),
+        startTyping: mock(async () => undefined),
+        post: mock(async (c: unknown) =>
+          posts.push(typeof c === "string" ? c : JSON.stringify(c)),
+        ),
+      };
+
+      await bridge.handleMessage(
+        thread as never,
+        {
+          id: "M_NOTICE",
+          text: "hello, anyone there?",
+          author: {
+            userId: "U_NOTICE",
+            userName: "alice",
+            isBot: false,
+            isMe: false,
+          },
+          raw: { team_id: "T_NOTICE" },
+          attachments: [],
+          metadata: { dateSent: new Date(), edited: false },
+        } as never,
+        "dm",
+      );
+
+      const posted = posts.join("\n");
+      expect(posted).toContain("isn't linked");
+      // Read the slug back off the row: the assertion has to be that the link
+      // names a connection the editor can find, not that it is slug-shaped.
+      const [stored] = await sql<{ slug: string }>`
+        SELECT slug FROM connections WHERE id = ${connectionRow.id}
+      `;
+      expect(stored.slug).toBe(connectionSlug);
+      expect(posted).toContain(`connection=${stored.slug}`);
+      // The runtime id must never reach the URL on its own. `connectionSlug`
+      // CONTAINS it, so assert on the param rather than the bare substring.
+      expect(posted).not.toContain(`connection=${runtimeConnectionId}`);
+      expect(enqueueMessage).not.toHaveBeenCalled();
+    } finally {
+      if (savedOrigin === undefined) delete process.env.PUBLIC_GATEWAY_URL;
+      else process.env.PUBLIC_GATEWAY_URL = savedOrigin;
+      __resetPublicOriginCachesForTests();
+      await sql`DELETE FROM connections WHERE id = ${connectionRow.id}`;
+      await sql`DELETE FROM agents WHERE id = ${agentId} AND organization_id = ${organizationId}`;
+      await sql`DELETE FROM organization WHERE id = ${organizationId}`;
     }
   });
 });

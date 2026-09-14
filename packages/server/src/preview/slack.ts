@@ -550,7 +550,18 @@ export async function workspaceUnlinkedNotice(
 		channelId: string;
 		teamId?: string;
 		channelName?: string;
-		connectionId?: string;
+		/**
+		 * `connections.slug`, NOT the gateway runtime id. The editor resolves
+		 * the `connection` param by exact match against the connection rows it
+		 * lists, whose public identity is the slug. A BYO connection's runtime
+		 * id is its slug minus the `agentconn-` namespace and so matches no
+		 * row (a managed `slackinst-…` id happens to be its own slug), which is
+		 * why the caller converts with `runtimeConnectionIdToSlug` rather than
+		 * guessing per connection. A present-but-unmatched param also
+		 * suppresses the editor's connector+team fallback, so passing an
+		 * unconverted id is strictly worse than passing nothing.
+		 */
+		connectionSlug?: string;
 	},
 ): Promise<string> {
 	const header =
@@ -588,8 +599,8 @@ export async function workspaceUnlinkedNotice(
 			// hardcoded "slack" silently matched nothing on every other one.
 			params.set("platform", platform);
 			if (channel.teamId) params.set("team", channel.teamId);
-			if (channel.connectionId)
-				params.set("connection", channel.connectionId);
+			if (channel.connectionSlug)
+				params.set("connection", channel.connectionSlug);
 			// Friendly channel name → the editor subtitle. `#` reads as a channel
 			// on Slack; every other platform names its own surfaces (a Google
 			// Chat space, a Telegram group) and a `#` would just be noise.
@@ -604,9 +615,9 @@ export async function workspaceUnlinkedNotice(
 		return `${origin}/${orgSlug}/automations/new?${params.toString()}`;
 	};
 	// `formatChatLink` renders each agent in the target platform's own link
-	// syntax: Slack mrkdwn `<url|label>` (a bare URL there renders as flat,
-	// unclickable text with unfurl_links disabled), a bare labelled URL
-	// everywhere else (which would otherwise show `<url|label>` literally).
+	// syntax: `<url|label>` where the platform takes it (Slack mrkdwn, Google
+	// Chat message text), a bare labelled URL everywhere else — which would
+	// otherwise show `<url|label>` to the reader as literal text.
 	const agentLines = agents.map((a) =>
 		canLink
 			? `   • ${formatChatLink(platform, automationsUrl(a.agentId), a.name)}`

@@ -17,6 +17,8 @@ import {
 } from "../../setup/test-fixtures";
 
 const ORIGIN_ENV = "PUBLIC_GATEWAY_URL";
+/** A BYO chat connection's `connections.slug` shape (`agentconn-<hex>`). */
+const BYO_CONNECTION_SLUG = "agentconn-9f3c1d0e7b2a4c55";
 
 // getConfiguredPublicOrigin() memoizes PUBLIC_GATEWAY_URL on first read, so every
 // case that changes the env must reset the cache to be observed.
@@ -71,7 +73,7 @@ describe("workspaceUnlinkedNotice", () => {
 
 			const text = await workspaceUnlinkedNotice(platform, org.id, {
 				channelId: "spaces/AAQA",
-				connectionId: "42",
+				connectionSlug: BYO_CONNECTION_SLUG,
 			});
 
 			// The editor keys off `platform=` === connector_key, so it must be the
@@ -81,14 +83,112 @@ describe("workspaceUnlinkedNotice", () => {
 			expect(text).toContain(
 				"https://app.lobu.ai/acme/automations/new?agent=planner",
 			);
-			expect(text).toContain("connection=42");
-			// Non-Slack surfaces auto-linkify a bare URL; mrkdwn `<url|label>` would
-			// render literally there, so it must not be used.
-			expect(text).not.toContain("<http");
-			expect(text).toContain("Planner — https://app.lobu.ai/acme/automations");
+			expect(text).toContain(`connection=${BYO_CONNECTION_SLUG}`);
 			expect(text).toContain(linkSpelling);
 		},
 	);
+
+	// `connection` is resolved by EXACT match against `connections.slug`, so the
+	// notice must name the slug and never the gateway runtime id it holds at
+	// send time. Both live namespaces are non-numeric and neither can ever equal
+	// a row's numeric `id`, which is what the editor used to be handed: the
+	// lookup missed every time AND, because a present-but-unmatched param skips
+	// the connector+team fallback, the link was worse than one carrying no
+	// connection at all.
+	it.each([
+		["byo", BYO_CONNECTION_SLUG],
+		["managed slack install", "slackinst-5915b502a2be4d3abb47cddc36ad8c6d"],
+	])("carries the %s connection slug verbatim", async (_kind, slug) => {
+		setOrigin("https://app.lobu.ai");
+		const org = await createTestOrganization({ slug: "acme" });
+		await createTestAgent({
+			organizationId: org.id,
+			agentId: "planner",
+			name: "Planner",
+		});
+
+		const text = await workspaceUnlinkedNotice("slack", org.id, {
+			channelId: "slack:C0ABC123",
+			teamId: "T0TEAM",
+			connectionSlug: slug,
+		});
+
+		expect(text).toContain(`connection=${slug}`);
+	});
+
+	// Google Chat's `Message.text` takes the SAME `<url|label>` hyperlink as
+	// Slack mrkdwn. It used to be lumped in with the bare-URL platforms, which
+	// left every agent rendered as the raw deep-link URL instead of its name.
+	it.each(["slack", "gchat"])(
+		"renders a labelled hyperlink on %s, never a bare URL",
+		async (platform) => {
+			setOrigin("https://app.lobu.ai");
+			const org = await createTestOrganization({ slug: "acme" });
+			await createTestAgent({
+				organizationId: org.id,
+				agentId: "planner",
+				name: "Planner",
+			});
+
+			const text = await workspaceUnlinkedNotice(platform, org.id, {
+				channelId: "spaces/AAQA",
+			});
+
+			expect(text).toContain("|Planner>");
+			expect(text).not.toContain("Planner — https://");
+		},
+	);
+
+	// Telegram, Discord, Teams and WhatsApp do not read the `<url|label>`
+	// spelling, so all four must get the bare URL they auto-linkify — otherwise
+	// the angle brackets reach the reader as literal text.
+	it.each(["telegram", "discord", "teams", "whatsapp"])(
+		"renders a bare labelled URL on %s",
+		async (platform) => {
+			setOrigin("https://app.lobu.ai");
+			const org = await createTestOrganization({ slug: "acme" });
+			await createTestAgent({
+				organizationId: org.id,
+				agentId: "planner",
+				name: "Planner",
+			});
+
+			const text = await workspaceUnlinkedNotice(platform, org.id, {
+				channelId: "spaces/AAQA",
+			});
+
+			expect(text).toContain("Planner — https://app.lobu.ai/acme/automations");
+			expect(text).not.toContain("<http");
+		},
+	);
+
+	// Slack mrkdwn decodes HTML entities, so encoding is lossless there. Google
+	// Chat does not, so an entity would reach the reader verbatim — the raw
+	// characters are dropped instead. Either way the label cannot terminate the
+	// link early.
+	it("escapes a label that could break the link, per platform", async () => {
+		setOrigin("https://app.lobu.ai");
+		const org = await createTestOrganization({ slug: "acme" });
+		await createTestAgent({
+			organizationId: org.id,
+			agentId: "odd",
+			name: "A&B <Co>",
+		});
+
+		const slack = await workspaceUnlinkedNotice("slack", org.id, {
+			channelId: "slack:C0ABC123",
+			teamId: "T0TEAM",
+		});
+		expect(slack).toContain("|A&amp;B &lt;Co&gt;>");
+
+		const gchat = await workspaceUnlinkedNotice("gchat", org.id, {
+			channelId: "spaces/AAQA",
+		});
+		// No entity survives to the reader, and no `<`/`>` is left to close the
+		// link early.
+		expect(gchat).toContain("|A&B Co>");
+		expect(gchat).not.toContain("&amp;");
+	});
 
 	it("omits the Slack `#` label prefix on platforms that name their own surfaces", async () => {
 		setOrigin("https://app.lobu.ai");
@@ -127,48 +227,27 @@ describe("workspaceUnlinkedNotice", () => {
 			channelId: "slack:C0ABC123",
 			teamId: "T0TEAM",
 			channelName: "general",
-			connectionId: "42",
+			connectionSlug: BYO_CONNECTION_SLUG,
 		});
 
 		// getConfiguredPublicOrigin() returns the URL *origin* (scheme+host), so the
 		// /lobu gateway mount is dropped — the SPA lives at the bare origin. The link
 		// targets the Automation editor with its connection event prefilled.
 		// `slack:C…`, `T0TEAM`, and the `#general` label are URL-encoded. Each agent
-		// is a Slack mrkdwn inline link `<url|Name>` so it renders clickable (the
-		// notice goes out via chat.postMessage text, which Slack reads as mrkdwn;
-		// unfurl_links is off so a bare URL would render as flat text).
+		// is a Slack mrkdwn inline link `<url|Name>` so the agent's NAME carries the
+		// link (the notice goes out via chat.postMessage text, which Slack reads as
+		// mrkdwn; a bare URL would put the raw deep-link URL in its place).
 		expect(text).toContain(
-			"<https://app.lobu.ai/acme/automations/new?agent=planner&listen=slack%3AC0ABC123&platform=slack&team=T0TEAM&connection=42&label=%23general|Planner>",
+			"<https://app.lobu.ai/acme/automations/new?agent=planner&listen=slack%3AC0ABC123&platform=slack&team=T0TEAM&connection=agentconn-9f3c1d0e7b2a4c55&label=%23general|Planner>",
 		);
 		expect(text).toContain(
-			"<https://app.lobu.ai/acme/automations/new?agent=builder&listen=slack%3AC0ABC123&platform=slack&team=T0TEAM&connection=42&label=%23general|Builder>",
+			"<https://app.lobu.ai/acme/automations/new?agent=builder&listen=slack%3AC0ABC123&platform=slack&team=T0TEAM&connection=agentconn-9f3c1d0e7b2a4c55&label=%23general|Builder>",
 		);
 		expect(text).toContain("Planner");
 		expect(text).toContain("Builder");
 		// The CLI path is always offered too.
 		expect(text).toContain("lobu run");
 		expect(text).toContain("/lobu link");
-	});
-
-	it("escapes mrkdwn control chars in the link label so a name can't break the inline link", async () => {
-		setOrigin("https://app.lobu.ai");
-		const org = await createTestOrganization({ slug: "acme" });
-		await createTestAgent({
-			organizationId: org.id,
-			agentId: "odd",
-			name: "A&B <Co>",
-		});
-
-		const text = await workspaceUnlinkedNotice("slack", org.id, {
-			channelId: "slack:C0ABC123",
-			teamId: "T0TEAM",
-			channelName: "general",
-		});
-
-		// The label inside `<url|label>` is entity-escaped; the raw name never
-		// reaches Slack, so a `>` can't prematurely close the inline link.
-		expect(text).toContain("|A&amp;B &lt;Co&gt;>");
-		expect(text).not.toContain("|A&B <Co>>");
 	});
 
 	it("deep-links to Automation creation with the agent prefilled when no channel context is given", async () => {

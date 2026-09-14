@@ -280,7 +280,7 @@ describe("resolveAgentId", () => {
       automationSubscriptionService: bindingService as any,
     });
 
-    // Bridge owns the auto-bind side effect, not the resolver.
+    // Resolving an agent is a read: binding a channel is the bridge's job.
     expect(createCount).toBe(0);
   });
 });

@@ -13,6 +13,7 @@ import {
   createRootSpan,
   generateTraceId,
 } from "@lobu/core";
+import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection.js";
 import {
   previewUnlinkedNotice,
   workspaceUnlinkedNotice,
@@ -572,12 +573,15 @@ export class MessageHandlerBridge {
     const platform = this.connection.platform;
     if (!this.connection.organizationId) return false;
 
+    // `this.connection.id` is the gateway RUNTIME id; the Automation editor
+    // matches the deep link's `connection` against `connections.slug`, which
+    // for a BYO connection is that id under its `agentconn-` namespace.
     let noticeChannel: {
       channelId: string;
       teamId?: string;
       channelName?: string;
-      connectionId?: string;
-    } = { channelId, connectionId: this.connection.id };
+      connectionSlug?: string;
+    } = { channelId, connectionSlug: runtimeConnectionIdToSlug(this.connection.id) };
 
     if (platform === "slack") {
       // A tenant's OAuth-installed Slack workspace bot has no owning agent —
@@ -624,12 +628,7 @@ export class MessageHandlerBridge {
           );
         }
       }
-      noticeChannel = {
-        channelId,
-        teamId: linkTeamId,
-        channelName,
-        connectionId: this.connection.id,
-      };
+      noticeChannel = { ...noticeChannel, teamId: linkTeamId, channelName };
     }
 
     const notice = await workspaceUnlinkedNotice(

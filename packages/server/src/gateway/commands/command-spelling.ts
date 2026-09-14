@@ -6,24 +6,25 @@ export function formatChatCommand(platform: string, name: string): string {
 }
 
 /**
- * Platforms whose message text is Slack mrkdwn, where a clickable link is
- * written `<url|label>` and a bare URL renders as flat, unclickable text.
- * Every other chat surface (Telegram, Google Chat, Discord, Teams, WhatsApp)
- * auto-linkifies a bare URL, and would show `<url|label>` literally.
+ * Platforms whose message text takes an angle-bracket hyperlink `<url|label>`,
+ * mapped to the label escape that syntax needs there. Slack mrkdwn and Google
+ * Chat `Message.text` share the spelling; every other surface would show it as
+ * literal text, so they keep the bare URL they auto-linkify.
+ *
+ * The escape differs even where the syntax matches: labels are agent names, and
+ * Slack decodes HTML entities while Google Chat does not — an entity there
+ * would reach the reader as `&amp;`. A Map, not an object literal, so a
+ * platform named `constructor` cannot resolve a prototype member.
  */
-const MRKDWN_LINK_PLATFORMS = new Set(["slack"]);
-
-/**
- * Escape the mrkdwn control chars that break an inline `<url|label>` label.
- * Labels are user-controlled (agent names), and a raw `<`, `>` or `&` would
- * terminate or corrupt the link. Inert on platforms that take a bare URL.
- */
-function escapeMrkdwnLabel(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
+const PIPE_LINK_LABEL_ESCAPES = new Map<string, (label: string) => string>([
+  [
+    "slack",
+    (label) =>
+      label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+  ],
+  // Also drops `|`, which would otherwise split the label from the URL.
+  ["gchat", (label) => label.replace(/[<>|]/g, "")],
+]);
 
 /**
  * Render a labelled hyperlink in the target platform's own message syntax, so
@@ -35,8 +36,9 @@ export function formatChatLink(
   url: string,
   label: string,
 ): string {
-  return MRKDWN_LINK_PLATFORMS.has(platform)
-    ? `<${url}|${escapeMrkdwnLabel(label)}>`
+  const escapeLabel = PIPE_LINK_LABEL_ESCAPES.get(platform);
+  return escapeLabel
+    ? `<${url}|${escapeLabel(label)}>`
     : `${label} — ${url}`;
 }
 
