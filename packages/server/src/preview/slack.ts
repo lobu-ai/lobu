@@ -683,7 +683,7 @@ async function listOrgAgentsForNotice(organizationId: string): Promise<{
  * to its Automations page (where this chat is added as a Listen source) when
  * the public origin is configured, plus the CLI `lobu run` / link-code path.
  *
- * Two things stay per-platform, and both are spellings rather than behaviour:
+ * Two things stay per-platform, and both are spellings rather than logic:
  * `formatChatLink` renders the link in the platform's own syntax, and
  * `platform=` carries the connection's real `connector_key`, which is what the
  * Automation editor matches on. Dropping the notice silently left the user with
