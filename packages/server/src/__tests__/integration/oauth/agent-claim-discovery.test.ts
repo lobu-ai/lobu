@@ -71,6 +71,9 @@ describe('auth.md discovery surface', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       agent_auth?: {
+        skill: string;
+        register_uri: string;
+        claim_uri: string;
         flows_supported: string[];
         claim_methods_supported: string[];
         claim_email_endpoint: string;
@@ -79,6 +82,10 @@ describe('auth.md discovery surface', () => {
       };
     };
     expect(body.agent_auth).toBeDefined();
+    // Standard auth.md profile names for generic scanners.
+    expect(body.agent_auth?.skill).toMatch(/\/auth\.md$/);
+    expect(body.agent_auth?.register_uri).toMatch(/\/oauth\/register$/);
+    expect(body.agent_auth?.claim_uri).toMatch(/\/oauth\/device\/email$/);
     expect(body.agent_auth?.flows_supported).toEqual(['user_claimed']);
     // Zero-touch ID-JAG is not offered yet.
     expect(body.agent_auth?.flows_supported).not.toContain('agent_verified');

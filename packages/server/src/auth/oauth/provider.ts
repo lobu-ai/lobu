@@ -1040,6 +1040,13 @@ export class OAuthProvider {
       // yet, so it is intentionally absent from flows_supported. The human/
       // agent-readable walkthrough is the auth.md file linked below.
       agent_auth: {
+        // Standard auth.md profile names first: skill is the registration
+        // manifest; register_uri/claim_uri are the endpoints a generic
+        // scanner reads. The *_endpoint names below are the same URLs under
+        // the names our CLI and existing clients consume — keep both.
+        skill: `${this.baseUrl}/auth.md`,
+        register_uri: `${this.baseUrl}/oauth/register`,
+        claim_uri: `${this.baseUrl}/oauth/device/email`,
         flows_supported: ['user_claimed'],
         claim_methods_supported: ['email'],
         registration_endpoint: `${this.baseUrl}/oauth/register`,
