@@ -32,10 +32,16 @@ import type { PlatformConnection } from "../connections/types.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
 let soleAgent: string | null = "sole-agent";
+/** Whether the sender is a member of the connection's org. Real rows decide this
+ * in `__tests__/integration/preview/auto-bind-dm.test.ts`. */
+let senderAuthorized = true;
 const resolveSoleOrgAgent = spyOn(autoBindAgent, "resolveSoleOrgAgent");
 resolveSoleOrgAgent.mockImplementation(async () => soleAgent);
+const senderMayAutoBind = spyOn(autoBindAgent, "senderMayAutoBind");
+senderMayAutoBind.mockImplementation(async () => senderAuthorized);
 afterAll(() => {
 	resolveSoleOrgAgent.mockRestore();
+	senderMayAutoBind.mockRestore();
 });
 
 const CONN_ID = "conn-autobind";
@@ -120,10 +126,10 @@ function makeThread() {
 	};
 }
 
-function makeMessage() {
+function makeMessage(text = "hi") {
 	return {
 		id: "M1",
-		text: "hi",
+		text,
 		author: {
 			userId: "U_USER",
 			userName: "alice",
@@ -140,6 +146,7 @@ function makeMessage() {
 describe("unlinked DM auto-bind", () => {
 	beforeEach(() => {
 		soleAgent = "sole-agent";
+		senderAuthorized = true;
 		resolveSoleOrgAgent.mockClear();
 	});
 
@@ -199,6 +206,42 @@ describe("unlinked DM auto-bind", () => {
 
 		expect(resolveSoleOrgAgent).not.toHaveBeenCalled();
 		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+	});
+
+	// A control message is not a conversation turn. `/lobu link <code>` arrives in
+	// an unlinked DM by definition, so auto-binding on it would wire the chat to
+	// the sole agent moments before the code binds it to the intended one — and
+	// every later message would then match two Automations and be answered twice.
+	test.each([
+		["/lobu link acme-AB12CD", "the Slack-style link command"],
+		["/link acme-AB12CD", "the bare link command"],
+		["link acme-AB12CD", "the plain-text link form an Apps DM forces"],
+		["acme-AB12CD", "a pasted bare code"],
+		["/help", "an unrelated slash command"],
+	])("does NOT auto-bind on %s (%s)", async (text) => {
+		const { bridge, materializeConnectionFallbackLink } = makeHarness({
+			agentId: undefined,
+		});
+
+		await bridge.handleMessage(makeThread(), makeMessage(text), "dm");
+
+		expect(resolveSoleOrgAgent).not.toHaveBeenCalled();
+		expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
+	});
+
+	test("does NOT auto-bind for a sender the organization does not contain", async () => {
+		// An ownerless connection carries no admin decision that the bot may answer
+		// strangers, and on an open-address platform (Telegram, WhatsApp) anyone can
+		// DM a tenant's bot. Binding there would hand an outsider the org's agent.
+		senderAuthorized = false;
+		const { bridge, enqueueMessage, materializeConnectionFallbackLink } =
+			makeHarness({ agentId: undefined });
+
+		await bridge.handleMessage(makeThread(), makeMessage(), "dm");
+
+		expect(resolveSoleOrgAgent).not.toHaveBeenCalled();
+		expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
+		expect(enqueueMessage).not.toHaveBeenCalled();
 	});
 
 	test("does NOT auto-bind a DM that a chat link already covers", async () => {

@@ -10,7 +10,10 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service";
-import { resolveSoleOrgAgent } from "../../../gateway/connections/auto-bind-agent";
+import {
+	resolveSoleOrgAgent,
+	senderMayAutoBind,
+} from "../../../gateway/connections/auto-bind-agent";
 import { cleanupTestDatabase } from "../../setup/test-db";
 import {
 	addUserToOrganization,
@@ -18,6 +21,7 @@ import {
 	createTestOrganization,
 	createTestUser,
 	insertChatConnectionRow,
+	linkSlackIdentityInGraph,
 } from "../../setup/test-fixtures";
 
 const CONNECTION_SLUG = "workspace-gchat";
@@ -72,6 +76,78 @@ describe("auto-binding an unlinked DM", () => {
 				agentId: "their-agent",
 			});
 			expect(await resolveSoleOrgAgent(orgId)).toBeNull();
+		});
+	});
+
+	describe("senderMayAutoBind", () => {
+		const TEAM = "T_AUTOBIND";
+
+		it("refuses a platform with no sender-identity model at all", async () => {
+			// Telegram and WhatsApp have no entry in the chat-identity registry, so a
+			// tenant's bot there is reachable by any stranger on the platform. The
+			// registry's null is the fail-closed verdict this gate wants.
+			expect(
+				await senderMayAutoBind({
+					platform: "telegram",
+					teamId: undefined,
+					platformUserId: "12345",
+					organizationId: orgId,
+				}),
+			).toBe(false);
+		});
+
+		it("refuses an unrecognized sender on a platform that HAS one", async () => {
+			expect(
+				await senderMayAutoBind({
+					platform: "slack",
+					teamId: TEAM,
+					platformUserId: "U_STRANGER",
+					organizationId: orgId,
+				}),
+			).toBe(false);
+		});
+
+		it("admits a linked sender who belongs to the organization", async () => {
+			await linkSlackIdentityInGraph({
+				organizationId: orgId,
+				userId: ownerUserId,
+				teamId: TEAM,
+				slackUserId: "U_MEMBER",
+			});
+			expect(
+				await senderMayAutoBind({
+					platform: "slack",
+					teamId: TEAM,
+					platformUserId: "U_MEMBER",
+					organizationId: orgId,
+				}),
+			).toBe(true);
+		});
+
+		it("refuses a linked sender who belongs to a DIFFERENT organization", async () => {
+			// An identity resolves across every org the person belongs to, so the
+			// membership read must scope the verdict to THIS connection's org —
+			// otherwise anyone with a Lobu account could bind any tenant's bot.
+			const other = await createTestOrganization({
+				name: "Elsewhere",
+				slug: `elsewhere-${Math.random().toString(36).slice(2, 10)}`,
+			});
+			const outsider = await createTestUser();
+			await addUserToOrganization(outsider.id, other.id, "owner");
+			await linkSlackIdentityInGraph({
+				organizationId: other.id,
+				userId: outsider.id,
+				teamId: TEAM,
+				slackUserId: "U_OUTSIDER",
+			});
+			expect(
+				await senderMayAutoBind({
+					platform: "slack",
+					teamId: TEAM,
+					platformUserId: "U_OUTSIDER",
+					organizationId: orgId,
+				}),
+			).toBe(false);
 		});
 	});
 

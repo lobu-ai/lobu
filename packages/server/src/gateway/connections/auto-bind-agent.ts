@@ -18,7 +18,9 @@
 
 import { createLogger } from "@lobu/core";
 import { getDb } from "../../db/client";
+import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity";
 import { errorMessage } from "../../utils/errors";
+import { getMembershipRole } from "../../workspace/multi-tenant";
 
 const logger = createLogger("chat-auto-bind");
 
@@ -48,5 +50,44 @@ export async function resolveSoleOrgAgent(
 			"[auto-bind] sole-agent lookup failed",
 		);
 		return null;
+	}
+}
+
+/**
+ * Whether this sender may have their chat bound into the connection's org.
+ *
+ * A connection with an owning agent carries an admin's explicit decision that
+ * the bot answers whoever can reach it. An ownerless one carries no such
+ * decision, so the bind cannot inherit one — and on an open-address platform
+ * (Telegram, WhatsApp) a tenant's bot is reachable by ANY stranger, who would
+ * otherwise be handed that org's agent, its model credentials and its tools.
+ *
+ * So require the sender to be someone the org actually contains. The chat
+ * identity registry answers null for a platform with no sender-identity model
+ * at all, which is its deliberate fail-closed answer and exactly the verdict
+ * wanted here; the membership read then scopes it to THIS organization, since
+ * an identity resolves across every org the person belongs to.
+ */
+export async function senderMayAutoBind(params: {
+	platform: string;
+	teamId: string | undefined;
+	platformUserId: string;
+	organizationId: string;
+}): Promise<boolean> {
+	try {
+		const userId = await resolveChatUserIdentity(
+			params.platform,
+			params.teamId,
+			params.platformUserId,
+		);
+		if (!userId) return false;
+		return (await getMembershipRole(params.organizationId, userId)) !== null;
+	} catch (err) {
+		// Fail closed: an authority check that cannot complete is not a pass.
+		logger.warn(
+			{ err: errorMessage(err), organizationId: params.organizationId },
+			"[auto-bind] sender authority check failed",
+		);
+		return false;
 	}
 }

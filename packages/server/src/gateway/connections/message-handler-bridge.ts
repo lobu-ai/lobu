@@ -17,7 +17,7 @@ import {
   previewUnlinkedNotice,
   workspaceUnlinkedNotice,
 } from "../../preview/slack.js";
-import { resolveSoleOrgAgent } from "./auto-bind-agent.js";
+import { resolveSoleOrgAgent, senderMayAutoBind } from "./auto-bind-agent.js";
 import type { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { createChatReply } from "../commands/command-reply-adapters.js";
 import { normalizeStatefulChatCommand } from "../commands/command-spelling.js";
@@ -570,6 +570,7 @@ export class MessageHandlerBridge {
   private async autoBindDirectMessage(
     channelId: string,
     teamId: string | undefined,
+    platformUserId: string,
     automationSubscriptionService: ReturnType<
       CoreServices["getAutomationSubscriptionService"]
     >
@@ -600,6 +601,19 @@ export class MessageHandlerBridge {
         organizationId,
         { teamId }
       )
+    ) {
+      return null;
+    }
+
+    // Authority first, before anything it would authorize: an ownerless
+    // connection carries no admin decision that the bot may answer strangers.
+    if (
+      !(await senderMayAutoBind({
+        platform: this.connection.platform,
+        teamId,
+        platformUserId,
+        organizationId,
+      }))
     ) {
       return null;
     }
@@ -882,12 +896,24 @@ export class MessageHandlerBridge {
     // for building an Automation by hand. DM-only on purpose — the trigger this
     // writes matches every `message.created` on the channel, which is exactly
     // right for a DM and would make the bot answer everything in a shared one.
+    // A slash command or a pasted link code is a control message, not a
+    // conversation turn, and must never trigger the bind. `/lobu link <code>`
+    // arrives in an unlinked DM BY DEFINITION: auto-binding on it would wire the
+    // chat to the sole agent moments before the code binds it to the intended
+    // one, leaving two Automations answering every later message.
+    const inboundCommandText = this.stripBotMention(
+      typeof message.text === "string" ? message.text : ""
+    );
+    const isControlMessage =
+      inboundCommandText.trim().startsWith("/") ||
+      parsePreviewLinkCode(inboundCommandText, isGroup) !== null;
     const autoResolved =
-      automation || ownerResolved || isPreview || isGroup
+      automation || ownerResolved || isPreview || isGroup || isControlMessage
         ? null
         : await this.autoBindDirectMessage(
             channelId,
             teamId,
+            userId,
             automationSubscriptionService
           );
     const fallbackResolved = ownerResolved ?? autoResolved;
@@ -906,15 +932,12 @@ export class MessageHandlerBridge {
       // early path to commands whose complete implementation lives in the
       // dispatcher: /new and /clear have real state handling later in the
       // resolved path and must not be falsely acknowledged here.
-      const unroutedCommandText = this.stripBotMention(
-        typeof message.text === "string" ? message.text : ""
-      );
       if (
         this.commandDispatcher &&
-        isEarlyDispatchableChatCommand(unroutedCommandText)
+        isEarlyDispatchableChatCommand(inboundCommandText)
       ) {
         const handled = await this.commandDispatcher.tryHandleSlashText(
-          unroutedCommandText,
+          inboundCommandText,
           {
             platform,
             userId,
