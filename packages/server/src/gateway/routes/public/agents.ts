@@ -121,7 +121,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
       if (!agentId) {
         return errorResponse(
           c,
-          "Invalid agentId. Must be 3-40 chars, lowercase alphanumeric with hyphens, starting with a letter.",
+          "Invalid agentId. Must be 3-60 chars, lowercase alphanumeric with hyphens, starting with a letter.",
           400
         );
       }
