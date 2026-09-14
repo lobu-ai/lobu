@@ -204,8 +204,8 @@ describe("workspaceUnlinkedNotice", () => {
 	it("offers agent creation, not just the CLI, when the org has no agents", async () => {
 		// The person most likely just installed the app and has never seen Lobu.
 		// "Install a CLI" is the wrong only-instruction: point at creating the
-		// first agent, which then becomes the org's ONLY agent — exactly the case
-		// a later DM auto-binds without anyone linking anything.
+		// first agent, after which the agent branch deep-links this chat into
+		// that agent's Automation editor.
 		setOrigin("https://app.lobu.ai");
 		const org = await createTestOrganization();
 
