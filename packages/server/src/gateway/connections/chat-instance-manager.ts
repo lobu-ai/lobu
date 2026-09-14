@@ -64,6 +64,7 @@ import { isAtlassianMcpConfig } from "../../operations/atlassian-mcp-feed.js";
 import {
 	handleWebhookIngest,
 	prepareWebhookIngestConfig,
+	type WebhookIngestOverrides,
 } from "./webhook-ingest.js";
 
 const logger = createLogger("chat-instance-manager");
@@ -1302,74 +1303,7 @@ export class ChatInstanceManager {
             request,
             this.services.getSecretStore(),
 						peerAddress,
-            bridged.connectorKey === "github"
-              ? {
-                  // Poll-canonical: mark the feed due (or store stars) so
-                  // Automation signals ride the real github poll path. Do not
-                  // raw-store under webhook:<id> — that never activates Automations.
-                  handleInsteadOfPersist: async ({
-                    rawBody,
-                    headers,
-                    organizationId,
-                    connectionId: connId,
-                  }) => {
-                    const { triggered } =
-                      await deliverGithubConnectorConnectionWebhook({
-                        sql: getDb(),
-                        connectionId: Number(connId),
-                        organizationId,
-                        connectorKey: "github",
-                        rawBody,
-                        headers,
-                        storeWebhookEvents:
-                          process.env.GITHUB_WEBHOOK_STORE_EVENTS !== "false",
-                      });
-                    return new Response(
-                      JSON.stringify({ ok: true, triggered }),
-                      {
-                        status: 202,
-                        headers: { "content-type": "application/json" },
-                      },
-                    );
-                  },
-                }
-              : bridged.structuredWebhook === "jira_mcp"
-                ? {
-                    verifyBearerToken: (token: string) =>
-                      verifyAtlassianWebhookAuthorization({
-                        organizationId: bridged.stored.organizationId!,
-                        connectionConfig: bridged.connectionConfig,
-                        token,
-                      }),
-                    handleInsteadOfPersist: async ({
-                      rawBody,
-                      organizationId,
-                      connectionId: connId,
-                    }) => {
-                      const result = await deliverJiraMcpConnectionWebhook({
-                        sql: getDb(),
-                        connectionId: Number(connId),
-                        organizationId,
-                        rawBody,
-                      });
-                      return new Response(
-                        JSON.stringify({
-                          ok: result.handled,
-                          triggered: result.triggered,
-                        }),
-                        {
-                          status: result.handled ? 202 : 400,
-                          headers: { "content-type": "application/json" },
-                        },
-                      );
-                    },
-                  }
-                : bridged.connectorKey === "webhook"
-                  ? {
-                      activateGenericAutomationEvent: true,
-                      automationConnectionId: Number(bridged.stored.id),
-                    }
-                  : undefined,
+            this.bridgedIngestOverrides(bridged),
 					),
         );
       }
@@ -1408,6 +1342,89 @@ export class ChatInstanceManager {
         { activateGenericAutomationEvent: true },
       ),
     );
+  }
+
+  /**
+   * Ingest overrides for a bridged connector-connection delivery, one branch
+   * per connector vocabulary. `undefined` means plain ingest with no
+   * Automation activation — the default every new bridge must consciously
+   * opt out of (a dropped generic case here is what silently killed
+   * `delivery.received` Automations before).
+   */
+  private bridgedIngestOverrides(
+    bridged: NonNullable<
+      Awaited<ReturnType<typeof this.resolveConnectorWebhookConnection>>
+    >,
+  ): WebhookIngestOverrides | undefined {
+    if (bridged.connectorKey === "github") {
+      // Poll-canonical: mark the feed due (or store stars) so Automation
+      // signals ride the real github poll path. Do not raw-store under
+      // webhook:<id> — that never activates Automations.
+      return {
+        handleInsteadOfPersist: async ({
+          rawBody,
+          headers,
+          organizationId,
+          connectionId: connId,
+        }) => {
+          const { triggered } = await deliverGithubConnectorConnectionWebhook({
+            sql: getDb(),
+            connectionId: Number(connId),
+            organizationId,
+            connectorKey: "github",
+            rawBody,
+            headers,
+            storeWebhookEvents:
+              process.env.GITHUB_WEBHOOK_STORE_EVENTS !== "false",
+          });
+          return new Response(JSON.stringify({ ok: true, triggered }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      };
+    }
+    if (bridged.structuredWebhook === "jira_mcp") {
+      return {
+        verifyBearerToken: (token: string) =>
+          verifyAtlassianWebhookAuthorization({
+            organizationId: bridged.stored.organizationId!,
+            connectionConfig: bridged.connectionConfig,
+            token,
+          }),
+        handleInsteadOfPersist: async ({
+          rawBody,
+          organizationId,
+          connectionId: connId,
+        }) => {
+          const result = await deliverJiraMcpConnectionWebhook({
+            sql: getDb(),
+            connectionId: Number(connId),
+            organizationId,
+            rawBody,
+          });
+          return new Response(
+            JSON.stringify({
+              ok: result.handled,
+              triggered: result.triggered,
+            }),
+            {
+              status: result.handled ? 202 : 400,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        },
+      };
+    }
+    if (bridged.connectorKey === "webhook") {
+      // Generic inbound webhook: persist AND activate. stored.id is the
+      // numeric connections.id, passed explicitly so ingest never infers it.
+      return {
+        activateGenericAutomationEvent: true,
+        automationConnectionId: Number(bridged.stored.id),
+      };
+    }
+    return undefined;
   }
 
   /**
