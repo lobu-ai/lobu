@@ -1,10 +1,8 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { select } from "@inquirer/prompts";
 import chalk from "chalk";
 import postgres from "postgres";
 import { resolveApiClient } from "../internal/api-client.js";
-import { parseEnvContent } from "../internal/env-file.js";
+import { readProjectEnvValue } from "../internal/env-file.js";
 import { getToken, resolveContext } from "../internal/index.js";
 import { isExternalDatabaseUrl } from "./dev.js";
 
@@ -146,12 +144,8 @@ export async function tokenRevokeCommand(
   // clearly instead of letting the dial fail cryptically.
   let databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) {
-    try {
-      const raw = await readFile(join(process.cwd(), ".env"), "utf-8");
-      databaseUrl = parseEnvContent(raw).DATABASE_URL?.trim();
-    } catch {
-      // No project .env — fall through to the missing-URL error below.
-    }
+    databaseUrl =
+      (await readProjectEnvValue(process.cwd(), "DATABASE_URL")) || undefined;
   }
   if (!databaseUrl) {
     console.error(

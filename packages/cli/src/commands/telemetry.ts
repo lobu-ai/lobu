@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
 import { setLocalEnvValue } from "../internal/local-env.js";
-import { parseEnvContent } from "../internal/env-file.js";
+import { readProjectEnvFile } from "../internal/env-file.js";
 
 const SENTRY_DSN_DEFAULT =
   "https://63abd848f1338116c41d4a8a29091c7c@o4511547660042240.ingest.us.sentry.io/4511547664171008";
@@ -12,12 +12,7 @@ interface TelemetryOptions {
 }
 
 async function loadEnv(cwd: string): Promise<Record<string, string>> {
-  try {
-    const raw = await readFile(join(cwd, ".env"), "utf-8");
-    return parseEnvContent(raw);
-  } catch {
-    return {};
-  }
+  return readProjectEnvFile(cwd);
 }
 
 export async function telemetryStatusCommand(

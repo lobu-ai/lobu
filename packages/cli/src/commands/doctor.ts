@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import chalk from "chalk";
@@ -11,7 +11,7 @@ import {
   isPortFree,
   resolveEmbeddedDataRoot,
 } from "./dev.js";
-import { parseEnvContent } from "../internal/env-file.js";
+import { readProjectEnvFile } from "../internal/env-file.js";
 import { MIN_NODE_MAJOR, checkNodeSupport } from "../internal/node-version.js";
 import { loadProviderRegistry } from "./providers/registry.js";
 import { loadProjectConfig } from "./_lib/apply/desired-state.js";
@@ -97,15 +97,6 @@ async function checkServerReachable(url: string): Promise<Check> {
     };
   } catch {
     return { name: "server", status: "fail", detail: `unreachable: ${origin}` };
-  }
-}
-
-async function loadProjectEnv(cwd: string): Promise<Record<string, string>> {
-  try {
-    const raw = await readFile(join(cwd, ".env"), "utf-8");
-    return parseEnvContent(raw);
-  } catch {
-    return {};
   }
 }
 
@@ -238,7 +229,7 @@ export async function doctorCommand(
   }
 
   const cwd = options.cwd ?? process.cwd();
-  const env = await loadProjectEnv(cwd);
+  const env = await readProjectEnvFile(cwd);
   const checks: Check[] = [];
 
   checks.push(checkNodeVersion());

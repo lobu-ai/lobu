@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 /**
  * Minimal .env file parser shared across Lobu CLIs.
  *
@@ -26,4 +29,29 @@ export function parseEnvContent(content: string): Record<string, string> {
     vars[key] = value;
   }
   return vars;
+}
+
+/**
+ * Read the project `.env` in `cwd`, falling back to {} when the file is
+ * absent. Shell environment always wins — callers check `process.env` first
+ * and use this only as the project-local fallback.
+ */
+export async function readProjectEnvFile(
+  cwd: string
+): Promise<Record<string, string>> {
+  try {
+    const raw = await readFile(join(cwd, ".env"), "utf-8");
+    return parseEnvContent(raw);
+  } catch {
+    return {};
+  }
+}
+
+/** Read one variable from the project `.env` in `cwd` ("" when absent). */
+export async function readProjectEnvValue(
+  cwd: string,
+  key: string
+): Promise<string> {
+  const env = await readProjectEnvFile(cwd);
+  return env[key]?.trim() ?? "";
 }

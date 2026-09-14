@@ -683,20 +683,13 @@ export async function handleWebhookIngest(
 		const landed = await getDb().begin(async (tx) => {
 			let automationConnectionId: number | null = null;
 			if (overrides?.activateGenericAutomationEvent) {
-				const [projected] = await tx<{ id: number }>`
-					SELECT id
-					FROM connections
-					WHERE organization_id = ${organizationId}
-					  AND slug = ${runtimeConnectionIdToSlug(stored.id)}
-					  AND connector_key = 'webhook'
-					  AND deleted_at IS NULL
-					LIMIT 1
-				`;
-				if (projected) {
-					automationConnectionId = Number(projected.id);
-				} else if (/^\d+$/.test(stored.id)) {
-					// Bridged connector-connection path: stored.id is the numeric
-					// connections.id itself (no agentconn-<id> projection row).
+				if (/^\d+$/.test(stored.id)) {
+					// Bridged connector-connection path: stored.id IS the numeric
+					// connections.id (the route resolved it before falling through
+					// to legacy lookup). Go direct — a slug lookup first could
+					// match an unrelated legacy projection for a numeric stable
+					// id (agentconn-<id>) in the same org and activate the wrong
+					// connection's Automations.
 					const [direct] = await tx<{ id: number }>`
 						SELECT id
 						FROM connections
@@ -713,9 +706,21 @@ export async function handleWebhookIngest(
 					}
 					automationConnectionId = Number(direct.id);
 				} else {
-					throw new Error(
-						`Generic webhook connection ${stored.id} has no active projection`,
-					);
+					const [projected] = await tx<{ id: number }>`
+						SELECT id
+						FROM connections
+						WHERE organization_id = ${organizationId}
+						  AND slug = ${runtimeConnectionIdToSlug(stored.id)}
+						  AND connector_key = 'webhook'
+						  AND deleted_at IS NULL
+						LIMIT 1
+					`;
+					if (!projected) {
+						throw new Error(
+							`Generic webhook connection ${stored.id} has no active projection`,
+						);
+					}
+					automationConnectionId = Number(projected.id);
 				}
 			}
 

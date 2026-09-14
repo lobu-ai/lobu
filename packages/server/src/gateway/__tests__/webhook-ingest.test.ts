@@ -1705,6 +1705,13 @@ describe("connector-connection webhook bridge (connections table)", () => {
 			RETURNING id
 		`) as Array<{ id: number }>;
 		const id = String(inserted[0].id);
+		// Guard against a vacuous pass: the row must really exist, so the 404
+		// below proves the gate rejected it rather than the seed failing.
+		const sql = getDb();
+		const [seeded] = await sql<{ id: number }>`
+			SELECT id FROM connections WHERE id = ${Number(id)}
+		`;
+		expect(Number(seeded?.id)).toBe(Number(id));
 		const app = createConnectionWebhookRoutes(manager);
 		const response = await app.fetch(
 			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
@@ -1718,6 +1725,69 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		);
 		expect(response.status).toBe(404);
 		expect(await eventRows(id)).toHaveLength(0);
+	});
+
+	test("a bridged delivery ignores an unrelated legacy numeric-stable-id projection", async () => {
+		// A legacy generic webhook with numeric stable id N owns the
+		// agentconn-<N> projection. A bridged connector connection that happens
+		// to have connections.id N must activate its OWN automations, never
+		// the legacy row's.
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { manager } = await buildManager();
+		const { createConnectionWebhookRoutes } = await import(
+			"../routes/public/connections.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		const docToken = "bridged-collide-token-0123456789abcdef0123456789";
+		const inserted = (await getDb()`
+			INSERT INTO connections (organization_id, connector_key, slug, status, config)
+			VALUES (${ORG}, 'webhook', ${`bridged-collide-${Date.now()}-${Math.random()}`},
+				'active', ${getDb().json({ token: docToken, semanticType: "alert" })})
+			RETURNING id
+		`) as Array<{ id: number }>;
+		const id = String(inserted[0].id);
+		// Decoy: legacy projection slug for the same numeric string, pointing
+		// at a different row.
+		const [decoy] = (await getDb()`
+			INSERT INTO connections (organization_id, connector_key, slug, status, config)
+			VALUES (${ORG}, 'webhook', ${`agentconn-${id}`},
+				'active', ${getDb().json({})})
+			RETURNING id
+		`) as Array<{ id: number }>;
+		const bridgedAutomationId = await seedWebhookEventAutomation({
+			connectionId: Number(id),
+		});
+		const decoyAutomationId = await seedWebhookEventAutomation({
+			connectionId: Number(decoy.id),
+		});
+		const app = createConnectionWebhookRoutes(manager);
+		const response = await app.fetch(
+			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
+				method: "POST",
+				body: JSON.stringify({ hello: "collide" }),
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${docToken}`,
+				},
+			}),
+		);
+		expect(response.status).toBe(202);
+		const rows = await eventRows(id);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].connection_id).toBe(Number(id));
+		const sql = getDb();
+		const [{ count: bridgedCount }] = await sql<{ count: number }>`
+			SELECT count(*)::int AS count FROM runs
+			WHERE automation_id = ${bridgedAutomationId}
+			  AND run_type = 'automation'
+		`;
+		const [{ count: decoyCount }] = await sql<{ count: number }>`
+			SELECT count(*)::int AS count FROM runs
+			WHERE automation_id = ${decoyAutomationId}
+			  AND run_type = 'automation'
+		`;
+		expect(bridgedCount).toBeGreaterThan(0);
+		expect(decoyCount).toBe(0);
 	});
 
 	test("an authenticated Jira delivery lands as a structured event on the Atlassian Rovo feed", async () => {
