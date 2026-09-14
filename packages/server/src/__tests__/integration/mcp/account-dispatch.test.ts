@@ -72,7 +72,12 @@ describe('account MCP dispatch', () => {
     expect(queried.rows).toEqual([{ value: 7 }]);
     const [audit] = await getDb()`SELECT organization_id FROM events WHERE client_id=${auth.clientId} AND payload_data->>'tool_name'='query_sql' ORDER BY id DESC LIMIT 1`;
     expect(audit.organization_id).toBe(second.id);
-    await expect(call('save_memory', { org_slug: second.slug, content: 'Denied target' }, { ...auth, grantedOrganizationIds: [first.id] })).rejects.toThrow(/not available/);
+    // The caller is a member of `second` — the grant just excludes it — so the
+    // denial names the workspace with a re-consent hint (visible only to
+    // members), not the indistinguishable answer for unknown targets.
+    const hinted = await call('save_memory', { org_slug: second.slug, content: 'Denied target' }, { ...auth, grantedOrganizationIds: [first.id] }).catch((e) => e);
+    expect(String(hinted.message)).toContain(second.slug);
+    expect(String(hinted.message)).toContain('Reconnect');
   });
 
   it('advertises required workspace targets only on account MCP and returns actionable errors', async () => {

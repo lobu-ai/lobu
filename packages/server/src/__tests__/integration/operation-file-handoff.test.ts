@@ -18,10 +18,12 @@ import type { ToolContext } from '../../tools/registry';
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
+  addUserToOrganization,
   createTestAccessToken,
   createTestConnection,
   createTestConnectorDefinition,
   createTestOAuthClient,
+  createTestOrganization,
   createTestSession,
   seedOwnerContext,
 } from '../setup/test-fixtures';
@@ -233,8 +235,17 @@ describe('multipart file → operation approval → connector execution', () => 
       }
       expect(await ingestMcpFiles(attachments, orgSlug, { ...ctx, organizationId: null, memberRole: undefined, allowCrossOrg: true, grantedOrganizationIds: [ctx.organizationId] })).toHaveLength(1);
       const downloads = download.mock.calls.length;
+      // Unknown targets stay indistinguishable. An empty grant naming a
+      // workspace the caller belongs to gets the OAuth re-consent hint.
       await expect(ingestMcpFiles(attachments, 'other-workspace-test', { ...ctx, allowCrossOrg: false })).rejects.toThrow('unavailable');
-      await expect(ingestMcpFiles(attachments, orgSlug, { ...ctx, organizationId: null, allowCrossOrg: true, grantedOrganizationIds: [] })).rejects.toThrow('not available');
+      const grantHint = await ingestMcpFiles(attachments, orgSlug, { ...ctx, organizationId: null, allowCrossOrg: true, grantedOrganizationIds: [] }).catch((e) => e);
+      expect(String(grantHint.message)).toContain('Reconnect with OAuth consent');
+      // A scoped connection naming another workspace the caller belongs to
+      // points at /mcp/{slug} instead of the generic answer.
+      const otherOrg = await createTestOrganization({ name: 'File handoff other' });
+      await addUserToOrganization(ctx.userId!, otherOrg.id, 'member');
+      const scopedHint = await ingestMcpFiles(attachments, otherOrg.slug, { ...ctx, allowCrossOrg: false }).catch((e) => e);
+      expect(String(scopedHint.message)).toContain(`Reconnect to /mcp/${otherOrg.slug}`);
       expect(download).toHaveBeenCalledTimes(downloads);
     } finally { download.mockRestore(); }
   });
