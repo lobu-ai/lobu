@@ -1,6 +1,6 @@
 {
   "name": "lobu-monorepo",
-  "version": "20.0.0",
+  "version": "20.0.1",
   "description": "Deploy autonomous AI agents with sandboxing, network isolation, and multi-platform access.",
   "license": "Apache-2.0",
   "workspaces": [

@@ -1,5 +1,36 @@
 # Changelog
 
+## [20.0.1](https://github.com/lobu-ai/lobu/compare/lobu-v20.0.0...lobu-v20.0.1) (2026-09-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mac:** move Mac app identity to lobu ([#3570](https://github.com/lobu-ai/lobu/issues/3570))
+
+### Features
+
+* execute Automation scripts without model turns ([#3505](https://github.com/lobu-ai/lobu/issues/3505)) ([ac7e1c1](https://github.com/lobu-ai/lobu/commit/ac7e1c1cc349bed022d12d00ad9484fd49fce13e))
+* **mac:** move Mac app identity to lobu ([#3570](https://github.com/lobu-ai/lobu/issues/3570)) ([b478ebc](https://github.com/lobu-ai/lobu/commit/b478ebc6983c265b5686104d01186bf32f8f9a12))
+* **runs:** dispatch worker claims promptly ([#3567](https://github.com/lobu-ai/lobu/issues/3567)) ([2f6d15d](https://github.com/lobu-ai/lobu/commit/2f6d15d9b81ef6fb0c85f005e0d4686fc0507dab))
+* **server:** count legacy compat hits as deletion-gate telemetry ([#3562](https://github.com/lobu-ai/lobu/issues/3562)) ([4ce5603](https://github.com/lobu-ai/lobu/commit/4ce5603d356a2e2e2671f4086285d116215ec5f3))
+* **server:** enforce first-party client version floor on device polls ([#3560](https://github.com/lobu-ai/lobu/issues/3560)) ([49817c2](https://github.com/lobu-ai/lobu/commit/49817c2174fc4ba61ed3821e4adc1fcf7d5c37ca))
+
+
+### Bug Fixes
+
+* **agent-turn:** bound the turn workspace so a runaway write refuses instead of killing the isolate ([#3545](https://github.com/lobu-ai/lobu/issues/3545)) ([9bb90bb](https://github.com/lobu-ai/lobu/commit/9bb90bb1c5e7c5c36cde6a8e5552b9eaaa5715d1))
+* **authz:** enforce derived-event permission envelopes (AND + stamp-aware gating) ([#3532](https://github.com/lobu-ai/lobu/issues/3532)) ([f097de4](https://github.com/lobu-ai/lobu/commit/f097de411ca06af9fc90befd3c42d16227923bb5))
+* batch of small CLI/server fixes ([#3558](https://github.com/lobu-ai/lobu/issues/3558)) ([e91874d](https://github.com/lobu-ai/lobu/commit/e91874da927ee165d9d9111b865a63b7491f3583))
+* **ci:** install unzip so the Bun consumer leg can actually run ([#3566](https://github.com/lobu-ai/lobu/issues/3566)) ([7d34f67](https://github.com/lobu-ai/lobu/commit/7d34f67ab0bc3f1dbbd3de6850f64d61087cea4e))
+* **core:** stop the console logger from dropping pino-style metadata ([#3564](https://github.com/lobu-ai/lobu/issues/3564)) ([0949263](https://github.com/lobu-ai/lobu/commit/0949263dc4ea2bd3425eefe7d50ceaa596e671c9))
+* **lobu-team:** re-anchor digest cadence to clear the Sep 9 auto-pause ([#3559](https://github.com/lobu-ai/lobu/issues/3559)) ([2e6e77f](https://github.com/lobu-ai/lobu/commit/2e6e77f6622301deecbcd80f7a312c420576116a))
+* **mac:** carry settings and device identity across the app rename ([#3577](https://github.com/lobu-ai/lobu/issues/3577)) ([7248cf4](https://github.com/lobu-ai/lobu/commit/7248cf47e19b2bd7a042dc27386bd15f999cca49))
+* **server:** close the two device-connector gaps deferred from [#3575](https://github.com/lobu-ai/lobu/issues/3575) ([#3582](https://github.com/lobu-ai/lobu/issues/3582)) ([f3f4c24](https://github.com/lobu-ai/lobu/commit/f3f4c244194cae2be0231d408750ccab05e4abc0))
+* **server:** keep a pinned team org's device connector definition current ([#3575](https://github.com/lobu-ai/lobu/issues/3575)) ([bc432d1](https://github.com/lobu-ai/lobu/commit/bc432d13605108073e7901c2a4dabd9b81f2dfaf))
+* **server:** rebuild poll metadata after a held claim ([#3572](https://github.com/lobu-ai/lobu/issues/3572)) ([1441ced](https://github.com/lobu-ai/lobu/commit/1441ceda2bda10e49ad92bbcdf4fcd93017c8ac4))
+* **server:** stop DCR from registering scopes authorization will strip ([#3578](https://github.com/lobu-ai/lobu/issues/3578)) ([220b526](https://github.com/lobu-ai/lobu/commit/220b526f612db289d1412cef5f6521ed531c55c0))
+* **server:** stop MIN_CLIENT_VERSION from looking set while enforcing nothing ([#3563](https://github.com/lobu-ai/lobu/issues/3563)) ([8ca2929](https://github.com/lobu-ai/lobu/commit/8ca29296861a6e938940920cfe0c48e76779fd91))
+
 ## [20.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v19.2.0...lobu-v20.0.0) (2026-09-13)
 
 

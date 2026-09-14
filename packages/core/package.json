@@ -1,6 +1,6 @@
 {
   "name": "@lobu/core",
-  "version": "20.0.0",
+  "version": "20.0.1",
   "license": "Apache-2.0",
   "description": "Core types and utilities for Lobu agent platform",
   "repository": {
