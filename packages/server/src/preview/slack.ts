@@ -12,7 +12,6 @@ import { errorMessage } from "../utils/errors";
 import logger from "../utils/logger";
 import { getConfiguredPublicOrigin } from "../utils/public-origin";
 import { requireOrgUser } from "../utils/require-org-user";
-import { MANAGED_CHAT_PLATFORMS_SET } from "./managed-platforms";
 import { AutomationSubscriptionService } from "../gateway/channels/automation-subscription-service";
 import { canLinkChatOrganizations } from "../gateway/channels/chat-link-authorization";
 import {
@@ -38,14 +37,46 @@ const DEFAULT_TTL_MINUTES = 15;
 const MAX_TTL_MINUTES = 60;
 const SURFACES = new Set(["dm", "channel"]);
 
-// Hosted preview bots — the platforms a `preview.<platform>` block / claim mint
-// is allowed for (currently Slack and Telegram), and the default join links.
-// Both Slack and Telegram route through the same Chat SDK adapter path.
-const PREVIEW_PLATFORMS = MANAGED_CHAT_PLATFORMS_SET;
+// Default join links for the hosted preview bots that have a public front door.
+// A platform without one still works — the CLI prints the "DM the hosted Lobu
+// bot" variant instead of a "join here first" step.
 const PREVIEW_JOIN_DEFAULTS: Record<string, string> = {
 	slack: "https://lobu.ai/slack",
 	telegram: "https://t.me/lobuaibot",
 };
+
+/**
+ * Can this platform serve an UNBOUND claim — one minted by `lobu run` with no
+ * `connection_id`, redeemable by messaging whatever hosted bot the user reaches?
+ *
+ * Only if a hosted preview connection actually exists for it. That is the real
+ * precondition, so read it rather than restate it: `uniq_preview_connection_per_platform_all`
+ * already allows at most ONE preview connection per `connector_key` globally,
+ * which is exactly what makes an unbound claim resolvable — `consumePreviewClaim`
+ * matches the redeeming connection on `previewMode` and names no platform.
+ *
+ * This replaced a hardcoded `["slack", "telegram"]` list, which had drifted from
+ * the deployment in BOTH directions: telegram was allowlisted with no preview
+ * connection (minting codes nothing could redeem), while Google Chat was refused
+ * despite having one. A literal list cannot track a row that someone adds or
+ * deletes; this cannot go stale.
+ */
+async function hasHostedPreviewConnection(
+	sql: ReturnType<typeof getDb>,
+	platform: string,
+): Promise<boolean> {
+	const rows = await sql<{ one: number }>`
+    SELECT 1 AS one
+    FROM connections
+    WHERE connector_key = ${platform}
+      AND config->'settings'->'previewMode' = 'true'::jsonb
+      AND credential_mode IS NOT NULL
+      AND status = 'active'
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+	return rows.length > 0;
+}
 
 type SurfaceType = "dm" | "channel";
 
@@ -201,11 +232,11 @@ export async function createPreviewClaim(c: Context<{ Bindings: Env }>) {
 		}
 		connectionId = connection.id;
 		connectionOrganizationId = connection.organization_id;
-	} else if (!PREVIEW_PLATFORMS.has(platform)) {
+	} else if (!(await hasHostedPreviewConnection(sql, platform))) {
 		return c.json(
 			{
-				error: "Unsupported preview platform",
-				message: `A connection_id is required for ${platform}`,
+				error: "No hosted bot for this platform",
+				message: `Lobu runs no hosted ${platform} bot, so a code has nothing to redeem through. Pass a connection_id to mint a code for your own ${platform} connection.`,
 			},
 			400,
 		);

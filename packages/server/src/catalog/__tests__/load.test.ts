@@ -1,9 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { MANAGED_CHAT_PLATFORMS } from "../../preview/managed-platforms";
 import { findBundledConnectorFile } from "../../utils/connector-catalog";
 import { clearCatalogCacheForTests, listCatalogEntries } from "../load";
 
@@ -59,20 +58,43 @@ describe("catalog/load", () => {
 		clearCatalogCacheForTests();
 	});
 
-	it("includes the bundled managed-chat connectors in the connectors catalog", async () => {
+	it("includes EVERY bundled chat connector in the connectors catalog", async () => {
 		// The connectors catalog is what `list_installed` with `include_catalog`
 		// merges against, so a fresh org (no connector_definitions row, no
-		// connection) can still reach the Slack/Telegram install affordance. If a
-		// managed-chat platform drops out of the bundled catalog, its install
-		// entry point becomes unreachable in the connectors picker.
+		// connection) can still reach a chat platform's install affordance. If a
+		// chat connector drops out of the bundled catalog, its install entry point
+		// becomes unreachable in the connectors picker.
+		//
+		// Enumerates the CLASS rather than naming platforms: a chat connector is
+		// one whose options schema declares `x-lobu-chat-platform` — the same
+		// marker the server already reads (tools/admin/manage_connections). This
+		// used to assert over a hardcoded ["slack", "telegram"], which silently
+		// covered neither Google Chat nor any platform added later.
+		const anchor = findBundledConnectorFile("slack");
+		expect(anchor, "bundled connector sources must resolve in this env").toBeTruthy();
+		const connectorDir = dirname(anchor as string);
+		const chatPlatforms: string[] = [];
+		for (const file of await readdir(connectorDir)) {
+			if (!file.endsWith(".ts") || file.endsWith(".d.ts")) continue;
+			const src = await readFile(join(connectorDir, file), "utf8");
+			const declared = /["']x-lobu-chat-platform["']\s*:\s*["']([^"']+)["']/.exec(
+				src,
+			);
+			if (declared?.[1]) chatPlatforms.push(declared[1]);
+		}
+		// Guard the guard: if the scan finds nothing the assertion below is vacuous.
+		expect(chatPlatforms.length).toBeGreaterThanOrEqual(6);
+
 		const prev = process.env.LOBU_CATALOG_URIS;
 		delete process.env.LOBU_CATALOG_URIS;
 		clearCatalogCacheForTests();
 
 		const entries = await listCatalogEntries(["connectors"]);
 		const ids = new Set(entries.connectors.map((entry) => entry.id));
-		for (const platform of MANAGED_CHAT_PLATFORMS) {
-			expect(ids.has(platform)).toBe(true);
+		for (const platform of chatPlatforms) {
+			expect(ids.has(platform), `${platform} missing from bundled catalog`).toBe(
+				true,
+			);
 		}
 
 		if (prev === undefined) delete process.env.LOBU_CATALOG_URIS;

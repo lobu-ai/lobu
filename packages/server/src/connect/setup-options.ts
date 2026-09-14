@@ -7,7 +7,6 @@ import { Value } from '@sinclair/typebox/value';
 import { getDb } from '../db/client';
 import { getWorkspaceProvider } from '../workspace';
 import type { OrgInfo } from '../workspace/types';
-import { MANAGED_CHAT_PLATFORMS_SET } from '../preview/managed-platforms';
 import {
   getPrimedBundledMethod,
   resolveAppInstallCredentials,
@@ -53,9 +52,13 @@ export async function publicSetupOptions(
   }
   // Hosted chat is connector-owned capability; readiness comes from the declared
   // app credentials, not the presence of a Slack-shaped URL in the client.
-  const method = MANAGED_CHAT_PLATFORMS_SET.has(connectorKey)
-    ? getPrimedBundledMethod(connectorKey, connectorKey)
-    : null;
+  //
+  // No platform allowlist in front of this: the cache is primed at boot only for
+  // connectors the deployment ships app credentials for, so an unprimed key
+  // already yields undefined, and the `oauth-code-exchange` check below is what
+  // separates a hosted-chat install from any other app install shape. An
+  // allowlist here only duplicated those two facts, and drifted from them.
+  const method = getPrimedBundledMethod(connectorKey, connectorKey);
   const creds = method ? resolveAppInstallCredentials(method) : null;
   if (method?.installShape === 'oauth-code-exchange' && creds?.clientId && creds.clientSecret) {
     options.push({

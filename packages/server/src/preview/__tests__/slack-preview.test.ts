@@ -44,6 +44,8 @@ const FOREIGN_SLACK_CONNECTION = "foreign-slack";
 const FOREIGN_PREVIEW_CONNECTION = "foreign-preview-slack";
 const FOREIGN_STRING_PREVIEW_CONNECTION = "foreign-string-preview-slack";
 const FOREIGN_TELEGRAM_CONNECTION = "foreign-telegram";
+const FOREIGN_TELEGRAM_PREVIEW_CONNECTION = "foreign-telegram-preview";
+const FOREIGN_GCHAT_PREVIEW_CONNECTION = "foreign-gchat-preview";
 
 let ORG_ID = "";
 let FOREIGN_ORG_ID = "";
@@ -186,6 +188,25 @@ describe("Slack Preview claims + channel Automations", () => {
 		credentialMode: "managed",
 		status: "active",
 	});
+	// The hosted bots an UNBOUND claim (`lobu run`, no connection_id) is redeemed
+	// through. Minting one is gated on such a connection EXISTING for the
+	// platform, so a suite that mints telegram/gchat codes must seed them.
+	await insertChatConnectionRow({
+		id: FOREIGN_TELEGRAM_PREVIEW_CONNECTION,
+		organizationId: FOREIGN_ORG_ID,
+		platform: "telegram",
+		credentialMode: "managed",
+		settings: { previewMode: true },
+		status: "active",
+	});
+	await insertChatConnectionRow({
+		id: FOREIGN_GCHAT_PREVIEW_CONNECTION,
+		organizationId: FOREIGN_ORG_ID,
+		platform: "gchat",
+		credentialMode: "byo",
+		settings: { previewMode: true },
+		status: "active",
+	});
   });
 
   beforeEach(async () => {
@@ -223,9 +244,45 @@ describe("Slack Preview claims + channel Automations", () => {
     expect(res.status).toBe(404);
   });
 
-  test("claim with an unsupported platform → 400", async () => {
+  test("an unbound claim for a platform with NO hosted bot → 400", async () => {
+    // discord has no previewMode connection anywhere, so a code minted for it
+    // could never be redeemed. This used to be an allowlist check; it is now the
+    // actual precondition, which is why it also covers platforms nobody thought
+    // to list.
     const res = await createPreviewClaim(
       orgUserContext({ agent_id: AGENT_ID, platform: "discord" })
+    );
+    if (!isFakeResponse(res)) throw new Error("not a json response");
+    expect(res.status).toBe(400);
+    expect(String(res.body.error)).toContain("No hosted bot");
+  });
+
+  test("an unbound GOOGLE CHAT claim mints, because a hosted gchat bot exists", async () => {
+    // The old allowlist was ["slack", "telegram"], so this 400'd even though the
+    // deployment ran a hosted Google Chat bot. Nothing about gchat is special —
+    // it qualifies for the same reason slack does.
+    const res = await createPreviewClaim(
+      orgUserContext({ agent_id: AGENT_ID, platform: "gchat", surfaces: ["dm"] })
+    );
+    if (!isFakeResponse(res)) throw new Error("not a json response");
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe("lobu-public-gchat");
+    expect(res.body.command).toBe(`/lobu link ${res.body.code as string}`);
+  });
+
+  test("a hosted bot that is not active does not qualify a platform", async () => {
+    // `whatsapp` gets a previewMode connection that is PAUSED. The gate reads
+    // live, redeemable connections only — a stopped bot cannot serve a code.
+    await insertChatConnectionRow({
+      id: "paused-whatsapp-preview",
+      organizationId: FOREIGN_ORG_ID,
+      platform: "whatsapp",
+      credentialMode: "managed",
+      settings: { previewMode: true },
+      status: "paused",
+    });
+    const res = await createPreviewClaim(
+      orgUserContext({ agent_id: AGENT_ID, platform: "whatsapp" })
     );
     if (!isFakeResponse(res)) throw new Error("not a json response");
     expect(res.status).toBe(400);
@@ -785,6 +842,16 @@ describe("chat-user identity + codeless re-link by agent id", () => {
 		credentialMode: "byo",
 		status: "active",
 		metadata: { teamId: ID_TEAM },
+	});
+	// This block mints unbound claims, which requires a hosted slack bot to exist.
+	await insertChatConnectionRow({
+		id: "identity-slack-preview",
+		organizationId: idOrgId,
+		platform: "slack",
+		credentialMode: "managed",
+		settings: { previewMode: true },
+		status: "active",
+		metadata: { teamId: "T_ID_HOSTED" },
 	});
   });
 
