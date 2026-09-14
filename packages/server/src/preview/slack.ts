@@ -18,6 +18,7 @@ import {
 	formatChatCommand,
 	formatChatLink,
 } from "../gateway/commands/command-spelling";
+import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 
 // Slack Preview lets people trying Lobu locally talk to their agent through the
 // hosted "Lobu Developer" Slack workspace before they have their own bot token.
@@ -142,19 +143,6 @@ function previewJoinUrl(platform: string): string {
 /** The slash command to send to the hosted bot to redeem a code. */
 function previewLinkCommand(platform: string, code: string): string {
 	return `${formatChatCommand(platform, "link")} ${code}`;
-}
-
-/**
- * Chat Automation projections expose Slack channels in the canonical
- * `slack:<id>` form that the message-handler bridge looks up via `getBinding`
- * (`thread.channelId`). The `/lobu link` slash command hands us the bare Slack
- * channel id (`D…` / `C…`), so prefix it; a value that already carries a
- * transport prefix is left as-is.
- */
-export function canonicalSlackChannelId(channelId: string): string {
-	return /^[a-z]+:/i.test(channelId)
-		? channelId
-		: `${SLACK_PLATFORM}:${channelId}`;
 }
 
 /** The link endpoint must not widen the bearer credential's workspace grant. */
@@ -603,13 +591,15 @@ export async function workspaceUnlinkedNotice(
 				params.set("connection", channel.connectionSlug);
 			// Friendly channel name → the editor subtitle. `#` reads as a channel
 			// on Slack; every other platform names its own surfaces (a Google
-			// Chat space, a Telegram group) and a `#` would just be noise.
+			// Chat space, a Telegram group) and a `#` would just be noise. The
+			// platform descriptor owns that spelling, so this and the
+			// conversations listing cannot drift apart.
 			if (channel.channelName)
 				params.set(
 					"label",
-					platform === "slack"
-						? `#${channel.channelName}`
-						: channel.channelName,
+					getPlatformDescriptor(platform)?.formatChannelLabel?.(
+						channel.channelName,
+					) ?? channel.channelName,
 				);
 		}
 		return `${origin}/${orgSlug}/automations/new?${params.toString()}`;

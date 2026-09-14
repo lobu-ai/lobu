@@ -139,6 +139,60 @@ export interface ChatPlatformDescriptor {
     webhookUrl: string
   ): Promise<void>;
 
+  /**
+   * The platform's canonical form of a channel id — the spelling bindings and
+   * Automation projections are keyed by. A platform whose inbound events and
+   * its own slash commands disagree normalizes here: Slack hands a slash
+   * command the bare `C…`/`D…` while every binding is stored `slack:C…`.
+   * Absent hook = the id the caller already holds is canonical.
+   */
+  canonicalChannelId?(channelId: string): string;
+
+  /**
+   * Render a channel's display name the way a reader of THIS platform expects
+   * it. `#general` on Slack, where `#` is simply how a channel is written;
+   * bare everywhere else, because a Google Chat space or a Telegram group
+   * names itself and a `#` would be noise. Absent hook = use the stored name.
+   */
+  formatChannelLabel?(name: string): string;
+
+  /**
+   * True when `teamId` is a real workspace id this platform can converge a
+   * teamless Automation subscription onto. Slack Grid is the case: a
+   * subscription written before its workspace was known carries no team, and
+   * inbound events reliably carry the REAL `T…` (never the enterprise `E…`).
+   * Absent hook = the platform has no workspace axis, so nothing to heal.
+   */
+  healableTeamId?(teamId: string): boolean;
+
+  /**
+   * True when a top-level channel message gets a FRESH thread id, so an
+   * Automation bound to the CHANNEL can never pre-subscribe the ids of future
+   * messages. Those events fall past the Chat SDK's subscribed → mention →
+   * pattern routing into the pattern handlers, so the bridge registers a
+   * catch-all to pick them up. Absent/false = channel messages keep a stable
+   * conversation id and the SDK's own branches already deliver them.
+   */
+  channelMessagesMintFreshThreadIds?: boolean;
+
+  /**
+   * Config keys this platform cannot run without, checked before the row is
+   * persisted. A nested array is an EITHER-OR group ("at least one of these"),
+   * reported as `a or b` — Google Chat takes a service-account JSON key or
+   * Application Default Credentials, never neither. A key counts as supplied
+   * when it holds a non-blank string or boolean `true` (an ADC-style flag).
+   * Format is not checked here, only presence: see `assertCredentialsUsable`.
+   */
+  requiredConfigKeys?: readonly (string | readonly string[])[];
+
+  /**
+   * Throw when a credential that IS present is unusable — malformed
+   * service-account JSON, say. Runs after `requiredConfigKeys`, so the value
+   * is known to exist; a platform whose credentials are opaque strings needs
+   * no hook.
+   */
+  assertCredentialsUsable?(config: Record<string, unknown>): void;
+
   /** Register slash commands with the platform's native command menu. */
   registerCommands?(
     connection: PlatformConnection,

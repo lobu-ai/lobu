@@ -7,6 +7,13 @@ import { extractWhatsAppStyleRoutingInfo } from "./shared.js";
 import type { ChatPlatformDescriptor } from "./types.js";
 
 export const whatsappPlatform: ChatPlatformDescriptor = {
+  requiredConfigKeys: [
+    "accessToken",
+    "phoneNumberId",
+    "appSecret",
+    "verifyToken",
+  ],
+
   // Pre-existing lazy adapter factory, moved verbatim from the manager's
   // ADAPTER_FACTORIES map (adapter SDKs stay lazy-loaded per platform).
   createAdapter: async (c) =>

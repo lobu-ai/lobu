@@ -1,6 +1,7 @@
 import { createLogger } from "@lobu/core";
 import { channelResourceIdentity } from "../../authz/channel-about.js";
 import { getDb } from "../../db/client.js";
+import { getPlatformDescriptor } from "../connections/platforms/index.js";
 
 const logger = createLogger("conversations-store");
 
@@ -185,7 +186,7 @@ export async function resolveConversationLocationLabel(args: {
 	const upperKey = key.toUpperCase();
 	const identifiers = new Set([upperKey, ...upperKey.split(":")]);
 	if (identifiers.has(name.toUpperCase())) return null;
-	return args.platform === "slack" ? `#${name.replace(/^#/, "")}` : name;
+	return getPlatformDescriptor(args.platform)?.formatChannelLabel?.(name) ?? name;
 }
 
 /** Audience a conversation listing is built for. See {@link listConversations}. */

@@ -56,6 +56,7 @@ import { createSlackWebApi } from "./slack-web.js";
 import type { ConversationStateStore } from "./conversation-state-store.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
 import type { PlatformConnection } from "./types.js";
+import { getPlatformDescriptor } from "./platforms/index.js";
 
 const logger = createLogger("chat-message-bridge");
 
@@ -438,7 +439,10 @@ export function registerMessageHandlers(
   // so this catch-all only ever sees events the branches above declined; it
   // cannot double-dispatch a mention. Admit only channels that already have a
   // durable message Automation — unlinked channels stay silent.
-  if (connection.platform === "slack") {
+  if (
+    getPlatformDescriptor(connection.platform)
+      ?.channelMessagesMintFreshThreadIds
+  ) {
     chat.onNewMessage(/[\s\S]*/, async (thread: any, message: any) => {
       await handler.handleUnmatchedChannelMessage(thread, message);
     });
@@ -878,8 +882,7 @@ export class MessageHandlerBridge {
     if (
       resolved.source === "automation" &&
       automationSubscriptionService &&
-      platform === "slack" &&
-      /^T[A-Z0-9]+$/i.test(teamId ?? "") &&
+      getPlatformDescriptor(platform)?.healableTeamId?.(teamId ?? "") === true &&
       routingOrganizationIds.length > 0
     ) {
       for (const organizationId of routingOrganizationIds) {

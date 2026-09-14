@@ -10,7 +10,6 @@ import { restoreRedactedConfig } from "../../utils/connection-config-redaction.j
 import { SLACK_INSTALLATION_ID_PREFIX } from "../../lobu/stores/slack-installations.js";
 import { PlatformAdapterConfigSchema } from "../routes/schemas/platform-config.js";
 import { isAdapterlessPlatform } from "./chat-instance-manager.js";
-import { parseGoogleChatCredentials } from "./platforms/gchat.js";
 import { getPlatformDescriptor } from "./platforms/index.js";
 import { createSlackWebApi } from "./slack-web.js";
 import { isSlackConfig, type PlatformAdapterConfig } from "./types.js";
@@ -90,52 +89,42 @@ function requireChatPlatform(platform: string): void {
 	}
 }
 
+/**
+ * A config key counts as supplied when it carries a non-blank string or the
+ * boolean `true` — the latter for flags like Google Chat's
+ * `useApplicationDefaultCredentials`, which stands in for a credential rather
+ * than holding one.
+ */
+function isConfigKeySupplied(value: unknown): boolean {
+	if (value === true) return true;
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Presence and usability of a platform's credentials, read off that platform's
+ * own descriptor. Every requirement is declared in `platforms/<key>.ts`, so
+ * this stays free of platform names — adding a platform never edits this file.
+ */
 function validateRequiredCredentials(
 	platform: string,
 	config: Record<string, unknown>,
 ): void {
-	if (platform === "gchat") {
-		const credentials = config.credentials;
-		const usesAdc = config.useApplicationDefaultCredentials === true;
-		const missing: string[] = [];
-		if (
-			(typeof credentials !== "string" || credentials.trim().length === 0) &&
-			!usesAdc
-		) {
-			missing.push("credentials or useApplicationDefaultCredentials");
-		}
-		if (
-			typeof config.googleChatProjectNumber !== "string" ||
-			config.googleChatProjectNumber.trim().length === 0
-		) {
-			missing.push("googleChatProjectNumber");
-		}
-		if (missing.length > 0) {
-			throw new Error(
-				`Missing required gchat configuration: ${missing.join(", ")}`,
-			);
-		}
-		if (typeof credentials === "string") {
-			parseGoogleChatCredentials(credentials);
-		}
-		return;
-	}
-	const requiredByPlatform: Record<string, string[]> = {
-		slack: ["botToken", "signingSecret"],
-		telegram: ["botToken"],
-		discord: ["botToken", "applicationId", "publicKey"],
-		whatsapp: ["accessToken", "phoneNumberId", "appSecret", "verifyToken"],
-		teams: ["appId", "appPassword"],
-	};
-	const missing = (requiredByPlatform[platform] ?? []).filter((key) => {
-		const value = config[key];
-		return typeof value !== "string" || value.trim().length === 0;
-	});
+	const descriptor = getPlatformDescriptor(platform);
+	const missing = (descriptor?.requiredConfigKeys ?? [])
+		.filter((requirement) =>
+			typeof requirement === "string"
+				? !isConfigKeySupplied(config[requirement])
+				: !requirement.some((key) => isConfigKeySupplied(config[key])),
+		)
+		.map((requirement) =>
+			typeof requirement === "string" ? requirement : requirement.join(" or "),
+		);
 	if (missing.length > 0) {
 		throw new Error(
 			`Missing required ${platform} configuration: ${missing.join(", ")}`,
 		);
 	}
+	descriptor?.assertCredentialsUsable?.(config);
 }
 
 export function parseConfig(

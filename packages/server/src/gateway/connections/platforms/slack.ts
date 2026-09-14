@@ -81,6 +81,8 @@ function createSlackFileHandler(
 }
 
 export const slackPlatform: ChatPlatformDescriptor = {
+  requiredConfigKeys: ["botToken", "signingSecret"],
+
   // Pre-existing lazy adapter factory, moved verbatim from the manager's
   // ADAPTER_FACTORIES map (adapter SDKs stay lazy-loaded per platform).
   createAdapter: async (c) =>
@@ -97,6 +99,25 @@ export const slackPlatform: ChatPlatformDescriptor = {
       teamId: slack.team,
     };
   },
+
+  // Chat Automation projections key Slack channels by the canonical
+  // `slack:<id>` the bridge looks bindings up with (`thread.channelId`), but a
+  // slash command hands us the bare `C…`/`D…`. A value that already carries a
+  // transport prefix is left alone.
+  canonicalChannelId: (channelId) =>
+    /^[a-z]+:/i.test(channelId) ? channelId : `slack:${channelId}`,
+
+  // `#` is how a Slack channel is written, and the stored name may or may not
+  // already carry it.
+  formatChannelLabel: (name) => `#${name.replace(/^#/, "")}`,
+
+  // Inbound Slack events carry the REAL workspace `T…`; the enterprise `E…` of
+  // a Grid org is not a workspace and must never be healed onto.
+  healableTeamId: (teamId) => /^T[A-Z0-9]+$/i.test(teamId),
+
+  // Slack gives every top-level channel message a fresh thread id
+  // (`slack:C…:<message-ts>`).
+  channelMessagesMintFreshThreadIds: true,
 
   createFileHandler: createSlackFileHandler,
 

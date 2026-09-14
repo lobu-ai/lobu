@@ -1,9 +1,9 @@
 import type { CommandContext, CommandRegistry } from "@lobu/core";
 import {
   bindChatToAgentForOwner,
-  canonicalSlackChannelId,
   consumePreviewClaim,
 } from "../../preview/slack.js";
+import { getPlatformDescriptor } from "../connections/platforms/index.js";
 import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
 import { chatUserIdentityFor } from "../../lobu/stores/chat-identity-sources.js";
 import type { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
@@ -123,11 +123,12 @@ export function registerBuiltInCommands(
       }
       const surfaceType: "dm" | "channel" = ctx.isGroup ? "channel" : "dm";
       // The message handler looks bindings up by the platform's canonical
-      // channel-id form; Slack slash commands hand us the bare id.
+      // channel-id form, which a slash command does not always hand us; the
+      // platform descriptor owns that normalization.
       const channelId =
-        ctx.platform === "slack"
-          ? canonicalSlackChannelId(ctx.channelId)
-          : ctx.channelId;
+        getPlatformDescriptor(ctx.platform)?.canonicalChannelId?.(
+          ctx.channelId,
+        ) ?? ctx.channelId;
       const result = await consumePreviewClaim({
         code: arg,
         platform: ctx.platform,

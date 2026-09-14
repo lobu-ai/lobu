@@ -11,6 +11,8 @@ import {
 import type { ChatPlatformDescriptor } from "./types.js";
 
 export const discordPlatform: ChatPlatformDescriptor = {
+  requiredConfigKeys: ["botToken", "applicationId", "publicKey"],
+
   // Pre-existing lazy adapter factory, moved verbatim from the manager's
   // ADAPTER_FACTORIES map (adapter SDKs stay lazy-loaded per platform).
   createAdapter: async (c) =>

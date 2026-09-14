@@ -609,6 +609,18 @@ async function createAdapter(
 }
 
 export const gchatPlatform: ChatPlatformDescriptor = {
+  // Either a service-account JSON key or ADC — never neither.
+  requiredConfigKeys: [
+    ["credentials", "useApplicationDefaultCredentials"],
+    "googleChatProjectNumber",
+  ],
+
+  assertCredentialsUsable: (config) => {
+    if (typeof config.credentials === "string") {
+      parseGoogleChatCredentials(config.credentials);
+    }
+  },
+
   createAdapter,
 
   extractRoutingInfo: extractWhatsAppStyleRoutingInfo,

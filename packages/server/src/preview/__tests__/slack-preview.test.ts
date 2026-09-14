@@ -19,12 +19,21 @@ import { getDb } from "../../db/client.js";
 import { registerBuiltInCommands } from "../../gateway/commands/built-in-commands.js";
 import type { Env } from "../../index";
 import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
+import { slackPlatform } from "../../gateway/connections/platforms/slack.js";
 import {
   bindChatToAgentForOwner,
-  canonicalSlackChannelId,
   consumePreviewClaim,
   createPreviewClaim,
 } from "../slack";
+
+/**
+ * The canonical `slack:<id>` a binding is stored under. Read off the Slack
+ * descriptor rather than restated here, so this suite exercises the same
+ * normalization the slash-command path uses.
+ */
+function canonicalSlackChannelId(channelId: string): string {
+  return slackPlatform.canonicalChannelId?.(channelId) ?? channelId;
+}
 
 /** Inlined from preview/slack.ts — DM channels start with `D`. */
 function slackSurfaceType(channelId: string): "dm" | "channel" {
