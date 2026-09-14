@@ -1747,6 +1747,27 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage).not.toHaveBeenCalled();
   });
 
+  test("slack connection with no known workspace: descriptor suppresses the notice", async () => {
+    // The other arm of `resolveSlackNoticeChannelScope`. A workspace install
+    // whose `metadata.teamId` is unknown can only produce a deep link that
+    // names no workspace, so the descriptor returns null and the bridge posts
+    // NOTHING — the rule that used to be an inline `if (!teamId) return
+    // false` here. Without the null check the reader would get a notice whose
+    // link is scoped to nowhere.
+    const { bridge, enqueueMessage } = makePreviewHarness({
+      linkedAutomation: null,
+      previewMode: false,
+      agentId: undefined,
+      metadata: { botUserId: "U_BOT" },
+    });
+    const thread = makeThread(undefined);
+
+    await bridge.handleMessage(thread, makeMessage(), "mention");
+
+    expect(thread.post).not.toHaveBeenCalled();
+    expect(enqueueMessage).not.toHaveBeenCalled();
+  });
+
   test("telegram unrouted message → generic link notice, no agent run (#2230)", async () => {
     // Same dead end as the Slack OAuth test above, but on a non-Slack platform:
     // no owning agent, no channel Automation. Slack replies with a link notice;

@@ -76,6 +76,13 @@ export interface NoticeChannelContext {
   /**
    * Gateway-owned stores, handed in rather than imported, so a descriptor can
    * reach its own provider API without reaching into the gateway's internals.
+   *
+   * Getters, not resolved values, and the laziness is load-bearing: a
+   * descriptor that declines early — Slack returns null the moment a
+   * connection has no known workspace — must not have caused the gateway to
+   * construct an installation or secret store for a notice it never sends.
+   * Flattening these to resolved values reaches into `services` on EVERY
+   * unlinked message and fails any caller that does not provide them.
    */
   stores: {
     getAppInstallationStore(): AppInstallationStore;
