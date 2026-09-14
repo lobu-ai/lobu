@@ -9,7 +9,12 @@ import { publicSetupOptions } from './setup-options';
 import { resolveManagedAuthConnectorOffer } from '../workspace/managed-auth-discovery';
 import { handleConnectManaged } from '../tools/admin/manage_connections/handlers/connect-managed';
 import { escapeHtml } from '../utils/html';
+import { renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
 
+/**
+ * The two managed-handoff pages whose content no redirect or shared error page
+ * can carry: the consent form, and the post-authorization local-CLI steps.
+ */
 function page(title: string, body: string) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font:16px/1.6 system-ui;margin:0;padding:24px;background:#fafafa;color:#171717;display:grid;place-items:center;min-height:90vh}main{max-width:480px}h1{font-size:24px}a{color:inherit}button{font:inherit;padding:8px 16px;cursor:pointer}code{overflow-wrap:anywhere}</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
 }
@@ -51,9 +56,10 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
       !(await deps.resolveOffer({ organizationSlug: org, connectorKey: connector }))
     ) {
       return c.html(
-        page(
-          'Connection option unavailable',
-          '<p>This managed app is no longer available. Return to Lobu and refresh connection options.</p>'
+        renderOAuthErrorPage(
+          'managed_offer_unavailable',
+          'This managed app is no longer available. Return to Lobu and refresh connection options.',
+          { title: 'Connection option unavailable' }
         ),
         404
       );
@@ -64,13 +70,7 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
       const callback = new URL('/connect/managed', deps.origin(c.req.raw));
       callback.searchParams.set('org', org);
       callback.searchParams.set('connector', connector);
-      const login = `/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`;
-      return c.html(
-        page(
-          'Connect with a managed app',
-          `<p>Sign in to Lobu Cloud, then authorize the account you want to use locally. No app credentials are needed.</p><a href="${escapeHtml(login)}">Sign in to continue</a>`
-        )
-      );
+      return c.redirect(`/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`, 302);
     }
     return c.html(
       page(
@@ -117,7 +117,9 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
     c.header('Cache-Control', 'no-store');
     if ('error' in result)
       return c.html(
-        page('Connection setup needs attention', `<p>${escapeHtml(result.error)}</p>`),
+        renderOAuthErrorPage('managed_connect_failed', result.error, {
+          title: 'Connection setup needs attention',
+        }),
         400
       );
     if ('connect_url' in result && result.connect_url) return c.redirect(result.connect_url, 303);
@@ -127,7 +129,9 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
           ? result.instructions
           : 'Complete connection setup in Lobu, then return here.';
       return c.html(
-        page('Connection setup needs attention', `<p>${escapeHtml(instructions)}</p>`),
+        renderOAuthErrorPage('managed_connect_incomplete', instructions, {
+          title: 'Connection setup needs attention',
+        }),
         409
       );
     }

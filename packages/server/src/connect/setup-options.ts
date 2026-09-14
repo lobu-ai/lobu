@@ -40,8 +40,10 @@ export async function publicSetupOptions(
       options.push({
         kind: 'managed_oauth',
         label: `Connect with ${org.name}`,
+        // The cloud connection is stamped `consent_only` and manage_feeds
+        // refuses feeds on those, so the cloud can never sync its own copy.
         description:
-          'Use the managed app. Your provider data can be accessed by your local Lobu runtime.',
+          'Use the managed app. This cloud holds only the authorization; your provider data syncs to your local Lobu runtime and is never copied into this workspace.',
         execution: 'local',
         configured: true,
         managed_by_org: org.slug,
