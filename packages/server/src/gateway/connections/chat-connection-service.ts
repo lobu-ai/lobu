@@ -91,9 +91,8 @@ function requireChatPlatform(platform: string): void {
 
 /**
  * A config key counts as supplied when it carries a non-blank string or the
- * boolean `true` — the latter for flags like Google Chat's
- * `useApplicationDefaultCredentials`, which stands in for a credential rather
- * than holding one.
+ * boolean `true` — the latter for an opt-in flag that STANDS IN for a
+ * credential (declare it in an either-or group) rather than holding one.
  */
 function isConfigKeySupplied(value: unknown): boolean {
 	if (value === true) return true;
@@ -103,7 +102,7 @@ function isConfigKeySupplied(value: unknown): boolean {
 /**
  * Presence and usability of a platform's credentials, read off that platform's
  * own descriptor. Every requirement is declared in `platforms/<key>.ts`, so
- * this stays free of platform names — adding a platform never edits this file.
+ * no platform branch lives here — adding a platform never edits this file.
  */
 function validateRequiredCredentials(
 	platform: string,

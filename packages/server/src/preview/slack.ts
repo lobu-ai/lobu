@@ -323,9 +323,9 @@ async function upsertBinding(
  * `link` chat command, so it never touches HTTP.
  *
  * Platform-agnostic: the caller supplies the `platform`, the canonical
- * `channelId` form that platform's message handler looks bindings up by (for
- * Slack: `canonicalSlackChannelId`), the workspace/`teamId` if the platform has
- * one, and the resolved `surfaceType` (dm vs channel).
+ * `channelId` form that platform's message handler looks bindings up by (the
+ * descriptor's `canonicalChannelId`), the workspace/`teamId` if the platform
+ * has one, and the resolved `surfaceType` (dm vs channel).
  */
 export async function consumePreviewClaim(args: {
 	code: string;

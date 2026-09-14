@@ -3,11 +3,13 @@
  *
  * Each chat platform contributes one `ChatPlatformDescriptor` to the registry
  * in `./index.ts` (keyed by platform name, merged with the adapter factory
- * that used to live in `ADAPTER_FACTORIES`). `ChatInstanceManager` stays
- * platform-agnostic: it looks up the descriptor for a connection's platform
- * and calls the optional capability hooks, falling back gracefully when a
- * hook is absent. Adding a platform means adding one module under
- * `./platforms/` and registering it in `./index.ts` — no manager edits.
+ * that used to live in `ADAPTER_FACTORIES`). Its consumers — the instance
+ * manager, the message-handler bridge, the connection config service, the
+ * conversations listing — stay platform-agnostic: each looks up the
+ * descriptor for a connection's platform and calls the optional capability
+ * hooks, falling back gracefully when a hook is absent. Adding a platform
+ * means adding one module under `./platforms/` and registering it in
+ * `./index.ts` — no edits to any of those consumers.
  */
 
 import type { InstructionProvider, StoredConnection } from "@lobu/core";
@@ -64,7 +66,7 @@ export interface NoticeChannelScope {
   channelName?: string;
 }
 
-/** Manager-owned context for `resolveNoticeChannelScope`. */
+/** Caller-owned context handed to `resolveNoticeChannelScope`. */
 export interface NoticeChannelContext {
   organizationId: string;
   /** Channel id as the bridge holds it, still transport-prefixed. */
@@ -72,7 +74,7 @@ export interface NoticeChannelContext {
   /** Workspace id carried by the inbound event, when it carried one. */
   teamId?: string;
   /**
-   * Manager-owned stores, handed in rather than imported, so a descriptor can
+   * Gateway-owned stores, handed in rather than imported, so a descriptor can
    * reach its own provider API without reaching into the gateway's internals.
    */
   stores: {
@@ -183,13 +185,14 @@ export interface ChatPlatformDescriptor {
   formatChannelLabel?(name: string): string;
 
   /**
-   * True when `teamId` is a real workspace id this platform can converge a
-   * teamless Automation subscription onto. Slack Grid is the case: a
-   * subscription written before its workspace was known carries no team, and
-   * inbound events reliably carry the REAL `T…` (never the enterprise `E…`).
-   * Absent hook = the platform has no workspace axis, so nothing to heal.
+   * True when `teamId` is a real workspace id this platform may write onto an
+   * Automation subscription — both to converge a teamless one and to scope a
+   * newly materialized link. Slack Grid is the case: inbound events reliably
+   * carry the REAL workspace `T…`, never the enterprise `E…`, which names no
+   * workspace and would scope a binding to nothing. Absent hook = the platform
+   * has no workspace axis, so whatever the event carried is fine.
    */
-  healableTeamId?(teamId: string): boolean;
+  bindableTeamId?(teamId: string): boolean;
 
   /**
    * True when a top-level channel message gets a FRESH thread id, so an

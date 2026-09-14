@@ -11,10 +11,10 @@
  * strategies live in sibling modules (`./slack.ts`); this module owns the
  * platform-clean default strategy and the lookup.
  *
- * This registry covers RESPONSE STREAMING only. Everything else a platform
- * does differently — channel-id and label spelling, credential requirements,
- * the unlinked-chat notice — hangs off `ChatPlatformDescriptor` in
- * `../platforms/`.
+ * This registry covers RESPONSE STREAMING only. The other per-platform
+ * differences the gateway needs — channel-id and label spelling, credential
+ * requirements, the unlinked-chat notice — hang off `ChatPlatformDescriptor`
+ * in `../platforms/`; add a new one there, not here.
  */
 
 import { createLogger } from "@lobu/core";

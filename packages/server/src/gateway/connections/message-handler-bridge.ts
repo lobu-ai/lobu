@@ -428,15 +428,15 @@ export function registerMessageHandlers(
     await handler.handleMessage(thread, message, "subscribed");
   });
 
-  // Chat SDK subscriptions are thread-scoped. Slack gives every top-level
-  // channel message a fresh thread id (`slack:C…:<message-ts>`), so an
-  // Automation linked to the CHANNEL can never pre-subscribe the ids of future
-  // messages. Those ordinary `message.channels` events therefore fall through
-  // the SDK's mention/DM/subscribed branches into its pattern handlers. The
-  // SDK routes subscribed → mention → patterns and returns at the first match,
-  // so this catch-all only ever sees events the branches above declined; it
-  // cannot double-dispatch a mention. Admit only channels that already have a
-  // durable message Automation — unlinked channels stay silent.
+  // Chat SDK subscriptions are thread-scoped. On a platform that mints a FRESH
+  // thread id per top-level channel message, an Automation linked to the
+  // CHANNEL can never pre-subscribe the ids of future messages, so those
+  // events fall through the SDK's mention/DM/subscribed branches into its
+  // pattern handlers. The SDK routes subscribed → mention → patterns and
+  // returns at the first match, so this catch-all only ever sees events the
+  // branches above declined; it cannot double-dispatch a mention. Admit only
+  // channels that already have a durable message Automation — unlinked
+  // channels stay silent.
   if (
     getPlatformDescriptor(connection.platform)
       ?.channelMessagesMintFreshThreadIds
@@ -556,11 +556,10 @@ export class MessageHandlerBridge {
    * no channel Automation and the connection has no owning agent — with a
    * "link this chat" notice instead of dropping silently.
    *
-   * Every platform gets the deep-linked notice. Only two things here remain
-   * Slack-specific, and both are enrichment: the `metadata.teamId` gate on a
-   * tenant's OAuth-installed workspace bot, and the `conversations.info`
-   * lookup that turns a channel id into a friendly `#name` for the link label
-   * (#2230). Loop safety needs no extra
+   * Every platform gets the deep-linked notice unless its own descriptor
+   * suppresses it; whatever the deep link can additionally name (a workspace,
+   * a friendly channel name) comes from `resolveNoticeChannelScope` rather
+   * than from a slug branch here (#2230). Loop safety needs no extra
    * state: the Chat SDK never re-delivers the bot's own posts (`isMe`), and a
    * channel with an Automation subscription never reaches this dead end (the
    * planner-rejection guard in `handleMessage` drops it silently first).
@@ -841,15 +840,16 @@ export class MessageHandlerBridge {
       ]),
     ];
 
-    // Lazy self-heal (Slack Grid): an Automation written before its workspace was
-    // known carries no team. Inbound Slack events reliably carry the REAL
-    // workspace `T…` (never the enterprise `E…`), so converge the trigger's team
-    // to it on the first message. Guarded to fill only an unknown team; best-
+    // Lazy self-heal: an Automation written before its workspace was known
+    // carries no team, so converge the trigger's team to the one the inbound
+    // event carried on the first message. The platform decides which team ids
+    // are real workspaces (`bindableTeamId`) — a platform with no workspace
+    // axis has nothing to heal. Guarded to fill only an unknown team; best-
     // effort — a heal failure must never block routing.
     if (
       resolved.source === "automation" &&
       automationSubscriptionService &&
-      getPlatformDescriptor(platform)?.healableTeamId?.(teamId ?? "") === true &&
+      getPlatformDescriptor(platform)?.bindableTeamId?.(teamId ?? "") === true &&
       routingOrganizationIds.length > 0
     ) {
       for (const organizationId of routingOrganizationIds) {
@@ -877,9 +877,10 @@ export class MessageHandlerBridge {
     // can never overwrite an explicit `/lobu link` that races it (decided under
     // the advisory lock inside createChatAutomation — race-safe across replicas).
     // Group channels only (DMs stay out of the bound set); hosted-preview
-    // placeholder agents are excluded. Slack passes only a real workspace `T…`
-    // (never enterprise `E…`); an unknown team is filled later by
-    // healSubscriptionTeam. Best-effort — a failure must never block the turn.
+    // placeholder agents are excluded. The team is scoped by the same
+    // `bindableTeamId` rule the self-heal above uses, so a platform never gets
+    // a non-workspace id written onto the link; an unknown team is filled later
+    // by healSubscriptionTeam. Best-effort — a failure must never block the turn.
     if (
       resolved.source === "connection" &&
       isGroup &&
@@ -887,10 +888,9 @@ export class MessageHandlerBridge {
       automationSubscriptionService &&
       this.connection.organizationId
     ) {
+      const isBindable = getPlatformDescriptor(platform)?.bindableTeamId;
       const bindingTeamId =
-        platform !== "slack" || /^T[A-Z0-9]+$/i.test(teamId ?? "")
-          ? teamId
-          : undefined;
+        !isBindable || isBindable(teamId ?? "") ? teamId : undefined;
       try {
         await automationSubscriptionService.materializeConnectionFallbackLink(
           this.connection.id,

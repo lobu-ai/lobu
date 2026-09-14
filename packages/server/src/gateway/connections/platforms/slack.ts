@@ -91,7 +91,6 @@ function createSlackFileHandler(
   };
 }
 
-
 /**
  * A tenant's OAuth-installed workspace bot has no owning agent — routing is by
  * tagged Automations created through `/lobu link`. Until the tenant links a
@@ -171,8 +170,8 @@ export const slackPlatform: ChatPlatformDescriptor = {
   formatChannelLabel: (name) => `#${name.replace(/^#/, "")}`,
 
   // Inbound Slack events carry the REAL workspace `T…`; the enterprise `E…` of
-  // a Grid org is not a workspace and must never be healed onto.
-  healableTeamId: (teamId) => /^T[A-Z0-9]+$/i.test(teamId),
+  // a Grid org is not a workspace and must never be bound to.
+  bindableTeamId: (teamId) => /^T[A-Z0-9]+$/i.test(teamId),
 
   // Slack gives every top-level channel message a fresh thread id
   // (`slack:C…:<message-ts>`).

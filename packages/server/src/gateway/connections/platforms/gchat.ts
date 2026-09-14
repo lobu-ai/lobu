@@ -505,7 +505,7 @@ async function normalizeWebhookRequest(
   };
 }
 
-export function parseGoogleChatCredentials(
+function parseGoogleChatCredentials(
   value: unknown
 ): ServiceAccountCredentials {
   let parsed: unknown = value;
