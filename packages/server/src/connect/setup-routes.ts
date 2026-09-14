@@ -121,8 +121,10 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
       );
     const session = await deps.session(c.req.raw, c.env);
     // A form POST is a browser navigation: JSON here strands the person on the
-    // consent page whose session simply expired while it sat open.
-    if (!session?.user) return c.redirect(loginContinuation(origin, org, connector), 302);
+    // consent page whose session simply expired while it sat open. 303, not
+    // 302, because /auth/login only serves GET and only 303 *specifies* the
+    // method change -- 302 leaves it to de-facto browser convention.
+    if (!session?.user) return c.redirect(loginContinuation(origin, org, connector), 303);
     const home = await deps.home(session.user.id);
     if (!home)
       return c.html(

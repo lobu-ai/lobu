@@ -97,8 +97,9 @@ describe('managed setup browser handoff', () => {
     const f = fixture({ session: async () => null });
     const res = await f.app.request(url, { method: 'POST', headers });
     // A form POST is a browser navigation; JSON would strand the person on a
-    // consent page whose session expired while it sat open.
-    expect(res.status).toBe(302);
+    // consent page whose session expired while it sat open. 303 so the method
+    // change to GET is specified rather than left to browser convention.
+    expect(res.status).toBe(303);
     expect(decodeURIComponent(res.headers.get('location') ?? '')).toContain(
       'https://cloud.example/connect/managed?org=public-provider&connector=mail'
     );
