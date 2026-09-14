@@ -69,10 +69,25 @@ describe("example lobu.config.ts provider refs", () => {
     source: string
   ): Array<{ id: string; model: string }> {
     const out: Array<{ id: string; model: string }> = [];
-    for (const m of source.matchAll(
-      /\bid:\s*["']([^"']+)["']\s*,\s*(?:\/\/[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*model:\s*["']([^"']+)["']/g
-    )) {
-      out.push({ id: m[1] as string, model: m[2] as string });
+    const lines = source.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const idMatch = /\bid:\s*["']([^"']*)["']/.exec(lines[i] as string);
+      if (!idMatch) continue;
+      // Scan forward within the same object literal. Stopping at `}` or the
+      // next `id:` keeps a lone Automation `model:` from pairing with an
+      // unrelated `id:` above it. Line-at-a-time so the scan stays linear.
+      for (let j = i + 1; j < lines.length; j++) {
+        const line = lines[j] as string;
+        if (/[}\]]/.test(line) || /\bid:\s*["']/.test(line)) break;
+        const modelMatch = /\bmodel:\s*["']([^"']*)["']/.exec(line);
+        if (modelMatch) {
+          out.push({
+            id: idMatch[1] as string,
+            model: modelMatch[1] as string,
+          });
+          break;
+        }
+      }
     }
     return out;
   }
