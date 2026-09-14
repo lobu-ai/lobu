@@ -163,16 +163,26 @@ export function parseProviderRetryAfter(
 
 /**
  * Extract a long account-window boundary such as OpenCode Go's
- * "Monthly usage limit reached. Resets in 14 days." These are not transient
- * Retry-After delays: they exceed an Automation's process budget and should
- * park the cron cursor until the provider says the account window resets.
+ * "Monthly usage limit reached. Resets in 14 days." or Codex's
+ * "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 min."
+ * These are not transient Retry-After delays: they exceed an Automation's
+ * process budget and should park the cron cursor until the provider says the
+ * account window resets.
+ *
+ * `parseProviderRetryAfter` also reads "try again in", but it does not admit
+ * the `~` Codex puts before the number and it caps at PROVIDER_RETRY_MAX_MS (a
+ * day) — 8700 min is ~6 days — so without this arm the Codex wording fell
+ * through to no park at all. Minutes are accepted because callers already
+ * gate on quota evidence, so the value is an account window rather than a
+ * CLI's own retry advice; a short horizon parks only briefly, and
+ * `advanceAutomationSchedule` never moves an existing cursor backward.
  */
 function parseProviderQuotaResetIn(
 	message: string,
 	now: Date = new Date()
 ): Date | null {
 	const match = message.match(
-		/\breset(?:s)?\s+in\s+(\d+(?:\.\d+)?)\s*(hours?|days?|weeks?)\b/i
+		/\b(?:reset(?:s)?|try\s+again)\s+in\s*~?\s*(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|hours?|days?|weeks?)\b/i
 	);
 	if (!match) return null;
 	const value = Number(match[1]);
@@ -182,7 +192,9 @@ function parseProviderQuotaResetIn(
 		? 7 * 24 * 60 * 60 * 1000
 		: unit.startsWith("day")
 			? 24 * 60 * 60 * 1000
-			: 60 * 60 * 1000;
+			: unit.startsWith("hour")
+				? 60 * 60 * 1000
+				: 60 * 1000;
 	const delayMs = value * unitMs;
 	if (!Number.isFinite(delayMs) || delayMs > PROVIDER_RELATIVE_RESET_MAX_MS) {
 		return null;
@@ -258,10 +270,10 @@ export function providerQuotaResetNotBefore(
 
 /**
  * Device CLI reports do not carry a structured error code, so require
- * provider-quota wording before moving a durable schedule, plus either the
- * provider's own reset timestamp or balance-exhaustion wording for the
- * boundary. This prevents unrelated stderr such as "session resets at ..."
- * from parking an Automation.
+ * provider-quota wording before moving a durable schedule, plus either a
+ * provider-named boundary (a reset timestamp, a retry horizon, or a relative
+ * reset) or balance-exhaustion wording. This prevents unrelated stderr such as
+ * "session resets at ..." from parking an Automation.
  */
 export function deviceProviderQuotaResetNotBefore(
 	message: string,
@@ -270,14 +282,17 @@ export function deviceProviderQuotaResetNotBefore(
 	// Balance wording is quota evidence by definition; composing the matchers
 	// keeps them in lockstep so a new balance alternate cannot silently fail to
 	// park on this path.
-	// "limit reached" is qualified by `usage`: OpenCode Go reports an account
-	// window as "Monthly usage limit reached", while a CLI's own "context limit
-	// reached" / "session limit reached" / "tool call limit reached" are not
-	// provider quota and must not park a durable schedule — the same hazard the
-	// doc comment above names for "session resets at ...".
+	// The qualifier is `usage`, not `reached`: OpenCode Go reports an account
+	// window as "Monthly usage limit reached" and Codex on a ChatGPT plan as
+	// "usage limit (pro plan)", while a CLI's own "context limit reached" /
+	// "session limit reached" / "tool call limit reached" are not provider quota
+	// and must not park a durable schedule — the same hazard the doc comment
+	// above names for "session resets at ...". Matching `usage limit` rather
+	// than the full `usage limit reached` admits the subscription wording
+	// without admitting any of those, since none of them is about usage.
 	const hasQuotaEvidence =
 		PROVIDER_BALANCE_EXHAUSTED.test(message) ||
-		/limit exhausted|usage limit reached|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
+		/limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
 			message
 		);
 	if (!hasQuotaEvidence) return null;

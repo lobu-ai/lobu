@@ -254,6 +254,37 @@ describe("provider quota reset parsing", () => {
     ).toBe("2026-08-19T10:01:00.000Z");
   });
 
+  // Subscription-plan CLIs report an account window in wording neither matcher
+  // covered: Codex on a ChatGPT plan says "usage limit (pro plan)" rather than
+  // "usage limit reached", and quotes the horizon as "Try again in ~N min"
+  // rather than "resets in <hours|days|weeks>". Missing both halves meant no
+  // park at all, so every cron tick burned a scheduled failure until the
+  // consecutive-failure auto-pause stopped the Automation outright.
+  it.each([
+    [
+      "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 min.",
+      "2026-09-19T05:01:00.000Z",
+    ],
+    ["Monthly usage limit reached. Resets in 90 minutes.", "2026-09-13T05:31:00.000Z"],
+  ])("parks a usage-limit window quoted in minutes (%s)", (message, expected) => {
+    const now = new Date("2026-09-13T04:00:00.000Z");
+
+    expect(deviceProviderQuotaResetNotBefore(message, now)?.toISOString()).toBe(
+      expected
+    );
+  });
+
+  // "try again in" alone is not quota evidence — a CLI's own limit must still
+  // retry on the normal cadence rather than park a durable schedule.
+  it.each([
+    "Tool call limit reached. Try again in ~5 min.",
+    "Context limit reached. Try again in ~2 hours.",
+  ])("does not park a non-quota limit that says try again in (%s)", (message) => {
+    const now = new Date("2026-09-13T04:00:00.000Z");
+
+    expect(deviceProviderQuotaResetNotBefore(message, now)).toBeNull();
+  });
+
   // A CLI's own limits reuse the "limit reached" phrasing but are not provider
   // quota, and a relative "resets in" would otherwise park a durable schedule
   // for hours or days on a run that should simply retry next tick.
