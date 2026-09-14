@@ -7,7 +7,6 @@
  */
 
 import { createLogger } from "@lobu/core";
-import { resolveSlackBotIdentity } from "../../../authz/slack-acl-sync.js";
 import { stripPlatformPrefix } from "../../channels/bound-channels.js";
 import type { IFileHandler } from "../../platform/file-handler.js";
 import { SlackInstructionProvider } from "../slack-instruction-provider.js";
@@ -113,6 +112,20 @@ async function resolveSlackNoticeChannelScope(
   // channel id in the UI and must never block the notice.
   let channelName: string | undefined;
   try {
+    // Dynamic by measurement, not taste. Importing `authz/slack-acl-sync.js`
+    // statically here drags this module — and through it the registry — into
+    // the server's import cycles: `madge --circular packages/server/src`
+    // counts 2 cycles containing `platforms/index.ts` on main and 29 with that
+    // one edge added; dropping it returns the count to 2. That matters because
+    // `index.ts` builds PLATFORM_REGISTRY at module-eval time from
+    // `const slackPlatform`, so a registry inside a cycle can be read in its
+    // TDZ on an unlucky entry order and hand back an `undefined` descriptor.
+    // A call-time import cannot join a module-evaluation cycle, which is what
+    // keeps the registry out. (`createAdapter` below defers the adapter SDK
+    // the same way.)
+    const { resolveSlackBotIdentity } = await import(
+      "../../../authz/slack-acl-sync.js"
+    );
     const slackWeb = createSlackWebApi();
     const identity = await resolveSlackBotIdentity(
       {
