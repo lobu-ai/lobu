@@ -21,7 +21,7 @@ import { withValidatedArgs } from '../validate-args';
 import { SortOrderField } from './schemas/common-fields';
 import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
 import { classifyToolError, getErrorMessage, isRetryable, type ToolErrorCode } from "@lobu/core";
-import { ToolUserError } from '../../utils/errors';
+import { ToolUserError, toolErrorHttpStatus } from '../../utils/errors';
 import {
   QUERY_SQL_RESULT_MAX_BYTES,
   finalizeDynamicQueryRows,
@@ -426,11 +426,21 @@ export async function querySqlImpl(
     } catch (err) {
       // A pushdown failure is a hard tool
       // error, never a success-shaped empty table (#2042).
+      //
+      // Report it under the classified code's status, not a flat 502: the
+      // failing upstream is the connection's, not this gateway's, and a 502
+      // body is the edge's to replace (see `toolErrorHttpStatus`) — which is
+      // how "<connector> does not support live queries" reached users as a bare
+      // `error code: 502`. Both derived-entity read seams
+      // (`listDerivedEntities`, `resolveDerivedLeaf`) handle only the SOFT
+      // error shape and let this throw pass through, so they showed the same
+      // blank page.
+      const code = classifyPushdownFailure(err);
       throw new ToolUserError(
         `connection pushdown failed (connection=${args.connection}): ${getErrorMessage(err)}. ` +
           'The query did not run against the source — this is not an empty result.',
-        502,
-        classifyPushdownFailure(err)
+        toolErrorHttpStatus(code),
+        code
       );
     }
   }
