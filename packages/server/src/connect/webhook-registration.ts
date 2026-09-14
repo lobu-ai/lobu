@@ -360,16 +360,20 @@ export async function unregisterConnectorWebhook(params: {
  * registered webhook (so the route can 404 rather than accept blindly).
  */
 export async function resolveConnectionWebhookConfig(
-  config: Record<string, unknown> | null | undefined
+  config: Record<string, unknown> | null | undefined,
+  connectorKey?: string
 ): Promise<Record<string, unknown> | null> {
   const c = (config ?? {}) as Record<string, unknown> & ConnectionWebhookState;
   // Documented generic-webhook schema keys (packages/connectors/src/webhook.ts
   // optionsSchema: token, dedupeHeader, …) fall back when the provider-
   // registration webhook_* keys are absent — otherwise a connection created
-  // via the documented schema 404s forever on ingest.
-  const token = c.webhook_callback_token ?? (typeof c.token === 'string' ? c.token : undefined);
+  // via the documented schema 404s forever on ingest. Gated to the webhook
+  // connector: any other connector storing a plain `token` config key must
+  // keep 404ing rather than silently becoming a bearer-auth receiver.
+  const documentedKeys = connectorKey === undefined || connectorKey === 'webhook';
+  const token = c.webhook_callback_token ?? (documentedKeys && typeof c.token === 'string' ? c.token : undefined);
   const dedupeHeader =
-    c.webhook_dedupe_header ?? (typeof c.dedupeHeader === 'string' ? c.dedupeHeader : undefined);
+    c.webhook_dedupe_header ?? (documentedKeys && typeof c.dedupeHeader === 'string' ? c.dedupeHeader : undefined);
   if (!c.webhook_signature_secret && !token && !c.webhook_external_id) {
     return null;
   }

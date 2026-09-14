@@ -1466,7 +1466,10 @@ export class ChatInstanceManager {
     // race activation, and a stray error shouldn't silently drop deliveries).
     if (row.status === "paused" || row.status === "revoked") return null;
 
-    const webhookConfig = await resolveConnectionWebhookConfig(row.config);
+    const webhookConfig = await resolveConnectionWebhookConfig(
+      row.config,
+      String(row.connector_key)
+    );
     if (!webhookConfig) return null;
 
     return {

@@ -1644,7 +1644,7 @@ describe("connector-connection webhook bridge (connections table)", () => {
 
 	test("a bridged generic webhook (documented schema keys) activates delivery.received", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const { manager, secretStore } = await buildManager();
+		const { manager } = await buildManager();
 		const { createConnectionWebhookRoutes } = await import(
 			"../routes/public/connections.js"
 		);
@@ -1660,7 +1660,6 @@ describe("connector-connection webhook bridge (connections table)", () => {
 			RETURNING id
 		`) as Array<{ id: number }>;
 		const id = String(inserted[0].id);
-		void secretStore;
 		const automationId = await seedWebhookEventAutomation({
 			connectionId: Number(id),
 		});
@@ -1686,6 +1685,39 @@ describe("connector-connection webhook bridge (connections table)", () => {
 			  AND run_type = 'automation'
 		`;
 		expect(runs.length).toBeGreaterThan(0);
+	});
+
+	test("a non-webhook connector storing a plain token key still 404s", async () => {
+		// The documented-key fallback is gated to connector_key 'webhook': any
+		// other connector with a `token` config key must not silently become a
+		// bearer-auth receiver.
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { manager } = await buildManager();
+		const { createConnectionWebhookRoutes } = await import(
+			"../routes/public/connections.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		const otherToken = "linear-plain-token-0123456789abcdef0123456789";
+		const inserted = (await getDb()`
+			INSERT INTO connections (organization_id, connector_key, slug, status, config)
+			VALUES (${ORG}, 'linear', ${`linear-plain-${Date.now()}-${Math.random()}`},
+				'active', ${getDb().json({ token: otherToken })})
+			RETURNING id
+		`) as Array<{ id: number }>;
+		const id = String(inserted[0].id);
+		const app = createConnectionWebhookRoutes(manager);
+		const response = await app.fetch(
+			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
+				method: "POST",
+				body: JSON.stringify({ hello: "nope" }),
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${otherToken}`,
+				},
+			}),
+		);
+		expect(response.status).toBe(404);
+		expect(await eventRows(id)).toHaveLength(0);
 	});
 
 	test("an authenticated Jira delivery lands as a structured event on the Atlassian Rovo feed", async () => {
