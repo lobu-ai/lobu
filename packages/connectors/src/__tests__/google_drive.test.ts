@@ -677,6 +677,40 @@ describe('GoogleDriveConnector sync content inlining', () => {
     expect(result.events[0].metadata.content_included).toBe(true);
   });
 
+  // Sharing one textual set with the download primitive WIDENED what the feed
+  // inlines: svg, rtf and x-javascript were not in Drive's own set, so these
+  // file classes now contribute payload_text (and therefore embeddings) where
+  // they previously synced as metadata only. That is intended — all three are
+  // text — but it changes what the ingest path stores, so it is pinned here
+  // rather than left to be discovered as an unexplained jump in event text.
+  test.each([
+    ['image/svg+xml', true],
+    ['application/rtf', true],
+    ['application/x-javascript', true],
+    // Still excluded: a binary type must never be inlined as text.
+    ['application/pdf', false],
+    ['image/png', false],
+  ])('sync inlines %s as payload_text: %s', async (mimeType, inlined) => {
+    const connector = new GoogleDriveConnector();
+    const drive = fakeDrive([
+      startToken('T'),
+      filesList([{ files: [driveFile('a', { mimeType })] }]),
+      contentBody('inline-me'),
+    ]);
+    connector.client = () => drive.client;
+
+    const result = await connector.sync({
+      feedKey: 'files',
+      config: { include_content: true },
+      credentials: { accessToken: 'tok' },
+      checkpoint: {},
+    });
+
+    expect(result.events[0].metadata.content_included).toBe(inlined);
+    // A skipped file still syncs — it just carries empty text, not absent text.
+    expect(result.events[0].payload_text).toBe(inlined ? 'inline-me' : '');
+  });
+
   test('a failed content fetch degrades to metadata rather than failing the sync', async () => {
     // One unreadable file must never take down a whole Drive sync.
     const connector = new GoogleDriveConnector();
