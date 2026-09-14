@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -152,6 +153,32 @@ describe("lobu init --yes", () => {
     }
     expect(code).toBe(1);
     expect(existsSync(join(cwd, "ab"))).toBe(false);
+  });
+
+  test("rejects --here in a directory whose name the server refuses", async () => {
+    // --yes defaults and the slugified cwd bypass the interactive prompt
+    // validation; the final guard must catch a short dir name like `ab`.
+    const short = join(cwd, "ab");
+    mkdirSync(short, { recursive: true });
+    const halt = new Error("__exit__");
+    let code: number | undefined;
+    const exit = spyOn(process, "exit").mockImplementation(((c: number) => {
+      code = c;
+      throw halt;
+    }) as never);
+    try {
+      await initCommand(short, undefined, {
+        here: true,
+        yes: true,
+        skipInstall: true,
+      });
+    } catch (err) {
+      if (err !== halt) throw err;
+    } finally {
+      exit.mockRestore();
+    }
+    expect(code).toBe(1);
+    expect(existsSync(join(short, "lobu.config.ts"))).toBe(false);
   });
 
   test(

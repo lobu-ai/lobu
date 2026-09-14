@@ -361,7 +361,7 @@ export async function unregisterConnectorWebhook(params: {
  */
 export async function resolveConnectionWebhookConfig(
   config: Record<string, unknown> | null | undefined,
-  connectorKey?: string
+  connectorKey: string
 ): Promise<Record<string, unknown> | null> {
   const c = (config ?? {}) as Record<string, unknown> & ConnectionWebhookState;
   // Documented generic-webhook schema keys (packages/connectors/src/webhook.ts
@@ -370,7 +370,9 @@ export async function resolveConnectionWebhookConfig(
   // via the documented schema 404s forever on ingest. Gated to the webhook
   // connector: any other connector storing a plain `token` config key must
   // keep 404ing rather than silently becoming a bearer-auth receiver.
-  const documentedKeys = connectorKey === undefined || connectorKey === 'webhook';
+  // `connectorKey` is required (no permissive default) so a future caller
+  // cannot omit it and silently widen the fallback.
+  const documentedKeys = connectorKey === 'webhook';
   const token = c.webhook_callback_token ?? (documentedKeys && typeof c.token === 'string' ? c.token : undefined);
   const dedupeHeader =
     c.webhook_dedupe_header ?? (documentedKeys && typeof c.dedupeHeader === 'string' ? c.dedupeHeader : undefined);

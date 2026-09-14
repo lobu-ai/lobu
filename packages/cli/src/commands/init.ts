@@ -323,6 +323,19 @@ export async function initCommand(
     }
   }
 
+  // Final choke point: every resolution path above must satisfy the server's
+  // agent-id contract. The interactive prompt validates, but --yes defaults
+  // and --here fallbacks (slugified cwd, explicit arg) bypass it — without
+  // this, a short name still scaffolds a project the server refuses.
+  if (!PROJECT_NAME_PATTERN.test(projectName)) {
+    console.log(
+      chalk.red(
+        `\n✗ "${projectName}" is not a valid project name (lowercase alphanumeric with hyphens, starting with a letter, 3-60 chars).\n`
+      )
+    );
+    process.exit(1);
+  }
+
   // Pick free ports at scaffold time so two `lobu run`s on the same machine
   // don't collide on the default 8787 / 8118. The flag / env value wins.
   const gatewayPortDefault = String(await pickFreePort(8787));
