@@ -16,11 +16,12 @@
  * connection — it marks a connection as LOBU'S OWN hosted relay, and is read by
  * cross-organization message routing (`message-handler-bridge.ts`), unbound
  * `lobu run` claim redemption (`preview/slack.ts`), tenant notification
- * delivery through the shared bot (`notifications/service.ts`,
- * `bound-channels.ts`), and the global one-row-per-platform slot
- * (`uniq_preview_connection_per_platform_all`). For a platform where Lobu runs
- * no hosted bot, that slot is unclaimed — and a tenant taking it makes other
- * tenants' link codes redeem through the seizing tenant's bot.
+ * delivery through the shared bot (`bound-channels.ts`, the cross-org branch
+ * `notifications/service.ts` delivers through), and the global
+ * one-row-per-platform slot (`uniq_preview_connection_per_platform_all`). For a
+ * platform where Lobu runs no hosted bot, that slot is unclaimed — and a tenant
+ * taking it makes other tenants' link codes redeem through the seizing tenant's
+ * bot.
  *
  * No application code writes `previewMode`: every occurrence in the repo is a
  * read, and Lobu's own preview rows are provisioned by an operator directly
@@ -37,9 +38,11 @@
  * Settings a tenant owns on their own chat connection. Everything else is
  * operator-owned or unrecognised, and both are refused.
  *
- * Mirrors the non-privileged members of `ConnectionSettings`
- * (`gateway/connections/types.ts`). A unit test pins this list, so adding a
- * member there without deciding whether a tenant may set it fails loudly.
+ * These are the non-privileged members of `ConnectionSettings`
+ * (`gateway/connections/types.ts`). A member added there later needs no edit
+ * here for the gate to hold — an unrecognised key is already refused. Widening
+ * this list is the deliberate act of handing tenants a new key, and a unit test
+ * pins it so that act cannot be a silent one.
  */
 export const TENANT_SETTABLE_CHAT_SETTINGS: readonly string[] = [
 	"allowFrom",
@@ -54,9 +57,9 @@ const ALLOWED = new Set(TENANT_SETTABLE_CHAT_SETTINGS);
  * Refuse a chat-connection `settings` object carrying any key a tenant may not
  * set. Returns null when every key is allowed (including no settings at all).
  *
- * Keys are judged on PRESENCE, not value: `previewMode: false` is still the
- * caller claiming a key that is not theirs, and a settings-merging update path
- * could carry it forward.
+ * Keys are judged on PRESENCE, not value: an allowlist decides which names a
+ * caller may state at all, so `previewMode: false` is refused for the same
+ * reason `previewMode: true` is.
  */
 export function denyOperatorOnlyChatSettings(
 	settings: Record<string, unknown> | undefined | null,

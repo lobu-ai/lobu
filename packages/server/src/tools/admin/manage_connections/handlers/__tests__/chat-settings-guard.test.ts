@@ -5,11 +5,8 @@
  * (`__tests__/integration/chat-connection-settings-operator-only.test.ts`) pins
  * that the HANDLER consults this guard. These cases pin what the guard decides,
  * which is the part worth enumerating exhaustively and does not need a database.
- *
- * The rule is an ALLOWLIST, not a denylist of known-bad keys: `settings` is an
- * open `Record<string, any>` in the tool contract, and the runtime reads its own
- * operator flags out of the very same object. A denylist would admit every
- * privileged key added after it was written.
+ * Why the rule is an allowlist rather than a denylist of known-bad keys is in
+ * the module's own header.
  */
 
 import { describe, expect, it } from "vitest";
@@ -41,9 +38,8 @@ describe("denyOperatorOnlyChatSettings", () => {
 	});
 
 	it("refuses previewMode on PRESENCE, whatever the value", () => {
-		// `false` reads as harmless, but accepting it concedes the key is part of
-		// the tenant's vocabulary — and a settings-merging update path could then
-		// carry it forward. Presence is the test.
+		// An allowlist judges NAMES, so a falsy value is not a special case:
+		// `previewMode: false` is still a caller stating a key that is not theirs.
 		for (const value of [false, null, 0, "", "false"]) {
 			const denied = denyOperatorOnlyChatSettings({ previewMode: value });
 			expect(denied?.error).toEqual(expect.stringContaining("previewMode"));
@@ -76,9 +72,11 @@ describe("denyOperatorOnlyChatSettings", () => {
 		]);
 	});
 
-	it("refuses inherited/prototype keys without walking the prototype chain", () => {
-		// `Object.keys` semantics, pinned: a caller cannot smuggle a key via the
-		// prototype, and an object with a null prototype is handled.
+	it("judges OWN enumerable keys only", () => {
+		// `Object.keys` semantics, pinned, matching the spread in
+		// `upsertByoChatConnection`: a key reachable only through the prototype
+		// never lands in the row, so it is ignored rather than refused — while an
+		// own key on a null-prototype object still is refused.
 		const viaPrototype = Object.create({ previewMode: true }) as Record<
 			string,
 			unknown
@@ -94,9 +92,10 @@ describe("denyOperatorOnlyChatSettings", () => {
 		);
 	});
 
-	it("keeps the allowlist in step with what tenants may set", () => {
-		// Guard the guard: if someone adds a key here without deciding whether a
-		// tenant may own it, this fails rather than silently widening the surface.
+	it("pins the allowlist so widening it cannot be silent", () => {
+		// Guard the guard: a new key is already refused at runtime, so the only way
+		// the tenant-settable surface grows is an edit to this list — which this
+		// case forces someone to make deliberately.
 		expect([...TENANT_SETTABLE_CHAT_SETTINGS].sort()).toEqual([
 			"allowFrom",
 			"allowGroups",
