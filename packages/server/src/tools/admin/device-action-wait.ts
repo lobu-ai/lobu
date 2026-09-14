@@ -11,6 +11,7 @@
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { type DbClient, getDb } from '../../db/client';
 import { classifyRunOutcome } from '../../runs/run-outcome';
+import { supersedeActionEvent } from './approval-events';
 import { describeDeviceLastSeen } from '../../utils/device-liveness';
 
 /**
@@ -308,21 +309,41 @@ export async function waitForDeviceActionRunWithOptions(
           options.queueMs / 1000
         )}s (${deviceDiagnostic})`;
 
-  // Atomic timeout finalization. The WHERE clause matches only non-
-  // terminal states; if the worker raced us and posted completion
-  // between our last SELECT and this UPDATE, this UPDATE is a no-op
-  // and we re-read the row to surface the worker's verdict.
-  const updated = (await sql`
-    UPDATE runs
-    SET status = 'timeout',
-        outcome = ${classifyRunOutcome({ status: 'timeout' })},
-        completed_at = current_timestamp,
-        error_message = ${timeoutMessage}
-    WHERE id = ${runId}
-      AND organization_id = ${organizationId}
-      AND status IN ('pending', 'running')
-    RETURNING id
-  `) as Array<{ id: number }>;
+  // Atomic timeout finalization, with the operation card supersede in the SAME
+  // transaction: a gateway-side timeout is the run's terminal state, and the
+  // ledger must not keep showing it as dispatched. The WHERE clause matches
+  // only non-terminal states; if the worker raced us and posted completion
+  // between our last SELECT and this UPDATE, this UPDATE is a no-op and we
+  // re-read the row to surface the worker's verdict. No fail-closed card guard
+  // here, unlike the approval-gated writers in worker-api: every caller of this
+  // waiter dispatches an auto run, and an auto run created before the dispatch
+  // card existed has none and must still reach a terminal state.
+  const updated = (await sql.begin(async (tx) => {
+    const rows = (await tx`
+      UPDATE runs
+      SET status = 'timeout',
+          outcome = ${classifyRunOutcome({ status: 'timeout' })},
+          completed_at = current_timestamp,
+          error_message = ${timeoutMessage}
+      WHERE id = ${runId}
+        AND organization_id = ${organizationId}
+        AND status IN ('pending', 'running')
+      RETURNING id, action_key
+    `) as Array<{ id: number; action_key: string | null }>;
+    if (rows.length === 0) return rows;
+    const actionKey = rows[0].action_key ?? 'Operation';
+    await supersedeActionEvent(
+      runId,
+      organizationId,
+      'failed',
+      `${actionKey} — timed out`,
+      `Operation timed out: ${actionKey} — ${timeoutMessage}`,
+      { error_message: timeoutMessage, run_status: 'timeout' },
+      null,
+      tx
+    );
+    return rows;
+  })) as Array<{ id: number }>;
 
   if (updated.length === 0) {
     // Worker won the race. Re-read to return whatever it actually said.

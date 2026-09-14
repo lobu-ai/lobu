@@ -145,7 +145,14 @@ export async function failClaimedWorkerRun(params: {
       });
     }
     const row = rows[0];
-    if (row.run_type === 'action' && row.approval_status === 'approved') {
+    // Both approval-gated and auto action runs carry an operation card, so a
+    // pre-dispatch failure supersedes either. Only the approval-gated lane
+    // fails closed on a missing card: an auto run created before the dispatch
+    // card existed has none and must still reach a terminal state.
+    if (
+      row.run_type === 'action' &&
+      (row.approval_status === 'approved' || row.approval_status === 'auto')
+    ) {
       const actionKey = row.action_key ?? 'Action';
       const eventId = await supersedeActionEvent(
         params.runId,
@@ -157,7 +164,7 @@ export async function failClaimedWorkerRun(params: {
         null,
         tx
       );
-      if (eventId === undefined) {
+      if (eventId === undefined && row.approval_status === 'approved') {
         throw new Error(
           `Cannot fail approval run ${params.runId}: its approval card is missing`
         );

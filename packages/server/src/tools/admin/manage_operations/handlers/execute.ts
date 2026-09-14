@@ -13,7 +13,7 @@ import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/a
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { resolveActingPrincipal, resolveWritePolicyDecision } from "../../../../authz/entity-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
-import { getDb } from "../../../../db/client";
+import { type DbClient, getDb } from "../../../../db/client";
 import type { Env } from "../../../../index";
 import {
 	isDelegatedBrowserAffinityConnector,
@@ -25,7 +25,12 @@ import { notifyActionApprovalNeeded } from "../../../../notifications/triggers";
 import { resolveApprovalChatOrigin } from "../../approval-delivery";
 import { resolveActionMode } from "../../../../operations/action-modes";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
-import { LOST_LEASE_MESSAGE, runLeaseFence } from "../../../../runs/run-lease";
+import { LOST_LEASE_MESSAGE } from "../../../../runs/run-lease";
+import {
+	AUTO_APPROVED_CARD_STATUS,
+	autoOperationCardOriginId,
+	terminalizeInlineOperationRun,
+} from "../../../../operations/operation-run-card";
 import { executeHttpOperation } from "../../../../operations/execute-http-operation";
 import { prepareOperationFiles, resolveOperationFiles } from "../../../../operations/file-inputs";
 import { validateOperationInput } from "../../../../operations/input-validation";
@@ -88,10 +93,13 @@ async function failRunInline(
 	// mcp_tool backends share; executeHttpOperation sanitizes its own response.
 	const message = stripNul(errorMsg);
 	if (!deferTerminalWrite) {
-		const sql = getDb();
-		const rows = await sql`UPDATE runs SET status = 'failed', completed_at = NOW(), error_message = ${message} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
-		if (rows.length === 0)
-			return { status: "failed", error_message: LOST_LEASE_MESSAGE };
+		const held = await terminalizeInlineOperationRun(
+			runId,
+			organizationId,
+			claimedBy,
+			{ status: "failed", errorMessage: message },
+		);
+		if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 	}
 	return { status: "failed", error_message: message };
 }
@@ -116,9 +124,17 @@ async function completeRunInline(
 	const { output: materialized, publishedArtifactIds } =
 		await materializeActionOutputAttachments(runId, sanitized);
 	if (!deferTerminalWrite) {
-		const sql = getDb();
-		const rows = await sql`UPDATE runs SET status = 'completed', completed_at = NOW(), action_output = ${sql.json(materialized)} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
-		if (rows.length === 0) {
+		// Terminalize the run and supersede its dispatch card in ONE transaction,
+		// so the ledger can never disagree with the run it describes. `materialized`
+		// (not `sanitized`) is what gets persisted: attachments were already
+		// published, so the row must carry the download_url form.
+		const held = await terminalizeInlineOperationRun(
+			runId,
+			organizationId,
+			claimedBy,
+			{ status: "completed", output: materialized },
+		);
+		if (!held) {
 			// Lost the lease: nothing references these artifacts and nothing ever
 			// will, since the row that would have carried them was not written.
 			await deleteMaterializedArtifacts(publishedArtifactIds);
@@ -439,6 +455,33 @@ export async function executeOperationInline(
 		options.claimedBy,
 	);
 }
+
+/**
+ * Entity ids an operation card links to: the connection's feed stamps, so an
+ * operation lands on the same subjects its connector's data does. Shared by
+ * the queued and the non-queued card writes — both cards are the same family
+ * and must link identically.
+ */
+async function resolveConnectionCardEntityIds(
+	sql: DbClient,
+	connectionId: number,
+): Promise<number[]> {
+	const feedRows = await sql`
+      SELECT entity_ids FROM feeds
+      WHERE connection_id = ${connectionId} AND deleted_at IS NULL AND entity_ids IS NOT NULL
+      LIMIT 1
+    `;
+	// The driver hands back either a parsed array or the raw `{1,2}` literal,
+	// depending on the column's declared type.
+	const rawEntityIds =
+		(feedRows[0] as { entity_ids: string | number[] } | undefined)
+			?.entity_ids ?? null;
+	if (rawEntityIds === null) return [];
+	return typeof rawEntityIds === "string"
+		? rawEntityIds.replace(/[{}]/g, "").split(",").filter(Boolean).map(Number)
+		: rawEntityIds.map(Number);
+}
+
 /** Return the durable outcome of a run claimed by an earlier request. */
 async function replayExistingOperationRun(
 	claim: Awaited<ReturnType<typeof createConnectorOperationRun>>,
@@ -730,35 +773,17 @@ export async function handleExecute(
 			? "device"
 			: "inline";
 
-	// Queued (approval) runs bind run creation to the pending approval EVENT in
-	// ONE transaction (#2033 item 16): if the event write fails, the run must
-	// not exist — otherwise the run is durably pending but the /memory approval
-	// page (events-only) shows nothing and the agent can never approve it.
-	// Device/inline runs have no approval event, so they create the run on the
-	// pool as before.
+	// Every operation run binds run creation to its ledger card in ONE
+	// transaction (#2033 item 16): if the card write fails, the run must not
+	// exist. For a queued run that would otherwise leave it durably pending
+	// while the /memory approval page (events-only) shows nothing and the agent
+	// can never approve it; for an auto run it would leave a connector action
+	// that executed with nothing recording that it did.
+	const cardEntityIds = await resolveConnectionCardEntityIds(
+		sql,
+		args.connection_id,
+	);
 	if (shouldQueue) {
-		const feedRows = await sql`
-      SELECT entity_ids FROM feeds
-      WHERE connection_id = ${args.connection_id} AND deleted_at IS NULL AND entity_ids IS NOT NULL
-      LIMIT 1
-    `;
-		const rawEntityIds =
-			(feedRows[0] as { entity_ids: string | number[] } | undefined)
-				?.entity_ids ?? null;
-		const entityIdsLiteral = rawEntityIds
-			? typeof rawEntityIds === "string"
-				? rawEntityIds
-				: `{${(rawEntityIds as number[]).join(",")}}`
-			: null;
-		const entityIds =
-			entityIdsLiteral && typeof entityIdsLiteral === "string"
-				? entityIdsLiteral
-						.replace(/[{}]/g, "")
-						.split(",")
-						.filter(Boolean)
-						.map(Number)
-				: [];
-
 		// Atomic: run + approval event commit together or not at all. Both writes
 		// run on `tx`; insertEvent threads it via options.sql, and
 		// createConnectorOperationRun via its db param (which also carries its
@@ -814,7 +839,7 @@ export async function handleExecute(
 			const initiator = resolveRunInitiator(ctx);
 			const event = await insertEvent(
 				{
-				entityIds,
+				entityIds: cardEntityIds,
 				organizationId: ctx.organizationId,
 				originId: `run_${createdRunId}_pending`,
 				title: `${operation.name} — pending approval`,
@@ -926,25 +951,97 @@ export async function handleExecute(
 		};
 	}
 
-	// Non-queued (device / inline) runs carry no approval event, so there is no
-	// second write to bind atomically — create the run on the pool.
-	const claim = await createConnectorOperationRun({
-		organizationId: ctx.organizationId,
-		connectionId: connection.id,
-		connectorKey: connection.connector_key,
-		operationKey: operation.operation_key,
-		operationInput: input,
-		approvalMode,
-		requireCompiledCode: operation.backend === "local_action",
-		policyPrincipalKind: actor.kind,
-		policyPrincipalId: actor.id,
-		createdByUserId: activation ? visibilityUserId : ctx.userId,
-		automationId: ctx.actingAutomationId,
-		parentRunId: ctx.actingRunId,
-		runMetadata,
-		sdkBrowserContext,
-		idempotencyKey: args.idempotency_key,
-		activation,
+	// Non-queued (auto) runs need no human decision, but they still belong in
+	// the operation ledger — an organization whose operations all resolve to
+	// `auto` must not end up with an empty audit trail. Run creation binds to
+	// its dispatch card in ONE transaction for the same reason the queued
+	// branch does: a run that exists without a card is a connector action with
+	// nothing recording that it ran.
+	const claim = await sql.begin(async (tx) => {
+		const createdRun = await createConnectorOperationRun({
+			organizationId: ctx.organizationId,
+			connectionId: connection.id,
+			connectorKey: connection.connector_key,
+			operationKey: operation.operation_key,
+			operationInput: input,
+			approvalMode,
+			requireCompiledCode: operation.backend === "local_action",
+			policyPrincipalKind: actor.kind,
+			policyPrincipalId: actor.id,
+			createdByUserId: activation ? visibilityUserId : ctx.userId,
+			automationId: ctx.actingAutomationId,
+			parentRunId: ctx.actingRunId,
+			runMetadata,
+			sdkBrowserContext,
+			idempotencyKey: args.idempotency_key,
+			activation,
+			db: tx,
+		});
+		// An idempotent replay adopts the existing run — and its existing card.
+		// Writing a second one here would fork the chain the terminal supersede
+		// walks.
+		if (!createdRun.created) return createdRun;
+		const createdRunId = createdRun.runId;
+		// A device run whose manifest admission fails is born terminal, so its
+		// only card IS the terminal one — there is nothing to supersede later.
+		const bornFailed = createdRun.status === "failed";
+		const initiator = resolveRunInitiator(ctx);
+		await insertEvent(
+			{
+				entityIds: cardEntityIds,
+				organizationId: ctx.organizationId,
+				originId: autoOperationCardOriginId(createdRunId),
+				title: bornFailed
+					? `${operation.name} — failed`
+					: `${operation.name} — dispatched`,
+				content: bornFailed
+					? `Operation failed: ${operation.name}${createdRun.errorMessage ? ` — ${createdRun.errorMessage}` : ""}`
+					: `Operation dispatched: ${operation.name}`,
+				semanticType: "operation",
+				connectorKey: connection.connector_key,
+				connectionId: args.connection_id,
+				runId: createdRunId,
+				interactionType: "approval",
+				// Pre-approved by configuration: `action_modes` granted this
+				// operation standing approval, which is the same fact
+				// `runs.approval_status='auto'` records. No decision is pending, so
+				// the chain starts one state later than a queued run's.
+				interactionStatus: bornFailed ? "failed" : "approved",
+				interactionError: bornFailed ? createdRun.errorMessage : null,
+				interactionInputSchema:
+					(operation.input_schema as Record<string, unknown> | undefined) ??
+					null,
+				interactionInput: input,
+				metadata: {
+					operation_key: operation.operation_key,
+					operation_name: operation.name,
+					action_key: operation.operation_key,
+					action_name: operation.name,
+					operation_input: input,
+					action_input: input,
+					input_schema: operation.input_schema ?? null,
+					// No approval_context and no review_fields: nothing here is
+					// awaiting review, and offering review affordances for a decision
+					// that was already made by configuration would be a lie.
+					status: bornFailed ? "failed" : AUTO_APPROVED_CARD_STATUS,
+					action_mode: mode,
+					...(bornFailed && createdRun.errorMessage
+						? { error_message: createdRun.errorMessage }
+						: {}),
+					connection_name: connection.display_name ?? connection.connector_key,
+					run_id: createdRunId,
+					initiator: {
+						kind: initiator.initiatorKind,
+						...initiator.initiatorRef,
+					},
+					...currentMcpActivityEventMetadata(ctx),
+				},
+				authorName: ctx.clientId ?? "agent",
+				clientId: ctx.tokenType === "oauth" ? (ctx.clientId ?? null) : null,
+			},
+			{ sql: tx },
+		);
+		return createdRun;
 	});
 	if (!claim.created) {
 		await trackOperationReaction(claim.runId);

@@ -2409,16 +2409,18 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			materializedActionOutput?.publishedArtifactIds ?? [];
 
 		// Atomic terminal-state transition with the shared F2 guard (see
-		// finalizeRun) AND, for approval-gated runs, the card supersede in ONE
-		// transaction, so a card INSERT failure rolls the run terminal state
-		// back instead of leaving a terminal run whose timeline is stuck at the
-		// prior card. Auto/no-approval runs (`approval_status='auto'`) have no
-		// card and finalize normally — no supersede is attempted. A no-op (0
-		// rows) means the row was already finalized by another path (e.g.
-		// waitForDeviceActionRun timed out and marked it 'timeout'). Without it a
-		// slow worker could overwrite a gateway-side timeout decision with
-		// success — and the caller has already returned timeout to its caller, so
-		// the action would double-finalize.
+		// finalizeRun) AND the operation card supersede in ONE transaction, so a
+		// card INSERT failure rolls the run terminal state back instead of
+		// leaving a terminal run whose timeline is stuck at the prior card. Both
+		// approval-gated and auto action runs carry a card now — an auto run is
+		// pre-approved by `action_modes`, not unrecorded — so both supersede
+		// here; only the approval-gated lane fails closed on a missing card,
+		// because an auto run created before the dispatch card existed has none
+		// and must still finalize. A no-op (0 rows) means the row was already
+		// finalized by another path (e.g. waitForDeviceActionRun timed out and
+		// marked it 'timeout'). Without it a slow worker could overwrite a
+		// gateway-side timeout decision with success — and the caller has already
+		// returned timeout to its caller, so the action would double-finalize.
 		const updatedRuns = await sql.begin(async (tx) => {
 			const rows = await finalizeRun(tx, {
 				runId: req.run_id,
@@ -2427,13 +2429,17 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				extraSet: tx`,
 					action_output = ${actionOutput ? tx.json(actionOutput) : null},
 					error_message = ${req.error_message ?? null}`,
-				returning: tx`organization_id, action_key, approval_status`,
+				returning: tx`organization_id, run_type, action_key, approval_status`,
 			});
 			if (rows.length === 0) return rows;
 
 			const organizationId = (rows[0] as any)?.organization_id;
 			const actionKey = (rows[0] as any)?.action_key ?? "Action";
-			if (organizationId && (rows[0] as any)?.approval_status === "approved") {
+			const approvalStatus = (rows[0] as any)?.approval_status;
+			const cardBearingRun =
+				approvalStatus === "approved" ||
+				((rows[0] as any)?.run_type === "action" && approvalStatus === "auto");
+			if (organizationId && cardBearingRun) {
 				const newStatus = req.status === "success" ? "completed" : "failed";
 				const eventId = await supersedeActionEvent(
 					req.run_id,
@@ -2449,7 +2455,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 					null,
 					tx
 				);
-				if (eventId === undefined) {
+				if (eventId === undefined && approvalStatus === "approved") {
 					throw new Error(
 						`Cannot finalize approval run ${req.run_id} as '${newStatus}': its approval card is missing`
 					);

@@ -1,7 +1,7 @@
 import { getErrorMessage } from "@lobu/core";
-import { getDb } from "../db/client";
 import { fetchCredentialedPublicUrl } from "@lobu/connector-worker/egress";
-import { LOST_LEASE_MESSAGE, runLeaseFence } from "../runs/run-lease";
+import { LOST_LEASE_MESSAGE } from "../runs/run-lease";
+import { terminalizeInlineOperationRun } from "./operation-run-card";
 import { resolveCredentialsByConnectionId } from "../mcp-proxy/credential-resolver";
 import { readResponseTextWithLimit } from "../utils/bounded-response";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
@@ -86,11 +86,15 @@ async function failRun(
 	if (!deferTerminalWrite) {
 		// Same lease fence as the completed/failed lanes below: a config refusal
 		// or a thrown request still terminalizes the run, and must not overwrite
-		// an outcome the reaper or a re-claim already recorded.
-		const sql = getDb();
-		const rows = await sql`UPDATE runs SET status = 'failed', completed_at = NOW(), error_message = ${message} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
-		if (rows.length === 0)
-			return { status: "failed", error_message: LOST_LEASE_MESSAGE };
+		// an outcome the reaper or a re-claim already recorded. The operation
+		// card supersede rides the same transaction.
+		const held = await terminalizeInlineOperationRun(
+			runId,
+			organizationId,
+			claimedBy,
+			{ status: "failed", errorMessage: message },
+		);
+		if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 	}
 	return { status: "failed", error_message: message };
 }
@@ -165,7 +169,6 @@ export async function executeHttpOperation(
 	deferTerminalWrite: boolean,
 	claimedBy: string,
 ): Promise<HttpOperationExecutionResult> {
-	const sql = getDb();
 	if (operation.backend_config.backend !== "http_operation") {
 		return failRun(
 			runId,
@@ -277,17 +280,26 @@ export async function executeHttpOperation(
 			const errorText =
 				typeof parsedBody === "string" ? parsedBody : `HTTP ${response.status}`;
 			if (!deferTerminalWrite) {
-				const updated = await sql`UPDATE runs SET status = 'failed', completed_at = NOW(), action_output = ${sql.json(output)}, error_message = ${errorText} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
-				if (updated.length === 0)
+				const held = await terminalizeInlineOperationRun(
+					runId,
+					organizationId,
+					claimedBy,
+					{ status: "failed", errorMessage: errorText, output },
+				);
+				if (!held)
 					return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 			}
 			return { status: "failed", error_message: errorText, output };
 		}
 
 		if (!deferTerminalWrite) {
-			const updated = await sql`UPDATE runs SET status = 'completed', completed_at = NOW(), action_output = ${sql.json(output)} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
-			if (updated.length === 0)
-				return { status: "failed", error_message: LOST_LEASE_MESSAGE };
+			const held = await terminalizeInlineOperationRun(
+				runId,
+				organizationId,
+				claimedBy,
+				{ status: "completed", output },
+			);
+			if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 		}
 		return { status: "completed", output, metadata };
 	} catch (error) {
