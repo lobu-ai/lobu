@@ -400,6 +400,30 @@ describe("Slack Preview claims + channel Automations", () => {
     });
   });
 
+  test("the demo commands are no longer registered", async () => {
+    // The self-serve `try` / `agents` surface is gone. `tryHandle` returns false
+    // for a name nothing registered, so this is the direct proof the removal
+    // took — the early-dispatch allowlist only covers whether they'd reach here.
+    const registry = new CommandRegistry();
+    registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: {} as never });
+    const ctx = {
+      userId: "U1",
+      channelId: "slack:D1",
+      teamId: "T1",
+      isGroup: false,
+      platform: "slack",
+      connectionId: FOREIGN_PREVIEW_CONNECTION,
+      organizationId: ORG_ID,
+      args: "",
+      reply: async () => {},
+    };
+    expect(await registry.tryHandle("try", ctx)).toBe(false);
+    expect(await registry.tryHandle("agents", ctx)).toBe(false);
+    // Control: a command that IS registered still resolves, so a broken harness
+    // cannot make the assertions above pass vacuously.
+    expect(await registry.tryHandle("link", ctx)).toBe(true);
+  });
+
   test("the link command explains the authorized connection boundary per platform", async () => {
     const registry = new CommandRegistry();
     registerBuiltInCommands(registry, { agentSettingsStore: {} as never, automationSubscriptionService: {} as never });

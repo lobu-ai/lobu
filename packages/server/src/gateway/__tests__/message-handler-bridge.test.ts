@@ -2230,11 +2230,11 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(payload.organizationId).toBe("org-bound");
   });
 
-  test("`/lobu link <code>` DM message dispatches link before the preview menu", async () => {
-    // On a previewMode bot, an unlinked DM normally gets the demo-agent menu.
+  test("`/lobu link <code>` DM message dispatches link before the preview notice", async () => {
+    // On a previewMode bot, an unlinked DM normally gets the unlinked-chat notice.
     // A `/lobu link <code>` arrives as plain message text in an AI-app DM (Slack
     // won't run slash commands there), so it MUST reach the dispatcher and bind
-    // — not be preempted by the menu. parsePreviewLinkCode routes it to `link`.
+    // — not be preempted by the notice. parsePreviewLinkCode routes it to `link`.
     const tryHandle = mock(async () => true);
     const tryHandleSlashText = mock(async () => false);
     const { bridge, enqueueMessage } = makePreviewHarness({
@@ -2252,7 +2252,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(tryHandle).toHaveBeenCalledTimes(1);
     expect(tryHandle.mock.calls[0]?.[0]).toBe("link");
     expect(tryHandle.mock.calls[0]?.[1]).toBe("crm-ABC123");
-    // The preview menu was NOT posted, and no agent run was queued.
+    // The preview notice was NOT posted, and no agent run was queued.
     expect(
       thread.post.mock.calls.every(
 				(c: unknown[]) => !String(c[0]).includes("/lobu link"),
@@ -2261,7 +2261,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage).not.toHaveBeenCalled();
   });
 
-  test("a bare preview-code paste in a DM dispatches link, not the menu", async () => {
+  test("a bare preview-code paste in a DM dispatches link, not the notice", async () => {
     const tryHandle = mock(async () => true);
     const { bridge, enqueueMessage } = makePreviewHarness({
       linkedAutomation: null,

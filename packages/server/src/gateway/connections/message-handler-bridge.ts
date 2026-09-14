@@ -1058,7 +1058,7 @@ export class MessageHandlerBridge {
     // bare `<slug>-<CODE>` paste — and redeems via the same `link` command. Gated
     // to previewMode so a normal agent bot's DMs (where a code-looking message is
     // just chat for the agent) are never swallowed. Runs before the worker
-    // enqueue and the previewMode menu so a pasted code binds.
+    // enqueue and the previewMode unlinked notice so a pasted code binds.
     if (
       !sessionReset &&
       this.commandDispatcher &&

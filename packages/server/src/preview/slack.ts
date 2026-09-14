@@ -503,10 +503,9 @@ export function previewUnlinkedNotice(platform: string): string {
 }
 
 /**
- * The org's agents + slug for building a link notice. Kept separate from
- * `listPreviewAgents` (which is preview-connection-scoped and excludes the
- * owning agent) — an OAuth-installed workspace has no owning agent, so every
- * agent in the org is a valid link target.
+ * The org's agents + slug for building a link notice. An OAuth-installed
+ * workspace has no owning agent, so every agent in the org is a valid link
+ * target.
  */
 async function listOrgAgentsForNotice(organizationId: string): Promise<{
 	orgSlug: string | null;
