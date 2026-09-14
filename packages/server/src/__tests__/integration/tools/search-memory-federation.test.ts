@@ -355,7 +355,7 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(highestGrantedRole([])).toBeNull();
   });
 
-  it('narrows through the grant resolver and makes unknown, ungranted, and revoked identical', async () => {
+  it('narrows through the grant resolver: unknown and revoked stay identical, ungranted membership hints re-consent', async () => {
     const narrowed = await search(
       {
         query: 'Atlas',
@@ -382,8 +382,12 @@ describe('search_memory direct OAuth workspace federation', () => {
     await getTestDb()`DELETE FROM member WHERE "userId" = ${user.id} AND "organizationId" = ${orgB.id}`;
     const revoked = await messageFor(orgB.slug);
     expect(unknown).toBe('Workspace is not available for this connection.');
-    expect(ungranted).toBe(unknown);
     expect(revoked).toBe(unknown);
+    // The caller is still a member of C — the grant snapshot just predates the
+    // membership — so they get an actionable re-consent hint naming the slug.
+    expect(ungranted).toContain(orgC.slug);
+    expect(ungranted).toContain('Reconnect');
+    expect(ungranted).not.toBe(unknown);
 
     const afterRevoke = await search(
       {

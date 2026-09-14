@@ -15,6 +15,8 @@ import {
 } from '../auth/tool-access';
 import {
   type GrantedMemberWorkspace,
+  findUngrantedMemberWorkspace,
+  formatUngrantedMemberMessage,
   listLiveGrantedMemberWorkspaces,
   resolveGrantedWorkspaceTarget,
 } from '../auth/oauth/workspace-grants';
@@ -378,7 +380,18 @@ async function resolveFederatedTargets(
       grantedOrganizationIds,
       slugOrId: args.workspace,
     });
-    if (!target) throw workspaceUnavailable();
+    if (!target) {
+      // Member-but-ungranted gets a re-consent hint (visible only to members);
+      // agent-bound sessions and non-members keep the indistinguishable answer.
+      if (!ctx.agentId && ctx.actingAutomationId == null) {
+        const ungranted = await findUngrantedMemberWorkspace({
+          userId: ctx.userId,
+          slugOrId: args.workspace,
+        });
+        if (ungranted) throw new ToolUserError(formatUngrantedMemberMessage(ungranted.slug), 403);
+      }
+      throw workspaceUnavailable();
+    }
     return [target];
   }
   return listLiveGrantedMemberWorkspaces({

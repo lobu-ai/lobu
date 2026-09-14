@@ -26,9 +26,10 @@ describe("cross-org gate", () => {
   });
 
   it("allowCrossOrg: true still denies a caller without a workspace grant snapshot", async () => {
-    // Unknown, ungranted, and missing-snapshot targets are deliberately
-    // indistinguishable: client.org() never acts as an org-name oracle. The
-    // DB-backed unknown/ungranted cases live in client-sdk-org.test.ts.
+    // A missing snapshot stays indistinguishable (generic denial, no DB lookup):
+    // member-but-ungranted hints only apply when a grant snapshot exists and a
+    // live membership check can tell the cases apart. The DB-backed
+    // unknown/ungranted/revoked cases live in client-sdk-org.test.ts.
     const sdk = buildClientSDK(ctx({ grantedOrganizationIds: null }), env, {
       mode: "read",
       allowCrossOrg: true,

@@ -122,3 +122,63 @@ export async function resolveGrantedWorkspaceTarget({
 		) ?? null
 	);
 }
+
+export interface UngrantedMemberWorkspace {
+	id: string;
+	slug: string;
+	name: string;
+	role: string;
+}
+
+/**
+ * Live membership check for a workspace the grant snapshot did not resolve.
+ * Returns the member row when `userId` belongs to `slugOrId` right now, null
+ * otherwise (unknown slug/id, or a real non-member).
+ *
+ * Callers use this ONLY after `resolveGrantedWorkspaceTarget` returned null to
+ * tell "you're a member but this authorization predates the membership"
+ * apart from "unknown or no access". The existence of a private workspace is
+ * revealed only to its own members, who can already see it via the session
+ * `/api/organizations` list — never to non-members.
+ */
+export async function findUngrantedMemberWorkspace({
+	sql = getDb(),
+	userId,
+	slugOrId,
+}: {
+	sql?: DbClient;
+	userId: string;
+	slugOrId: string;
+}): Promise<UngrantedMemberWorkspace | null> {
+	const target = slugOrId.trim();
+	if (!target || !userId) return null;
+	const rows = await sql`
+      SELECT o.id, o.slug, o.name, m.role
+      FROM organization o
+      JOIN member m
+        ON m."organizationId" = o.id
+       AND m."userId" = ${userId}
+      WHERE o.slug = ${target} OR o.id = ${target}
+      LIMIT 1
+    `;
+	if (rows.length === 0) return null;
+	const row = rows[0];
+	return {
+		id: String(row.id),
+		slug: String(row.slug),
+		name: String(row.name),
+		role: String(row.role),
+	};
+}
+
+/**
+ * Actionable copy for the member-but-ungranted case. Names the canonical slug
+ * from the live member row (not the caller's raw input) and points at the
+ * fix: a fresh OAuth consent that includes the workspace.
+ */
+export function formatUngrantedMemberMessage(slug: string): string {
+	return (
+		`You are a member of '${slug}' but this authorization doesn't include it. ` +
+		`Reconnect with OAuth consent for that workspace, then retry.`
+	);
+}

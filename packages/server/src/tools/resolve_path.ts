@@ -9,7 +9,7 @@
 
 import * as Sentry from '@sentry/node';
 import { type Static, Type } from '@sinclair/typebox';
-import { resolveGrantedWorkspaceTarget } from '../auth/oauth/workspace-grants';
+import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGrantedWorkspaceTarget } from '../auth/oauth/workspace-grants';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
@@ -451,7 +451,18 @@ async function _resolvePath(
       `;
       if (publicRows.length === 0) {
         // Unknown, ungranted, and private workspaces deliberately collapse to
-        // one result so `resolve_path` cannot be used as an org-name oracle.
+        // one result so `resolve_path` cannot be used as an org-name oracle —
+        // except for the caller's own memberships, which get an actionable
+        // re-consent hint (visible only to members; never to agent-bound
+        // sessions or non-members).
+        if (ctx.userId && !ctx.agentId && ctx.actingAutomationId == null) {
+          const ungranted = await findUngrantedMemberWorkspace({
+            sql,
+            userId: ctx.userId,
+            slugOrId: workspace.id,
+          });
+          if (ungranted) throw new ToolUserError(formatUngrantedMemberMessage(ungranted.slug), 403);
+        }
         throw new ToolUserError('Workspace is not available for this authorization', 404);
       }
       // Cross-workspace public browse is intentionally readable, but never

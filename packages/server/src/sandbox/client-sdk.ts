@@ -14,7 +14,7 @@ import {
 	SAFE_COLUMN_DEFS,
 } from "../utils/table-schema";
 import type { AccountToolContext, ToolContext } from "../tools/registry";
-import { resolveGrantedWorkspaceTarget } from "../auth/oauth/workspace-grants";
+import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngrantedMemberMessage } from "../auth/oauth/workspace-grants";
 import { raceAbort } from "../utils/race-abort";
 import { METHOD_METADATA } from "./method-metadata";
 import type { SDKMode } from "./sdk-manifest";
@@ -107,8 +107,12 @@ class SdkError extends Error {
 }
 
 export class CrossOrgAccessDenied extends SdkError {
-	constructor(message: string) {
+	readonly reason: "ungranted_member" | "unavailable";
+	readonly workspaceSlug: string | null;
+	constructor(message: string, opts?: { reason?: CrossOrgAccessDenied["reason"]; workspaceSlug?: string | null }) {
 		super("CrossOrgAccessDenied", message);
+		this.reason = opts?.reason ?? "unavailable";
+		this.workspaceSlug = opts?.workspaceSlug ?? null;
 	}
 }
 
@@ -139,6 +143,24 @@ export async function resolveCrossOrgToolContext(
 		slugOrId,
 	});
 	if (!member) {
+		// Member-but-ungranted (e.g. an org created after this OAuth consent)
+		// gets an actionable hint; unknown and non-member targets keep the
+		// generic answer so client.org() never oracles private workspaces.
+		// Agent/automation-bound sessions keep the generic answer too: their
+		// fix is reconnecting without the binding, not re-consent, and the
+		// bound agent is not the audience for membership enumeration.
+		if (!ctx.agentId && ctx.actingAutomationId == null) {
+			const ungranted = await findUngrantedMemberWorkspace({
+				userId: ctx.userId,
+				slugOrId,
+			});
+			if (ungranted) {
+				throw new CrossOrgAccessDenied(formatUngrantedMemberMessage(ungranted.slug), {
+					reason: "ungranted_member",
+					workspaceSlug: ungranted.slug,
+				});
+			}
+		}
 		throw new CrossOrgAccessDenied(
 			"Workspace is not available for this authorization."
 		);

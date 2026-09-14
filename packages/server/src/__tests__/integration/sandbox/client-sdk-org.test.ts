@@ -157,6 +157,30 @@ describe("ClientSDK.org() accessor", () => {
       expect(sdkBackToA).toBeDefined();
     });
 
+    it(".org() hints re-consent for a member workspace outside the grant snapshot", async () => {
+      // The new-org case: user1 belongs to orgB but this authorization predates
+      // the membership, so the slug resolves to a hint instead of "not found".
+      const ctx = buildCtx(user1.id, orgA.id, [orgA.id]);
+      const sdk = buildClientSDK(ctx, testEnv);
+      const err = await sdk.org(orgB.slug).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossOrgAccessDenied);
+      expect(err.reason).toBe("ungranted_member");
+      expect(err.workspaceSlug).toBe(orgB.slug);
+      expect(String(err.message)).toContain(orgB.slug);
+      expect(String(err.message)).toContain("Reconnect");
+    });
+
+    it(".org() keeps unknown slugs indistinguishable from non-members", async () => {
+      const ctx = buildCtx(user1.id, orgA.id, [orgA.id]);
+      const sdk = buildClientSDK(ctx, testEnv);
+      const err = await sdk.org("workspace-that-does-not-exist").catch((e) => e);
+      expect(err).toBeInstanceOf(CrossOrgAccessDenied);
+      expect(err.reason).toBe("unavailable");
+      expect(String(err.message)).toBe(
+        "Workspace is not available for this authorization."
+      );
+    });
+
     it("revocation is detected after explicit cache invalidation", async () => {
       const ctx = buildCtx(user1.id, orgA.id, [orgA.id, orgB.id]);
       const sdk = buildClientSDK(ctx, testEnv);
@@ -165,9 +189,10 @@ describe("ClientSDK.org() accessor", () => {
       const sql = getTestDb();
       await sql`DELETE FROM "member" WHERE "userId" = ${user1.id} AND "organizationId" = ${orgB.id}`;
 
-      await expect(sdk.org(orgB.slug)).rejects.toBeInstanceOf(
-        CrossOrgAccessDenied
-      );
+      // No longer a member: back to the indistinguishable generic denial.
+      const err = await sdk.org(orgB.slug).catch((e) => e);
+      expect(err).toBeInstanceOf(CrossOrgAccessDenied);
+      expect(err.reason).toBe("unavailable");
     });
 
     it("rejects workspace changes for an agent-bound session", async () => {

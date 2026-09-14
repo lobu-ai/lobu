@@ -1,7 +1,7 @@
 import { type Static, Type } from '@sinclair/typebox';
 import type { AccountToolContext } from './tools/registry';
 import { resolveCrossOrgToolContext } from './sandbox/client-sdk';
-import { resolveGrantedWorkspaceTarget } from './auth/oauth/workspace-grants';
+import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace } from './auth/oauth/workspace-grants';
 import { getLobuCoreServices } from './lobu/gateway';
 import { attachmentFromUrl, ingestInputFiles, MAX_INPUT_FILES } from './gateway/files/input-files';
 import { ToolUserError } from './utils/errors';
@@ -40,7 +40,18 @@ export async function ingestMcpFiles(
       const current = ctx.organizationId && ctx.userId
         ? await resolveGrantedWorkspaceTarget({ userId: ctx.userId, grantedOrganizationIds: [ctx.organizationId], slugOrId: organization })
         : null;
-      if (!current) throw new ToolUserError('File workspace is unavailable to this connection.', 403);
+      if (!current) {
+        if (ctx.userId && !ctx.agentId && ctx.actingAutomationId == null) {
+          const ungranted = await findUngrantedMemberWorkspace({ userId: ctx.userId, slugOrId: organization });
+          if (ungranted) {
+            throw new ToolUserError(
+              `You are a member of '${ungranted.slug}' but this connection is bound to another workspace. Reconnect to /mcp/${ungranted.slug} for that workspace, then retry.`,
+              403
+            );
+          }
+        }
+        throw new ToolUserError('File workspace is unavailable to this connection.', 403);
+      }
       owner = { ...ctx, memberRole: current.role };
     }
   }

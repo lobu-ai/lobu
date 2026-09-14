@@ -630,6 +630,9 @@ describe('MCP Authentication', () => {
       const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
       const unavailable = 'Workspace is not available for this authorization';
 
+      // The caller is a member of org2 — the grant just predates it — so the
+      // denial names the workspace with a re-consent hint instead of the
+      // indistinguishable answer reserved for unknown/non-member targets.
       const deniedPaths = [
         { path: `/${org2.slug}` },
         { path: `/${org2.slug}/brand/private-b-resolve-path-secret` },
@@ -644,8 +647,8 @@ describe('MCP Authentication', () => {
         expect(denied.error).toBeUndefined();
         expect(denied.result?.isError).toBe(true);
         const text = String(denied.result?.content?.[0]?.text);
-        expect(text).toBe(unavailable);
-        expect(text).not.toContain(org2.slug);
+        expect(text).toContain(org2.slug);
+        expect(text).toContain('Reconnect');
         expect(text).not.toContain(secretEntityName);
       }
 
@@ -674,8 +677,10 @@ describe('MCP Authentication', () => {
         body: { path: `/${org2.slug}`, include_bootstrap: true },
         token,
       });
-      expect(urlBodyMismatch.status).toBe(404);
-      expect(await urlBodyMismatch.json()).toEqual({ error: unavailable });
+      expect(urlBodyMismatch.status).toBe(403);
+      const urlBodyMismatchJson = await urlBodyMismatch.json();
+      expect(String(urlBodyMismatchJson.error)).toContain(org2.slug);
+      expect(String(urlBodyMismatchJson.error)).toContain('Reconnect');
 
       const publicBrowse = await mcpToolsCall<any>(
         'resolve_path',
