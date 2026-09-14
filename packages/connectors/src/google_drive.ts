@@ -1007,14 +1007,14 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       };
     }
 
-    const encoded = new TextEncoder().encode(await response.text());
-    const { content: text, truncated } = inlineText(encoded, maxBytes);
+    const raw = await response.text();
+    const { content: text, truncated } = inlineText(raw, maxBytes);
 
     return {
       ok: true,
       text,
       truncated,
-      byteCount: encoded.byteLength,
+      byteCount: new TextEncoder().encode(raw).byteLength,
       ...(exportMime ? { exportedAs: exportMime } : {}),
     };
   }

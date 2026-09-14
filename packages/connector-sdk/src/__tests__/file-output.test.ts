@@ -66,6 +66,19 @@ describe('downloadSizeError', () => {
 });
 
 describe('inlineText', () => {
+  test('a string source is identical to encoding it first', () => {
+    // The feed path hands inlineText the string it already decoded, instead of
+    // re-encoding a full copy for inlineText to decode again. The two entry
+    // points must not be allowed to drift apart.
+    for (const sample of ['plain ascii', 'a\u20acb multi-byte', 'x'.repeat(300)]) {
+      for (const budget of [4, 8, 1024]) {
+        expect(inlineText(sample, budget)).toEqual(
+          inlineText(new TextEncoder().encode(sample), budget),
+        );
+      }
+    }
+  });
+
   test('returns the whole text untouched when it fits', () => {
     expect(inlineText(utf8('hello'), 100)).toEqual({ content: 'hello', truncated: false });
   });

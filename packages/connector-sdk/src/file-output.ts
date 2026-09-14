@@ -118,10 +118,15 @@ function decodeTruncated(encoded: Uint8Array, maxBytes: number): string {
  * same as the first page of an untruncated one.
  */
 export function inlineText(
-  bytes: Uint8Array,
+  source: Uint8Array | string,
   maxBytes: number,
 ): { content: string; truncated: boolean } {
-  const text = new TextDecoder('utf-8').decode(bytes);
+  // A caller that already decoded (a feed reading `response.text()`) passes the
+  // string: re-encoding it only to decode it back here is a full extra copy of
+  // every file on the ingest path, and it is a no-op — `response.text()` has
+  // already substituted U+FFFD for anything undecodable, and that round-trips
+  // cleanly.
+  const text = typeof source === 'string' ? source : new TextDecoder('utf-8').decode(source);
   const encoded = new TextEncoder().encode(text);
   if (encoded.byteLength <= maxBytes) return { content: text, truncated: false };
   return { content: decodeTruncated(encoded, maxBytes), truncated: true };
