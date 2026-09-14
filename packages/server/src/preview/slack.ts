@@ -605,14 +605,20 @@ export function previewAgentMenu(
 /**
  * Reply for a `previewMode` connection when an unlinked chat arrives. If the
  * connection's org has demo agents, it's the `/lobu try` menu; otherwise it
- * falls back to "wire your own agent" instructions. Returns null only when
- * there's nothing useful to say (unknown platform).
+ * falls back to "wire your own agent" instructions.
+ *
+ * Never returns null, on any platform: the caller has no safe fall-through. A
+ * hosted bot takes installs and DMs from people who belong to no organization
+ * here, so skipping the notice would run the connection's OWNING agent — and
+ * that agent's model credentials and tool access — for a sender who linked
+ * nothing. Nothing here needs a platform gate: the caller has already
+ * established this is a `previewMode` connection, and `formatChatCommand`
+ * spells the link command for any platform.
  */
 export async function previewUnlinkedNotice(
 	platform: string,
 	connectionId: string,
-): Promise<string | null> {
-	if (!PREVIEW_PLATFORMS.has(platform)) return null;
+): Promise<string> {
 	const agents = await listPreviewAgents(connectionId);
 	if (agents.length > 0) {
 		return [

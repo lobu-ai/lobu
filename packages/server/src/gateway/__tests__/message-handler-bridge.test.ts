@@ -968,6 +968,37 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage).not.toHaveBeenCalled();
   });
 
+  test("an unlinked hosted-bot chat never runs the owning agent, on any platform", async () => {
+    // The owning agent carries its organization's model credentials and tool
+    // access, and a hosted bot takes DMs from senders who belong to no
+    // organization here — so an unbound conversation must end in a link notice
+    // with NO agent turn. Enumerated across every hosted platform because the
+    // defect was one platform the notice path didn't cover, which fell through
+    // to the owner's agent instead of failing closed.
+    const routed: Record<string, { enqueued: number; posts: string[] }> = {};
+    for (const platform of ["slack", "telegram", "gchat"]) {
+      const { bridge, enqueueMessage } = makePreviewHarness({
+        platform,
+        linkedAutomation: null,
+      });
+      const thread = makeThread(undefined);
+
+      await bridge.handleMessage(thread, makeMessage(), "dm");
+
+      routed[platform] = {
+        enqueued: enqueueMessage.mock.calls.length,
+        posts: thread.post.mock.calls.map((call: unknown[]) => String(call[0])),
+      };
+    }
+
+    // Exactly one post per platform, spelling that platform's link command.
+    expect(routed).toEqual({
+      slack: { enqueued: 0, posts: [expect.stringContaining("/lobu link")] },
+      telegram: { enqueued: 0, posts: [expect.stringContaining("/link")] },
+      gchat: { enqueued: 0, posts: [expect.stringContaining("/lobu link")] },
+    });
+  });
+
   test("adapter-normalized help dispatches before preview onboarding", async () => {
     const tryHandleSlashText = mock(async () => true);
     const { bridge, enqueueMessage } = makePreviewHarness({

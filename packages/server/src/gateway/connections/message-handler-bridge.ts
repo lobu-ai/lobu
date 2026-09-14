@@ -1102,27 +1102,28 @@ export class MessageHandlerBridge {
       if (handled) return;
     }
 
-    // Preview connection (a hosted Lobu workspace bot — Slack, Telegram, …):
-    // an unlinked DM/@-mention that ISN'T a command. Don't run the connection's
-    // placeholder owning agent — reply with the "pick a demo agent" menu (or the
-    // "wire your own agent" instructions) and stop. This MUST come after the
-    // slash dispatch above: `/lobu link <code>` / `/lobu try <id>` arrive as
-    // slash commands in channels, but as plain message text in an "Agents & AI
-    // Apps" DM — they have to bind/pick via the dispatcher before we'd otherwise
-    // preempt them with this menu.
+    // Preview connection (a hosted Lobu workspace bot — Slack, Telegram, Google
+    // Chat): an unlinked DM/@-mention that ISN'T a command. Don't run the
+    // connection's placeholder owning agent — that agent carries its
+    // organization's model credentials and tool access, and a hosted bot takes
+    // DMs from people who belong to no organization here. Reply with the "pick a
+    // demo agent" menu (or the "wire your own agent" instructions) and stop,
+    // unconditionally: `previewUnlinkedNotice` never declines, so there is no
+    // fall-through. This MUST come after the slash dispatch above: `/lobu link
+    // <code>` / `/lobu try <id>` arrive as slash commands in channels, but as
+    // plain message text in an "Agents & AI Apps" DM — they have to bind/pick
+    // via the dispatcher before we'd otherwise preempt them with this menu.
     if (
       resolved.source === "connection" &&
       this.connection.settings?.previewMode === true
     ) {
       const notice = await previewUnlinkedNotice(platform, this.connection.id);
-      if (notice) {
-        logger.info(
-          { platform, channelId, teamId, connectionId: this.connection.id },
-          "Preview connection: unlinked chat — replying with demo-agent menu"
-        );
-        await thread.post(notice);
-        return;
-      }
+      logger.info(
+        { platform, channelId, teamId, connectionId: this.connection.id },
+        "Preview connection: unlinked chat — replying with the link notice"
+      );
+      await thread.post(notice);
+      return;
     }
 
     // Gap 1: Retrieve + append conversation history via the SDK state adapter.
