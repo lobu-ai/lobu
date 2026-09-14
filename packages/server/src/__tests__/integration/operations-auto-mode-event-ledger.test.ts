@@ -440,9 +440,12 @@ describe("operation ledger under auto action mode", () => {
 		expect(result.reaped).toBeGreaterThan(0);
 
 		const [runRow] = (await sql`
-			SELECT status FROM runs WHERE id = ${runId}
-		`) as unknown as Array<{ status: string }>;
+			SELECT status, error_message FROM runs WHERE id = ${runId}
+		`) as unknown as Array<{ status: string; error_message: string | null }>;
 		expect(runRow.status).toBe("timeout");
+		// This run was never claimed (claimed_at NULL), so the reaper classifies
+		// it as a claim timeout rather than a lost heartbeat.
+		expect(runRow.error_message).toBe("worker_claim_timeout");
 
 		const rows = await operationLedger(orgId, runId);
 		expect(rows).toHaveLength(2);
@@ -453,6 +456,10 @@ describe("operation ledger under auto action mode", () => {
 		});
 		expect(Number(rows[1].supersedes_event_id)).toBe(Number(rows[0].id));
 		expect(rows[1].metadata.run_status).toBe("timeout");
+		// The card must record the SAME cause the run row got. Hardcoding one of
+		// the two reaper causes here made the ledger contradict the run it
+		// describes, which is exactly the contract this test exists to hold.
+		expect(rows[1].metadata.error_message).toBe(runRow.error_message);
 		await execution;
 	});
 

@@ -18,7 +18,7 @@
  * `runs.approval_status='auto'` records) and there is no decision left to make.
  */
 
-import { type DbClient, getDb } from "../db/client";
+import { getDb } from "../db/client";
 import { runLeaseFence } from "../runs/run-lease";
 import { supersedeActionEvent } from "../tools/admin/approval-events";
 
@@ -63,9 +63,8 @@ export async function terminalizeInlineOperationRun(
 	organizationId: string,
 	claimedBy: string,
 	terminal: InlineOperationTerminal,
-	db: DbClient = getDb(),
 ): Promise<boolean> {
-	return db.begin(async (tx) => {
+	return getDb().begin(async (tx) => {
 		const output = terminal.output ?? null;
 		const errorMessage =
 			terminal.status === "failed" ? terminal.errorMessage : null;

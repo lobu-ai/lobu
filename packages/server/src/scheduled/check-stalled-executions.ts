@@ -555,7 +555,8 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
              json_agg(json_build_object(
                'runId', id,
                'organizationId', organization_id,
-               'actionKey', action_key
+               'actionKey', action_key,
+               'staleStatus', stale_status
              )),
              '[]'::json
            )
@@ -629,17 +630,24 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         runId: number;
         organizationId: string;
         actionKey: string | null;
+        staleStatus: string | null;
       }>) {
         const actionKey = row.actionKey ?? 'Operation';
+        // Mirror the CASE that set `runs.error_message` above: a row reaped at
+        // 'pending' was never claimed by a worker, so its cause is the claim
+        // timeout, not a lost heartbeat. Hardcoding one of the two here made
+        // the ledger card contradict the run it describes.
+        const reason =
+          row.staleStatus === 'pending' ? claimErrorMessage : heartbeatErrorMessage;
         try {
           await supersedeActionEvent(
             row.runId,
             row.organizationId,
             'failed',
             `${actionKey} — timed out`,
-            `Operation timed out: ${actionKey} — ${heartbeatErrorMessage}`,
+            `Operation timed out: ${actionKey} — ${reason}`,
             {
-              error_message: heartbeatErrorMessage,
+              error_message: reason,
               run_status: 'timeout',
             }
           );
