@@ -48,6 +48,7 @@ const TOPIC_RECORD_SCHEMA = {
   properties: {
     category: { type: 'string' },
     name: { type: 'string' },
+    severity: { type: 'string' },
   },
   additionalProperties: true,
 };
@@ -933,6 +934,57 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     expect(after.name).toBe('Deploy the crash fix');
     expect(after.metadata.name).toBe('Deploy the crash fix');
     expect(after.slug).toBe(held.slug);
+  });
+
+  it('rebuilds the title from only the applied half of a split naming set', async () => {
+    // Two naming fields, one human-owned and one still automation-owned. The
+    // derived title must track the field that applied and must NOT leak the
+    // held one, so it diverges from BOTH the stored name and the proposal.
+    const ctx = await setupKeyedAutomation({
+      problems: { entity: 'topic', key: ['category'], name: ['name', 'severity'] },
+    });
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'Investigate the crash', severity: 'low' }],
+    });
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id} AND namespace = 'automation_key'
+    `;
+    const [seeded] = await ctx.sql`SELECT name, slug FROM entities WHERE id = ${created.entity_id}`;
+    expect(seeded.name).toBe('Investigate the crash \u00b7 low');
+
+    // The human claims `name` only; `severity` stays automation-owned.
+    await ctx.workspace.owner.entities.update({
+      entity_id: Number(created.entity_id), affirm_fields: ['name'], field_note: 'Wording is mine',
+    });
+
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, {
+      problems: [{ category: 'Stability', name: 'Deploy the crash fix', severity: 'high' }],
+    });
+
+    const [held] = await ctx.sql`SELECT name, slug, metadata FROM entities WHERE id = ${created.entity_id}`;
+    // severity applied, name held -> title is neither the old nor the proposed one.
+    expect(held.metadata.name).toBe('Investigate the crash');
+    expect(held.metadata.severity).toBe('high');
+    expect(held.name).toBe('Investigate the crash \u00b7 high');
+    expect(held.name).not.toContain('Deploy the crash fix');
+    expect(held.slug).toBe(seeded.slug);
+
+    const [card] = await ctx.sql`
+      SELECT id, action_input FROM runs WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity_field_change' AND approval_status = 'pending'
+    `;
+    expect(card.action_input.fields.name).toBe('Deploy the crash fix');
+    expect(card.action_input.fields.$name).toBe('Deploy the crash fix \u00b7 high');
+
+    await executeTool('manage_operations', { action: 'approve', run_id: Number(card.id) },
+      TEST_ENV, ownerAuthCtx(ctx.workspace.org.id, ctx.workspace.users.owner.id));
+    const [approved] = await ctx.sql`SELECT name, slug, metadata FROM entities WHERE id = ${created.entity_id}`;
+    expect(approved.metadata.name).toBe('Deploy the crash fix');
+    expect(approved.name).toBe('Deploy the crash fix \u00b7 high');
+    expect(approved.slug).toBe(seeded.slug);
   });
 
   it.each(['approval', 'deny'] as const)('honors a $name %s policy for derived names', async (effect) => {
