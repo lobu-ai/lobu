@@ -553,9 +553,11 @@ export class MessageHandlerBridge {
    * no channel Automation and the connection has no owning agent — with a
    * "link this chat" notice instead of dropping silently.
    *
-   * Slack keeps its original gate: only a tenant's OAuth-installed workspace
-   * bot (`metadata.teamId`) gets the deep-linked notice. Every other platform
-   * gets the generic dashboard+CLI notice (#2230). Loop safety needs no extra
+   * Every platform gets the deep-linked notice. Only two things here remain
+   * Slack-specific, and both are enrichment: the `metadata.teamId` gate on a
+   * tenant's OAuth-installed workspace bot, and the `conversations.info`
+   * lookup that turns a channel id into a friendly `#name` for the link label
+   * (#2230). Loop safety needs no extra
    * state: the Chat SDK never re-delivers the bot's own posts (`isMe`), and a
    * channel with an Automation subscription never reaches this dead end (the
    * planner-rejection guard in `handleMessage` drops it silently first).

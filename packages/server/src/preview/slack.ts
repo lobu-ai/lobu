@@ -679,13 +679,15 @@ async function listOrgAgentsForNotice(organizationId: string): Promise<{
  * tenant's agents yet. Unlike a preview connection there are no demo agents to
  * offer — the tenant links their own agents.
  *
- * Slack: lists the org's agents and, when the public origin is configured,
- * deep-links each to its Automations page (where a channel is added as a Listen
- * source); also gives the CLI `lobu run` / `/lobu link <code>` path.
+ * EVERY chat platform gets the same thing: the org's agents, each deep-linked
+ * to its Automations page (where this chat is added as a Listen source) when
+ * the public origin is configured, plus the CLI `lobu run` / link-code path.
  *
- * Every other platform (Telegram, …) gets a generic dashboard+CLI notice —
- * there is no workspace/team concept to deep-link, and dropping silently left
- * the user with no signal at all (#2230).
+ * Two things stay per-platform, and both are spellings rather than behaviour:
+ * `formatChatLink` renders the link in the platform's own syntax, and
+ * `platform=` carries the connection's real `connector_key`, which is what the
+ * Automation editor matches on. Dropping the notice silently left the user with
+ * no signal at all (#2230).
  */
 export async function workspaceUnlinkedNotice(
 	platform: string,
