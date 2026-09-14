@@ -905,13 +905,19 @@ async function fetchContentSnippets(
     // keep the (non-nullable) `text_content` schema field honest: "" is the
     // correct representation of no text, so structuredContent stays valid.
     const text = c.payload_text ?? '';
+    // `platform` is COALESCE(events.connector_key, connections.connector_key):
+    // system rows (e.g. "Connection needs authorization") have neither, so it
+    // can be null. Coalesce to 'lobu' — same as toExactContentSnippet — to keep
+    // the non-nullable schema field honest.
+    const platform =
+      typeof c.platform === 'string' && c.platform.length > 0 ? c.platform : 'lobu';
     return {
       id: c.id,
       title: c.title,
       text_content: text.length > 500 ? `${text.slice(0, 500)}...` : text,
       author_name: c.author_name,
       source_url: c.source_url,
-      platform: c.platform,
+      platform,
       occurred_at: c.occurred_at,
       similarity: c.similarity,
       entity_ids: Array.isArray(c.entity_ids) ? c.entity_ids.map(Number) : [],
