@@ -47,7 +47,9 @@ defineConnection({
 `lobu init --from-org <slug>`. It is optional only so older single-grant configs
 keep working: with it omitted, one matching grant resolves normally and more
 than one is refused as 409 `ambiguous_connection` rather than guessed at.
-`credentialMode` is derived from `managedBy` — do not set it by hand.
+Omit `credentialMode`: `managedBy` alone is sufficient. Nothing derives the
+field — `map-config.ts:854-862` only rejects the inconsistent pairs
+(`"managed"` without `managedBy`, `"byo"` with it).
 
 At execution, `resolveManagedByForConnection` reads `config.managedBy` and
 `fetchManagedConnectionToken` POSTs to the cloud's `/oauth/connection-token`,
@@ -112,9 +114,17 @@ every URI as valid, so always include a known-bad negative control.
 
 ## Proving a change
 
-`scripts/managed-e2e.sh` boots two real `lobu run` instances plus mock OAuth and
-data servers and exercises cloud-auth/local-data over real HTTP. Use it rather
-than hand-wiring a token.
+`scripts/managed-e2e.sh` boots two real `lobu run` instances — a cloud one
+holding the grant and a local one holding none — and exercises
+cloud-auth/local-data over real HTTP. Use it rather than hand-wiring a token.
+
+There is no mock OAuth server: the cloud grant is seeded straight into the
+cloud instance's embedded Postgres as an `oauth_app` profile plus an
+`oauth_account` row with a non-expiring access token. The two mocks are a
+mock LLM provider (`scripts/agent-turn-e2e/mock-openai.mjs`, needed because
+both instances apply a project declaring an agent) and a mock data API
+(`scripts/managed-e2e/mock-data-api.mjs`, which 401s on anything but the exact
+managed bearer — that is what proves the token actually travelled).
 
 ## Key files
 
