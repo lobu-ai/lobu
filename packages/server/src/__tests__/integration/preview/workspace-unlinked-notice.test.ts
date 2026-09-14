@@ -1,8 +1,10 @@
 /**
  * `workspaceUnlinkedNotice` — the reply from a tenant connection with no owning
- * agent when a chat is not bound to an Automation. Slack gets agent deep links and
- * `/lobu link`; other platforms get generic dashboard and `/link` instructions.
- * The notice must remain available when the Slack agent lookup fails.
+ * agent when a chat is not bound to an Automation. EVERY chat platform gets the
+ * same agent deep links into the Automation editor, each rendered in that
+ * platform's own link syntax and carrying that platform's own `platform=` value
+ * (the editor matches it against the connection's `connector_key`). The notice
+ * must remain available when the agent lookup fails.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -36,15 +38,75 @@ describe("workspaceUnlinkedNotice", () => {
 		setOrigin(savedOrigin);
 	});
 
-	it("returns a generic dashboard+CLI notice for Telegram (#2230)", async () => {
+	it("returns the CLI notice in the platform's own command spelling when the org has no agents (#2230)", async () => {
 		const org = await createTestOrganization();
 		const text = await workspaceUnlinkedNotice("telegram", org.id);
 		expect(text).toContain("isn't linked");
-		// The platform's own command spelling, not Slack's `/lobu link` wrapper…
+		// The platform's own command spelling, not Slack's `/lobu link` wrapper.
 		expect(text).toContain("/link <code>");
 		expect(text).not.toContain("/lobu link");
-		// …and no Slack workspace/team deep links or mrkdwn inline links.
-		expect(text).not.toContain("<http");
+	});
+
+	// The deep link used to be gated to Slack: every other platform hard-returned
+	// a linkless notice, and the one link that was built hardcoded
+	// `platform=slack`, which the editor matches against the connection's
+	// `connector_key` — so it would have matched nothing anyway. Enumerate the
+	// class rather than the platform that happened to report it.
+	it.each([
+		["gchat", "/lobu link"],
+		["telegram", "/link"],
+		["discord", "/link"],
+		["teams", "/link"],
+		["whatsapp", "/link"],
+	])(
+		"deep-links agents on %s with that platform's own connector_key",
+		async (platform, linkSpelling) => {
+			setOrigin("https://app.lobu.ai");
+			const org = await createTestOrganization({ slug: "acme" });
+			await createTestAgent({
+				organizationId: org.id,
+				agentId: "planner",
+				name: "Planner",
+			});
+
+			const text = await workspaceUnlinkedNotice(platform, org.id, {
+				channelId: "spaces/AAQA",
+				connectionId: "42",
+			});
+
+			// The editor keys off `platform=` === connector_key, so it must be the
+			// real platform — never a hardcoded "slack".
+			expect(text).toContain(`platform=${platform}`);
+			expect(text).not.toContain("platform=slack");
+			expect(text).toContain(
+				"https://app.lobu.ai/acme/automations/new?agent=planner",
+			);
+			expect(text).toContain("connection=42");
+			// Non-Slack surfaces auto-linkify a bare URL; mrkdwn `<url|label>` would
+			// render literally there, so it must not be used.
+			expect(text).not.toContain("<http");
+			expect(text).toContain("Planner — https://app.lobu.ai/acme/automations");
+			expect(text).toContain(linkSpelling);
+		},
+	);
+
+	it("omits the Slack `#` label prefix on platforms that name their own surfaces", async () => {
+		setOrigin("https://app.lobu.ai");
+		const org = await createTestOrganization({ slug: "acme" });
+		await createTestAgent({
+			organizationId: org.id,
+			agentId: "planner",
+			name: "Planner",
+		});
+
+		const text = await workspaceUnlinkedNotice("gchat", org.id, {
+			channelId: "spaces/AAQA",
+			channelName: "Team Space",
+		});
+
+		// `%23` is the encoded `#` — a Google Chat space is not a Slack channel.
+		expect(text).toContain("label=Team+Space");
+		expect(text).not.toContain("label=%23");
 	});
 
 	it('deep-links each agent to the Automations "new" step with the channel prefilled', async () => {

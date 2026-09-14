@@ -15,7 +15,10 @@ import { requireOrgUser } from "../utils/require-org-user";
 import { MANAGED_CHAT_PLATFORMS_SET } from "./managed-platforms";
 import { AutomationSubscriptionService } from "../gateway/channels/automation-subscription-service";
 import { canLinkChatOrganizations } from "../gateway/channels/chat-link-authorization";
-import { formatChatCommand } from "../gateway/commands/command-spelling";
+import {
+	formatChatCommand,
+	formatChatLink,
+} from "../gateway/commands/command-spelling";
 
 // Slack Preview lets people trying Lobu locally talk to their agent through the
 // hosted "Lobu Developer" Slack workspace before they have their own bot token.
@@ -671,20 +674,6 @@ async function listOrgAgentsForNotice(organizationId: string): Promise<{
 }
 
 /**
- * Escape the Slack mrkdwn chars that break an inline `<url|label>` link label.
- * Agent names are user-controlled; a `>`, `<`, or `&` in a name would otherwise
- * terminate/mangle the link (Slack reads `text` as mrkdwn, and `&` is the entity
- * escape prefix). Mirrors the private `escapeMrkdwn` in slack-platform-bridge.ts;
- * kept local because preview and gateway/connections are separate modules.
- */
-function escapeMrkdwnLabel(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;");
-}
-
-/**
  * Reply for a tenant's own workspace bot (a connection with no owning agent)
  * when a non-command message arrives in a chat that isn't bound to one of the
  * tenant's agents yet. Unlike a preview connection there are no demo agents to
@@ -708,22 +697,8 @@ export async function workspaceUnlinkedNotice(
 		connectionId?: string;
 	},
 ): Promise<string> {
-	// Non-Slack platforms have no workspace/team deep links, so the notice is
-	// generic: the dashboard path plus the platform's own link command.
-	// Deliberately static — no DB/origin lookups whose failure could turn the
-	// reply back into a dead drop.
-	if (platform !== "slack") {
-		return [
-			"👋 This chat isn't linked to a Lobu agent yet.",
-			"",
-			"Link it two ways:",
-			"• In the dashboard — create an Automation for an agent and add this chat as a Listen source.",
-			`• From the CLI — run \`lobu run\`, then paste the \`${linkCommand(platform)} <code>\` it prints here.`,
-		].join("\n");
-	}
-
 	const header =
-		"👋 Thanks for adding Lobu! This channel isn't linked to one of your agents yet.";
+		"👋 Thanks for adding Lobu! This chat isn't linked to one of your agents yet.";
 	const cliLine = `From the CLI — run \`lobu run\`, then paste the \`${linkCommand(platform)} <code>\` it prints here.`;
 
 	let agents: Array<{ agentId: string; name: string }> = [];
@@ -752,26 +727,33 @@ export async function workspaceUnlinkedNotice(
 		});
 		if (channel?.channelId) {
 			params.set("listen", channel.channelId);
-			params.set("platform", "slack");
+			// The editor matches this against the connection's `connector_key`
+			// (automations-new-page), so it must be the REAL platform — a
+			// hardcoded "slack" silently matched nothing on every other one.
+			params.set("platform", platform);
 			if (channel.teamId) params.set("team", channel.teamId);
 			if (channel.connectionId)
 				params.set("connection", channel.connectionId);
-			// Friendly channel name → the editor subtitle. Prefixed with `#` so it reads
-			// as a channel.
-			if (channel.channelName) params.set("label", `#${channel.channelName}`);
+			// Friendly channel name → the editor subtitle. `#` reads as a channel
+			// on Slack; every other platform names its own surfaces (a Google
+			// Chat space, a Telegram group) and a `#` would just be noise.
+			if (channel.channelName)
+				params.set(
+					"label",
+					platform === "slack"
+						? `#${channel.channelName}`
+						: channel.channelName,
+				);
 		}
 		return `${origin}/${orgSlug}/automations/new?${params.toString()}`;
 	};
-	// Render each agent as a Slack mrkdwn inline link (`<url|label>`). The notice
-	// is posted via thread.post(string) → chat.postMessage({ text }), which Slack
-	// always interprets as mrkdwn; with unfurl_links disabled a bare URL renders
-	// as flat text, but `<url|label>` renders as a clickable link. The adapter's
-	// plain-text path only rewrites @mentions, so the `<>` survive intact. The
-	// label is escaped because agent names are user-controlled and a raw `>`/`<`/`&`
-	// would terminate or corrupt the inline link.
+	// `formatChatLink` renders each agent in the target platform's own link
+	// syntax: Slack mrkdwn `<url|label>` (a bare URL there renders as flat,
+	// unclickable text with unfurl_links disabled), a bare labelled URL
+	// everywhere else (which would otherwise show `<url|label>` literally).
 	const agentLines = agents.map((a) =>
 		canLink
-			? `   • <${automationsUrl(a.agentId)}|${escapeMrkdwnLabel(a.name)}>`
+			? `   • ${formatChatLink(platform, automationsUrl(a.agentId), a.name)}`
 			: `   • ${a.name}`,
 	);
 
@@ -781,8 +763,8 @@ export async function workspaceUnlinkedNotice(
 			"",
 			"Link it to an agent two ways:",
 			canLink
-				? "• In the dashboard — create an Automation for an agent and add this channel as a Listen source:"
-				: "• In the dashboard — create an Automation for an agent and add this channel as a Listen source. Your agents:",
+				? "• In the dashboard — create an Automation for an agent and add this chat as a Listen source:"
+				: "• In the dashboard — create an Automation for an agent and add this chat as a Listen source. Your agents:",
 			...agentLines,
 			`• ${cliLine}`,
 		].join("\n");
