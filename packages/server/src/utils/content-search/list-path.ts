@@ -19,7 +19,11 @@ import {
 import { buildLatestClassificationsCteSql, buildThreadMetaCteSql } from './ctes';
 import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from './entity-link';
 import type { EntityIdentityScope } from './entity-link';
-import { buildFinalSelect, deduplicateWithClassifications } from './sql-fragments';
+import {
+  INTERNAL_OPS_EXCLUSION_SQL,
+  buildFinalSelect,
+  deduplicateWithClassifications,
+} from './sql-fragments';
 import {
   buildDateCandidateOrderBy,
   buildDateCursorClause,
@@ -365,6 +369,15 @@ export async function listContentInternal(
     if (options.exclude_workspace_audit) {
       baseConditions.push(`NOT (f.metadata ? '_lobu_workspace_audit')`);
     }
+    // Internal-ops filter, same rule as the search path and the standard
+    // branch below. Recall does not reach this classification-filtered branch
+    // today (fetchContentSnippets sends no classification_filters), but the
+    // option is a contract on ContentSearchOptions, and exclude_workspace_audit
+    // above is likewise applied on every builder. An explicit semantic_type
+    // filter still wins, as in search-path.ts.
+    if (options.exclude_internal_ops && !options.semantic_type) {
+      baseConditions.push(INTERNAL_OPS_EXCLUSION_SQL);
+    }
     if (options.interaction_status) {
       baseParams.push(options.interaction_status);
       baseConditions.push(`f.interaction_status = $${baseParams.length}`);
@@ -538,6 +551,18 @@ export async function listContentInternal(
           AND ${feedCondition}
           AND ${runCondition}
           ${options.exclude_workspace_audit ? `AND NOT (f.metadata ? '_lobu_workspace_audit')` : ''}
+          ${
+            // Internal-ops filter. Recall lands here, not on the search path,
+            // whenever its query is shorter than three characters and no
+            // embedding was supplied — `search_memory({ query: 'Q3' })` on a
+            // workspace-scoped connection is the live case (searchContentByText
+            // routes on that length). Without this, the rows the search path
+            // hides come straight back through the other door. See the comment
+            // on the sibling site above.
+            options.exclude_internal_ops && !options.semantic_type
+              ? `AND ${INTERNAL_OPS_EXCLUSION_SQL}`
+              : ''
+          }
           ${excludeClause.sql}
           ${producedFilterClause.sql}
           ${analyzedFilterClause.sql}

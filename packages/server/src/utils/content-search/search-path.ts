@@ -19,7 +19,11 @@ import {
   buildSearchDocumentExpr,
   buildTsqueryString,
 } from './fts';
-import { buildFinalSelect, deduplicateWithClassifications } from './sql-fragments';
+import {
+  INTERNAL_OPS_EXCLUSION_SQL,
+  buildFinalSelect,
+  deduplicateWithClassifications,
+} from './sql-fragments';
 import { buildSemanticTypeFilterSql } from './params';
 import {
   buildDateCandidateOrderBy,
@@ -210,7 +214,7 @@ export async function searchContentBySingleQuery(
             // explicit semantic_type filter ($9) wins over it: a caller asking
             // for 'audit' rows is reading the ops trail on purpose.
             options.exclude_internal_ops && !options.semantic_type
-              ? `AND f.semantic_type <> 'audit' AND COALESCE(f.metadata->>'category', '') NOT IN ('config', 'lifecycle')`
+              ? `AND ${INTERNAL_OPS_EXCLUSION_SQL}`
               : ''
           }
           ${orgScope.sql}${entityTypesClause.sql}`;

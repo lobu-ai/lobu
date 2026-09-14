@@ -10,6 +10,26 @@ import {
   boundedPayloadTextSql,
 } from '../content-read-bounds';
 
+/**
+ * Rows recall must not surface: the internal operational trail. Matched by the
+ * shape their writers actually persist, on alias `f`:
+ *
+ *   - tool-invocation audit — `semantic_type 'audit'` + `origin_type
+ *     'tool_invocation'`, the same pair `get_content`'s renderer recognizes
+ *     these rows by (`tools/get_content/render.ts`).
+ *   - config / lifecycle state changes — `semantic_type 'change'` +
+ *     `metadata.category`, the shape `idx_events_lifecycle_changes` is
+ *     defined on.
+ *
+ * Neither half keys on `metadata.category` alone: `save_content` strips only
+ * the reserved `_lobu_` namespace, so `category` is caller-written, and a
+ * member's note tagged `category: 'config'` must stay recallable. `origin_type`
+ * is never set through `save_content`, and both COALESCEs keep the negation
+ * two-valued (a NULL arm would drop the row instead of keeping it).
+ */
+export const INTERNAL_OPS_EXCLUSION_SQL = `(NOT (f.semantic_type = 'audit' AND COALESCE(f.origin_type, '') = 'tool_invocation')
+           AND NOT (f.semantic_type = 'change' AND COALESCE(f.metadata->>'category', '') IN ('config', 'lifecycle')))`;
+
 const CONTEXT_CASE_SQL = `
         CASE
           WHEN f.origin_parent_id IS NOT NULL

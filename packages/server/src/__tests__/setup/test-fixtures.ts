@@ -813,6 +813,9 @@ export async function createTestEvent(options: {
    */
   created_at?: Date;
   origin_id?: string;
+  /** Source-native item type. Server writers stamp it; `save_content` never
+   *  does, so it distinguishes a platform row from a member-saved one. */
+  origin_type?: string;
   embedding?: number[];
   /** Model stamp for the embedding. Defaults to the configured model (mirrors
    *  real ingestion, which always stamps); set null to simulate a legacy row. */
@@ -843,7 +846,7 @@ export async function createTestEvent(options: {
   [inserted] = await sql`
     INSERT INTO events (
       entity_ids, connection_id, feed_id, feed_key, automation_id, automation_version_id, origin_id,
-      title, payload_type, payload_text, occurred_at, semantic_type,
+      origin_type, title, payload_type, payload_text, occurred_at, semantic_type,
       connector_key, metadata,
       organization_id, created_at
     ) VALUES (
@@ -854,6 +857,7 @@ export async function createTestEvent(options: {
       ${options.automation_id ?? null},
       ${options.automation_version_id ?? null},
       ${originId},
+      ${options.origin_type ?? null},
       ${options.title ?? null},
       'text',
       ${options.content},
