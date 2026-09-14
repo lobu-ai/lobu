@@ -45,6 +45,7 @@ import {
   denyNonHumanActionModesWrite,
   hasActionModes,
 } from "./action-modes-guard";
+import { denyOperatorOnlyChatSettings } from "./chat-settings-guard";
 import { projectConnectionForReader } from "../public-projection";
 import {
   getAuthProfileById,
@@ -1396,6 +1397,11 @@ export async function handleApplyChatConnection(
 	if (hasDeviceAutowireSuppressionMarker(args.config)) {
 		return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
 	}
+	// `settings` bypasses `parseConfig` (which strips unknown keys) and is
+	// spread verbatim into the same column the runtime reads its operator flags
+	// from. Refuse before ANY work: no agent lookup, no row, no partial apply.
+	const deniedSettings = denyOperatorOnlyChatSettings(args.settings);
+	if (deniedSettings) return deniedSettings;
 	const { organizationId } = ctx;
 	if (args.agent_id) {
 		const sql = getDb();
