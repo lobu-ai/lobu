@@ -11,18 +11,20 @@
 // test actually reaches them; extensionDomScrape and the paginateBy* generators
 // are faithfully re-implemented so connectors that delegate their sync loops
 // exercise the real paging semantics (the real helpers have their own tests in
-// packages/connector-sdk). They are re-implemented inline rather than imported
-// from connector-sdk/src because this mock is copied verbatim into the cli's
-// dist/ for the packaged-connector test run, where that cross-package source
-// path does not resolve.
+// packages/connector-sdk). Those stay inline only because they already were;
+// nothing forces it. The once-stated reason — that this file is copied verbatim
+// somewhere a cross-package source path cannot resolve — is not true of either
+// copier today: `packages/cli/scripts/build.cjs`'s `excludeTests` filter skips
+// any `__tests__` subtree outright, and while
+// `packages/server/scripts/build-server-bundle.mjs` cpSyncs connectors/src
+// wholesale (tests included), nothing ever executes that copy — server vitest
+// includes only `src/**/*.test.ts`.
 
-// The file OUTPUT helpers are imported rather than re-implemented, because a
+// The file OUTPUT helpers are therefore imported rather than re-implemented: a
 // hand-copy that drifted would let a connector pass its tests while
-// manufacturing a U+FFFD in prod. `file-output.ts` imports nothing, so it
-// drags in none of the browser stack, and the path resolves for this copy of
-// the mock — the one the connectors package's own tests run against. A derived
-// copy elsewhere only needs the import if it stubs a file-downloading
-// connector.
+// manufacturing a U+FFFD in prod. `file-output.ts` imports nothing, so it drags
+// in none of the browser stack, and the path resolves for the copy that is
+// actually run — the connectors package's own test run.
 import * as fileOutput from '../../../connector-sdk/src/file-output.js';
 
 interface DomScrapeOpts {

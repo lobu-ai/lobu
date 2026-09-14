@@ -865,10 +865,16 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
           filename,
           mimeType: fetched.contentType,
           inlineMaxBytes,
+          // Always decide textuality from Drive's DECLARED `file.mimeType`,
+          // never from `fetched.contentType`: the latter is the alt=media
+          // response header, which Drive routinely serves as
+          // `application/octet-stream` even for a text file. Letting the
+          // default rule read `contentType` would silently stop inlining those.
           // An Apps Script exports as `...script+json`, which no generic
           // media-type rule reads as text; the other exports already land on a
           // `text/*` type and need no override.
-          textual: fetched.exportedAs !== undefined ? true : undefined,
+          textual:
+            fetched.exportedAs !== undefined || isTextualMimeType(file.mimeType),
         }),
       },
     };

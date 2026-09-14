@@ -603,6 +603,36 @@ describe('GoogleDriveConnector content routing', () => {
     expect(new Uint8Array(Buffer.from(attachment.data as string, 'base64'))).toEqual(latin1);
   });
 
+  test('a text file Drive serves as octet-stream still inlines', async () => {
+    // Drive's alt=media response header is routinely `application/octet-stream`
+    // even when the file's DECLARED `mimeType` is text. Textuality must be read
+    // off the declared metadata MIME, never off the response header, or every
+    // such file silently stops inlining while still downloading fine — the exact
+    // regression that consolidating the download primitive can introduce
+    // unnoticed, since the attachment bytes look correct either way.
+    const connector = new GoogleDriveConnector();
+    const drive = fakeDrive([
+      fileGet(driveFile('declared-text', { mimeType: 'text/plain' })),
+      (url) =>
+        url.searchParams.get('alt') === 'media'
+          ? {
+              bytes: new TextEncoder().encode('hello inline'),
+              contentType: 'application/octet-stream',
+            }
+          : undefined,
+    ]);
+    connector.client = () => drive.client;
+
+    const result = await connector.execute({
+      actionKey: 'download_file',
+      input: { file_id: 'declared-text' },
+      credentials: { accessToken: 'tok' },
+    });
+
+    expect(result.output.content).toBe('hello inline');
+    expect(result.output.content_truncated).toBe(false);
+  });
+
   test('content is truncated at inline_max_bytes and reports it', async () => {
     const connector = new GoogleDriveConnector();
     const drive = fakeDrive([fileGet(driveFile('big')), contentBody('abcdefghij')]);
