@@ -6,6 +6,10 @@
  */
 
 import {
+  downloadSizeError,
+  fileDownloadOutput,
+  inlineContentBudget,
+  inlineMaxBytesSchema,
   type ActionContext,
   type ActionResult,
   ConnectorRuntime,
@@ -403,6 +407,38 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           },
         },
       },
+      download_attachment: {
+        key: 'download_attachment',
+        kind: 'read',
+        name: 'Download Attachment',
+        description:
+          'Download one attachment from a Gmail message. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content`. Get `attachment_id` from `get_thread`, which lists each message\'s attachments.',
+        requiresApproval: false,
+        requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        inputSchema: {
+          type: 'object',
+          required: ['message_id', 'attachment_id'],
+          properties: {
+            message_id: {
+              type: 'string',
+              description: 'Message ID the attachment belongs to (from get_thread).',
+            },
+            attachment_id: {
+              type: 'string',
+              description: 'Attachment ID from get_thread. Gmail re-issues these per fetch, so use one from a recent get_thread rather than a stored copy.',
+            },
+            filename: {
+              type: 'string',
+              description: 'Name to publish the attachment under. Defaults to the filename get_thread reported, or the attachment ID.',
+            },
+            mime_type: {
+              type: 'string',
+              description: 'Media type of the bytes. Defaults to the type get_thread reported, or application/octet-stream.',
+            },
+            inline_max_bytes: inlineMaxBytesSchema(),
+          },
+        },
+      },
     },
   };
 
@@ -585,6 +621,8 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           return await this.searchEmails(http, ctx.input);
         case 'get_thread':
           return await this.getThread(http, ctx.input);
+        case 'download_attachment':
+          return await this.downloadAttachment(http, ctx.input);
         default:
           return { success: false, error: `Unknown action: ${ctx.actionKey}` };
       }
@@ -981,6 +1019,11 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         received_at: Number.isFinite(Number(msg.internalDate)) ? new Date(Number(msg.internalDate)).toISOString() : null,
         snippet: msg.snippet,
         body: await this.extractBody(msg.payload, http, msg.id),
+        // Without this an agent can see that a mail HAS an attachment and
+        // still have no way to name it: `attachment_id` exists nowhere else in
+        // the connector's output, and download_attachment cannot be called
+        // without one.
+        attachments: this.collectAttachments(msg.payload),
       });
     }
 
@@ -1172,6 +1215,110 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   }
 
   private readonly emailBodyConverter = createEmailBodyConverter();
+
+  /**
+   * List a message's attachment parts so an agent can name one.
+   *
+   * Gmail models an attachment as a leaf MIME part carrying a `filename` and a
+   * `body.attachmentId`. The walk mirrors `extractBody`'s, but keeps exactly
+   * what that one discards: a part with a filename is skipped there as "not
+   * body text", which is precisely what makes it an attachment here.
+   *
+   * Inline parts (an embedded signature image) are included: they are real
+   * bytes a caller may want, and Gmail does not mark them differently enough
+   * to filter on without also dropping legitimate attachments.
+   */
+  private collectAttachments(
+    payload: GmailMessagePayload
+  ): Array<{ attachment_id: string; filename: string; mime_type: string; size_bytes: number }> {
+    const found: Array<{
+      attachment_id: string;
+      filename: string;
+      mime_type: string;
+      size_bytes: number;
+    }> = [];
+    const walk = (part: GmailMessagePayload): void => {
+      if (part.body?.attachmentId && part.filename) {
+        found.push({
+          attachment_id: part.body.attachmentId,
+          filename: part.filename,
+          mime_type: part.mimeType,
+          size_bytes: part.body.size ?? 0,
+        });
+      }
+      for (const child of part.parts ?? []) walk(child);
+    };
+    walk(payload);
+    return found;
+  }
+
+  /**
+   * Download one attachment's bytes and publish them.
+   *
+   * Gmail returns the bytes base64url-encoded inside a JSON envelope rather
+   * than as a body, and carries no filename or media type on that response —
+   * both live on the MIME part, which is why `get_thread` reports them and why
+   * they can be passed back in here.
+   */
+  private async downloadAttachment(
+    http: HttpClient,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
+    const messageId = input.message_id as string;
+    const attachmentId = input.attachment_id as string;
+    if (!messageId) return { success: false, error: 'message_id is required.' };
+    if (!attachmentId) return { success: false, error: 'attachment_id is required.' };
+
+    const response = await http.raw(
+      `${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`
+    );
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `Gmail attachment error (${response.status}): ${await response.text()}`,
+      };
+    }
+
+    const envelope = (await response.json()) as { data?: string; size?: number };
+
+    // Refuse on the DECLARED size first: the isolate would otherwise buffer the
+    // base64 string, the decoded bytes and a re-encoded copy at once, which is
+    // an out-of-memory kill rather than an error the caller can read.
+    const declaredTooBig = downloadSizeError(envelope.size, attachmentId);
+    if (declaredTooBig) return { success: false, error: declaredTooBig };
+
+    if (!envelope.data) {
+      return { success: false, error: `Gmail attachment ${attachmentId} returned no data.` };
+    }
+
+    // Gmail uses base64URL (RFC 4648 §5); Buffer's 'base64' decoder accepts
+    // both alphabets, so no translation is needed.
+    const bytes = Buffer.from(envelope.data, 'base64');
+    if (bytes.length === 0) {
+      return { success: false, error: `Gmail attachment ${attachmentId} is empty.` };
+    }
+    const receivedTooBig = downloadSizeError(bytes.length, attachmentId);
+    if (receivedTooBig) return { success: false, error: receivedTooBig };
+
+    const filename = (input.filename as string) || attachmentId;
+    const mimeType = (input.mime_type as string) || 'application/octet-stream';
+
+    return {
+      success: true,
+      output: {
+        message_id: messageId,
+        attachment_id: attachmentId,
+        name: filename,
+        mime_type: mimeType,
+        ...fileDownloadOutput({
+          bytes,
+          filename,
+          mimeType,
+          inlineMaxBytes: inlineContentBudget(input.inline_max_bytes),
+        }),
+      },
+    };
+  }
 
   private async extractBody(
     payload: GmailMessagePayload,

@@ -16,6 +16,13 @@
 // dist/ for the packaged-connector test run, where that cross-package source
 // path does not resolve.
 
+// The file OUTPUT helpers are the exception to the inline-copy rule above:
+// `file-output.ts` imports nothing, so pulling the real module in costs none of
+// the browser stack this mock exists to avoid. Re-implementing its UTF-8-safe
+// truncation here would be worse than the duplication — a copy that drifted
+// would let a connector pass its tests while manufacturing a U+FFFD in prod.
+import * as fileOutput from '../../../connector-sdk/src/file-output.js';
+
 interface DomScrapeOpts {
   dispatcher: {
     // biome-ignore lint/suspicious/noExplicitAny: stub dispatcher return
@@ -142,6 +149,7 @@ export function connectorSdkMock() {
   });
 
   return {
+    ...fileOutput,
     // Sole platform entity-type slug for ACL-gated resources. Inlined (not
     // imported from connector-sdk/src) to keep this mock valid when copied
     // verbatim into the cli's dist/ (see the file header). Must stay in step

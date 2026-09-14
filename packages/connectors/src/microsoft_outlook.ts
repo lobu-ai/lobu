@@ -6,10 +6,16 @@
  */
 
 import {
+  type ActionContext,
+  type ActionResult,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
+  downloadSizeError,
   type EventEnvelope,
+  fileDownloadOutput,
   type HttpClient,
+  inlineContentBudget,
+  inlineMaxBytesSchema,
   paginateByCursor,
   requireBearerClient,
   type SyncContext,
@@ -19,6 +25,21 @@ import {
 // ---------------------------------------------------------------------------
 // Microsoft Graph API types
 // ---------------------------------------------------------------------------
+
+/**
+ * One `/messages/{id}/attachments` entry. `contentBytes` is present only on
+ * `#microsoft.graph.fileAttachment`; the reference and item subtypes carry a
+ * link or an embedded resource instead.
+ */
+interface GraphAttachment {
+  id: string;
+  name?: string;
+  contentType?: string;
+  size?: number;
+  isInline?: boolean;
+  contentBytes?: string;
+  '@odata.type'?: string;
+}
 
 interface GraphMessage {
   id: string;
@@ -218,6 +239,51 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
         },
       },
     },
+    actions: {
+      list_attachments: {
+        key: 'list_attachments',
+        kind: 'read',
+        name: 'List Attachments',
+        description:
+          "List a message's attachments with their IDs, names, types and sizes. The feed only reports `has_attachments`, so this is how an agent learns what to download.",
+        requiresApproval: false,
+        requiredScopes: ['Mail.Read'],
+        inputSchema: {
+          type: 'object',
+          required: ['message_id'],
+          properties: {
+            message_id: {
+              type: 'string',
+              description: 'Message ID (the event\'s origin_id).',
+            },
+          },
+        },
+      },
+      download_attachment: {
+        key: 'download_attachment',
+        kind: 'read',
+        name: 'Download Attachment',
+        description:
+          'Download one attachment from an Outlook message. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content`. Get `attachment_id` from `list_attachments`.',
+        requiresApproval: false,
+        requiredScopes: ['Mail.Read'],
+        inputSchema: {
+          type: 'object',
+          required: ['message_id', 'attachment_id'],
+          properties: {
+            message_id: {
+              type: 'string',
+              description: 'Message ID the attachment belongs to.',
+            },
+            attachment_id: {
+              type: 'string',
+              description: 'Attachment ID from list_attachments.',
+            },
+            inline_max_bytes: inlineMaxBytesSchema(),
+          },
+        },
+      },
+    },
   };
 
   private readonly API_BASE = 'https://graph.microsoft.com/v1.0';
@@ -248,6 +314,129 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
   // -------------------------------------------------------------------------
   // execute
   // -------------------------------------------------------------------------
+
+  async execute(ctx: ActionContext): Promise<ActionResult> {
+    try {
+      const http = requireBearerClient(ctx.credentials, {
+        errorPrefix: 'Microsoft Graph API',
+        label: 'Microsoft Outlook',
+      });
+
+      switch (ctx.actionKey) {
+        case 'list_attachments':
+          return await this.listAttachments(http, ctx.input);
+        case 'download_attachment':
+          return await this.downloadAttachment(http, ctx.input);
+        default:
+          return { success: false, error: `Unknown action: ${ctx.actionKey}` };
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * List a message's attachments without their bytes.
+   *
+   * `$select` is load-bearing, not a micro-optimisation: Graph serialises
+   * `contentBytes` into the LIST response by default, so an unfiltered call on
+   * a mail with three 5 MB files returns ~20 MB of base64 the caller never
+   * asked for — which on the isolate lane is an out-of-memory kill.
+   *
+   * Reference attachments (a OneDrive link) and item attachments (an embedded
+   * mail) carry no `contentBytes` at all; they are listed with their real
+   * `type` so a caller can see why `download_attachment` will refuse them.
+   */
+  private async listAttachments(
+    http: HttpClient,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
+    const messageId = input.message_id as string;
+    if (!messageId) return { success: false, error: 'message_id is required.' };
+
+    const response = (await http.get(
+      `${this.API_BASE}/me/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,contentType,size,isInline`
+    )) as { value?: GraphAttachment[] };
+
+    return {
+      success: true,
+      output: {
+        message_id: messageId,
+        attachments: (response.value ?? []).map((attachment) => ({
+          attachment_id: attachment.id,
+          filename: attachment.name,
+          mime_type: attachment.contentType ?? 'application/octet-stream',
+          size_bytes: attachment.size ?? 0,
+          is_inline: Boolean(attachment.isInline),
+          type: attachment['@odata.type'] ?? '',
+        })),
+      },
+    };
+  }
+
+  /**
+   * Download one attachment's bytes and publish them.
+   *
+   * Graph returns the bytes base64 inside the attachment resource rather than
+   * as a body. The `$value` endpoint would hand back raw bytes, but it 404s for
+   * anything that is not a file attachment, so the JSON shape is used for both
+   * the bytes and the readable refusal.
+   */
+  private async downloadAttachment(
+    http: HttpClient,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
+    const messageId = input.message_id as string;
+    const attachmentId = input.attachment_id as string;
+    if (!messageId) return { success: false, error: 'message_id is required.' };
+    if (!attachmentId) return { success: false, error: 'attachment_id is required.' };
+
+    const attachment = (await http.get(
+      `${this.API_BASE}/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`
+    )) as GraphAttachment;
+
+    // Refuse on the DECLARED size before decoding: the isolate would otherwise
+    // hold the base64 string and the decoded bytes at once.
+    const declaredTooBig = downloadSizeError(attachment.size, attachment.name ?? attachmentId);
+    if (declaredTooBig) return { success: false, error: declaredTooBig };
+
+    if (!attachment.contentBytes) {
+      return {
+        success: false,
+        error: `Outlook attachment ${attachment.name ?? attachmentId} carries no bytes (${attachment['@odata.type'] ?? 'unknown type'}). Only file attachments can be downloaded; a reference attachment lives in OneDrive and an item attachment is an embedded message.`,
+      };
+    }
+
+    const bytes = Buffer.from(attachment.contentBytes, 'base64');
+    if (bytes.length === 0) {
+      return { success: false, error: `Outlook attachment ${attachment.name ?? attachmentId} is empty.` };
+    }
+    const receivedTooBig = downloadSizeError(bytes.length, attachment.name ?? attachmentId);
+    if (receivedTooBig) return { success: false, error: receivedTooBig };
+
+    const filename = attachment.name ?? attachmentId;
+    const mimeType = attachment.contentType ?? 'application/octet-stream';
+
+    return {
+      success: true,
+      output: {
+        message_id: messageId,
+        attachment_id: attachmentId,
+        name: filename,
+        mime_type: mimeType,
+        ...fileDownloadOutput({
+          bytes,
+          filename,
+          mimeType,
+          inlineMaxBytes: inlineContentBudget(input.inline_max_bytes),
+        }),
+      },
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Feed: messages
   // -------------------------------------------------------------------------

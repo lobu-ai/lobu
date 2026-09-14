@@ -1188,3 +1188,140 @@ describe('Gmail readable HTML sync bodies', () => {
     expect(result.events[0].origin_id).toBe('html-thread');
   });
 });
+
+describe('Gmail attachment download', () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const CSV = 'id,total\n1,42\n';
+
+  /**
+   * Serves a thread whose message carries two attachments — a binary one and a
+   * text one — plus the attachments endpoint that returns their base64url
+   * bytes. `attachmentBody` overrides the envelope to stage the refusals.
+   */
+  function setup(attachmentBody?: (id: string) => Record<string, unknown>) {
+    const connector = new GmailConnector();
+    const urls: string[] = [];
+    connector.createClient = () => ({
+      raw: async (url: string) => {
+        urls.push(url);
+        const attachmentMatch = url.match(/\/attachments\/([^/?]+)/);
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '',
+          json: async () => {
+            if (attachmentMatch) {
+              const id = attachmentMatch[1];
+              if (attachmentBody) return attachmentBody(id);
+              const bytes = id === 'att-csv' ? Buffer.from(CSV) : PNG;
+              return { data: bytes.toString('base64url'), size: bytes.length };
+            }
+            return {
+              id: 'thread-att',
+              messages: [
+                {
+                  id: 'message-att',
+                  internalDate: '1783558800000',
+                  snippet: 'Invoice attached',
+                  payload: {
+                    mimeType: 'multipart/mixed',
+                    headers: [],
+                    parts: [
+                      { mimeType: 'text/plain', body: { data: Buffer.from('See attached.').toString('base64url'), size: 13 } },
+                      { mimeType: 'image/png', filename: 'logo.png', body: { attachmentId: 'att-png', size: PNG.length } },
+                      { mimeType: 'text/csv', filename: 'rows.csv', body: { attachmentId: 'att-csv', size: CSV.length } },
+                    ],
+                  },
+                },
+              ],
+            };
+          },
+        };
+      },
+    });
+    const download = (input: Record<string, unknown>) =>
+      connector.execute({
+        actionKey: 'download_attachment',
+        input,
+        credentials: { accessToken: 'synthetic-token' },
+      });
+    return { connector, urls, download };
+  }
+
+  test('get_thread names every attachment so one can be downloaded', async () => {
+    const { connector } = setup();
+    const result = await connector.execute({
+      actionKey: 'get_thread',
+      input: { thread_id: 'thread-att' },
+      credentials: { accessToken: 'synthetic-token' },
+    });
+    expect(result.output.messages[0].attachments).toEqual([
+      { attachment_id: 'att-png', filename: 'logo.png', mime_type: 'image/png', size_bytes: PNG.length },
+      { attachment_id: 'att-csv', filename: 'rows.csv', mime_type: 'text/csv', size_bytes: CSV.length },
+    ]);
+  });
+
+  test('a binary attachment is published whole and not inlined', async () => {
+    const { download, urls } = setup();
+    const result = await download({
+      message_id: 'message-att',
+      attachment_id: 'att-png',
+      filename: 'logo.png',
+      mime_type: 'image/png',
+    });
+
+    expect(result.success).toBe(true);
+    expect(urls).toContain(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/message-att/attachments/att-png'
+    );
+    const [attachment] = result.output.attachments;
+    // Byte-identical: the artifact a device downloads must be the file itself.
+    expect(Buffer.from(attachment.data, 'base64')).toEqual(PNG);
+    expect(attachment.filename).toBe('logo.png');
+    expect(result.output).not.toHaveProperty('content');
+  });
+
+  test('a text attachment is attached AND inlined', async () => {
+    const { download } = setup();
+    const result = await download({
+      message_id: 'message-att',
+      attachment_id: 'att-csv',
+      filename: 'rows.csv',
+      mime_type: 'text/csv',
+    });
+
+    expect(result.output.content).toBe(CSV);
+    expect(result.output.content_truncated).toBe(false);
+    expect(Buffer.from(result.output.attachments[0].data, 'base64').toString()).toBe(CSV);
+  });
+
+  test('missing identifiers are refused before any request', async () => {
+    const { download, urls } = setup();
+    expect((await download({ attachment_id: 'att-png' })).error).toContain('message_id');
+    expect((await download({ message_id: 'message-att' })).error).toContain('attachment_id');
+    expect(urls).toHaveLength(0);
+  });
+
+  // The declared size is refused BEFORE decoding: the isolate would otherwise
+  // hold the base64 string and the decoded bytes at once and be OOM-killed.
+  test('an oversized attachment is refused on its declared size', async () => {
+    const { download } = setup(() => ({ data: 'AAAA', size: 64 * 1024 * 1024 }));
+    const result = await download({ message_id: 'message-att', attachment_id: 'att-png' });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('download limit');
+  });
+
+  test('an empty attachment is an error, not a zero-byte artifact', async () => {
+    const { download } = setup(() => ({ data: '', size: 0 }));
+    const result = await download({ message_id: 'message-att', attachment_id: 'att-png' });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('no data');
+  });
+
+  test('names default when the caller does not pass them', async () => {
+    const { download } = setup();
+    const result = await download({ message_id: 'message-att', attachment_id: 'att-png' });
+    expect(result.output.attachments[0].filename).toBe('att-png');
+    expect(result.output.attachments[0].mime_type).toBe('application/octet-stream');
+  });
+});

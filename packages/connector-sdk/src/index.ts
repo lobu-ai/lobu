@@ -23,6 +23,18 @@ export { defineConnector } from './define-connector.js';
 export { fileInputSchema, MAX_CONNECTOR_FILE_BYTES } from './file-input.js';
 export type { ConnectorFile, FileInputOptions, FileReference } from './file-input.js';
 export {
+  DEFAULT_INLINE_CONTENT_BYTES,
+  downloadSizeError,
+  fileDownloadOutput,
+  inlineContentBudget,
+  inlineMaxBytesSchema,
+  inlineText,
+  isTextualMimeType,
+  MAX_CONNECTOR_DOWNLOAD_BYTES,
+  MAX_INLINE_CONTENT_BYTES,
+} from './file-output.js';
+export type { FileDownloadOutput } from './file-output.js';
+export {
   canonicalDeviceManifestJson,
   defineDeviceConnector,
   serializeDeviceConnector,

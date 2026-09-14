@@ -21,6 +21,12 @@
  */
 
 import {
+  downloadSizeError,
+  fileDownloadOutput,
+  inlineContentBudget,
+  inlineMaxBytesSchema,
+  inlineText,
+  isTextualMimeType,
   type ActionContext,
   type ActionResult,
   ConnectorRuntime,
@@ -129,18 +135,6 @@ const EXPORT_MIME_TYPES: Record<string, string> = {
   'application/vnd.google-apps.script': 'application/vnd.google-apps.script+json',
 };
 
-/** MIME types we will inline as `payload_text` when they are not Google-native. */
-const TEXTUAL_MIME_TYPES = new Set([
-  'application/json',
-  'application/xml',
-  'application/x-yaml',
-  'application/yaml',
-  'application/javascript',
-  'application/typescript',
-  'application/sql',
-  'application/x-sh',
-]);
-
 /**
  * Cap on text inlined into `payload_text`.
  *
@@ -150,18 +144,6 @@ const TEXTUAL_MIME_TYPES = new Set([
  * metadata and their content is fetched on demand through `download_file`.
  */
 const MAX_INLINE_TEXT_BYTES = 256 * 1024;
-
-/**
- * Default and ceiling for the text `download_file` echoes back inline.
- *
- * Inlining is a convenience for the caller that wants to READ a small file
- * without a second fetch through the artifact's `download_url`. It is not the
- * transport: the attachment is published either way. The ceiling exists because
- * inline content lands in an agent's context verbatim, where a multi-megabyte
- * blob is worse than useless — the `download_url` is the path for anything big.
- */
-const DEFAULT_INLINE_CONTENT_BYTES = 256 * 1024;
-const MAX_INLINE_CONTENT_BYTES = 1024 * 1024;
 
 /**
  * Grace window subtracted from `last_sync_at` before deciding a file's content
@@ -174,13 +156,6 @@ const MAX_INLINE_CONTENT_BYTES = 1024 * 1024;
  * redundant fetch; erring the other way loses an edit.
  */
 const CONTENT_SKEW_GRACE_MS = 5 * 60 * 1000;
-
-/**
- * Ceiling on anything this connector pulls in one piece — Google's own hard cap
- * on `files.export` (requesting more returns a 403), reused as the `alt=media`
- * download ceiling so both content paths refuse at the same size.
- */
-const MAX_EXPORT_BYTES = 10 * 1024 * 1024;
 
 /** Field mask for files.list / changes.list. Drive v3 returns almost nothing without it. */
 const FILE_FIELDS =
@@ -220,51 +195,6 @@ function isPageTokenRejection(status: number): boolean {
   return status === 404 || status === 410;
 }
 
-/**
- * Truncate encoded UTF-8 to at most `maxBytes` WITHOUT splitting a character.
- *
- * A plain `slice(0, maxBytes)` can cut mid-sequence, and the decoder turns the
- * orphaned bytes into U+FFFD — a garbage character that then gets stored and
- * embedded. Back off up to three bytes (the longest UTF-8 tail) until the slice
- * decodes cleanly, so a legitimate U+FFFD already in the source is preserved
- * while a manufactured one is impossible.
- */
-function decodeTruncated(encoded: Uint8Array, maxBytes: number): string {
-  const strict = new TextDecoder('utf-8', { fatal: true });
-  for (let end = maxBytes; end > maxBytes - 4 && end >= 0; end--) {
-    try {
-      return strict.decode(encoded.slice(0, end));
-    } catch {
-      // Slice ended mid-sequence — drop a byte and retry.
-    }
-  }
-  // Unreachable: `encoded` always comes from TextEncoder, so one of the four
-  // slices above lands on a character boundary. Returning lossily here would
-  // manufacture the very U+FFFD this function exists to prevent.
-  return '';
-}
-
-/**
- * Decode downloaded bytes as text and cut them to the inline budget.
- *
- * The decode comes FIRST because `decodeTruncated` requires well-formed UTF-8
- * (it hands back nothing rather than manufacture a U+FFFD), and a downloaded
- * file is not required to be any such thing — a latin-1 CSV would otherwise
- * inline as an empty string, the exact "looks like an empty file" outcome this
- * connector refuses everywhere else. Decoding lossily once and re-encoding
- * gives the truncator the input it documents, and makes a truncated file read
- * the same as the first page of an untruncated one.
- */
-function inlineText(
-  bytes: Uint8Array,
-  maxBytes: number
-): { content: string; truncated: boolean } {
-  const text = new TextDecoder('utf-8').decode(bytes);
-  const encoded = new TextEncoder().encode(text);
-  if (encoded.byteLength <= maxBytes) return { content: text, truncated: false };
-  return { content: decodeTruncated(encoded, maxBytes), truncated: true };
-}
-
 function exportMimeTypeFor(mimeType: string | undefined): string | undefined {
   if (!mimeType) return undefined;
   return EXPORT_MIME_TYPES[mimeType];
@@ -272,12 +202,6 @@ function exportMimeTypeFor(mimeType: string | undefined): string | undefined {
 
 function isGoogleNative(mimeType: string | undefined): boolean {
   return Boolean(mimeType?.startsWith('application/vnd.google-apps.'));
-}
-
-function isTextualMimeType(mimeType: string | undefined): boolean {
-  if (!mimeType) return false;
-  const base = mimeType.split(';')[0]!.trim().toLowerCase();
-  return TEXTUAL_MIME_TYPES.has(base) || base.startsWith('text/');
 }
 
 /** Drive reports size as a decimal string, and omits it entirely for native files. */
@@ -476,12 +400,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
               type: 'string',
               description: 'Drive file ID to download.',
             },
-            inline_max_bytes: {
-              type: 'integer',
-              minimum: 0,
-              maximum: MAX_INLINE_CONTENT_BYTES,
-              description: `Return text content inline when the file is at most this many bytes (default ${DEFAULT_INLINE_CONTENT_BYTES}, max ${MAX_INLINE_CONTENT_BYTES}). Binary files are never inlined. 0 disables inlining; the attachment is still published.`,
-            },
+            inline_max_bytes: inlineMaxBytesSchema(),
           },
         },
       },
@@ -920,13 +839,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     const fileId = input.file_id as string;
     if (!fileId) return { success: false, error: 'file_id is required.' };
 
-    const requestedInline = input.inline_max_bytes;
-    const inlineMaxBytes = Math.min(
-      typeof requestedInline === 'number' && Number.isFinite(requestedInline) && requestedInline >= 0
-        ? requestedInline
-        : DEFAULT_INLINE_CONTENT_BYTES,
-      MAX_INLINE_CONTENT_BYTES
-    );
+    const inlineMaxBytes = inlineContentBudget(input.inline_max_bytes);
 
     const file = await this.fetchFileMetadata(http, fileId);
     if (!file) {
@@ -939,23 +852,6 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     }
 
     const filename = file.name ?? file.id;
-    // `kind` is deliberately omitted: the gateway infers it from the media type
-    // (`inferKindFromMime`), so there is one rule rather than two that can
-    // disagree about what counts as an image.
-    const attachment = {
-      filename,
-      mime_type: fetched.contentType,
-      data: fetched.bytes.toString('base64'),
-      size_bytes: fetched.bytes.length,
-    };
-
-    // Text is TRUNCATED to the inline budget rather than withheld: an agent
-    // peeking at a large log or CSV is better served by its first page than by
-    // being told to go fetch a URL. The attachment always carries the whole
-    // file, so truncating here loses nothing.
-    const textual =
-      fetched.exportedAs !== undefined || isTextualMimeType(file.mimeType);
-    const inline = inlineMaxBytes > 0 && textual ? inlineText(fetched.bytes, inlineMaxBytes) : undefined;
 
     return {
       success: true,
@@ -964,20 +860,16 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         name: filename,
         mime_type: file.mimeType ?? '',
         exported_as: fetched.exportedAs,
-        size_bytes: fetched.bytes.length,
-        attachments: [attachment],
-        ...(inline
-          ? {
-              content: inline.content,
-              content_truncated: inline.truncated,
-              line_count:
-                inline.content.length === 0 ? 0 : inline.content.split('\n').length,
-            }
-          : {
-              content_omitted_reason: textual
-                ? 'inlining disabled'
-                : 'file is binary; fetch it through the attachment download_url',
-            }),
+        ...fileDownloadOutput({
+          bytes: fetched.bytes,
+          filename,
+          mimeType: fetched.contentType,
+          inlineMaxBytes,
+          // An Apps Script exports as `...script+json`, which no generic
+          // media-type rule reads as text; the other exports already land on a
+          // `text/*` type and need no override.
+          textual: fetched.exportedAs !== undefined ? true : undefined,
+        }),
       },
     };
   }
@@ -1034,16 +926,11 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     // Refuse before fetching. The isolate buffers the whole body, then base64s
     // it to cross the host boundary at 4/3 the size, so an unbounded download
     // is an out-of-memory kill rather than an error the caller can read.
-    // MAX_EXPORT_BYTES sits above the gateway's own attachment cap on purpose:
-    // the gateway stays the authority on what is too big to store, and this
-    // only stops what cannot physically make the trip.
-    const declaredSize = parseSize(file.size);
-    if (declaredSize !== undefined && declaredSize > MAX_EXPORT_BYTES) {
-      return {
-        ok: false,
-        error: `File ${file.name ?? file.id} is ${declaredSize} bytes, above the ${MAX_EXPORT_BYTES}-byte download limit.`,
-      };
-    }
+    // The shared ceiling sits above the gateway's own attachment cap on
+    // purpose: the gateway stays the authority on what is too big to store,
+    // and this only stops what cannot physically make the trip.
+    const declaredTooBig = downloadSizeError(parseSize(file.size), file.name ?? file.id);
+    if (declaredTooBig) return { ok: false, error: declaredTooBig };
 
     const response = await http.raw(request.url);
     if (!response.ok) {
@@ -1054,14 +941,10 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     }
 
     const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > MAX_EXPORT_BYTES) {
-      // Drive omits `size` for native docs, so the export path only learns the
-      // real size here. Same refusal, after the fact.
-      return {
-        ok: false,
-        error: `File ${file.name ?? file.id} returned ${bytes.length} bytes, above the ${MAX_EXPORT_BYTES}-byte download limit.`,
-      };
-    }
+    // Drive omits `size` for native docs, so the export path only learns the
+    // real size here. Same refusal, after the fact.
+    const receivedTooBig = downloadSizeError(bytes.length, file.name ?? file.id);
+    if (receivedTooBig) return { ok: false, error: receivedTooBig };
     if (bytes.length === 0) {
       return { ok: false, error: `Drive file ${file.name ?? file.id} is empty.` };
     }
@@ -1120,10 +1003,8 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       };
     }
 
-    const raw = await response.text();
-    const encoded = new TextEncoder().encode(raw);
-    const truncated = encoded.byteLength > maxBytes;
-    const text = truncated ? decodeTruncated(encoded, maxBytes) : raw;
+    const encoded = new TextEncoder().encode(await response.text());
+    const { content: text, truncated } = inlineText(encoded, maxBytes);
 
     return {
       ok: true,
