@@ -201,15 +201,33 @@ describe("workspaceUnlinkedNotice", () => {
 		expect(text).toContain("lobu run"); // CLI path still present
 	});
 
-	it("falls back to the CLI-only notice when the org has no agents", async () => {
+	it("offers agent creation, not just the CLI, when the org has no agents", async () => {
+		// The person most likely just installed the app and has never seen Lobu.
+		// "Install a CLI" is the wrong only-instruction: point at creating the
+		// first agent, which then becomes the org's ONLY agent — exactly the case
+		// a later DM auto-binds without anyone linking anything.
 		setOrigin("https://app.lobu.ai");
 		const org = await createTestOrganization();
 
 		const text = await workspaceUnlinkedNotice("slack", org.id);
+		expect(text).toContain(`/${org.slug}/agents/new`);
+		expect(text).toContain("create your first agent");
+		// The CLI path stays offered alongside it.
 		expect(text).toContain("lobu run");
 		expect(text).toContain("/lobu link");
-		// No agent-list section.
+		// Still no agent-list section — there are no agents to list.
 		expect(text).not.toContain("Automations page");
+	});
+
+	it("keeps the CLI-only notice when no public origin makes a link possible", async () => {
+		// `canLink` is false without an origin, so there is no URL to offer; the
+		// notice must still say something actionable rather than dead-drop.
+		setOrigin(undefined);
+		const org = await createTestOrganization();
+
+		const text = await workspaceUnlinkedNotice("slack", org.id);
+		expect(text).toContain("lobu run");
+		expect(text).not.toContain("create your first agent");
 	});
 
 	it("never throws / dead-drops for an unknown org (returns the CLI-only notice)", async () => {

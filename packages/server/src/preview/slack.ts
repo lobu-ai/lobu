@@ -626,8 +626,17 @@ export async function workspaceUnlinkedNotice(
 		].join("\n");
 	}
 
-	// No agents yet (or the lookup failed) — CLI path only.
-	return [header, "", cliLine].join("\n");
+	// No agents yet (or the lookup failed). Do NOT stop at the CLI line: the
+	// person most likely just installed the app and has never seen Lobu, so
+	// "install a CLI" is the wrong first instruction. Point at agent creation
+	// instead — and once that agent exists it is the org's only one, which is
+	// exactly the case a later DM auto-binds without anyone linking anything.
+	const createLine = canLink
+		? `• In the dashboard — ${formatChatLink(platform, `${origin}/${orgSlug}/agents/new`, "create your first agent")}, then message me again and I'll connect this chat to it.`
+		: null;
+	return createLine
+		? [header, "", createLine, `• ${cliLine}`].join("\n")
+		: [header, "", cliLine].join("\n");
 }
 
 type BindForOwnerResult = { status: "bound" } | { status: "forbidden" } | { status: "link_authority_revoked" };

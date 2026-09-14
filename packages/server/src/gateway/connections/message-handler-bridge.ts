@@ -17,6 +17,7 @@ import {
   previewUnlinkedNotice,
   workspaceUnlinkedNotice,
 } from "../../preview/slack.js";
+import { resolveSoleOrgAgent } from "./auto-bind-agent.js";
 import type { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { createChatReply } from "../commands/command-reply-adapters.js";
 import { normalizeStatefulChatCommand } from "../commands/command-spelling.js";
@@ -549,6 +550,73 @@ export class MessageHandlerBridge {
   }
 
   /**
+   * Bind an unlinked DM to the org's agent and route this very message to it.
+   *
+   * Only when the org's agent is UNAMBIGUOUS — see `auto-bind-agent.ts` for why
+   * that is the rule. Zero or several agents return null and fall through to the
+   * notice, which lists them with per-agent deep links.
+   *
+   * The Automation is written, not just resolved in memory, and that matters:
+   * without a row the DM would keep re-resolving on every message and would
+   * silently STOP working the day the org gains a second agent. Writing it
+   * pins the decision made here. `materializeConnectionFallbackLink` is
+   * create-only under an advisory lock, so a concurrent `/lobu link` that
+   * committed first is preserved rather than clobbered.
+   *
+   * A write failure is non-fatal: routing still returns the agent, so the person
+   * gets an answer to the message they just sent, and the next one retries the
+   * bind.
+   */
+  private async autoBindDirectMessage(
+    channelId: string,
+    teamId: string | undefined,
+    automationSubscriptionService: ReturnType<
+      CoreServices["getAutomationSubscriptionService"]
+    >
+  ): Promise<{
+    agentId: string;
+    source: "connection";
+    organizationId: string;
+    /** No per-Automation model override exists yet — the agent's own default. */
+    model?: string;
+  } | null> {
+    const organizationId = this.connection.organizationId;
+    if (!organizationId || !automationSubscriptionService) return null;
+
+    const agentId = await resolveSoleOrgAgent(organizationId);
+    if (!agentId) return null;
+
+    const platform = this.connection.platform;
+    // Same normalization the group-channel fallback applies: a Slack workspace
+    // id is `T…`; anything else on Slack is not a team id and would poison the
+    // trigger's match.
+    const bindingTeamId =
+      platform !== "slack" || /^T[A-Z0-9]+$/i.test(teamId ?? "")
+        ? teamId
+        : undefined;
+    try {
+      await automationSubscriptionService.materializeConnectionFallbackLink(
+        this.connection.id,
+        organizationId,
+        agentId,
+        platform,
+        channelId,
+        bindingTeamId
+      );
+      logger.info(
+        { platform, channelId, agentId, connectionId: this.connection.id },
+        "Unlinked DM auto-bound to the organization's only agent"
+      );
+    } catch (err) {
+      logger.warn(
+        { channelId, agentId, error: String(err) },
+        "Auto-bind chat-link write failed (non-fatal; routing this message anyway)"
+      );
+    }
+    return { agentId, source: "connection", organizationId };
+  }
+
+  /**
    * Reply at a routing dead end — an inbound message/interaction resolved to
    * no channel Automation and the connection has no owning agent — with a
    * "link this chat" notice instead of dropping silently.
@@ -779,7 +847,7 @@ export class MessageHandlerBridge {
     // The planner above is the only Automation routing decision because it
     // evaluates the complete trigger predicate. A channel-only subscription
     // lookup here would re-select Automations rejected by mention/team filters.
-    const fallbackResolved = automation
+    const ownerResolved = automation
       ? null
       : await resolveAgentId({
           platform,
@@ -787,6 +855,21 @@ export class MessageHandlerBridge {
           agentId: this.connection.agentId,
           organizationId: this.connection.organizationId,
         });
+    // Third fallback, after the planner and the connection's owning agent: a
+    // DM to a connection that HAS no owning agent (an OAuth install routes by
+    // Automation alone). Bind it rather than answering a "hi" with instructions
+    // for building an Automation by hand. DM-only on purpose — the trigger this
+    // writes matches every `message.created` on the channel, which is exactly
+    // right for a DM and would make the bot answer everything in a shared one.
+    const autoResolved =
+      automation || ownerResolved || isPreview || isGroup
+        ? null
+        : await this.autoBindDirectMessage(
+            channelId,
+            teamId,
+            automationSubscriptionService
+          );
+    const fallbackResolved = ownerResolved ?? autoResolved;
     const resolved = automation
       ? {
           agentId: automation.agentId,
