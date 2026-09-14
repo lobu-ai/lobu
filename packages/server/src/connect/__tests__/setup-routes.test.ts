@@ -65,6 +65,9 @@ describe('managed setup browser handoff', () => {
     const res = await f.app.request(url);
     expect(res.status).toBe(404);
     expect(await res.text()).toContain('Connection option unavailable');
+    // Offer availability is mutable per-org state; a cached 404 outlives the
+    // org republishing the offer.
+    expect(res.headers.get('cache-control')).toBe('no-store');
     expect(f.calls()).toBe(0);
   });
   test('rejects cross-origin, missing-origin, and bearer-only submissions', async () => {
@@ -90,10 +93,35 @@ describe('managed setup browser handoff', () => {
     expect(res.status).toBe(403);
     expect(f.calls()).toBe(0);
   });
-  test('rechecks session on POST before creating or reusing a grant', async () => {
+  test('rechecks session on POST and sends an expired one back through login', async () => {
     const f = fixture({ session: async () => null });
-    expect((await f.app.request(url, { method: 'POST', headers })).status).toBe(401);
+    const res = await f.app.request(url, { method: 'POST', headers });
+    // A form POST is a browser navigation; JSON would strand the person on a
+    // consent page whose session expired while it sat open.
+    expect(res.status).toBe(302);
+    expect(decodeURIComponent(res.headers.get('location') ?? '')).toContain(
+      'https://cloud.example/connect/managed?org=public-provider&connector=mail'
+    );
     expect(f.calls()).toBe(0);
+  });
+  test('a visitor with no personal workspace gets an actionable page, not JSON', async () => {
+    const f = fixture({ home: async () => null });
+    const res = await f.app.request(url, { method: 'POST', headers });
+    expect(res.status).toBe(409);
+    const body = await res.text();
+    expect(body).toContain('Finish setting up your account');
+    expect(body).toContain('Return to Lobu');
+    expect(f.calls()).toBe(0);
+  });
+  test('every human-facing dead end offers a way back into the product', async () => {
+    const stale = fixture({ resolveOffer: async () => null });
+    const failed = fixture({ connect: async () => ({ error: 'Offer withdrawn.' }) });
+    for (const res of [
+      await stale.app.request(url),
+      await failed.app.request(url, { method: 'POST', headers }),
+    ]) {
+      expect(await res.text()).toContain('href="/"');
+    }
   });
   test('explicit human submission uses their home workspace and returns local setup instructions', async () => {
     const f = fixture();
