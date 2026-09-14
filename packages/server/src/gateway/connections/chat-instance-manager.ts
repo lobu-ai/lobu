@@ -296,6 +296,19 @@ export function isAdapterlessPlatform(platform: string): boolean {
   return ADAPTERLESS_PLATFORMS.has(platform);
 }
 
+/**
+ * A resolved connector-owned webhook connection: the `connections` row behind
+ * a numeric ingest URL, shaped for `handleWebhookIngest`. Shared by
+ * `resolveConnectorWebhookConnection` and `bridgedIngestOverrides` so the
+ * bridge contract reads without unwinding utility types.
+ */
+interface BridgedWebhookConnection {
+  stored: StoredConnection;
+  connectorKey: string;
+  structuredWebhook: "jira_mcp" | null;
+  connectionConfig: Record<string, unknown>;
+}
+
 interface ManagedInstance {
   connection: PlatformConnection;
   chat: any; // Chat SDK instance
@@ -1352,9 +1365,7 @@ export class ChatInstanceManager {
    * `delivery.received` Automations before).
    */
   private bridgedIngestOverrides(
-    bridged: NonNullable<
-      Awaited<ReturnType<typeof this.resolveConnectorWebhookConnection>>
-    >,
+    bridged: BridgedWebhookConnection,
   ): WebhookIngestOverrides | undefined {
     if (bridged.connectorKey === "github") {
       // Poll-canonical: mark the feed due (or store stars) so Automation
@@ -1445,12 +1456,7 @@ export class ChatInstanceManager {
    */
   private async resolveConnectorWebhookConnection(
 		connectionId: string,
-  ): Promise<{
-    stored: StoredConnection;
-    connectorKey: string;
-    structuredWebhook: "jira_mcp" | null;
-    connectionConfig: Record<string, unknown>;
-  } | null> {
+  ): Promise<BridgedWebhookConnection | null> {
     // Connector connection ids are bigints; a non-numeric id can't match.
     if (!/^\d+$/.test(connectionId)) return null;
     const rows = await getDb()`
