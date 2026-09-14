@@ -313,6 +313,15 @@ async function resolveActiveConnectorVersion(
 /**
  * Reject an unavailable manifest on the exact execution pin before queuing.
  * Compiled artifacts bypass this check; native hashless artifacts retain capability claims.
+ *
+ * The readiness owner is the fleet whose manifests are compared, so it is the
+ * DEVICE's owner, falling back to the personal org's owner when the connection
+ * carries no pin — the same resolution `manage_feeds`, `list_available` and
+ * `connector-pushdown` use. Resolving it from `connections.created_by` instead
+ * looked up the creator's fleet: in a team org a connection created by a
+ * teammate who owns no advertising device matched no manifest source at all,
+ * so every run on a perfectly healthy pin was refused with
+ * DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE.
  */
 async function deviceManifestAdmissionError(
   sql: DbClient,
@@ -329,9 +338,12 @@ async function deviceManifestAdmissionError(
     manifest_hash: string | null;
     runtime: Record<string, unknown> | null;
   }>`
-    SELECT COALESCE(c.created_by, dw.user_id) AS owner_user_id, cv.artifact_hash AS manifest_hash,
+    SELECT COALESCE(dw.user_id, (o.metadata::jsonb)->>'personal_org_for_user_id')
+             AS owner_user_id,
+           cv.artifact_hash AS manifest_hash,
            cd.runtime
     FROM connections c
+    JOIN "organization" o ON o.id = c.organization_id
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
     LEFT JOIN connector_definitions cd
       ON cd.organization_id = c.organization_id AND cd.key = c.connector_key

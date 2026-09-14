@@ -26,7 +26,9 @@ import { ensureUniqueConnectionSlug, isConnectionSlugUniqueViolation } from '../
 import { clearDevicePinTombstoneIfPinned } from '../utils/device-pin-tombstones';
 import {
   DEVICE_AUTOWIRE_SUPPRESSION_KEY,
+  DEVICE_CONNECTOR_ARTIFACT_SQL,
   IS_DEVICE_CONNECTOR_SQL,
+  ORG_INSTALLED_CONNECTOR_ARTIFACT_SQL,
 } from '../utils/device-autowire-suppression';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
@@ -440,6 +442,46 @@ async function ensureDeviceConnectorWired(
         LIMIT 1
       `) as unknown as Array<{ '?column?': number }>;
       if (suppressed.length > 0) return null;
+
+      // Auto-wire writes on nobody's behalf, so it has to ask whether this org
+      // already installed the key with its OWN code. A device-manifest write
+      // replaces the whole artifact family rather than merging into it
+      // (`replaceVersionArtifact`) — that atomic crossing is the writer's
+      // deliberate INTEGRITY rule, and it applies in both directions, so the
+      // writer cannot also be the one to refuse the crossing. The refusal is
+      // authorization, and it belongs to the unattended caller.
+      //
+      // Only chrome.* is a reserved namespace
+      // (`assertChromeNamespaceInstallIsDeviceManifest`); os.shell, apple.* and
+      // local.directory are all keys a user may legitimately install with their
+      // own source, which is exactly the collision.
+      // `refreshPinnedOrgDeviceConnectorDefinitions` reaches the same outcome
+      // by a stricter route: it SELECTS only orgs whose definition is already a
+      // device connector (`IS_DEVICE_CONNECTOR_SQL`), which excludes an
+      // org-installed artifact as a side effect. The wire path cannot reuse
+      // that — it must also admit the first install, where no definition
+      // exists yet — so it asks the ownership question directly.
+      const [owned] = (await tx`
+        SELECT ${tx.unsafe(ORG_INSTALLED_CONNECTOR_ARTIFACT_SQL)} AS org_installed
+        FROM connector_definitions cd
+        WHERE cd.organization_id = ${organizationId}
+          AND cd.key = ${connectorKey}
+          AND cd.status = 'active'
+        LIMIT 1
+      `) as unknown as Array<{ org_installed: boolean }>;
+      if (owned?.org_installed) {
+        // Warn, not debug, even though a colliding org can never reach the fast
+        // path and so logs this on EVERY poll: the collision is a real config
+        // conflict only a human resolves (uninstall one side), and
+        // `[auto-wire] Bundled connector file not found` above is the same
+        // unhealable-per-poll shape at the same level. Revisit if a real org
+        // ever sits here — dedupe per (org, key) would need shared state.
+        logger.warn(
+          { userId, organizationId, connectorKey },
+          '[auto-wire] Declined to wire over an org-installed connector artifact'
+        );
+        return null;
+      }
 
       // 2. Ensure the connector definition + version are installed (idempotent).
       await upsertConnectorDefinitionRecords({
@@ -871,21 +913,7 @@ async function archiveVanishedDeviceConnectorDefinitions(
           AND cd.status = 'active'
           AND cd.required_capability IS NOT NULL
           AND NOT (cd.key = ANY(${pgTextArray(liveKeys)}::text[]))
-          AND COALESCE((
-            SELECT CASE
-              WHEN cv.organization_id IS NOT NULL
-                THEN cv.source_path LIKE 'device-manifest://%'
-              ELSE cv.source_path IS NOT NULL
-                AND cv.compiled_code IS NULL
-                AND cv.source_code IS NULL
-            END
-            FROM connector_versions cv
-            WHERE cv.connector_key = cd.key
-              AND cv.version = cd.version
-              AND (cv.organization_id = cd.organization_id OR cv.organization_id IS NULL)
-            ORDER BY cv.organization_id NULLS LAST
-            LIMIT 1
-          ), false)
+          AND ${tx.unsafe(DEVICE_CONNECTOR_ARTIFACT_SQL)}
           AND NOT EXISTS (
             SELECT 1 FROM connections c
             WHERE c.organization_id = cd.organization_id
@@ -907,21 +935,7 @@ async function archiveVanishedDeviceConnectorDefinitions(
           AND cd.status = 'active'
           AND cd.required_capability IS NOT NULL
           AND cd.key = ANY(${pgTextArray(candidateKeys)}::text[])
-          AND COALESCE((
-            SELECT CASE
-              WHEN cv.organization_id IS NOT NULL
-                THEN cv.source_path LIKE 'device-manifest://%'
-              ELSE cv.source_path IS NOT NULL
-                AND cv.compiled_code IS NULL
-                AND cv.source_code IS NULL
-            END
-            FROM connector_versions cv
-            WHERE cv.connector_key = cd.key
-              AND cv.version = cd.version
-              AND (cv.organization_id = cd.organization_id OR cv.organization_id IS NULL)
-            ORDER BY cv.organization_id NULLS LAST
-            LIMIT 1
-          ), false)
+          AND ${tx.unsafe(DEVICE_CONNECTOR_ARTIFACT_SQL)}
           AND NOT EXISTS (
             SELECT 1
             FROM device_workers dw

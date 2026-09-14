@@ -368,6 +368,44 @@ describe('manifest-backed device pin admission', () => {
     expect(runs).toHaveLength(0);
   });
 
+  it('admits a team pin whose connection a teammate created', async () => {
+    // The readiness owner is the fleet whose manifests are compared, so it is
+    // the DEVICE's owner. Resolving it from `connections.created_by` instead
+    // looked up the creator's fleet: in a team org a connection created by a
+    // teammate who owns no advertising device matched no manifest source at
+    // all, so a perfectly healthy pin was refused. `list_available` and
+    // `manage_feeds` always resolved it from the device, which is how the
+    // catalog could report the operation ready while queuing refused it.
+    const fixture = await seedFixture();
+    const sql = getTestDb();
+    const teammateId = `user_teammate_${randomUUID()}`;
+    await sql`
+      INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+      VALUES (${teammateId}, 'Teammate', ${`${teammateId}@test.local`}, true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
+      VALUES (${`mem_${randomUUID()}`}, ${fixture.org.id}, ${teammateId}, 'admin', NOW())
+    `;
+    // A team org, not anyone's personal org, with the pin created by a
+    // teammate who owns no device.
+    await sql`UPDATE organization SET metadata = ${sql.json({})} WHERE id = ${fixture.org.id}`;
+    await sql`
+      UPDATE connections SET created_by = ${teammateId}, visibility = 'org'
+      WHERE id = ${fixture.connection.id}
+    `;
+
+    expect((await readiness(fixture.connection.id, fixture.ctx)).executable).toBe(true);
+
+    const run = await queueOperation(fixture);
+    expect(run.status).toBe('pending');
+    const [stored] = await sql`SELECT target_device_worker_id FROM runs WHERE id = ${run.runId}`;
+    expect(stored.target_device_worker_id).toBe(fixture.device.id);
+
+    const [feed] = await sql`SELECT id FROM feeds WHERE connection_id = ${fixture.connection.id}`;
+    expect((await createSyncRun(Number(feed.id), {} as Env)).ok).toBe(true);
+  });
+
   it('admits a retained pinned_version sync despite an incompatible newer active definition', async () => {
     const oldManifest = manifest('0.9.0');
     const fixture = await seedFixture(oldManifest);
