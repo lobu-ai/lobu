@@ -429,11 +429,11 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
             },
             filename: {
               type: 'string',
-              description: 'Name to publish the attachment under. Defaults to the filename get_thread reported, or the attachment ID.',
+              description: 'Name to publish the attachment under. Pass the filename get_thread reported for this attachment; nothing looks it up for you, so omitting it names the file after the attachment ID.',
             },
             mime_type: {
               type: 'string',
-              description: 'Media type of the bytes. Defaults to the type get_thread reported, or application/octet-stream.',
+              description: 'Media type of the bytes. Pass the type get_thread reported for this attachment; nothing looks it up for you, so omitting it falls back to application/octet-stream, which also stops a text file being returned inline.',
             },
             inline_max_bytes: inlineMaxBytesSchema(),
           },
