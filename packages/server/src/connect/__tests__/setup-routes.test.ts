@@ -105,6 +105,32 @@ describe('managed setup browser handoff', () => {
     );
     expect(f.calls()).toBe(0);
   });
+  test('an incomplete setup link renders a page rather than JSON', async () => {
+    // Only hand-craftable: the consent form always posts back to the current
+    // URL with its query intact. Still a browser navigation, so it must not
+    // answer with JSON -- verified live in prod as 400 text/html.
+    const f = fixture();
+    const res = await f.app.request('https://cloud.example/connect/managed', {
+      method: 'POST',
+      headers,
+    });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    const body = await res.text();
+    expect(body).toContain('This setup link is incomplete.');
+    expect(body).toContain('Return to Lobu');
+    expect(f.calls()).toBe(0);
+  });
+  test('an oversized org or connector is refused before any grant work', async () => {
+    const f = fixture();
+    const long = 'x'.repeat(201);
+    const res = await f.app.request(
+      `https://cloud.example/connect/managed?org=${long}&connector=mail`,
+      { method: 'POST', headers }
+    );
+    expect(res.status).toBe(400);
+    expect(f.calls()).toBe(0);
+  });
   test('a visitor with no personal workspace gets an actionable page, not JSON', async () => {
     const f = fixture({ home: async () => null });
     const res = await f.app.request(url, { method: 'POST', headers });
