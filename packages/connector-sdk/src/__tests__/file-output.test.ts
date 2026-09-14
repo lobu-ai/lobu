@@ -106,6 +106,23 @@ describe('inlineText', () => {
 });
 
 describe('fileDownloadOutput', () => {
+  test('encodes the view, not the whole backing buffer', () => {
+    // The base64 is taken as a VIEW over `bytes` to avoid a full copy at the
+    // 10 MiB ceiling. A view built with the wrong offset/length silently encodes
+    // the WRONG bytes, so pin a subarray whose backing buffer is deliberately
+    // larger than the payload.
+    const backing = new Uint8Array([0, 0, 0, 1, 2, 3, 9, 9]);
+    const payload = backing.subarray(3, 6);
+    const output = fileDownloadOutput({
+      bytes: payload,
+      filename: 'slice.bin',
+      mimeType: 'application/octet-stream',
+    });
+    const [attachment] = output.attachments as Array<Record<string, unknown>>;
+    expect(attachment.data).toBe(Buffer.from([1, 2, 3]).toString('base64'));
+    expect(attachment.size_bytes).toBe(3);
+  });
+
   test('always publishes the WHOLE file as one attachment', () => {
     const bytes = utf8('id,name\n1,a\n');
     const out = fileDownloadOutput({ bytes, filename: 'r.csv', mimeType: 'text/csv' });

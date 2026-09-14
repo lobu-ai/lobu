@@ -172,7 +172,10 @@ export function fileDownloadOutput(params: FileDownloadOptions): Record<string, 
       {
         filename,
         mime_type: mimeType,
-        data: Buffer.from(bytes).toString('base64'),
+        // A VIEW over the same memory, not `Buffer.from(bytes)` — that copies
+        // the whole payload, and at the 10 MiB ceiling an extra full copy is
+        // exactly the allocation this module's callers guard against.
+        data: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64'),
         size_bytes: bytes.length,
       },
     ],

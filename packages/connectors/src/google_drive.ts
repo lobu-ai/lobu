@@ -1014,7 +1014,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       ok: true,
       text,
       truncated,
-      byteCount: new TextEncoder().encode(raw).byteLength,
+      byteCount: Buffer.byteLength(raw, 'utf8'),
       ...(exportMime ? { exportedAs: exportMime } : {}),
     };
   }
