@@ -1,14 +1,7 @@
 /**
- * `apply_chat_connection` must not let a tenant write OPERATOR-owned connection
- * settings — above all `previewMode`, which marks a connection as Lobu's own
- * hosted relay and steers cross-organization routing. Why the guard is an
- * allowlist, and what `previewMode` actually controls, is documented once in
- * `tools/admin/manage_connections/handlers/chat-settings-guard.ts`; its
- * decisions are enumerated in that module's unit test.
- *
- * Neither of those can see the handler. This file pins the two things they
- * cannot: that `apply_chat_connection` consults the guard at all, and that it
- * does so before any other work.
+ * That `apply_chat_connection` consults the settings guard at all, and does so
+ * before any other work — the two things neither the guard module nor its unit
+ * test can see. Why the rule exists is documented on the guard itself.
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -43,10 +36,8 @@ describe("apply_chat_connection refuses operator-only settings", () => {
 
 	beforeEach(async () => {
 		const { ctx } = await seedOwnerContext({ orgName: "Chat Settings Org" });
-		// The STRONGEST caller this tool admits: an org owner on a real human web
-		// session. Refused here means refused for agents, PATs and MCP sessions
-		// too, so the gate needs no separate actor-kind axis the way
-		// `action_modes` does.
+		// The strongest caller this tool admits: an org owner on a human web
+		// session. Refused here means refused for agents, PATs and MCP sessions too.
 		humanCtx = { ...ctx, tokenType: "session" };
 	});
 
@@ -66,11 +57,8 @@ describe("apply_chat_connection refuses operator-only settings", () => {
 	});
 
 	it("refuses before any other work, so a bad agent_id cannot shadow it", async () => {
-		// Ordering, which is the reason the guard sits at the top of the handler:
-		// nothing — not the agent lookup, not the upsert — runs on a request
-		// carrying an operator-only key. An unknown `agent_id` is the cheapest
-		// observable step after the guard: if the guard were moved below it, this
-		// would come back "Agent not found" instead.
+		// An unknown `agent_id` is the cheapest observable step after the guard: if
+		// the guard were moved below it, this would say "Agent not found" instead.
 		const result = await callManageConnections(
 			{
 				action: "apply_chat_connection",
@@ -87,12 +75,9 @@ describe("apply_chat_connection refuses operator-only settings", () => {
 	});
 
 	it("does NOT refuse the settings a tenant legitimately owns", async () => {
-		// Guard the guard: an allowlist that refused everything would satisfy the
-		// cases above while breaking the feature. Persistence needs a running chat
-		// instance manager, which this harness has none of — so assert the thing
-		// that is actually under test here, that the guard did not reject. Whether
-		// those keys then persist is `upsertByoChatConnection`'s existing logic,
-		// which this change does not touch.
+		// An allowlist that refused everything would satisfy the cases above while
+		// breaking the feature. Persistence needs a chat instance manager this
+		// harness has none of, so assert only that the guard did not reject.
 		const result = await callManageConnections(
 			{
 				action: "apply_chat_connection",
