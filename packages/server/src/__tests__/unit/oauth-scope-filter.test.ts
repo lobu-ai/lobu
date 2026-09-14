@@ -7,7 +7,9 @@ import {
   NON_PUBLIC_OAUTH_SCOPES,
   AVAILABLE_SCOPES,
   filterRequestedScopes,
+  narrowAuthorizationCodeScopes,
   normalizeOAuthScopeRequest,
+  registrableScopesFor,
   stripNonPublicOAuthScopes,
 } from '../../auth/oauth/scopes';
 
@@ -200,5 +202,104 @@ describe('filterRequestedScopes on the device flow', () => {
     expect(filterRequestedScopes('openid offline_access mcp:read', AVAILABLE_SCOPES)).toBe(
       'mcp:read'
     );
+  });
+});
+
+describe('registrableScopesFor', () => {
+  it('never lets an authorization-code client register a device-flow-only scope', () => {
+    const registrable = registrableScopesFor(false);
+    for (const scope of NON_PUBLIC_OAUTH_SCOPES) {
+      expect(registrable).not.toContain(scope);
+    }
+  });
+
+  it('lets a device-code client register them, since its consent is the boundary', () => {
+    const registrable = registrableScopesFor(true);
+    for (const scope of NON_PUBLIC_OAUTH_SCOPES) {
+      expect(registrable).toContain(scope);
+    }
+  });
+
+  // THE GUARD. A DCR client is held to the scope it registered with, so
+  // registration must never promise something authorization will not deliver.
+  // If a future change moves a scope out of DISCOVERY_SCOPES without moving it
+  // out of what /oauth/register hands back, this fails instead of silently
+  // wedging every client that registers afterwards.
+  it('only registers scopes the authorization-code flow will grant back in full', () => {
+    for (const scope of registrableScopesFor(false)) {
+      expect(narrowAuthorizationCodeScopes(scope)).toEqual({ scope });
+    }
+    expect(narrowAuthorizationCodeScopes(registrableScopesFor(false).join(' '))).toEqual({
+      scope: registrableScopesFor(false).join(' '),
+    });
+  });
+});
+
+describe('narrowAuthorizationCodeScopes', () => {
+  // The literal string Slack's DCR client sent on 2026-09-13. It registered
+  // while discovery still advertised all six (before #1901, 2026-07-13), so it
+  // asked for all six forever, was silently handed four, and refused the
+  // connection with "you didn't select all the required permissions" — while
+  // every server-side hop logged 200.
+  const SLACK_REQUEST =
+    'mcp:read mcp:write mcp:admin profile:read device_worker:run connections:token';
+
+  it('rejects the stale Slack request loudly instead of silently reducing it', () => {
+    const result = narrowAuthorizationCodeScopes(SLACK_REQUEST);
+    expect(result).toEqual({
+      error: 'non_public',
+      scopes: ['device_worker:run', 'connections:token'],
+    });
+  });
+
+  it('names every offending scope so the error is diagnosable in one line', () => {
+    expect(narrowAuthorizationCodeScopes('mcp:read connections:token')).toEqual({
+      error: 'non_public',
+      scopes: ['connections:token'],
+    });
+  });
+
+  it('still DROPS unknown scopes — strangers send OIDC dialect we never issue', () => {
+    expect(narrowAuthorizationCodeScopes('openid email profile offline_access mcp:read')).toEqual({
+      scope: 'mcp:read',
+    });
+  });
+
+  it('reports an empty request when nothing asked for is grantable', () => {
+    expect(narrowAuthorizationCodeScopes('openid offline_access')).toEqual({ error: 'empty' });
+    expect(narrowAuthorizationCodeScopes('')).toEqual({ error: 'empty' });
+  });
+
+  it('passes a well-formed public request through untouched', () => {
+    expect(narrowAuthorizationCodeScopes('mcp:read mcp:write profile:read')).toEqual({
+      scope: 'mcp:read mcp:write profile:read',
+    });
+  });
+});
+
+describe('discovery scope stability', () => {
+  // Changing this literal is a MIGRATION, not an edit.
+  //
+  // A DCR client is held to the scope it registered with, and it only
+  // re-registers when the resource returns 401 — a scope mismatch never gets
+  // that far, because the client rejects the narrower token client-side after a
+  // successful exchange. So REMOVING a scope here strands every client that
+  // registered while it was advertised: they go on asking for the old set
+  // forever, and nothing short of re-registration recovers them.
+  //
+  // That is exactly how Slack broke. Discovery advertised six scopes until
+  // #1901 (2026-07-13) shrank the list to four; Slack had registered against
+  // the six and went on requesting them, so its connection wedged while every
+  // hop kept returning 200.
+  //
+  // Adding a scope is safe. Before removing one, work out how already-
+  // registered clients will re-register — then update this list.
+  it('advertises exactly this set — shrinking it strands already-registered clients', () => {
+    expect([...DISCOVERY_SCOPES]).toEqual([
+      'mcp:read',
+      'mcp:write',
+      'mcp:admin',
+      'profile:read',
+    ]);
   });
 });

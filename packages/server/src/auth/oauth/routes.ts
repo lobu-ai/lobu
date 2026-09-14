@@ -29,8 +29,10 @@ import {
   filterRequestedScopes,
   filterScopeByRole,
   isOAuthScopeGrantWithinRequest,
+  narrowAuthorizationCodeScopes,
   NON_PUBLIC_OAUTH_SCOPES,
   normalizeOAuthScopeRequest,
+  registrableScopesFor,
   stripNonPublicOAuthScopes,
 } from './scopes';
 import type { AuthorizationParams, OAuthClientMetadata, TokenRequestParams } from './types';
@@ -492,6 +494,19 @@ oauthRoutes.post('/oauth/register', async (c) => {
     }
   }
 
+  // Narrow the registration to what this client's grant types can actually be
+  // granted. RFC 7591 §2 lets the server replace requested metadata, and the
+  // response is the authoritative registration — so echoing a scope the
+  // authorization endpoint will always strip hands the client a contract we can
+  // never satisfy. It then asks for that scope forever, gets less, and refuses
+  // the connection, with every server-side hop still reporting 200.
+  //
+  // Absent scope stays absent: that means "server default", not "everything".
+  if (metadata.scope !== undefined && metadata.scope !== null) {
+    metadata.scope =
+      filterRequestedScopes(metadata.scope, registrableScopesFor(!!hasDeviceGrant)) ?? undefined;
+  }
+
   try {
     const client = await provider.clientsStore.registerClient(metadata);
     return c.json(client, 201);
@@ -554,14 +569,19 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
     );
   }
 
-  params.scope =
-    filterRequestedScopes(params.scope || DEFAULT_SCOPES_STRING, DISCOVERY_SCOPES) ?? undefined;
-  if (!params.scope) {
+  const narrowedScope = narrowAuthorizationCodeScopes(params.scope || DEFAULT_SCOPES_STRING);
+  if ('error' in narrowedScope) {
     return c.json(
-      createOAuthError('invalid_scope', 'No requested scopes are available to OAuth clients'),
+      createOAuthError(
+        'invalid_scope',
+        narrowedScope.error === 'non_public'
+          ? `${narrowedScope.scopes.join(', ')} cannot be granted on the authorization-code flow; they are only available via the device authorization grant. Re-register this client against the current /.well-known/oauth-authorization-server scopes_supported.`
+          : 'No requested scopes are available to OAuth clients'
+      ),
       400
     );
   }
+  params.scope = narrowedScope.scope;
   const requestedScopes = getRequestedScopes(params.scope);
   const requestedHasMcpScopes = requestedScopes.some((s) => s.startsWith('mcp:'));
   if (requestedHasMcpScopes) {
@@ -640,7 +660,7 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
   }
 
   // MCP scopes or other scopes — show consent page as before. Device-flow-only
-  // device/managed-credential scopes were stripped above and must never reach
+  // device/managed-credential scopes were rejected above and must never reach
   // authorization-code consent.
   const webUrl = getBaseUrl(c);
   const consentUrl = new URL('/oauth/consent', webUrl);

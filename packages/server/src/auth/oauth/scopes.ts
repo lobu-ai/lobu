@@ -176,11 +176,14 @@ export function canonicalizeOAuthScopeGrant(scope: string): string {
 }
 
 /**
- * Drop device-flow-only scopes from an authorization-code request.
+ * Drop device-flow-only scopes from a client-supplied scope string.
  *
- * MCP clients that already cached a broad `scopes_supported` list may still
- * request `device_worker:run` / `connections:token`. Stripping (rather than
- * rejecting) lets them complete consent with the scopes they actually need.
+ * Defense in depth BEHIND the authorization request, which now rejects these
+ * outright (see {@link narrowAuthorizationCodeScopes}). The remaining callers
+ * take a scope the client controls after that gate — the consent submission
+ * body, and an authorization code minted before the gate existed — where
+ * stripping keeps the grant public without failing a flow the user already
+ * completed.
  */
 export function stripNonPublicOAuthScopes(scope: string | undefined | null): string {
   return (scope || '')
@@ -189,6 +192,68 @@ export function stripNonPublicOAuthScopes(scope: string | undefined | null): str
     .filter(Boolean)
     .filter((s) => !(NON_PUBLIC_OAUTH_SCOPES as readonly string[]).includes(s))
     .join(' ');
+}
+
+/**
+ * The scopes a dynamically-registered client may be REGISTERED with.
+ *
+ * A DCR client treats the registration response as the contract it will be held
+ * to: it asks the authorization endpoint for exactly what it registered, and a
+ * strict one (Slack) refuses the whole connection when the issued token carries
+ * less. So registration must never echo a scope the client's own grant types
+ * can never be granted — that mints a client permanently stuck asking for
+ * something every authorization will strip, and re-registration is the only
+ * escape (see the `narrowAuthorizationCodeScopes` note).
+ *
+ * The device-code grant is the only flow where NON_PUBLIC_OAUTH_SCOPES are
+ * grantable, and the issuing grant type — not client-supplied name or software
+ * metadata — is the enforceable boundary, so it is the only input here.
+ */
+export function registrableScopesFor(supportsDeviceCodeGrant: boolean): readonly string[] {
+  return supportsDeviceCodeGrant ? AVAILABLE_SCOPES : DISCOVERY_SCOPES;
+}
+
+export type AuthorizationCodeScopeResult =
+  | { scope: string }
+  | { error: 'non_public'; scopes: string[] }
+  | { error: 'empty' };
+
+/**
+ * Narrow an authorization-code scope request, REJECTING device-flow-only scopes
+ * instead of dropping them.
+ *
+ * Unknown scopes are still dropped — see {@link filterRequestedScopes} for why
+ * that tolerance is deliberate. But `device_worker:run` / `connections:token`
+ * are OUR names, and a client asking for one on this flow is asking for
+ * something the consent path will never grant. Reducing that silently returns a
+ * valid 200 with a narrower token, which an all-or-nothing client rejects
+ * client-side without ever calling the resource — so it never gets the 401 that
+ * would make it re-read discovery and re-register. The connection wedges with
+ * every server-side hop reporting success.
+ *
+ * Failing loudly costs an all-or-nothing client nothing — it was already
+ * broken — and turns a silent wedge into one `invalid_scope` line naming the
+ * scope. The tradeoff is deliberate: a TOLERANT client still holding a
+ * pre-#1901 registration used to complete authorization at the reduced scope
+ * and now gets a 400 until it re-registers. Both kinds are asking for a scope
+ * this flow will never issue, so both are told so rather than one being
+ * quietly served something other than what it asked for.
+ *
+ * Measured before shipping: across every authorization-code client registered
+ * before #1901 that issued a token in the preceding 30 days, no issued token
+ * carried a non-public scope — so no tolerant client was live to strand.
+ *
+ * Returns the narrowed scope, or the reason it is an `invalid_scope`.
+ */
+export function narrowAuthorizationCodeScopes(
+  scope: string | undefined | null
+): AuthorizationCodeScopeResult {
+  const nonPublic = normalizeScopeList(scope).filter((value) =>
+    (NON_PUBLIC_OAUTH_SCOPES as readonly string[]).includes(value)
+  );
+  if (nonPublic.length > 0) return { error: 'non_public', scopes: nonPublic };
+  const narrowed = filterRequestedScopes(scope, DISCOVERY_SCOPES);
+  return narrowed ? { scope: narrowed } : { error: 'empty' };
 }
 
 /**
