@@ -48,6 +48,10 @@ import {
 	highApprovalImpact,
 	normalApprovalImpact,
 } from "../../../../utils/approval-context";
+import {
+	deleteMaterializedArtifacts,
+	materializeActionOutputAttachments,
+} from "../../../../utils/inline-attachments";
 import { insertEvent } from "../../../../utils/insert-event";
 import logger from "../../../../utils/logger";
 import { stripNul, stripNulDeep } from "../../../../utils/strip-nul";
@@ -104,13 +108,24 @@ async function completeRunInline(
 	// produced and lands in the jsonb `action_output` column. Sanitize before
 	// returning too: approve's deferred phase 2 persists this value itself.
 	const sanitized = stripNulDeep(output) as Record<string, unknown>;
+	// Inline runs publish their attachments for the same reason the worker lane
+	// does it in /complete-action: `action_output` is jsonb that goes straight
+	// back to the caller, so inline base64 would put a connector's file bytes in
+	// the database AND in the requester's context instead of behind a
+	// download_url. A connector that returns no `attachments` array is untouched.
+	const { output: materialized, publishedArtifactIds } =
+		await materializeActionOutputAttachments(runId, sanitized);
 	if (!deferTerminalWrite) {
 		const sql = getDb();
-		const rows = await sql`UPDATE runs SET status = 'completed', completed_at = NOW(), action_output = ${sql.json(sanitized)} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
-		if (rows.length === 0)
+		const rows = await sql`UPDATE runs SET status = 'completed', completed_at = NOW(), action_output = ${sql.json(materialized)} WHERE id = ${runId} AND organization_id = ${organizationId} ${runLeaseFence(sql, claimedBy)} RETURNING id`;
+		if (rows.length === 0) {
+			// Lost the lease: nothing references these artifacts and nothing ever
+			// will, since the row that would have carried them was not written.
+			await deleteMaterializedArtifacts(publishedArtifactIds);
 			return { status: "failed", error_message: LOST_LEASE_MESSAGE };
+		}
 	}
-	return { status: "completed", output: sanitized };
+	return { status: "completed", output: materialized };
 }
 
 /**

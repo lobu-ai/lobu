@@ -568,7 +568,42 @@ describe('GoogleDriveConnector content routing', () => {
     expect(result.output.content).toBe('ab\uFFFD');
   });
 
-  test('content is truncated at max_bytes and reports it', async () => {
+  test('a text file that is not valid UTF-8 still inlines its first page', async () => {
+    // The truncator requires well-formed UTF-8 and returns NOTHING when it
+    // cannot find a clean boundary, so handing it raw download bytes made a
+    // latin-1 CSV inline as an empty string — the "indistinguishable from an
+    // empty file" outcome this connector refuses everywhere else. A truncated
+    // file must read like the first page of an untruncated one.
+    const connector = new GoogleDriveConnector();
+    // 'abc', a lone 0xE9 (latin-1 'é', invalid UTF-8), then more ASCII.
+    const latin1 = new Uint8Array([0x61, 0x62, 0x63, 0xe9, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69]);
+    const drive = fakeDrive([
+      fileGet(driveFile('latin1', { size: String(latin1.length) })),
+      (url) =>
+        url.searchParams.get('alt') === 'media'
+          ? { bytes: latin1, contentType: 'text/plain' }
+          : undefined,
+    ]);
+    connector.client = () => drive.client;
+
+    const result = await connector.execute({
+      actionKey: 'download_file',
+      input: { file_id: 'latin1', inline_max_bytes: 8 },
+      credentials: { accessToken: 'tok' },
+    });
+
+    expect(result.output.content_truncated).toBe(true);
+    // Lossy decode, same as an untruncated read of the same file: the undecodable
+    // byte becomes one U+FFFD, which re-encodes to 3 bytes, so the 8-byte budget
+    // holds 'abc' + U+FFFD + 'de'. Before the fix this was '' — the whole page lost.
+    expect(result.output.content).toBe('abc�de');
+    expect(result.output.line_count).toBe(1);
+    // The attachment is byte-exact regardless of what the inline decode did.
+    const [attachment] = result.output.attachments as Array<Record<string, unknown>>;
+    expect(new Uint8Array(Buffer.from(attachment.data as string, 'base64'))).toEqual(latin1);
+  });
+
+  test('content is truncated at inline_max_bytes and reports it', async () => {
     const connector = new GoogleDriveConnector();
     const drive = fakeDrive([fileGet(driveFile('big')), contentBody('abcdefghij')]);
     connector.client = () => drive.client;

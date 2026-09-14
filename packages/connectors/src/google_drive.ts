@@ -175,7 +175,11 @@ const MAX_INLINE_CONTENT_BYTES = 1024 * 1024;
  */
 const CONTENT_SKEW_GRACE_MS = 5 * 60 * 1000;
 
-/** Google's own hard cap on `files.export`. Requesting more returns a 403. */
+/**
+ * Ceiling on anything this connector pulls in one piece — Google's own hard cap
+ * on `files.export` (requesting more returns a 403), reused as the `alt=media`
+ * download ceiling so both content paths refuse at the same size.
+ */
 const MAX_EXPORT_BYTES = 10 * 1024 * 1024;
 
 /** Field mask for files.list / changes.list. Drive v3 returns almost nothing without it. */
@@ -238,6 +242,27 @@ function decodeTruncated(encoded: Uint8Array, maxBytes: number): string {
   // slices above lands on a character boundary. Returning lossily here would
   // manufacture the very U+FFFD this function exists to prevent.
   return '';
+}
+
+/**
+ * Decode downloaded bytes as text and cut them to the inline budget.
+ *
+ * The decode comes FIRST because `decodeTruncated` requires well-formed UTF-8
+ * (it hands back nothing rather than manufacture a U+FFFD), and a downloaded
+ * file is not required to be any such thing — a latin-1 CSV would otherwise
+ * inline as an empty string, the exact "looks like an empty file" outcome this
+ * connector refuses everywhere else. Decoding lossily once and re-encoding
+ * gives the truncator the input it documents, and makes a truncated file read
+ * the same as the first page of an untruncated one.
+ */
+function inlineText(
+  bytes: Uint8Array,
+  maxBytes: number
+): { content: string; truncated: boolean } {
+  const text = new TextDecoder('utf-8').decode(bytes);
+  const encoded = new TextEncoder().encode(text);
+  if (encoded.byteLength <= maxBytes) return { content: text, truncated: false };
+  return { content: decodeTruncated(encoded, maxBytes), truncated: true };
 }
 
 function exportMimeTypeFor(mimeType: string | undefined): string | undefined {
@@ -930,13 +955,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     // file, so truncating here loses nothing.
     const textual =
       fetched.exportedAs !== undefined || isTextualMimeType(file.mimeType);
-    const inlined = inlineMaxBytes > 0 && textual;
-    const truncated = inlined && fetched.bytes.length > inlineMaxBytes;
-    const content = inlined
-      ? truncated
-        ? decodeTruncated(fetched.bytes, inlineMaxBytes)
-        : fetched.bytes.toString('utf-8')
-      : undefined;
+    const inline = inlineMaxBytes > 0 && textual ? inlineText(fetched.bytes, inlineMaxBytes) : undefined;
 
     return {
       success: true,
@@ -947,11 +966,12 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         exported_as: fetched.exportedAs,
         size_bytes: fetched.bytes.length,
         attachments: [attachment],
-        ...(inlined
+        ...(inline
           ? {
-              content,
-              content_truncated: truncated,
-              line_count: content!.length === 0 ? 0 : content!.split('\n').length,
+              content: inline.content,
+              content_truncated: inline.truncated,
+              line_count:
+                inline.content.length === 0 ? 0 : inline.content.split('\n').length,
             }
           : {
               content_omitted_reason: textual
