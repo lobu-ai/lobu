@@ -48,8 +48,9 @@ defineConnection({
 keep working: with it omitted, one matching grant resolves normally and more
 than one is refused as 409 `ambiguous_connection` rather than guessed at.
 Omit `credentialMode`: `managedBy` alone is sufficient. Nothing derives the
-field — `map-config.ts:854-862` only rejects the inconsistent pairs
-(`"managed"` without `managedBy`, `"byo"` with it).
+field — `packages/cli/src/commands/_lib/apply/map-config.ts` (the
+`credentialMode`/`managedBy` consistency checks) only rejects the inconsistent
+pairs (`"managed"` without `managedBy`, `"byo"` with it).
 
 At execution, `resolveManagedByForConnection` reads `config.managedBy` and
 `fetchManagedConnectionToken` POSTs to the cloud's `/oauth/connection-token`,
