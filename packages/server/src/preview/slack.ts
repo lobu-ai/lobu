@@ -822,8 +822,11 @@ export async function bindChatToAgentForOwner(args: {
 	if (connections.length !== 1) return { status: "forbidden" };
 	const requiresInstallationAuthority = connections[0].organization_id !== organizationId && !connections[0].is_preview;
 	if (requiresInstallationAuthority) {
-		// Codeless identity currently comes from verified Slack workspace identity.
-		// Platforms without that identity adapter use connection-scoped codes.
+		// A cross-organization codeless bind needs the workspace the identity was
+		// proven in. Only Slack supplies one: Google Chat resolves a sender from a
+		// globally-unique account id with no workspace attached, so it falls back
+		// to connection-scoped codes here, same as a platform with no identity at
+		// all.
 		if (!teamId) return { status: "forbidden" };
 		if (!(await canLinkChatOrganizations(sql, lobuUserId, organizationId, connections[0].organization_id))) {
 			return { status: "forbidden" };

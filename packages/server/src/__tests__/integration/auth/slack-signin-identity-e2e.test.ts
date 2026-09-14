@@ -3,12 +3,12 @@
  * BetterAuth handler.
  *
  * This is the e2e the unit tests can't be: it does NOT call
- * `persistLoginSlackIdentity` directly. It drives a full genericOAuth sign-in
+ * `persistLoginChatIdentity` directly. It drives a full genericOAuth sign-in
  * through `auth.handler(...)` — POST /sign-in/oauth2, the provider authorize
  * redirect, and the /oauth2/callback/slack exchange — against a mock Slack
  * OAuth server. The only thing under test is the wiring in `auth/index.tsx`:
  * does the configured `databaseHooks.account.create.after` hook actually fire,
- * thread `account.idToken`/`accountId` into `persistLoginSlackIdentity`, decode
+ * thread `account.idToken`/`accountId` into `persistLoginChatIdentity`, decode
  * the id_token, and write the team-scoped `slack_user_id` onto the user's
  * `$member`?
  *
@@ -25,7 +25,7 @@
  *   4. Assert `buildSlackChannelGraph` collapses the channel member onto that
  *      same `$member` — no forked `person`.
  *
- * Red→green: with the two `void persistLoginSlackIdentity(accountSummary)`
+ * Red→green: with the two `void persistLoginChatIdentity(accountSummary)`
  * lines removed from `auth/index.tsx`, step 3 finds no row and the test fails
  * (verified manually — see the PR body).
  */
@@ -302,7 +302,7 @@ describe("slack sign-in slack_user_id e2e (real BetterAuth handler)", () => {
 
 		// 3) Hit the BetterAuth callback with the code+state and the state cookie.
 		//    This triggers the real token exchange (mock /token) → id_token decode
-		//    → account link → account.create.after hook → persistLoginSlackIdentity.
+		//    → account link → account.create.after hook → persistLoginChatIdentity.
 		const callbackRes = await auth.handler(
 			new Request(callbackLocation as string, {
 				method: "GET",

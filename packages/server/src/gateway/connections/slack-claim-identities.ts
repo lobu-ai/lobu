@@ -1,5 +1,5 @@
 import { SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
-import { decodeJwtClaims } from "../../auth/subject-identities.js";
+import { decodeJwtClaims } from "../../auth/jwt-claims.js";
 import { getDb, type DbClient } from "../../db/client.js";
 
 /**

@@ -1,0 +1,188 @@
+/**
+ * `resolveChatUserIdentity` across platforms.
+ *
+ * The function used to open with `if (platform !== "slack") return null`, so a
+ * Google Chat sender could never be recognised as the Lobu user who signed in
+ * with that same Google account — which is what gates `/lobu <agent>` re-binding.
+ * It is now registry-driven: a platform resolves iff a connector contributes a
+ * `ChatUserIdentity` for it.
+ *
+ * These cases pin the two things that registry must get right, which are
+ * OPPOSITE for the two platforms shipped today:
+ *
+ *   - gchat keys on the BARE Google account id, accepting the `users/{id}`
+ *     resource name Google Chat actually sends, and needs NO team id.
+ *   - slack keys on the composite `TEAM:USER` and must REFUSE to resolve
+ *     without a team — two workspaces can share a bare `U…`.
+ *
+ * Plus the fail-closed properties: an unregistered platform resolves null, a
+ * malformed id resolves null, and one platform's namespace is never reachable
+ * through another's.
+ */
+
+import { beforeEach, describe, expect, it } from "vitest";
+import {
+	addUserToOrganization,
+	createTestOrganization,
+	createTestUser,
+} from "../../../__tests__/setup/test-fixtures";
+import { cleanupTestDatabase, getTestDb } from "../../../__tests__/setup/test-db";
+import { provisionMemberAndCoreIdentities } from "../../../auth/subject-identities";
+import { resolveChatUserIdentity } from "../chat-identity";
+
+/** A synthetic Google account id — the shape Google's OIDC `sub` uses. */
+const GOOGLE_SUB = "100000000000000000001";
+const TEAM = "T1";
+const SLACK_USER = "U1";
+
+async function seedMember(email: string): Promise<{
+	orgId: string;
+	userId: string;
+	memberEntityId: number;
+}> {
+	const org = await createTestOrganization({
+		name: "Acme",
+		visibility: "private",
+	});
+	const user = await createTestUser({ name: "Alice", email });
+	await addUserToOrganization(user.id, org.id, "owner");
+	const { memberEntityId } = await provisionMemberAndCoreIdentities(org.id, {
+		userId: user.id,
+		email,
+		name: "Alice",
+	});
+	return { orgId: org.id, userId: user.id, memberEntityId };
+}
+
+/** Stamp a chat identity directly, as the login writer would. */
+async function stamp(
+	organizationId: string,
+	memberEntityId: number,
+	namespace: string,
+	identifier: string,
+): Promise<void> {
+	await getTestDb()`
+    INSERT INTO entity_identities (
+      organization_id, entity_id, namespace, identifier, source_connector, scope_key
+    ) VALUES (
+      ${organizationId}, ${memberEntityId}, ${namespace}, ${identifier}, 'auth:signup', NULL
+    )
+  `;
+}
+
+describe("resolveChatUserIdentity across platforms", () => {
+	beforeEach(async () => {
+		await cleanupTestDatabase();
+	});
+
+	it("resolves a Google Chat sender from the `users/{id}` resource name", async () => {
+		const { orgId, userId, memberEntityId } = await seedMember(
+			"alice@acme.test",
+		);
+		await stamp(orgId, memberEntityId, "google_user_id", GOOGLE_SUB);
+
+		// Exactly what the gchat adapter hands over: `message.sender.name`, and no
+		// team id — Google Chat events carry none.
+		expect(
+			await resolveChatUserIdentity("gchat", undefined, `users/${GOOGLE_SUB}`),
+		).toBe(userId);
+	});
+
+	it("resolves a Google Chat sender from a bare account id too", async () => {
+		const { orgId, userId, memberEntityId } = await seedMember(
+			"alice@acme.test",
+		);
+		await stamp(orgId, memberEntityId, "google_user_id", GOOGLE_SUB);
+
+		expect(await resolveChatUserIdentity("gchat", undefined, GOOGLE_SUB)).toBe(
+			userId,
+		);
+	});
+
+	it("refuses a malformed Google Chat sender id", async () => {
+		const { orgId, memberEntityId } = await seedMember("alice@acme.test");
+		await stamp(orgId, memberEntityId, "google_user_id", GOOGLE_SUB);
+
+		// A Chat app / service-account resource name, not a person.
+		expect(
+			await resolveChatUserIdentity("gchat", undefined, "users/app-not-a-person"),
+		).toBeNull();
+		expect(await resolveChatUserIdentity("gchat", undefined, "")).toBeNull();
+	});
+
+	it("still REFUSES a Slack sender with no team id", async () => {
+		const { orgId, userId, memberEntityId } = await seedMember("alice@acme.test");
+		await stamp(orgId, memberEntityId, "slack_user_id", `${TEAM}:${SLACK_USER}`);
+
+		// Two workspaces can both contain `U1`, and this link grants privilege —
+		// an unscoped match would be a mis-grant. Generalising the platform gate
+		// must not have relaxed this.
+		expect(
+			await resolveChatUserIdentity("slack", undefined, SLACK_USER),
+		).toBeNull();
+		// With the team id it resolves, so the null above is the scoping rule and
+		// not a broken fixture.
+		expect(await resolveChatUserIdentity("slack", TEAM, SLACK_USER)).toBe(
+			userId,
+		);
+	});
+
+	it("resolves null for a platform no connector has registered", async () => {
+		const { orgId, memberEntityId } = await seedMember("alice@acme.test");
+		await stamp(orgId, memberEntityId, "google_user_id", GOOGLE_SUB);
+
+		// telegram/discord/teams/whatsapp ship no ChatUserIdentity yet. Fail
+		// closed: an unlinked sender must never resolve to some user.
+		for (const platform of ["telegram", "discord", "teams", "whatsapp"]) {
+			expect(
+				await resolveChatUserIdentity(platform, undefined, GOOGLE_SUB),
+			).toBeNull();
+		}
+	});
+
+	it("never reaches one platform's namespace through another's", async () => {
+		const { orgId, memberEntityId } = await seedMember("alice@acme.test");
+		// Only a Slack identity exists. A gchat lookup whose id happens to be
+		// numeric must not find it, and vice versa.
+		await stamp(orgId, memberEntityId, "slack_user_id", `${TEAM}:${SLACK_USER}`);
+
+		expect(
+			await resolveChatUserIdentity("gchat", undefined, GOOGLE_SUB),
+		).toBeNull();
+		expect(
+			await resolveChatUserIdentity("gchat", TEAM, `users/${GOOGLE_SUB}`),
+		).toBeNull();
+	});
+
+	it("resolves BOTH of one person's Google accounts to that same user", async () => {
+		// Real shape: a human signs into Lobu with their work Google account and
+		// their personal one, so two `google_user_id` rows land on one `$member`.
+		// Each must resolve independently — neither is ambiguity.
+		const { orgId, userId, memberEntityId } = await seedMember(
+			"alice@acme.test",
+		);
+		const SECOND_SUB = "100000000000000000002";
+		await stamp(orgId, memberEntityId, "google_user_id", GOOGLE_SUB);
+		await stamp(orgId, memberEntityId, "google_user_id", SECOND_SUB);
+
+		expect(
+			await resolveChatUserIdentity("gchat", undefined, `users/${GOOGLE_SUB}`),
+		).toBe(userId);
+		expect(
+			await resolveChatUserIdentity("gchat", undefined, `users/${SECOND_SUB}`),
+		).toBe(userId);
+	});
+
+	it("fails closed when two distinct users are reachable from one sender id", async () => {
+		const a = await seedMember("alice@acme.test");
+		const b = await seedMember("bob@acme.test");
+		await stamp(a.orgId, a.memberEntityId, "google_user_id", GOOGLE_SUB);
+		await stamp(b.orgId, b.memberEntityId, "google_user_id", GOOGLE_SUB);
+
+		// The graph is inconsistent — one Google account cannot be two humans.
+		// Returning either one would be an arbitrary privilege grant.
+		expect(
+			await resolveChatUserIdentity("gchat", undefined, `users/${GOOGLE_SUB}`),
+		).toBeNull();
+	});
+});

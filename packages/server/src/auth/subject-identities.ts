@@ -6,7 +6,10 @@
  * single entity_identities lookup.
  */
 
-import { normalizeSlackUserId, SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
+import {
+	normalizeSlackUserId,
+	slackChatUserIdentity,
+} from "@lobu/connectors/slack-identity";
 import { fetchUserInfoWithRaw } from "../connect/oauth-providers";
 import { getDb } from "../db/client";
 import {
@@ -18,6 +21,11 @@ import {
 	ensureMemberEntity,
 	resolveMemberSchemaFields,
 } from "../utils/member-entity";
+import {
+	type ChatLoginIdentityDeps,
+	chatLoginIdentityFor,
+	type LoginAccountForChatIdentity,
+} from "./chat-login-identities";
 import { getEnabledLoginProviderConfigs } from "./config";
 
 const log = logger.child({ module: "auth-subject-identities" });
@@ -97,20 +105,24 @@ async function writeIdentities(
  * those, which would let an attacker attach their `U…` to a victim's `$member`.
  *
  * The takeover is scoped to `person` entities. A claim already held by another
- * `$member` is a genuine identity conflict (two humans, one Slack id) and is
+ * `$member` is a genuine identity conflict (two humans, one platform id) and is
  * left alone — fail closed, never steal.
+ *
+ * `namespace` comes from the platform's connector-owned descriptor, so this
+ * helper serves every chat platform without naming one.
  */
-async function adoptSlackIdentityOntoMember(
+async function adoptChatIdentityOntoMember(
 	sql: Sql,
 	organizationId: string,
 	memberEntityId: number,
+	namespace: string,
 	identifier: string,
 ): Promise<"created" | "adopted" | "already-owned" | "conflict"> {
 	const inserted = await sql<{ id: number }>`
     INSERT INTO entity_identities (
       organization_id, entity_id, namespace, identifier, source_connector, scope_key
     ) VALUES (
-      ${organizationId}, ${memberEntityId}, ${SLACK_IDENTITY.USER_ID}, ${identifier}, 'auth:signup', NULL
+      ${organizationId}, ${memberEntityId}, ${namespace}, ${identifier}, 'auth:signup', NULL
     )
     ON CONFLICT (organization_id, namespace, identifier, COALESCE(scope_key, '')) WHERE deleted_at IS NULL
     DO NOTHING
@@ -134,7 +146,7 @@ async function adoptSlackIdentityOntoMember(
       ON et.id = e.entity_type_id
      AND et.organization_id = e.organization_id
     WHERE ei.organization_id = ${organizationId}
-      AND ei.namespace = ${SLACK_IDENTITY.USER_ID}
+      AND ei.namespace = ${namespace}
       AND ei.identifier = ${identifier}
       AND ei.scope_key IS NULL
       AND ei.deleted_at IS NULL
@@ -148,7 +160,7 @@ async function adoptSlackIdentityOntoMember(
 	const mine = await sql<{ id: number }>`
     SELECT id FROM entity_identities
     WHERE organization_id = ${organizationId}
-      AND namespace = ${SLACK_IDENTITY.USER_ID}
+      AND namespace = ${namespace}
       AND identifier = ${identifier}
       AND scope_key IS NULL
       AND entity_id = ${memberEntityId}
@@ -230,80 +242,44 @@ export async function provisionMemberAndCoreIdentities(
 }
 
 /**
- * The slice of a BetterAuth social-login account this needs. Structurally
- * satisfied by the `accountSummary` the auth hooks already build.
+ * The writer's injected boundary: the extractors' network reads
+ * (`ChatLoginIdentityDeps`) plus the tenant lookup this function does itself.
+ * `defaultPersistDeps` wires the production implementations.
  */
-export interface LoginAccountForSlackIdentity {
-	providerId: string;
-	userId: string;
-	accessToken?: string | null;
-	/**
-	 * The provider's external account id (the bare Slack `U…` sub), distinct
-	 * from the BetterAuth row PK. Preferred over the userinfo body when present.
-	 */
-	accountId?: string | null;
-	/**
-	 * The OIDC id_token BetterAuth stored on the account row at the login code
-	 * exchange. Slack's id_token payload carries both `https://slack.com/team_id`
-	 * and `https://slack.com/user_id`, so when present we read them straight from
-	 * it — no second HTTP round-trip / provider-config lookup needed.
-	 */
-	idToken?: string | null;
-}
-
-/**
- * Decode the claims (payload) of a JWT without verifying its signature. Safe
- * here because this is our own server-stored token from a TLS code exchange —
- * same trust level as the access token we already store and use. Mirrors
- * better-auth's own `decodeJwt`. Returns null on any malformation.
- */
-export function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
-	const seg = jwt.split(".")[1];
-	if (!seg) return null;
-	try {
-		return JSON.parse(Buffer.from(seg, "base64url").toString("utf8")) as Record<
-			string,
-			unknown
-		>;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Injected boundary so tests can stub the network reads (userinfo fetch +
- * provider config) while exercising the real DB write path. Defaults wire the
- * production implementations. This is the `isolate: false` vitest-safe seam:
- * the integration suite shares one module graph, so `vi.mock` of these shared
- * singletons is unreliable — dependency injection is the durable alternative.
- */
-export interface PersistLoginSlackIdentityDeps {
+export interface PersistLoginChatIdentityDeps extends ChatLoginIdentityDeps {
 	/**
 	 * EVERY org where this user is a `$member`, not just their personal one — a
-	 * Slack workspace identity is meaningful in each org whose ACL graph covers
-	 * that workspace, and the authz gate resolves per-org.
+	 * chat identity is meaningful in each org whose ACL graph covers that
+	 * workspace, and the authz gate resolves per-org.
 	 */
 	resolveMemberOrgsForUser: (
 		userId: string,
 	) => Promise<ResolvedTenantMember[]>;
-	getEnabledLoginProviderConfigs: typeof getEnabledLoginProviderConfigs;
-	fetchUserInfoWithRaw: typeof fetchUserInfoWithRaw;
 }
 
-const defaultPersistDeps: PersistLoginSlackIdentityDeps = {
+const defaultPersistDeps: PersistLoginChatIdentityDeps = {
 	resolveMemberOrgsForUser,
 	getEnabledLoginProviderConfigs,
 	fetchUserInfoWithRaw,
 };
 
 /**
- * On Slack sign-in, write the user's team-scoped `slack_user_id` (`T…:U…`) onto
- * their `$member` entity, sourced `auth:signup`, in EVERY org where they are a
- * member. Idempotent.
+ * On sign-in with a provider that proves a chat identity, write that identity
+ * onto the user's `$member` entity, sourced `auth:signup`, in EVERY org where
+ * they are a member. Idempotent, and a no-op for every other provider.
  *
- * Effect: the ACL Slack channel-graph collapses the workspace member onto the
- * existing `$member` instead of forking a separate `person`, because both sides
- * now resolve on the same canonical `slack_user_id`.
+ * Which providers qualify, what namespace they write, and how the key is built
+ * all come from the registry (`chat-login-identities.ts` +
+ * `@lobu/connectors/*-identity`) — this function names no provider. Today:
+ * Slack sign-in mints the team-scoped `slack_user_id` (`T…:U…`); Google sign-in
+ * mints the bare `google_user_id`, which is what Google Chat puts in a sender's
+ * `users/{id}`.
+ *
+ * Effect: the chat-side graph collapses the platform member onto the existing
+ * `$member` instead of forking a separate `person`, because both sides now
+ * resolve on the same canonical key. That link is what lets a chat user bind an
+ * agent (`/lobu <agent>`) as themselves, and on Slack — the only platform whose
+ * interaction bridge resolves a reviewer today — decide an approval card.
  *
  * Runs across every member org, not just the personal one: a workspace is
  * commonly connected to a SHARED org, and the authz gate resolves per-org — so
@@ -312,99 +288,58 @@ const defaultPersistDeps: PersistLoginSlackIdentityDeps = {
  *
  * Fire-and-forget — failures log and never throw into the auth hook.
  */
-export async function persistLoginSlackIdentity(
-	account: LoginAccountForSlackIdentity,
-	deps: PersistLoginSlackIdentityDeps = defaultPersistDeps,
+export async function persistLoginChatIdentity(
+	account: LoginAccountForChatIdentity,
+	deps: PersistLoginChatIdentityDeps = defaultPersistDeps,
 ): Promise<void> {
+	const entry = chatLoginIdentityFor(account.providerId);
+	if (!entry) return;
+	const { identity } = entry;
 	try {
-		if (account.providerId.trim().toLowerCase() !== "slack") return;
-		if (!account.accessToken) return;
-
 		const memberOrgs = await deps.resolveMemberOrgsForUser(account.userId);
 		if (memberOrgs.length === 0) {
 			log.debug(
-				{ userId: account.userId },
-				"slack-identity: no tenant $member yet — skipping slack_user_id write",
+				{ userId: account.userId, namespace: identity.namespace },
+				"chat-identity: no tenant $member yet — skipping identity write",
 			);
 			return;
 		}
 
-		let teamId: string | null | undefined;
-		let bareUser: string | null | undefined;
-		let source: "id_token" | "userinfo-fallback" = "id_token";
-
-		// PRIMARY: read team + user straight out of the stored id_token. No network.
-		if (account.idToken) {
-			const claims = decodeJwtClaims(account.idToken);
-			if (claims) {
-				teamId = claims["https://slack.com/team_id"] as
-					| string
-					| null
-					| undefined;
-				bareUser = (account.accountId ??
-					claims["https://slack.com/user_id"] ??
-					claims.sub) as string | null | undefined;
-			}
-		}
-
-		// FALLBACK: no id_token (or it yielded no team_id) → the userinfo endpoint.
-		// One extra HTTP round-trip + a provider-config DB read, kept behind the
-		// injected deps seam so it stays testable.
-		if (!teamId) {
-			source = "userinfo-fallback";
-			// Resolve the Slack userinfo endpoint from the BASELINE catalog config
-			// only (org id = null). We are about to send the user's real Slack OAuth
-			// access token to `userinfoUrl`, so that URL must come from a trusted
-			// source. An org-specific provider definition SHADOWS the baseline
-			// (mergeLoginProviderConfigs), so reading it from any org the user
-			// belongs to would let a tenant-controlled `userinfoUrl` receive the
-			// token — an exfiltration vector, and unrelated to whichever org
-			// actually initiated the OAuth exchange. The endpoint is a fixed
-			// provider property, identical for every tenant, so the baseline is
-			// both correct and safe.
-			const cfgs = await deps.getEnabledLoginProviderConfigs(null);
-			const slackCfg = cfgs.find((c) => c.provider.toLowerCase() === "slack");
-			const { raw } = await deps.fetchUserInfoWithRaw({
-				provider: "slack",
-				accessToken: account.accessToken,
-				userinfoUrl: slackCfg?.userinfoUrl,
-			});
-			teamId = raw?.["https://slack.com/team_id"] as string | null | undefined;
-			bareUser = (account.accountId ??
-				raw?.["https://slack.com/user_id"] ??
-				raw?.sub) as string | null | undefined;
-		}
-
-		// null = missing team id or malformed → NEVER write a bare, un-scoped id
-		// (two workspaces can share a `U…`, so a bare id would bleed across orgs).
-		const combined = normalizeSlackUserId(teamId, bareUser);
+		const principal = await entry.extract(account, deps);
+		// null = the provider could not prove a principal (no token, no id_token
+		// claim, no account id). Never guess one.
+		const combined = principal
+			? identity.buildUserKey(principal.teamId, principal.platformUserId)
+			: null;
 		if (!combined) {
 			log.debug(
-				{ userId: account.userId },
-				"slack-identity: missing team_id or user id — skipping slack_user_id write",
+				{ userId: account.userId, namespace: identity.namespace },
+				"chat-identity: could not build a scoped key — skipping identity write",
 			);
 			return;
 		}
 
 		const sql = getDb();
 		for (const org of memberOrgs) {
-			const outcome = await adoptSlackIdentityOntoMember(
+			const outcome = await adoptChatIdentityOntoMember(
 				sql,
 				org.tenantOrganizationId,
 				org.memberEntityId,
+				identity.namespace,
 				combined,
 			);
 			if (outcome === "conflict") {
-				// Another `$member` in this org already holds this Slack id. Two
-				// humans cannot share one workspace account, so this is a data
-				// problem a person must look at — never silently reassign.
+				// Another `$member` in this org already holds this platform id. Two
+				// humans cannot share one account, so this is a data problem a person
+				// must look at — never silently reassign.
 				log.warn(
 					{
 						userId: account.userId,
 						organizationId: org.tenantOrganizationId,
 						memberEntityId: org.memberEntityId,
+						namespace: identity.namespace,
 					},
-					"slack-identity: slack_user_id already claimed by a different $member — leaving it alone",
+					"chat-identity: identity already claimed by a different $member — leaving it alone",
 				);
 				continue;
 			}
@@ -412,16 +347,17 @@ export async function persistLoginSlackIdentity(
 				{
 					userId: account.userId,
 					organizationId: org.tenantOrganizationId,
-					source,
+					namespace: identity.namespace,
+					source: principal?.source,
 					outcome,
 				},
-				"slack-identity: linked slack_user_id to $member",
+				"chat-identity: linked chat identity to $member",
 			);
 		}
 	} catch (err) {
 		log.error(
 			{ err, userId: account.userId, providerId: account.providerId },
-			"slack-identity: failed to persist slack_user_id on login",
+			"chat-identity: failed to persist chat identity on login",
 		);
 	}
 }
@@ -430,7 +366,7 @@ export async function persistLoginSlackIdentity(
  * Stamp a workspace-scoped Slack identity onto a user's `$member` in every org
  * they belong to, idempotently and failing closed on conflict.
  *
- * This is the same write `persistLoginSlackIdentity` performs, exposed for the
+ * This is the same write `persistLoginChatIdentity` performs, exposed for the
  * install-claim path. That path needs it for a key OAuth alone cannot supply:
  * on Slack Grid the install row is keyed by the ENTERPRISE id (`E…`) while a
  * sign-in only ever proves the WORKSPACE id (`T…`), and inbound events may
@@ -463,10 +399,11 @@ export async function stampSlackIdentityForUser(
 	}
 	const sql = getDb();
 	for (const org of memberOrgs) {
-		const outcome = await adoptSlackIdentityOntoMember(
+		const outcome = await adoptChatIdentityOntoMember(
 			sql,
 			org.tenantOrganizationId,
 			org.memberEntityId,
+			slackChatUserIdentity.namespace,
 			combined,
 		);
 		if (outcome === "conflict") {

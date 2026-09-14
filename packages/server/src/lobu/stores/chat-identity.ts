@@ -1,24 +1,26 @@
-import { SLACK_IDENTITY, normalizeSlackUserId } from "@lobu/connectors/slack-identity";
+import { SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
 import { getDb } from "../../db/client.js";
+import { chatUserIdentityFor } from "./chat-identity-sources.js";
 
 /**
  * Resolve a chat-platform user to the Lobu `user` they are, using the entity
  * graph as the source of truth.
  *
  * This used to read a dedicated `chat_user_identities` table. It no longer
- * does: the same fact is already recorded, better, by `persistLoginSlackIdentity`
- * (auth/subject-identities.ts) on every Slack OAuth sign-in and token refresh.
- * That writer stamps `entity_identities(namespace = 'slack_user_id')` with a
- * WORKSPACE-SCOPED `TEAM:USER` key onto the signer's `$member` in each org they
- * belong to, resolving the team from the id_token claim with a userinfo
- * fallback — and refuses to write anything when it cannot establish the team.
+ * does: the same fact is already recorded, better, by `persistLoginChatIdentity`
+ * (auth/subject-identities.ts) on every matching OAuth sign-in and token
+ * refresh. That writer stamps `entity_identities` in the platform's own
+ * namespace onto the signer's `$member` in each org they belong to — and
+ * refuses to write anything it cannot key safely.
  *
- * Workspace scoping is not optional here. Two Slack workspaces can legitimately
- * contain the same bare `U…`, so a lookup keyed on the user id alone would map
- * one workspace's person onto another workspace's Lobu account. Callers use this
- * to grant privilege (approval clicks, owner re-bind), so
- * that would be a mis-grant, not merely a wrong answer. The composite
- * `TEAM:USER` identifier carries the scope in the key itself.
+ * The KEY SHAPE is per platform and comes from the connector-owned descriptor
+ * (`chat-identity-sources.ts`), never from this file. Slack's is the composite
+ * `TEAM:USER`, because two workspaces can legitimately contain the same bare
+ * `U…` and a lookup keyed on the user id alone would map one workspace's person
+ * onto another workspace's Lobu account. Google's is the bare account id,
+ * because Google cannot mint that id twice. Callers use this to grant privilege
+ * (approval clicks, owner re-bind), so a wrong key is a mis-grant, not merely a
+ * wrong answer.
  *
  * NOTE: this is a 1:1 platform-identity → user link, NOT cross-platform identity
  * CONSOLIDATION (one human's Slack + Telegram + custom identities merged to one
@@ -29,9 +31,10 @@ import { getDb } from "../../db/client.js";
 /**
  * The Lobu user id a chat-platform user has linked to, or null.
  *
- * Slack-only by construction: `slack_user_id` is the only chat namespace any
- * writer populates. Every other platform resolves null, which is the correct
- * fail-closed answer — an unlinked id must never resolve to the wrong user.
+ * Registry-driven: a platform resolves only when a connector contributes a
+ * `ChatUserIdentity` for it AND that descriptor can key the inbound ids. Every
+ * other platform resolves null, which is the correct fail-closed answer — an
+ * unlinked id must never resolve to the wrong user.
  *
  * FAILS CLOSED on ambiguity. The identity rows are org-scoped, so one human in
  * several orgs yields several rows; they normally all carry the same
@@ -48,30 +51,32 @@ export async function resolveChatUserIdentity(
 	teamId: string | undefined,
 	platformUserId: string,
 ): Promise<string | null> {
-	if (platform !== "slack") return null;
-	// Same normalizer the writer uses, so the key matches byte-for-byte. Returns
-	// null when the team is missing/malformed — never a bare, unscoped id.
-	const combined = normalizeSlackUserId(teamId, platformUserId);
+	const identity = chatUserIdentityFor(platform);
+	if (!identity) return null;
+	// Same key builder the writer uses, so the key matches byte-for-byte. Returns
+	// null when the platform's scoping requirements aren't met (e.g. Slack
+	// without a team id) — never a bare, unscoped id for a platform that needs one.
+	const combined = identity.buildUserKey(teamId, platformUserId);
 	if (!combined) return null;
 
 	const rows = await getDb()<{ lobu_user_id: string }>`
     SELECT DISTINCT auth_ei.identifier AS lobu_user_id
-    FROM entity_identities slack_ei
+    FROM entity_identities chat_ei
     JOIN entities e
-      ON e.id = slack_ei.entity_id
-     AND e.organization_id = slack_ei.organization_id
+      ON e.id = chat_ei.entity_id
+     AND e.organization_id = chat_ei.organization_id
      AND e.deleted_at IS NULL
     JOIN entity_identities auth_ei
-      ON auth_ei.organization_id = slack_ei.organization_id
-     AND auth_ei.entity_id = slack_ei.entity_id
+      ON auth_ei.organization_id = chat_ei.organization_id
+     AND auth_ei.entity_id = chat_ei.entity_id
      AND auth_ei.namespace = 'auth_user_id'
      AND auth_ei.scope_key IS NULL
      AND auth_ei.source_connector = 'auth:signup'
      AND auth_ei.deleted_at IS NULL
-    WHERE slack_ei.namespace = ${SLACK_IDENTITY.USER_ID}
-      AND slack_ei.identifier = ${combined}
-      AND slack_ei.scope_key IS NULL
-      AND slack_ei.deleted_at IS NULL
+    WHERE chat_ei.namespace = ${identity.namespace}
+      AND chat_ei.identifier = ${combined}
+      AND chat_ei.scope_key IS NULL
+      AND chat_ei.deleted_at IS NULL
     LIMIT 2
   `;
 	if (rows.length !== 1) return null;

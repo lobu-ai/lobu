@@ -48,7 +48,7 @@ import {
 	findExistingPersonalOrg,
 	isPersonalOrgDeletionBlocked,
 } from "./personal-org-provisioning";
-import { persistLoginSlackIdentity } from "./subject-identities";
+import { persistLoginChatIdentity } from "./subject-identities";
 
 function gravatarUrl(email: string): string {
 	const hash = createHash("md5")
@@ -980,9 +980,10 @@ export async function createAuth(
 								error,
 							);
 						}
-						// Slack sign-in: collapse the workspace member onto this $member by
-						// stamping their team-scoped slack_user_id. Fire-and-forget.
-						void persistLoginSlackIdentity(accountSummary);
+						// Chat sign-in (Slack, Google, …): collapse the platform member onto
+						// this $member by stamping the provider's chat identity. Which
+						// providers qualify comes from the registry. Fire-and-forget.
+						void persistLoginChatIdentity(accountSummary);
 					},
 				},
 				update: {
@@ -1019,8 +1020,8 @@ export async function createAuth(
 								error,
 							);
 						}
-						// Slack re-link / token refresh: keep the slack_user_id stamped.
-						void persistLoginSlackIdentity(accountSummary);
+						// Re-link / token refresh: keep the chat identity stamped.
+						void persistLoginChatIdentity(accountSummary);
 					},
 				},
 			},

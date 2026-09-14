@@ -13,6 +13,7 @@ import type {
   AclSourceDef,
   ChannelReadIdentity,
 } from '@lobu/connector-sdk';
+import type { ChatUserIdentity } from './chat-user-identity.js';
 import type { ConnectorIdentityModule } from './connector-identity-module.js';
 
 /** Connector-owned identity namespaces (not SDK-global). */
@@ -122,6 +123,25 @@ export const slackChannelReadIdentity: ChannelReadIdentity = {
     // Mirrors slackChannelKey: UPPER(team || ':' || channel). The team column
     // may be a COALESCE the compiler builds; the channel column is the bare id.
     return `UPPER(${teamColExpr} || ':' || ${channelColExpr})`;
+  },
+};
+
+/**
+ * Slack's chat-sender identity model — how an inbound message's sender maps to
+ * the `slack_user_id` a Slack sign-in stamped. Shares `normalizeSlackUserId`
+ * with the writer so the key matches byte-for-byte.
+ *
+ * The team id is REQUIRED: `buildUserKey` returns null without it rather than
+ * falling back to a bare `U…`. Two workspaces can legitimately contain the same
+ * bare id, and this link authorizes approvals and agent re-binding, so an
+ * unscoped key would be a mis-grant.
+ */
+export const slackChatUserIdentity: ChatUserIdentity = {
+  platform: 'slack',
+  providerId: 'slack',
+  namespace: SLACK_IDENTITY.USER_ID,
+  buildUserKey(teamId, platformUserId) {
+    return normalizeSlackUserId(teamId, platformUserId);
   },
 };
 

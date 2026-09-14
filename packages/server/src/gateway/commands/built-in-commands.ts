@@ -179,9 +179,10 @@ export function registerBuiltInCommands(
     handler: async (ctx: CommandContext) => {
       const arg = ctx.args.trim();
       const cmd = formatChatCommand(ctx.platform, "link");
-      // The codeless `<agentId>` shortcut needs a workspace-scoped Slack
-      // identity, which only Slack sign-in and the install claim write — so it
-      // never applies on other platforms. Don't promise it there.
+      // The codeless `<agentId>` shortcut needs a proven chat identity: a Slack
+      // sign-in, the Slack install claim, or — now that Google Chat senders
+      // resolve — a Google sign-in. This hint's copy is written for Slack's
+      // workspace wording, so it is only offered there.
       const agentIdHint =
         ctx.platform === "slack"
           ? " (If you connected this workspace to Lobu, `/lobu link <agentId>` works too.)"
@@ -230,9 +231,10 @@ export function registerBuiltInCommands(
         case "not_found": {
           // Not a valid code — but if we already know who this chat user is,
           // treat the arg as an agent id and re-bind directly (no fresh code
-          // needed). Identity comes only from Slack sign-in / the install claim
-          // (slack-claim.ts), never from redeeming a code: the same mapping
-          // authorizes Slack approvals, so a pasted code must not mint it.
+          // needed). Identity comes only from a chat sign-in (Slack, Google) or
+          // the install claim (slack-claim.ts), never from redeeming a code:
+          // the same mapping authorizes Slack approvals, so a pasted code must
+          // not mint it.
           const lobuUserId = await resolveChatUserIdentity(
             ctx.platform,
             ctx.teamId,

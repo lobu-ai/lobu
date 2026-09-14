@@ -9,7 +9,7 @@
  * `$member` and minted a separate `person` for the same human.
  *
  * Flow: provision a `$member` with ONLY `auth_user_id` (the pre-fix state) →
- * run `persistLoginSlackIdentity` via the PRIMARY id_token path (the injected
+ * run `persistLoginChatIdentity` via the PRIMARY id_token path (the injected
  * network deps THROW, proving no userinfo fetch is needed; real DB write) →
  * build the channel graph with that user as a channel member → assert the
  * member edge lands on the EXISTING `$member`, and no new `person` was created.
@@ -17,7 +17,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-	persistLoginSlackIdentity,
+	persistLoginChatIdentity,
 	provisionMemberAndCoreIdentities,
 } from "../../../auth/subject-identities";
 import {
@@ -49,7 +49,7 @@ function makeJwt(claims: Record<string, unknown>): string {
 }
 
 /**
- * persistLoginSlackIdentity deps for the PRIMARY (id_token) path: real tenant
+ * persistLoginChatIdentity deps for the PRIMARY (id_token) path: real tenant
  * resolution, and a network layer that THROWS — proving the id_token path needs
  * no userinfo fetch / provider-config read at all.
  */
@@ -116,7 +116,7 @@ describe("sign-in slack_user_id collapse (e2e via channel graph)", () => {
 
 		// Slack sign-in writes the team-scoped slack_user_id onto the SAME $member,
 		// reading team + user straight from the stored id_token (no network).
-		await persistLoginSlackIdentity(
+		await persistLoginChatIdentity(
 			{
 				providerId: "slack",
 				userId: alice.id,
@@ -234,7 +234,7 @@ describe("sign-in slack_user_id collapse (e2e via channel graph)", () => {
 		const personId = Number(personBefore[0].entity_id);
 
 		// THEN: Alice signs in and the claim moves from the person to her $member.
-		await persistLoginSlackIdentity(
+		await persistLoginChatIdentity(
 			{
 				providerId: "slack",
 				userId: alice.id,
@@ -316,7 +316,7 @@ describe("sign-in slack_user_id collapse (e2e via channel graph)", () => {
 			email: "alice@acme.test",
 			name: "Alice",
 		});
-		await persistLoginSlackIdentity(
+		await persistLoginChatIdentity(
 			{
 				providerId: "slack",
 				userId: alice.id,
