@@ -9,6 +9,7 @@ import chalk from "chalk";
 import ora from "ora";
 import type { ConnectorRef } from "../config/index.js";
 import { resolveApiClient } from "../internal/api-client.js";
+import { agentApiBase } from "../internal/gateway-url.js";
 import {
   addContext,
   getCurrentContextName,
@@ -343,7 +344,9 @@ export async function devCommand(
         )
       );
     }
-    console.log(chalk.dim(`  api docs:      ${gatewayUrl}/api/docs`));
+    console.log(
+      chalk.dim(`  api docs:      ${agentApiBase(gatewayUrl)}/api/docs`)
+    );
     console.log();
   }
 

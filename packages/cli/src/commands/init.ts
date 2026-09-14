@@ -19,6 +19,7 @@ import {
   type RegistryProvider,
 } from "../commands/providers/registry.js";
 import { DEFAULT_LOBU_MCP_URL } from "../internal/context.js";
+import { agentApiBase } from "../internal/gateway-url.js";
 import { setLocalEnvValue } from "../internal/local-env.js";
 import { renderTemplate } from "../utils/template.js";
 import { installProjectDeps } from "./_lib/ensure-deps-installed.js";
@@ -829,7 +830,9 @@ export async function initCommand(
         )
       );
     }
-    console.log(chalk.cyan(`  ${n++}. API docs: ${gatewayUrl}/api/docs`));
+    console.log(
+      chalk.cyan(`  ${n++}. API docs: ${agentApiBase(gatewayUrl)}/api/docs`)
+    );
     console.log(
       chalk.dim(
         "\n  See README.md for layout, AGENTS.md for the agent contract.\n"

@@ -6,10 +6,10 @@ export const GATEWAY_DEFAULT_URL = "http://localhost:8787";
 
 /**
  * The embedded Lobu server mounts its public Agent API (`/api/v1/agents/*`,
- * `/api/docs`) under this path prefix — see `packages/server/src/server.ts`'s
- * `app.route('/lobu', ...)`. Every deployment (local `lobu run`, app.lobu.ai,
- * community.lobu.ai) follows this layout: the org-scoped admin REST API and
- * OAuth live at the origin, the Agent API lives at `<origin>/lobu`.
+ * `/api/docs`) under this path prefix — see `buildWrapperApp` in
+ * `packages/server/src/server-lifecycle.ts`. Every deployment (local `lobu run`,
+ * app.lobu.ai, community.lobu.ai) follows this layout: the org-scoped admin
+ * REST API and OAuth live at the origin, the Agent API lives at `<origin>/lobu`.
  */
 export const GATEWAY_AGENT_API_PREFIX = "/lobu";
 

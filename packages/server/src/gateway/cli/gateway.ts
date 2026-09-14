@@ -30,6 +30,13 @@ import { createInteractionRoutes } from "../routes/internal/interactions.js";
 import { createRuntimeRoutes } from "../routes/internal/runtime.js";
 import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
 import {
+  OPENAPI_DOC_PATH,
+  OPENAPI_REFERENCE_PATH,
+  gatewayMountPrefix,
+  serverUrlForMountPrefix,
+  withPathServers,
+} from "./openapi-servers.js";
+import {
   buildRoutePaths,
   mergeOpenApiPaths,
 } from "../routes/shared/define-route.js";
@@ -836,6 +843,21 @@ export function createGatewayApp(
 
 The Lobu API allows you to create and interact with AI agents programmatically.
 
+## Base URLs
+
+This document describes two surfaces with two different bases, both relative to
+wherever you fetched this document:
+
+- The Agent API (\`/api/v1/…\`, \`/connect/claim\`) is served from the base in each
+  operation's own \`servers\` entry — \`/lobu\` on the embedded server every Lobu
+  deployment runs, the origin on a standalone \`lobu\` gateway.
+- The org-scoped dispatch API (\`POST /api/{orgSlug}/{tool}\`) is served from the
+  document-level \`servers\` entry: the origin, in both topologies.
+
+Requesting an Agent API path at the origin of an embedded deployment does NOT
+reach it — \`/api/v1/agents\` is parsed as workspace \`v1\` and answers
+\`Organization 'v1' not found\`.
+
 ## Authentication
 
 1. Authenticate the agent-creation request with a settings session or CLI access token
@@ -845,14 +867,18 @@ The Lobu API allows you to create and interact with AI agents programmatically.
 ## Quick Start
 
 \`\`\`bash
+# The Agent API base — the \`servers\` entry on the operations below, resolved
+# against this document's URL. \`lobu run\` serves it here by default:
+export LOBU_API_BASE="http://localhost:8787/lobu"
+
 # 1. Create an agent (authenticate with a CLI token)
-curl -X POST http://localhost:8787/api/v1/agents \\
+curl -X POST "$LOBU_API_BASE/api/v1/agents" \\
   -H "Authorization: Bearer $LOBU_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"provider": "claude"}'
 
 # 2. Send a message (use worker token from step 1)
-curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \\
+curl -X POST "$LOBU_API_BASE/api/v1/agents/{agentId}/messages" \\
   -H "Authorization: Bearer {token}" \\
   -H "Content-Type: application/json" \\
   -d '{"content": "Hello!"}'
@@ -902,10 +928,15 @@ curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \\
         description: "Browse and install skills and MCP servers.",
       },
     ],
-    servers: [
-      { url: "http://localhost:8787", description: "Local development" },
-    ],
+    // `servers` is deliberately absent here: this app answers the Agent API
+    // from two bases (the origin when standalone, `/lobu` when embedded), so
+    // the handler below fills both in per request. See openapi-servers.ts.
   };
+
+  const ORIGIN_SERVER_DESCRIPTION =
+    "This deployment's origin — serves the org-scoped dispatch API (POST /api/{orgSlug}/{tool}).";
+  const AGENT_API_SERVER_DESCRIPTION =
+    "This deployment's Agent API mount — the origin standalone, /lobu when embedded in the server.";
 
   // One merged OpenAPI document: the defineRoute registry (agent-session
   // orchestration, TypeBox), the openapi-auto walk of the remaining gateway
@@ -915,7 +946,7 @@ curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \\
   // The first-party `@lobu/client` is generated from THIS single document, so
   // the CLI and UI get a typed client for BOTH surfaces instead of only agent
   // sessions.
-  app.get("/api/docs/openapi.json", async (c) => {
+  app.get(OPENAPI_DOC_PATH, async (c) => {
     // Dynamic import (rationale): a static `gateway → openapi-generator →
     // registry` edge closes a circular-init cycle with the tool registry's admin
     // deps, throwing a TDZ error during module load under some import orders.
@@ -925,7 +956,16 @@ curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \\
     const { generateStrictToolPaths } = await import(
       "../../utils/openapi-generator.js"
     );
-    const base = app.getOpenAPI31Document(openApiDocConfig);
+    // The Agent API base is read off THIS request, so the document is correct
+    // whichever way the app is mounted and carries no hostname of its own. The
+    // dispatch half is the origin in both topologies, hence a constant `/`.
+    const agentApiServer = serverUrlForMountPrefix(
+      gatewayMountPrefix(c.req.path, OPENAPI_DOC_PATH),
+    );
+    const base = app.getOpenAPI31Document({
+      ...openApiDocConfig,
+      servers: [{ url: "/", description: ORIGIN_SERVER_DESCRIPTION }],
+    });
     const toolPaths = generateStrictToolPaths();
     // `defineRoute` routes (agent-session + config) carry richer TypeBox
     // request/response schemas than openapi-auto's generic stubs; they win —
@@ -934,18 +974,36 @@ curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \\
     const routePaths = buildRoutePaths();
     return c.json({
       ...base,
-      paths: mergeOpenApiPaths(toolPaths, base.paths ?? {}, routePaths),
+      // The dispatch-tool half lives in the main app at the origin and inherits
+      // the document-level server; everything this app serves itself is under
+      // the gateway mount and says so per path.
+      paths: mergeOpenApiPaths(
+        toolPaths,
+        withPathServers(
+          base.paths ?? {},
+          agentApiServer,
+          AGENT_API_SERVER_DESCRIPTION,
+        ),
+        withPathServers(
+          routePaths,
+          agentApiServer,
+          AGENT_API_SERVER_DESCRIPTION,
+        ),
+      ),
     });
   });
 
-  app.get(
-    "/api/docs",
+  // The reference page fetches the document from the BROWSER, so its url has to
+  // carry the mount prefix too — a bare `/api/docs/openapi.json` 404s on the
+  // embedded server. Built per request (a cold docs page) for the same reason
+  // the document's own servers are.
+  app.get(OPENAPI_REFERENCE_PATH, (c, next) =>
     apiReference({
-      url: "/api/docs/openapi.json",
+      url: `${gatewayMountPrefix(c.req.path, OPENAPI_REFERENCE_PATH)}${OPENAPI_DOC_PATH}`,
       theme: "kepler",
       layout: "modern",
       defaultHttpClient: { targetKey: "js", clientKey: "fetch" },
-		}),
+    })(c, next),
   );
   logger.debug("API docs enabled at /api/docs");
 

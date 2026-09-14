@@ -49,7 +49,8 @@ specialization.
 2. **Action dispatch by deliveryKind** (consumed per surface):
    - chat → "pick a connected workspace → bind a DM/channel to this agent"
      (resolve bot token from the install → `conversations.open` / `conversations.list`
-     + `conversations.join` → `POST /api/v1/agents/{id}/channels`).
+     + `conversations.join` → `POST <agent-api-base>/api/v1/agents/{id}/channels`,
+     where the Agent API base is `<origin>/lobu` on the embedded server).
    - data → link to the existing Sources connection (no new action).
 3. **"+ Add an app"** — when no install for the wanted provider, link to the
    declared `/{provider}/install` path (generic, already mounted).
