@@ -30,7 +30,6 @@ import {
   resolveAgentId,
   resolveAgentOptions,
 } from "../services/platform-helpers.js";
-import { resolveSlackBotIdentity } from "../../authz/slack-acl-sync.js";
 import {
   buildAutomationTurnContext,
   type AutomationActivationPlan,
@@ -52,7 +51,6 @@ import { buildCtaCardPayload } from "../platform/link-buttons.js";
 import { stripPlatformPrefix } from "../channels/bound-channels.js";
 import { buildConversationUrl } from "./conversation-url.js";
 import { captureChannelMessage } from "./channel-transcript.js";
-import { createSlackWebApi } from "./slack-web.js";
 import type { ConversationStateStore } from "./conversation-state-store.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
 import type { PlatformConnection } from "./types.js";
@@ -587,53 +585,22 @@ export class MessageHandlerBridge {
       connectionSlug?: string;
     } = { channelId, connectionSlug: runtimeConnectionIdToSlug(this.connection.id) };
 
-    if (platform === "slack") {
-      // A tenant's OAuth-installed Slack workspace bot has no owning agent —
-      // routing is via tagged Automations created by `/lobu link`. Before the
-      // tenant links a channel, a non-command message resolves to nothing.
-      // (Slash commands like `/lobu link` take the `onSlashCommand` path and
-      // never reach here.)
-      if (!this.connection.metadata?.teamId) return false;
-      // Fall back to the connection's stored team when the raw event omits
-      // team_id, so the deep-link stays team-scoped. The connection always
-      // carries it — it's the gate above.
-      const linkTeamId = teamId ?? this.connection.metadata?.teamId;
-      // Best-effort: resolve the channel's friendly name (#general) for the
-      // notice's deep-link label. Uses this connection's own bot token via
-      // conversations.info; any failure (no token, not-in-channel, rate limit)
-      // just drops to the channel id in the UI — never blocks the notice.
-      let channelName: string | undefined;
-      if (linkTeamId) {
-        try {
-          const slackWeb = createSlackWebApi();
-          const identity = await resolveSlackBotIdentity(
-            {
-              installStore: this.services.getAppInstallationStore(),
-              secretStore: this.services.getSecretStore(),
-              slackWeb,
-            },
-            {
-              organizationId: this.connection.organizationId,
-              teamId: linkTeamId,
-              connectionId: this.connection.id,
-            }
-          );
-          if (identity?.token) {
-            const info = await slackWeb.conversationInfo(
-              identity.token,
-              stripPlatformPrefix(platform, channelId)
-            );
-            channelName = info.name ?? undefined;
-          }
-        } catch (err) {
-          logger.debug(
-            { channelId, error: String(err) },
-            "unlinked-notice: channel name lookup failed (using id)"
-          );
-        }
-      }
-      noticeChannel = { ...noticeChannel, teamId: linkTeamId, channelName };
-    }
+    // The platform decides whether an unlinked chat earns a notice at all and
+    // what its deep link can name — a workspace-scoped install with no known
+    // workspace suppresses it rather than linking to nothing.
+    const scope = await getPlatformDescriptor(
+      platform,
+    )?.resolveNoticeChannelScope?.(this.connection, {
+      organizationId: this.connection.organizationId,
+      channelId,
+      teamId,
+      stores: {
+        getAppInstallationStore: () => this.services.getAppInstallationStore(),
+        getSecretStore: () => this.services.getSecretStore(),
+      },
+    });
+    if (scope === null) return false;
+    if (scope) noticeChannel = { ...noticeChannel, ...scope };
 
     const notice = await workspaceUnlinkedNotice(
       platform,

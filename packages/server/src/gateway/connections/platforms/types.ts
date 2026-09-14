@@ -12,6 +12,7 @@
 
 import type { InstructionProvider, StoredConnection } from "@lobu/core";
 import type { IFileHandler } from "../../platform/file-handler.js";
+import type { AppInstallationStore } from "../../../lobu/stores/app-installation-store.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import type { ChatInstanceManager } from "../chat-instance-manager.js";
 import type { PlatformAdapterConfig, PlatformConnection } from "../types.js";
@@ -53,6 +54,31 @@ export interface WebhookSecretDeps {
 export interface AdapterCreationContext {
   /** Canonical public URL that receives this connection's webhooks. */
   webhookUrl?: string;
+}
+
+/** What a descriptor may add to an unlinked-chat notice's deep link. */
+export interface NoticeChannelScope {
+  /** Workspace the deep link should stay scoped to. */
+  teamId?: string;
+  /** Friendly channel name for the link's label (`#general`). */
+  channelName?: string;
+}
+
+/** Manager-owned context for `resolveNoticeChannelScope`. */
+export interface NoticeChannelContext {
+  organizationId: string;
+  /** Channel id as the bridge holds it, still transport-prefixed. */
+  channelId: string;
+  /** Workspace id carried by the inbound event, when it carried one. */
+  teamId?: string;
+  /**
+   * Manager-owned stores, handed in rather than imported, so a descriptor can
+   * reach its own provider API without reaching into the gateway's internals.
+   */
+  stores: {
+    getAppInstallationStore(): AppInstallationStore;
+    getSecretStore(): WritableSecretStore;
+  };
 }
 
 /**
@@ -192,6 +218,19 @@ export interface ChatPlatformDescriptor {
    * no hook.
    */
   assertCredentialsUsable?(config: Record<string, unknown>): void;
+
+  /**
+   * Decide whether an unlinked chat should get a "link me to an agent" notice,
+   * and enrich the deep link that notice carries. Returning `null` SUPPRESSES
+   * the notice — a Slack workspace install with no known workspace is in a
+   * state where a notice would name nothing useful. Everything in the returned
+   * scope is best-effort decoration; a platform with no hook simply posts the
+   * notice with the channel id it already has.
+   */
+  resolveNoticeChannelScope?(
+    connection: PlatformConnection,
+    ctx: NoticeChannelContext
+  ): Promise<NoticeChannelScope | null>;
 
   /** Register slash commands with the platform's native command menu. */
   registerCommands?(

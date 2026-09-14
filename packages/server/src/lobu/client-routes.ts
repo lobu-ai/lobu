@@ -75,27 +75,42 @@ function asNonEmptyString(value: unknown): string | null {
 		: null;
 }
 
+/**
+ * Platforms that publish a person's chat identity as a web profile, mapped to
+ * the builder for that link. Each one normalizes its own identifier shape —
+ * Telegram a handle, WhatsApp a phone number — and returns null when the value
+ * it was handed is not one, so a malformed identifier renders as plain text
+ * rather than a broken link. Only the platforms listed get a link at all; a
+ * Map, not an object, so a platform named `constructor` resolves nothing.
+ */
+const MESSAGING_PROFILE_URLS = new Map<
+	string,
+	(identifier: string) => string | null
+>([
+	[
+		"telegram",
+		(identifier) => {
+			const handle = identifier.replace(/^@/, "").trim();
+			return /^[a-zA-Z][a-zA-Z0-9_]{3,}$/.test(handle)
+				? `https://t.me/${handle}`
+				: null;
+		},
+	],
+	[
+		"whatsapp",
+		(identifier) => {
+			const digits = identifier.replace(/[^\d]/g, "");
+			return digits ? `https://wa.me/${digits}` : null;
+		},
+	],
+]);
+
 function externalUrlForMessagingIdentity(
 	platform: string,
 	identifier?: string | null,
 ): string | null {
 	if (!identifier) return null;
-
-	if (platform === "telegram") {
-		const normalized = identifier.replace(/^@/, "").trim();
-		if (/^[a-zA-Z][a-zA-Z0-9_]{3,}$/.test(normalized)) {
-			return `https://t.me/${normalized}`;
-		}
-	}
-
-	if (platform === "whatsapp") {
-		const digits = identifier.replace(/[^\d]/g, "");
-		if (digits) {
-			return `https://wa.me/${digits}`;
-		}
-	}
-
-	return null;
+	return MESSAGING_PROFILE_URLS.get(platform)?.(identifier) ?? null;
 }
 
 /**

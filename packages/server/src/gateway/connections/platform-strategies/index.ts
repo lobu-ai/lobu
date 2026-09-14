@@ -6,10 +6,15 @@
  * `markdown_text`, most other platforms stream deltas through the Chat SDK).
  *
  * `ChatResponseBridge` picks one strategy per payload based on the platform
- * field and delegates the delta/completion shape to it — no more ad-hoc
- * `if (platform === "slack")` branches in the bridge. Platform-specific
+ * field and delegates the delta/completion shape to it, so the bridge never
+ * branches on a platform slug to stream a response. Platform-specific
  * strategies live in sibling modules (`./slack.ts`); this module owns the
  * platform-clean default strategy and the lookup.
+ *
+ * This registry covers RESPONSE STREAMING only. Everything else a platform
+ * does differently — channel-id and label spelling, credential requirements,
+ * the unlinked-chat notice — hangs off `ChatPlatformDescriptor` in
+ * `../platforms/`.
  */
 
 import { createLogger } from "@lobu/core";

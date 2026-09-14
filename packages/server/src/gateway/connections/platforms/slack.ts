@@ -6,12 +6,23 @@
  * capability.)
  */
 
+import { createLogger } from "@lobu/core";
+import { resolveSlackBotIdentity } from "../../../authz/slack-acl-sync.js";
 import { stripPlatformPrefix } from "../../channels/bound-channels.js";
 import type { IFileHandler } from "../../platform/file-handler.js";
 import { SlackInstructionProvider } from "../slack-instruction-provider.js";
+import { createSlackWebApi } from "../slack-web.js";
 import { isSlackConfig } from "../types.js";
+import type { PlatformConnection } from "../types.js";
 import { postFileToChatTarget, streamToBuffer } from "./shared.js";
-import type { ChatPlatformDescriptor, ChatPlatformInstance } from "./types.js";
+import type {
+  ChatPlatformDescriptor,
+  ChatPlatformInstance,
+  NoticeChannelContext,
+  NoticeChannelScope,
+} from "./types.js";
+
+const logger = createLogger("slack-platform");
 
 function createSlackFileHandler(
   instance: ChatPlatformInstance
@@ -80,6 +91,54 @@ function createSlackFileHandler(
   };
 }
 
+
+/**
+ * A tenant's OAuth-installed workspace bot has no owning agent — routing is by
+ * tagged Automations created through `/lobu link`. Until the tenant links a
+ * channel, an ordinary message resolves to nothing and earns the notice. A
+ * connection with no known workspace cannot produce a usable deep link, so it
+ * suppresses the notice instead of posting one that names nothing.
+ */
+async function resolveSlackNoticeChannelScope(
+  connection: PlatformConnection,
+  ctx: NoticeChannelContext
+): Promise<NoticeChannelScope | null> {
+  const storedTeamId = connection.metadata?.teamId;
+  if (!storedTeamId) return null;
+  // The inbound event may omit team_id; the connection always carries one —
+  // that is the gate above — so the deep link stays workspace-scoped either way.
+  const teamId = ctx.teamId ?? storedTeamId;
+
+  // Best-effort `#general` for the link label, via this connection's own bot
+  // token. Any failure (no token, not in channel, rate limit) falls back to the
+  // channel id in the UI and must never block the notice.
+  let channelName: string | undefined;
+  try {
+    const slackWeb = createSlackWebApi();
+    const identity = await resolveSlackBotIdentity(
+      {
+        installStore: ctx.stores.getAppInstallationStore(),
+        secretStore: ctx.stores.getSecretStore(),
+        slackWeb,
+      },
+      { organizationId: ctx.organizationId, teamId, connectionId: connection.id }
+    );
+    if (identity?.token) {
+      const info = await slackWeb.conversationInfo(
+        identity.token,
+        stripPlatformPrefix(connection.platform, ctx.channelId)
+      );
+      channelName = info.name ?? undefined;
+    }
+  } catch (err) {
+    logger.debug(
+      { channelId: ctx.channelId, error: String(err) },
+      "unlinked-notice: channel name lookup failed (using id)"
+    );
+  }
+  return { teamId, channelName };
+}
+
 export const slackPlatform: ChatPlatformDescriptor = {
   requiredConfigKeys: ["botToken", "signingSecret"],
 
@@ -118,6 +177,8 @@ export const slackPlatform: ChatPlatformDescriptor = {
   // Slack gives every top-level channel message a fresh thread id
   // (`slack:C…:<message-ts>`).
   channelMessagesMintFreshThreadIds: true,
+
+  resolveNoticeChannelScope: resolveSlackNoticeChannelScope,
 
   createFileHandler: createSlackFileHandler,
 
