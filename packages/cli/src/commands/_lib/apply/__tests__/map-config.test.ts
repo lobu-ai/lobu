@@ -377,7 +377,32 @@ describe("mapProjectToDesiredState", () => {
         }),
         env
       )
-    ).toThrow(/does not support the hosted Lobu bot/);
+    ).toThrow(/is not a chat platform/);
+  });
+
+  test("accepts a hosted connection on ANY chat platform", () => {
+    // The client's job is only to reject a non-chat connector. Whether Lobu runs
+    // a hosted bot for a given chat platform depends on the deployment, which
+    // the server answers when the link code is minted. Checking it here used to
+    // reject Google Chat outright with "expected slack or telegram".
+    for (const connector of ["gchat", "discord", "teams", "whatsapp"]) {
+      expect(() =>
+        mapProjectToDesiredState(
+          defineConfig({
+            org: "o",
+            agents: [],
+            connections: [
+              defineConnection({
+                slug: `hosted-${connector}`,
+                connector,
+                credentialMode: "hosted",
+              }),
+            ],
+          }),
+          env
+        )
+      ).not.toThrow();
+    }
   });
 
   test("rejects contradictory chat credential modes", () => {

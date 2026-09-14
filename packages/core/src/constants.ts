@@ -28,15 +28,29 @@ export const TIME = {
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
 
 /**
- * Chat platforms Lobu operates a hosted bot for. A project connection using
- * one of these connector keys with `credentialMode: "hosted"` is reached by
- * redeeming a `/lobu link <code>` claim; the user never supplies a bot token.
+ * Every chat platform Lobu ships a connector for — the connectors declaring
+ * `x-lobu-chat-platform` in their options schema. A `connectors/*-chat-platforms`
+ * guard test keeps this in step with those declarations.
+ *
+ * This answers "is this connector a chat platform", which is all a CLIENT can
+ * know. It deliberately does NOT answer "does Lobu run a hosted bot for it" —
+ * that depends on whether a hosted preview connection exists in the deployment,
+ * which only the server can see, and which it reports with a specific 400.
+ * Conflating the two is what previously hard-rejected Google Chat in `lobu
+ * apply` while happily minting Telegram codes that nothing could redeem.
  */
-export const HOSTED_CHAT_PLATFORMS = ["slack", "telegram"] as const;
-export type HostedChatPlatform = (typeof HOSTED_CHAT_PLATFORMS)[number];
+export const CHAT_PLATFORMS = [
+  "slack",
+  "telegram",
+  "gchat",
+  "discord",
+  "teams",
+  "whatsapp",
+] as const;
+export type ChatPlatform = (typeof CHAT_PLATFORMS)[number];
 
-export function isHostedChatPlatform(type: string): type is HostedChatPlatform {
-  return (HOSTED_CHAT_PLATFORMS as readonly string[]).includes(type);
+export function isChatPlatform(type: string): type is ChatPlatform {
+  return (CHAT_PLATFORMS as readonly string[]).includes(type);
 }
 
 // Default configuration values

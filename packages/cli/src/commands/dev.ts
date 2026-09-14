@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { isHostedChatPlatform } from "@lobu/core";
+import { isChatPlatform } from "@lobu/core";
 import chalk from "chalk";
 import ora from "ora";
 import type { ConnectorRef } from "../config/index.js";
@@ -979,7 +979,7 @@ async function printPreviewInstructions(cwd: string): Promise<void> {
   const hostedConnections = (project.connections ?? []).filter(
     (c) =>
       c.credentialMode === "hosted" &&
-      isHostedChatPlatform(connectorRefKey(c.connector))
+      isChatPlatform(connectorRefKey(c.connector))
   );
   const enabled: Array<{
     agentId: string;

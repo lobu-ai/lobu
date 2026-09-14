@@ -11,7 +11,7 @@
 import { validateEntityMetrics } from "@lobu/connector-sdk/metrics";
 import {
   type AgentSettings,
-  isHostedChatPlatform,
+  isChatPlatform,
   normalizeEntityTypeSlug,
 } from "@lobu/core";
 import type { AgentSettingsStored } from "@lobu/core/contracts/agent-settings";
@@ -919,9 +919,13 @@ function mapConnection(
 function isHostedConnection(connection: Connection): boolean {
   if (connection.credentialMode !== "hosted") return false;
   const connector = connectorKey(connection.connector);
-  if (!isHostedChatPlatform(connector)) {
+  // Only that it IS a chat platform. Whether Lobu runs a hosted bot for that
+  // platform is a deployment fact the client cannot see; the server answers it
+  // when the code is minted, with a message naming the platform. Checking it
+  // here used to reject Google Chat outright.
+  if (!isChatPlatform(connector)) {
     throw new ValidationError(
-      `connection "${connection.slug}" uses credentialMode "hosted", but connector "${connector}" does not support the hosted Lobu bot (expected slack or telegram)`
+      `connection "${connection.slug}" uses credentialMode "hosted", but connector "${connector}" is not a chat platform`
     );
   }
   if (connection.config && Object.keys(connection.config).length > 0) {
