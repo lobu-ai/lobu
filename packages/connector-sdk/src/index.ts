@@ -33,7 +33,7 @@ export {
   MAX_CONNECTOR_DOWNLOAD_BYTES,
   MAX_INLINE_CONTENT_BYTES,
 } from './file-output.js';
-export type { FileDownloadOutput } from './file-output.js';
+export type { FileDownloadOptions } from './file-output.js';
 export {
   canonicalDeviceManifestJson,
   defineDeviceConnector,

@@ -1302,8 +1302,8 @@ describe('Gmail attachment download', () => {
     expect(urls).toHaveLength(0);
   });
 
-  // The declared size is refused BEFORE decoding: the isolate would otherwise
-  // hold the base64 string and the decoded bytes at once and be OOM-killed.
+  // The declared size is refused before decoding, so the decoded bytes and the
+  // base64 copy re-encoded for the attachment never join the string in memory.
   test('an oversized attachment is refused on its declared size', async () => {
     const { download } = setup(() => ({ data: 'AAAA', size: 64 * 1024 * 1024 }));
     const result = await download({ message_id: 'message-att', attachment_id: 'att-png' });

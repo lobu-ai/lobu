@@ -923,12 +923,10 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     const request = this.contentRequest(file);
     if (!request.ok) return request;
 
-    // Refuse before fetching. The isolate buffers the whole body, then base64s
-    // it to cross the host boundary at 4/3 the size, so an unbounded download
-    // is an out-of-memory kill rather than an error the caller can read.
-    // The shared ceiling sits above the gateway's own attachment cap on
-    // purpose: the gateway stays the authority on what is too big to store,
-    // and this only stops what cannot physically make the trip.
+    // Refuse before fetching, so a 2 GB file costs nothing. The shared ceiling
+    // (MAX_CONNECTOR_DOWNLOAD_BYTES, rationale there) happens to coincide with
+    // Google's own hard cap on `files.export` — requesting more returns a 403 —
+    // so both content paths refuse at the size Drive refuses at anyway.
     const declaredTooBig = downloadSizeError(parseSize(file.size), file.name ?? file.id);
     if (declaredTooBig) return { ok: false, error: declaredTooBig };
 

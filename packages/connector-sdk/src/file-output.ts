@@ -8,17 +8,14 @@
  * returns file content any other way (a bare base64 string, a provider URL that
  * needs the provider's credential) cannot be downloaded by an agent at all.
  *
- * This module exists because that emit step is identical for every provider —
- * only "which URL holds the bytes" differs. Before it, Drive carried its own
- * copy of the size guards, the UTF-8-safe truncation and the output shape, and
- * every other connector would have needed the same ~100 lines. Getting any one
- * of them subtly wrong is silent: a mis-sliced UTF-8 string stores a
- * manufactured U+FFFD, and a missing size guard is an out-of-memory kill rather
- * than a readable error.
+ * The emit step is identical for every provider — only "which URL holds the
+ * bytes" differs — and getting any part of it subtly wrong is silent: a
+ * mis-sliced UTF-8 string stores a manufactured U+FFFD, and a missing size
+ * guard is an out-of-memory kill rather than a readable error. Hence one copy.
  */
 
 /**
- * Ceiling on a single download, enforced by the connector before it buffers.
+ * Ceiling on a single download, enforced by the connector.
  *
  * This sits ABOVE the gateway's own 8 MiB attachment cap on purpose: the
  * gateway decides what is too big to STORE and reports it as
@@ -72,10 +69,10 @@ export function inlineContentBudget(requested: unknown): number {
 /**
  * Refuse an oversized download and say why, or return null to proceed.
  *
- * Call it twice: once with the size the provider DECLARES (before fetching, so
- * a 2 GB file costs nothing) and once with the bytes actually received, because
- * a provider may omit the declared size entirely — Google Drive does exactly
- * that for its native documents.
+ * Call it twice: once with the size the provider DECLARES and once with the
+ * bytes actually received. Neither call is redundant — Drive omits the declared
+ * size for its native documents, while Gmail and Graph only reveal it in the
+ * same response that carries the bytes.
  */
 export function downloadSizeError(
   size: number | undefined,
@@ -130,11 +127,14 @@ export function inlineText(
   return { content: decodeTruncated(encoded, maxBytes), truncated: true };
 }
 
-export interface FileDownloadOutput {
+export interface FileDownloadOptions {
   bytes: Uint8Array;
   filename: string;
   mimeType: string;
-  /** Clamped budget from {@link inlineContentBudget}. Omit to use the default. */
+  /**
+   * Inline text budget. Omit for the default; re-clamped here either way, so
+   * the ceiling holds even for a caller that skipped {@link inlineContentBudget}.
+   */
   inlineMaxBytes?: number;
   /**
    * Force the textual decision instead of deriving it from `mimeType`. Drive
@@ -155,9 +155,9 @@ export interface FileDownloadOutput {
  * from the media type (`inferKindFromMime`), so there is one rule rather than
  * two that can disagree about what counts as an image.
  */
-export function fileDownloadOutput(params: FileDownloadOutput): Record<string, unknown> {
+export function fileDownloadOutput(params: FileDownloadOptions): Record<string, unknown> {
   const { bytes, filename, mimeType } = params;
-  const budget = params.inlineMaxBytes ?? DEFAULT_INLINE_CONTENT_BYTES;
+  const budget = inlineContentBudget(params.inlineMaxBytes);
   const textual = params.textual ?? isTextualMimeType(mimeType);
   const inline = budget > 0 && textual ? inlineText(bytes, budget) : undefined;
 

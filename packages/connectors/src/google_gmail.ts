@@ -1280,28 +1280,30 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     }
 
     const envelope = (await response.json()) as { data?: string; size?: number };
+    const filename = (input.filename as string) || attachmentId;
+    const mimeType = (input.mime_type as string) || 'application/octet-stream';
 
-    // Refuse on the DECLARED size first: the isolate would otherwise buffer the
-    // base64 string, the decoded bytes and a re-encoded copy at once, which is
-    // an out-of-memory kill rather than an error the caller can read.
-    const declaredTooBig = downloadSizeError(envelope.size, attachmentId);
+    // Gmail has no size endpoint, so the base64 string is already in hand by
+    // the time the declared size can be read. Refusing here still keeps the
+    // decoded bytes and the base64 copy `fileDownloadOutput` re-encodes from
+    // ever existing alongside it — three copies of the file is the OOM.
+    const declaredTooBig = downloadSizeError(envelope.size, filename);
     if (declaredTooBig) return { success: false, error: declaredTooBig };
 
     if (!envelope.data) {
-      return { success: false, error: `Gmail attachment ${attachmentId} returned no data.` };
+      return { success: false, error: `Gmail attachment ${filename} returned no data.` };
     }
 
     // Gmail uses base64URL (RFC 4648 §5); Buffer's 'base64' decoder accepts
     // both alphabets, so no translation is needed.
     const bytes = Buffer.from(envelope.data, 'base64');
     if (bytes.length === 0) {
-      return { success: false, error: `Gmail attachment ${attachmentId} is empty.` };
+      return { success: false, error: `Gmail attachment ${filename} is empty.` };
     }
-    const receivedTooBig = downloadSizeError(bytes.length, attachmentId);
+    // Gmail's `size` is the decoded length, but it is advisory: an attachment
+    // that omits it only reveals its real size here.
+    const receivedTooBig = downloadSizeError(bytes.length, filename);
     if (receivedTooBig) return { success: false, error: receivedTooBig };
-
-    const filename = (input.filename as string) || attachmentId;
-    const mimeType = (input.mime_type as string) || 'application/octet-stream';
 
     return {
       success: true,

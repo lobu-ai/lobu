@@ -16,11 +16,13 @@
 // dist/ for the packaged-connector test run, where that cross-package source
 // path does not resolve.
 
-// The file OUTPUT helpers are the exception to the inline-copy rule above:
-// `file-output.ts` imports nothing, so pulling the real module in costs none of
-// the browser stack this mock exists to avoid. Re-implementing its UTF-8-safe
-// truncation here would be worse than the duplication — a copy that drifted
-// would let a connector pass its tests while manufacturing a U+FFFD in prod.
+// The file OUTPUT helpers are imported rather than re-implemented, because a
+// hand-copy that drifted would let a connector pass its tests while
+// manufacturing a U+FFFD in prod. `file-output.ts` imports nothing, so it
+// drags in none of the browser stack, and the path resolves for this copy of
+// the mock — the one the connectors package's own tests run against. A derived
+// copy elsewhere only needs the import if it stubs a file-downloading
+// connector.
 import * as fileOutput from '../../../connector-sdk/src/file-output.js';
 
 interface DomScrapeOpts {

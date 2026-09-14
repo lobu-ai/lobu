@@ -143,6 +143,19 @@ describe('fileDownloadOutput', () => {
     expect(out.attachments).toHaveLength(1);
   });
 
+  // The schema's `maximum` is advisory — a connector calls this directly, so
+  // the ceiling has to be enforced here rather than assumed of the caller.
+  test('clamps an over-ceiling budget handed straight in', () => {
+    const out = fileDownloadOutput({
+      bytes: utf8('x'.repeat(MAX_INLINE_CONTENT_BYTES + 100)),
+      filename: 'big.txt',
+      mimeType: 'text/plain',
+      inlineMaxBytes: MAX_INLINE_CONTENT_BYTES * 4,
+    });
+    expect((out.content as string).length).toBe(MAX_INLINE_CONTENT_BYTES);
+    expect(out.content_truncated).toBe(true);
+  });
+
   test('a 0 budget disables inlining without dropping the attachment', () => {
     const out = fileDownloadOutput({
       bytes: utf8('hello'),

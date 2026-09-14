@@ -347,8 +347,12 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
    * asked for — which on the isolate lane is an out-of-memory kill.
    *
    * Reference attachments (a OneDrive link) and item attachments (an embedded
-   * mail) carry no `contentBytes` at all; they are listed with their real
-   * `type` so a caller can see why `download_attachment` will refuse them.
+   * mail) carry no `contentBytes` at all. `type` echoes the `@odata.type`
+   * annotation that marks which subtype each entry is, so a caller can usually
+   * see up front why `download_attachment` will refuse one. It is an annotation
+   * rather than a selected property, so treat it as advisory and empty when
+   * absent — the authoritative refusal comes from `download_attachment`, whose
+   * single-attachment GET is not `$select`ed and always carries the subtype.
    */
   private async listAttachments(
     http: HttpClient,
@@ -367,7 +371,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
         message_id: messageId,
         attachments: (response.value ?? []).map((attachment) => ({
           attachment_id: attachment.id,
-          filename: attachment.name,
+          filename: attachment.name ?? attachment.id,
           mime_type: attachment.contentType ?? 'application/octet-stream',
           size_bytes: attachment.size ?? 0,
           is_inline: Boolean(attachment.isInline),
@@ -398,8 +402,8 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
       `${this.API_BASE}/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`
     )) as GraphAttachment;
 
-    // Refuse on the DECLARED size before decoding: the isolate would otherwise
-    // hold the base64 string and the decoded bytes at once.
+    // Refuse on the DECLARED size before decoding, so the decoded bytes and the
+    // base64 copy re-encoded for the attachment never join the string in memory.
     const declaredTooBig = downloadSizeError(attachment.size, attachment.name ?? attachmentId);
     if (declaredTooBig) return { success: false, error: declaredTooBig };
 
