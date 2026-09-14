@@ -32,9 +32,12 @@ import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, Run
 export const WORKSPACE_ROOT = '/workspace';
 
 /**
- * Total bytes the write and edit tools may place in one turn's workspace.
- * Far above real workloads (the largest measured transcript is ~633KB) and
- * far below the isolate memory ceiling that would otherwise kill the turn.
+ * Total bytes the write and edit tools may place in one turn's workspace: an
+ * eighth of the isolate's default 512MB heap, and far above a real turn's
+ * files (the largest session transcript measured across 2050 real rows is
+ * 633KB, `gateway/services/transcript-snapshot.ts`). A runaway write then
+ * refuses with an error the model can act on, instead of an OOM that kills
+ * the whole turn.
  */
 export const WORKSPACE_WRITE_BUDGET_BYTES = 64 * 1024 * 1024;
 
@@ -295,14 +298,12 @@ export function createWorkspace(
   };
   // Pi owns mutation ordering, matching, cancellation, and result formatting.
   // Only filesystem access changes: every operation stays in this turn's tree.
-  // The budget below is the only bound on the write/edit tools: without it a
-  // write loop runs until the isolate's own memory ceiling kills the whole
-  // turn as MemoryLimitExceeded, instead of refusing with an error the model
-  // can read and act on. An overwrite counts as a delta, so rewriting one
-  // file in a loop does not accumulate. bash redirection goes through
-  // just-bash's own filesystem and is not intercepted at this layer, so the
-  // isolate memory limit stays the backstop there. Host-placed seed files
-  // also bypass this accounting; they are bounded by the host, not the model.
+  // Writes are charged as deltas against WORKSPACE_WRITE_BUDGET_BYTES, so
+  // rewriting one file in a loop does not accumulate. Only bytes these two
+  // tools place are counted: a host-seeded file costs nothing until a tool
+  // rewrites it, and bash redirection writes through just-bash's own
+  // filesystem rather than this layer, so the isolate memory limit stays the
+  // backstop there.
   const writeSizes = new Map<string, number>();
   let writtenBytes = 0;
   const writeFile = async (path: string, content: string): Promise<void> => {

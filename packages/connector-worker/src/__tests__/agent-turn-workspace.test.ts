@@ -6,8 +6,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { truncateTail } from "@mariozechner/pi-coding-agent";
-import { createWorkspace, WORKSPACE_ROOT } from "../agent-turn/workspace.js";
+import { formatSize, truncateTail } from "@mariozechner/pi-coding-agent";
+import { createWorkspace, WORKSPACE_ROOT, WORKSPACE_WRITE_BUDGET_BYTES } from "../agent-turn/workspace.js";
 
 function toolMap(tools: AgentTool[]): Record<string, AgentTool> {
   return Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -168,19 +168,20 @@ describe("createWorkspace tools", () => {
 
   test("write enforces the turn workspace byte budget, counting overwrites as deltas", async () => {
     const t = toolMap(createWorkspace(["write"]).tools);
-    const chunk = "x".repeat(32 * 1024 * 1024);
+    const chunk = "x".repeat(WORKSPACE_WRITE_BUDGET_BYTES / 2);
+    const refusal = `limited to ${formatSize(WORKSPACE_WRITE_BUDGET_BYTES)}`;
     await run(t.write, { file_path: "a.bin", content: chunk });
     await run(t.write, { file_path: "b.bin", content: chunk });
-    // 64MB held: a third 32MB file would exceed the 64MB budget and is refused.
-    await expect(run(t.write, { file_path: "c.bin", content: chunk })).rejects.toThrow("limited to 64.0MB");
-    // A same-size overwrite is a delta of zero, not a fresh allocation.
+    // The budget is now spent, so a third half-budget file is refused.
+    await expect(run(t.write, { file_path: "c.bin", content: chunk })).rejects.toThrow(refusal);
+    // A same-size overwrite is a delta of zero: an exact fit still passes.
     await run(t.write, { file_path: "a.bin", content: chunk });
-    // Growing a file counts only the growth, and even that must fit.
-    await expect(run(t.write, { file_path: "a.bin", content: `${chunk}x` })).rejects.toThrow("limited to 64.0MB");
+    // At the cap, even a one-byte growth is over it.
+    await expect(run(t.write, { file_path: "a.bin", content: `${chunk}x` })).rejects.toThrow(refusal);
     // Shrinking a file frees its bytes for later writes.
     await run(t.write, { file_path: "a.bin", content: "freed" });
     expect(await run(t.write, { file_path: "small.txt", content: "ok" })).toBe("Successfully wrote 2 bytes to small.txt");
-  }, 120000);
+  });
 });
 
 describe("edit and grep — pi's two remaining builtins, inside the isolate", () => {
