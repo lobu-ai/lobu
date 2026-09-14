@@ -19,7 +19,7 @@ export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 const ARTIFACT_TRASH_DIRNAME = ".trash";
 const DOWNLOAD_TOKEN_MAX_CHARS = 4096;
 
-interface StoredArtifactMetadata {
+export interface StoredArtifactMetadata {
   artifactId: string;
   filename: string;
   contentType: string;

@@ -1,7 +1,10 @@
 import { type FileInputOptions, MAX_CONNECTOR_FILE_BYTES } from '@lobu/connector-sdk';
-import type { ArtifactStore } from '../gateway/files/artifact-store';
+import type { ArtifactStore, StoredArtifactMetadata } from '../gateway/files/artifact-store';
+import { runArtifactBinding } from '../gateway/files/artifact-store';
 import { inputArtifactId, inputFileBinding, MAX_INPUT_FILES, storedInputFile } from '../gateway/files/input-files';
 import { getLobuCoreServices } from '../lobu/gateway';
+import { handleGetRun } from '../tools/admin/manage_operations/handlers/runs';
+import { resolvePublicGatewayUrl } from '../utils/public-origin';
 import type { ToolContext } from '../tools/registry';
 import { ToolUserError } from '../utils/errors';
 
@@ -85,6 +88,76 @@ function readInlineFile(value: Schema, maxBytes: number) {
   };
 }
 
+
+/** `run:<id>` is the binding `materializeActionOutputAttachments` stamps on an action's output files. */
+const RUN_BINDING = /^run:([1-9][0-9]{0,17})$/;
+
+/**
+ * Adopt an artifact a connector action produced into the caller's own input
+ * namespace, or return null when it is not one / the caller may not have it.
+ *
+ * An agent that downloads a file (Drive `download_file`, Gmail
+ * `download_attachment`) gets back an artifact bound `run:<id>`. Feeding it
+ * straight into another connector's `$file` field fails, because
+ * `prepareOperationFiles` reads under `input:<sha256(principal)>` and
+ * `ArtifactStore.read` demands an exact binding match. The bytes are right
+ * there and every connector-to-connector handoff dead-ends on the boundary.
+ *
+ * The boundary is correct and stays: this does not relax the binding check, it
+ * re-runs the SAME authorization the MCP media-resource reader already uses for
+ * run-bound attachments (`mcp-media-resources.ts`) — can this caller `get_run`
+ * that run? — and only then copies the bytes into a NEW artifact the caller
+ * genuinely owns. A copy rather than a rebind, so the run's own artifact keeps
+ * its binding and lifetime: adopting a file must not mutate the run's output or
+ * let one caller's cleanup delete another's input.
+ *
+ * `inspect` is deliberately called WITHOUT a binding. That is the one read here
+ * that is not access-controlled, and it is safe precisely because nothing is
+ * returned from it to the caller — it only names which run to authorize
+ * against. An unauthorized caller learns nothing: a foreign run and a
+ * nonexistent one both end as the same 422.
+ */
+async function adoptRunArtifact(params: {
+  store: ArtifactStore;
+  artifactId: string;
+  ctx: ToolContext;
+  binding: string;
+  maxBytes: number;
+  publicGatewayUrl: string;
+}): Promise<{ metadata: StoredArtifactMetadata; bytes: Buffer } | null> {
+  const stored = await params.store.inspect(params.artifactId);
+  const runId = stored?.binding ? RUN_BINDING.exec(stored.binding)?.[1] : undefined;
+  if (!runId) return null;
+
+  // The authorization. `handleGetRun` scopes to `ctx.organizationId` and
+  // excludes the run types `list_runs` hides, so a run this caller cannot see
+  // is "Run not found" here too.
+  const run = await handleGetRun({ action: 'get_run', run_id: Number(runId) }, params.ctx);
+  if (!('run' in run) || !run.run) return null;
+
+  const source = await params.store.read(params.artifactId, {
+    binding: runArtifactBinding(Number(runId)),
+    maxBytes: params.maxBytes,
+  });
+  if (!source) return null;
+
+  const published = await params.store.publish({
+    buffer: source.bytes,
+    filename: source.metadata.filename,
+    contentType: source.metadata.contentType,
+    publicGatewayUrl: params.publicGatewayUrl,
+    binding: params.binding,
+  });
+  // Everything but the id and the binding carries over verbatim: the adopted
+  // copy must present the SAME filename, media type, size and digest, so a
+  // connector's contentTypes gate and the claim's sha256 pin behave identically
+  // whether the file was uploaded or adopted.
+  return {
+    metadata: { ...source.metadata, artifactId: published.artifactId, binding: params.binding },
+    bytes: source.bytes,
+  };
+}
+
 /** Authorize files before queuing; persist claims with the existing operation run. */
 export async function prepareOperationFiles(
   input: Record<string, unknown>,
@@ -111,9 +184,26 @@ export async function prepareOperationFiles(
       maxBytes = Math.min(maxBytes, Number(declaration.maxBytes));
     }
     const binding = artifactId ? inputFileBinding(ctx) : undefined;
-    const file = artifactId
+    let adoptedArtifactId: string | undefined;
+    let file = artifactId
       ? await storeOrThrow(store).read(artifactId, { binding, maxBytes })
       : readInlineFile(value, maxBytes);
+    if (!file && artifactId) {
+      // Not in the caller's own namespace — it may still be a file THIS caller
+      // just produced through a connector action, which lands bound to the run.
+      const adopted = await adoptRunArtifact({
+        store: storeOrThrow(store),
+        artifactId,
+        ctx,
+        binding: binding!,
+        maxBytes,
+        publicGatewayUrl: resolvePublicGatewayUrl(),
+      });
+      if (adopted) {
+        adoptedArtifactId = adopted.metadata.artifactId;
+        file = adopted;
+      }
+    }
     if (!file) throw new ToolUserError('File is unavailable, outside this caller’s scope, or exceeds the connector limit. Upload it again in this workspace.', 422);
     for (const declaration of declarations) {
       const contentTypes = (declaration as unknown as FileInputOptions).contentTypes;
@@ -124,7 +214,9 @@ export async function prepareOperationFiles(
     totalBytes += file.metadata.size;
     if (totalBytes > MAX_CONNECTOR_FILE_BYTES) throw new ToolUserError('Operation files exceed the 12 MiB connector execution limit. Use smaller files or separate operations.', 413);
     if (!artifactId) return value;
-    claims.push({ path, artifactId, binding: binding!, sha256: file.metadata.sha256, maxBytes });
+    // The claim names the ADOPTED copy: it is the one bound to this caller, and
+    // the one `resolveOperationFiles` will read back under the `input:` binding.
+    claims.push({ path, artifactId: adoptedArtifactId ?? artifactId, binding: binding!, sha256: file.metadata.sha256, maxBytes });
     // Approval cards show storage metadata, never caller-invented filenames/hashes.
     return storedInputFile(file.metadata);
   });

@@ -11,6 +11,7 @@ import { app, type Env } from '../../index';
 import * as gateway from '../../lobu/gateway';
 import { ArtifactStore } from '../../gateway/files/artifact-store';
 import { inputArtifactId } from '../../gateway/files/input-files';
+import { prepareOperationFiles, resolveOperationFiles } from '../../operations/file-inputs';
 import { ingestMcpFiles } from '../../mcp-file-inputs';
 import { manageOperations } from '../../tools/admin/manage_operations';
 import type { ToolContext } from '../../tools/registry';
@@ -283,5 +284,111 @@ describe('multipart file → operation approval → connector execution', () => 
     const [run] = await getTestDb()`SELECT status, error_message FROM runs WHERE id = ${queued.run_id}`;
     expect(run.status).toBe('failed');
     expect(run.error_message).toContain(condition === 'missing' ? 'missing or changed' : 'changed after authorization');
+  });
+});
+
+/**
+ * Connector-to-connector file handoff.
+ *
+ * A connector action publishes its bytes bound `run:<id>`. Feeding that
+ * artifact into another connector's `$file` field used to dead-end: the input
+ * path reads under `input:<sha256(principal)>` and the store demands an exact
+ * binding match. These pin that the boundary itself did not move — adoption
+ * happens only for a run the caller could `get_run`, and only by copying.
+ */
+describe('adopting a run-produced artifact as connector file input', () => {
+  let ctx: ToolContext;
+  let otherCtx: ToolContext;
+  let directory: string;
+  let store: ArtifactStore;
+  const schema = { type: 'object', properties: { image: fileInputSchema({ maxBytes: 1024, contentTypes: ['image/png'] }) } };
+  const BYTES = Buffer.from('run-produced-bytes');
+
+  beforeAll(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'run-adopt-'));
+    store = new ArtifactStore(directory);
+    ctx = (await seedOwnerContext()).ctx;
+    otherCtx = (await seedOwnerContext()).ctx;
+  });
+
+  afterAll(async () => {
+    if (directory) await rm(directory, { recursive: true, force: true });
+  });
+
+  /** A completed action run in `organizationId`, plus an artifact bound to it. */
+  async function runWithArtifact(organizationId: string) {
+    const sql = getTestDb();
+    const [row] = await sql`
+      INSERT INTO runs (organization_id, run_type, status, action_output, created_at, completed_at)
+      VALUES (${organizationId}, 'action', 'completed', ${sql.json({})}, NOW(), NOW())
+      RETURNING id
+    ` as unknown as Array<{ id: number }>;
+    const runId = Number(row.id);
+    const published = await store.publish({
+      buffer: BYTES,
+      filename: 'downloaded.png',
+      contentType: 'image/png',
+      publicGatewayUrl: 'http://localhost/lobu',
+      binding: `run:${runId}`,
+    });
+    return { runId, artifactId: published.artifactId };
+  }
+
+  const fileRef = (artifactId: string) => ({ image: { $file: `lobu://file/${artifactId}` } });
+
+  it('adopts a file this caller produced, as a copy that leaves the run artifact intact', async () => {
+    const { runId, artifactId } = await runWithArtifact(ctx.organizationId!);
+
+    const prepared = await prepareOperationFiles(fileRef(artifactId), schema, ctx, store);
+
+    // The claim names a NEW artifact, bound to the caller, with identical bytes.
+    const adoptedId = prepared.claims[0]!.artifactId;
+    expect(adoptedId).not.toBe(artifactId);
+    expect(prepared.claims[0]!.binding).toMatch(/^input:[0-9a-f]{64}$/);
+    expect(prepared.claims[0]!.sha256).toBe(createHash('sha256').update(BYTES).digest('hex'));
+    expect(inputArtifactId(prepared.input.image)).toBe(adoptedId);
+
+    // The run's own artifact still exists under its own binding: adoption is a
+    // copy, so the run's output is not mutated and neither side's cleanup can
+    // delete the other's file.
+    const original = await store.read(artifactId, { binding: `run:${runId}` });
+    expect(original?.bytes).toEqual(BYTES);
+
+    // And the adopted copy resolves to the same bytes on execution.
+    const resolved = await resolveOperationFiles(prepared.input, JSON.parse(JSON.stringify({ input_files: prepared.claims })), store);
+    expect((resolved as { image: { base64: string } }).image.base64).toBe(BYTES.toString('base64'));
+  });
+
+  it('refuses a run in another organization', async () => {
+    const { artifactId } = await runWithArtifact(otherCtx.organizationId!);
+    await expect(prepareOperationFiles(fileRef(artifactId), schema, ctx, store))
+      .rejects.toThrow('outside this caller');
+  });
+
+  it('refuses an artifact bound to a run that does not exist', async () => {
+    const published = await store.publish({
+      buffer: BYTES,
+      filename: 'orphan.png',
+      contentType: 'image/png',
+      publicGatewayUrl: 'http://localhost/lobu',
+      binding: 'run:987654321',
+    });
+    await expect(prepareOperationFiles(fileRef(published.artifactId), schema, ctx, store))
+      .rejects.toThrow('outside this caller');
+  });
+
+  // The binding namespace is the boundary; only `run:` is adoptable. An event
+  // artifact stays unreachable, so this cannot become a way to launder a feed's
+  // stored attachment into an agent's own input namespace.
+  it('refuses an event-bound artifact', async () => {
+    const published = await store.publish({
+      buffer: BYTES,
+      filename: 'event.png',
+      contentType: 'image/png',
+      publicGatewayUrl: 'http://localhost/lobu',
+      binding: `event:${ctx.organizationId}:connection:1:origin-1`,
+    });
+    await expect(prepareOperationFiles(fileRef(published.artifactId), schema, ctx, store))
+      .rejects.toThrow('outside this caller');
   });
 });
