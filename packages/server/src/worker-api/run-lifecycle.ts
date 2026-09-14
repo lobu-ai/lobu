@@ -561,7 +561,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			// author fixes their eventKinds, and the next sync re-collects the
 			// page in full.
 			if (rejectedItems.length > 0) {
-				return { totalItems: 0, rejectedItems, rejected: true };
+				return { totalItems: 0, rejectedItems };
 			}
 
 			// Resolve or create entities declared via eventKinds[kind].attributions
@@ -1013,7 +1013,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				{
 					error: "batch_rejected",
 					error_description:
-						"Every offered item failed validation; the batch was not ingested and no checkpoint was advanced. Fix the connector's declared eventKinds and re-sync.",
+						"One or more offered items failed validation; the whole batch was rejected, nothing was ingested and no checkpoint was advanced. Fix the connector's declared eventKinds and re-sync.",
 					rejected_items: rejectedItems,
 				},
 				422

@@ -376,16 +376,97 @@ describe('feed dry run persists nothing', () => {
 
     await streamContent(streamed.ctx);
 
-    // A rejected page is not successful ingestion. A non-2xx response forces
-    // the worker to fail the run instead of reporting the offered item count as
+    // A rejected page is not successful ingestion. The 422 is what forces the
+    // worker to fail the run instead of reporting the offered item count as
     // collected and committing the cursor that made this page unreachable.
-    expect(streamed.result().status).toBeGreaterThanOrEqual(400);
+    expect(streamed.result().status).toBe(422);
     expect(streamed.result().body).toMatchObject({
+      error: 'batch_rejected',
       rejected_items: [
         expect.objectContaining({ id: 'invalid-kind-item', semantic_type: 'hn_story' }),
       ],
     });
 
+    expect((await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId}`)[0].count).toBe(0);
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
+    expect((await sql`SELECT checkpoint FROM runs WHERE id = ${runId}`)[0].checkpoint).toBeNull();
+
+    // Close the loop the way the worker does: a thrown stream error fails the
+    // run, and the failed completion carries NO checkpoint (see the
+    // connector-worker 422 contract test). The feed must still hold the last
+    // good cursor afterwards — that is what makes the rejected page reachable
+    // on the next sync instead of permanently skipped.
+    const completed = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      status: 'failed',
+      items_collected: 1,
+      error_message: 'Stream batch failed: /api/workers/stream failed: 422 batch_rejected',
+    });
+    await completeWorkerJob(completed.ctx);
+
+    const [finalRun] = await sql`SELECT status, error_message FROM runs WHERE id = ${runId}`;
+    expect(finalRun.status).toBe('failed');
+    expect(finalRun.error_message).toContain('422');
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
+    expect((await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId}`)[0].count).toBe(0);
+  });
+
+  // The whole-batch rule is the part of this fix with the widest blast radius:
+  // before it, a mixed batch ingested its valid items and the connector author
+  // never learned the rest were dropped. Splitting is precisely what loses
+  // data, because the checkpoint committed next describes the page as consumed.
+  it('rejects a PARTIALLY invalid batch wholesale, ingesting none of its valid items', async () => {
+    const sql = getTestDb();
+    const { orgId, feedId, runId } = await seed(false);
+    await createTestConnectorDefinition({
+      key: 'rss',
+      name: 'Kind-restricted feed',
+      organization_id: orgId,
+      feeds_schema: {
+        items: {
+          eventKinds: {
+            story: {},
+          },
+        },
+      },
+    });
+
+    const streamed = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      checkpoint: { cursor: 'after-mixed-page' },
+      items: [
+        {
+          id: 'valid-item',
+          origin_type: 'story',
+          title: 'Declared kind',
+          payload_text: 'This one would have been ingested before the fix.',
+          payload_type: 'text',
+          occurred_at: new Date().toISOString(),
+        },
+        {
+          id: 'invalid-kind-item',
+          origin_type: 'hn_story',
+          title: 'Undeclared kind',
+          payload_text: 'A connector author used hn_story while declaring story.',
+          payload_type: 'text',
+          occurred_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    await streamContent(streamed.ctx);
+
+    expect(streamed.result().status).toBe(422);
+    expect(streamed.result().body).toMatchObject({
+      error: 'batch_rejected',
+      rejected_items: [
+        expect.objectContaining({ id: 'invalid-kind-item', semantic_type: 'hn_story' }),
+      ],
+    });
+    // The valid item is NOT ingested: a half-written page plus an advanced
+    // cursor is the data-loss shape this fix exists to prevent.
     expect((await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId}`)[0].count).toBe(0);
     expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
     expect((await sql`SELECT checkpoint FROM runs WHERE id = ${runId}`)[0].checkpoint).toBeNull();
