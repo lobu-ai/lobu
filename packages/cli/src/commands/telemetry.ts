@@ -11,15 +11,11 @@ interface TelemetryOptions {
   cwd?: string;
 }
 
-async function loadEnv(cwd: string): Promise<Record<string, string>> {
-  return readProjectEnvFile(cwd);
-}
-
 export async function telemetryStatusCommand(
   options: TelemetryOptions = {}
 ): Promise<void> {
   const cwd = options.cwd ?? process.cwd();
-  const env = await loadEnv(cwd);
+  const env = await readProjectEnvFile(cwd);
   const dsn = env.SENTRY_DSN ?? process.env.SENTRY_DSN;
   if (dsn) {
     console.log(chalk.green("\n  Telemetry: on"));

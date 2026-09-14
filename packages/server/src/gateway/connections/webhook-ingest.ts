@@ -683,14 +683,14 @@ export async function handleWebhookIngest(
 		const landed = await getDb().begin(async (tx) => {
 			let automationConnectionId: number | null = null;
 			if (overrides?.activateGenericAutomationEvent) {
-				if (/^\d+$/.test(stored.id)) {
-					// Bridged connector-connection path: stored.id IS the numeric
-					// connections.id (the route resolved it before falling through
-					// to legacy lookup). Go direct — a slug lookup first could
-					// match an unrelated legacy projection for a numeric stable
-					// id (agentconn-<id>) in the same org and activate the wrong
-					// connection's Automations.
-					const [direct] = await tx<{ id: number }>`
+				// A numeric stored.id is always the bridged connections.id (the
+				// route resolves connector rows before legacy lookup), so it goes
+				// direct: a slug lookup first could match an unrelated legacy
+				// projection for a numeric stable id (agentconn-<id>) in the same
+				// org and activate the wrong connection's Automations. Anything
+				// else is a legacy stable id resolved through its projection.
+				const [automationConnection] = /^\d+$/.test(stored.id)
+					? await tx<{ id: number }>`
 						SELECT id
 						FROM connections
 						WHERE id = ${Number(stored.id)}
@@ -698,15 +698,8 @@ export async function handleWebhookIngest(
 						  AND connector_key = 'webhook'
 						  AND deleted_at IS NULL
 						LIMIT 1
-					`;
-					if (!direct) {
-						throw new Error(
-							`Generic webhook connection ${stored.id} has no active projection`,
-						);
-					}
-					automationConnectionId = Number(direct.id);
-				} else {
-					const [projected] = await tx<{ id: number }>`
+					`
+					: await tx<{ id: number }>`
 						SELECT id
 						FROM connections
 						WHERE organization_id = ${organizationId}
@@ -715,13 +708,12 @@ export async function handleWebhookIngest(
 						  AND deleted_at IS NULL
 						LIMIT 1
 					`;
-					if (!projected) {
-						throw new Error(
-							`Generic webhook connection ${stored.id} has no active projection`,
-						);
-					}
-					automationConnectionId = Number(projected.id);
+				if (!automationConnection) {
+					throw new Error(
+						`Generic webhook connection ${stored.id} has no active projection`,
+					);
 				}
+				automationConnectionId = Number(automationConnection.id);
 			}
 
 			// Insert FIRST (empty entity_ids). A concurrent duplicate trips the
