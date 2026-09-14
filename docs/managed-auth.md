@@ -61,8 +61,9 @@ receiving only `{ access_token, expires_at }`. The connector then runs locally.
 - **The bearer token and the cloud base URL come only from the local install's
   own login** (`resolveCloudCredential`: `~/.config/lobu/credentials.json`,
   falling back to `LOBU_CLOUD_PAT` + `LOBU_CLOUD_URL` for headless/CI). The
-  connection config supplies the `org` and nothing else. A connection-controlled
-  URL would let a malicious config exfiltrate the cloud credential.
+  connection config supplies only `org` and the optional `connectionSlug` —
+  never the base URL or the token. A connection-controlled URL would let a
+  malicious config exfiltrate the cloud credential.
 - The login token must carry the **`connections:token`** scope. It is granted on
   the device-code login path or an explicitly minted PAT, never the auth-code
   path.
