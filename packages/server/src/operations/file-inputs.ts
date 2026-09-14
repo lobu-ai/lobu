@@ -1,6 +1,5 @@
 import { type FileInputOptions, MAX_CONNECTOR_FILE_BYTES } from '@lobu/connector-sdk';
-import type { ArtifactStore, StoredArtifactMetadata } from '../gateway/files/artifact-store';
-import { runArtifactBinding } from '../gateway/files/artifact-store';
+import { runArtifactBinding, type ArtifactStore, type StoredArtifactMetadata } from '../gateway/files/artifact-store';
 import { inputArtifactId, inputFileBinding, MAX_INPUT_FILES, storedInputFile } from '../gateway/files/input-files';
 import { getLobuCoreServices } from '../lobu/gateway';
 import { handleGetRun } from '../tools/admin/manage_operations/handlers/runs';
@@ -88,14 +87,9 @@ function readInlineFile(value: Schema, maxBytes: number) {
   };
 }
 
-
 /** `run:<id>` is the binding `materializeActionOutputAttachments` stamps on an action's output files. */
-// Capped at 15 digits, not 18: the id goes through `Number()`, so anything past
-// Number.MAX_SAFE_INTEGER would round to a DIFFERENT id than the binding names.
-// Defense-in-depth rather than a reachable bug — the writer stamps real run ids,
-// and a rounded id resolves to no run, so both widths end in the same 422 today
-// (a test here would pass either way). Matches mcp-media-resources.ts's
-// `Number.isSafeInteger` guard so the two readers agree on what a run id is.
+// 15 digits keeps the id inside Number.MAX_SAFE_INTEGER, matching the
+// `Number.isSafeInteger` guard in mcp-media-resources.ts.
 const RUN_BINDING = /^run:([1-9][0-9]{0,14})$/;
 
 /**
@@ -131,11 +125,12 @@ async function adoptRunArtifact(params: {
   maxBytes: number;
   publicGatewayUrl: string;
   /**
-   * Runs against the SOURCE metadata, before the copy is published. The field's
-   * gates have to be applied here rather than by the caller afterwards: a gate
-   * that rejects after publishing would leave an orphaned artifact sitting in
-   * the caller's own `input:` namespace, charged to them and referenced by
-   * nothing. Throwing from here publishes nothing.
+   * Runs against the SOURCE metadata, before the copy is published: a gate that
+   * rejected afterwards would leave an orphan in the caller's own `input:`
+   * namespace, referenced by no claim. Throwing from here publishes nothing.
+   *
+   * Per file, not per operation — in a multi-file input an already-adopted copy
+   * still outlives a later file's rejection, same as an uploaded input does.
    */
   accept: (metadata: { contentType: string; size: number }) => void;
 }): Promise<{ metadata: StoredArtifactMetadata; bytes: Buffer } | null> {
@@ -219,8 +214,11 @@ export async function prepareOperationFiles(
       ? await storeOrThrow(store).read(artifactId, { binding, maxBytes })
       : readInlineFile(value, maxBytes);
     if (!file && artifactId) {
-      // Not in the caller's own namespace — it may still be a file THIS caller
-      // just produced through a connector action, which lands bound to the run.
+      // Not in the caller's own namespace — it may still be a file produced by
+      // a run this caller's ORG can `get_run`, which lands bound to that run.
+      // Note the asymmetry: input bindings are principal-scoped, while this
+      // adoption is org-scoped, exactly like the run-attachment read that
+      // mcp-media-resources.ts already exposes.
       const adopted = await adoptRunArtifact({
         store: storeOrThrow(store),
         artifactId,
