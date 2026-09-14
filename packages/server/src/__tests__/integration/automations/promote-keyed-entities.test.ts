@@ -961,18 +961,36 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     });
     const [after] = await ctx.sql`SELECT name, metadata FROM entities WHERE id = ${created.entity_id}`;
     expect(after.name).toBe('Investigate the crash');
-    expect(after.metadata.name).toBe(effect === 'approval' ? 'Deploy the crash fix' : 'Investigate the crash');
+    expect(after.metadata.name).toBe('Investigate the crash');
     const cards = await ctx.sql`
       SELECT id, action_input FROM runs WHERE organization_id = ${ctx.workspace.org.id}
         AND action_key = 'entity_field_change' AND approval_status = 'pending'
     `;
     expect(cards).toHaveLength(effect === 'approval' ? 1 : 0);
     if (effect === 'approval') {
-      expect(cards[0].action_input.fields).toEqual({ $name: 'Deploy the crash fix' });
+      expect(cards[0].action_input.fields).toEqual({ name: 'Deploy the crash fix', $name: 'Deploy the crash fix' });
+      const later = await nextCompletion(ctx);
+      await completeWithToken(ctx, later.token, later.runId, {
+        problems: [{ category: 'Stability', name: 'Verify the crash fix' }],
+      });
+      const [stillHeld] = await ctx.sql`SELECT name, metadata FROM entities WHERE id = ${created.entity_id}`;
+      expect(stillHeld.name).toBe('Investigate the crash');
+      expect(stillHeld.metadata.name).toBe('Investigate the crash');
       await executeTool('manage_operations', { action: 'approve', run_id: Number(cards[0].id) },
         TEST_ENV, ownerAuthCtx(ctx.workspace.org.id, ctx.workspace.users.owner.id));
-      const [approved] = await ctx.sql`SELECT name FROM entities WHERE id = ${created.entity_id}`;
+      const [approved] = await ctx.sql`SELECT name, metadata FROM entities WHERE id = ${created.entity_id}`;
       expect(approved.name).toBe('Deploy the crash fix');
+      expect(approved.metadata.name).toBe('Deploy the crash fix');
+      const final = await nextCompletion(ctx);
+      await completeWithToken(ctx, final.token, final.runId, {
+        problems: [{ category: 'Stability', name: 'Monitor the deployed fix' }],
+      });
+      const [finalCard] = await ctx.sql`
+        SELECT action_input FROM runs WHERE organization_id = ${ctx.workspace.org.id}
+          AND action_key = 'entity_field_change' AND approval_status = 'pending'
+        ORDER BY id DESC LIMIT 1
+      `;
+      expect(finalCard.action_input.fields).toEqual({ name: 'Monitor the deployed fix', $name: 'Monitor the deployed fix' });
     }
   });
 

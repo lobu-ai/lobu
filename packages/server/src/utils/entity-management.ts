@@ -1287,6 +1287,19 @@ export async function updateEntity(
 			}
 		}
 
+		// Holding the derived label must also hold its changing inputs. Otherwise
+		// this write itself creates a name/metadata mismatch that the next
+		// promotion mistakes for a custom label, permanently losing tracking.
+		if (derivedName && blockedAttributes.$name) {
+			for (const field of derivedName.fields) {
+				if (Object.hasOwn(metadataUpdates, field) &&
+					JSON.stringify(existing[field] ?? null) !== JSON.stringify(metadataUpdates[field] ?? null) &&
+					!requireApproval.includes(field)) {
+					requireApproval.push(field);
+				}
+			}
+		}
+
 		let mergedMetadata: Record<string, unknown> | null = null;
 		let mergedControls: Record<string, unknown> | null = null;
 		if (hasMetadataUpdates || hasAffirm) {
