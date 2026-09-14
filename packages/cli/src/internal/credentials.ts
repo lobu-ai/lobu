@@ -154,13 +154,22 @@ async function getCredentialsToken(
   if (!creds) return null;
   if (!credentialNeedsRefresh(creds)) return creds.accessToken;
 
+  // Say why before dropping: a silent clear surfaces downstream as
+  // "Not logged in", sending users to debug auth instead of re-running login.
+  // Fires once per process — the clear poisons the cache to null, so later
+  // getToken() calls take the `!creds` path above without repeating this.
+  const staleNote =
+    `\n  Saved login for "${contextName ?? DEFAULT_CONTEXT_NAME}" expired and ` +
+    `could not be refreshed. Run \`lobu login\` to sign in again.\n`;
   if (!credentialCanRefresh(creds)) {
+    process.stderr.write(staleNote);
     await clearCredentials(contextName);
     return null;
   }
 
   const refreshed = await refreshCredentials(creds, contextName);
   if (!refreshed) {
+    process.stderr.write(staleNote);
     await clearCredentials(contextName);
     return null;
   }

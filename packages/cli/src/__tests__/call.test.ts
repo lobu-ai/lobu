@@ -298,4 +298,54 @@ describe("callCommand", () => {
       /Tool not found: bogus/
     );
   });
+
+  test("a 200 soft-error payload prints JSON and exits non-zero", async () => {
+    stubAuth();
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ rows: [], error: "syntax error near DROP" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )) as unknown as typeof fetch;
+
+    // NOTE: `process.exitCode = undefined` does not clear a set code in
+    // Bun — baseline to numeric 0 explicitly (see memory-auth.test.ts).
+    const priorExitCode = process.exitCode ?? 0;
+    process.exitCode = 0;
+    const captured = captureStdout();
+    let code: number | undefined;
+    try {
+      await callCommand("query_sql", { arg: ["query=SELECT 1"] });
+      code = process.exitCode;
+    } finally {
+      captured.restore();
+      process.exitCode = priorExitCode;
+    }
+    // Stdout contract unchanged — the error payload still parses.
+    expect(JSON.parse(captured.chunks.join("")).error).toContain(
+      "syntax error"
+    );
+    expect(code).toBe(1);
+  });
+
+  test("a successful call leaves the exit code untouched", async () => {
+    stubAuth();
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ feeds: [{ id: 1 }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    const priorExitCode = process.exitCode ?? 0;
+    process.exitCode = 0;
+    const captured = captureStdout();
+    let code: number | undefined = -1;
+    try {
+      await callCommand("manage_feeds", { arg: ["action=list"] });
+      code = process.exitCode;
+    } finally {
+      captured.restore();
+      process.exitCode = priorExitCode;
+    }
+    expect(code).toBe(0);
+  });
 });

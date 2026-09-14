@@ -1,4 +1,4 @@
-import { ValidationError } from "./_lib/errors.js";
+import { ValidationError, isFailedToolPayload } from "./_lib/errors.js";
 import { mcpRpc, resolveMcpEndpoint } from "./_lib/mcp.js";
 import {
   getSessionForOrg,
@@ -84,4 +84,10 @@ export async function memoryRunCommand(
   );
 
   printText(JSON.stringify(result, null, 2));
+  // The JSON above is the report — leave it parseable — but a reported
+  // failure must still fail the shell, or CI gates on this command pass
+  // silently. Success paths never touch the exit code.
+  if (isFailedToolPayload(tool, result)) {
+    process.exitCode = 1;
+  }
 }

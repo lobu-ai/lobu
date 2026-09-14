@@ -27,6 +27,32 @@ export class ApiError extends CliError {
 }
 
 /**
+ * True when an already-printed tool result payload reports failure, so the
+ * command can exit non-zero without changing its stdout contract (the JSON
+ * still parses — `gh`/`kubectl -o json` semantics, not curl's). Three shapes:
+ * - MCP `tools/call` failures, marked `isError` at the protocol boundary;
+ * - `run_sdk` script failures, reported as data (`success` is a required
+ *   field of the script result) — the tool ran fine, the script did not;
+ * - REST-proxy soft failures, a top-level `error` string. This mirrors the
+ *   server's `isSoftErrorResult` (server/src/tools/execute.ts); kept as a
+ *   local predicate so the CLI never imports server sources.
+ */
+export function isFailedToolPayload(
+  tool: string | undefined,
+  result: unknown
+): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  const payload = result as {
+    isError?: unknown;
+    success?: unknown;
+    error?: unknown;
+  };
+  if (payload.isError === true) return true;
+  if (tool === "run_sdk" && payload.success === false) return true;
+  return typeof payload.error === "string" && payload.error.length > 0;
+}
+
+/**
  * Parse `raw` as a JSON object, throwing {@link ValidationError} when it is not
  * valid JSON or not a top-level object (arrays and primitives are rejected).
  * `label` names the source for the error messages, e.g. `"on stdin"` or

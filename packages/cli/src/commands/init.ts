@@ -26,7 +26,11 @@ import { installProjectDeps } from "./_lib/ensure-deps-installed.js";
 import { initFromOrg } from "./_lib/init-from-org/bootstrap.js";
 import { isPortFree } from "./dev.js";
 
-const PROJECT_NAME_PATTERN = /^[a-z0-9-]+$/;
+// Mirrors the server's sanitizeAgentId contract (gateway/routes/public/agents.ts):
+// lowercase alphanumeric with hyphens, 3-60 chars, starting with a letter.
+// The project name becomes agents/<name>, so anything weaker scaffolds a
+// project the server refuses on first contact.
+const PROJECT_NAME_PATTERN = /^[a-z][a-z0-9-]{2,59}$/;
 const NETWORK_CHOICES = ["restricted", "open", "isolated"] as const;
 type NetworkChoice = (typeof NETWORK_CHOICES)[number];
 const MEMORY_CHOICES = ["none", "lobu-cloud", "lobu-custom"] as const;
@@ -284,7 +288,7 @@ export async function initCommand(
     if (projectNameArg && !PROJECT_NAME_PATTERN.test(projectNameArg)) {
       console.log(
         chalk.red(
-          `\n✗ Project name must be lowercase alphanumeric with hyphens only (got: ${projectNameArg}).\n`
+          `\n✗ Project name must be lowercase alphanumeric with hyphens, starting with a letter, 3-60 chars (got: ${projectNameArg}).\n`
         )
       );
       process.exit(1);
@@ -846,7 +850,7 @@ export async function initCommand(
 
 function validateProjectName(value: string): string | true {
   if (!PROJECT_NAME_PATTERN.test(value)) {
-    return "Project name must be lowercase alphanumeric with hyphens only";
+    return "Project name must be lowercase alphanumeric with hyphens, starting with a letter, 3-60 chars";
   }
   return true;
 }

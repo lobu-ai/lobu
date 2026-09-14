@@ -1642,6 +1642,52 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		expect(count).toBe(0);
 	});
 
+	test("a bridged generic webhook (documented schema keys) activates delivery.received", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { manager, secretStore } = await buildManager();
+		const { createConnectionWebhookRoutes } = await import(
+			"../routes/public/connections.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		// Documented optionsSchema keys only (token/dedupeHeader) — no
+		// webhook_* registration keys. resolveConnectionWebhookConfig must
+		// accept both or ingest 404s forever (H2).
+		const docToken = "bridged-doc-token-0123456789abcdef0123456789";
+		const inserted = (await getDb()`
+			INSERT INTO connections (organization_id, connector_key, slug, status, config)
+			VALUES (${ORG}, 'webhook', ${`bridged-doc-${Date.now()}-${Math.random()}`},
+				'active', ${getDb().json({ token: docToken, semanticType: "alert" })})
+			RETURNING id
+		`) as Array<{ id: number }>;
+		const id = String(inserted[0].id);
+		void secretStore;
+		const automationId = await seedWebhookEventAutomation({
+			connectionId: Number(id),
+		});
+		const app = createConnectionWebhookRoutes(manager);
+		const raw = JSON.stringify({ hello: "bridged" });
+		const response = await app.fetch(
+			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
+				method: "POST",
+				body: raw,
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${docToken}`,
+				},
+			}),
+		);
+		expect(response.status).toBe(202);
+		const rows = await eventRows(id);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].connection_id).toBe(Number(id));
+		const runs = await getDb()<{ id: number }>`
+			SELECT id FROM runs
+			WHERE automation_id = ${automationId}
+			  AND run_type = 'automation'
+		`;
+		expect(runs.length).toBeGreaterThan(0);
+	});
+
 	test("an authenticated Jira delivery lands as a structured event on the Atlassian Rovo feed", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const { manager } = await buildManager();

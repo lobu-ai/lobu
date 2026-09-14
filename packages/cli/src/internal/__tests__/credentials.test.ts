@@ -395,6 +395,26 @@ describe("credentials", () => {
     expect(rmSpy).toHaveBeenCalled();
   });
 
+  test("getToken says why when it drops a stale session", async () => {
+    // A bogus/expired token must not vanish silently into "Not logged in" —
+    // say it expired so the user runs `lobu login` instead of debugging auth.
+    const creds = buildCreds({
+      accessToken: "expired",
+      refreshToken: undefined,
+      expiresAt: Date.now() - 60_000,
+    });
+    const store = { version: 2, contexts: { [currentContextName]: creds } };
+    readFileSpy.mockResolvedValue(JSON.stringify(store));
+    const errSpy = spyOn(process.stderr, "write").mockImplementation(
+      () => true
+    );
+
+    const token = await getToken();
+
+    expect(token).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("lobu login"));
+  });
+
   test("getToken refreshes expired tokens through refreshTokens()", async () => {
     const expiredAt = Date.now() - 60_000;
     const creds = buildCreds({

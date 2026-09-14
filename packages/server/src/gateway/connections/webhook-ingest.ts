@@ -692,12 +692,31 @@ export async function handleWebhookIngest(
 					  AND deleted_at IS NULL
 					LIMIT 1
 				`;
-				if (!projected) {
+				if (projected) {
+					automationConnectionId = Number(projected.id);
+				} else if (/^\d+$/.test(stored.id)) {
+					// Bridged connector-connection path: stored.id is the numeric
+					// connections.id itself (no agentconn-<id> projection row).
+					const [direct] = await tx<{ id: number }>`
+						SELECT id
+						FROM connections
+						WHERE id = ${Number(stored.id)}
+						  AND organization_id = ${organizationId}
+						  AND connector_key = 'webhook'
+						  AND deleted_at IS NULL
+						LIMIT 1
+					`;
+					if (!direct) {
+						throw new Error(
+							`Generic webhook connection ${stored.id} has no active projection`,
+						);
+					}
+					automationConnectionId = Number(direct.id);
+				} else {
 					throw new Error(
 						`Generic webhook connection ${stored.id} has no active projection`,
 					);
 				}
-				automationConnectionId = Number(projected.id);
 			}
 
 			// Insert FIRST (empty entity_ids). A concurrent duplicate trips the

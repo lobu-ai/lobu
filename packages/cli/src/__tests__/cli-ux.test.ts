@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   existsSync,
   mkdtempSync,
@@ -127,6 +127,31 @@ describe("lobu init --yes", () => {
     expect(existsSync(join(proj, "lobu.config.ts"))).toBe(true);
     expect(existsSync(join(proj, "package.json"))).toBe(true);
     expect(existsSync(join(proj, "node_modules"))).toBe(false);
+  });
+
+  test("rejects names the server refuses as agent ids (min 3 chars)", async () => {
+    // The project name becomes agents/<name> and the server's sanitizeAgentId
+    // rejects anything under 3 chars — fail fast here instead of scaffolding
+    // a project the server will never accept.
+    // Halt on exit so a mocked exit(1) stops the scaffold the way a real
+    // exit would; anything reaching past it is a fail-fast violation.
+    // (Assert on the captured code, not mock calls — mockRestore semantics
+    // vary on whether calls survive restoration.)
+    const halt = new Error("__exit__");
+    let code: number | undefined;
+    const exit = spyOn(process, "exit").mockImplementation(((c: number) => {
+      code = c;
+      throw halt;
+    }) as never);
+    try {
+      await initCommand(cwd, "ab", { yes: true, skipInstall: true });
+    } catch (err) {
+      if (err !== halt) throw err;
+    } finally {
+      exit.mockRestore();
+    }
+    expect(code).toBe(1);
+    expect(existsSync(join(cwd, "ab"))).toBe(false);
   });
 
   test(

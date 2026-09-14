@@ -363,19 +363,24 @@ export async function resolveConnectionWebhookConfig(
   config: Record<string, unknown> | null | undefined
 ): Promise<Record<string, unknown> | null> {
   const c = (config ?? {}) as Record<string, unknown> & ConnectionWebhookState;
-  if (!c.webhook_signature_secret && !c.webhook_callback_token && !c.webhook_external_id) {
+  // Documented generic-webhook schema keys (packages/connectors/src/webhook.ts
+  // optionsSchema: token, dedupeHeader, …) fall back when the provider-
+  // registration webhook_* keys are absent — otherwise a connection created
+  // via the documented schema 404s forever on ingest.
+  const token = c.webhook_callback_token ?? (typeof c.token === 'string' ? c.token : undefined);
+  const dedupeHeader =
+    c.webhook_dedupe_header ?? (typeof c.dedupeHeader === 'string' ? c.dedupeHeader : undefined);
+  if (!c.webhook_signature_secret && !token && !c.webhook_external_id) {
     return null;
   }
   return {
     platform: 'webhook',
-    ...(c.webhook_callback_token
-      ? { token: c.webhook_callback_token, allowQueryAuth: true }
-      : {}),
+    ...(token ? { token, allowQueryAuth: true } : {}),
     ...(c.webhook_signature_secret ? { signatureSecret: c.webhook_signature_secret } : {}),
     ...(c.webhook_signature_header ? { signatureHeader: c.webhook_signature_header } : {}),
     ...(c.webhook_algorithm ? { algorithm: c.webhook_algorithm } : {}),
     ...(c.webhook_signature_prefix ? { signaturePrefix: c.webhook_signature_prefix } : {}),
-    ...(c.webhook_dedupe_header ? { dedupeHeader: c.webhook_dedupe_header } : {}),
+    ...(dedupeHeader ? { dedupeHeader } : {}),
     // Carry through any ingest-shaping the connection set (semantic type, etc.).
     ...(typeof c.semanticType === 'string' ? { semanticType: c.semanticType } : {}),
     ...(typeof c.titlePath === 'string' ? { titlePath: c.titlePath } : {}),

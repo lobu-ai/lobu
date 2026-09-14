@@ -10,14 +10,19 @@
  *   --arg key:=<jsonvalue>  JSON-parsed field (httpie-style)
  *
  * Output is pretty JSON by default; `--raw` switches to compact JSON for piping.
- * Errors go to stderr with exit code 1 (ApiError) / 2 (validation).
+ * Errors go to stderr with exit code 1 (ApiError) / 2 (validation). A tool
+ * that reports failure inside a 200 payload still prints its JSON, then exits 1.
  */
 
 import { readFile } from "node:fs/promises";
 
 import { resolveApiClient } from "../internal/api-client.js";
 import { printJson } from "../internal/output.js";
-import { parseJsonObject, ValidationError } from "./memory/_lib/errors.js";
+import {
+  isFailedToolPayload,
+  parseJsonObject,
+  ValidationError,
+} from "./memory/_lib/errors.js";
 import { restToolCall } from "./memory/_lib/mcp.js";
 import {
   getSessionForOrg,
@@ -218,4 +223,9 @@ export async function callCommand(
     options.context
   );
   printJson(result, raw);
+  // Same contract as `memory run`: the printed JSON stays parseable, but a
+  // reported failure must fail the shell or CI gates pass silently.
+  if (isFailedToolPayload(tool, result)) {
+    process.exitCode = 1;
+  }
 }

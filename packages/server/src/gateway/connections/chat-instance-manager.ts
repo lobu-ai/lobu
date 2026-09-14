@@ -1364,7 +1364,9 @@ export class ChatInstanceManager {
                       );
                     },
                   }
-                : undefined,
+                : bridged.connectorKey === "webhook"
+                  ? { activateGenericAutomationEvent: true }
+                  : undefined,
 					),
         );
       }
