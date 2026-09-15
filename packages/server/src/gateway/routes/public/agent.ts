@@ -465,7 +465,8 @@ interface AgentApiConfig {
   platformRegistry?: PlatformRegistry;
   approveToolCall?: (
     requestId: string,
-    decision: string
+    decision: string,
+    claimant: { userId: string; organizationId?: string }
   ) => Promise<{ success: boolean; error?: string }>;
 }
 
@@ -1925,7 +1926,12 @@ export function createAgentApi(config: AgentApiConfig): Hono {
           400
         );
       }
-      const result = await approveHandler(requestId, decision);
+      const auth = c.get("authContext");
+      if (!auth?.userId) return errorResponse(c, "Unauthorized", 401);
+      const result = await approveHandler(requestId, decision, {
+        userId: auth.userId,
+        organizationId: auth.organizationId,
+      });
       if (!result.success) {
         return errorResponse(c, result.error || "Approval failed", 400);
       }

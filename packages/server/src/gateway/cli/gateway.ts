@@ -317,7 +317,11 @@ export function createGatewayApp(
         userAgentsStore: coreServices.getUserAgentsStore(),
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
-        approveToolCall: async (requestId: string, decision: string) => {
+        approveToolCall: async (
+          requestId: string,
+          decision: string,
+          claimant: { userId: string; organizationId?: string },
+        ) => {
           const expiresMap = {
             "1h": Date.now() + 3_600_000,
             "24h": Date.now() + 86_400_000,
@@ -335,7 +339,7 @@ export function createGatewayApp(
           // double-clicks, Slack webhook retries) cannot double-execute the
           // tool. The Slack/Telegram interaction-bridge path uses the same
           // helper.
-          const pending = await takePendingTool(requestId);
+          const pending = await takePendingTool(requestId, claimant);
           if (!pending)
             return { success: false, error: "Request not found or expired" };
           if (!pending.organizationId) {

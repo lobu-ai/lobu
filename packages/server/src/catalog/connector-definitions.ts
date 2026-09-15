@@ -3,12 +3,16 @@ import { readFile } from "node:fs/promises";
 import { getErrorMessage } from "@lobu/core";
 import { getLoginProviderScopes } from "../auth/config";
 import { getDb } from "../db/client";
-import { getLocalActionKind } from "../operations/connector-operations";
 import {
 	getMcpOAuthRequestedScopes,
 	probeMcpServer,
 	selectMcpOAuthClientAuthMethod,
 } from "../mcp-proxy/client";
+import {
+	ATLASSIAN_MCP_FEEDS,
+	isAtlassianMcpUrl,
+} from "../operations/atlassian-mcp-feed";
+import { getLocalActionKind } from "../operations/connector-operations";
 import { computeCodeHash } from "../utils/compiler-core";
 import {
 	connectorSourcePathToUri,
@@ -30,10 +34,6 @@ import {
 } from "../utils/ensure-connector-installed";
 import logger from "../utils/logger";
 import { listCatalogEntries } from "./load";
-import {
-	ATLASSIAN_MCP_FEEDS,
-	isAtlassianMcpUrl,
-} from "../operations/atlassian-mcp-feed";
 
 type AuthSchema =
 	| { methods?: Array<Record<string, unknown>> }
@@ -225,9 +225,7 @@ export async function installCatalogConnectorDefinition(params: {
 	const catalog = (await listCatalogEntries(["connectors"])).connectors;
 	const entry = catalog.find((item) => item.id === params.connectorId);
 	if (!entry) {
-		throw new Error(
-			`Catalog connector '${params.connectorId}' was not found.`,
-		);
+		throw new Error(`Catalog connector '${params.connectorId}' was not found.`);
 	}
 	const availability = getCatalogConnectorInstallability(entry.id);
 	if (!availability.installable) throw new Error(availability.message);
@@ -269,8 +267,9 @@ export async function installConnectorFromMcpUrl(params: {
 						requiredScopes: getMcpOAuthRequestedScopes(probed.oauth),
 						authorizationUrl: probed.oauth.authorizationUrl,
 						tokenUrl: probed.oauth.tokenUrl,
-						tokenEndpointAuthMethod:
-							selectMcpOAuthClientAuthMethod(probed.oauth),
+						tokenEndpointAuthMethod: selectMcpOAuthClientAuthMethod(
+							probed.oauth,
+						),
 						usePkce:
 							probed.oauth.codeChallengeMethodsSupported.includes("S256"),
 						clientIdKey: "MCP_CLIENT_ID",
@@ -506,7 +505,10 @@ function summarizeValidatedActions(
 			// with how the action is actually treated (kind:'read' OR
 			// annotations.readOnlyHint:true → read; else write).
 			kind: getLocalActionKind(a),
-			requires_approval: a.requiresApproval === true,
+			requires_approval:
+				typeof a.requiresApproval === "boolean"
+					? a.requiresApproval
+					: getLocalActionKind(a) === "write",
 			required_scopes: scopes,
 		};
 	}
@@ -787,7 +789,10 @@ export async function rollbackConnectorVersion(params: {
 	const code = await resolveConnectorCode(params.connectorKey, rows[0]);
 	const metadata = await extractConnectorMetadata(code);
 	validateConnectorMetadata(metadata);
-	if (metadata.key !== params.connectorKey || metadata.version !== params.version) {
+	if (
+		metadata.key !== params.connectorKey ||
+		metadata.version !== params.version
+	) {
 		throw new Error(
 			`Retained code for '${params.connectorKey}@${params.version}' resolved to ` +
 				`'${metadata.key}@${metadata.version}' — cannot roll back safely.`,

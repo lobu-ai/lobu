@@ -116,8 +116,15 @@ export async function listPendingToolsForConversation(
  * once — Slack/Telegram webhook retries that arrive after the first
  * click see null and no-op.
  */
+export interface PendingToolClaimant {
+	userId: string;
+	organizationId?: string;
+	conversationId?: string;
+}
+
 export async function takePendingTool(
 	requestId: string,
+	claimant: PendingToolClaimant,
 ): Promise<PendingToolInvocation | null> {
   const sql = getDb();
   const rows = await sql`
@@ -125,6 +132,9 @@ export async function takePendingTool(
     WHERE id = ${requestId}
       AND scope = ${SCOPE}
       AND expires_at > now()
+      AND payload->>'userId' = ${claimant.userId}
+      AND (${claimant.organizationId ?? null}::text IS NULL OR payload->>'organizationId' = ${claimant.organizationId ?? null})
+      AND (${claimant.conversationId ?? null}::text IS NULL OR payload->>'conversationId' = ${claimant.conversationId ?? null})
     RETURNING payload
   `;
   if (rows.length === 0) return null;
