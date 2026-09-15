@@ -57,6 +57,7 @@ describe("manage_connections surfaces derived connection health", () => {
 	let pausedId: number;
 	let healthyId: number;
 	let neverCollectedId: number;
+	let userManagedOnlyId: number;
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
@@ -124,6 +125,30 @@ describe("manage_connections surfaces derived connection health", () => {
 			schedule: "*/5 * * * *",
 			nextRunAt: new Date(Date.now() + 60_000),
 		});
+
+		// A connector whose only declared sync feed needs per-instance config the
+		// create flow cannot supply. Zero feeds is the CORRECT resting state here,
+		// so neither read path may call it no_feeds — and the flag that says so is
+		// computed from the definition join, not from the connection row.
+		await createTestConnectorDefinition({
+			key: "user-managed-only",
+			name: "User Managed Only",
+			organization_id: orgId,
+			feeds_schema: {
+				main: { key: "main", operations: ["sync"], userManaged: true },
+			},
+		});
+		userManagedOnlyId = Number(
+			(
+				await createTestConnection({
+					organization_id: orgId,
+					connector_key: "user-managed-only",
+					display_name: "Nothing to auto-provision",
+					created_by: workspace.users.owner.id,
+					createDefaultFeed: false,
+				})
+			).id,
+		);
 	});
 
 	it("reports each connection's observed state, not just its status", async () => {
@@ -142,6 +167,32 @@ describe("manage_connections surfaces derived connection health", () => {
 		expect(attention.get(neverCollectedId)).toBe("never_collected");
 	});
 
+	it("does not flag a connector that declares no auto-provisionable feed", () => {
+		// Regression: has_auto_syncable_feeds is the fail-closed guard that keeps
+		// this row out of no_feeds, and it is computed per read path. list once
+		// computed it in the definition lateral but never projected it, so the
+		// derivation read undefined, failed closed, and reported no_feeds here
+		// while get reported healthy for the same row. Asserting BOTH paths is
+		// what makes a projection gap visible; the shapes above all sit on a
+		// connector that DOES declare one, where the flag never matters.
+		return Promise.all([
+			workspace.owner.connections
+				.list({ limit: 50 })
+				.then((result) =>
+					expect(
+						((result as ListResult).connections ?? []).find(
+							(row) => Number(row.id) === userManagedOnlyId,
+						)?.attention,
+					).toBe("healthy"),
+				),
+			workspace.owner.connections
+				.get(userManagedOnlyId)
+				.then((result) =>
+					expect((result as GetResult).connection?.attention).toBe("healthy"),
+				),
+		]);
+	});
+
 	it("does not leak the derivation input onto the response", async () => {
 		const result = (await workspace.owner.connections.list({
 			limit: 50,
@@ -158,6 +209,7 @@ describe("manage_connections surfaces derived connection health", () => {
 			[pausedId, "paused"],
 			[healthyId, "healthy"],
 			[neverCollectedId, "never_collected"],
+			[userManagedOnlyId, "healthy"],
 		] as const) {
 			const result = (await workspace.owner.connections.get(id)) as GetResult;
 			expect(result.connection?.attention).toBe(expected);

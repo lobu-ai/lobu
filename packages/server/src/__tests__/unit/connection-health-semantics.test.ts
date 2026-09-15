@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { deriveConnectionHealthSemantics } from "../../connectors/connection-health-semantics";
 import {
-	type ConnectionFeedRollupInput,
-	deriveConnectionHealthSemantics,
-} from "../../connectors/connection-health-semantics";
-import { deriveFeedHealthSemantics } from "../../connectors/feed-health-semantics";
+	deriveFeedHealthSemantics,
+	type FeedHealthSemantics,
+} from "../../connectors/feed-health-semantics";
 
 /**
  * Feed fixtures go through the REAL feed derivation rather than hand-built
@@ -12,13 +12,12 @@ import { deriveFeedHealthSemantics } from "../../connectors/feed-health-semantic
  */
 const feed = (
 	input: Parameters<typeof deriveFeedHealthSemantics>[0],
-): ConnectionFeedRollupInput => ({
-	semantics: deriveFeedHealthSemantics({
+): FeedHealthSemantics =>
+	deriveFeedHealthSemantics({
 		operations: ["sync"],
 		store: "events",
 		...input,
-	}),
-});
+	});
 
 /** A feed that collects on a cron and has synced successfully. */
 const healthyFeed = () =>

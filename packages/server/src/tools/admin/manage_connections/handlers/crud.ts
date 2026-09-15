@@ -330,6 +330,7 @@ export async function handleList(
            cd.name AS connector_name,
            cd.has_feeds_schema,
            cd.declares_chat,
+           cd.has_auto_syncable_feeds,
            ap.slug AS auth_profile_slug,
            ap.display_name AS auth_profile_name,
            ap.status AS auth_profile_status,

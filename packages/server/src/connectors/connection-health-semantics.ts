@@ -97,12 +97,6 @@ export type ConnectionAttentionState =
   | "degraded"
   | "misconfigured";
 
-/** One collector feed's contribution to the fold. */
-export interface ConnectionFeedRollupInput {
-  /** Straight from `deriveFeedHealthSemantics` — never hand-built. */
-  semantics: FeedHealthSemantics;
-}
-
 export interface ConnectionHealthSemanticsInput {
   /** `connections.status` — 'active' | 'paused' | 'error' | 'revoked' | 'pending_auth'. */
   status?: string | null;
@@ -128,8 +122,11 @@ export interface ConnectionHealthSemanticsInput {
    * install problem surfaces rather than hides.
    */
   connector_has_auto_syncable_feeds?: boolean | null;
-  /** Every non-deleted feed on this connection, already derived. */
-  feeds: readonly ConnectionFeedRollupInput[];
+  /**
+   * Every non-deleted feed on this connection, each already run through
+   * `deriveFeedHealthSemantics` — never a hand-built verdict.
+   */
+  feeds: readonly FeedHealthSemantics[];
 }
 
 export interface ConnectionHealthSemantics {
@@ -146,10 +143,9 @@ export interface ConnectionHealthSemantics {
  * ratio below — the same reason `classifyFeed` keeps them out of its expected
  * set.
  */
-function isCollector(feed: ConnectionFeedRollupInput): boolean {
+function isCollector(feed: FeedHealthSemantics): boolean {
   return (
-    feed.semantics.executionMode === "scheduled" ||
-    feed.semantics.executionMode === "no_schedule"
+    feed.executionMode === "scheduled" || feed.executionMode === "no_schedule"
   );
 }
 
@@ -167,7 +163,7 @@ export function deriveConnectionHealthSemantics(
   // not currently collecting. Expressed as the negative rather than a listed
   // Set so a state added to that union cannot silently read as healthy here.
   const attentionFeedCount = collectors.filter(
-    (feed) => feed.semantics.attention !== "healthy"
+    (feed) => feed.attention !== "healthy"
   ).length;
 
   const base = { expectedFeedCount, attentionFeedCount };
@@ -208,11 +204,9 @@ export function deriveConnectionHealthSemantics(
     };
   }
 
-  const allPaused = collectors.every(
-    (feed) => feed.semantics.attention === "paused"
-  );
+  const allPaused = collectors.every((feed) => feed.attention === "paused");
   const allNoTrigger = collectors.every(
-    (feed) => feed.semantics.attention === "no_trigger"
+    (feed) => feed.attention === "no_trigger"
   );
 
   // Cause before symptom: a feed with no dispatch path has also never run, and
@@ -220,7 +214,7 @@ export function deriveConnectionHealthSemantics(
   // reason. Same ranking the feed-level module applies to no_trigger/never_run.
   if (allNoTrigger) return { ...base, attention: "no_trigger" };
   if (allPaused) return { ...base, attention: "paused" };
-  if (collectors.every((feed) => feed.semantics.attention === "never_run")) {
+  if (collectors.every((feed) => feed.attention === "never_run")) {
     return { ...base, attention: "never_collected" };
   }
   if (attentionFeedCount > 0) return { ...base, attention: "degraded" };
@@ -314,25 +308,23 @@ export function deriveConnectionHealthFromRow(
   row: ConnectionHealthRow
 ): ConnectionHealthSemantics {
   const rawFeeds = Array.isArray(row.feed_health) ? row.feed_health : [];
-  const feeds: ConnectionFeedRollupInput[] = rawFeeds.map((entry) => {
+  const feeds: FeedHealthSemantics[] = rawFeeds.map((entry) => {
     const feed = (entry ?? {}) as FeedHealthJsonRow;
-    return {
-      semantics: deriveFeedHealthSemantics({
-        operations: parseOperations(feed.operations),
-        store: feed.store === 'channel_messages' ? 'channel_messages' : 'events',
-        status: stringOrNull(feed.status),
-        schedule: stringOrNull(feed.schedule),
-        webhook_driven: feed.webhook_driven === true,
-        last_sync_status: stringOrNull(feed.last_sync_status),
-        last_sync_at: stringOrNull(feed.last_sync_at),
-        consecutive_failures: Number(feed.consecutive_failures ?? 0),
-        next_run_at: stringOrNull(feed.next_run_at),
-        connection_status: row.status ?? null,
-        auth_profile_status: row.auth_profile_status ?? null,
-        device_worker_id: row.device_worker_id ?? null,
-        device_online: row.device_online ?? null,
-      }),
-    };
+    return deriveFeedHealthSemantics({
+      operations: parseOperations(feed.operations),
+      store: feed.store === 'channel_messages' ? 'channel_messages' : 'events',
+      status: stringOrNull(feed.status),
+      schedule: stringOrNull(feed.schedule),
+      webhook_driven: feed.webhook_driven === true,
+      last_sync_status: stringOrNull(feed.last_sync_status),
+      last_sync_at: stringOrNull(feed.last_sync_at),
+      consecutive_failures: Number(feed.consecutive_failures ?? 0),
+      next_run_at: stringOrNull(feed.next_run_at),
+      connection_status: row.status ?? null,
+      auth_profile_status: row.auth_profile_status ?? null,
+      device_worker_id: row.device_worker_id ?? null,
+      device_online: row.device_online ?? null,
+    });
   });
 
   return deriveConnectionHealthSemantics({
