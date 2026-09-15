@@ -22,9 +22,10 @@ import {
 } from "../../notifications/action-card-state.js";
 import { resolveInteractionActionOrigin } from "../../notifications/action-origin.js";
 import {
+	claimPendingTool,
 	pairAdminGrant,
-  type PendingToolInvocation,
-	takePendingTool,
+  type PendingToolClaim,
+	type PendingToolClaimant,
 } from "../auth/mcp/pending-tool-store.js";
 import type { DirectToolExecutionOptions } from "../auth/mcp/proxy.js";
 import type {
@@ -146,15 +147,16 @@ function resolveGrantExpiresAt(duration: string): number | null {
 }
 
 /**
- * Atomically fetch and delete the pending invocation. The PG-backed
- * `pending-tool` row uses DELETE ... RETURNING so the first click claims
- * the payload and subsequent webhook retries see null and no-op.
+ * Atomically claim the pending invocation. The PG-backed `pending-tool` row is
+ * consumed in a single statement so the first click wins and subsequent webhook
+ * retries report `missing` and no-op. A click by someone other than the
+ * requester reports `forbidden`, leaving the row live for the real requester.
  */
 async function takePendingToolInvocation(
 	requestId: string,
-	claimant: { userId: string; organizationId: string; conversationId?: string },
-): Promise<PendingToolInvocation | null> {
-  return takePendingTool(requestId, claimant);
+	claimant: PendingToolClaimant,
+): Promise<PendingToolClaim> {
+  return claimPendingTool(requestId, claimant);
 }
 
 function actionEventTeamId(
@@ -1210,20 +1212,38 @@ export function registerActionHandlers(
 
 			if (!requestId) return;
 
-			// GETDEL atomically claims the pending invocation. On Slack retries of
-			// the same block_actions webhook the second GETDEL returns null and we
-			// silently no-op (the first click already won). But if the card was
-			// never claimed before — i.e. the in-memory approval card is still
+			// The claim atomically consumes the pending invocation. On Slack retries
+			// of the same block_actions webhook the second claim reports `missing`
+			// and we silently no-op (the first click already won). But if the card
+			// was never claimed before — i.e. the in-memory approval card is still
 			// tracked — this is a real first click landing on an expired/missing
 			// pending key, and we MUST surface that to the user. Otherwise the
-			// click looks like it did nothing.
+			// click looks like it did nothing. A `forbidden` claim is different
+			// again: the row is live for someone else, so it is handled below
+			// without touching the card.
 			const clickerUserId = event.user?.userId;
 			const organizationId = connection.organizationId;
 			if (!clickerUserId || !organizationId) return;
-			const pending = await takePendingToolInvocation(requestId, {
+			const claim = await takePendingToolInvocation(requestId, {
 				userId: clickerUserId,
 				organizationId,
-			}).catch(() => null);
+			}).catch((): PendingToolClaim => ({ status: "missing" }));
+			// A bystander click: the row is still live for the requester, so we must
+			// NOT claim or settle the card — the buttons stay actionable for them.
+			// Only the clicker gets a receipt explaining why nothing happened.
+			if (claim.status === "forbidden") {
+				logger.info(
+					{ requestId, decision, clickerUserId },
+					"Tool approval click by a non-requester — leaving the approval live",
+				);
+				try {
+					await thread.post("Only the requester can act on this approval.");
+				} catch {
+					// best effort
+				}
+				return;
+			}
+			const pending = claim.status === "taken" ? claim.invocation : null;
       if (!pending) {
         const sent = claimApprovalCard?.(requestId);
         if (sent) {
