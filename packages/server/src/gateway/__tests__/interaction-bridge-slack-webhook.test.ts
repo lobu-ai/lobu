@@ -6,7 +6,7 @@ import {
   createTestEntity,
   createTestOrganization,
   createTestUser,
-  linkSlackIdentityInGraph,
+  linkChatIdentityInGraph,
 } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
 import { __setChatInstanceManagerForTests } from "../../lobu/gateway.js";
@@ -304,11 +304,12 @@ describe("Slack block_actions → run-approval entity_field_change (Tier B)", ()
     const org = await createTestOrganization({ name: "Run Approval Webhook Org" });
     const admin = await createTestUser({ name: "Admin Reviewer" });
     await addUserToOrganization(admin.id, org.id, "admin");
-    await linkSlackIdentityInGraph({
+    await linkChatIdentityInGraph({
       organizationId: org.id,
+      platform: "slack",
       userId: admin.id,
       teamId: TEAM_ID,
-      slackUserId: "U-ADMIN-RA",
+      platformUserId: "U-ADMIN-RA",
     });
 
     const entity = await createTestEntity({

@@ -1092,21 +1092,3 @@ export async function linkChatIdentityInGraph(opts: {
   `;
 }
 
-/**
- * Stamp a Slack sender identity. Thin wrapper over the platform-generic helper
- * so the many Slack-only suites keep reading naturally.
- */
-export async function linkSlackIdentityInGraph(opts: {
-  organizationId: string;
-  userId: string;
-  teamId: string;
-  slackUserId: string;
-}): Promise<void> {
-  await linkChatIdentityInGraph({
-    organizationId: opts.organizationId,
-    userId: opts.userId,
-    platform: 'slack',
-    teamId: opts.teamId,
-    platformUserId: opts.slackUserId,
-  });
-}

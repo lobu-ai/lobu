@@ -632,4 +632,22 @@ export const gchatPlatform: ChatPlatformDescriptor = {
   // for one and the same message.
   messageIdIdentifiesMessage: (messageId) =>
     /^spaces\/[^/]+\/messages\/[^/]+$/.test(messageId),
+
+  // Chat can only REUSE an existing DM space without delegation; creating one
+  // goes through `spaces.setup`, which needs domain-wide delegation. Resolved
+  // exactly as the adapter resolves it — `config.impersonateUser` then the env
+  // fallback — so this answer cannot disagree with what `openDM` will actually
+  // be able to do.
+  canOpenDirectMessage: (config) =>
+    hasImpersonationSubject(
+      typeof config.impersonateUser === "string"
+        ? config.impersonateUser
+        : process.env.GOOGLE_CHAT_IMPERSONATE_USER,
+    ),
 };
+
+/** A blank or whitespace-only subject is no subject: the adapter's `if
+ * (this.impersonateUser)` treats `""` as absent, so this must too. */
+function hasImpersonationSubject(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}

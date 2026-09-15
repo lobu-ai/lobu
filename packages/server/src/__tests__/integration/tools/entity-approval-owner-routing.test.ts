@@ -27,7 +27,6 @@ import {
 	createTestUser,
 	insertChatConnectionRow,
 	linkChatIdentityInGraph,
-	linkSlackIdentityInGraph,
 } from "../../setup/test-fixtures";
 
 const TEAM_ID = "T-OWNERROUTE";
@@ -166,11 +165,12 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 	});
 
 	it("picks the owner's Slack identity in the connected workspace", async () => {
-		await linkSlackIdentityInGraph({
+		await linkChatIdentityInGraph({
 			organizationId: orgId,
+			platform: "slack",
 			userId: owner.id,
 			teamId: TEAM_ID,
-			slackUserId: "U-DMOWNER",
+			platformUserId: "U-DMOWNER",
 		});
 		const target = await resolveOwnerDmTarget(orgId, owner.id);
 		expect(target).toEqual({
@@ -196,17 +196,19 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 		await addUserToOrganization(twin.id, orgId, "member");
 		const otherOrg = await createTestOrganization({ name: "Second Org" });
 		await addUserToOrganization(twin.id, otherOrg.id, "member");
-		await linkSlackIdentityInGraph({
+		await linkChatIdentityInGraph({
 			organizationId: orgId,
+			platform: "slack",
 			userId: twin.id,
 			teamId: "TDUPTEAM",
-			slackUserId: "U-FIRST",
+			platformUserId: "U-FIRST",
 		});
-		await linkSlackIdentityInGraph({
+		await linkChatIdentityInGraph({
 			organizationId: otherOrg.id,
+			platform: "slack",
 			userId: twin.id,
 			teamId: "TDUPTEAM",
-			slackUserId: "U-SECOND",
+			platformUserId: "U-SECOND",
 		});
 
 		expect(
@@ -234,6 +236,10 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			organizationId: gOrg.id,
 			platform: "gchat",
 			metadata: {},
+			// Delegation configured, so the connection can actually originate the
+			// DM and is a legitimate owner-DM candidate. Without it the candidate
+			// is correctly skipped — the sibling test above pins that half.
+			config: { impersonateUser: "chat-bot@example.com" },
 		});
 		await createTestAutomationSubscription({
 			organizationId: gOrg.id,
@@ -257,6 +263,89 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			platform: "gchat",
 			platformUserId: "users/110000000000000000003",
 		});
+	});
+
+	it("does NOT pin an owner DM to a gchat connection that cannot open one", async () => {
+		// `google_user_id` is stamped by ANY Google sign-in, in every org the
+		// user belongs to — nobody has to intend a chat link. So a gchat-bound
+		// org acquires owner-DM candidates involuntarily, and Chat can only
+		// REUSE an existing DM space unless the connection carries
+		// `impersonateUser`. Pinning here would suppress the channel fallback and
+		// strand the notification in neither place, so the candidate is skipped
+		// and delivery stays on the channel.
+		const noDmOrg = await createTestOrganization({ name: "No Delegation Org" });
+		const noDmOwner = await createTestUser({ name: "Undeliverable Owner" });
+		await addUserToOrganization(noDmOwner.id, noDmOrg.id, "member");
+		const noDmAgent = await createTestAgent({
+			organizationId: noDmOrg.id,
+			ownerUserId: noDmOwner.id,
+			agentId: "agent-no-delegation",
+			name: "No Delegation Agent",
+		});
+		await insertChatConnectionRow({
+			id: "conn-gchat-nodeleg",
+			organizationId: noDmOrg.id,
+			platform: "gchat",
+			metadata: {},
+		});
+		await createTestAutomationSubscription({
+			organizationId: noDmOrg.id,
+			agentId: noDmAgent.agentId,
+			connectionSlug: "agentconn-conn-gchat-nodeleg",
+			platform: "gchat",
+			channelId: "gchat:spaces/AAQNoDeleg",
+		});
+		await linkChatIdentityInGraph({
+			organizationId: noDmOrg.id,
+			userId: noDmOwner.id,
+			platform: "gchat",
+			platformUserId: "users/110000000000000000005",
+		});
+
+		// The identity resolves — this is NOT a linkage failure.
+		expect(
+			await resolveChatUserIdForUser(noDmOwner.id, "gchat", null),
+		).toBe("users/110000000000000000005");
+		// but the connection cannot originate the DM, so no owner DM is pinned.
+		expect(await resolveOwnerDmTarget(noDmOrg.id, noDmOwner.id)).toBeNull();
+	});
+
+	it("treats a blank impersonateUser as no delegation at all", async () => {
+		// The adapter gates on `if (this.impersonateUser)`, so an empty or
+		// whitespace-only subject is no subject and `spaces.setup` still cannot
+		// create the DM. A presence-only check here would read that as
+		// "delegation configured", pin the DM, and lose the notification.
+		const blankOrg = await createTestOrganization({ name: "Blank Deleg Org" });
+		const blankOwner = await createTestUser({ name: "Blank Deleg Owner" });
+		await addUserToOrganization(blankOwner.id, blankOrg.id, "member");
+		const blankAgent = await createTestAgent({
+			organizationId: blankOrg.id,
+			ownerUserId: blankOwner.id,
+			agentId: "agent-blank-deleg",
+			name: "Blank Deleg Agent",
+		});
+		await insertChatConnectionRow({
+			id: "conn-gchat-blank",
+			organizationId: blankOrg.id,
+			platform: "gchat",
+			metadata: {},
+			config: { impersonateUser: "   " },
+		});
+		await createTestAutomationSubscription({
+			organizationId: blankOrg.id,
+			agentId: blankAgent.agentId,
+			connectionSlug: "agentconn-conn-gchat-blank",
+			platform: "gchat",
+			channelId: "gchat:spaces/AAQBlank",
+		});
+		await linkChatIdentityInGraph({
+			organizationId: blankOrg.id,
+			userId: blankOwner.id,
+			platform: "gchat",
+			platformUserId: "users/110000000000000000007",
+		});
+
+		expect(await resolveOwnerDmTarget(blankOrg.id, blankOwner.id)).toBeNull();
 	});
 
 	it("an org on BOTH platforms DMs on the one it bound first", async () => {
@@ -303,11 +392,12 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			platform: "gchat",
 			channelId: "gchat:spaces/AAQMixed",
 		});
-		await linkSlackIdentityInGraph({
+		await linkChatIdentityInGraph({
 			organizationId: mixOrg.id,
+			platform: "slack",
 			userId: mixOwner.id,
 			teamId: "TMIXED",
-			slackUserId: "U-MIXED",
+			platformUserId: "U-MIXED",
 		});
 		await linkChatIdentityInGraph({
 			organizationId: mixOrg.id,
@@ -347,11 +437,12 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 		// otherwise this returns an id from whichever workspace happens to match.
 		const scoped = await createTestUser({ name: "Scoped Only" });
 		await addUserToOrganization(scoped.id, orgId, "member");
-		await linkSlackIdentityInGraph({
+		await linkChatIdentityInGraph({
 			organizationId: orgId,
+			platform: "slack",
 			userId: scoped.id,
 			teamId: "TNOWIDEN",
-			slackUserId: "U-SCOPED",
+			platformUserId: "U-SCOPED",
 		});
 		expect(await resolveChatUserIdForUser(scoped.id, "slack", "TNOWIDEN")).toBe(
 			"U-SCOPED",
@@ -366,11 +457,12 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 		// back a user id from the wrong workspace.
 		const roamer = await createTestUser({ name: "Wildcard Roamer" });
 		await addUserToOrganization(roamer.id, orgId, "member");
-		await linkSlackIdentityInGraph({
+		await linkChatIdentityInGraph({
 			organizationId: orgId,
+			platform: "slack",
 			userId: roamer.id,
 			teamId: "TXDMOWNER",
-			slackUserId: "U-ROAMER",
+			platformUserId: "U-ROAMER",
 		});
 		expect(
 			await resolveChatUserIdForUser(roamer.id, "slack", "TXDMOWNER"),

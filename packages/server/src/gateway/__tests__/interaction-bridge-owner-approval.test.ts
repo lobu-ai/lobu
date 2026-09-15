@@ -13,7 +13,6 @@ import {
   createTestOrganization,
   createTestUser,
   linkChatIdentityInGraph,
-  linkSlackIdentityInGraph,
 } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
 import { proposeEntityFieldChange } from "../../tools/admin/entity-field-approval.js";
@@ -92,11 +91,12 @@ async function seedApprovalFixture(): Promise<Fixture> {
     ["U-OTHER", other.id],
   ];
   for (const [slackId, lobuId] of identities) {
-    await linkSlackIdentityInGraph({
+    await linkChatIdentityInGraph({
       organizationId: org.id,
+      platform: "slack",
       userId: lobuId,
       teamId: TEAM_ID,
-      slackUserId: slackId,
+      platformUserId: slackId,
     });
   }
 
