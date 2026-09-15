@@ -259,10 +259,11 @@ async function claimedTurnRun(workerId: string): Promise<number> {
 async function runRow(runId: number) {
   const sql = getTestDb();
   const [row] = (await sql`
-    SELECT status, error_message, exit_reason, output_tail, action_input
+    SELECT status, outcome, error_message, exit_reason, output_tail, action_input
     FROM runs WHERE id = ${runId}
   `) as unknown as Array<{
     status: string;
+    outcome: string | null;
     error_message: string | null;
     exit_reason: string | null;
     output_tail: string | null;
@@ -3925,6 +3926,48 @@ describe('agent turn completion', () => {
       errorCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
       errorContext: { provider: 'claude', model: 'claude-opus-4-8' },
     });
+    // The provider refused the request, so the run is NOT agent evidence.
+    // Asserted here and not only in the classifier's unit test because
+    // `outcome` is what the quality reads and Automation health actually
+    // consume, and this route is the only writer for an agent turn.
+    expect((await runRow(runId)).outcome).toBe('infra_error');
+  });
+
+  /**
+   * The wording that was actually breaking in prod. Codex on a ChatGPT plan
+   * reports its own subscription limit as prose — there is no HTTP status to
+   * read, because the CLI talks to the provider itself and hands the adapter a
+   * sentence. Over the 30 days to 2026-09-15 this shape accounted for 47 of
+   * the 52 runs that a provider had refused and the platform recorded as the
+   * agent's fault, with no remediation CTA for the user.
+   *
+   * Driven through the real completion route rather than the classifier alone:
+   * the defect was never in the catalog's ability to match, it was that this
+   * path's `outcome` write consulted a different, drifted list.
+   */
+  it.each([
+    'You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 minutes.',
+    'codex exited with status 1: ERROR: You\'ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits.',
+    '403 Access to model denied. Please make sure you are eligible for using the model.',
+  ])('charges a prose provider refusal to infra and gives the user a CTA: %s', async (raw) => {
+    const workerId = `fleet-refusal-${raw.slice(0, 12).replace(/\W+/g, '-')}`;
+    const runId = await claimedTurnRun(workerId);
+
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'failed',
+      error: raw,
+    });
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // A code at all is the CTA: `AGENT_ERRORS` resolves every PROVIDER_* entry
+    // to a remediation link, and an unclassified failure resolves to none.
+    const code = (rows[0] as { errorCode?: AgentErrorCode }).errorCode;
+    expect(code).toBeDefined();
+    expect(AGENT_ERRORS[code!].cta).not.toBe('none');
+    expect((await runRow(runId)).outcome).toBe('infra_error');
   });
 
   it('refuses an authoritative turn that carries nowhere to deliver', async () => {
