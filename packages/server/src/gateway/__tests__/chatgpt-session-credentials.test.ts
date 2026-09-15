@@ -133,34 +133,30 @@ describe("ChatGPT subscription credentials", () => {
         "worker-test",
         { channelId: "channel-test", agentId: AGENT, organizationId: ORG },
       );
-      try {
-        const response = await gateway.getApp().request("/session-context", {
-          headers: {
-            authorization: `Bearer ${workerToken}`,
-            host: "gateway.example.invalid",
-          },
-        });
-        expect(response.status).toBe(200);
-        const body = (await response.json()) as {
-          providerConfig?: Record<string, unknown>;
-        };
-        const providerConfig = body.providerConfig;
-        // The stored subscription credential must never reach the worker.
-        expect(JSON.stringify(providerConfig)).not.toContain(
-          STORED_CREDENTIAL,
-        );
-        const placeholders = providerConfig?.credentialPlaceholders as
-          | Record<string, string>
-          | undefined;
-        expect(placeholders).toBeDefined();
-        // All proxied providers receive only the signed token. The gateway
-        // resolves the subscription under its verified org/agent/user scope.
-        expect(placeholders?.openai).toBe(workerToken);
-        expect(placeholders?.deepseek).toBe(workerToken);
-        expect(placeholders?.chatgpt).toBe(workerToken);
-      } finally {
-        gateway.shutdown();
-      }
+      const response = await gateway.getApp().request("/session-context", {
+        headers: {
+          authorization: `Bearer ${workerToken}`,
+          host: "gateway.example.invalid",
+        },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        providerConfig?: Record<string, unknown>;
+      };
+      const providerConfig = body.providerConfig;
+      // The stored subscription credential must never reach the worker.
+      expect(JSON.stringify(providerConfig)).not.toContain(
+        STORED_CREDENTIAL,
+      );
+      const placeholders = providerConfig?.credentialPlaceholders as
+        | Record<string, string>
+        | undefined;
+      expect(placeholders).toBeDefined();
+      // All proxied providers receive only the signed token. The gateway
+      // resolves the subscription under its verified org/agent/user scope.
+      expect(placeholders?.openai).toBe(workerToken);
+      expect(placeholders?.deepseek).toBe(workerToken);
+      expect(placeholders?.chatgpt).toBe(workerToken);
     }, 30_000);
   }
 });

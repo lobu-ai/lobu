@@ -948,11 +948,6 @@ export class CoreServices {
 			await this.queueProducer.stop();
 		}
 
-		if (this.workerGateway) {
-			this.workerGateway.shutdown();
-			logger.info("Worker gateway shutdown complete");
-		}
-
 		if (this.queue) {
 			await this.queue.stop();
 		}

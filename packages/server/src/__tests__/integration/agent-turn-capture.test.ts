@@ -141,7 +141,6 @@ describe('native capture over HTTP and Postgres', () => {
   afterAll(async () => {
     __setChatInstanceManagerForTests(null);
     vi.restoreAllMocks();
-    workerGateway?.shutdown();
     if (server) {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));

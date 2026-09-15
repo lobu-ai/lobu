@@ -29,7 +29,6 @@ import {
 } from "../../auth/settings/resolved-settings-view.js";
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
-import type { WorkerConnectionManager } from "../../worker-dispatch/connection-manager.js";
 import type { IMessageQueue } from "../../infrastructure/queue/index.js";
 import type { GrantStore } from "../../permissions/grant-store.js";
 import { createOwnershipResolver } from "../shared/agent-ownership.js";
@@ -88,7 +87,6 @@ interface AgentConfigRoutesConfig {
 	providerCatalogService?: ProviderCatalogService;
 	authProfilesManager?: AuthProfilesManager;
 	queue?: IMessageQueue;
-	connectionManager?: WorkerConnectionManager;
 	grantStore?: GrantStore;
 }
 

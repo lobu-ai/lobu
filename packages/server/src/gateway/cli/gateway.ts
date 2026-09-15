@@ -575,22 +575,16 @@ export function createGatewayApp(
     }
 
     {
-      const connectionManager = coreServices
-        .getWorkerGateway()
-        ?.getConnectionManager();
-      if (connectionManager) {
-        const agentHistoryRouter = createAgentHistoryRoutes({
-          connectionManager,
-          agentConfigStore: coreServices.getConfigStore(),
-          userAgentsStore: coreServices.getUserAgentsStore(),
-          artifactStore: coreServices.getArtifactStore(),
-          publicGatewayUrl: coreServices.getPublicGatewayUrl(),
-        });
-        app.route("/api/v1/agents/:agentId/history", agentHistoryRouter);
-        logger.debug(
-					"Agent history routes enabled at :8080/api/v1/agents/{agentId}/history/*",
-        );
-      }
+      const agentHistoryRouter = createAgentHistoryRoutes({
+        agentConfigStore: coreServices.getConfigStore(),
+        userAgentsStore: coreServices.getUserAgentsStore(),
+        artifactStore: coreServices.getArtifactStore(),
+        publicGatewayUrl: coreServices.getPublicGatewayUrl(),
+      });
+      app.route("/api/v1/agents/:agentId/history", agentHistoryRouter);
+      logger.debug(
+        "Agent history routes enabled at :8080/api/v1/agents/{agentId}/history/*",
+      );
     }
 
     if (agentSettingsStore) {
@@ -604,9 +598,6 @@ export function createGatewayApp(
         providerConnectedOverrides,
         providerCatalogService: coreServices.getProviderCatalogService(),
         authProfilesManager: coreServices.getAuthProfilesManager(),
-        connectionManager: coreServices
-          .getWorkerGateway()
-          ?.getConnectionManager(),
         grantStore: coreServices.getGrantStore(),
       });
       app.route("/api/v1/agents/:agentId/config", agentConfigRouter);

@@ -124,8 +124,7 @@ function armLiveTurn(messageId = "m1"): Promise<void> {
   });
 }
 
-/** Post a body to `/worker/response` through the real Hono handler. The gateway
- *  is shut down in a finally so its timers/intervals don't leak across tests. */
+/** Post a body to `/worker/response` through the real Hono handler. */
 async function postWorkerResponse(
   body: unknown,
   opts?: {
@@ -138,24 +137,20 @@ async function postWorkerResponse(
 ): Promise<Response> {
   const gateway = makeGateway();
   if (opts?.tracker) gateway.setDeploymentActivityTracker(opts.tracker);
-  try {
-    return await gateway.getApp().request("/response", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${mintToken({
-          omitOrganizationId: opts?.omitTokenOrganizationId,
-          omitConnectionId: opts?.omitTokenConnectionId,
-          omitResponseThreadId: opts?.omitTokenResponseThreadId,
-          runId: opts?.tokenRunId,
-        })}`,
-        host: "gateway.example.com",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-  } finally {
-    gateway.shutdown();
-  }
+  return await gateway.getApp().request("/response", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${mintToken({
+        omitOrganizationId: opts?.omitTokenOrganizationId,
+        omitConnectionId: opts?.omitTokenConnectionId,
+        omitResponseThreadId: opts?.omitTokenResponseThreadId,
+        runId: opts?.tokenRunId,
+      })}`,
+      host: "gateway.example.com",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 interface StoredThreadResponse {

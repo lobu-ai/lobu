@@ -1,18 +1,18 @@
 /**
- * Regression tests for the three race windows that PR #845 missed (codex audit):
+ * Regression tests for the race windows that PR #845 missed (codex audit):
  *
- *   1. `gateway/worker-dispatch/worker-gateway.ts` — `WorkerGateway.handleStreamConnection`
- *      registered the `sseWriter.onClose` cleanup AFTER awaiting
- *      `pauseWorker`/`addConnection`/`registerWorker`. An abort fired in that
- *      window left a dead writer in `WorkerConnectionManager`.
- *   2. `gateway/routes/public/agent.ts` — the agent events SSE route did
+ *   1. `gateway/routes/public/agent.ts` — the agent events SSE route did
  *      `sseManager.addConnection(...)` + initial `writeSSE`/backlog writes
  *      BEFORE wiring `stream.onAbort(cleanup)` and the abort bridge. An abort
  *      in that window leaked the manager registration.
- *   3. `mcp-handler.ts` — `withSSEHeartbeat` wrapped the SSE response with a
+ *   2. `mcp-handler.ts` — `withSSEHeartbeat` wrapped the SSE response with a
  *      heartbeat `setInterval` but never bound the inbound request's
  *      `AbortSignal`. Abnormal disconnects (LB timeout, proxy kill, client
  *      hard-close) left the interval running forever.
+ *
+ * A third covered `WorkerGateway.handleStreamConnection` registering into
+ * `WorkerConnectionManager`. Both are deleted — the worker SSE reverse channel
+ * is gone — so that case went with them.
  *
  * The fix in each spot is the same shape:
  *   - Register an idempotent cleanup latch FIRST.
@@ -29,159 +29,7 @@ import { bindRequestAbortToStream } from '../../events/sse-abort-bridge';
 import { withSSEHeartbeat } from '../../mcp-handler';
 
 // ---------------------------------------------------------------------------
-// Finding 1 — worker SSE registration-order latch
-// ---------------------------------------------------------------------------
-
-/**
- * Minimal stand-in for `WorkerConnectionManager`. Tracks the only two
- * surfaces the route exercises: `addConnection` and `removeConnection`.
- */
-function fakeConnectionManager() {
-  const added: unknown[] = [];
-  const removed: string[] = [];
-  return {
-    addConnection(name: string, writer: unknown) {
-      added.push({ name, writer });
-    },
-    removeConnection(name: string) {
-      removed.push(name);
-    },
-    get state() {
-      return { added: [...added], removed: [...removed] };
-    },
-  };
-}
-
-describe('worker SSE handleStreamConnection — registration-order latch', () => {
-  it('does not add a dead writer when abort fires during async pauseWorker', async () => {
-    // Re-implement the route's latch shape against fakes. This mirrors the
-    // production code in `packages/server/src/gateway/worker-dispatch/worker-gateway.ts`
-    // (`handleStreamConnection`) — see the comments around `runCleanup`.
-    const manager = fakeConnectionManager();
-    const ctrl = new AbortController();
-    const writer = { id: 'writer-A' };
-    const closeSubscribers: Array<() => void> = [];
-
-    let pauseResolved: (() => void) | null = null;
-    const pauseWorker = () =>
-      new Promise<void>((resolve) => {
-        pauseResolved = resolve;
-      });
-
-    let connectionAdded = false;
-    let cleanupRan = false;
-    let aborted = false;
-
-    const runCleanup = () => {
-      if (cleanupRan) return;
-      cleanupRan = true;
-      aborted = true;
-      if (!connectionAdded) return;
-      manager.removeConnection('dep-A');
-    };
-
-    // Step 1: register cleanup FIRST.
-    closeSubscribers.push(runCleanup);
-
-    // Step 2: bridge signal → cleanup.
-    const detach = bindRequestAbortToStream(ctrl.signal, {
-      get aborted() {
-        return aborted;
-      },
-      get closed() {
-        return cleanupRan;
-      },
-      abort() {
-        for (const s of closeSubscribers) s();
-      },
-    });
-
-    // Step 3: simulate the async pauseWorker await.
-    const setupPromise = (async () => {
-      await pauseWorker();
-      if (aborted || ctrl.signal.aborted) {
-        return;
-      }
-      manager.addConnection('dep-A', writer);
-      connectionAdded = true;
-    })();
-
-    // Fire the abort mid-await BEFORE pauseWorker resolves.
-    ctrl.abort();
-    pauseResolved!();
-    await setupPromise;
-    detach();
-
-    expect(manager.state.added).toEqual([]); // never added
-    expect(manager.state.removed).toEqual([]); // nothing to remove
-    expect(cleanupRan).toBe(true);
-  });
-
-  it('removes the writer via cleanup latch when abort fires AFTER addConnection', async () => {
-    const manager = fakeConnectionManager();
-    const ctrl = new AbortController();
-    const writer = { id: 'writer-B' };
-    const closeSubscribers: Array<() => void> = [];
-
-    let connectionAdded = false;
-    let cleanupRan = false;
-    let aborted = false;
-
-    const runCleanup = () => {
-      if (cleanupRan) return;
-      cleanupRan = true;
-      aborted = true;
-      if (!connectionAdded) return;
-      manager.removeConnection('dep-B');
-    };
-
-    closeSubscribers.push(runCleanup);
-
-    bindRequestAbortToStream(ctrl.signal, {
-      get aborted() {
-        return aborted;
-      },
-      get closed() {
-        return cleanupRan;
-      },
-      abort() {
-        for (const s of closeSubscribers) s();
-      },
-    });
-
-    // Setup: register, then later abort, then latch removes.
-    manager.addConnection('dep-B', writer);
-    connectionAdded = true;
-
-    // Abort fires AFTER the connection is registered. The cleanup latch
-    // (wired via onAbort → bridge → subscribers) must remove it.
-    ctrl.abort();
-    // Give microtasks a tick to run.
-    await Promise.resolve();
-
-    expect(manager.state.added.length).toBe(1);
-    expect(manager.state.removed).toEqual(['dep-B']);
-    expect(cleanupRan).toBe(true);
-  });
-
-  it('cleanup latch is idempotent across multiple fire paths', () => {
-    let calls = 0;
-    let cleanupRan = false;
-    const runCleanup = () => {
-      if (cleanupRan) return;
-      cleanupRan = true;
-      calls++;
-    };
-
-    runCleanup();
-    runCleanup();
-    runCleanup();
-    expect(calls).toBe(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Finding 2 — agent.ts SseManager registration-order latch
+// Finding 1 — agent.ts SseManager registration-order latch
 // ---------------------------------------------------------------------------
 
 function fakeSseManager() {
@@ -284,7 +132,7 @@ describe('agent SSE route — registration-order latch', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Finding 3 — withSSEHeartbeat must clear the interval on abrupt abort
+// Finding 2 — withSSEHeartbeat must clear the interval on abrupt abort
 // ---------------------------------------------------------------------------
 
 describe('withSSEHeartbeat — abort signal clears heartbeat interval', () => {

@@ -94,20 +94,14 @@ function makeGateway(): WorkerGateway {
 }
 
 async function postRefresh(token: string) {
-  // shutdown() in a finally so the gateway's timers/intervals don't leak across
-  // tests (which can wedge the runner into a hang).
   const gateway = makeGateway();
-  try {
-    return await gateway.getApp().request("/token/refresh", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        host: "gateway.example.com",
-      },
-    });
-  } finally {
-    gateway.shutdown();
-  }
+  return await gateway.getApp().request("/token/refresh", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      host: "gateway.example.com",
+    },
+  });
 }
 
 const DEPLOYMENT = "lobu-worker-agent-1";

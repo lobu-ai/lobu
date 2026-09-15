@@ -39,9 +39,6 @@ import {
 } from "../orchestration/turn-liveness.js";
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
-import {
-  WorkerConnectionManager,
-} from "./connection-manager.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
 
 const logger = createLogger("worker-gateway");
@@ -64,7 +61,6 @@ export interface DeploymentActivityTracker {
  */
 export class WorkerGateway {
   private app: Hono;
-  private connectionManager: WorkerConnectionManager;
   private queue: IMessageQueue;
   private mcpConfigService: McpConfigService;
   private instructionService: InstructionService;
@@ -87,7 +83,6 @@ export class WorkerGateway {
   ) {
     this.queue = queue;
     this.publicGatewayUrl = publicGatewayUrl;
-    this.connectionManager = new WorkerConnectionManager();
     this.mcpConfigService = mcpConfigService;
     this.instructionService = instructionService;
     this.mcpProxy = mcpProxy;
@@ -105,13 +100,6 @@ export class WorkerGateway {
    */
   getApp(): Hono {
     return this.app;
-  }
-
-  /**
-   * Get the connection manager (for sending SSE notifications from external routes)
-   */
-  getConnectionManager(): WorkerConnectionManager {
-    return this.connectionManager;
   }
 
   /**
@@ -252,10 +240,6 @@ export class WorkerGateway {
     }
 
     const { deploymentName } = auth.tokenData;
-
-    // SSE stale-cleanup clock: every worker HTTP response (including pure
-    // heartbeats) proves the SSE connection is still alive.
-    this.connectionManager.touchConnection(deploymentName);
 
     try {
       const body = await c.req.json();
@@ -1013,12 +997,5 @@ export class WorkerGateway {
     }
 
     return result;
-  }
-
-  /**
-   * Shutdown gateway
-   */
-  shutdown(): void {
-    this.connectionManager.shutdown();
   }
 }

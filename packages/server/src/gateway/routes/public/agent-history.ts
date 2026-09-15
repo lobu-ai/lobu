@@ -22,7 +22,6 @@ import { resolveOrgId } from "../../../lobu/stores/org-context.js";
 import { readCurrentSuggestion } from "../../suggestions/persist-suggestion.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
 import type { ArtifactStore } from "../../files/artifact-store.js";
-import type { WorkerConnectionManager } from "../../worker-dispatch/connection-manager.js";
 import {
 	isConversationVisible,
 	listAgentThreads,
@@ -392,14 +391,13 @@ async function readSessionStats(
 }
 
 export function createAgentHistoryRoutes(deps: {
-	connectionManager?: WorkerConnectionManager;
 	agentConfigStore?: Pick<AgentConfigStore, "getMetadata">;
 	userAgentsStore?: UserAgentsStore;
 	artifactStore?: ArtifactStore;
 	publicGatewayUrl?: string;
 }) {
 	const app = new Hono();
-	const { connectionManager, artifactStore, publicGatewayUrl } = deps;
+	const { artifactStore, publicGatewayUrl } = deps;
 	const resolveOwnership = createOwnershipResolver({
 		userAgentsStore: deps.userAgentsStore,
 		agentMetadataStore: deps.agentConfigStore,
@@ -608,45 +606,26 @@ export function createAgentHistoryRoutes(deps: {
 		};
 	}
 
-	async function resolveActiveAgent(
-		agentId: string
-	): Promise<{ connected: boolean; resolvedAgentId: string }> {
-		if (
-			connectionManager &&
-			connectionManager.getDeploymentsForAgent(agentId).length > 0
-		) {
-			return { connected: true, resolvedAgentId: agentId };
-		}
-		return { connected: false, resolvedAgentId: agentId };
-	}
 
-	async function proxyOrFallback<T>(
+	/**
+	 * Read a transcript view for an agent.
+	 *
+	 * This used to try the worker's own HTTP server first and fall back to the
+	 * session file. That proxy arm is gone with the subprocess lane's worker SSE
+	 * channel: nothing has registered a worker connection since
+	 * `WorkerGateway.handleStreamConnection` was deleted, so the lookup could
+	 * only ever return `undefined` and every call already took the fallback.
+	 */
+	async function readTranscript<T>(
 		agentId: string,
-		workerPath: string,
 		fallback: (agentId: string) => Promise<T>
-	): Promise<{ data: T; proxied: boolean } | null> {
-		const { resolvedAgentId } = await resolveActiveAgent(agentId);
-		const httpUrl = connectionManager?.getHttpUrl(resolvedAgentId);
-
-		if (httpUrl) {
-			try {
-				const response = await fetch(`${httpUrl}${workerPath}`, {
-					signal: AbortSignal.timeout(5000),
-				});
-				if (response.ok) {
-					return { data: (await response.json()) as T, proxied: true };
-				}
-			} catch {
-				// Worker HTTP not reachable, fall through to file read
-			}
-		}
-
+	): Promise<{ data: T } | null> {
 		try {
-			return { data: await fallback(resolvedAgentId), proxied: false };
+			return { data: await fallback(agentId) };
 		} catch (e) {
 			logger.debug("Session file fallback failed", {
 				error: e,
-				agentId: resolvedAgentId,
+				agentId,
 			});
 			return null;
 		}
@@ -976,9 +955,7 @@ export function createAgentHistoryRoutes(deps: {
 		const scope = await getAuthorizedAgentScope(c);
 		if (!scope) return errorResponse(c, "Unauthorized", 401);
 
-		const { connected, resolvedAgentId } = await resolveActiveAgent(
-			scope.agentId
-		);
+		const resolvedAgentId = scope.agentId;
 
 		let hasSessionFile =
 			(await readLatestSnapshotJsonl(resolvedAgentId, scope.organizationId)) !==
@@ -987,12 +964,15 @@ export function createAgentHistoryRoutes(deps: {
 			hasSessionFile = !!(await findSessionFile(resolvedAgentId));
 		}
 
+		// `hasHttpServer` and `deploymentCount` described the subprocess lane's
+		// worker SSE channel. Nothing has registered a worker connection since
+		// `WorkerGateway.handleStreamConnection` was deleted, so both answers were
+		// already constant on every request. They stay in the response as the
+		// constants they had become rather than changing this route's shape.
 		return c.json({
-			connected: connected || hasSessionFile,
-			hasHttpServer: !!connectionManager?.getHttpUrl(resolvedAgentId),
-			deploymentCount: connectionManager
-				? connectionManager.getDeploymentsForAgent(resolvedAgentId).length
-				: 0,
+			connected: hasSessionFile,
+			hasHttpServer: false,
+			deploymentCount: 0,
 		});
 	});
 
@@ -1010,11 +990,8 @@ export function createAgentHistoryRoutes(deps: {
 		const cursor = c.req.query("cursor") || "";
 		const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
 
-		const result = await proxyOrFallback(
-			scope.agentId,
-			`/session/messages?cursor=${cursor}&limit=${limit}`,
-			(resolved) =>
-				readSessionMessages(resolved, cursor, limit, scope.organizationId)
+		const result = await readTranscript(scope.agentId, (resolved) =>
+			readSessionMessages(resolved, cursor, limit, scope.organizationId)
 		);
 
 		if (!result) {
@@ -1041,10 +1018,8 @@ export function createAgentHistoryRoutes(deps: {
 			return errorResponse(c, "Unauthorized", 401);
 		}
 
-		const result = await proxyOrFallback(
-			scope.agentId,
-			"/session/stats",
-			(resolved) => readSessionStats(resolved, scope.organizationId)
+		const result = await readTranscript(scope.agentId, (resolved) =>
+			readSessionStats(resolved, scope.organizationId)
 		);
 
 		if (!result) {
