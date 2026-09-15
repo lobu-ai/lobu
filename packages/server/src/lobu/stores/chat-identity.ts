@@ -90,8 +90,11 @@ export async function resolveChatUserIdentity(
  * Same source of truth as `resolveChatUserIdentity`, walked the other way:
  * from the `$member` carrying this `auth_user_id` to the platform id stamped
  * on it. Registry-driven like the forward direction — the platform's own
- * `ChatUserIdentity` supplies both the namespace and, through `userKeyScope`,
- * how the search must be narrowed.
+ * `ChatUserIdentity` supplies the namespace, how the search must be narrowed
+ * (`userKeyScope`), and how a stored key turns back into an ADDRESSABLE id
+ * (`platformUserIdFromKey`). The last one is not cosmetic: Slack stores
+ * `TEAM:U…` and addresses `U…`, Google stores a bare account id and addresses
+ * `users/<id>`, so a key handed to a DM call unconverted does not route.
  *
  * REFUSES rather than widens. A `team-prefix` platform with no usable team
  * yields null, never an unconstrained scan: Slack ids repeat across
@@ -138,7 +141,7 @@ export async function resolveChatUserIdForUser(
 	// who joins a second org, or whose Slack account id changes inside one
 	// workspace, can hold two DISTINCT ids under the same `TEAM:` prefix. The
 	// caller uses this as a DM recipient — picking arbitrarily sends the owner DM
-	// to a stale Slack user and loses it silently.
+	// to a stale chat account and loses it silently.
 	if (rows.length !== 1) return null;
-	return rows[0].identifier.slice(prefix.length) || null;
+	return identity.platformUserIdFromKey(rows[0].identifier);
 }

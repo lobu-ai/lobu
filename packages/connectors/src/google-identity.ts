@@ -108,4 +108,11 @@ export const gchatChatUserIdentity: ChatUserIdentity = {
   // account has exactly one id, so there is no tenant axis to narrow by and
   // nothing to bleed across. Never null — a missing team is not an error here.
   userKeyScope: () => ({ kind: 'global' }),
+  // Re-wraps the bare stored id as the resource name Chat addresses people by.
+  // The `users/` prefix is load-bearing on the way out as well as in: the chat
+  // SDK picks the Google Chat adapter off it, so a bare id is not routable.
+  platformUserIdFromKey(key) {
+    const bare = normalizeGoogleUserId(key);
+    return bare ? `${GCHAT_USER_PREFIX}${bare}` : null;
+  },
 };

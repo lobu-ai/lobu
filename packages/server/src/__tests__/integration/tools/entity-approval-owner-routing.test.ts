@@ -5,8 +5,8 @@
  *     action_input.owner_user_id ONLY when the gated fields have exactly one
  *     distinct field_controls.set_by. Mixed owners or $-attribute-only
  *     proposals record nothing (admin-only automation).
- *  2. Delivery-tier selection: resolveOwnerDmTarget picks the owner's Slack
- *     identity in a workspace one of the org's bot connections is bound to;
+ *  2. Delivery-tier selection: resolveOwnerDmTarget picks the owner's chat
+ *     identity on a platform one of the org's bot connections is bound to;
  *     no identity → null (caller falls back to channel delivery).
  */
 
@@ -173,7 +173,11 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			slackUserId: "U-DMOWNER",
 		});
 		const target = await resolveOwnerDmTarget(orgId, owner.id);
-		expect(target).toEqual({ connectionId, platformUserId: "U-DMOWNER" });
+		expect(target).toEqual({
+			connectionId,
+			platform: "slack",
+			platformUserId: "U-DMOWNER",
+		});
 	});
 
 	it("returns null when the owner has no Slack identity (caller falls back)", async () => {
@@ -205,7 +209,9 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			slackUserId: "U-SECOND",
 		});
 
-		expect(await resolveChatUserIdForUser(twin.id, "slack", "TDUPTEAM")).toBeNull();
+		expect(
+			await resolveChatUserIdForUser(twin.id, "slack", "TDUPTEAM"),
+		).toBeNull();
 	});
 
 	it("resolveOwnerDmTarget routes to a Google Chat connection end to end", async () => {
@@ -243,9 +249,77 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			platformUserId: "users/110000000000000000003",
 		});
 
+		// The ADDRESSABLE form, not the bare stored key: the chat SDK routes a DM
+		// by inferring the adapter from the `users/` prefix, so a bare account id
+		// would not reach Google Chat at all.
 		expect(await resolveOwnerDmTarget(gOrg.id, gOwner.id)).toEqual({
 			connectionId: gConnectionId,
-			platformUserId: "110000000000000000003",
+			platform: "gchat",
+			platformUserId: "users/110000000000000000003",
+		});
+	});
+
+	it("an org on BOTH platforms DMs on the one it bound first", async () => {
+		// Now that every platform is a candidate, `resolveBotDeliveryTargets`
+		// order decides the PLATFORM, not just the connection. It orders by
+		// `created_at ASC` — the org's primary channel — so the owner keeps
+		// getting DMs where they already got them instead of the destination
+		// hopping the day a second platform is connected. Both identities resolve
+		// here, so only the order can pick the winner.
+		const mixOrg = await createTestOrganization({ name: "Both Platforms Org" });
+		const mixOwner = await createTestUser({ name: "Dual Linked Owner" });
+		await addUserToOrganization(mixOwner.id, mixOrg.id, "member");
+		const mixAgent = await createTestAgent({
+			organizationId: mixOrg.id,
+			ownerUserId: mixOwner.id,
+			agentId: "agent-mixed-dm",
+			name: "Mixed DM Agent",
+		});
+		await insertChatConnectionRow({
+			id: "conn-mixed-slack",
+			organizationId: mixOrg.id,
+			platform: "slack",
+			metadata: { teamId: "TMIXED" },
+		});
+		await insertChatConnectionRow({
+			id: "conn-mixed-gchat",
+			organizationId: mixOrg.id,
+			platform: "gchat",
+			metadata: {},
+		});
+		// Slack binding FIRST, so it holds the earlier `created_at`.
+		await createTestAutomationSubscription({
+			organizationId: mixOrg.id,
+			agentId: mixAgent.agentId,
+			connectionSlug: "agentconn-conn-mixed-slack",
+			platform: "slack",
+			channelId: "slack:C-MIXED",
+			teamId: "TMIXED",
+		});
+		await createTestAutomationSubscription({
+			organizationId: mixOrg.id,
+			agentId: mixAgent.agentId,
+			connectionSlug: "agentconn-conn-mixed-gchat",
+			platform: "gchat",
+			channelId: "gchat:spaces/AAQMixed",
+		});
+		await linkSlackIdentityInGraph({
+			organizationId: mixOrg.id,
+			userId: mixOwner.id,
+			teamId: "TMIXED",
+			slackUserId: "U-MIXED",
+		});
+		await linkChatIdentityInGraph({
+			organizationId: mixOrg.id,
+			userId: mixOwner.id,
+			platform: "gchat",
+			platformUserId: "users/110000000000000000004",
+		});
+
+		expect(await resolveOwnerDmTarget(mixOrg.id, mixOwner.id)).toEqual({
+			connectionId: "conn-mixed-slack",
+			platform: "slack",
+			platformUserId: "U-MIXED",
 		});
 	});
 
@@ -262,9 +336,9 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			platform: "gchat",
 			platformUserId: "users/110000000000000000002",
 		});
-		expect(
-			await resolveChatUserIdForUser(gOwner.id, "gchat", null),
-		).toBe("110000000000000000002");
+		expect(await resolveChatUserIdForUser(gOwner.id, "gchat", null)).toBe(
+			"users/110000000000000000002",
+		);
 	});
 
 	it("REFUSES a team-scoped platform with no team rather than widening", async () => {
@@ -298,9 +372,11 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			teamId: "TXDMOWNER",
 			slackUserId: "U-ROAMER",
 		});
-		expect(await resolveChatUserIdForUser(roamer.id, "slack", "TXDMOWNER")).toBe(
-			"U-ROAMER",
-		);
-		expect(await resolveChatUserIdForUser(roamer.id, "slack", "T_DMOWNER")).toBeNull();
+		expect(
+			await resolveChatUserIdForUser(roamer.id, "slack", "TXDMOWNER"),
+		).toBe("U-ROAMER");
+		expect(
+			await resolveChatUserIdForUser(roamer.id, "slack", "T_DMOWNER"),
+		).toBeNull();
 	});
 });

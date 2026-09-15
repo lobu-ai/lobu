@@ -68,4 +68,19 @@ export interface ChatUserIdentity {
    * `buildUserKey` exists to prevent. Callers must refuse on null.
    */
   userKeyScope(teamId: string | null | undefined): ChatUserKeyScope | null;
+
+  /**
+   * Recover from a stored key the id the PLATFORM addresses this user by — the
+   * form its API takes (`openDM`, a mention), which is also the form
+   * `buildUserKey` accepts back.
+   *
+   * NOT "the key minus its scope prefix". Google stores the bare account id but
+   * addresses `users/<id>`, and the chat SDK routes a DM by inferring the
+   * adapter from exactly that prefix, so a bare id does not reach Google Chat
+   * at all. Each platform owns the difference; core must never re-derive it.
+   *
+   * Returns null when the stored key is not one this platform could have
+   * written — fail closed rather than address a malformed id.
+   */
+  platformUserIdFromKey(key: string): string | null;
 }

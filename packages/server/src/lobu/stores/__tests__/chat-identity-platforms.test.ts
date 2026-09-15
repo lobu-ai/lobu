@@ -189,10 +189,11 @@ describe("resolveChatUserIdentity across platforms", () => {
 });
 
 /**
- * `userKeyScope` is the reverse direction of `buildUserKey`, and the two must
- * agree or the reverse lookup silently searches the wrong key space. These
- * enumerate the registry, so a newly registered platform is covered without
- * editing this file.
+ * `userKeyScope` and `platformUserIdFromKey` are the reverse direction of
+ * `buildUserKey`, and all three must agree or the reverse lookup silently
+ * searches the wrong key space — or returns an id the platform cannot address.
+ * These enumerate the registry, so a newly registered platform is covered
+ * without editing this file.
  */
 describe("chat user key scope contract", () => {
 	it("every registered platform declares a scope", () => {
@@ -207,13 +208,14 @@ describe("chat user key scope contract", () => {
 		expect(declared).toEqual({ slack: "team-prefix", gchat: "global" });
 	});
 
-	// A representative sender id per platform. This IS platform knowledge, so it
-	// is declared rather than guessed — and pinned against the registry below, so
-	// a newly registered platform fails here with a clear reason instead of
-	// silently skipping the invariant.
+	// A representative sender id per platform, in the form that platform
+	// ADDRESSES a person — what an inbound event carries and what its API takes
+	// back. This IS platform knowledge, so it is declared rather than guessed —
+	// and pinned against the registry below, so a newly registered platform fails
+	// here with a clear reason instead of silently skipping the invariants.
 	const SAMPLE_USER_ID: Record<string, string> = {
 		slack: "U12345",
-		gchat: "110000000000000000001",
+		gchat: "users/110000000000000000001",
 	};
 
 	it("every registered platform has a sample id for the invariant below", () => {
@@ -235,12 +237,30 @@ describe("chat user key scope contract", () => {
 			if (!key) throw new Error(`expected a key for ${platform}/${sample}`);
 			if (scope.kind === "team-prefix") {
 				expect(key.startsWith(scope.prefix)).toBe(true);
-				// And the suffix is what the lookup slices back off.
+				// And the prefix is not the whole key — there is a user half left
+				// for `platformUserIdFromKey` to recover.
 				expect(key.slice(scope.prefix.length)).toBeTruthy();
 			} else {
 				// A global platform must not smuggle a tenant into its key.
 				expect(identity.buildUserKey("T-OTHER", sample)).toBe(key);
 			}
+		},
+	);
+
+	it.each(CHAT_USER_IDENTITIES.map((i) => [i.platform, i] as const))(
+		"%s: a stored key round-trips to the id the platform addresses",
+		(platform, identity) => {
+			// The half that is NOT prefix-stripping. Google stores a bare account
+			// id but addresses `users/<id>`, and the chat SDK picks its adapter off
+			// that prefix — so a reverse lookup that returned the raw key would
+			// hand `openDM` an id it cannot route. Round-tripping through
+			// `buildUserKey` proves the recovered form is the one the writer takes.
+			const sample = SAMPLE_USER_ID[platform];
+			const key = identity.buildUserKey("T0XYZ", sample);
+			if (!key) throw new Error(`expected a key for ${platform}/${sample}`);
+			const addressable = identity.platformUserIdFromKey(key);
+			expect(addressable).toBe(sample);
+			expect(identity.buildUserKey("T0XYZ", addressable)).toBe(key);
 		},
 	);
 

@@ -154,6 +154,14 @@ export const slackChatUserIdentity: ChatUserIdentity = {
     if (!t || !/^[a-z0-9_-]+$/i.test(t)) return null;
     return { kind: 'team-prefix', prefix: `${t.toUpperCase()}:` };
   },
+  // Slack addresses a user by the BARE `U…`; the team prefix is storage scoping
+  // only and would not resolve if sent back. Re-validating through
+  // `normalizeTeamScopedId` first means a key this connector could not have
+  // written (no prefix, bad chars) yields null rather than a half-parsed id.
+  platformUserIdFromKey(key) {
+    const normalized = normalizeTeamScopedId(key);
+    return normalized ? normalized.slice(normalized.indexOf(':') + 1) : null;
+  },
 };
 
 /** A Slack channel and the (bare `U…`) ids of its members. */
