@@ -37,6 +37,7 @@ import {
   extendTurnDeadlines,
   hasLiveTurnForMessage,
 } from "../orchestration/turn-liveness.js";
+import { turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
@@ -240,6 +241,10 @@ export class WorkerGateway {
     }
 
     const { deploymentName } = auth.tokenData;
+    // Deployment LIFECYCLE (idle tracking, logs) is the credential's own scope,
+    // so it uses the claim. Turn-liveness markers are a different namespace and
+    // must be derived — see `turnMarkerDeploymentFromClaims`.
+    const markerDeployment = turnMarkerDeploymentFromClaims(auth.tokenData);
 
     try {
       const body = await c.req.json();
@@ -346,7 +351,7 @@ export class WorkerGateway {
         // A worker ACK (delivery receipt or heartbeat) is a worker-driven
         // liveness signal — push the turn-liveness deadline forward so a live
         // but slow worker is never falsely failed by the sweep. Best-effort.
-        void extendTurnDeadlines(deploymentName);
+        if (markerDeployment) void extendTurnDeadlines(markerDeployment);
         return c.json({ success: true });
       }
 
@@ -360,7 +365,7 @@ export class WorkerGateway {
       // extends its marker from the run heartbeat in `run-lifecycle.ts`.)
       // Best-effort, same as the ACK path.
       if (enrichedResponse.statusUpdate) {
-        void extendTurnDeadlines(deploymentName);
+        if (markerDeployment) void extendTurnDeadlines(markerDeployment);
       }
 
       // Log for debugging
@@ -399,12 +404,22 @@ export class WorkerGateway {
         for (const id of enrichedResponse.processedMessageIds ?? []) {
           if (typeof id === "string") dischargeIds.add(id);
         }
-        await commitTerminalReply(
-          deploymentName,
-          [...dischargeIds],
-          enrichedResponse,
-          (enrichedResponse.organizationId as string | undefined) ?? null
-        );
+        if (markerDeployment) {
+          await commitTerminalReply(
+            markerDeployment,
+            [...dischargeIds],
+            enrichedResponse,
+            (enrichedResponse.organizationId as string | undefined) ?? null
+          );
+        } else {
+          // No derivable marker means the token is not turn-scoped, so there is
+          // nothing to win the discharge race against and no delivery this
+          // could gate. Say so rather than addressing the credential's own
+          // namespace, which matches no marker and drops the reply silently.
+          logger.warn(
+            `[WORKER-GATEWAY] Terminal reply from ${deploymentName} carries no turn identity — not discharging`
+          );
+        }
       } else {
         // Non-terminal (delta / status): best-effort, not owner-gated.
         await this.queue.send("thread_response", enrichedResponse);
@@ -708,12 +723,19 @@ export class WorkerGateway {
       return c.json({ error: "Token not eligible for refresh" }, 403);
     }
 
-    if (!tokenData.deploymentName) {
+    // DERIVED, not `tokenData.deploymentName`: that claim scopes the
+    // CREDENTIAL (`agent-turn:<messageId>` for a turn), which is a different
+    // namespace from the conversation deployment the marker was armed under.
+    // Read directly, this gate found no marker for any turn-credential refresh
+    // and denied all of them — and "no marker" is also what a legitimately
+    // finished turn looks like, so it read as the gate working.
+    const markerDeployment = turnMarkerDeploymentFromClaims(tokenData);
+    if (!markerDeployment) {
       return c.json({ error: "Token missing deployment scope" }, 400);
     }
 
     const live = await hasLiveTurnForMessage(
-      tokenData.deploymentName,
+      markerDeployment,
       tokenData.messageId
     );
     if (!live) {

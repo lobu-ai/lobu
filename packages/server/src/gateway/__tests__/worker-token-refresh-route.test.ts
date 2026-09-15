@@ -30,6 +30,7 @@ import {
   verifyWorkerToken,
 } from "@lobu/core";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import { generateDeploymentName } from "../orchestration/deployment-identity.js";
 import {
   armTurnTimeout,
   commitTerminalReply,
@@ -104,15 +105,37 @@ async function postRefresh(token: string) {
   });
 }
 
-const DEPLOYMENT = "lobu-worker-agent-1";
+/**
+ * The turn's routing identity. Production derives BOTH names below from it, and
+ * they are not the same string — a test that reuses one name on both sides
+ * fabricates a linkage the gate does not have (this file did, and the gate was
+ * denying every turn-credential refresh while these tests passed).
+ */
+const TURN = {
+  organizationId: "org-1",
+  agentId: "agent-1",
+  userId: "user-1",
+  platform: "api",
+  channelId: "chan-1",
+  conversationId: "conv-1",
+};
+
+/** What `MessageConsumer` arms the marker under. */
+const DEPLOYMENT = generateDeploymentName(TURN);
+
+/** What `mintTurnToken` scopes the CREDENTIAL to — a per-turn namespace. */
+function credentialScope(messageId: string | undefined): string {
+  return `agent-turn:${messageId ?? "none"}`;
+}
 
 function mintToken(opts: {
   runId?: number;
   messageId?: string;
   adminGrant?: boolean;
 }): string {
-  return generateWorkerToken("user-1", "conv-1", DEPLOYMENT, {
+  return generateWorkerToken("user-1", "conv-1", credentialScope(opts.messageId), {
     channelId: "chan-1",
+    platform: "api",
     agentId: "agent-1",
     organizationId: "org-1",
     connectionId: "connection-1",
@@ -174,7 +197,9 @@ describe("POST /worker/token/refresh", () => {
     expect(data!.connectionId).toBe("connection-1");
     expect(data!.responseThreadId).toBe("slack:chan-1:thread-1");
     expect(data!.source).toBe("automation-run");
-    expect(data!.deploymentName).toBe(DEPLOYMENT);
+    // The refreshed credential keeps its own per-turn scope; it is NOT the
+    // marker's deployment name, and the gate derives that instead of reading this.
+    expect(data!.deploymentName).toBe(credentialScope("m1"));
     expect(data!.organizationId).toBe("org-1");
     expect(data!.adminTools).toEqual(["manage_agents"]);
     expect(data!.adminActorUserId).toBe("auth-user-1");

@@ -31,6 +31,7 @@ import {
 import { generateWorkerToken } from "@lobu/core";
 import { getDb } from "../../db/client.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import { generateDeploymentName } from "../orchestration/deployment-identity.js";
 import { armTurnTimeout } from "../orchestration/turn-liveness.js";
 import { WorkerGateway } from "../worker-dispatch/worker-gateway.js";
 import {
@@ -44,7 +45,25 @@ const TEST_ENCRYPTION_KEY = Buffer.from(
 ).toString("base64");
 
 const TURN_TIMEOUT_QUEUE = "internal:turn_timeout";
-const DEPLOYMENT = "lobu-worker-agent-1";
+/** The turn's routing identity. */
+const TURN = {
+  organizationId: "org-1",
+  agentId: "agent-1",
+  userId: "user-1",
+  platform: "slack",
+  channelId: "chan-1",
+  conversationId: "conv-1",
+};
+
+/**
+ * This route serves a DEPLOYMENT-scoped credential, whose `deploymentName` is
+ * the conversation deployment — so here the credential scope and the marker key
+ * are the same string. They are still both produced by `generateDeploymentName`
+ * rather than written as a literal: the handler derives the marker key from the
+ * token's claims, and a hand-picked literal would only agree with it by
+ * accident.
+ */
+const DEPLOYMENT = generateDeploymentName(TURN);
 
 let queue: RunsQueue;
 const previousEncryptionKey = process.env.ENCRYPTION_KEY;
@@ -94,12 +113,13 @@ function mintToken(opts?: {
   omitOrganizationId?: boolean;
   omitConnectionId?: boolean;
   omitResponseThreadId?: boolean;
+  omitAgentId?: boolean;
   runId?: number;
 }): string {
   return generateWorkerToken("user-1", "conv-1", DEPLOYMENT, {
     channelId: "chan-1",
     teamId: "team-1",
-    agentId: "agent-1",
+    ...(opts?.omitAgentId ? {} : { agentId: "agent-1" }),
     ...(opts?.omitOrganizationId ? {} : { organizationId: "org-1" }),
     ...(opts?.omitConnectionId ? {} : { connectionId: "connection-1" }),
     platform: "slack",
@@ -118,7 +138,7 @@ function armLiveTurn(messageId = "m1"): Promise<void> {
     channelId: "chan-1",
     conversationId: "conv-1",
     userId: "user-1",
-    platform: "api",
+    platform: TURN.platform,
     deploymentName: DEPLOYMENT,
     organizationId: "org-1",
   });
@@ -130,6 +150,7 @@ async function postWorkerResponse(
   opts?: {
     tracker?: { updateDeploymentActivity: (d: string) => Promise<void> };
     omitTokenOrganizationId?: boolean;
+    omitTokenAgentId?: boolean;
     omitTokenConnectionId?: boolean;
     omitTokenResponseThreadId?: boolean;
     tokenRunId?: number;
@@ -142,6 +163,7 @@ async function postWorkerResponse(
     headers: {
       authorization: `Bearer ${mintToken({
         omitOrganizationId: opts?.omitTokenOrganizationId,
+        omitAgentId: opts?.omitTokenAgentId,
         omitConnectionId: opts?.omitTokenConnectionId,
         omitResponseThreadId: opts?.omitTokenResponseThreadId,
         runId: opts?.tokenRunId,
@@ -162,6 +184,17 @@ interface StoredThreadResponse {
   organizationId?: string;
   platformMetadata?: Record<string, unknown>;
   customEvent?: { data?: { event?: Record<string, unknown> } };
+}
+
+/** How many live turn markers exist for the test deployment. */
+async function liveMarkerCount(): Promise<number> {
+  const rows = await getDb()<{ n: string }>`
+    SELECT count(*)::text AS n FROM public.runs
+    WHERE queue_name = 'internal:turn_timeout'
+      AND status = 'pending'
+      AND action_input->>'deploymentName' = ${DEPLOYMENT}
+  `;
+  return Number(rows[0]?.n ?? "0");
 }
 
 async function latestThreadResponse(): Promise<{
@@ -345,6 +378,26 @@ describe("POST /worker/response — authoritative tenant", () => {
 
     const { input } = await latestThreadResponse();
     expect(input.platformMetadata?.automationId).toBeUndefined();
+  });
+
+  test("a terminal reply whose token carries no turn identity discharges nothing", async () => {
+    // The marker is addressed by a DERIVED name, so a token missing any part of
+    // the turn identity yields none — and `commitTerminalReply` gates delivery
+    // on deleting that marker. Assert the reply is not committed rather than
+    // committed against some other namespace: the discharge race is what stops
+    // a second terminal event for the same turn.
+    await armLiveTurn("m1");
+    const res = await postWorkerResponse(
+      { messageId: "m1", conversationId: "conv-1", error: "boom" },
+      { omitTokenAgentId: true }
+    );
+    expect(res.status).toBe(200);
+    await expect(latestThreadResponse()).rejects.toThrow(
+      "thread_response row not found"
+    );
+    // And the marker is still live, so the sweep — not this reply — remains the
+    // one thing that can terminalize the turn.
+    expect(await liveMarkerCount()).toBe(1);
   });
 
   test("an orgless worker token cannot inject a body organization id", async () => {

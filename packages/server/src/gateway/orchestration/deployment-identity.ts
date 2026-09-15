@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { generateWorkerToken, generateWorkerTokenPair } from "@lobu/core";
+import {
+  generateWorkerToken,
+  generateWorkerTokenPair,
+  type WorkerTokenData,
+} from "@lobu/core";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
@@ -141,6 +145,50 @@ export function generateDeploymentName(identity: DeploymentIdentity): string {
     .digest("hex")
     .slice(0, 12);
   return `lobu-worker-${hint}-${hash}`;
+}
+
+/**
+ * The deployment name a turn-liveness marker is addressable under, derived from
+ * a VERIFIED worker token's own routing claims.
+ *
+ * A worker token carries a `deploymentName` claim, and reading it is the
+ * obvious thing to do — but for an agent turn that claim is the credential's
+ * per-turn scope (`agent-turn:<messageId>`, minted by `mintTurnToken`), not the
+ * conversation deployment `MessageConsumer` armed the marker under. The two are
+ * different namespaces, so a lookup keyed on the claim matches no marker at
+ * all: it fails silently, and the caller sees "this turn has no marker" rather
+ * than an error.
+ *
+ * So the marker's deployment identity is DERIVED here, through the same
+ * `generateDeploymentName` the arming site calls, from claims the token signs.
+ * A token-holding caller must go through this rather than read the claim —
+ * that is what keeps the two sides from drifting again.
+ *
+ * Returns undefined when the token carries no turn identity (no agent, org or
+ * conversation): there is no marker to address, and a name guessed from a
+ * partial identity would address a different conversation's.
+ */
+export function turnMarkerDeploymentFromClaims(
+  claims: Pick<
+    WorkerTokenData,
+    | "userId"
+    | "conversationId"
+    | "channelId"
+    | "platform"
+    | "agentId"
+    | "organizationId"
+  >
+): string | undefined {
+  if (!claims.agentId || !claims.organizationId || !claims.conversationId)
+    return undefined;
+  return generateDeploymentName({
+    organizationId: claims.organizationId,
+    agentId: claims.agentId,
+    userId: claims.userId,
+    platform: claims.platform,
+    channelId: claims.channelId,
+    conversationId: claims.conversationId,
+  });
 }
 
 /** Check if an env var name looks like a secret (API key / token / secret / password). */

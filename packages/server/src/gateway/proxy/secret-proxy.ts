@@ -16,6 +16,7 @@ import {
   markInferenceProviderUnhealthy,
   readOrgSharedProviderApiKey,
 } from "../../lobu/stores/provider-secrets.js";
+import { turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
 import {
   clearTurnProviderFailed,
   markTurnProviderFailed,
@@ -628,14 +629,21 @@ export class SecretProxy {
   }
 
   /**
-   * The `deploymentName` bound into the SIGNED worker token — the key
-   * turn-liveness markers are stored under. Taken from the token rather than the
-   * URL because it decides whether a turn keeps renewing its deadline, and the
-   * URL carries only agent/org/user.
+   * The deployment name this caller's turn-liveness marker is stored under,
+   * derived from the SIGNED worker token's routing claims.
+   *
+   * Deliberately NOT the token's own `deploymentName` claim: on an agent turn
+   * that claim is the credential's per-turn scope (`agent-turn:<messageId>`),
+   * while the marker was armed under the conversation deployment. Keyed on the
+   * claim, every mark/clear below matched zero rows for a turn credential —
+   * silently, because "no marker" is also what a legitimately finished turn
+   * looks like.
+   * See `turnMarkerDeploymentFromClaims`.
    */
   private extractWorkerTokenDeployment(c: Context): string | undefined {
     for (const data of this.verifiedWorkerClaims(c)) {
-      if (data.deploymentName) return data.deploymentName;
+      const deployment = turnMarkerDeploymentFromClaims(data);
+      if (deployment) return deployment;
     }
     return undefined;
   }
