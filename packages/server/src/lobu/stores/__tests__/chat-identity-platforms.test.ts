@@ -21,6 +21,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { CHAT_USER_IDENTITIES } from "../chat-identity-sources";
 import {
 	addUserToOrganization,
 	createTestOrganization,
@@ -184,5 +185,72 @@ describe("resolveChatUserIdentity across platforms", () => {
 		expect(
 			await resolveChatUserIdentity("gchat", undefined, `users/${GOOGLE_SUB}`),
 		).toBeNull();
+	});
+});
+
+/**
+ * `userKeyScope` is the reverse direction of `buildUserKey`, and the two must
+ * agree or the reverse lookup silently searches the wrong key space. These
+ * enumerate the registry, so a newly registered platform is covered without
+ * editing this file.
+ */
+describe("chat user key scope contract", () => {
+	it("every registered platform declares a scope", () => {
+		const declared = Object.fromEntries(
+			CHAT_USER_IDENTITIES.map((identity) => [
+				identity.platform,
+				identity.userKeyScope("T0XYZ")?.kind ?? null,
+			]),
+		);
+		// Golden pin: a platform silently flipping to `global` would widen its
+		// reverse lookup across tenants, which no outcome-level test would catch.
+		expect(declared).toEqual({ slack: "team-prefix", gchat: "global" });
+	});
+
+	// A representative sender id per platform. This IS platform knowledge, so it
+	// is declared rather than guessed — and pinned against the registry below, so
+	// a newly registered platform fails here with a clear reason instead of
+	// silently skipping the invariant.
+	const SAMPLE_USER_ID: Record<string, string> = {
+		slack: "U12345",
+		gchat: "110000000000000000001",
+	};
+
+	it("every registered platform has a sample id for the invariant below", () => {
+		expect(Object.keys(SAMPLE_USER_ID).sort()).toEqual(
+			CHAT_USER_IDENTITIES.map((i) => i.platform).sort(),
+		);
+	});
+
+	it.each(CHAT_USER_IDENTITIES.map((i) => [i.platform, i] as const))(
+		"%s: a key built for a team lies inside that team's scope",
+		(platform, identity) => {
+			// THE invariant tying the two directions together. If a platform's
+			// prefix and its built keys ever disagree, `resolveChatUserIdForUser`
+			// returns null for identities that genuinely exist.
+			const scope = identity.userKeyScope("T0XYZ");
+			if (!scope) throw new Error("expected a scope for a valid team id");
+			const sample = SAMPLE_USER_ID[platform];
+			const key = identity.buildUserKey("T0XYZ", sample);
+			if (!key) throw new Error(`expected a key for ${platform}/${sample}`);
+			if (scope.kind === "team-prefix") {
+				expect(key.startsWith(scope.prefix)).toBe(true);
+				// And the suffix is what the lookup slices back off.
+				expect(key.slice(scope.prefix.length)).toBeTruthy();
+			} else {
+				// A global platform must not smuggle a tenant into its key.
+				expect(identity.buildUserKey("T-OTHER", sample)).toBe(key);
+			}
+		},
+	);
+
+	it("a team-scoped platform refuses a missing or blank team, never widening", () => {
+		for (const identity of CHAT_USER_IDENTITIES) {
+			if (identity.userKeyScope("T0XYZ")?.kind !== "team-prefix") continue;
+			// Refusal, NOT `{kind:"global"}` — the whole point of the nullable.
+			expect(identity.userKeyScope(null)).toBeNull();
+			expect(identity.userKeyScope(undefined)).toBeNull();
+			expect(identity.userKeyScope("   ")).toBeNull();
+		}
 	});
 });

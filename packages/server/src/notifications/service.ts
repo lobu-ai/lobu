@@ -16,7 +16,7 @@ import { getChatInstanceManager } from "../lobu/gateway";
 import { NOTIFICATION_DELIVERY_TASK } from "../scheduled/task-definitions";
 import { enqueueTasksInTransaction } from "../scheduled/task-scheduler";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
-import { resolveSlackUserIdForUser } from "../lobu/stores/chat-identity.js";
+import { resolveChatUserIdForUser } from "../lobu/stores/chat-identity.js";
 import { resolveEventKindDefinition } from "../utils/event-kind-validation";
 import { insertEvent } from "../utils/insert-event";
 import { toAbsolutePermalink } from "../utils/url-builder";
@@ -336,23 +336,27 @@ export async function resolveOwnerDmTarget(
 	organizationId: string,
 	ownerUserId: string,
 	connectionId?: string | null,
-): Promise<{ connectionId: string; slackUserId: string } | null> {
+): Promise<{ connectionId: string; platformUserId: string } | null> {
 	const targets = await resolveBotDeliveryTargets(
 		organizationId,
 		connectionId ?? null,
 	);
 	const seen = new Set<string>();
 	for (const target of targets) {
-		if (target.platform !== "slack" || target.teamId == null) continue;
-		const key = `${target.connectionId}:${target.teamId}`;
+		// No platform branch and no teamId pre-check: `resolveChatUserIdForUser`
+		// asks the platform's own descriptor how its keys are scoped, so a
+		// team-scoped platform still refuses without a team while a global one
+		// (Google Chat carries no workspace id) resolves normally.
+		const key = `${target.connectionId}:${target.teamId ?? ""}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
-		const slackUserId = await resolveSlackUserIdForUser(
+		const platformUserId = await resolveChatUserIdForUser(
 			ownerUserId,
+			target.platform,
 			target.teamId,
 		);
-		if (slackUserId) {
-			return { connectionId: target.connectionId, slackUserId };
+		if (platformUserId) {
+			return { connectionId: target.connectionId, platformUserId };
 		}
 	}
 	return null;
@@ -1040,7 +1044,7 @@ interface NotificationDeliveryRequest {
 	context: NotificationDeliveryContext;
 	strictAutomationTarget: boolean;
 	targets: BotDeliveryTarget[];
-	ownerDm: { connectionId: string; slackUserId: string } | null;
+	ownerDm: { connectionId: string; platformUserId: string } | null;
 }
 
 export interface NotificationDeliveryTaskPayload {
@@ -1267,7 +1271,7 @@ export async function deliverNotificationTask(
 					if (
 						!dm ||
 						dm.connectionId !== request.ownerDm.connectionId ||
-						dm.slackUserId !== request.ownerDm.slackUserId
+						dm.platformUserId !== request.ownerDm.platformUserId
 					) {
 						throw new Error("Notification owner destination changed");
 					}
@@ -1313,7 +1317,7 @@ export async function deliverNotificationTask(
 				const sent = request.ownerDm
 					? await manager.postDirectMessage(
 							target.connectionId,
-							request.ownerDm.slackUserId,
+							request.ownerDm.platformUserId,
 							content,
 						)
 					: await manager.postMessageToChannel(

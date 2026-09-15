@@ -12,7 +12,7 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { getDb } from "../../../db/client";
-import { resolveSlackUserIdForUser } from "../../../lobu/stores/chat-identity";
+import { resolveChatUserIdForUser } from "../../../lobu/stores/chat-identity";
 import { resolveOwnerDmTarget } from "../../../notifications/service";
 import { proposeEntityFieldChange } from "../../../tools/admin/entity-field-approval";
 import type { ToolContext } from "../../../tools/registry";
@@ -26,6 +26,7 @@ import {
 	createTestOrganization,
 	createTestUser,
 	insertChatConnectionRow,
+	linkChatIdentityInGraph,
 	linkSlackIdentityInGraph,
 } from "../../setup/test-fixtures";
 
@@ -172,7 +173,7 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			slackUserId: "U-DMOWNER",
 		});
 		const target = await resolveOwnerDmTarget(orgId, owner.id);
-		expect(target).toEqual({ connectionId, slackUserId: "U-DMOWNER" });
+		expect(target).toEqual({ connectionId, platformUserId: "U-DMOWNER" });
 	});
 
 	it("returns null when the owner has no Slack identity (caller falls back)", async () => {
@@ -204,7 +205,85 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			slackUserId: "U-SECOND",
 		});
 
-		expect(await resolveSlackUserIdForUser(twin.id, "TDUPTEAM")).toBeNull();
+		expect(await resolveChatUserIdForUser(twin.id, "slack", "TDUPTEAM")).toBeNull();
+	});
+
+	it("resolveOwnerDmTarget routes to a Google Chat connection end to end", async () => {
+		// Whole path, not just the resolver: a gchat connection + binding, an owner
+		// with a Google identity, and no team id anywhere. The removed
+		// `target.platform !== "slack" || target.teamId == null` branch skipped
+		// exactly this target, so owner DMs silently fell back to the channel.
+		const gOrg = await createTestOrganization({ name: "Chat DM Org" });
+		const gOwner = await createTestUser({ name: "Chat DM Owner" });
+		await addUserToOrganization(gOwner.id, gOrg.id, "member");
+		const gAgent = await createTestAgent({
+			organizationId: gOrg.id,
+			ownerUserId: gOwner.id,
+			agentId: "agent-gchat-dm",
+			name: "GChat DM Agent",
+		});
+		const gConnectionId = "conn-gchat-dm";
+		await insertChatConnectionRow({
+			id: gConnectionId,
+			organizationId: gOrg.id,
+			platform: "gchat",
+			metadata: {},
+		});
+		await createTestAutomationSubscription({
+			organizationId: gOrg.id,
+			agentId: gAgent.agentId,
+			connectionSlug: `agentconn-${gConnectionId}`,
+			platform: "gchat",
+			channelId: "gchat:spaces/AAQProof",
+		});
+		await linkChatIdentityInGraph({
+			organizationId: gOrg.id,
+			userId: gOwner.id,
+			platform: "gchat",
+			platformUserId: "users/110000000000000000003",
+		});
+
+		expect(await resolveOwnerDmTarget(gOrg.id, gOwner.id)).toEqual({
+			connectionId: gConnectionId,
+			platformUserId: "110000000000000000003",
+		});
+	});
+
+	it("resolves a Google Chat owner, which carries NO team id at all", async () => {
+		// The case the old `target.platform !== "slack" || target.teamId == null`
+		// branch made unreachable. Google Chat events carry no workspace id and
+		// its descriptor declares `userKeyScope` global, so a null team is normal
+		// here rather than a refusal.
+		const gOwner = await createTestUser({ name: "Chat Owner" });
+		await addUserToOrganization(gOwner.id, orgId, "member");
+		await linkChatIdentityInGraph({
+			organizationId: orgId,
+			userId: gOwner.id,
+			platform: "gchat",
+			platformUserId: "users/110000000000000000002",
+		});
+		expect(
+			await resolveChatUserIdForUser(gOwner.id, "gchat", null),
+		).toBe("110000000000000000002");
+	});
+
+	it("REFUSES a team-scoped platform with no team rather than widening", async () => {
+		// The security half of the scope contract. Slack ids repeat across
+		// workspaces, so "no team" must mean refuse, never "scan the namespace" —
+		// otherwise this returns an id from whichever workspace happens to match.
+		const scoped = await createTestUser({ name: "Scoped Only" });
+		await addUserToOrganization(scoped.id, orgId, "member");
+		await linkSlackIdentityInGraph({
+			organizationId: orgId,
+			userId: scoped.id,
+			teamId: "TNOWIDEN",
+			slackUserId: "U-SCOPED",
+		});
+		expect(await resolveChatUserIdForUser(scoped.id, "slack", "TNOWIDEN")).toBe(
+			"U-SCOPED",
+		);
+		expect(await resolveChatUserIdForUser(scoped.id, "slack", null)).toBeNull();
+		expect(await resolveChatUserIdForUser(scoped.id, "slack", "  ")).toBeNull();
 	});
 
 	it("matches the team prefix literally — `_` in a team id is not a LIKE wildcard", async () => {
@@ -219,9 +298,9 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			teamId: "TXDMOWNER",
 			slackUserId: "U-ROAMER",
 		});
-		expect(await resolveSlackUserIdForUser(roamer.id, "TXDMOWNER")).toBe(
+		expect(await resolveChatUserIdForUser(roamer.id, "slack", "TXDMOWNER")).toBe(
 			"U-ROAMER",
 		);
-		expect(await resolveSlackUserIdForUser(roamer.id, "T_DMOWNER")).toBeNull();
+		expect(await resolveChatUserIdForUser(roamer.id, "slack", "T_DMOWNER")).toBeNull();
 	});
 });

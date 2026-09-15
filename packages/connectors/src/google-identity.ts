@@ -104,4 +104,8 @@ export const gchatChatUserIdentity: ChatUserIdentity = {
   buildUserKey(_teamId, platformUserId) {
     return normalizeGoogleUserId(platformUserId);
   },
+  // Global for the same reason `buildUserKey` ignores the team: one Google
+  // account has exactly one id, so there is no tenant axis to narrow by and
+  // nothing to bleed across. Never null — a missing team is not an error here.
+  userKeyScope: () => ({ kind: 'global' }),
 };
