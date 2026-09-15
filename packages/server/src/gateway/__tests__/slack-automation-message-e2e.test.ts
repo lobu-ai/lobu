@@ -20,7 +20,7 @@ import { createHmac } from "node:crypto";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { Chat, type StateAdapter } from "chat";
 import { CommandRegistry } from "@lobu/core";
-import { addUserToOrganization, createTestUser, linkSlackIdentityInGraph } from "../../__tests__/setup/test-fixtures.js";
+import { addUserToOrganization, createTestUser, linkChatIdentityInGraph } from "../../__tests__/setup/test-fixtures.js";
 import { bindChatToAgentForOwner } from "../../preview/slack.js";
 import { planAutomationActivationsForRuntimeConnection } from "../../automations/activation.js";
 import { registerBuiltInCommands } from "../commands/built-in-commands.js";
@@ -638,9 +638,10 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     const user = await createTestUser();
     await addUserToOrganization(user.id, sourceOrg, "owner");
     await addUserToOrganization(user.id, targetOrg, "admin");
-    await linkSlackIdentityInGraph({
+    await linkChatIdentityInGraph({
       organizationId: sourceOrg, userId: user.id,
-      teamId: WORKSPACE_TEAM_ID, slackUserId: "U_LINK_ADMIN",
+      platform: "slack",
+      teamId: WORKSPACE_TEAM_ID, platformUserId: "U_LINK_ADMIN",
     });
     const subscriptions = new AutomationSubscriptionService();
     const registry = new CommandRegistry();

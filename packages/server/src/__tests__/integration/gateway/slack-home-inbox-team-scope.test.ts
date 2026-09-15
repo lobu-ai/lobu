@@ -39,7 +39,7 @@ import {
   createTestEvent,
   createTestOrganization,
   createTestUser,
-  linkSlackIdentityInGraph,
+  linkChatIdentityInGraph,
 } from '../../setup/test-fixtures';
 
 const COLLIDING_SLACK_USER_ID = 'U_COLLIDE';
@@ -51,11 +51,12 @@ async function linkSlackIdentity(opts: {
   platformUserId: string;
   lobuUserId: string;
 }): Promise<void> {
-  await linkSlackIdentityInGraph({
+  await linkChatIdentityInGraph({
     organizationId: opts.organizationId,
+    platform: "slack",
     userId: opts.lobuUserId,
     teamId: opts.teamId,
-    slackUserId: opts.platformUserId,
+    platformUserId: opts.platformUserId,
   });
 }
 

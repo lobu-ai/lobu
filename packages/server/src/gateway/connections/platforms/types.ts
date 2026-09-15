@@ -225,6 +225,26 @@ export interface ChatPlatformDescriptor {
   messageIdIdentifiesMessage?(messageId: string): boolean;
 
   /**
+   * True when the bot can open a DM with a user it has never messaged, given
+   * THIS connection's config. Absent hook = yes, which is what Slack needs:
+   * `conversations.open` mints the DM from the bot token alone.
+   *
+   * Google Chat is why this is config-dependent rather than a static flag. Its
+   * `openDM` first looks for an existing DM space, which needs no extra grant;
+   * only when none exists does it fall to `spaces.setup`, and creating a DM
+   * requires domain-wide delegation via `impersonateUser`. So a Chat connection
+   * WITH delegation can originate a DM and one without cannot — the same
+   * platform, two answers.
+   *
+   * The owner-DM tier consults this before PINNING a notification to a DM,
+   * because a pinned owner DM suppresses the channel fallback by design (a
+   * private approval must never widen into a channel). Answering false means
+   * "don't pin", so the notification still reaches the bound channel instead of
+   * failing to a destination that can never accept it.
+   */
+  canOpenDirectMessage?(config: Record<string, unknown>): boolean;
+
+  /**
    * Config keys this platform cannot run without, checked before the row is
    * persisted. A nested array is an EITHER-OR group ("at least one of these"),
    * reported as `a or b` — Google Chat takes a service-account JSON key or

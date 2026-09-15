@@ -17,6 +17,8 @@ import { NOTIFICATION_DELIVERY_TASK } from "../scheduled/task-definitions";
 import { enqueueTasksInTransaction } from "../scheduled/task-scheduler";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
 import { resolveChatUserIdForUser } from "../lobu/stores/chat-identity.js";
+import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection.js";
+import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 import { resolveEventKindDefinition } from "../utils/event-kind-validation";
 import { insertEvent } from "../utils/insert-event";
 import { toAbsolutePermalink } from "../utils/url-builder";
@@ -324,6 +326,33 @@ export async function resolveNotificationDeliveryPlan(params: {
 }
 
 /**
+ * Whether this connection's platform can open a DM with someone it has never
+ * messaged. Reads the stored config and hands it to the platform's own
+ * descriptor, which owns the rule — Slack needs nothing beyond its bot token
+ * and declares no hook; Google Chat needs domain-wide delegation to CREATE a
+ * space and answers from `impersonateUser`.
+ *
+ * Fails OPEN on an unreadable connection: a missing row here means the target
+ * was resolved from a binding whose connection just vanished, and that is the
+ * delivery task's error to report, not a reason to silently re-route a DM that
+ * a caller explicitly asked to be owner-routed.
+ */
+async function connectionCanOpenDm(
+	connectionId: string,
+	platform: string,
+): Promise<boolean> {
+	const descriptor = getPlatformDescriptor(platform);
+	if (!descriptor?.canOpenDirectMessage) return true;
+	const rows = await getDb()<{ config: Record<string, unknown> | null }>`
+    SELECT config FROM connections
+    WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
+    LIMIT 1
+  `;
+	if (rows.length === 0) return true;
+	return descriptor.canOpenDirectMessage(rows[0].config ?? {});
+}
+
+/**
  * Owner-routed delivery target: the chat identity of `ownerUserId` on a
  * platform one of the org's bot connections lives on. Reverse-looks-up the
  * identity stamped on the owner's `$member`, scoped the way that platform
@@ -364,13 +393,22 @@ export async function resolveOwnerDmTarget(
 			target.platform,
 			target.teamId,
 		);
-		if (platformUserId) {
-			return {
-				connectionId: target.connectionId,
-				platform: target.platform,
-				platformUserId,
-			};
+		if (!platformUserId) continue;
+		// Resolving an identity is not the same as being able to REACH it. A
+		// pinned owner DM suppresses the channel fallback, so pinning one to a
+		// connection that cannot originate a DM costs the notification entirely
+		// — it reaches neither the DM nor the channel. Ask the platform before
+		// pinning; a connection that says no simply isn't an owner-DM candidate
+		// and delivery falls through to the bound channel, as it did before this
+		// tier understood any platform but Slack.
+		if (!(await connectionCanOpenDm(target.connectionId, target.platform))) {
+			continue;
 		}
+		return {
+			connectionId: target.connectionId,
+			platform: target.platform,
+			platformUserId,
+		};
 	}
 	return null;
 }

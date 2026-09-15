@@ -13,7 +13,7 @@ import {
   createTestOrganization,
   createTestUser,
   insertChatConnectionRow,
-  linkSlackIdentityInGraph,
+  linkChatIdentityInGraph,
 } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
 import { registerBuiltInCommands } from "../../gateway/commands/built-in-commands.js";
@@ -723,11 +723,12 @@ describe("chat-user identity + codeless re-link by agent id", () => {
     // from redeeming a preview code — redemption deliberately records none.
     // Seed the graph the way those paths do so the shortcut stays covered.
     await mintAndConsume(ID_AGENT, "D903");
-    await linkSlackIdentityInGraph({
+    await linkChatIdentityInGraph({
       organizationId: idOrgId,
+      platform: "slack",
       userId: lobuUserId,
       teamId: ID_TEAM,
-      slackUserId: SLACK_USER,
+      platformUserId: SLACK_USER,
     });
 
     const registry = new CommandRegistry();
