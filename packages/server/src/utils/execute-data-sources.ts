@@ -711,10 +711,10 @@ export function buildScopedQuery(
     const safeName = table.replace(/"/g, '""');
 
     if (table === 'entities') {
-      // security-allowed: see block comment above this for-loop
       // $member rows carry PII reserved by the manage_entity read policy;
       // exclude them for non-admin readers just like workspace-audit events.
       const memberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
+      // security-allowed: see block comment above this for-loop
       ctes.push(
         `"${safeName}" AS (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
