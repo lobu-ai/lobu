@@ -417,8 +417,7 @@ export async function handleList(
               'last_sync_status', f.last_sync_status,
               'last_sync_at', f.last_sync_at,
               'consecutive_failures', f.consecutive_failures,
-              'next_run_at', f.next_run_at,
-              'items_collected', f.items_collected
+              'next_run_at', f.next_run_at
             )
           ),
           '[]'::jsonb
@@ -664,8 +663,7 @@ export async function handleGet(
               'last_sync_status', f.last_sync_status,
               'last_sync_at', f.last_sync_at,
               'consecutive_failures', f.consecutive_failures,
-              'next_run_at', f.next_run_at,
-              'items_collected', f.items_collected
+              'next_run_at', f.next_run_at
             )
           ),
           '[]'::jsonb

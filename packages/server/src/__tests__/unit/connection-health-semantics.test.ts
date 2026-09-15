@@ -12,28 +12,23 @@ import { deriveFeedHealthSemantics } from "../../connectors/feed-health-semantic
  */
 const feed = (
 	input: Parameters<typeof deriveFeedHealthSemantics>[0],
-	itemsCollected = 0,
 ): ConnectionFeedRollupInput => ({
 	semantics: deriveFeedHealthSemantics({
 		operations: ["sync"],
 		store: "events",
 		...input,
 	}),
-	items_collected: itemsCollected,
 });
 
-/** A feed that collects on a cron and has produced items. */
-const healthyFeed = (itemsCollected = 45_295) =>
-	feed(
-		{
-			status: "active",
-			schedule: "*/5 * * * *",
-			last_sync_status: "success",
-			last_sync_at: new Date(),
-			next_run_at: new Date(Date.now() + 60_000),
-		},
-		itemsCollected,
-	);
+/** A feed that collects on a cron and has synced successfully. */
+const healthyFeed = () =>
+	feed({
+		status: "active",
+		schedule: "*/5 * * * *",
+		last_sync_status: "success",
+		last_sync_at: new Date(),
+		next_run_at: new Date(Date.now() + 60_000),
+	});
 
 describe("connection attention — the three prod shapes this exists to separate", () => {
 	// conn 623 (whatsapp.web, kshitij-aranke): created 2026-09-14, never touched
@@ -54,7 +49,7 @@ describe("connection attention — the three prod shapes this exists to separate
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: Array.from({ length: 14 }, () =>
-				feed({ status: "paused", schedule: null }, 5_000),
+				feed({ status: "paused", schedule: null }),
 			),
 		});
 		expect(result.attention).toBe("paused");
@@ -66,10 +61,9 @@ describe("connection attention — the three prod shapes this exists to separate
 	test("a collecting connection reports healthy", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
-			feeds: [healthyFeed(281)],
+			feeds: [healthyFeed()],
 		});
 		expect(result.attention).toBe("healthy");
-		expect(result.itemsCollected).toBe(281);
 	});
 });
 
@@ -86,7 +80,6 @@ describe("never_collected", () => {
 			],
 		});
 		expect(result.attention).toBe("never_collected");
-		expect(result.itemsCollected).toBe(0);
 	});
 
 	test("a feed that syncs successfully but collects nothing is NOT never_collected", () => {
@@ -96,17 +89,16 @@ describe("never_collected", () => {
 		// applies before it pages a human.
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
-			feeds: [healthyFeed(0)],
+			feeds: [healthyFeed()],
 		});
 		expect(result.attention).toBe("healthy");
-		expect(result.itemsCollected).toBe(0);
 	});
 
 	test("one feed that has ever collected clears it for the connection", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [
-				healthyFeed(1),
+				healthyFeed(),
 				feed({
 					status: "active",
 					schedule: "*/5 * * * *",
@@ -115,7 +107,6 @@ describe("never_collected", () => {
 			],
 		});
 		expect(result.attention).toBe("degraded");
-		expect(result.itemsCollected).toBe(1);
 	});
 });
 
@@ -202,7 +193,6 @@ describe("only collector feeds are folded", () => {
 						store: "channel_messages",
 						status: "active",
 					}),
-					items_collected: 0,
 				},
 				{
 					semantics: deriveFeedHealthSemantics({
@@ -210,7 +200,6 @@ describe("only collector feeds are folded", () => {
 						store: "events",
 						status: "active",
 					}),
-					items_collected: 0,
 				},
 			],
 		});
@@ -236,7 +225,6 @@ describe("only collector feeds are folded", () => {
 					store: "channel_messages",
 					status: "active",
 				}),
-				items_collected: 0,
 			})),
 		});
 		expect(result.attention).toBe("healthy");

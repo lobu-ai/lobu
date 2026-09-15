@@ -42,11 +42,12 @@
  * That reuses the feed module's own definition rather than inventing a second
  * one, so the two can never disagree about the same row.
  *
- * `items_collected` is carried through as INFORMATION only and is deliberately
- * not the verdict. "Syncs fine, produces nothing" reads like a defect but is
- * routine — a mailbox label with no mail syncs successfully and collects zero
- * forever. `connector-health.ts` pages on the same never-succeeded signal for
- * the same reason.
+ * Cumulative `feeds.items_collected` is deliberately NOT consulted, in either
+ * direction. Zero is not a defect: a mailbox label with no mail syncs cleanly
+ * and collects zero forever. Non-zero is not health either — prod conn 250 has
+ * collected 74 items across 27 runs and has never once completed a successful
+ * sync, so an item count would have called that stuck feed healthy.
+ * `connector-health.ts` keys its own never-started rule the same way.
  *
  * ## There are deliberately no grace periods here
  *
@@ -96,8 +97,6 @@ export type ConnectionAttentionState =
 export interface ConnectionFeedRollupInput {
   /** Straight from `deriveFeedHealthSemantics` — never hand-built. */
   semantics: FeedHealthSemantics;
-  /** `feeds.items_collected` — cumulative; see the header. */
-  items_collected?: number | null;
 }
 
 export interface ConnectionHealthSemanticsInput {
@@ -135,25 +134,7 @@ export interface ConnectionHealthSemantics {
   expectedFeedCount: number;
   /** Collector feeds whose own attention state is something other than healthy. */
   attentionFeedCount: number;
-  /**
-   * Cumulative items across every collector feed. INFORMATIONAL — no verdict
-   * reads it; see the header for why zero is not itself a defect.
-   */
-  itemsCollected: number;
 }
-
-/** Feed attention states that mean "this feed is not currently collecting". */
-const FEED_NEEDS_ATTENTION = new Set([
-  "paused",
-  "needs_auth",
-  "setup_required",
-  "last_attempt_failed",
-  "overdue",
-  "no_trigger",
-  "never_run",
-  "device_offline",
-  "misconfigured",
-]);
 
 /**
  * Collector feeds only. `streaming` (chat transcripts) and `source_only`
@@ -178,15 +159,14 @@ export function deriveConnectionHealthSemantics(
 ): ConnectionHealthSemantics {
   const collectors = input.feeds.filter(isCollector);
   const expectedFeedCount = collectors.length;
-  const itemsCollected = collectors.reduce(
-    (sum, feed) => sum + Math.max(0, Number(feed.items_collected ?? 0)),
-    0
-  );
-  const attentionFeedCount = collectors.filter((feed) =>
-    FEED_NEEDS_ATTENTION.has(feed.semantics.attention)
+  // Every state in FeedAttentionState other than `healthy` means the feed is
+  // not currently collecting. Expressed as the negative rather than a listed
+  // Set so a state added to that union cannot silently read as healthy here.
+  const attentionFeedCount = collectors.filter(
+    (feed) => feed.semantics.attention !== "healthy"
   ).length;
 
-  const base = { expectedFeedCount, attentionFeedCount, itemsCollected };
+  const base = { expectedFeedCount, attentionFeedCount };
 
   // Connection-level blockers outrank anything a feed can say: no feed can
   // collect while the connection itself cannot authenticate.
@@ -284,7 +264,6 @@ interface FeedHealthJsonRow {
   last_sync_at?: unknown;
   consecutive_failures?: unknown;
   next_run_at?: unknown;
-  items_collected?: unknown;
 }
 
 /** A connection row carrying the `feed_health` aggregate. */
@@ -349,7 +328,6 @@ export function deriveConnectionHealthFromRow(
         device_worker_id: row.device_worker_id ?? null,
         device_online: row.device_online ?? null,
       }),
-      items_collected: Number(feed.items_collected ?? 0),
     };
   });
 
