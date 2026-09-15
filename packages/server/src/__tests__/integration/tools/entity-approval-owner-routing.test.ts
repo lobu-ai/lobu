@@ -348,6 +348,66 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 		expect(await resolveOwnerDmTarget(blankOrg.id, blankOwner.id)).toBeNull();
 	});
 
+	it("reads the LIVE connection's config, not a soft-deleted twin's", async () => {
+		// `connections_chat_slug_unique` is UNIQUE (slug) WHERE credential_mode IS
+		// NOT NULL AND deleted_at IS NULL, so slug is unique only among LIVE chat
+		// rows and a soft-deleted row may hold the same slug. Prod has plenty of
+		// repeated slugs for exactly this reason. An unfiltered `LIMIT 1` could
+		// read the dead row — here that would see its delegation and wrongly pin a
+		// DM the live, undelegated connection can never open.
+		const sql = getTestDb();
+		const twinOrg = await createTestOrganization({ name: "Deleted Twin Org" });
+		const twinOwner = await createTestUser({ name: "Twin Owner" });
+		await addUserToOrganization(twinOwner.id, twinOrg.id, "member");
+		const twinAgent = await createTestAgent({
+			organizationId: twinOrg.id,
+			ownerUserId: twinOwner.id,
+			agentId: "agent-deleted-twin",
+			name: "Deleted Twin Agent",
+		});
+		// Decoy FIRST, live row second, and the order is the whole test: with no
+		// ORDER BY, an unfiltered `LIMIT 1` takes whatever the scan reaches first,
+		// so a decoy inserted second would be shadowed by the live row and the
+		// test would pass with or without the filter — vacuous. Inserted first,
+		// the dead row is what an unfiltered query actually returns.
+		await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, display_name, status, config,
+        credential_mode, slug, visibility, deleted_at, created_at, updated_at
+      ) VALUES (
+        ${twinOrg.id}, 'gchat', 'Dead Twin', 'active',
+        ${sql.json({
+					impersonateUser: "ghost@example.com",
+					settings: {},
+					chatMetadata: {},
+				})},
+        'byo', 'agentconn-conn-gchat-twin', 'org', NOW(), NOW(), NOW()
+      )
+    `;
+		// LIVE row, same slug, NO delegation — so it cannot originate a DM.
+		await insertChatConnectionRow({
+			id: "conn-gchat-twin",
+			organizationId: twinOrg.id,
+			platform: "gchat",
+			metadata: {},
+		});
+		await createTestAutomationSubscription({
+			organizationId: twinOrg.id,
+			agentId: twinAgent.agentId,
+			connectionSlug: "agentconn-conn-gchat-twin",
+			platform: "gchat",
+			channelId: "gchat:spaces/AAQTwin",
+		});
+		await linkChatIdentityInGraph({
+			organizationId: twinOrg.id,
+			userId: twinOwner.id,
+			platform: "gchat",
+			platformUserId: "users/110000000000000000008",
+		});
+
+		expect(await resolveOwnerDmTarget(twinOrg.id, twinOwner.id)).toBeNull();
+	});
+
 	it("an org on BOTH platforms DMs on the one it bound first", async () => {
 		// Now that every platform is a candidate, `resolveBotDeliveryTargets`
 		// order decides the PLATFORM, not just the connection. It orders by
