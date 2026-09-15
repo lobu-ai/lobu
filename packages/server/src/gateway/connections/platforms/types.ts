@@ -212,6 +212,19 @@ export interface ChatPlatformDescriptor {
   channelMessagesMintFreshThreadIds?: boolean;
 
   /**
+   * True when this platform's message id already names the exact message, so a
+   * delivery match must NOT additionally require the thread id to agree.
+   *
+   * Google Chat is the case that forces it: the id is a full space-scoped
+   * resource name (`spaces/<s>/messages/<m>`), and a DM click re-encodes its
+   * thread from the stable DM route to a message-bound one — so the recorded
+   * and inbound thread ids legitimately differ for the same message. Absent
+   * hook = keep the thread check, which is what identifiers like Slack's `ts`
+   * need, being conversation-scoped rather than message-scoped.
+   */
+  messageIdIdentifiesMessage?(messageId: string): boolean;
+
+  /**
    * Config keys this platform cannot run without, checked before the row is
    * persisted. A nested array is an EITHER-OR group ("at least one of these"),
    * reported as `a or b` — Google Chat takes a service-account JSON key or

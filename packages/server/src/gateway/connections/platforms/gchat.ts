@@ -624,4 +624,12 @@ export const gchatPlatform: ChatPlatformDescriptor = {
   createAdapter,
 
   extractRoutingInfo: extractWhatsAppStyleRoutingInfo,
+
+  // A Chat message id is a full space-scoped resource name, so it already names
+  // the exact message and a delivery match needs no thread agreement. That
+  // matters because a DM click re-encodes its thread from the stable DM route
+  // to a message-bound one, making the recorded and inbound thread ids differ
+  // for one and the same message.
+  messageIdIdentifiesMessage: (messageId) =>
+    /^spaces\/[^/]+\/messages\/[^/]+$/.test(messageId),
 };

@@ -6,7 +6,7 @@
  */
 
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
-import { normalizeSlackUserId } from '@lobu/connectors/slack-identity';
+import { chatUserIdentityFor } from '../../lobu/stores/chat-identity-sources';
 import { serializeSigned } from 'hono/utils/cookie';
 import { hashClientSecret } from '../../auth/oauth/clients';
 import { NON_PUBLIC_OAUTH_SCOPES } from '../../auth/oauth/scopes';
@@ -1049,11 +1049,18 @@ export async function createAutomationResultRun(options: {
  * `auth_user_id` with `source_connector = 'auth:signup'`, so a hand-rolled
  * INSERT that skipped that would pass while production failed.
  */
-export async function linkSlackIdentityInGraph(opts: {
+/**
+ * Stamp a chat-platform sender identity on a member, keyed exactly the way the
+ * product keys it: through that platform's own `ChatUserIdentity`. Generic on
+ * purpose — Slack scopes by team, Google Chat does not, and the descriptor owns
+ * that difference so fixtures never re-encode it.
+ */
+export async function linkChatIdentityInGraph(opts: {
   organizationId: string;
   userId: string;
-  teamId: string;
-  slackUserId: string;
+  platform: string;
+  teamId?: string;
+  platformUserId: string;
 }): Promise<void> {
   const sql = getTestDb();
   const users = await sql<{ email: string | null }>`
@@ -1067,19 +1074,42 @@ export async function linkSlackIdentityInGraph(opts: {
     { userId: opts.userId, email },
   );
 
-  const identifier = normalizeSlackUserId(opts.teamId, opts.slackUserId);
+  const identity = chatUserIdentityFor(opts.platform);
+  if (!identity) {
+    throw new Error(`no chat identity descriptor for platform ${opts.platform}`);
+  }
+  const identifier = identity.buildUserKey(opts.teamId, opts.platformUserId);
   if (!identifier) {
     throw new Error(
-      `unnormalizable Slack identity: ${opts.teamId}/${opts.slackUserId}`,
+      `unnormalizable ${opts.platform} identity: ${opts.teamId}/${opts.platformUserId}`,
     );
   }
   await sql`
     INSERT INTO entity_identities (
       organization_id, entity_id, namespace, identifier, source_connector
     ) VALUES (
-      ${opts.organizationId}, ${memberEntityId}, 'slack_user_id', ${identifier}, 'auth:signup'
+      ${opts.organizationId}, ${memberEntityId}, ${identity.namespace}, ${identifier}, 'auth:signup'
     )
     ON CONFLICT (organization_id, namespace, identifier, COALESCE(scope_key, '')) WHERE deleted_at IS NULL
     DO NOTHING
   `;
+}
+
+/**
+ * Stamp a Slack sender identity. Thin wrapper over the platform-generic helper
+ * so the many Slack-only suites keep reading naturally.
+ */
+export async function linkSlackIdentityInGraph(opts: {
+  organizationId: string;
+  userId: string;
+  teamId: string;
+  slackUserId: string;
+}): Promise<void> {
+  await linkChatIdentityInGraph({
+    organizationId: opts.organizationId,
+    userId: opts.userId,
+    platform: 'slack',
+    teamId: opts.teamId,
+    platformUserId: opts.slackUserId,
+  });
 }

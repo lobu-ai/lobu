@@ -55,6 +55,30 @@ describe("chat platform descriptor contract", () => {
     });
   });
 
+  // Golden pin, same reason as the credentials one above: a hook that is merely
+  // "read off the descriptor" can be deleted from a platform without any
+  // outcome-level test noticing, because the absent-hook fallback is a legal
+  // answer everywhere. Naming the exact set makes removal loud.
+  test("exactly the platforms whose message id pins a message declare it", () => {
+    const declaring = PLATFORMS.filter(
+      ([, descriptor]) => descriptor.messageIdIdentifiesMessage !== undefined,
+    ).map(([platform]) => platform);
+    expect(declaring).toEqual(["gchat"]);
+  });
+
+  test("gchat pins only a full space-scoped resource name", () => {
+    const pins = PLATFORM_REGISTRY.gchat.messageIdIdentifiesMessage;
+    if (!pins) throw new Error("gchat must declare messageIdIdentifiesMessage");
+    // The real shape the notice path produced in prod.
+    expect(pins("spaces/3eodnKAAAAE/messages/abc.abc")).toBe(true);
+    // A bare space, a thread route, and Slack's `ts` are all conversation- or
+    // thread-scoped, so none of them may suppress the thread check.
+    expect(pins("spaces/3eodnKAAAAE")).toBe(false);
+    expect(pins("spaces/3eodnKAAAAE/threads/t1")).toBe(false);
+    expect(pins("1712345678.000001")).toBe(false);
+    expect(pins("")).toBe(false);
+  });
+
   describe.each(PLATFORMS)("%s", (platform, descriptor) => {
     // The `##general` class: `preview/slack.ts` and the conversations listing
     // each held their own copy of the `#` rule and only one stripped an

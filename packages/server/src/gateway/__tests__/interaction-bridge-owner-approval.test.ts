@@ -12,6 +12,7 @@ import {
   createTestEntity,
   createTestOrganization,
   createTestUser,
+  linkChatIdentityInGraph,
   linkSlackIdentityInGraph,
 } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
@@ -26,7 +27,10 @@ const TEAM_ID = "T-OWNERAPPROVE";
 
 type ActionHandler = (event: any) => Promise<void>;
 
-function setupHandler(organizationId: string): {
+function setupHandler(
+  organizationId: string,
+  platform = "slack",
+): {
   handler: ActionHandler;
   post: ReturnType<typeof mock>;
 } {
@@ -38,11 +42,14 @@ function setupHandler(organizationId: string): {
   };
   const connection = {
     id: "conn-owner-1",
-    platform: "slack",
+    platform,
     organizationId,
     config: {},
     settings: {},
-    metadata: { teamId: TEAM_ID },
+    // Only Slack has a workspace axis. Stamping a teamId on a Google Chat
+    // connection would hide the very case under test, since `actionEventTeamId`
+    // falls back to `connection.metadata.teamId`.
+    metadata: platform === "slack" ? { teamId: TEAM_ID } : {},
     status: "active",
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -58,6 +65,7 @@ interface Fixture {
   entityId: number;
   runId: number;
   adminSlackId: string;
+  adminUserId: string;
   ownerSlackId: string;
   otherSlackId: string;
   ownerUserId: string;
@@ -128,6 +136,7 @@ async function seedApprovalFixture(): Promise<Fixture> {
     entityId: entity.id,
     runId: proposed.runId,
     adminSlackId: "U-ADMIN",
+    adminUserId: admin.id,
     ownerSlackId: "U-OWNER",
     otherSlackId: "U-OTHER",
     ownerUserId: owner.id,
@@ -187,8 +196,40 @@ describe("interaction bridge — owner-routed approval authority", () => {
     expect((await runStatus(fx.runId)).approval_status).toBe("pending");
     expect(post).toHaveBeenCalledTimes(1);
     expect(String(post.mock.calls[0][0])).toContain(
-      "couldn’t verify that your Slack account maps to a Lobu admin",
+      "couldn’t verify that your chat account maps to a Lobu admin",
     );
+  });
+
+  /**
+   * Approval from a NON-Slack chat. `resolveActionReviewer` used to open with
+   * `if (connection.platform !== "slack") return null`, plus a blanket
+   * `teamId == null` guard — so every Google Chat tap was refused and the
+   * refusal even named Slack. Google Chat carries no workspace id and its
+   * `ChatUserIdentity.buildUserKey` ignores one by design, so BOTH the branch
+   * and the guard had to go for this to resolve.
+   */
+  test("a Google Chat admin can approve — no team id, no Slack branch", async () => {
+    const fx = await seedApprovalFixture();
+    const googleUserId = "users/110000000000000000001";
+    await linkChatIdentityInGraph({
+      organizationId: fx.orgId,
+      userId: fx.adminUserId,
+      platform: "gchat",
+      platformUserId: googleUserId,
+    });
+
+    const { handler, post } = setupHandler(fx.orgId, "gchat");
+    await handler({
+      actionId: `run-approval:${fx.runId}:approve`,
+      value: "approve",
+      thread: { post },
+      user: { userId: googleUserId },
+      // Google Chat sends no team id at all — the case the old guard rejected.
+      channelId: "spaces/AAA",
+      conversationId: "gchat:spaces/AAA:dm",
+    });
+
+    expect((await runStatus(fx.runId)).approval_status).toBe("approved");
   });
 
   test("the non-admin field owner can approve — run resolves and the change applies", async () => {
