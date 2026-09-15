@@ -265,8 +265,8 @@ describe("provider refusals prod was recording as the agent's fault", () => {
     // for the user, no PROVIDER_* alert, and `outcome = agent_error` on a run
     // the provider had refused.
 
-    // ChatGPT subscription limit — the single largest unclassified class (24
-    // runs). Reaches us three ways: direct, and relayed through a codex or
+    // ChatGPT subscription limit — the single largest unclassified class, 47
+    // of the 52. Reaches us three ways: direct, and relayed through a codex or
     // opencode crash tail, which is why the plain phrase has to match and not
     // an anchored shape.
     for (const message of [
@@ -280,7 +280,7 @@ describe("provider refusals prod was recording as the agent's fault", () => {
     }
 
     // A windowed subscription limit must NOT reach the balance union, which
-    // parks an Automation for a full day; this one resets in hours.
+    // parks an Automation for a flat day; this one names its own reset.
     expect(
       PROVIDER_BALANCE_EXHAUSTED.test(
         "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 minutes."

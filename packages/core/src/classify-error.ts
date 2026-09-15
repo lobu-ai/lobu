@@ -83,16 +83,18 @@ export function classifyErrorMessage(
 
   // `usage limit` is ChatGPT subscription wording ("You have hit your ChatGPT
   // usage limit (pro plan)."). It was the single largest unclassified failure
-  // in prod over the 30 days to 2026-09-15 — 19 agent turns and 7 Automation
-  // runs — and being unclassified cost three things at once: the run was
-  // blamed on the agent (`outcome = agent_error`), the user got the raw
-  // provider sentence with no "Manage provider" CTA, and the failure dodged
-  // the PROVIDER_* alert.
+  // in prod over the 30 days to 2026-09-15 — 47 of the 52 runs the provider
+  // had refused and the platform blamed on the agent, across both agent turns
+  // and Automation runs — and being unclassified cost three things at once: the
+  // run was blamed on the agent (`outcome = agent_error`), the user got the
+  // raw provider sentence with no "Manage provider" CTA, and the failure
+  // dodged the PROVIDER_* alert.
   //
   // It belongs HERE and not in `PROVIDER_BALANCE_EXHAUSTED` above: a
-  // subscription usage limit is WINDOWED and self-heals, while that union
-  // parks an Automation for a full day. Day-parking a limit that resets in
-  // hours would be a worse bug than the one this fixes.
+  // subscription usage limit is WINDOWED — the provider names its own reset,
+  // hours or days out — while that union parks an Automation for a flat day
+  // regardless. Parking a windowed limit on a balance schedule would be a
+  // worse bug than the one this fixes.
   if (
     /weekly\/monthly limit exhausted|limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
       message

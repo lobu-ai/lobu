@@ -57,20 +57,19 @@ const AGENT_PROTOCOL_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * Provider/platform/config faults. Sources, in prod-frequency order (14-day
- * corpus, 2026-08-06): provider quota 429s (2,209 of 2,651 failures), the
- * provider-error formatter shape (`url-builder.ts` labelProviderErrorBody),
- * synthesized worker texts from the AGENT_ERRORS catalog, gateway
- * session/enqueue failures, executor config, and approval walls (a headless
- * run blocked on a human approval is an environment condition, not agent
- * evidence).
+ * Platform/config faults, plus provider phrasings LOOSER than the catalog's.
+ * Consulted only after `classifyErrorMessage` returned no code, so nothing
+ * here may duplicate a catalog pattern — such an entry is unreachable.
+ * Sources (14-day corpus, 2026-08-06): the provider-error formatter shape
+ * (`url-builder.ts` labelProviderErrorBody), bare quota/limit/billing/401
+ * words the catalog keeps narrower on purpose, synthesized worker texts from
+ * the AGENT_ERRORS catalog, gateway session/enqueue failures, executor config,
+ * and approval walls (a headless run blocked on a human approval is an
+ * environment condition, not agent evidence).
  */
 const INFRA_PATTERNS: readonly RegExp[] = [
 	/returned an error:/i,
-	/\b429\b/,
-	/rate limit/i,
 	/quota/i,
-	/limit exhausted/i,
 	/limit reached/i,
 	/insufficient balance/i,
 	/billing/i,
@@ -141,9 +140,10 @@ export function classifyRunOutcome(input: {
 	// growing provider wording independently and had already drifted: over the
 	// 30 days to 2026-09-15 the catalog knew ChatGPT's "usage limit" and
 	// `INFRA_PATTERNS` did not, so 52 prod runs whose provider refused them
-	// were recorded as the agent's fault — 24 ChatGPT subscription limits, 13
-	// codex and 2 opencode crashes whose tail carried the provider's own quota
-	// error, 4 missing-credential 401s and a model-eligibility 403.
+	// were recorded as the agent's fault: 47 carrying ChatGPT's subscription
+	// "usage limit" (direct, and relayed through codex and opencode crash
+	// tails), 4 bare missing-credential failures whose code this path was
+	// dropping, and one model-eligibility 403.
 	//
 	// Ordered AFTER the protocol patterns on purpose. An agent that ended its
 	// turn without calling `complete_window` stays agent evidence even when the
@@ -152,10 +152,10 @@ export function classifyRunOutcome(input: {
 	if (classifyErrorMessage(message)) {
 		return "infra_error";
 	}
-	// Platform/orchestration faults the provider catalog has no code for:
-	// approval walls, enqueue failures, sweeper timeouts. Kept as the
-	// supplement rather than folded into the catalog, which is specifically a
-	// PROVIDER/worker-fault vocabulary.
+	// The supplement: platform/orchestration faults the catalog has no code
+	// for (approval walls, enqueue failures, sweeper timeouts) and provider
+	// wording looser than the catalog admits. Not folded into the catalog,
+	// which is specifically a PROVIDER/worker-fault vocabulary.
 	if (INFRA_PATTERNS.some((p) => p.test(message))) {
 		return "infra_error";
 	}
