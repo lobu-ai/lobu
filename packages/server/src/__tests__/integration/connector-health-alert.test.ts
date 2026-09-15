@@ -964,6 +964,15 @@ describe('connector-health alerter', () => {
       consentOnly: true,
     });
 
+    // Pre-set the marker these rows already carry in prod, so this also pins the
+    // self-heal: the scan clears `unhealthy_alerted_at` whenever a connection
+    // classifies healthy, which means the 8 live false positives need no manual
+    // cleanup — the first scan after this deploys retracts them.
+    await sql`
+      UPDATE connections SET unhealthy_alerted_at = now() - interval '30 days'
+      WHERE id = ${consentOnly.id}
+    `;
+
     const res = await runConnectorHealthCheck();
     expect(res.details.some((d) => d.connectionId === consentOnly.id)).toBe(false);
 
