@@ -31,8 +31,8 @@ const healthyFeed = () =>
 	});
 
 describe("connection attention — the three prod shapes this exists to separate", () => {
-	// conn 623 (whatsapp.web, kshitij-aranke): created 2026-09-14, never touched
-	// again. 0 feeds, 0 runs, status 'active'. connector-health called it healthy.
+	// The abandoned-setup shape: a connection created and never returned to.
+	// 0 feeds, 0 runs, status 'active' — connector-health called it healthy.
 	test("a connection with no feeds at all reports no_feeds", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
@@ -43,8 +43,8 @@ describe("connection attention — the three prod shapes this exists to separate
 		expect(result.expectedFeedCount).toBe(0);
 	});
 
-	// conn 280 (x, market): 14 feeds, every one paused with no schedule since
-	// 2026-07-18. Also previously classified healthy.
+	// The all-paused shape: 14 feeds, every one paused with no schedule for two
+	// months. Also previously classified healthy.
 	test("a connection whose every feed is paused reports paused", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
@@ -56,8 +56,8 @@ describe("connection attention — the three prod shapes this exists to separate
 		expect(result.expectedFeedCount).toBe(14);
 	});
 
-	// conn 615 (whatsapp.web, lobu-team): verified collecting end-to-end
-	// 2026-09-15, 6s from message to stored row.
+	// The working shape: verified collecting end-to-end, 6s from inbound message
+	// to stored row.
 	test("a collecting connection reports healthy", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",

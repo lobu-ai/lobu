@@ -15,12 +15,15 @@
  * that cannot collect anything was indistinguishable from one collecting
  * thousands of events an hour.
  *
- * Measured on prod 2026-09-15, three connections show the three shapes this
- * module exists to separate, all of them `status='active'`:
- *   - conn 623 (`whatsapp.web`) — 0 feeds, 0 runs, created and abandoned mid-setup.
- *   - conn 280 (`x`) — 14 feeds, every one paused with no schedule since July.
- *   - conn 615 (`whatsapp.web`) — genuinely healthy, ~1 event per push.
- * `connector-health.ts` classified all three the same way: healthy.
+ * Measured on prod 2026-09-15, three shapes this module exists to separate, all
+ * of them `status='active'` and all reported healthy beforehand:
+ *   - a browser-backed connection with 0 feeds and 0 runs, created and
+ *     abandoned mid-setup;
+ *   - one with 14 feeds, every one paused with no schedule for two months;
+ *   - one genuinely collecting, ~1 event per push.
+ * `connector-health.ts` classified all three the same way: healthy. Across the
+ * whole estate it read 124 connections as fine; this module finds 66 of them
+ * wanting attention.
  *
  * ## The fold
  *
@@ -44,9 +47,10 @@
  *
  * Cumulative `feeds.items_collected` is deliberately NOT consulted, in either
  * direction. Zero is not a defect: a mailbox label with no mail syncs cleanly
- * and collects zero forever. Non-zero is not health either — prod conn 250 has
- * collected 74 items across 27 runs and has never once completed a successful
- * sync, so an item count would have called that stuck feed healthy.
+ * and collects zero forever. Non-zero is not health either — a prod feed
+ * measured 2026-09-15 had collected 74 items across 27 runs and had never once
+ * completed a successful sync, so an item count would have called it healthy
+ * while it sat stuck.
  * `connector-health.ts` keys its own never-started rule the same way.
  *
  * ## There are deliberately no grace periods here
