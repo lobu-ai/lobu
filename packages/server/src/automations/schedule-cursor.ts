@@ -1,4 +1,8 @@
-import { AgentErrorCode, PROVIDER_BALANCE_EXHAUSTED } from "@lobu/core";
+import {
+	AgentErrorCode,
+	PROVIDER_BALANCE_EXHAUSTED,
+	PROVIDER_WINDOWED_QUOTA,
+} from "@lobu/core";
 import type { DbClient } from "../db/client";
 import { nextRunAt } from "../utils/cron";
 import logger from "../utils/logger";
@@ -292,9 +296,7 @@ export function deviceProviderQuotaResetNotBefore(
 	// without admitting any of those, since none of them is about usage.
 	const hasQuotaEvidence =
 		PROVIDER_BALANCE_EXHAUSTED.test(message) ||
-		/limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
-			message
-		);
+		PROVIDER_WINDOWED_QUOTA.test(message);
 	if (!hasQuotaEvidence) return null;
 	return (
 		parseProviderQuotaResetAt(message, now) ??

@@ -28,17 +28,13 @@
  *  2. A known `AgentErrorCode` → infra_error. The catalog (core/errors.ts) is
  *     exclusively provider/worker/config failures today; an agent-fault code
  *     added there must be mapped here explicitly.
- *  3. Message patterns, ordered agent-protocol → provider catalog → platform
- *     infra → agent-process, with unknown failures defaulting to agent_error:
- *     fail toward VISIBILITY. An unrecognized failure shows up in the
- *     quality-relevant bucket and gets a pattern added, rather than being
- *     silently excused as infra. Provider wording is recognized by deriving a
- *     code from `classifyErrorMessage` — a new provider failure mode is taught
- *     to the catalog once and every layer learns it, instead of to this file
- *     and the catalog separately, which is how the two drifted.
+ *  3. Message patterns, ordered agent-protocol → infra → agent-process, with
+ *     unknown failures defaulting to agent_error: fail toward VISIBILITY. An
+ *     unrecognized failure shows up in the quality-relevant bucket and gets a
+ *     pattern added here, rather than being silently excused as infra.
  */
 
-import { AgentErrorCode, classifyErrorMessage } from "@lobu/core";
+import { AgentErrorCode } from "@lobu/core";
 
 export type RunOutcome = "infra_error" | "agent_error" | "scoreable";
 
@@ -57,19 +53,20 @@ const AGENT_PROTOCOL_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * Platform/config faults, plus provider phrasings LOOSER than the catalog's.
- * Consulted only after `classifyErrorMessage` returned no code, so nothing
- * here may duplicate a catalog pattern — such an entry is unreachable.
- * Sources (14-day corpus, 2026-08-06): the provider-error formatter shape
- * (`url-builder.ts` labelProviderErrorBody), bare quota/limit/billing/401
- * words the catalog keeps narrower on purpose, synthesized worker texts from
- * the AGENT_ERRORS catalog, gateway session/enqueue failures, executor config,
- * and approval walls (a headless run blocked on a human approval is an
- * environment condition, not agent evidence).
+ * Provider/platform/config faults. Sources, in prod-frequency order (14-day
+ * corpus, 2026-08-06): provider quota 429s (2,209 of 2,651 failures), the
+ * provider-error formatter shape (`url-builder.ts` labelProviderErrorBody),
+ * synthesized worker texts from the AGENT_ERRORS catalog, gateway
+ * session/enqueue failures, executor config, and approval walls (a headless
+ * run blocked on a human approval is an environment condition, not agent
+ * evidence).
  */
 const INFRA_PATTERNS: readonly RegExp[] = [
 	/returned an error:/i,
+	/\b429\b/,
+	/rate limit/i,
 	/quota/i,
+	/limit exhausted/i,
 	/limit reached/i,
 	/insufficient balance/i,
 	/billing/i,
@@ -135,27 +132,6 @@ export function classifyRunOutcome(input: {
 	if (AGENT_PROTOCOL_PATTERNS.some((p) => p.test(message))) {
 		return "agent_error";
 	}
-	// Provider faults are recognized by THE catalog (core/classify-error.ts),
-	// not by a second copy of its vocabulary maintained here. Both lists were
-	// growing provider wording independently and had already drifted: over the
-	// 30 days to 2026-09-15 the catalog knew ChatGPT's "usage limit" and
-	// `INFRA_PATTERNS` did not, so 52 prod runs whose provider refused them
-	// were recorded as the agent's fault: 47 carrying ChatGPT's subscription
-	// "usage limit" (direct, and relayed through codex and opencode crash
-	// tails), 4 bare missing-credential failures whose code this path was
-	// dropping, and one model-eligibility 403.
-	//
-	// Ordered AFTER the protocol patterns on purpose. An agent that ended its
-	// turn without calling `complete_window` stays agent evidence even when the
-	// CLI tail it printed also mentions a rate limit; running the catalog first
-	// would let any crash dump quoting a provider excuse itself.
-	if (classifyErrorMessage(message)) {
-		return "infra_error";
-	}
-	// The supplement: platform/orchestration faults the catalog has no code
-	// for (approval walls, enqueue failures, sweeper timeouts) and provider
-	// wording looser than the catalog admits. Not folded into the catalog,
-	// which is specifically a PROVIDER/worker-fault vocabulary.
 	if (INFRA_PATTERNS.some((p) => p.test(message))) {
 		return "infra_error";
 	}

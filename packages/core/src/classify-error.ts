@@ -20,7 +20,11 @@
  * specific and why they are worth keeping verbatim rather than generalising.
  */
 
-import { AgentErrorCode, PROVIDER_BALANCE_EXHAUSTED } from "./errors.js";
+import {
+  AgentErrorCode,
+  PROVIDER_BALANCE_EXHAUSTED,
+  PROVIDER_WINDOWED_QUOTA,
+} from "./errors.js";
 import { getProviderAuthHintFromError } from "./provider-auth-hints.js";
 
 /**
@@ -95,11 +99,7 @@ export function classifyErrorMessage(
   // hours or days out — while that union parks an Automation for a flat day
   // regardless. Parking a windowed limit on a balance schedule would be a
   // worse bug than the one this fixes.
-  if (
-    /weekly\/monthly limit exhausted|limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
-      message
-    )
-  )
+  if (PROVIDER_WINDOWED_QUOTA.test(message))
     return AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED;
 
   // Gemini can end a turn with this provider-side tool-call rejection instead

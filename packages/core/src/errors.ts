@@ -318,6 +318,28 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
 export const PROVIDER_BALANCE_EXHAUSTED =
   /credit balance is too low|insufficient (?:credits?|balance|funds|quota)\b|no resource package|billing_hard_limit_reached|payment required|exceeded your current quota|out of credits?\b|no credits remaining/i;
 
+/**
+ * Provider says: not now — a WINDOWED limit that self-heals, as opposed to the
+ * balance wall above. A bare 429, a rate limit, an exhausted plan window, or a
+ * subscription usage limit.
+ *
+ * Hoisted here for exactly the reason {@link PROVIDER_BALANCE_EXHAUSTED} was.
+ * This alternation was maintained as three independent literals — the turn
+ * classifier (`classify-error.ts`), the device schedule parker
+ * (`deviceProviderQuotaResetNotBefore`) and the server's own `INFRA_PATTERNS`
+ * — and drifted the same way the balance list did: the device parker learned
+ * ChatGPT's `usage limit` and the other two did not, so over the 30 days to
+ * 2026-09-15, 47 runs the provider had refused were recorded as the agent's
+ * fault, rendered to the user with no remediation CTA, and dodged the
+ * PROVIDER_* alert.
+ *
+ * Keep windowed wording ONLY. These must classify as quota but must NOT reach
+ * the day-park: they often clear within the minute, and the caller decides the
+ * horizon from the provider's own named reset.
+ */
+export const PROVIDER_WINDOWED_QUOTA =
+  /limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i;
+
 /** Parse an `AgentErrorCode` from an unknown value (payload/DB boundary). */
 export function toAgentErrorCode(value: unknown): AgentErrorCode | undefined {
   if (typeof value !== "string") return undefined;
