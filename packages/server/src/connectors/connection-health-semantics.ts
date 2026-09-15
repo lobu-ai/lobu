@@ -313,7 +313,12 @@ export function connectorHasAutoSyncableFeedsSql(definitionAlias: string): strin
             FROM jsonb_each(COALESCE(${definitionAlias}.feeds_schema, '{}'::jsonb))
               AS declared(feed_key, config)
             WHERE COALESCE(declared.config -> 'operations', '[]'::jsonb) @> '["sync"]'::jsonb
-              AND COALESCE((declared.config ->> 'userManaged')::boolean, false) = false
+              -- Text comparison, not a ::boolean cast: feeds_schema comes from a
+              -- connector definition, which a tenant can author, and a declared
+              -- value like "yes" would make the cast raise. This fragment runs
+              -- in the global health scan as well as both read paths, so one
+              -- malformed definition would take all three down.
+              AND declared.config ->> 'userManaged' IS DISTINCT FROM 'true'
           )`;
 }
 

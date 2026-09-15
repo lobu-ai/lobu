@@ -342,7 +342,13 @@ async function loadConnectionHealthRows(
       c.created_at AS connection_created_at,
       c.status AS connection_status,
       c.credential_mode,
-      COALESCE((c.config ->> 'consent_only')::boolean, false) AS consent_only,
+      -- Text comparison, never a ::boolean cast. config is free-form
+      -- tenant-written jsonb, so a value like "maybe" or an object would make
+      -- the cast raise and abort this whole scan -- which is global, so one
+      -- malformed row in one org would silence health alerting for every org.
+      -- Every other reader of this key compares text, including the filter
+      -- further down this same query.
+      COALESCE(c.config ->> 'consent_only' = 'true', false) AS consent_only,
       cd.has_auto_syncable_feeds AS connector_has_auto_syncable_feeds,
       ap.status AS auth_profile_status,
       -- Fails CLOSED on a missing/blank worker row: a connection pinned to a

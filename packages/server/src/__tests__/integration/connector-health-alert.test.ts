@@ -52,6 +52,8 @@ async function seedConnection(opts: {
   authProfileId?: number | null;
   credentialMode?: 'managed' | 'byo' | null;
   consentOnly?: boolean;
+  /** Raw config, for shapes consentOnly cannot express (a non-boolean value). */
+  config?: Record<string, unknown>;
 }): Promise<SeededConn> {
   const sql = getTestDb();
   const [row] = await sql`
@@ -65,7 +67,13 @@ async function seedConnection(opts: {
       ${opts.createdAt}, ${opts.createdAt},
       ${opts.deviceWorkerId ?? null}, ${opts.authProfileId ?? null},
       ${opts.credentialMode ?? null},
-      ${opts.consentOnly ? sql.json({ consent_only: true }) : null}
+      ${
+        opts.config
+          ? sql.json(opts.config)
+          : opts.consentOnly
+            ? sql.json({ consent_only: true })
+            : null
+      }
     )
     RETURNING id
   `;
@@ -1215,6 +1223,35 @@ describe('connector-health alerter', () => {
     const detail = res.details.find((d) => d.connectionId === neverStarted.id);
     expect(detail?.reason).toBe('never_collected' satisfies UnhealthyReason);
     expect(detail?.lastSyncAt).toBeNull();
+  });
+
+  // connections.config is free-form tenant-written jsonb, and this scan is
+  // global: a ::boolean cast on a value like "maybe" would raise and abort the
+  // whole run, silencing health alerting for every org from one malformed row
+  // in one of them. Seeded as a live shape rather than asserted on the SQL text
+  // so the guarantee survives a rewrite of the query.
+  it('survives a non-boolean consent_only without aborting the scan', async () => {
+    const malformed = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'gmail',
+      slug: 'consent-only-garbage',
+      createdAt: OLD,
+      config: { consent_only: 'maybe' },
+    });
+    await seedFeed({
+      orgId,
+      connectionId: malformed.id,
+      feedKey: 'a',
+      lastSyncStatus: null,
+      lastSyncAt: null,
+    });
+
+    // The scan completes at all, and still reaches its verdict for this row:
+    // 'maybe' is not 'true', so the connection is NOT treated as consent-only.
+    const res = await runConnectorHealthCheck();
+    const detail = res.details.find((d) => d.connectionId === malformed.id);
+    expect(detail?.reason).toBe('never_collected' satisfies UnhealthyReason);
   });
 
   // A sync claim stamps last_sync_status='pending' and leaves last_sync_at
