@@ -295,6 +295,9 @@ export function buildClientSDK(
 				// Workspace-identity audit rows are owner/admin-only; ordinary
 				// members running client.query must not surface them.
 				excludeWorkspaceAudit: !isInProcessSystemCall(workspaceCtx) && !isAdmin,
+				// $member entity rows carry PII reserved by the manage_entity
+				// read policy; ordinary members must not bypass it via raw SQL.
+				excludeMemberEntities: !isInProcessSystemCall(workspaceCtx) && !isAdmin,
 			});
 			// Outer LIMIT caps rows at the source so a broad SELECT can't
 			// materialize an unbounded result set host-side.

@@ -389,6 +389,36 @@ export function resolveMemberSchemaFieldsFromSchema(
   };
 }
 
+/**
+ * Read policy for the built-in $member entity type, shared by every surface
+ * that returns member entities (manage_entity list/get, search_memory):
+ * - Anyone who isn't a member of the org cannot see the member list at all.
+ * - Members who aren't admin/owner see names + non-PII metadata, but not the
+ *   email address.
+ * - Only admin/owner see the email field.
+ *
+ * Keep these three in one place so a new caller cannot drift the rule — the
+ * member list is PII, and search_memory once served it (with emails) to
+ * anonymous callers on public orgs because only manage_entity enforced it.
+ */
+export function canSeeMemberList(memberRole: string | null | undefined): boolean {
+  return !!memberRole;
+}
+
+export function canSeeMemberEmail(memberRole: string | null | undefined): boolean {
+  return memberRole === 'owner' || memberRole === 'admin';
+}
+
+export function redactMemberEmail(
+  metadata: Record<string, unknown>,
+  schema: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const { emailField } = resolveMemberSchemaFieldsFromSchema(schema);
+  if (!(emailField in metadata)) return metadata;
+  const { [emailField]: _removed, ...rest } = metadata;
+  return rest;
+}
+
 function memberMetadataSchemasEqual(
   a: Record<string, unknown> | MemberMetadataSchema | null | undefined,
   b: Record<string, unknown> | MemberMetadataSchema | null | undefined

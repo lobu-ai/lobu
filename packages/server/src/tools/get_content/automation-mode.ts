@@ -374,6 +374,11 @@ async function queryContentData(
           measure: source.ref.measure,
           userId: params.userId,
           excludeWorkspaceAudit: params.excludeWorkspaceAudit,
+          // Window metrics run admin-declared backing SQL under automation
+          // privilege; reader entitlement is enforced by the window gates, not
+          // here — same reason this site leaves the member default to the
+          // declared measure rather than the reader-driven SQL rule.
+          excludeMemberEntities: false,
         });
       } catch (err) {
         if (params.throwOnSourceError) throw err;

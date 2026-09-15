@@ -379,6 +379,20 @@ export function validateAndScopeQuery(
      * running query_sql / client.query must not surface them.
      */
     excludeWorkspaceAudit?: boolean;
+    /**
+     * Exclude $member entities from the entities (and entity-type-slug) CTEs.
+     * Member rows carry PII (email) that the manage_entity read policy reserves
+     * for members (list) and owners/admins (email); ordinary members running
+     * reader-driven SQL must not bypass that policy.
+     *
+     * REQUIRED (no default) so a future SQL entry point cannot forget it and
+     * silently re-open the leak — decide explicitly at every call site.
+     * Author-driven compilers (view templates, automation data sources,
+     * declared metrics) keep include semantics via executeDataSources, whose
+     * option stays optional: their SQL is admin-authored published content,
+     * same as automation prompts served to public readers.
+     */
+    excludeMemberEntities: boolean;
     /** Verified Automation window; supplied by the token resolver, never raw SQL. */
     window?: Pick<DataSourceContext, 'windowStart' | 'windowEnd' | 'entityIds' | 'excludeProducedByAutomationId'>;
   }
@@ -452,6 +466,8 @@ export function buildScopedQuery(
   options?: {
     safeColumns?: Map<string, ColumnDef[]>;
     excludeWorkspaceAudit?: boolean;
+    /** Exclude $member entities from the entities (and entity-type-slug) CTEs. See validateAndScopeQuery. */
+    excludeMemberEntities?: boolean;
   }
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
@@ -696,11 +712,14 @@ export function buildScopedQuery(
 
     if (table === 'entities') {
       // security-allowed: see block comment above this for-loop
+      // $member rows carry PII reserved by the manage_entity read policy;
+      // exclude them for non-admin readers just like workspace-audit events.
+      const memberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
       ctes.push(
         `"${safeName}" AS (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
           `JOIN public.entity_types et ON et.id = e.entity_type_id ` +
-          `WHERE e.organization_id = ${orgP})`
+          `WHERE e.organization_id = ${orgP}${memberPredicate})`
       );
     } else if (table === 'events') {
       // Tenancy via eventOrgScope, shared with event_classifications — keeps
@@ -900,15 +919,18 @@ export function buildScopedQuery(
           `WHERE ei.organization_id = ${orgP})`
       );
     } else {
-      // Treat as entity_type slug — uses entities columns
+      // Treat as entity_type slug — uses entities columns. The $member
+      // exclusion applies here too, so `SELECT * FROM "$member"` cannot
+      // bypass the entities-table predicate above.
       idx++;
       params.push(table);
+      const slugMemberPredicate = options?.excludeMemberEntities ? ` AND et.slug <> '$member'` : '';
       // security-allowed: see block comment above the for-loop
       ctes.push(
         `"${safeName}" AS (SELECT ${selEntitiesJoined('e', 'et')} ` +
           `FROM public.entities e ` +
           `JOIN public.entity_types et ON et.id = e.entity_type_id ` +
-          `WHERE e.organization_id = ${orgP} AND et.slug = $${idx})`
+          `WHERE e.organization_id = ${orgP} AND et.slug = $${idx}${slugMemberPredicate})`
       );
     }
   }
@@ -1055,6 +1077,8 @@ export async function executeDataSources(
     validateEntitySlugs?: boolean;
     /** Exclude workspace-identity audit rows from the events/event_classifications CTEs. */
     excludeWorkspaceAudit?: boolean;
+    /** Exclude $member entities from the entities (and entity-type-slug) CTEs. See validateAndScopeQuery. */
+    excludeMemberEntities?: boolean;
   }
 ): Promise<Record<string, unknown[]>> {
   const results: Record<string, unknown[]> = {};
@@ -1116,6 +1140,7 @@ export async function executeDataSources(
         let { sql: scopedQuery, params } = buildScopedQuery(query, tableRefs, context, {
           safeColumns: SAFE_COLUMN_DEFS,
           excludeWorkspaceAudit: options?.excludeWorkspaceAudit,
+          excludeMemberEntities: options?.excludeMemberEntities,
         });
 
         // Validate param count matches placeholders in scoped query

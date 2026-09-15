@@ -48,6 +48,13 @@ interface RunMetricInput {
    * readers must set true so member/invitation lifecycle cannot move metrics.
    */
   excludeWorkspaceAudit?: boolean;
+  /**
+   * Exclude $member entities from the entities CTE. REQUIRED (no default):
+   * ordinary members / public readers must set true so member PII cannot move
+   * metrics past the manage_entity policy; owner/admin and trusted system
+   * callers set false explicitly.
+   */
+  excludeMemberEntities: boolean;
 }
 
 export async function runMetric(input: RunMetricInput): Promise<Record<string, unknown>[]> {
@@ -87,6 +94,7 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
     safeColumns: usesDerivedMetric ? SAFE_COLUMN_DEFS : METRIC_SAFE_COLUMNS,
     userId: input.userId ?? null,
     excludeWorkspaceAudit: input.excludeWorkspaceAudit,
+    excludeMemberEntities: input.excludeMemberEntities,
   });
 
   const rows = await sql.begin(async (tx: typeof sql) => {

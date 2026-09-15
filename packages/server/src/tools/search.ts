@@ -21,7 +21,8 @@ import {
   resolveGrantedWorkspaceTarget,
 } from '../auth/oauth/workspace-grants';
 import { isInProcessSystemCall } from './access-control';
-import { AUDIT_SEMANTIC_TYPE } from './constants';
+import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
+import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from '../utils/member-entity-type';
 import { evaluateEntityMutation, resolveActingPrincipal } from '../authz/entity-policy';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
@@ -1603,6 +1604,19 @@ async function searchWorkspaceImpl(
         args.include_public_catalogs ?? true
       )) ?? execution.preResolvedEntity ?? null;
     if (entity) {
+      // $member entities follow the manage_entity read policy, not the agent
+      // read policy: invisible member rows fail closed here (no entity, no
+      // recall) instead of flowing into formatEntityResult.
+      if (
+        entity.entity_type === MEMBER_ENTITY_TYPE_SLUG &&
+        (entity.organization_id !== ctx.organizationId || !canSeeMemberList(ctx.memberRole))
+      ) {
+        return emptyResult({
+          ...(title ? { title } : {}),
+          entity_type: entity.entity_type,
+          suggestion: entityIdNotFoundSuggestion(args.entity_id),
+        });
+      }
       const readable = await filterEntitiesByReadPolicy(ctx, [entity]);
       if (readable.length === 0) {
         return emptyResult({
@@ -2012,6 +2026,19 @@ async function fetchPublicEntityById(
 // Formatting Helper Functions
 // ============================================
 
+/** $member metadata_schema for email-field resolution (null = default 'email'). */
+async function loadMemberMetadataSchema(
+  organizationId: string | null
+): Promise<Record<string, unknown> | null> {
+  if (!organizationId) return null;
+  const rows = await getDb()`
+    SELECT metadata_schema FROM entity_types
+    WHERE slug = ${MEMBER_ENTITY_TYPE_SLUG} AND organization_id = ${organizationId} AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  return (rows[0]?.metadata_schema as Record<string, unknown> | null) ?? null;
+}
+
 async function formatEntityResult(
   entityRows: EntityQueryRow[],
   args: SearchArgs,
@@ -2019,8 +2046,36 @@ async function formatEntityResult(
   connectionScope: AuthzScope
 ): Promise<UnifiedSearchResult> {
   const title = args.title?.trim() || undefined;
+  // $member read policy mirrors manage_entity list/get: callers who are not
+  // members of the row's workspace never see member entities (this closed an
+  // anonymous-email leak on public orgs — search served $member metadata with
+  // emails while manage_entity denied the same list), and non-admin members
+  // see them with the email field redacted. Cross-workspace $member rows are
+  // never visible: a member list belongs to its own workspace.
+  const memberRows = entityRows.filter((row) => row.entity_type === MEMBER_ENTITY_TYPE_SLUG);
+  let visibleRows = entityRows;
+  if (memberRows.length > 0) {
+    if (!canSeeMemberList(ctx.memberRole)) {
+      visibleRows = entityRows.filter((row) => row.entity_type !== MEMBER_ENTITY_TYPE_SLUG);
+    } else {
+      visibleRows = entityRows.filter(
+        (row) => row.entity_type !== MEMBER_ENTITY_TYPE_SLUG || row.organization_id === ctx.organizationId
+      );
+    }
+    if (!canSeeMemberEmail(ctx.memberRole)) {
+      const memberSchema = await loadMemberMetadataSchema(ctx.organizationId);
+      visibleRows = visibleRows.map((row) =>
+        row.entity_type === MEMBER_ENTITY_TYPE_SLUG
+          ? { ...row, metadata: redactMemberEmail((row.metadata ?? {}) as Record<string, unknown>, memberSchema) }
+          : row
+      );
+    }
+  }
+  if (visibleRows.length === 0) {
+    return emptyResult({ ...(title ? { title } : {}), entity_type: args.entity_type || null });
+  }
   // Map rows to unified Entity format (all fields, nulls where not applicable)
-  const matches: Entity[] = entityRows.map((row) => ({
+  const matches: Entity[] = visibleRows.map((row) => ({
     id: Number(row.id),
     type: row.entity_type,
     name: row.name,
@@ -2045,7 +2100,7 @@ async function formatEntityResult(
 
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
   const primaryEntity = matches[0];
-  const primaryRow = entityRows[0];
+  const primaryRow = visibleRows[0];
   const entityType = primaryEntity.type;
   const isRootEntity = !primaryEntity.parent_id;
 

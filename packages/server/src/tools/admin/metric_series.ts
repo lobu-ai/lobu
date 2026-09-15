@@ -180,6 +180,9 @@ async function metricSeriesImpl(
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not chart member/invitation lifecycle data via raw SQL.
     excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdmin,
+    // $member entity rows carry PII reserved by the manage_entity read
+    // policy; ordinary members must not bypass it via raw SQL.
+    excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdmin,
   });
   const db = getDb();
 

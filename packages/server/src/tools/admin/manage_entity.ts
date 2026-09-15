@@ -100,7 +100,7 @@ import {
 	insertEdgeChangeEventInTransaction,
 	stableJson,
 } from "../../utils/insert-event";
-import { resolveMemberSchemaFieldsFromSchema } from "../../utils/member-entity-type";
+import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from "../../utils/member-entity-type";
 import {
 	ACL_MANAGED_TYPE_SQL,
 	assertNotAclManagedEdge,
@@ -852,28 +852,9 @@ async function handleUpdate(
 	};
 }
 
-// Access policy for the built-in $member entity type:
-//  - Anyone who isn't a member of the org cannot see the member list at all.
-//  - Members who aren't admin/owner see names + non-PII metadata, but not the
-//    email address.
-//  - Only admin/owner see the email field.
-function canSeeMemberList(ctx: ToolContext): boolean {
-  return !!ctx.memberRole;
-}
-
-function canSeeMemberEmail(ctx: ToolContext): boolean {
-  return isAdminOrOwnerRole(ctx.memberRole);
-}
-
-function redactMemberEmail(
-	metadata: Record<string, unknown>,
-	schema: Record<string, unknown> | null | undefined,
-): Record<string, unknown> {
-  const { emailField } = resolveMemberSchemaFieldsFromSchema(schema);
-  if (!(emailField in metadata)) return metadata;
-  const { [emailField]: _removed, ...rest } = metadata;
-  return rest;
-}
+// $member read policy (canSeeMemberList / canSeeMemberEmail /
+// redactMemberEmail) lives in utils/member-entity-type.ts, shared with
+// search_memory so the two surfaces cannot drift.
 
 /**
  * Fold a duplicate entity (`entity_id`, the loser) into the one it really is
@@ -1302,7 +1283,7 @@ async function handleList(
 	env: Env,
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
-	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx)) {
+	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx.memberRole)) {
 		throw new ToolUserError(
 			"The member list is only visible to members of this workspace. Join the workspace to see members.",
 			400,
@@ -1398,7 +1379,7 @@ async function handleList(
 	]);
 
 	const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-	const hideMemberEmail = !canSeeMemberEmail(ctx);
+	const hideMemberEmail = !canSeeMemberEmail(ctx.memberRole);
 
 	return {
 		action: "list",
@@ -1587,7 +1568,7 @@ async function handleGet(
 
 	if (
 		entity.entity_type === MEMBER_ENTITY_TYPE_SLUG &&
-		!canSeeMemberList(ctx)
+		!canSeeMemberList(ctx.memberRole)
 	) {
 		throw new ToolUserError(
 			"Member details are only visible to members of this workspace. Join the workspace to see members.",
@@ -1600,7 +1581,7 @@ async function handleGet(
 	let metadata = entity.metadata ?? {};
 	if (
 		entity.entity_type === MEMBER_ENTITY_TYPE_SLUG &&
-		!canSeeMemberEmail(ctx)
+		!canSeeMemberEmail(ctx.memberRole)
 	) {
 		const sql = getDb();
 		const rows = await sql`

@@ -56,6 +56,9 @@ async function queryMetricImpl(
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not move a declared metric by counting lifecycle events.
     excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
+    // $member entity rows carry PII reserved by the manage_entity read
+    // policy; ordinary members must not bypass it via a declared measure.
+    excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
   });
   return { rows, row_count: rows.length };
 }

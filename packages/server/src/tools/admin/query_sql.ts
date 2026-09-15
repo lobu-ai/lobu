@@ -465,6 +465,9 @@ export async function querySqlImpl(
       // Workspace-identity audit rows are owner/admin/system-only; ordinary
       // members must not select their member/invitation lifecycle data via raw SQL.
       excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !callerIsAdmin,
+      // $member entity rows carry PII reserved by the manage_entity read
+      // policy; ordinary members must not bypass it via raw SQL.
+      excludeMemberEntities: !isInProcessSystemCall(ctx) && !callerIsAdmin,
     });
     scopedSql = scoped.sql;
     params = scoped.params;
