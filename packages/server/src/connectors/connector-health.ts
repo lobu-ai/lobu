@@ -599,6 +599,17 @@ function classify(
   let failingExpectedCount = 0;
   let persistentCount = 0;
   let newestSyncAtMs: number | null = null;
+  // Has any expected feed ever finished a sync, successfully or not?
+  //
+  // `last_sync_status` cannot answer this: the worker claim CTE stamps
+  // 'pending' on every sync claim (worker-api/poll.ts) and a failure stamps
+  // 'failed', so the column only ever reports the LATEST attempt and a feed
+  // that collected for months reads as though it never had. `last_sync_at` is
+  // written by both terminal paths and by neither the claim nor the enqueue, so
+  // a NULL there is the one durable "this feed has never finished a run"
+  // signal — the same definition `feed-health-semantics.ts` uses for
+  // `never_run`.
+  let everFinishedASync = false;
   let failingError: string | null = null;
   let expectedError: string | null = null;
 
@@ -614,6 +625,7 @@ function classify(
     }
     if (feed.persistent) persistentCount += 1;
 
+    if (row.last_sync_at) everFinishedASync = true;
     if (row.last_sync_status === 'success' && row.last_sync_at) {
       const syncMs = tsTimeOrNull(row.last_sync_at);
       if (syncMs !== undefined && (newestSyncAtMs === null || syncMs > newestSyncAtMs)) {
@@ -653,14 +665,17 @@ function classify(
     // feed that can never sync cannot keep the timestamp fresh forever.
     reason = 'no_recent_sync';
   } else if (
-    newestSyncAtMs === null &&
+    !everFinishedASync &&
     neverCollectedGraceElapsed(rows[0]?.connection_created_at, cfg, nowMs)
   ) {
-    // Rule E: never started — the exact complement of Rule C above. No expected
-    // feed has ever completed a successful sync, so there is no "before" for any
-    // regression rule to measure against and this connection was invisible to
-    // all of them. See NEVER_COLLECTED_GRACE_HOURS for why the signal is
-    // never-succeeded rather than never-produced.
+    // Rule E: never started — no expected feed has ever FINISHED a sync, so
+    // there is no "before" for any regression rule to measure against and this
+    // connection was invisible to all of them. Deliberately keyed on
+    // everFinishedASync and not on the newest SUCCESS: a connection that
+    // collected for months and is now failing, or simply mid-run when the scan
+    // lands, has no current success either, and calling that "never collected"
+    // is both false and a worse description than the failure rules above
+    // already give it. See NEVER_COLLECTED_GRACE_HOURS for the grace window.
     reason = 'never_collected';
   } else {
     return null;

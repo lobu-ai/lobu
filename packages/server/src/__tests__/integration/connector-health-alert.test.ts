@@ -1217,6 +1217,57 @@ describe('connector-health alerter', () => {
     expect(detail?.lastSyncAt).toBeNull();
   });
 
+  // A sync claim stamps last_sync_status='pending' and leaves last_sync_at
+  // alone, so a feed mid-run reports no CURRENT success however long it has
+  // been collecting. Keying Rule E on the newest success therefore paged
+  // `never_collected` at a connection that had synced an hour earlier — the
+  // exact false positive this whole change set out to remove, in the one path
+  // that wakes a human.
+  it('does not flag a connection whose feed is mid-run', async () => {
+    const midRun = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'gmail',
+      slug: 'mid-run',
+      createdAt: OLD,
+    });
+    await seedFeed({
+      orgId,
+      connectionId: midRun.id,
+      feedKey: 'a',
+      lastSyncStatus: 'pending',
+      lastSyncAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    const res = await runConnectorHealthCheck();
+    expect(res.details.some((d) => d.connectionId === midRun.id)).toBe(false);
+  });
+
+  // Same root cause, the other shape it produced: a connection that collected
+  // for months and is now failing also has no current success. `all_feeds_
+  // failing` already describes it, and `never_collected` would be plainly
+  // false — measured on prod conn with items_collected > 0 and 27 runs.
+  it('does not call a formerly-collecting connection never-collected', async () => {
+    const regressed = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'notion',
+      slug: 'was-collecting-now-failing',
+      createdAt: OLD,
+    });
+    await seedFeed({
+      orgId,
+      connectionId: regressed.id,
+      feedKey: 'a',
+      lastSyncStatus: 'failed',
+      lastSyncAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    });
+
+    const res = await runConnectorHealthCheck();
+    const detail = res.details.find((d) => d.connectionId === regressed.id);
+    expect(detail?.reason).not.toBe('never_collected' satisfies UnhealthyReason);
+  });
+
   // The complement, and the reason the rule is keyed on never-SUCCEEDED rather
   // than never-PRODUCED: a source that legitimately holds nothing (a mailbox
   // label with no mail) syncs cleanly and collects zero forever. That is not an
