@@ -28,6 +28,7 @@ import {
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
 import {
   listPendingToolsForConversation,
+  peekPendingTool,
   type PendingToolClaimant,
 } from "../../auth/mcp/pending-tool-store.js";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
@@ -1706,12 +1707,21 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       );
 
       try {
+        // Carry the AUTHENTICATED caller through to the enqueue. The adapters
+        // used to derive a synthetic id from the token bytes, which became the
+        // claimant on any approval this turn blocked on — an identity no
+        // approver could present.
+        const callerUserId = c.get("authContext")?.userId;
+        if (!callerUserId) {
+          return c.json({ success: false, error: "Unauthorized" }, 401);
+        }
         const result = await adapter.sendMessage(rawToken, messageContent, {
           agentId,
           organizationId: messageOrganizationId,
           channelId,
           conversationId,
           teamId,
+          callerUserId,
           files,
         });
 
@@ -1931,9 +1941,34 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       }
       const auth = c.get("authContext");
       if (!auth?.userId) return errorResponse(c, "Unauthorized", 401);
+      // The org predicate on the claim MUST be the org the pending row was
+      // written under, and `authContext.organizationId` is only populated by
+      // token auth — the settings-session COOKIE path (the SPA, which renders
+      // these approval cards) carries none. Passing that undefined through
+      // would silently drop the org predicate and leave the claim scoped by
+      // userId alone. Resolve the pending row's own conversation to its agent
+      // and AUTHORIZE the caller against it, exactly as the sibling
+      // pending-approvals route does: the grant names the agent's real tenant
+      // for cookie and token callers alike, so the predicate is always applied.
+      const peeked = await peekPendingTool(requestId);
+      if (!peeked) {
+        return errorResponse(c, "Request not found or expired", 400);
+      }
+      const approveSession = peeked.conversationId
+        ? await sessMgr.getSession(peeked.conversationId)
+        : null;
+      const approveAccess = await authorizeAgentAccess(
+        c,
+        approveSession?.agentId || peeked.agentId,
+        approveSession
+      );
+      if (approveAccess instanceof Response) return approveAccess;
+      if (!approveAccess.organizationId) {
+        return errorResponse(c, "Forbidden", 403);
+      }
       const result = await approveHandler(requestId, decision, {
         userId: auth.userId,
-        organizationId: auth.organizationId,
+        organizationId: approveAccess.organizationId,
       });
       if (!result.success) {
         return errorResponse(c, result.error || "Approval failed", 400);
