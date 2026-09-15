@@ -111,6 +111,13 @@ export interface ConnectionHealthSemanticsInput {
    */
   credential_mode?: string | null;
   /**
+   * `connections.config.consent_only` — the connection holds an OAuth grant for
+   * cloud-delegated token fetch and MUST have no feeds: the member's data lives
+   * only on their local instance, and `manage_feeds` refuses feeds on one. Zero
+   * feeds is the designed state here, never an install problem.
+   */
+  consent_only?: boolean | null;
+  /**
    * Whether the selected connector definition declares any auto-syncable feed.
    * Operation-only, source-only and user-managed-only connectors legitimately
    * have no collector rows, and `no_feeds` is meaningless for them. Left
@@ -190,10 +197,12 @@ export function deriveConnectionHealthSemantics(
     return { ...base, attention: "misconfigured" };
   }
 
-  // A chat transport carries no collector feeds by design, and a connector that
-  // declares none legitimately has nothing to roll up. Neither is a defect.
+  // A chat transport carries no collector feeds by design, a consent-only
+  // connection is forbidden from having any, and a connector that declares none
+  // legitimately has nothing to roll up. None of the three is a defect.
   const isCollectorConnection =
     input.credential_mode == null &&
+    input.consent_only !== true &&
     input.connector_has_auto_syncable_feeds !== false;
 
   if (expectedFeedCount === 0) {
@@ -285,6 +294,7 @@ export interface ConnectionHealthRow {
   auth_profile_status?: string | null;
   device_worker_id?: string | null;
   device_online?: boolean | null;
+  consent_only?: boolean | null;
   connector_has_auto_syncable_feeds?: boolean | null;
   feed_health?: unknown;
 }
@@ -346,6 +356,7 @@ export function deriveConnectionHealthFromRow(
   return deriveConnectionHealthSemantics({
     status: row.status,
     credential_mode: row.credential_mode,
+    consent_only: row.consent_only,
     connector_has_auto_syncable_feeds: row.connector_has_auto_syncable_feeds,
     feeds,
   });

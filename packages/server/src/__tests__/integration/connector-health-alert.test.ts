@@ -51,19 +51,21 @@ async function seedConnection(opts: {
   deviceWorkerId?: string | null;
   authProfileId?: number | null;
   credentialMode?: 'managed' | 'byo' | null;
+  consentOnly?: boolean;
 }): Promise<SeededConn> {
   const sql = getTestDb();
   const [row] = await sql`
     INSERT INTO connections (
       organization_id, connector_key, slug, display_name, status,
       created_by, visibility, created_at, updated_at,
-      device_worker_id, auth_profile_id, credential_mode
+      device_worker_id, auth_profile_id, credential_mode, config
     ) VALUES (
       ${opts.orgId}, ${opts.connectorKey}, ${opts.slug},
       ${`Conn ${opts.slug}`}, 'active', ${opts.userId}, 'org',
       ${opts.createdAt}, ${opts.createdAt},
       ${opts.deviceWorkerId ?? null}, ${opts.authProfileId ?? null},
-      ${opts.credentialMode ?? null}
+      ${opts.credentialMode ?? null},
+      ${opts.consentOnly ? sql.json({ consent_only: true }) : null}
     )
     RETURNING id
   `;
@@ -943,6 +945,32 @@ describe('connector-health alerter', () => {
     `) as unknown as Array<{ id: string; unhealthy_alerted_at: Date | null }>;
     expect(rows).toHaveLength(3);
     expect(rows.every((row) => row.unhealthy_alerted_at === null)).toBe(true);
+  });
+
+  // A consent-only connection holds an OAuth grant for cloud-delegated token
+  // fetch and is FORBIDDEN feeds — the member's data stays on their local
+  // instance, and manage_feeds refuses feeds on one outright. Zero feeds is the
+  // designed state. Measured on prod 2026-09-15 this rule had flagged all 8
+  // active connections of this shape, the oldest since 2026-07-09, and no
+  // operator action could ever have cleared them.
+  it('does not apply the zero-feed rule to a consent-only connection', async () => {
+    const sql = getTestDb();
+    const consentOnly = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'gmail',
+      slug: 'consent-only',
+      createdAt: OLD,
+      consentOnly: true,
+    });
+
+    const res = await runConnectorHealthCheck();
+    expect(res.details.some((d) => d.connectionId === consentOnly.id)).toBe(false);
+
+    const [row] = (await sql`
+      SELECT unhealthy_alerted_at FROM connections WHERE id = ${consentOnly.id}
+    `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>;
+    expect(row.unhealthy_alerted_at).toBeNull();
   });
 
   it('keeps the zero-feed alert fail-closed when the definition is missing', async () => {

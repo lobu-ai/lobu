@@ -514,6 +514,7 @@ export async function handleList(
     const connectionHealth = deriveConnectionHealthFromRow({
       status: row.status as string | null,
       credential_mode: row.credential_mode as string | null,
+      consent_only: parseJsonObject(row.config).consent_only === true,
       auth_profile_status: row.auth_profile_status as string | null,
       device_worker_id: row.device_worker_id as string | null,
       device_online: row.device_online as boolean | null,
@@ -746,6 +747,7 @@ export async function handleGet(
       attention: deriveConnectionHealthFromRow({
         status: getRow.status as string | null,
         credential_mode: getRow.credential_mode as string | null,
+        consent_only: parseJsonObject(getRow.config).consent_only === true,
         auth_profile_status: getRow.auth_profile_status as string | null,
         device_worker_id: getRow.device_worker_id as string | null,
         device_online: getRow.device_online as boolean | null,

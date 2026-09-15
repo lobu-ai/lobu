@@ -157,6 +157,20 @@ describe("connections that legitimately have no collector feeds", () => {
 		expect(result.attention).toBe("healthy");
 	});
 
+	test("a consent-only connection is FORBIDDEN feeds, so zero is correct", () => {
+		// It holds an OAuth grant for cloud-delegated token fetch; the member's
+		// data lives on their local instance and manage_feeds refuses feeds on one.
+		// Measured on prod 2026-09-15, all 8 active connections of this shape were
+		// already carrying unhealthy_alerted_at — the oldest since 2026-07-09.
+		const result = deriveConnectionHealthSemantics({
+			status: "active",
+			consent_only: true,
+			connector_has_auto_syncable_feeds: true,
+			feeds: [],
+		});
+		expect(result.attention).toBe("healthy");
+	});
+
 	test("a connector declaring no auto-syncable feeds stays healthy", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",

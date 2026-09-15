@@ -293,6 +293,7 @@ interface FeedHealthRow {
   connection_created_at: Date | string;
   connection_status: string | null;
   credential_mode: string | null;
+  consent_only: boolean;
   /** Whether the selected definition declares a sync operation that Lobu can
    *  create without user-supplied instance config. A zero-feed row necessarily
    *  selects the active definition. NULL means no selectable definition was
@@ -341,6 +342,7 @@ async function loadConnectionHealthRows(
       c.created_at AS connection_created_at,
       c.status AS connection_status,
       c.credential_mode,
+      COALESCE((c.config ->> 'consent_only')::boolean, false) AS consent_only,
       cd.has_auto_syncable_feeds AS connector_has_auto_syncable_feeds,
       ap.status AS auth_profile_status,
       -- Fails CLOSED on a missing/blank worker row: a connection pinned to a
@@ -563,6 +565,16 @@ function classify(
     // Chat rows are transports, not collectors. A channel-less chat connection
     // must not trip the collector-only zero-feed rule.
     if (rows[0]?.credential_mode != null) return null;
+    // A consent-only connection holds an OAuth grant for cloud-delegated token
+    // fetch and MUST have no feeds — the member's data stays on their local
+    // instance, and `manage_feeds` refuses feeds on one outright. Zero feeds is
+    // the designed state, not an install problem.
+    //
+    // Measured on prod 2026-09-15: all 8 active consent-only zero-feed
+    // connections carried `unhealthy_alerted_at`, the oldest since 2026-07-09 —
+    // this rule has been paging on connections working exactly as intended, and
+    // no operator action could ever clear them.
+    if (rows[0]?.consent_only === true) return null;
     // Operation-only, source-only, and user-managed-only connectors
     // legitimately have no automatic collector rows. If the definition is
     // missing, keep the alert fail-closed instead of hiding an install problem.
