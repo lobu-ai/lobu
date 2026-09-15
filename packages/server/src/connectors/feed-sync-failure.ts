@@ -1,0 +1,109 @@
+/**
+ * Charge one failed feed sync to the feed's source health.
+ *
+ * A sync run can reach a terminal failure from two lanes:
+ *
+ *  1. the worker reported an outcome — `completeWorkerJob`
+ *     (worker-api/run-lifecycle.ts), the lane the backoff policy was written
+ *     for; and
+ *  2. the gateway failed the run inside the poll request itself, after the
+ *     claim CTE already stamped the feed `last_sync_status='pending'` —
+ *     `pollWorkerJob` (worker-api/poll.ts) resolving the connector's bundle.
+ *
+ * Only (1) used to apply the policy, so a connector that could never produce a
+ * bundle re-fired on its plain cadence forever: `consecutive_failures` pinned
+ * at 0, `last_error` NULL, no backoff and no auto-pause — a feed that reports
+ * healthy while every run fails. Both lanes charge through here.
+ *
+ * This is the FAILURE half only. Success also resets the counter, advances the
+ * checkpoint and adds `items_collected`, none of which a lane that never ran
+ * connector code can report; `completeWorkerJob` keeps that half.
+ *
+ * The caller must have already transitioned the run to a terminal state under
+ * a lease fence, and must call this only when that transition actually
+ * happened — charging a feed for a run someone else finalized double-counts
+ * the failure.
+ */
+
+import { maybeEmitFeedAutoPausedAfterFailure } from '../automations/platform-events';
+import { getDb } from '../db/client';
+import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
+import { errorMessage } from '../utils/errors';
+import logger from '../utils/logger';
+import { feedBackoff } from './feed-backoff';
+
+/**
+ * Stamp the failed outcome, increment `consecutive_failures`, open the failure
+ * episode, back `next_run_at` off beyond the plain cadence, and hard-pause
+ * (plus emit `feed.auto_paused`) once the threshold is crossed.
+ */
+export async function applyFeedSyncFailure(params: {
+  feedId: number;
+  errorMessage: string | null;
+  runId: number;
+}): Promise<void> {
+  const sql = getDb();
+  const feedRows = (await sql`
+    SELECT schedule, timezone FROM feeds WHERE id = ${params.feedId}
+  `) as unknown as Array<{ schedule: string | null; timezone: string | null }>;
+  if (feedRows.length === 0) return;
+
+  // Manual feeds (no schedule) stay unscheduled after failure.
+  const schedule = feedRows[0]?.schedule ?? null;
+  const nextRun = schedule
+    ? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
+    : null;
+
+  const backoffBaseMs = feedBackoff.baseMs;
+  const backoffMaxMs = feedBackoff.maxMs;
+  const pauseThreshold = feedBackoff.pauseThreshold;
+
+  // Exponential backoff on top of the cron cadence so a persistently-failing
+  // feed retries progressively less often instead of re-enqueueing every plain
+  // cadence. Computed from the NEW count directly in SQL so it stays correct
+  // under concurrent completions across replicas. Once the NEW count crosses
+  // the pause threshold the feed is paused and next_run_at nulled.
+  const updated = (await sql`
+    UPDATE feeds
+    SET last_sync_at = current_timestamp,
+        last_sync_status = 'failed',
+        last_error = ${params.errorMessage},
+        consecutive_failures = consecutive_failures + 1,
+        first_failure_at = COALESCE(first_failure_at, current_timestamp),
+        status = CASE WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN 'paused' ELSE status END,
+        next_run_at = CASE
+              WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
+              WHEN ${nextRun}::timestamptz IS NULL THEN NULL
+              ELSE GREATEST(
+                ${nextRun}::timestamptz,
+                current_timestamp + (LEAST(
+                  ${backoffBaseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint,
+                  ${backoffMaxMs}::bigint
+                ) || ' milliseconds')::interval
+              )
+            END,
+        updated_at = current_timestamp
+    WHERE id = ${params.feedId}
+    RETURNING consecutive_failures
+  `) as unknown as Array<{ consecutive_failures: number }>;
+
+  const consecutiveFailures = Number(updated[0]?.consecutive_failures ?? 0);
+  // delivery_id is stable per failure episode (first_failure_at), so retries
+  // after a failed activation are idempotent and do not double-queue
+  // Automations.
+  try {
+    await maybeEmitFeedAutoPausedAfterFailure({
+      feedId: params.feedId,
+      consecutiveFailures,
+      pauseThreshold,
+      runId: params.runId,
+    });
+  } catch (err) {
+    // The feed is already paused; log hard so we notice a lost activation, but
+    // never fail the caller — its run is already terminal.
+    logger.error(
+      { feed_id: params.feedId, error: errorMessage(err) },
+      '[applyFeedSyncFailure] maybeEmitFeedAutoPausedAfterFailure threw'
+    );
+  }
+}

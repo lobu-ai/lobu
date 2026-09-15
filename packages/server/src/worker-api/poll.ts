@@ -39,6 +39,7 @@ import {
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
+import { applyFeedSyncFailure } from '../connectors/feed-sync-failure';
 import { resolveOperationFiles } from '../operations/file-inputs';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
@@ -1063,6 +1064,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         r.id AS run_id,
         r.run_type,
         r.feed_id,
+        r.dry_run,
         r.connection_id,
         r.connector_key,
         r.connector_version,
@@ -1296,6 +1298,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     run_id: number;
     run_type: string;
     feed_id: number | null;
+    dry_run: boolean | null;
     connection_id: number | null;
     connector_key: string | null;
     connector_version: string | null;
@@ -1934,11 +1937,24 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       });
     } catch (err) {
       const message = errorMessage(err);
-      await failClaimedWorkerRun({
+      const failed = await failClaimedWorkerRun({
         runId: row.run_id,
         workerId: worker_id,
         errorMessage: message,
       });
+      // The claim CTE above already stamped this feed `last_sync_status =
+      // 'pending'`. Failing only the run leaves it there forever: a connector
+      // whose bundle can never be produced re-fires on its plain cadence with
+      // `consecutive_failures` pinned at 0, so it never backs off, never
+      // auto-pauses, and reports healthy while every run fails. Gated on the
+      // transition so a lost lease cannot charge the feed twice.
+      if (failed && row.feed_id && !row.dry_run) {
+        await applyFeedSyncFailure({
+          feedId: row.feed_id,
+          errorMessage: message,
+          runId: row.run_id,
+        });
+      }
       logger.error(
         { run_id: row.run_id, connector_key: row.connector_key, err },
         'Failed to resolve connector code for claimed worker run'

@@ -6,14 +6,16 @@
  * `consecutive_failures`. On a 5-minute feed that is a failing run every 5
  * minutes, forever — hammering the connector and its upstream API rate limit.
  *
- * The policy lives here so completion (run-lifecycle.ts), source wake
- * scheduling (runs/feed-notifications.ts), and the `feed.auto_paused` signal
- * (automations/platform-events.ts) read the same numbers. It applies ONLY once
- * connector code has actually executed and reported an outcome. A never-claimed
- * run is a dispatch failure — the connector never ran — so
- * check-stalled-executions.ts deliberately does not consume this source-health
- * budget. Manual feeds normally stay unscheduled after failure; a retained
- * source wake hint may re-arm one under this same delay.
+ * The policy lives here so sync failure charging (feed-sync-failure.ts, for
+ * both the worker-reported outcome and the gateway failing a claimed run whose
+ * connector bundle cannot be produced), source wake scheduling
+ * (runs/feed-notifications.ts), and the `feed.auto_paused` signal
+ * (automations/platform-events.ts) read the same numbers. It applies ONLY to a
+ * run that was claimed for the feed. A never-claimed run is a dispatch failure
+ * — the connector never ran — so check-stalled-executions.ts deliberately does
+ * not consume this source-health budget. Manual feeds normally stay unscheduled
+ * after failure; a retained source wake hint may re-arm one under this same
+ * delay.
  *
  *  1. Exponential backoff on `next_run_at` after a failure, so a failing feed
  *     retries progressively less often instead of every cadence.

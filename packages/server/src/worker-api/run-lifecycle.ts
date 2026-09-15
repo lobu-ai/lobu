@@ -34,9 +34,8 @@ import {
 	type ConnectorDeriveFeedContext,
 } from "../automations/connector-derived";
 import { materializeConnectorAutomationSignal } from "../automations/connector-signal";
-import { feedBackoff } from "../connectors/feed-backoff";
+import { applyFeedSyncFailure } from "../connectors/feed-sync-failure";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
-import { maybeEmitFeedAutoPausedAfterFailure } from "../automations/platform-events";
 import { getDb, parsePgNumberArray } from "../db/client";
 import { eventArtifactBinding } from "../gateway/files/artifact-store";
 import { emit } from "../events/emitter";
@@ -1207,7 +1206,6 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			const nextRun = schedule
 				? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
 				: null;
-			const isSuccess = req.status === "success";
 
 			// A connector that could not reach a required execution dependency never
 			// reached the source. Preserve the last real source-health result, do not
@@ -1220,85 +1218,33 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
               updated_at = current_timestamp
           WHERE id = ${feedId}
         `;
+			} else if (req.status === "failed") {
+				// Backoff + hard auto-pause (item 5, #2033) live in the shared helper
+				// so the gateway-side poll failure lane applies the same policy.
+				await applyFeedSyncFailure({
+					feedId,
+					errorMessage: req.error_message ?? null,
+					runId: req.run_id,
+				});
 			} else {
-
-			// Failure rescheduling (item 5, #2033):
-			//  - On success: reset consecutive_failures to 0 and use the plain cron
-			//    next_run_at so a recovered feed immediately resumes normal cadence.
-			//  - On failure: apply exponential backoff on top of the cron cadence so
-			//    a persistently-failing feed retries progressively less often instead
-			//    of re-enqueueing every plain cadence (which hammered the connector,
-			//    the worker lane, and upstream rate limits). The backoff is computed
-			//    from the NEW consecutive_failures count (post-increment) directly in
-			//    SQL so it stays correct under concurrent completions across replicas.
-			//  - Hard auto-pause: once the NEW count crosses the pause threshold, the
-			//    feed is paused (status='paused'; the DB trigger nulls next_run_at).
-			//    Crossing the threshold emits feed.auto_paused so Automations can react.
-			//    Manual feeds (no schedule) normally remain unscheduled here; a retained
-			//    source wake hint can re-arm one through the shared backoff policy.
-			const backoffBaseMs = feedBackoff.baseMs;
-			const backoffMaxMs = feedBackoff.maxMs;
-			const pauseThreshold = feedBackoff.pauseThreshold;
-
-			const feedUpdate = (await sql`
+				// Success: reset consecutive_failures to 0 and use the plain cron
+				// next_run_at so a recovered feed immediately resumes normal cadence.
+				await sql`
         UPDATE feeds
         SET last_sync_at = current_timestamp,
-            last_sync_status = ${req.status},
-            last_error = ${isSuccess ? null : (req.error_message ?? null)},
-            consecutive_failures = ${isSuccess ? sql`0` : sql`consecutive_failures + 1`},
-            first_failure_at = ${isSuccess ? sql`NULL` : sql`COALESCE(first_failure_at, current_timestamp)`},
-            items_collected = ${isSuccess ? sql`items_collected + ${req.items_collected ?? 0}` : sql`items_collected`},
-            checkpoint = ${isSuccess ? sql`COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint)` : sql`checkpoint`},
-            status = ${
-							isSuccess
-								? sql`status`
-								: sql`CASE WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN 'paused' ELSE status END`
-						},
-            next_run_at = ${
-							isSuccess
-								// Enqueue consumes the previous due time. A newly-due value
-								// belongs to a notification received during this run; preserve
-								// it under the same row lock as completion/checkpoint commit.
-								? sql`CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END`
-								: sql`CASE
-                    WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
-                    WHEN ${nextRun}::timestamptz IS NULL THEN NULL
-                    ELSE GREATEST(
-                      ${nextRun}::timestamptz,
-                      current_timestamp + (LEAST(
-                        ${backoffBaseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint,
-                        ${backoffMaxMs}::bigint
-                      ) || ' milliseconds')::interval
-                    )
-                  END`
-						},
+            last_sync_status = 'success',
+            last_error = NULL,
+            consecutive_failures = 0,
+            first_failure_at = NULL,
+            items_collected = items_collected + ${req.items_collected ?? 0},
+            checkpoint = COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint),
+            -- Enqueue consumes the previous due time. A newly-due value belongs
+            -- to a notification received during this run; preserve it under the
+            -- same row lock as completion/checkpoint commit.
+            next_run_at = CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END,
             updated_at = current_timestamp
         WHERE id = ${feedId}
-        RETURNING consecutive_failures, status
-      `) as Array<{ consecutive_failures: number; status: string }>;
-
-			if (!isSuccess) {
-				const after = feedUpdate[0];
-				const consec = Number(after?.consecutive_failures ?? 0);
-				// Emit when paused at/above threshold. delivery_id is stable per
-				// failure episode (first_failure_at), so retries after a failed
-				// activation are idempotent and do not double-queue Automations.
-				try {
-					await maybeEmitFeedAutoPausedAfterFailure({
-						feedId,
-						consecutiveFailures: consec,
-						pauseThreshold,
-						runId: req.run_id,
-					});
-				} catch (err) {
-					// Feed is already paused; log hard so we notice lost activation,
-					// but do not fail the worker complete ACK (run is terminal).
-					logger.error(
-						{ feed_id: feedId, error: errorMessage(err) },
-						"[completeWorkerJob] maybeEmitFeedAutoPausedAfterFailure threw"
-					);
-				}
-			}
+      `;
 			}
 		}
 

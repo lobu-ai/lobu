@@ -16,6 +16,7 @@
  * as complete-worker-job-status-guard.test.ts.
  */
 
+import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -26,6 +27,7 @@ import type { Env } from '../../index';
 import { manageAutomations } from '../../tools/admin/manage_automations';
 import { manageFeeds } from '../../tools/admin/manage_feeds';
 import { completeWorkerJob } from '../../worker-api';
+import { pollWorkerJob } from '../../worker-api/poll';
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -722,5 +724,150 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     // Plain 1-minute cron cadence — next run is <= ~60s out, NOT backed off.
     expect(after[0].next_run_at).not.toBeNull();
     expect(Number(after[0].seconds_out)).toBeLessThanOrEqual(61);
+  });
+  /**
+   * A connector whose bundle cannot be produced fails INSIDE the poll request,
+   * gateway-side, after the claim CTE has already stamped the feed
+   * `last_sync_status='pending'`. That path terminalises the run but never ran
+   * the feed bookkeeping, so a permanently-broken connector re-fired on its
+   * plain cadence forever: no backoff, no auto-pause, `consecutive_failures`
+   * pinned at 0 and `last_error` NULL, i.e. a feed that reports healthy while
+   * every run fails. Observed in prod on a connector importing an SDK export
+   * that had been removed (14 days, 0 recorded failures).
+   */
+  it('charges a gateway-side compile failure to the feed, not just the run', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    // No bundled source on disk and no stored compiled_code for this key, so
+    // resolveConnectorCode throws exactly where the prod esbuild error did.
+    const [connRow] = (await sql`
+      INSERT INTO connections
+        (organization_id, connector_key, status, visibility, slug, created_at, updated_at)
+      VALUES
+        (${org.id}, 'test.uncompilable', 'active', 'org', 'uncompilable-conn', NOW(), NOW())
+      RETURNING id
+    `) as Array<{ id: number }>;
+    const [feedRow] = (await sql`
+      INSERT INTO feeds
+        (organization_id, connection_id, feed_key, status, schedule, next_run_at,
+         consecutive_failures, items_collected, created_at, updated_at)
+      VALUES
+        (${org.id}, ${connRow.id}, 'pages', 'active', '* * * * *',
+         current_timestamp - INTERVAL '5 minutes', 0, 0, NOW(), NOW())
+      RETURNING id
+    `) as Array<{ id: number }>;
+    const [runRow] = (await sql`
+      INSERT INTO runs
+        (organization_id, run_type, feed_id, connection_id, connector_key,
+         connector_version, status, created_at)
+      VALUES
+        (${org.id}, 'sync', ${feedRow.id}, ${connRow.id}, 'test.uncompilable',
+         '1.0.0', 'pending', NOW())
+      RETURNING id
+    `) as Array<{ id: number }>;
+
+    const app = new Hono();
+    app.post(
+      '/api/workers/poll',
+      async (c, next) => {
+        c.set('workerAuthMode' as never, 'trusted' as never);
+        c.set('workerOrgIds' as never, [org.id] as never);
+        c.set('organizationId' as never, org.id as never);
+        c.set('mcpAuthInfo' as never, { scopes: ['device_worker:run'] } as never);
+        await next();
+      },
+      (c) => pollWorkerJob(c as never)
+    );
+    const response = await app.fetch(
+      new Request('http://localhost/api/workers/poll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ worker_id: WORKER_ID, capabilities: {} }),
+      }),
+      {} as never
+    );
+    const polled = (await response.json()) as Record<string, unknown>;
+    expect(polled.skipped_run_id).toBe(runRow.id);
+
+    const [run] = (await sql`
+      SELECT status, error_message FROM runs WHERE id = ${runRow.id}
+    `) as Array<{ status: string; error_message: string | null }>;
+    expect(run.status).toBe('failed');
+    expect(String(run.error_message)).toContain('test.uncompilable');
+
+    const [feed] = (await sql`
+      SELECT status, last_sync_status, last_error, consecutive_failures,
+             EXTRACT(EPOCH FROM (next_run_at - current_timestamp)) AS seconds_out
+      FROM feeds WHERE id = ${feedRow.id}
+    `) as Array<{
+      status: string;
+      last_sync_status: string | null;
+      last_error: string | null;
+      consecutive_failures: number;
+      seconds_out: number | string | null;
+    }>;
+
+    // The feed must record the failure the run already recorded...
+    expect(feed.status).toBe('active'); // one failure, below PAUSE_THRESHOLD
+    expect(feed.last_sync_status).toBe('failed');
+    expect(String(feed.last_error)).toContain('test.uncompilable');
+    expect(Number(feed.consecutive_failures)).toBe(1);
+    // ...and be re-armed in the future. It was seeded 5 minutes overdue, and
+    // the claim CTE never moves next_run_at, so without the charge it would
+    // still be due and re-fire on the next poll.
+    expect(Number(feed.seconds_out)).toBeGreaterThan(0);
+  });
+  /**
+   * Guards the success half of the completion UPDATE, which the failure-lane
+   * consolidation rewrote from a ternary-in-SQL form to plain SQL. Nothing else
+   * asserts that `items_collected` and `checkpoint` advance together on a real
+   * success, so a column dropped in that rewrite would land silently.
+   */
+  it('advances items_collected and checkpoint together on a success', async () => {
+    const org = await createTestOrganization();
+    const connId = await insertConnection(org.id);
+    const feedId = await insertFeed(org.id, connId, 2);
+    const runId = await insertRunningRun(org.id, connId, feedId);
+    const sql = getTestDb();
+    await sql`
+      UPDATE feeds
+      SET items_collected = 7,
+          checkpoint = ${sql.json({ cursor: 'before' })},
+          last_error = 'stale failure',
+          first_failure_at = current_timestamp - INTERVAL '1 hour'
+      WHERE id = ${feedId}
+    `;
+
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      status: 'success',
+      items_collected: 5,
+      checkpoint: { cursor: 'after' },
+    });
+    await completeWorkerJob(ctx);
+    expect(result().body).toEqual({ success: true });
+
+    const [feed] = (await sql`
+      SELECT items_collected, checkpoint, last_sync_status, last_error,
+             consecutive_failures, first_failure_at
+      FROM feeds WHERE id = ${feedId}
+    `) as Array<{
+      items_collected: number;
+      checkpoint: Record<string, unknown> | null;
+      last_sync_status: string | null;
+      last_error: string | null;
+      consecutive_failures: number;
+      first_failure_at: Date | string | null;
+    }>;
+
+    // Added to the prior total, not replacing it.
+    expect(Number(feed.items_collected)).toBe(12);
+    expect(feed.checkpoint).toEqual({ cursor: 'after' });
+    expect(feed.last_sync_status).toBe('success');
+    // A success also clears the failure episode.
+    expect(feed.last_error).toBeNull();
+    expect(Number(feed.consecutive_failures)).toBe(0);
+    expect(feed.first_failure_at).toBeNull();
   });
 });
