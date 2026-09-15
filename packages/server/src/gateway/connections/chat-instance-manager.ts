@@ -2643,7 +2643,11 @@ export class ChatInstanceManager {
     });
 
     await queueProducer.enqueueMessage({
-      userId: options.channelId,
+      // MUST match the session's userId. The worker token carries this value,
+      // and a blocked tool call stores it as the pending approval's claimant —
+      // enqueueing the channelId instead bound the approval to an identity the
+      // session never had, so no caller could ever claim it.
+      userId: sessionUserId,
       conversationId,
       messageId,
       channelId: options.channelId,

@@ -53,12 +53,20 @@ function setup(
       | Error;
     withExecute?: boolean;
     withGrantStore?: boolean;
+    /**
+     * Request ids already settled by an earlier click. `claimApprovalCard`
+     * returns undefined for these, matching the real in-memory card registry
+     * where a card can only be claimed once — which is what makes a webhook
+     * retry silent rather than posting a duplicate "expired" notice.
+     */
+    claimedCards?: Set<string>;
   } = {}
 ): Harness {
   const {
     executeToolResult,
     withExecute = true,
     withGrantStore = true,
+    claimedCards,
   } = options;
 
   let captured: ActionHandler | undefined;
@@ -83,7 +91,11 @@ function setup(
   const thread = { post };
 
   const editCard = mock(async () => undefined);
-  const claimApprovalCard = mock((_requestId: string) => ({ edit: editCard }));
+  const claimApprovalCard = mock((requestId: string) => {
+    if (claimedCards?.has(requestId)) return undefined;
+    claimedCards?.add(requestId);
+    return { edit: editCard };
+  });
 
   registerActionHandlers(
     chat as any,
@@ -213,6 +225,69 @@ describe("registerActionHandlers — tool approval", () => {
 		expect(editedCardJson(h)).toMatch(/expired/i);
     expect(h.post).toHaveBeenCalledTimes(1);
     expect(h.post.mock.calls[0]?.[0] as string).toMatch(/expired/i);
+  });
+
+  test("a bystander click leaves the row and card live, then the requester can still act", async () => {
+    await seedPending("req-bystander");
+    const bystander = setup();
+    await bystander.handler({
+      actionId: "tool:req-bystander:1h",
+      value: "1h",
+      user: { userId: "user-2", userName: "Someone Else" },
+      thread: bystander.thread,
+    });
+
+    // Forbidden must NOT take the expired path: no grant, no execution, and
+    // crucially the card is left untouched so its buttons stay actionable.
+    expect(bystander.grantStore.grant).not.toHaveBeenCalled();
+    expect(bystander.executeToolDirect).not.toHaveBeenCalled();
+    expect(bystander.editCard).not.toHaveBeenCalled();
+    expect(bystander.post).toHaveBeenCalledTimes(1);
+    expect(bystander.post.mock.calls[0]?.[0] as string).toBe(
+      "Only the requester can act on this approval.",
+    );
+
+    // The DB row survived the bystander click, so the real requester still wins.
+    const requester = setup();
+    await requester.handler({
+      actionId: "tool:req-bystander:1h",
+      value: "1h",
+      thread: requester.thread,
+    });
+    expect(requester.grantStore.grant).toHaveBeenCalledTimes(1);
+    expect(requester.executeToolDirect).toHaveBeenCalledTimes(1);
+    expect(requester.editCard).toHaveBeenCalledTimes(1);
+    expect(editedCardJson(requester)).toContain("*Approved*");
+  });
+
+  test("a retry after a successful claim stays silent — no second grant or receipt", async () => {
+    await seedPending("req-retry");
+    // Shared across both clicks so the retry sees a card the first click
+    // already settled — without this the retry would re-claim a fresh card and
+    // wrongly post the "expired" notice, and the test would pass vacuously.
+    const claimedCards = new Set<string>();
+
+    const first = setup({ claimedCards });
+    await first.handler({
+      actionId: "tool:req-retry:1h",
+      value: "1h",
+      thread: first.thread,
+    });
+    expect(first.grantStore.grant).toHaveBeenCalledTimes(1);
+
+    // The webhook retry finds the row gone (missing, not forbidden). The card
+    // was already claimed, so there is nothing to settle and the retry must be
+    // a silent no-op — no second grant, no execution, no post at all.
+    const retry = setup({ claimedCards });
+    await retry.handler({
+      actionId: "tool:req-retry:1h",
+      value: "1h",
+      thread: retry.thread,
+    });
+    expect(retry.grantStore.grant).not.toHaveBeenCalled();
+    expect(retry.executeToolDirect).not.toHaveBeenCalled();
+    expect(retry.editCard).not.toHaveBeenCalled();
+    expect(retry.post).not.toHaveBeenCalled();
   });
 
   test("approve but tool execution throws posts failure message and still stores grant", async () => {

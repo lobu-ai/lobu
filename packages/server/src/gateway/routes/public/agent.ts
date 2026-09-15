@@ -26,7 +26,10 @@ import {
   getOrgBySlug,
 } from "../../../workspace/multi-tenant.js";
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
-import { listPendingToolsForConversation } from "../../auth/mcp/pending-tool-store.js";
+import {
+  listPendingToolsForConversation,
+  type PendingToolClaimant,
+} from "../../auth/mcp/pending-tool-store.js";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
 import { AUTOMATION_RUN_SOURCE } from "../../automation-run-session.js";
 import {
@@ -466,7 +469,7 @@ interface AgentApiConfig {
   approveToolCall?: (
     requestId: string,
     decision: string,
-    claimant: { userId: string; organizationId?: string }
+    claimant: PendingToolClaimant
   ) => Promise<{ success: boolean; error?: string }>;
 }
 

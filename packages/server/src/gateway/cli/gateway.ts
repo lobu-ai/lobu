@@ -11,6 +11,7 @@ import { isAllowedCorsOrigin } from "../../utils/cors-origin.js";
 import { getConfiguredPublicOrigin } from "../../utils/public-origin.js";
 import {
   pairAdminGrant,
+  type PendingToolClaimant,
   takePendingTool,
 } from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
@@ -320,7 +321,7 @@ export function createGatewayApp(
         approveToolCall: async (
           requestId: string,
           decision: string,
-          claimant: { userId: string; organizationId?: string },
+          claimant: PendingToolClaimant,
         ) => {
           const expiresMap = {
             "1h": Date.now() + 3_600_000,
