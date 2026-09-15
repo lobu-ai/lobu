@@ -48,6 +48,11 @@ import {
 import { denyOperatorOnlyChatSettings } from "./chat-settings-guard";
 import { projectConnectionForReader } from "../public-projection";
 import {
+	connectorHasAutoSyncableFeedsSql,
+	deriveConnectionHealthFromRow,
+} from "../../../../connectors/connection-health-semantics";
+import { feedWebhookDrivenSql } from "../../../../connectors/feed-health-semantics";
+import {
   getAuthProfileById,
   getAuthProfileBySlug,
   getBrowserSessionReadiness,
@@ -350,12 +355,13 @@ export async function handleList(
            -- post-incident perf brainstorm). For the per-connection detail
            -- page, handleGet below still computes it — that path is a single
            -- row and costs ~1.2ms.
-           (SELECT COUNT(*) FROM feeds f WHERE f.connection_id = c.id AND f.deleted_at IS NULL)::int AS feed_count,
+           fh.feed_count,
            -- The DATA facet must not light up just because a chat connection's
            -- channels are feed rows too: exclude the channel_messages store
            -- for facet.data. feed_count stays the TOTAL
            -- (drives the feeds rail, which lists channels too).
-           (SELECT COUNT(*) FROM feeds f WHERE f.connection_id = c.id AND f.deleted_at IS NULL AND COALESCE(f.config ->> 'store', '') <> 'channel_messages')::int AS data_feed_count,
+           fh.data_feed_count,
+           fh.feed_health,
            (SELECT ct.token FROM connect_tokens ct
             WHERE ct.connection_id = c.id AND ct.status = 'pending' AND ct.expires_at > NOW()
             ORDER BY ct.created_at DESC LIMIT 1) AS connect_token,
@@ -369,9 +375,15 @@ export async function handleList(
     FROM connections c
     LEFT JOIN LATERAL (
       SELECT name,
+             feeds_schema,
              (feeds_schema IS NOT NULL
               AND feeds_schema::text <> '{}'
               AND feeds_schema::text <> 'null') AS has_feeds_schema,
+             -- Whether the product can provision this connector's feeds itself;
+             -- see connectorHasAutoSyncableFeedsSql for why a connection with
+             -- none of those must never read as no_feeds.
+             ${sql.unsafe(connectorHasAutoSyncableFeedsSql("connector_definitions"))}
+               AS has_auto_syncable_feeds,
              (options_schema ->> 'x-lobu-chat-platform') IS NOT NULL AS declares_chat
       FROM connector_definitions
       WHERE key = c.connector_key
@@ -380,6 +392,40 @@ export async function handleList(
       ORDER BY updated_at DESC
       LIMIT 1
     ) cd ON TRUE
+    -- One pass over this connection's feeds for BOTH the counts the facets need
+    -- and the per-feed columns deriveFeedHealthSemantics reads. It replaces
+    -- the two correlated COUNT subqueries that used to sit in the select list,
+    -- so the row visits feeds once instead of twice. feeds is a bounded config
+    -- table keyed by connection_id, so unlike the events aggregate removed from
+    -- this query above, this answer does not grow with history.
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*)::int AS feed_count,
+        COUNT(*) FILTER (
+          WHERE COALESCE(f.config ->> 'store', '') <> 'channel_messages'
+        )::int AS data_feed_count,
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'operations', COALESCE(cd.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb),
+              'store', COALESCE(f.config ->> 'store', 'events'),
+              'status', f.status,
+              'schedule', f.schedule,
+              -- Shared with list_feeds and the alerter; see feedWebhookDrivenSql
+              -- for why a bare IS NOT NULL on the webhook key is not equivalent.
+              'webhook_driven', ${sql.unsafe(feedWebhookDrivenSql("cd", "f"))},
+              'last_sync_status', f.last_sync_status,
+              'last_sync_at', f.last_sync_at,
+              'consecutive_failures', f.consecutive_failures,
+              'next_run_at', f.next_run_at,
+              'items_collected', f.items_collected
+            )
+          ),
+          '[]'::jsonb
+        ) AS feed_health
+      FROM feeds f
+      WHERE f.connection_id = c.id AND f.deleted_at IS NULL
+    ) fh ON TRUE
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
     LEFT JOIN auth_profiles app ON app.id = c.app_auth_profile_id
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
@@ -465,8 +511,25 @@ export async function handleList(
 			...EMPTY_SUMMARY,
 		};
     const hasOperations = operationsSummary.total > 0;
+    const connectionHealth = deriveConnectionHealthFromRow({
+      status: row.status as string | null,
+      credential_mode: row.credential_mode as string | null,
+      auth_profile_status: row.auth_profile_status as string | null,
+      device_worker_id: row.device_worker_id as string | null,
+      device_online: row.device_online as boolean | null,
+      connector_has_auto_syncable_feeds: row.has_auto_syncable_feeds as boolean | null,
+      feed_health: row.feed_health,
+    });
+    // Derivation input, not public surface — both are already expressed in the
+    // `attention` value the caller reads, and `feed_health` is a per-feed array
+    // that list_feeds owns. Same exclusion list_feeds applies to webhook_driven.
+    const {
+      feed_health: _feedHealth,
+      has_auto_syncable_feeds: _hasAutoSyncableFeeds,
+      ...publicRow
+    } = row;
     return {
-      ...row,
+      ...publicRow,
       // Secrets never leave the server through a connection serializer.
       config: redactConnectionConfig(
         row.config,
@@ -487,6 +550,11 @@ export async function handleList(
 			}),
       operations_summary: operationsSummary,
       has_operations: hasOperations,
+      // `status` is operator INTENT — written once at INSERT and never revised
+      // by anything that runs. `attention` is the observed counterpart, derived
+      // from the same feed columns list_feeds derives from, so a connection that
+      // cannot collect says so where someone reads it.
+      attention: connectionHealth.attention,
       facets: deriveConnectionFacets({
         connectorKey: String(row.connector_key),
         isChat: row.declares_chat === true,
@@ -557,11 +625,17 @@ export async function handleGet(
            -- feed_count = TOTAL live feeds (drives the feeds rail, channels
            -- included). data_feed_count excludes streaming channels so the DATA
            -- facet stays off for a pure-chat connection (mirrors list).
-           (SELECT COUNT(*) FROM feeds f WHERE f.connection_id = c.id AND f.deleted_at IS NULL)::int AS feed_count,
-           (SELECT COUNT(*) FROM feeds f WHERE f.connection_id = c.id AND f.deleted_at IS NULL AND COALESCE(f.config ->> 'store', '') <> 'channel_messages')::int AS data_feed_count
+           fh.feed_count,
+           fh.data_feed_count,
+           fh.feed_health,
+           cd.has_auto_syncable_feeds
     FROM connections c
     LEFT JOIN LATERAL (
       SELECT name, feeds_schema, auth_schema, options_schema,
+             -- Whether the product can provision this connector's feeds itself;
+             -- a connection declaring none must never read as no_feeds.
+             ${sql.unsafe(connectorHasAutoSyncableFeedsSql("connector_definitions"))}
+               AS has_auto_syncable_feeds,
              (options_schema ->> 'x-lobu-chat-platform') IS NOT NULL AS declares_chat
       FROM connector_definitions
       WHERE key = c.connector_key
@@ -570,6 +644,34 @@ export async function handleGet(
       ORDER BY updated_at DESC
       LIMIT 1
     ) cd ON TRUE
+    -- Same single pass over this connection's feeds as handleList, so the
+    -- detail page and the inventory cannot disagree about one connection.
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*)::int AS feed_count,
+        COUNT(*) FILTER (
+          WHERE COALESCE(f.config ->> 'store', '') <> 'channel_messages'
+        )::int AS data_feed_count,
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'operations', COALESCE(cd.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb),
+              'store', COALESCE(f.config ->> 'store', 'events'),
+              'status', f.status,
+              'schedule', f.schedule,
+              'webhook_driven', ${sql.unsafe(feedWebhookDrivenSql("cd", "f"))},
+              'last_sync_status', f.last_sync_status,
+              'last_sync_at', f.last_sync_at,
+              'consecutive_failures', f.consecutive_failures,
+              'next_run_at', f.next_run_at,
+              'items_collected', f.items_collected
+            )
+          ),
+          '[]'::jsonb
+        ) AS feed_health
+      FROM feeds f
+      WHERE f.connection_id = c.id AND f.deleted_at IS NULL
+    ) fh ON TRUE
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
     LEFT JOIN auth_profiles app ON app.id = c.app_auth_profile_id
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
@@ -626,11 +728,30 @@ export async function handleGet(
 		JSON.stringify(feedsSchema) !== "{}" &&
 		JSON.stringify(feedsSchema) !== "null";
   const hasOperations = operationsSummary.total > 0;
+  // Derivation input, not public surface — already expressed in `attention`,
+  // and the per-feed array is list_feeds' to publish.
+  const {
+    feed_health: feedHealth,
+    has_auto_syncable_feeds: hasAutoSyncableFeeds,
+    ...publicGetRow
+  } = getRow;
 
   return {
 		action: "get",
     connection: projectConnectionForReader({
-      ...resolved,
+      ...publicGetRow,
+      // The observed counterpart to `status` (operator intent); see
+      // connection-health-semantics.ts. Derived through the same adapter
+      // handleList uses, so the detail page cannot contradict the inventory.
+      attention: deriveConnectionHealthFromRow({
+        status: getRow.status as string | null,
+        credential_mode: getRow.credential_mode as string | null,
+        auth_profile_status: getRow.auth_profile_status as string | null,
+        device_worker_id: getRow.device_worker_id as string | null,
+        device_online: getRow.device_online as boolean | null,
+        connector_has_auto_syncable_feeds: hasAutoSyncableFeeds as boolean | null,
+        feed_health: feedHealth,
+      }).attention,
 			error_message: effectiveConnectionErrorMessage({
 				error_message: getRow.error_message as string | null,
 				device_worker_id: getRow.device_worker_id as string | null,

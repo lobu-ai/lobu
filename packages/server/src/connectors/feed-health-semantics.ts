@@ -179,7 +179,7 @@ interface FeedHealthSemanticsInput {
     | null;
 }
 
-interface FeedHealthSemantics {
+export interface FeedHealthSemantics {
   executionMode: FeedExecutionMode;
   attention: FeedAttentionState;
 }

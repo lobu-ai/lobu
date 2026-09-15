@@ -1152,4 +1152,83 @@ describe('connector-health alerter', () => {
     expect(byId.get(staleMarker.id)).toBeNull();
     expect(byId.get(trueStale.id)).not.toBeNull();
   });
+
+  // Rule E. Every regression rule above measures a fall from a previous good
+  // state, so a connection that never reached one was invisible to all of them:
+  // Rule A needs a failure, Rule D needs failures, Rule C needs a past success.
+  // A connection whose feeds sit at last_sync_status NULL forever fell straight
+  // through to `return null` and was reported healthy indefinitely.
+  it('flags a connection whose expected feeds have never once synced', async () => {
+    const neverStarted = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'spotify',
+      slug: 'never-started',
+      createdAt: OLD,
+    });
+    await seedFeed({
+      orgId,
+      connectionId: neverStarted.id,
+      feedKey: 'a',
+      lastSyncStatus: null,
+      lastSyncAt: null,
+    });
+
+    const res = await runConnectorHealthCheck();
+    const detail = res.details.find((d) => d.connectionId === neverStarted.id);
+    expect(detail?.reason).toBe('never_collected' satisfies UnhealthyReason);
+    expect(detail?.lastSyncAt).toBeNull();
+  });
+
+  // The complement, and the reason the rule is keyed on never-SUCCEEDED rather
+  // than never-PRODUCED: a source that legitimately holds nothing (a mailbox
+  // label with no mail) syncs cleanly and collects zero forever. That is not an
+  // incident, and one successful sync is enough to say so.
+  it('does not flag a connection that syncs successfully but collects nothing', async () => {
+    const emptySource = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'gmail',
+      slug: 'empty-but-syncing',
+      createdAt: OLD,
+    });
+    await seedFeed({
+      orgId,
+      connectionId: emptySource.id,
+      feedKey: 'a',
+      lastSyncStatus: 'success',
+      lastSyncAt: new Date(),
+    });
+
+    const res = await runConnectorHealthCheck();
+    expect(res.details.some((d) => d.connectionId === emptySource.id)).toBe(false);
+  });
+
+  // Feed creation is human-paced (measured prod gaps of +11s to +13 days), so a
+  // connection made hours ago has legitimately not synced yet. Aged PAST the
+  // general minimum so it is this rule's own grace window being pinned, not the
+  // shared age floor — same construction as the zero-feed grace test above.
+  it('waits out the grace window before calling a connection never-collected', async () => {
+    expect(cfg.neverCollectedGraceHours).toBeGreaterThan(cfg.minConnectionAgeHours);
+    const fresh = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'apple.photos',
+      slug: 'never-started-but-fresh',
+      createdAt: new Date(
+        Date.now() -
+          ((cfg.minConnectionAgeHours + cfg.neverCollectedGraceHours) / 2) * 60 * 60 * 1000,
+      ),
+    });
+    await seedFeed({
+      orgId,
+      connectionId: fresh.id,
+      feedKey: 'photos',
+      lastSyncStatus: null,
+      lastSyncAt: null,
+    });
+
+    const res = await runConnectorHealthCheck();
+    expect(res.details.some((d) => d.connectionId === fresh.id)).toBe(false);
+  });
 });
