@@ -617,6 +617,11 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       : !cancelling && body.status === 'completed' && snapshot ? inputReceiptError(run, body, snapshot, offered) : undefined;
     const error = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
     const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
+    // Rendering needs the code; `classifyRunOutcome` deliberately does NOT get
+    // it. It derives the same code from the same message itself, but only
+    // AFTER checking the agent-protocol patterns — handing it an explicit code
+    // here would short-circuit that ordering and let a protocol violation whose
+    // tail quotes a provider limit excuse itself as infra.
     const errorCode = status === 'failed' ? classifyErrorMessage(error) : undefined;
     const consumed = status === 'completed' ? body.consumed_inputs! : [];
     const conversationId = envelope.turn!.conversation_id;
