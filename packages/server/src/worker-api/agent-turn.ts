@@ -625,7 +625,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     const stored = status === 'completed' && snapshot && typeof snapshot !== 'string'
       ? boundSnapshot(snapshot, body.session_jsonl!, { runId: body.run_id, conversationId }) : undefined;
     await tx`UPDATE runs SET status = ${status}, completed_at = now(),
-      outcome = ${classifyRunOutcome({ status, errorMessage: error })},
+      outcome = ${classifyRunOutcome({ status, errorCode, errorMessage: error })},
       error_message = ${status === 'completed' ? null : error || 'agent turn failed'},
       output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
       exit_reason = ${cancelling ? 'cancelled' : invalid ? 'error_message' : body.exit_reason ?? (status === 'completed' ? 'ok' : 'error_message')},

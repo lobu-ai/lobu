@@ -28,13 +28,17 @@
  *  2. A known `AgentErrorCode` → infra_error. The catalog (core/errors.ts) is
  *     exclusively provider/worker/config failures today; an agent-fault code
  *     added there must be mapped here explicitly.
- *  3. Message patterns, ordered agent-protocol → infra → agent-process, with
- *     unknown failures defaulting to agent_error: fail toward VISIBILITY. An
- *     unrecognized failure shows up in the quality-relevant bucket and gets a
- *     pattern added here, rather than being silently excused as infra.
+ *  3. Message patterns, ordered agent-protocol → provider catalog → platform
+ *     infra → agent-process, with unknown failures defaulting to agent_error:
+ *     fail toward VISIBILITY. An unrecognized failure shows up in the
+ *     quality-relevant bucket and gets a pattern added, rather than being
+ *     silently excused as infra. Provider wording is recognized by deriving a
+ *     code from `classifyErrorMessage` — a new provider failure mode is taught
+ *     to the catalog once and every layer learns it, instead of to this file
+ *     and the catalog separately, which is how the two drifted.
  */
 
-import { AgentErrorCode } from "@lobu/core";
+import { AgentErrorCode, classifyErrorMessage } from "@lobu/core";
 
 export type RunOutcome = "infra_error" | "agent_error" | "scoreable";
 
@@ -132,6 +136,26 @@ export function classifyRunOutcome(input: {
 	if (AGENT_PROTOCOL_PATTERNS.some((p) => p.test(message))) {
 		return "agent_error";
 	}
+	// Provider faults are recognized by THE catalog (core/classify-error.ts),
+	// not by a second copy of its vocabulary maintained here. Both lists were
+	// growing provider wording independently and had already drifted: over the
+	// 30 days to 2026-09-15 the catalog knew ChatGPT's "usage limit" and
+	// `INFRA_PATTERNS` did not, so 52 prod runs whose provider refused them
+	// were recorded as the agent's fault — 24 ChatGPT subscription limits, 13
+	// codex and 2 opencode crashes whose tail carried the provider's own quota
+	// error, 4 missing-credential 401s and a model-eligibility 403.
+	//
+	// Ordered AFTER the protocol patterns on purpose. An agent that ended its
+	// turn without calling `complete_window` stays agent evidence even when the
+	// CLI tail it printed also mentions a rate limit; running the catalog first
+	// would let any crash dump quoting a provider excuse itself.
+	if (classifyErrorMessage(message)) {
+		return "infra_error";
+	}
+	// Platform/orchestration faults the provider catalog has no code for:
+	// approval walls, enqueue failures, sweeper timeouts. Kept as the
+	// supplement rather than folded into the catalog, which is specifically a
+	// PROVIDER/worker-fault vocabulary.
 	if (INFRA_PATTERNS.some((p) => p.test(message))) {
 		return "infra_error";
 	}

@@ -108,4 +108,55 @@ describe("classifyRunOutcome", () => {
 		).toBe("agent_error");
 		expect(classifyRunOutcome({ status: "failed" })).toBe("agent_error");
 	});
+
+	/**
+	 * The provider refused the run, so it is not agent evidence. Each message is
+	 * a verbatim prod `runs.error_message`; together they are the 52 runs that
+	 * `outcome` was charging to the agent over the 30 days to 2026-09-15,
+	 * because this file kept its own copy of the provider vocabulary and the
+	 * catalog had learned wording it had not.
+	 */
+	const PROD_PROVIDER_REFUSALS = [
+		"You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 minutes.",
+		// The same refusal relayed through an agent CLI's crash tail.
+		"codex exited with status 1: ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits.",
+		'opencode exited with status 1: error="The usage limit has been reached"',
+		// Verbatim, and deliberately WITHOUT a leading "401": prod sends this
+		// bare, which is exactly why `INFRA_PATTERNS`'s `\b401\b` never caught
+		// it and the catalog's `no_credentials` branch has to.
+		"No provider credentials configured. End-user provider setup is not available in chat yet.",
+		"403 Access to model denied. Please make sure you are eligible for using the model.",
+	];
+
+	it.each(PROD_PROVIDER_REFUSALS)(
+		"charges a provider refusal to infra, not the agent: %s",
+		(message) => {
+			expect(
+				classifyRunOutcome({ status: "failed", errorMessage: message }),
+			).toBe("infra_error");
+		},
+	);
+
+	it("keeps a protocol violation agent_error even when its tail quotes a provider limit", () => {
+		// The precedence guard for deriving codes from the message: an agent that
+		// ended its turn without finalizing is agent evidence, and must not be
+		// excused because the CLI output it printed also mentions a rate limit.
+		expect(
+			classifyRunOutcome({
+				status: "failed",
+				errorMessage:
+					"Agent reply finished without calling run_sdk (tail: 429 rate limit warning from provider)",
+			}),
+		).toBe("agent_error");
+	});
+
+	it("uses an explicitly supplied code over the message", () => {
+		expect(
+			classifyRunOutcome({
+				status: "failed",
+				errorCode: AgentErrorCode.PROVIDER_AUTH,
+				errorMessage: "something this file has never seen",
+			}),
+		).toBe("infra_error");
+	});
 });

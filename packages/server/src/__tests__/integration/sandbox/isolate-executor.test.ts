@@ -855,7 +855,7 @@ describe("isolate lane: fixture connector", () => {
 		const started = Date.now();
 		const failure = await failIsolate(fixtureIsolateCode, syncJob({ scenario: "loop" }), { timeoutMs: 1500 });
 		expect(Date.now() - started).toBeLessThan(10_000);
-		expect(failure.message).toContain("Feed execution timed out after 1500ms");
+		expect(failure.message).toContain("Execution timed out after 1500ms");
 		expect(failure.exitReason).toBe("timeout");
 	});
 
@@ -865,7 +865,7 @@ describe("isolate lane: fixture connector", () => {
 			timeoutMs: 1500,
 		});
 		expect(Date.now() - started).toBeLessThan(10_000);
-		expect(failure.message).toContain("Feed execution timed out after 1500ms");
+		expect(failure.message).toContain("Execution timed out after 1500ms");
 		expect(failure.exitReason).toBe("timeout");
 	});
 

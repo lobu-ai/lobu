@@ -54,6 +54,20 @@ export function classifyErrorMessage(
   if (/wall-clock budget of \d+ms exceeded/.test(message))
     return AgentErrorCode.WORKER_UNRESPONSIVE;
 
+  // The isolate EXECUTOR's timeout, which is a different path from the host
+  // wall-clock kill above and was never classified: `IsolateExecutor` throws
+  // "Execution timed out after <n>ms" when `host.run` exceeds its budget. Same
+  // event class, same remediation, so it takes the same code — without it the
+  // user read a raw "…timed out after 600000ms" with no CTA (11 agent turns in
+  // the 30 days to 2026-09-15, all of them wedged for the full 600s).
+  //
+  // The leading `(?:Feed )?` is not optional politeness: that message said
+  // "Feed execution timed out" until this change, workers deploy on their own
+  // cadence, and the server classifies whatever text the worker sent. Matching
+  // both spellings keeps a mid-rollout worker's failures classified.
+  if (/(?:feed )?execution timed out after \d+ms/i.test(message))
+    return AgentErrorCode.WORKER_UNRESPONSIVE;
+
   // Provider usage/rate limit. Covers "429 Weekly/Monthly Limit
   // Exhausted", generic rate-limit/quota phrasings, and a bare 429. Placed
   // before PROVIDER_AUTH because a rate-limited request can also echo auth-ish
@@ -67,8 +81,20 @@ export function classifyErrorMessage(
   if (PROVIDER_BALANCE_EXHAUSTED.test(message))
     return AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED;
 
+  // `usage limit` is ChatGPT subscription wording ("You have hit your ChatGPT
+  // usage limit (pro plan)."). It was the single largest unclassified failure
+  // in prod over the 30 days to 2026-09-15 — 19 agent turns and 7 Automation
+  // runs — and being unclassified cost three things at once: the run was
+  // blamed on the agent (`outcome = agent_error`), the user got the raw
+  // provider sentence with no "Manage provider" CTA, and the failure dodged
+  // the PROVIDER_* alert.
+  //
+  // It belongs HERE and not in `PROVIDER_BALANCE_EXHAUSTED` above: a
+  // subscription usage limit is WINDOWED and self-heals, while that union
+  // parks an Automation for a full day. Day-parking a limit that resets in
+  // hours would be a worse bug than the one this fixes.
   if (
-    /weekly\/monthly limit exhausted|limit exhausted|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
+    /weekly\/monthly limit exhausted|limit exhausted|usage limit|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
       message
     )
   )
@@ -131,8 +157,16 @@ export function classifyErrorMessage(
   // reaches here from an upstream provider, so its length is not ours to
   // trust. Lazy stops at the first " not found" and the bound caps the walk;
   // spaces stay allowed so a quoted multi-word id still classifies.
+  //
+  // `access to model denied` / `eligible for using the model` is the provider
+  // refusing THIS account this model ("403 Access to model denied. Please make
+  // sure you are eligible for using the model.", seen in prod on agent turns).
+  // The credential is good and every other model still works, so this is the
+  // model class and not PROVIDER_AUTH: "Choose model" is the remediation that
+  // actually unblocks the user, where "Reconnect provider" would send them to
+  // re-auth a credential that is already valid.
   if (
-    /not a valid model|unknown model|model [^\n]{0,120}? not found/i.test(
+    /not a valid model|unknown model|model [^\n]{0,120}? not found|access to model denied|eligible for using the model/i.test(
       message
     )
   )

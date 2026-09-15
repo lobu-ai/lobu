@@ -18,6 +18,7 @@ import {
   AgentErrorCode,
   classifyError,
   classifyErrorMessage,
+  PROVIDER_BALANCE_EXHAUSTED,
 } from "../index";
 
 describe("classifyError", () => {
@@ -252,6 +253,62 @@ describe("isolate host wall-clock timeout", () => {
     ]) {
       expect(classifyErrorMessage(message), message).toBe(
         AgentErrorCode.PROVIDER_UNKNOWN_MODEL
+      );
+    }
+  });
+});
+
+describe("provider refusals prod was recording as the agent's fault", () => {
+  test("classifies the provider refusals prod was blaming on the agent", () => {
+    // Every case below is a verbatim prod `runs.error_message` from the 30
+    // days to 2026-09-15, when each landed unclassified: no remediation CTA
+    // for the user, no PROVIDER_* alert, and `outcome = agent_error` on a run
+    // the provider had refused.
+
+    // ChatGPT subscription limit — the single largest unclassified class (24
+    // runs). Reaches us three ways: direct, and relayed through a codex or
+    // opencode crash tail, which is why the plain phrase has to match and not
+    // an anchored shape.
+    for (const message of [
+      "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 minutes.",
+      "codex exited with status 1: ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 7th, 2026 3:26 AM.",
+      'opencode exited with status 1: error="The usage limit has been reached" stack="AI_APICallError: The usage limit has been reached"',
+    ]) {
+      expect(classifyErrorMessage(message), message).toBe(
+        AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED
+      );
+    }
+
+    // A windowed subscription limit must NOT reach the balance union, which
+    // parks an Automation for a full day; this one resets in hours.
+    expect(
+      PROVIDER_BALANCE_EXHAUSTED.test(
+        "You have hit your ChatGPT usage limit (pro plan). Try again in ~8700 minutes."
+      )
+    ).toBe(false);
+
+    // The account is not entitled to this model. The credential is valid and
+    // other models still work, so the remediation is "Choose model", not
+    // "Reconnect provider".
+    expect(
+      classifyErrorMessage(
+        "403 Access to model denied. Please make sure you are eligible for using the model."
+      )
+    ).toBe(AgentErrorCode.PROVIDER_UNKNOWN_MODEL);
+  });
+
+  test("classifies the isolate executor timeout, in both spellings", () => {
+    // The executor's budget kill is a separate path from the host wall-clock
+    // kill and went unclassified, so a wedged turn rendered as a raw
+    // "...timed out after 600000ms". Workers deploy on their own cadence and
+    // the server classifies whatever text the worker sent, so the pre-rename
+    // "Feed execution" spelling must keep classifying too.
+    for (const message of [
+      "Execution timed out after 600000ms",
+      "Feed execution timed out after 600000ms",
+    ]) {
+      expect(classifyErrorMessage(message), message).toBe(
+        AgentErrorCode.WORKER_UNRESPONSIVE
       );
     }
   });
