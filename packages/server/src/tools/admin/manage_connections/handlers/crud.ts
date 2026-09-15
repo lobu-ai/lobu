@@ -397,6 +397,11 @@ export async function handleList(
     -- One pass over this connection's feeds, replacing the two correlated COUNT
     -- subqueries that used to sit in the select list. Shared verbatim with
     -- handleGet; see connectionFeedHealthLateralSql for why it is not copied.
+    --
+    -- Measured, not assumed: EXPLAIN ANALYZE on the largest prod org (40
+    -- connections, full 50-row page) runs this at ~2.3ms against ~0.7ms for the
+    -- two COUNTs it replaces, and it returns the per-feed health those could
+    -- not -- the only other way to get which is a query per connection.
     LEFT JOIN LATERAL (
       ${sql.unsafe(
         connectionFeedHealthLateralSql("cd", "c", feedWebhookDrivenSql("cd", "f"))

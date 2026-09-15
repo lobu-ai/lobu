@@ -217,6 +217,40 @@ describe("manage_connections surfaces derived connection health", () => {
 		}
 	});
 
+	it("treats a non-boolean userManaged as user-managed rather than raising", async () => {
+		// feeds_schema comes from a connector definition a tenant can author, so
+		// the declared value is not guaranteed to be a JSON boolean. A ::boolean
+		// cast of "yes" raises and would take down this read path AND the global
+		// health scan that shares the fragment. Anything that is not explicitly
+		// JSON false counts as user-managed, which is the fail-safe direction:
+		// the connection is merely ineligible for no_feeds rather than being
+		// handed a problem it does not have.
+		const orgId = workspace.org.id;
+		await createTestConnectorDefinition({
+			key: "odd-user-managed",
+			name: "Odd User Managed",
+			organization_id: orgId,
+			feeds_schema: {
+				main: { key: "main", operations: ["sync"], userManaged: "yes" },
+				other: { key: "other", operations: ["sync"], userManaged: { on: 1 } },
+			},
+		});
+		const odd = Number(
+			(
+				await createTestConnection({
+					organization_id: orgId,
+					connector_key: "odd-user-managed",
+					display_name: "Malformed userManaged",
+					created_by: workspace.users.owner.id,
+					createDefaultFeed: false,
+				})
+			).id,
+		);
+
+		const result = (await workspace.owner.connections.get(odd)) as GetResult;
+		expect(result.connection?.attention).toBe("healthy");
+	});
+
 	it("a partially working connection reports degraded, not its worst feed", async () => {
 		const orgId = workspace.org.id;
 		const mixed = Number(

@@ -313,12 +313,20 @@ export function connectorHasAutoSyncableFeedsSql(definitionAlias: string): strin
             FROM jsonb_each(COALESCE(${definitionAlias}.feeds_schema, '{}'::jsonb))
               AS declared(feed_key, config)
             WHERE COALESCE(declared.config -> 'operations', '[]'::jsonb) @> '["sync"]'::jsonb
-              -- Text comparison, not a ::boolean cast: feeds_schema comes from a
-              -- connector definition, which a tenant can author, and a declared
-              -- value like "yes" would make the cast raise. This fragment runs
-              -- in the global health scan as well as both read paths, so one
-              -- malformed definition would take all three down.
-              AND declared.config ->> 'userManaged' IS DISTINCT FROM 'true'
+              -- Compared as jsonb, never cast to boolean: feeds_schema comes
+              -- from a connector definition a tenant can author, and a ::boolean
+              -- cast of a declared "yes" RAISES. This fragment runs in the
+              -- global health scan as well as both read paths, so one malformed
+              -- definition would take all three down.
+              --
+              -- Auto-syncable requires userManaged to be absent or explicitly
+              -- JSON false, so any other value (a string, an object) counts as
+              -- user-managed. That is the fail-safe direction: a connector
+              -- wrongly read as user-managed is merely ineligible for a
+              -- zero-feed verdict, while the reverse invents a no_feeds
+              -- problem for a connection that never had one.
+              AND COALESCE(declared.config -> 'userManaged', 'false'::jsonb)
+                    = 'false'::jsonb
           )`;
 }
 
