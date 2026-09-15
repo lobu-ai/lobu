@@ -18,6 +18,18 @@
  * these links authorize approvals and agent re-binding.
  */
 
+/**
+ * How a platform's stored user keys are scoped for a reverse lookup.
+ *
+ * `team-prefix` — keys for one tenant all begin with `prefix`, so a search must
+ * be constrained to it (Slack: `T0XYZ:`).
+ * `global` — ids are unique platform-wide, so the namespace needs no narrowing
+ * (Google: one account can only ever have one id).
+ */
+export type ChatUserKeyScope =
+  | { kind: 'team-prefix'; prefix: string }
+  | { kind: 'global' };
+
 /** How one chat platform keys a sender identity. */
 export interface ChatUserIdentity {
   /** Chat platform key an inbound message arrives on (`slack`, `gchat`, …). */
@@ -42,4 +54,18 @@ export interface ChatUserIdentity {
     teamId: string | null | undefined,
     platformUserId: string | null | undefined,
   ): string | null;
+
+  /**
+   * The REVERSE of `buildUserKey`, for "which platform id does this Lobu user
+   * have here?": how stored keys are scoped when searching within `teamId`.
+   *
+   * Required, not optional, and deliberately NOT a bare nullable string. The
+   * two failure shapes must not collapse into one value: `global` means the
+   * platform has no tenant axis so the whole namespace is in scope, while null
+   * means this platform REQUIRES a team and did not get a usable one. A caller
+   * that treats those alike widens a Slack search past its `TEAM:` prefix and
+   * can return an id from a DIFFERENT workspace — the exact cross-tenant bleed
+   * `buildUserKey` exists to prevent. Callers must refuse on null.
+   */
+  userKeyScope(teamId: string | null | undefined): ChatUserKeyScope | null;
 }
