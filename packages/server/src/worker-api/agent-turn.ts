@@ -617,6 +617,11 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       : !cancelling && body.status === 'completed' && snapshot ? inputReceiptError(run, body, snapshot, offered) : undefined;
     const error = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
     const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
+    // Rendering needs the code; `classifyRunOutcome` deliberately does NOT get
+    // it. It derives the same code from the same message itself, but only
+    // AFTER checking the agent-protocol patterns — handing it an explicit code
+    // here would short-circuit that ordering and let a protocol violation whose
+    // tail quotes a provider limit excuse itself as infra.
     const errorCode = status === 'failed' ? classifyErrorMessage(error) : undefined;
     const consumed = status === 'completed' ? body.consumed_inputs! : [];
     const conversationId = envelope.turn!.conversation_id;
@@ -625,7 +630,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     const stored = status === 'completed' && snapshot && typeof snapshot !== 'string'
       ? boundSnapshot(snapshot, body.session_jsonl!, { runId: body.run_id, conversationId }) : undefined;
     await tx`UPDATE runs SET status = ${status}, completed_at = now(),
-      outcome = ${classifyRunOutcome({ status, errorCode, errorMessage: error })},
+      outcome = ${classifyRunOutcome({ status, errorMessage: error })},
       error_message = ${status === 'completed' ? null : error || 'agent turn failed'},
       output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
       exit_reason = ${cancelling ? 'cancelled' : invalid ? 'error_message' : body.exit_reason ?? (status === 'completed' ? 'ok' : 'error_message')},
