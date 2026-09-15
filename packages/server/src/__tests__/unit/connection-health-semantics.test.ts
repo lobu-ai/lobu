@@ -250,22 +250,19 @@ describe("only collector feeds are folded", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [
-				{
-					semantics: deriveFeedHealthSemantics({
-						operations: ["sync"],
-						store: "channel_messages",
-						status: "active",
-					}),
-				},
-				{
-					semantics: deriveFeedHealthSemantics({
-						operations: ["read"],
-						store: "events",
-						status: "active",
-					}),
-				},
+				feed({ store: "channel_messages", status: "active" }),
+				feed({ operations: ["read"], status: "active" }),
 			],
 		});
+		// The fixtures must really be non-collectors, or this test would pass for
+		// any shape isCollector happens to reject — which is how it read before:
+		// it passed hand-built objects carrying no executionMode at all.
+		expect(
+			feed({ store: "channel_messages", status: "active" }).executionMode,
+		).toBe("streaming");
+		expect(feed({ operations: ["read"], status: "active" }).executionMode).toBe(
+			"source_only",
+		);
 		// No collector feeds were supplied, so there is nothing to roll up — and
 		// crucially NOT `no_feeds`, because feed rows DO exist. A Slack connection
 		// carrying only channel feeds is the common shape here, and flagging it
@@ -282,13 +279,9 @@ describe("only collector feeds are folded", () => {
 			// feed elsewhere (Slack's `files`) — so neither existing guard rescues
 			// this row. Only counting its actual feed rows does.
 			connector_has_auto_syncable_feeds: true,
-			feeds: Array.from({ length: 5 }, () => ({
-				semantics: deriveFeedHealthSemantics({
-					operations: ["sync"],
-					store: "channel_messages",
-					status: "active",
-				}),
-			})),
+			feeds: Array.from({ length: 5 }, () =>
+				feed({ store: "channel_messages", status: "active" }),
+			),
 		});
 		expect(result.attention).toBe("healthy");
 	});

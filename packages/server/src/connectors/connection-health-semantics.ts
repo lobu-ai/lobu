@@ -245,21 +245,6 @@ export function deriveConnectionHealthSemantics(
 }
 
 /**
- * SQL predicate: does this connector definition declare a feed the PRODUCT can
- * provision on its own?
- *
- * A `userManaged` feed needs per-instance configuration nobody can supply
- * automatically (a database table, a folder id), so a connection carrying none
- * of those is not missing anything and `no_feeds` would be a false positive for
- * it. Operation-only and source-only connectors declare no `sync` feed at all
- * and fall out the same way.
- *
- * Exported as a fragment rather than reimplemented per call site because the
- * alerter and both read paths must agree about which connections are even
- * eligible for a zero-feed verdict; three copies of this would be three chances
- * to drift. `definitionAlias` is a table alias, never user input.
- */
-/**
  * SQL body of the per-connection feed lateral: the feed counts the facets need
  * and the per-feed columns `deriveConnectionHealthFromRow` reads, in ONE pass
  * over `feeds`.
@@ -272,6 +257,14 @@ export function deriveConnectionHealthSemantics(
  *
  * `feeds` is a bounded config table keyed by connection_id, so unlike an
  * aggregate over `events` or `runs` this answer does not grow with history.
+ *
+ * KNOWN LIMIT: the caller resolves ONE definition per connection (the active
+ * one), while `list_feeds` resolves one per feed and honours `feeds.pinned_version`.
+ * A feed pinned to an older version whose `feeds_schema` declared different
+ * operations would therefore read differently here than on the feed page. No
+ * feed is pinned in prod today (279 live feeds, 0 pinned, measured 2026-09-15),
+ * so this is latent rather than live; if pinning ships, this lateral has to
+ * resolve the definition per feed the way `manage_feeds` already does.
  */
 export function connectionFeedHealthLateralSql(
   definitionAlias: string,
@@ -303,6 +296,21 @@ export function connectionFeedHealthLateralSql(
       WHERE f.connection_id = ${connectionAlias}.id AND f.deleted_at IS NULL`;
 }
 
+/**
+ * SQL predicate: does this connector definition declare a feed the PRODUCT can
+ * provision on its own?
+ *
+ * A `userManaged` feed needs per-instance configuration nobody can supply
+ * automatically (a database table, a folder id), so a connection carrying none
+ * of those is not missing anything and `no_feeds` would be a false positive for
+ * it. Operation-only and source-only connectors declare no `sync` feed at all
+ * and fall out the same way.
+ *
+ * Exported as a fragment rather than reimplemented per call site because the
+ * alerter and both read paths must agree about which connections are even
+ * eligible for a zero-feed verdict; three copies of this would be three chances
+ * to drift. `definitionAlias` is a table alias, never user input.
+ */
 export function connectorHasAutoSyncableFeedsSql(definitionAlias: string): string {
   return `EXISTS (
             SELECT 1
