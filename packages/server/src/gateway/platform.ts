@@ -131,6 +131,12 @@ export interface PlatformAdapter {
    * @param options.channelId - Platform-specific channel (or agentId for API)
    * @param options.conversationId - Platform-specific conversation (or agentId for API)
    * @param options.teamId - Platform-specific team/workspace
+   * @param options.callerUserId - The AUTHENTICATED caller's identity, as the
+   *   route's auth context resolved it. This is the value a blocked tool call
+   *   stores as the pending approval's claimant, and the same value the
+   *   approver later presents on `POST /api/v1/agents/approve` — so it MUST be
+   *   the real subject id. Deriving one from the token bytes instead bound
+   *   approvals to an identity no caller could ever present.
    * @param options.files - Files to upload with the message (up to 10)
    * @returns Message metadata
    */
@@ -143,6 +149,7 @@ export interface PlatformAdapter {
       channelId: string;
       conversationId?: string;
       teamId: string;
+      callerUserId: string;
       files?: Array<{ buffer: Buffer; filename: string }>;
     }
   ): Promise<{

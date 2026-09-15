@@ -111,6 +111,37 @@ export async function listPendingToolsForConversation(
 }
 
 /**
+ * Read a pending invocation WITHOUT consuming it, to recover the routing keys
+ * (agentId / conversationId) an authorization check needs before the claim.
+ *
+ * This is a lookup, not a grant: it returns no tool arguments and authorizes
+ * nothing. The caller MUST still authorize against the returned agent and then
+ * claim through `claimPendingTool`, whose ownership predicate is what actually
+ * gates consumption. A non-owner that peeks still cannot claim.
+ */
+export async function peekPendingTool(
+	requestId: string,
+): Promise<{ agentId: string; conversationId?: string } | null> {
+	const sql = getDb();
+	const rows = await sql`
+    SELECT payload->>'agentId' AS agent_id,
+           payload->>'conversationId' AS conversation_id
+    FROM oauth_states
+    WHERE id = ${requestId}
+      AND scope = ${SCOPE}
+      AND expires_at > now()
+  `;
+	const row = rows[0] as
+		| { agent_id: string | null; conversation_id: string | null }
+		| undefined;
+	if (!row?.agent_id) return null;
+	return {
+		agentId: row.agent_id,
+		conversationId: row.conversation_id || undefined,
+	};
+}
+
+/**
  * Atomically fetch and delete a pending tool invocation. Used by the
  * interaction bridge / CLI approve handler to claim the row exactly
  * once — Slack/Telegram webhook retries that arrive after the first

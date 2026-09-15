@@ -14,6 +14,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:te
 import { generateWorkerToken } from "@lobu/core";
 import { hashToken } from "../../auth/oauth/utils.js";
 import { getDb } from "../../db/client.js";
+import { storePendingTool } from "../auth/mcp/pending-tool-store.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
@@ -667,33 +668,140 @@ describe("POST /api/v1/agents — automation_run intent verification", () => {
   });
 });
 describe("POST /api/v1/agents/approve caller binding", () => {
-	test("passes the authenticated caller to approval consumption", async () => {
-		let claimant: unknown;
-		const app = createAgentApi({
+	// The approval cards live in the SPA, which authenticates by COOKIE — a path
+	// that populates `authContext.userId` but NO `organizationId`. Reading the
+	// org straight off the auth context therefore passed `undefined` into the
+	// claim, and `claimPendingTool` treats a null org as "no org predicate",
+	// silently dropping tenant scoping on exactly the caller class that uses the
+	// feature. The route must instead resolve the org the pending row was
+	// written under, via the same `authorizeAgentAccess` grant the sibling
+	// pending-approvals route uses.
+	const approveApp = (
+		onClaim: (claimant: unknown) => void,
+		opts?: { ownerUserId?: string },
+	) =>
+		createAgentApi({
 			queueProducer: {} as never,
-			sessionManager: {} as never,
+			sessionManager: {
+				getSession: async () => ({
+					agentId: "agent-1",
+					conversationId: "conv-1",
+					organizationId: "org-1",
+					userId: "caller-user",
+					createdByUserId: "caller-user",
+				}),
+			} as never,
 			sseManager: {} as never,
 			publicGatewayUrl: "http://localhost:8787",
 			artifactStore: {} as never,
+			agentMetadataStore: {
+				async getMetadata() {
+					return {
+						owner: {
+							platform: "api",
+							userId: opts?.ownerUserId ?? "caller-user",
+						},
+						organizationId: "org-1",
+					};
+				},
+			} as never,
 			approveToolCall: async (_requestId, _decision, observed) => {
-				claimant = observed;
+				onClaim(observed);
 				return { success: true };
 			},
+		});
+
+	const approve = (app: ReturnType<typeof createAgentApi>) =>
+		app.request("/api/v1/agents/approve", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ requestId: "ta_target", decision: "1h" }),
+		});
+
+	test("a cookie caller's claim carries the agent's resolved org, never undefined", async () => {
+		await ensureDbForGatewayTests();
+		await storePendingTool(
+			"ta_target",
+			{
+				mcpId: "m",
+				toolName: "t",
+				args: {},
+				agentId: "agent-1",
+				userId: "caller-user",
+				organizationId: "org-1",
+				conversationId: "conv-1",
+			},
+			300,
+		);
+		let claimant: unknown;
+		const app = approveApp((c) => {
+			claimant = c;
+		});
+		// A settings-session cookie caller: userId only, no org on authContext.
+		setAuthProvider(() => ({
+			userId: "caller-user",
+			platform: "api",
+			exp: Date.now() + 60_000,
+		}));
+
+		const res = await approve(app);
+		expect(res.status).toBe(200);
+		// RED before the fix: `{ userId: "caller-user", organizationId: undefined }`.
+		expect(claimant).toEqual({
+			userId: "caller-user",
+			organizationId: "org-1",
+		});
+	});
+
+	test("a caller not authorized for the pending row's agent is refused", async () => {
+		await ensureDbForGatewayTests();
+		await storePendingTool(
+			"ta_target",
+			{
+				mcpId: "m",
+				toolName: "t",
+				args: {},
+				agentId: "agent-1",
+				userId: "owner-user",
+				organizationId: "org-1",
+				conversationId: "conv-1",
+			},
+			300,
+		);
+		let called = false;
+		const app = approveApp(() => {
+			called = true;
+		}, { ownerUserId: "owner-user" });
+		setAuthProvider(() => ({
+			userId: "stranger",
+			platform: "api",
+			exp: Date.now() + 60_000,
+		}));
+
+		const res = await approve(app);
+		expect(res.status).toBe(403);
+		// The claim must never be attempted with an org the caller did not prove.
+		expect(called).toBe(false);
+	});
+
+	test("an unknown requestId is refused before any authorization work", async () => {
+		await ensureDbForGatewayTests();
+		let called = false;
+		const app = approveApp(() => {
+			called = true;
 		});
 		setAuthProvider(() => ({
 			userId: "caller-user",
 			platform: "api",
 			exp: Date.now() + 60_000,
 		}));
+
 		const res = await app.request("/api/v1/agents/approve", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ requestId: "ta_target", decision: "1h" }),
+			body: JSON.stringify({ requestId: "ta_missing", decision: "1h" }),
 		});
-		expect(res.status).toBe(200);
-		expect(claimant).toEqual({
-			userId: "caller-user",
-			organizationId: undefined,
-		});
+		expect(res.status).toBe(400);
+		expect(called).toBe(false);
 	});
 });
