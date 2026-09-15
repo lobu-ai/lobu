@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DbClient } from "../../db/client";
-import { resolveActingPrincipal } from "../entity-policy";
+import { resolveActingPrincipal, resolveWriteCreatorUserId } from "../entity-policy";
 
 /**
  * The single seam every write surface resolves identity through. The stub
@@ -221,5 +221,92 @@ describe("resolveActingPrincipal", () => {
 		});
 		expect(actor.ownerResolved).toBe(false);
 		expect(actor.kind).toBe("automation");
+	});
+});
+
+/**
+ * A stub for the created_by lookups. `automationOwner` models the
+ * `automations JOIN "user"` result (a string is a resolved human owner; null means
+ * the JOIN found nothing — no automation row, or its created_by is not a real user).
+ * `orgAdmin` models the resolveEntityCreator fallback (`FROM "member"`). Captures the
+ * queried automation id so a test can assert WHICH automation was read.
+ */
+function stubCreatorSql(
+	automationOwner: string | null,
+	orgAdmin: string | null = null,
+): DbClient & { queriedIds: number[] } {
+	const queriedIds: number[] = [];
+	const sql = (strings: TemplateStringsArray, ...vals: unknown[]) => {
+		const text = strings.join(" ");
+		if (text.includes("FROM automations")) {
+			for (const v of vals) if (typeof v === "number") queriedIds.push(v);
+			return Promise.resolve(
+				automationOwner == null ? [] : [{ created_by: automationOwner }],
+			);
+		}
+		if (text.includes('FROM "member"')) {
+			return Promise.resolve(orgAdmin == null ? [] : [{ userId: orgAdmin }]);
+		}
+		return Promise.resolve([]);
+	};
+	(sql as unknown as { queriedIds: number[] }).queriedIds = queriedIds;
+	return sql as unknown as DbClient & { queriedIds: number[] };
+}
+
+describe("resolveWriteCreatorUserId", () => {
+	it("a real user is used as-is and never queries an automation", async () => {
+		const sql = stubCreatorSql("should-not-read");
+		const creator = await resolveWriteCreatorUserId(sql, {
+			organizationId: ORG,
+			userId: "user-1",
+			sessionAutomationId: 9,
+		});
+		expect(creator).toBe("user-1");
+		expect(sql.queriedIds).toEqual([]);
+	});
+
+	it("a HEADLESS session automation attributes to the automation's human owner", async () => {
+		// The script-executor path: userId is null, so created_by falls to the acting
+		// automation's owner — the fix for the entities_created_by_fkey violation.
+		const sql = stubCreatorSql("owner-human", "org-admin");
+		const creator = await resolveWriteCreatorUserId(sql, {
+			organizationId: ORG,
+			userId: null,
+			sessionAutomationId: 9,
+		});
+		expect(creator).toBe("owner-human");
+		expect(sql.queriedIds).toEqual([9]);
+	});
+
+	it("no session automation falls back to the org owner/admin (never 'system')", async () => {
+		const sql = stubCreatorSql(null, "org-admin");
+		const creator = await resolveWriteCreatorUserId(sql, {
+			organizationId: ORG,
+			userId: null,
+		});
+		expect(creator).toBe("org-admin");
+		expect(sql.queriedIds).toEqual([]);
+	});
+
+	it("an automation owner that is not a real user (JOIN empty) falls back to the org admin", async () => {
+		// automations.created_by has no FK of its own, so it can be a deleted user or a
+		// historical "system"/agent value. The JOIN to "user" filters those out, then
+		// resolveEntityCreator supplies a real org owner/admin — so a valid FK target is
+		// always stamped, never the "system" sentinel.
+		const creator = await resolveWriteCreatorUserId(stubCreatorSql(null, "org-admin"), {
+			organizationId: ORG,
+			userId: null,
+			sessionAutomationId: 9,
+		});
+		expect(creator).toBe("org-admin");
+	});
+
+	it("an org with no members at all returns null (caller keeps its 'system' last resort)", async () => {
+		const creator = await resolveWriteCreatorUserId(stubCreatorSql(null, null), {
+			organizationId: ORG,
+			userId: null,
+			sessionAutomationId: 9,
+		});
+		expect(creator).toBeNull();
 	});
 });

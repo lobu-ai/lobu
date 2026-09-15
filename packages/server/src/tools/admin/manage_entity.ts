@@ -58,6 +58,7 @@ import {
 	type ActingPrincipal,
 	evaluateEntityMutation,
 	resolveActingPrincipal,
+	resolveWriteCreatorUserId,
 } from "../../authz/entity-policy";
 import { resolveAutomationAttribution } from "../../automations/automation-source";
 import {
@@ -415,7 +416,14 @@ async function handleCreate(
 		enabled_classifiers: args.enabled_classifiers ?? null,
 		organization_id: ctx.organizationId,
 	};
-	(entityData as any).created_by = ctx.userId ?? "system";
+	// created_by is NOT NULL, FK → "user"; a headless script-executor create
+	// (userId == null) resolves the automation owner / org admin (see the helper).
+	entityData.created_by =
+		(await resolveWriteCreatorUserId(getDb(), {
+			organizationId: ctx.organizationId,
+			userId: ctx.userId,
+			sessionAutomationId: ctx.actingAutomationId ?? null,
+		})) ?? "system";
 
 	// All fields available on all entity types - DB constraints handle validation
 	entityData.domain = args.domain ?? null;

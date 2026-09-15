@@ -21,6 +21,7 @@
  * flood approvals. Any new user-facing entity write path MUST call this module.
  */
 import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
+import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
 	WRITE_ACTION_MANIFEST,
 	type WriteAction,
@@ -471,6 +472,51 @@ export async function resolveActingPrincipal(
 		ownerAgentId: null,
 		ownerResolved,
 	};
+}
+
+/**
+ * The user id to stamp as `created_by` on a HEADLESS (userId == null) write to a
+ * table whose `created_by` is FK → "user"(id) — `entities` is the one such write
+ * surface reached from the sandbox (`entities_created_by_fkey`, ON DELETE RESTRICT).
+ *
+ * An automation or agent is a policy principal, NOT a "user" row, so a headless
+ * automation-driven write — a script executor runs with userId == null — cannot
+ * attribute the row to itself, and the "system" sentinel has no user row either, so
+ * it fails the FK. Attribute to the acting automation's OWNER, the human who created
+ * that automation, exactly as the approval-apply path attributes an
+ * automation-proposed create to the human who approved it (`entity-field-approval.ts`).
+ *
+ * Only the TRUSTED session automation (stamped by the reaction/script executor) is
+ * used — never a caller-supplied `automation_source` tag, which is unverified here and
+ * would let any org caller select another automation's owner as the creator. The
+ * lookup JOINs "user" so a dangling `automations.created_by` (a deleted user, or a
+ * historical "system"/agent value — that column has no FK of its own) is never stamped
+ * back into the FK-constrained column. Anything unresolved falls back to
+ * {@link resolveEntityCreator} (the org's longest-standing owner/admin), the same
+ * attribution every other lazily-created system entity uses, so this never yields the
+ * FK-invalid "system" sentinel. Returns null only for an org with no members at all.
+ */
+export async function resolveWriteCreatorUserId(
+	sql: DbClient,
+	args: {
+		organizationId: string;
+		userId?: string | null;
+		sessionAutomationId?: number | null;
+	},
+): Promise<string | null> {
+	if (args.userId) return args.userId;
+	if (args.sessionAutomationId != null) {
+		const rows = await sql<{ created_by: string }>`
+    SELECT a.created_by
+    FROM automations a
+    JOIN "user" u ON u.id = a.created_by
+    WHERE a.id = ${args.sessionAutomationId}
+      AND a.organization_id = ${args.organizationId}
+    LIMIT 1
+  `;
+		if (rows[0]?.created_by) return rows[0].created_by;
+	}
+	return resolveEntityCreator(sql, args.organizationId, null);
 }
 
 /** True iff an agent row with this id exists in the org. Org-scoped so a caller
