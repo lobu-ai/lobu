@@ -48,6 +48,7 @@ import {
 import { denyOperatorOnlyChatSettings } from "./chat-settings-guard";
 import { projectConnectionForReader } from "../public-projection";
 import {
+	connectionFeedHealthLateralSql,
 	connectorHasAutoSyncableFeedsSql,
 	deriveConnectionHealthFromRow,
 } from "../../../../connectors/connection-health-semantics";
@@ -393,38 +394,13 @@ export async function handleList(
       ORDER BY updated_at DESC
       LIMIT 1
     ) cd ON TRUE
-    -- One pass over this connection's feeds for BOTH the counts the facets need
-    -- and the per-feed columns deriveFeedHealthSemantics reads. It replaces
-    -- the two correlated COUNT subqueries that used to sit in the select list,
-    -- so the row visits feeds once instead of twice. feeds is a bounded config
-    -- table keyed by connection_id, so unlike the events aggregate removed from
-    -- this query above, this answer does not grow with history.
+    -- One pass over this connection's feeds, replacing the two correlated COUNT
+    -- subqueries that used to sit in the select list. Shared verbatim with
+    -- handleGet; see connectionFeedHealthLateralSql for why it is not copied.
     LEFT JOIN LATERAL (
-      SELECT
-        COUNT(*)::int AS feed_count,
-        COUNT(*) FILTER (
-          WHERE COALESCE(f.config ->> 'store', '') <> 'channel_messages'
-        )::int AS data_feed_count,
-        COALESCE(
-          jsonb_agg(
-            jsonb_build_object(
-              'operations', COALESCE(cd.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb),
-              'store', COALESCE(f.config ->> 'store', 'events'),
-              'status', f.status,
-              'schedule', f.schedule,
-              -- Shared with list_feeds and the alerter; see feedWebhookDrivenSql
-              -- for why a bare IS NOT NULL on the webhook key is not equivalent.
-              'webhook_driven', ${sql.unsafe(feedWebhookDrivenSql("cd", "f"))},
-              'last_sync_status', f.last_sync_status,
-              'last_sync_at', f.last_sync_at,
-              'consecutive_failures', f.consecutive_failures,
-              'next_run_at', f.next_run_at
-            )
-          ),
-          '[]'::jsonb
-        ) AS feed_health
-      FROM feeds f
-      WHERE f.connection_id = c.id AND f.deleted_at IS NULL
+      ${sql.unsafe(
+        connectionFeedHealthLateralSql("cd", "c", feedWebhookDrivenSql("cd", "f"))
+      )}
     ) fh ON TRUE
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
     LEFT JOIN auth_profiles app ON app.id = c.app_auth_profile_id
@@ -645,32 +621,12 @@ export async function handleGet(
       ORDER BY updated_at DESC
       LIMIT 1
     ) cd ON TRUE
-    -- Same single pass over this connection's feeds as handleList, so the
-    -- detail page and the inventory cannot disagree about one connection.
+    -- The same fragment handleList uses, so the detail page and the inventory
+    -- cannot disagree about one connection.
     LEFT JOIN LATERAL (
-      SELECT
-        COUNT(*)::int AS feed_count,
-        COUNT(*) FILTER (
-          WHERE COALESCE(f.config ->> 'store', '') <> 'channel_messages'
-        )::int AS data_feed_count,
-        COALESCE(
-          jsonb_agg(
-            jsonb_build_object(
-              'operations', COALESCE(cd.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb),
-              'store', COALESCE(f.config ->> 'store', 'events'),
-              'status', f.status,
-              'schedule', f.schedule,
-              'webhook_driven', ${sql.unsafe(feedWebhookDrivenSql("cd", "f"))},
-              'last_sync_status', f.last_sync_status,
-              'last_sync_at', f.last_sync_at,
-              'consecutive_failures', f.consecutive_failures,
-              'next_run_at', f.next_run_at
-            )
-          ),
-          '[]'::jsonb
-        ) AS feed_health
-      FROM feeds f
-      WHERE f.connection_id = c.id AND f.deleted_at IS NULL
+      ${sql.unsafe(
+        connectionFeedHealthLateralSql("cd", "c", feedWebhookDrivenSql("cd", "f"))
+      )}
     ) fh ON TRUE
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
     LEFT JOIN auth_profiles app ON app.id = c.app_auth_profile_id

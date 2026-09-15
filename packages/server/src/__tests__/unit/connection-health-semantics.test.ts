@@ -109,6 +109,47 @@ describe("never_collected", () => {
 	});
 });
 
+describe("verdicts this rollup deliberately does not reach", () => {
+	/** Scheduled, synced before, and its next run is two hours late. */
+	const overdueFeed = () =>
+		feed({
+			status: "active",
+			schedule: "*/5 * * * *",
+			last_sync_status: "success",
+			last_sync_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
+			next_run_at: new Date(Date.now() - 2 * 60 * 60 * 1000),
+		});
+
+	test("the fixture really does derive overdue at the feed level", () => {
+		// Without this the two tests below would pass for the wrong reason if the
+		// feed-level rule ever stopped firing for this shape.
+		expect(overdueFeed().attention).toBe("overdue");
+	});
+
+	test("an overdue feed does not drag its connection to degraded", () => {
+		// `overdue` is derived from active_runs, which this rollup cannot supply
+		// without counting `runs` on a list request path. list_feeds DOES supply
+		// it and suppresses overdue while a sync is in flight, so folding it here
+		// would let the connection say degraded about a feed the feed page calls
+		// healthy. The omission is one-directional by design: understate, never
+		// invent. connector-health's no_recent_sync still pages a human.
+		const result = deriveConnectionHealthSemantics({
+			status: "active",
+			feeds: [overdueFeed()],
+		});
+		expect(result.attention).toBe("healthy");
+	});
+
+	test("an overdue feed alongside a paused one still reports degraded", () => {
+		// Ignoring overdue must not swallow a sibling feed's real problem.
+		const result = deriveConnectionHealthSemantics({
+			status: "active",
+			feeds: [overdueFeed(), feed({ status: "paused", schedule: null })],
+		});
+		expect(result.attention).toBe("degraded");
+	});
+});
+
 describe("precedence", () => {
 	test("cause before symptom: no_trigger outranks never_collected", () => {
 		// A feed with no cron, no webhook and no channel has also never run.
@@ -124,6 +165,29 @@ describe("precedence", () => {
 		const result = deriveConnectionHealthSemantics({
 			status: "pending_auth",
 			feeds: [],
+		});
+		expect(result.attention).toBe("needs_auth");
+	});
+
+	test("a revoked auth profile reports needs_auth, not degraded", () => {
+		// connections.status records intent and nothing rewrites it, so a profile
+		// can go revoked under an 'active' connection. Every feed then derives
+		// needs_auth, and calling the connection merely degraded would bury the
+		// one state a human can act on.
+		const result = deriveConnectionHealthSemantics({
+			status: "active",
+			feeds: [
+				feed({
+					status: "active",
+					schedule: "*/5 * * * *",
+					auth_profile_status: "revoked",
+				}),
+				feed({
+					status: "active",
+					schedule: "*/5 * * * *",
+					auth_profile_status: "revoked",
+				}),
+			],
 		});
 		expect(result.attention).toBe("needs_auth");
 	});

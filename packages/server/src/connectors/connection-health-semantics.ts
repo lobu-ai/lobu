@@ -133,8 +133,6 @@ export interface ConnectionHealthSemantics {
   attention: ConnectionAttentionState;
   /** Collector feeds considered by the fold (streaming/source_only excluded). */
   expectedFeedCount: number;
-  /** Collector feeds whose own attention state is something other than healthy. */
-  attentionFeedCount: number;
 }
 
 /**
@@ -150,6 +148,28 @@ function isCollector(feed: FeedHealthSemantics): boolean {
 }
 
 /**
+ * Does this feed's verdict count against its connection?
+ *
+ * Everything except `healthy` does, with ONE exception. `overdue` is derived
+ * from `active_runs`, which this rollup cannot supply: counting active runs per
+ * feed means aggregating `runs` — unbounded history — on a list request path.
+ * `list_feeds` does supply it and suppresses `overdue` while a sync is in
+ * flight, so folding it here would let a connection report `degraded` about the
+ * very feed the feed page reports healthy. Ignored instead, which keeps this
+ * module's omissions one-directional: like the `device_connector_readiness`
+ * omission below, it can understate a feed's attention and can never invent
+ * one. A feed that has genuinely stalled still reaches a human through
+ * `connector-health.ts`'s `no_recent_sync` rule, which reads `last_sync_at` and
+ * needs no run count.
+ *
+ * Stated as an explicit exception rather than a listed set of bad states so a
+ * state added to `FeedAttentionState` cannot silently read as healthy here.
+ */
+function contributesAttention(feed: FeedHealthSemantics): boolean {
+  return feed.attention !== "healthy" && feed.attention !== "overdue";
+}
+
+/**
  * Fold a connection's feed verdicts into one connection verdict. Pure: the
  * caller supplies the connection row fields and its already-derived feed
  * semantics. Order of checks fixes precedence (most actionable wins).
@@ -159,14 +179,9 @@ export function deriveConnectionHealthSemantics(
 ): ConnectionHealthSemantics {
   const collectors = input.feeds.filter(isCollector);
   const expectedFeedCount = collectors.length;
-  // Every state in FeedAttentionState other than `healthy` means the feed is
-  // not currently collecting. Expressed as the negative rather than a listed
-  // Set so a state added to that union cannot silently read as healthy here.
-  const attentionFeedCount = collectors.filter(
-    (feed) => feed.attention !== "healthy"
-  ).length;
+  const attentionFeedCount = collectors.filter(contributesAttention).length;
 
-  const base = { expectedFeedCount, attentionFeedCount };
+  const base = { expectedFeedCount };
 
   // Connection-level blockers outrank anything a feed can say: no feed can
   // collect while the connection itself cannot authenticate.
@@ -214,6 +229,13 @@ export function deriveConnectionHealthSemantics(
   // reason. Same ranking the feed-level module applies to no_trigger/never_run.
   if (allNoTrigger) return { ...base, attention: "no_trigger" };
   if (allPaused) return { ...base, attention: "paused" };
+  // An auth profile can go revoked while `connections.status` still reads
+  // 'active' — the status column records intent and nothing rewrites it. Every
+  // feed then derives needs_auth, and reporting the connection as merely
+  // `degraded` would bury the one state a human can actually act on.
+  if (collectors.every((feed) => feed.attention === "needs_auth")) {
+    return { ...base, attention: "needs_auth" };
+  }
   if (collectors.every((feed) => feed.attention === "never_run")) {
     return { ...base, attention: "never_collected" };
   }
@@ -237,6 +259,50 @@ export function deriveConnectionHealthSemantics(
  * eligible for a zero-feed verdict; three copies of this would be three chances
  * to drift. `definitionAlias` is a table alias, never user input.
  */
+/**
+ * SQL body of the per-connection feed lateral: the feed counts the facets need
+ * and the per-feed columns `deriveConnectionHealthFromRow` reads, in ONE pass
+ * over `feeds`.
+ *
+ * Shared rather than copied because `list` and `get` must not disagree about
+ * one connection, and a projection that exists in only one of them is exactly
+ * how they drift — the jsonb keys built here have to stay in lockstep with
+ * `FeedHealthJsonRow` on the reading side, and there is no typecheck across
+ * that boundary.
+ *
+ * `feeds` is a bounded config table keyed by connection_id, so unlike an
+ * aggregate over `events` or `runs` this answer does not grow with history.
+ */
+export function connectionFeedHealthLateralSql(
+  definitionAlias: string,
+  connectionAlias: string,
+  webhookDrivenSql: string
+): string {
+  return `SELECT
+        COUNT(*)::int AS feed_count,
+        COUNT(*) FILTER (
+          WHERE COALESCE(f.config ->> 'store', '') <> 'channel_messages'
+        )::int AS data_feed_count,
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'operations', COALESCE(${definitionAlias}.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb),
+              'store', COALESCE(f.config ->> 'store', 'events'),
+              'status', f.status,
+              'schedule', f.schedule,
+              'webhook_driven', ${webhookDrivenSql},
+              'last_sync_status', f.last_sync_status,
+              'last_sync_at', f.last_sync_at,
+              'consecutive_failures', f.consecutive_failures,
+              'next_run_at', f.next_run_at
+            )
+          ),
+          '[]'::jsonb
+        ) AS feed_health
+      FROM feeds f
+      WHERE f.connection_id = ${connectionAlias}.id AND f.deleted_at IS NULL`;
+}
+
 export function connectorHasAutoSyncableFeedsSql(definitionAlias: string): string {
   return `EXISTS (
             SELECT 1
