@@ -4,7 +4,7 @@ import { CommandRegistry } from "@lobu/core";
 import { Chat } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import type { Context } from "hono";
-import { addUserToOrganization, createTestUser, linkSlackIdentityInGraph } from "../../__tests__/setup/test-fixtures.js";
+import { addUserToOrganization, createTestUser, linkChatIdentityInGraph } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
 import type { Env } from "../../index.js";
 import { createPreviewClaim } from "../../preview/slack.js";
@@ -297,9 +297,10 @@ describe("platform-neutral chat link-code routing", () => {
         const sql = getDb();
         await sql`UPDATE connections SET config = ${sql.json({ settings: { previewMode: true } })} WHERE id = ${installed.id}`;
         await sql`DELETE FROM member WHERE "userId" = ${ownerId} AND "organizationId" = ${SOURCE_ORG}`;
-        await linkSlackIdentityInGraph({
+        await linkChatIdentityInGraph({
           organizationId: TARGET_ORG, userId: ownerId,
-          teamId: "T_CODE_WORKSPACE", slackUserId: "provider-code-redeemer",
+          platform: "slack",
+          teamId: "T_CODE_WORKSPACE", platformUserId: "provider-code-redeemer",
         });
         await installed.send(`/lobu link ${AGENT_ID}`);
         expect(String(installed.thread.post.mock.calls[0]?.[0])).toContain("Linked this chat");

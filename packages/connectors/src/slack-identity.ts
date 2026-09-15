@@ -143,6 +143,25 @@ export const slackChatUserIdentity: ChatUserIdentity = {
   buildUserKey(teamId, platformUserId) {
     return normalizeSlackUserId(teamId, platformUserId);
   },
+  userKeyScope(teamId) {
+    // No usable team = REFUSE, never "search the whole namespace". Two
+    // workspaces can both hold `U12345`, so an unconstrained search here would
+    // hand back an id from the wrong one. Validate exactly as
+    // `normalizeSlackUserId` does so the prefix cannot disagree with the keys
+    // it wrote.
+    if (typeof teamId !== 'string') return null;
+    const t = teamId.trim();
+    if (!t || !/^[a-z0-9_-]+$/i.test(t)) return null;
+    return { kind: 'team-prefix', prefix: `${t.toUpperCase()}:` };
+  },
+  // Slack addresses a user by the BARE `U…`; the team prefix is storage scoping
+  // only and would not resolve if sent back. Re-validating through
+  // `normalizeTeamScopedId` first means a key this connector could not have
+  // written (no prefix, bad chars) yields null rather than a half-parsed id.
+  platformUserIdFromKey(key) {
+    const normalized = normalizeTeamScopedId(key);
+    return normalized ? normalized.slice(normalized.indexOf(':') + 1) : null;
+  },
 };
 
 /** A Slack channel and the (bare `U…`) ids of its members. */

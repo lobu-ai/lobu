@@ -16,7 +16,9 @@ import { getChatInstanceManager } from "../lobu/gateway";
 import { NOTIFICATION_DELIVERY_TASK } from "../scheduled/task-definitions";
 import { enqueueTasksInTransaction } from "../scheduled/task-scheduler";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
-import { resolveSlackUserIdForUser } from "../lobu/stores/chat-identity.js";
+import { resolveChatUserIdForUser } from "../lobu/stores/chat-identity.js";
+import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection.js";
+import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 import { resolveEventKindDefinition } from "../utils/event-kind-validation";
 import { insertEvent } from "../utils/insert-event";
 import { toAbsolutePermalink } from "../utils/url-builder";
@@ -98,10 +100,10 @@ interface CreateNotificationParams {
 	 */
 	deliveryScope?: "targeted" | "org";
 	/**
-	 * Lobu user whose Slack DM is the first chat destination — the owner of the
+	 * Lobu user whose chat DM is the first chat destination — the owner of the
 	 * change under review (field-change approvals), or the requester of an
 	 * approval that has no chat origin. When set, bot delivery tries their DM
-	 * FIRST, resolved via the owner's workspace-scoped Slack identity. When no
+	 * FIRST, resolved via the owner's identity on that platform. When no
 	 * identity resolves at creation, delivery falls back to the configured-target
 	 * or org-wide channel snapshot. Once a DM resolves, durable retries stay on
 	 * that private destination rather than widening to a channel after a transient
@@ -324,36 +326,98 @@ export async function resolveNotificationDeliveryPlan(params: {
 }
 
 /**
- * Owner-routed delivery target: the Slack identity of `ownerUserId` in a
- * workspace one of the org's bot connections lives in. Reverse-looks-up
- * the workspace-scoped Slack identity on the owner's `$member` (team matching
- * the connection's binding team) per candidate connection, most-recently-bound first via
- * resolveBotDeliveryTargets order. Null when the owner has no Slack identity in
- * any connected workspace — the caller falls back to channel delivery.
+ * Whether this connection's platform can open a DM with someone it has never
+ * messaged. Reads the stored config and hands it to the platform's own
+ * descriptor, which owns the rule — Slack needs nothing beyond its bot token
+ * and declares no hook; Google Chat needs domain-wide delegation to CREATE a
+ * space and answers from `impersonateUser`.
+ *
+ * Fails OPEN on an unreadable connection: a missing row here means the target
+ * was resolved from a binding whose connection just vanished, and that is the
+ * delivery task's error to report, not a reason to silently re-route a DM that
+ * a caller explicitly asked to be owner-routed.
+ */
+async function connectionCanOpenDm(
+	connectionId: string,
+	platform: string,
+): Promise<boolean> {
+	const descriptor = getPlatformDescriptor(platform);
+	if (!descriptor?.canOpenDirectMessage) return true;
+	// Both predicates are load-bearing, not defensive noise: they reproduce
+	// `connections_chat_slug_unique` (UNIQUE (slug) WHERE credential_mode IS NOT
+	// NULL AND deleted_at IS NULL) exactly, which is the ONLY thing that makes
+	// slug a unique key. Uniqueness is scoped to live chat rows, so a
+	// soft-deleted connection may carry the same slug — and without these, a
+	// `LIMIT 1` with no ORDER BY could read the dead row's config and decide DM
+	// reachability from a connection that no longer exists.
+	const rows = await getDb()<{ config: Record<string, unknown> | null }>`
+    SELECT config FROM connections
+    WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
+      AND credential_mode IS NOT NULL
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+	if (rows.length === 0) return true;
+	return descriptor.canOpenDirectMessage(rows[0].config ?? {});
+}
+
+/**
+ * Owner-routed delivery target: the chat identity of `ownerUserId` on a
+ * platform one of the org's bot connections lives on. Reverse-looks-up the
+ * identity stamped on the owner's `$member`, scoped the way that platform
+ * scopes its keys (Slack by the connection's binding team, Google Chat not at
+ * all), per candidate connection in `resolveBotDeliveryTargets` order —
+ * EARLIEST binding first (`ORDER BY created_at ASC`), the org's primary
+ * channel. That order now also decides the PLATFORM: an org bound to both
+ * Slack and Google Chat DMs the owner on whichever it bound first, so the
+ * destination stays put instead of hopping when a second platform is added.
+ * Null when the owner has no linked identity on any connected platform — the
+ * caller falls back to channel delivery.
  * Exported for testing the tier-selection logic against a real DB.
  */
 export async function resolveOwnerDmTarget(
 	organizationId: string,
 	ownerUserId: string,
 	connectionId?: string | null,
-): Promise<{ connectionId: string; slackUserId: string } | null> {
+): Promise<{
+	connectionId: string;
+	platform: string;
+	platformUserId: string;
+} | null> {
 	const targets = await resolveBotDeliveryTargets(
 		organizationId,
 		connectionId ?? null,
 	);
 	const seen = new Set<string>();
 	for (const target of targets) {
-		if (target.platform !== "slack" || target.teamId == null) continue;
-		const key = `${target.connectionId}:${target.teamId}`;
+		// No platform branch and no teamId pre-check: `resolveChatUserIdForUser`
+		// asks the platform's own descriptor how its keys are scoped, so a
+		// team-scoped platform still refuses without a team while a global one
+		// (Google Chat carries no workspace id) resolves normally.
+		const key = `${target.connectionId}:${target.teamId ?? ""}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
-		const slackUserId = await resolveSlackUserIdForUser(
+		const platformUserId = await resolveChatUserIdForUser(
 			ownerUserId,
+			target.platform,
 			target.teamId,
 		);
-		if (slackUserId) {
-			return { connectionId: target.connectionId, slackUserId };
+		if (!platformUserId) continue;
+		// Resolving an identity is not the same as being able to REACH it. A
+		// pinned owner DM suppresses the channel fallback, so pinning one to a
+		// connection that cannot originate a DM costs the notification entirely
+		// — it reaches neither the DM nor the channel. Ask the platform before
+		// pinning; a connection that says no simply isn't an owner-DM candidate
+		// and delivery falls through to the bound channel, as it did before this
+		// tier understood any platform but Slack.
+		if (!(await connectionCanOpenDm(target.connectionId, target.platform))) {
+			continue;
 		}
+		return {
+			connectionId: target.connectionId,
+			platform: target.platform,
+			platformUserId,
+		};
 	}
 	return null;
 }
@@ -1040,7 +1104,11 @@ interface NotificationDeliveryRequest {
 	context: NotificationDeliveryContext;
 	strictAutomationTarget: boolean;
 	targets: BotDeliveryTarget[];
-	ownerDm: { connectionId: string; slackUserId: string } | null;
+	ownerDm: {
+		connectionId: string;
+		platform: string;
+		platformUserId: string;
+	} | null;
 }
 
 export interface NotificationDeliveryTaskPayload {
@@ -1129,7 +1197,7 @@ export async function deliverNotificationTask(
 				{
 					connectionId: request.ownerDm.connectionId,
 					channelKey: "dm",
-					platform: "slack",
+					platform: request.ownerDm.platform,
 					teamId: null,
 				},
 			]
@@ -1267,7 +1335,8 @@ export async function deliverNotificationTask(
 					if (
 						!dm ||
 						dm.connectionId !== request.ownerDm.connectionId ||
-						dm.slackUserId !== request.ownerDm.slackUserId
+						dm.platform !== request.ownerDm.platform ||
+						dm.platformUserId !== request.ownerDm.platformUserId
 					) {
 						throw new Error("Notification owner destination changed");
 					}
@@ -1313,7 +1382,7 @@ export async function deliverNotificationTask(
 				const sent = request.ownerDm
 					? await manager.postDirectMessage(
 							target.connectionId,
-							request.ownerDm.slackUserId,
+							request.ownerDm.platformUserId,
 							content,
 						)
 					: await manager.postMessageToChannel(

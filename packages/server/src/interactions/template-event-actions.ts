@@ -5,6 +5,7 @@ import {
 	type TemplateInteractionRegistry,
 } from "@lobu/core/json-template";
 import { getDb, parsePgNumberArray } from "../db/client";
+import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 import { resolveEntityRender } from "../utils/default-entity-template";
 import { ToolUserError } from "../utils/errors";
 import {
@@ -108,7 +109,12 @@ function deliveryMatches(
 	metadata: Record<string, unknown>,
 	source: Required<Pick<TemplateActionSource, "connectionId" | "messageId">> &
 		Pick<TemplateActionSource, "threadId">,
-	platform: string,
+	/**
+	 * Whether this platform's message id already names the exact message, so the
+	 * thread ids need not agree. Resolved by the caller from the platform
+	 * descriptor, keeping this matcher a pure predicate over its inputs.
+	 */
+	messageIdPinsMessage: boolean,
 ): boolean {
 	if (!Array.isArray(metadata.delivery)) return false;
 	return metadata.delivery.some((raw) => {
@@ -119,16 +125,8 @@ function deliveryMatches(
 		) {
 			return false;
 		}
-		// Google Chat identifies the exact message with a full space-scoped
-		// resource name, but a DM click re-encodes its thread from the stable DM
-		// route to a message-bound route. Other adapters retain the thread check:
-		// identifiers such as Slack's `ts` are only conversation-scoped.
-		const isSpaceScopedGoogleChatMessage =
-			platform === "gchat" &&
-			typeof source.messageId === "string" &&
-			/^spaces\/[^/]+\/messages\/[^/]+$/.test(source.messageId);
 		return (
-			isSpaceScopedGoogleChatMessage ||
+			messageIdPinsMessage ||
 			!source.threadId ||
 			stringOrNull(delivery.threadId) === source.threadId
 		);
@@ -212,6 +210,15 @@ export async function invokeTemplateEventAction(
 				403,
 			);
 		}
+		// Whether a message id alone pins the message is the platform's own rule,
+		// so its descriptor owns it: Google Chat says yes (a full space-scoped
+		// resource name), and platforms without the hook keep the thread check,
+		// which identifiers like Slack's `ts` need, being conversation- rather
+		// than message-scoped.
+		const messageIdPinsMessage =
+			getPlatformDescriptor(params.surface)?.messageIdIdentifiesMessage?.(
+				source.messageId,
+			) === true;
 		if (
 			!deliveryMatches(
 				record(sourceEvent.metadata),
@@ -220,7 +227,7 @@ export async function invokeTemplateEventAction(
 					messageId: source.messageId,
 					threadId: source.threadId,
 				},
-				params.surface,
+				messageIdPinsMessage,
 			)
 		) {
 			throw new ToolUserError(

@@ -173,23 +173,34 @@ function actionEventTeamId(
 }
 
 /**
- * Map the clicking Slack user to a Lobu member allowed to decide this run:
- * exactly ONE workspace-scoped Slack identity for (team, platform user) that
- * joins to an org member, AND that member is an admin/owner OR the run's recorded field
- * owner (`ownerUserId`). A non-admin member who is not the owner resolves null,
- * same as an unverified account.
+ * Map the clicking chat user to a Lobu member allowed to decide this run:
+ * exactly ONE identity for (team, platform user) that joins to an org member,
+ * AND that member is an admin/owner OR the run's recorded field owner
+ * (`ownerUserId`). A non-admin member who is not the owner resolves null, same
+ * as an unverified account.
+ *
+ * Platform-generic by dispatch, not by branch. `resolveChatUserIdentity` already
+ * takes the platform and looks up that connector's `ChatUserIdentity`, whose
+ * `buildUserKey` owns the scoping rule: Slack's needs a team id because two
+ * workspaces can both contain `U12345`, Google's ignores one because Chat events
+ * carry no workspace id. So this must NOT pre-check `teamId` itself — a blanket
+ * `teamId == null` guard here is Slack's rule applied to every platform, and it
+ * is what used to make approval-from-chat Slack-only. A platform with no
+ * registered identity still resolves null, the correct fail-closed answer.
  */
-async function resolveSlackActionReviewer(params: {
+async function resolveActionReviewer(params: {
 	connection: PlatformConnection;
 	platformUserId: string | undefined;
 	teamId: string | null;
 	ownerUserId?: string | null;
 }): Promise<{ userId: string; role: string } | null> {
 	const { connection, platformUserId, teamId, ownerUserId } = params;
-	if (connection.platform !== "slack") return null;
-	if (!connection.organizationId || !platformUserId || teamId == null)
-		return null;
-	const userId = await resolveChatUserIdentity("slack", teamId, platformUserId);
+	if (!connection.organizationId || !platformUserId) return null;
+	const userId = await resolveChatUserIdentity(
+		connection.platform,
+		teamId ?? undefined,
+		platformUserId,
+	);
 	if (!userId) return null;
 	const sql = getDb();
 	const rows = await sql<{ role: string }>`
@@ -1131,7 +1142,7 @@ export function registerActionHandlers(
 				return;
 			}
 
-			const reviewer = await resolveSlackActionReviewer({
+			const reviewer = await resolveActionReviewer({
 				connection,
 				platformUserId: event.user?.userId,
 				teamId: actionEventTeamId(event, connection),
@@ -1139,8 +1150,10 @@ export function registerActionHandlers(
 			}).catch(() => null);
 			if (!reviewer) {
 				try {
+					// Names no platform: the card renders on every chat connection, so
+					// a Slack-worded refusal was simply wrong on Google Chat.
 					await thread.post(
-						"I couldn’t verify that your Slack account maps to a Lobu admin for this workspace. Use the Review in Lobu link.",
+						"I couldn’t verify that your chat account maps to a Lobu admin for this workspace. Use the Review in Lobu link.",
 					);
 				} catch {
 					// best effort

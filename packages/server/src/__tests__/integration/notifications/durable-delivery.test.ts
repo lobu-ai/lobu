@@ -26,7 +26,7 @@ import {
   createTestOrganization,
   createTestUser,
   insertChatConnectionRow,
-  linkSlackIdentityInGraph,
+  linkChatIdentityInGraph,
 } from "../../setup/test-fixtures";
 
 describe("durable notification delivery", () => {
@@ -157,11 +157,12 @@ describe("durable notification delivery", () => {
 
   it("retries a resolved owner DM without widening to channels", async () => {
     const h = await setup();
-    await linkSlackIdentityInGraph({
+    await linkChatIdentityInGraph({
       organizationId: h.org.id,
+      platform: "slack",
       userId: h.user.id,
       teamId: "T_TEST",
-      slackUserId: "U_SYNTHETIC_OWNER",
+      platformUserId: "U_SYNTHETIC_OWNER",
     });
     let fail = true;
     const postDirectMessage = vi.fn(async () => {

@@ -1,4 +1,3 @@
-import { SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
 import { getDb } from "../../db/client.js";
 import { chatUserIdentityFor } from "./chat-identity-sources.js";
 
@@ -84,44 +83,57 @@ export async function resolveChatUserIdentity(
 }
 
 /**
- * The REVERSE lookup: the workspace-scoped Slack user id a Lobu user has in
- * `teamId`, or null. Used to address an owner directly in a workspace one of
- * the org's bot connections lives in.
+ * The REVERSE lookup: the platform user id a Lobu user has on `platform`
+ * within `teamId`, or null. Used to address an owner directly on a platform
+ * one of the org's bot connections lives in.
  *
  * Same source of truth as `resolveChatUserIdentity`, walked the other way:
- * from the `$member` carrying this `auth_user_id` to the `slack_user_id`
- * stamped on it. The prefix match is on the composite `TEAM:USER` key, so it
- * stays workspace-scoped and index-usable (no leading wildcard).
+ * from the `$member` carrying this `auth_user_id` to the platform id stamped
+ * on it. Registry-driven like the forward direction — the platform's own
+ * `ChatUserIdentity` supplies the namespace, how the search must be narrowed
+ * (`userKeyScope`), and how a stored key turns back into an ADDRESSABLE id
+ * (`platformUserIdFromKey`). The last one is not cosmetic: Slack stores
+ * `TEAM:U…` and addresses `U…`, Google stores a bare account id and addresses
+ * `users/<id>`, so a key handed to a DM call unconverted does not route.
+ *
+ * REFUSES rather than widens. A `team-prefix` platform with no usable team
+ * yields null, never an unconstrained scan: Slack ids repeat across
+ * workspaces, so an unnarrowed match could address the wrong person entirely.
  */
-export async function resolveSlackUserIdForUser(
+export async function resolveChatUserIdForUser(
 	userId: string,
-	teamId: string,
+	platform: string,
+	teamId: string | null | undefined,
 ): Promise<string | null> {
-	const prefix = `${teamId.toUpperCase()}:`;
-	// `_` is a LIKE wildcard AND a character `normalizeSlackUserId` accepts in a
-	// team id, so an unescaped pattern like `T_ACME:%` would also match
-	// `TXACME:…` — returning a user id from the wrong workspace. Escape all
-	// LIKE metacharacters so the prefix matches literally.
+	const identity = chatUserIdentityFor(platform);
+	if (!identity) return null;
+	const scope = identity.userKeyScope(teamId);
+	if (!scope) return null;
+	const prefix = scope.kind === "team-prefix" ? scope.prefix : "";
+	// `_` is a LIKE wildcard AND a character a team id may contain, so an
+	// unescaped pattern like `T_ACME:%` would also match `TXACME:…` — returning
+	// a user id from the wrong workspace. Escape all LIKE metacharacters so the
+	// prefix matches literally. A `global` scope needs no pattern at all.
 	const likePrefix = prefix.replace(/([\\%_])/g, "\\$1");
 	const rows = await getDb()<{ identifier: string }>`
-    SELECT DISTINCT slack_ei.identifier
+    SELECT DISTINCT chat_ei.identifier
     FROM entity_identities auth_ei
     JOIN entities e
       ON e.id = auth_ei.entity_id
      AND e.organization_id = auth_ei.organization_id
      AND e.deleted_at IS NULL
-    JOIN entity_identities slack_ei
-      ON slack_ei.organization_id = auth_ei.organization_id
-     AND slack_ei.entity_id = auth_ei.entity_id
-     AND slack_ei.namespace = ${SLACK_IDENTITY.USER_ID}
-     AND slack_ei.scope_key IS NULL
-     AND slack_ei.deleted_at IS NULL
+    JOIN entity_identities chat_ei
+      ON chat_ei.organization_id = auth_ei.organization_id
+     AND chat_ei.entity_id = auth_ei.entity_id
+     AND chat_ei.namespace = ${identity.namespace}
+     AND chat_ei.scope_key IS NULL
+     AND chat_ei.deleted_at IS NULL
     WHERE auth_ei.namespace = 'auth_user_id'
       AND auth_ei.identifier = ${userId}
       AND auth_ei.scope_key IS NULL
       AND auth_ei.source_connector = 'auth:signup'
       AND auth_ei.deleted_at IS NULL
-      AND slack_ei.identifier LIKE ${`${likePrefix}%`}
+      AND chat_ei.identifier LIKE ${`${likePrefix}%`}
     LIMIT 2
   `;
 	// FAILS CLOSED on ambiguity, exactly like `resolveChatUserIdentity`. The
@@ -129,7 +141,7 @@ export async function resolveSlackUserIdForUser(
 	// who joins a second org, or whose Slack account id changes inside one
 	// workspace, can hold two DISTINCT ids under the same `TEAM:` prefix. The
 	// caller uses this as a DM recipient — picking arbitrarily sends the owner DM
-	// to a stale Slack user and loses it silently.
+	// to a stale chat account and loses it silently.
 	if (rows.length !== 1) return null;
-	return rows[0].identifier.slice(prefix.length) || null;
+	return identity.platformUserIdFromKey(rows[0].identifier);
 }
