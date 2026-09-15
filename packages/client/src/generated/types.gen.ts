@@ -7216,7 +7216,10 @@ export type GetApiV1AgentsByAgentIdEventsData = {
   path: {
     agentId: string;
   };
-  query?: never;
+  query?: {
+    since?: string;
+    token?: string;
+  };
   url: "/api/v1/agents/{agentId}/events";
 };
 

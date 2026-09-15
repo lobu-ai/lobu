@@ -105,15 +105,38 @@ export const intervals = {
     return parseEnvInt('WORKER_KILL_TIMEOUT_MS', 5_000);
   },
 
-  /** Turn-liveness deadline while the turn EXECUTES. Comfortably exceeds the
-   *  worker's 20s status_update interval so a live worker (which extends the
-   *  deadline on every status_update — plus on the 30s SSE-ping ACK and
-   *  delivery receipts) is never falsely failed; a silent/dead worker lapses
-   *  within this window of its last worker-driven signal. `armTurnTimeout`
-   *  adds `runsReaperStaleAfterSeconds` on top, because a turn still waiting
-   *  for a worker slot has nothing that could signal liveness yet. */
+  /** Cadence of the isolate lane's run heartbeat, mirroring
+   *  `DEFAULT_CONFIG.heartbeatIntervalMs` in the worker's `daemon/executor.ts`.
+   *  Declared here because `turnDefaultDeadlineMs` is a multiple of it and
+   *  silently mis-sizes if the worker's cadence drifts.
+   *
+   *  Deliberately NOT env-overridable: the worker's beat is a hardcoded
+   *  constant, so a knob here would move the deadline without moving the beat
+   *  it is sized against — the exact drift this mirror exists to prevent. */
+  get isolateTurnHeartbeatMs(): number {
+    return 30_000;
+  },
+
+  /** Turn-liveness deadline while the turn EXECUTES. Must clear THREE beats of
+   *  the lane that actually extends it, so one slow or dropped beat cannot fail
+   *  a working turn.
+   *
+   *  This was 60s, written for the subprocess lane's 20s `status_update`. The
+   *  isolate lane beats every 30s (`isolateTurnHeartbeatMs`) with a 15s HTTP
+   *  timeout on the call, so a single late beat could exceed 60s and lapse the
+   *  marker of a perfectly healthy turn — which then emitted a spurious
+   *  terminal error while the worker kept running and later delivered a second
+   *  one. Sized off the heartbeat so the two cannot drift apart again; the
+   *  inequality is asserted in `__tests__/unit/turn-liveness-intervals.test.ts`.
+   *
+   *  `armTurnTimeout` adds `runsReaperStaleAfterSeconds` on top, because a turn
+   *  still waiting for a worker slot has nothing that could signal liveness
+   *  yet. */
   get turnDefaultDeadlineMs(): number {
-    return parseEnvInt('TURN_DEFAULT_DEADLINE_MS', 60_000);
+    return parseEnvInt(
+      'TURN_DEFAULT_DEADLINE_MS',
+      3 * intervals.isolateTurnHeartbeatMs
+    );
   },
 
   /** How often each replica sweeps for lapsed turn-liveness markers. */

@@ -2857,7 +2857,7 @@ describe('agent turn producer', () => {
     expect(marker!.n).toBe(0);
 
     // What the user actually receives: the real cause, with prose and a CTA —
-    // not WORKER_UNRESPONSIVE after 60s of silence.
+    // not WORKER_UNRESPONSIVE after the turn-liveness deadline of silence.
     const delivered = await threadResponsesGlobal();
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toMatchObject({
@@ -3557,6 +3557,17 @@ describe('agent turn completion', () => {
       turn_delta: { text: 'ok', sequence: 1 },
     });
     expect(await fine.json()).toMatchObject({ turn_delta_ack: { sequence: 1, published: true } });
+    // The liveness status is published off the beat's reply path (`void`), so
+    // an immediate read cannot see it land — the check above is only as strong
+    // as the race. Wait for the well-formed span's row, issued two round trips
+    // AFTER the dropped beats, and assert those beats still contributed
+    // nothing. A dropped payload means the beat carried something the server
+    // refused, not that the beat was silent, so it must publish neither the
+    // span nor a status standing in for it.
+    await vi.waitFor(async () => {
+      expect(await threadResponses()).toHaveLength(1);
+    }, { timeout: 5_000, interval: 20 });
+    expect((await threadResponses()).every((row) => row.statusUpdate === undefined)).toBe(true);
   });
 
   it('streams an in-flight turn to the client on the heartbeat it already sends', async () => {
@@ -3660,6 +3671,59 @@ describe('agent turn completion', () => {
       'the isolate',
       ' lane answered',
     ]);
+  });
+
+  it('answers a SILENT beat with a liveness status, and a carrying beat with none', async () => {
+    // The subprocess lane's unconditional `status_update` is gone with that
+    // lane, so a turn that is thinking or waiting on a tool says nothing on the
+    // wire — indistinguishable from a dead worker to the SPA's stream and to
+    // the chat platforms' typing indicator, which this row alone drives.
+    const workerId = 'fleet-silent-beat';
+    const runId = await claimedTurnRun(workerId);
+
+    const silent = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+    });
+    expect(silent.status).toBe(200);
+
+    // The publish is fired off the beat's reply path on purpose, so it is
+    // observed rather than awaited.
+    await vi.waitFor(async () => {
+      expect(await threadResponses()).toHaveLength(1);
+    }, { timeout: 5_000, interval: 20 });
+    const [status] = await threadResponses();
+    // Addressed from the RUN's envelope, exactly like the delta path — the
+    // worker names no destination on a heartbeat and cannot.
+    expect(status).toMatchObject({
+      messageId: 'msg-turn',
+      channelId: 'api_user-turn',
+      conversationId: 'conv-turn',
+      userId: 'user-turn',
+      platform: 'api',
+      statusUpdate: { state: 'is working' },
+    });
+    // Non-terminal: it must not look like an answer to any consumer.
+    expect(status.finalText).toBeUndefined();
+    expect(status.processedMessageIds).toBeUndefined();
+    expect(status.delta).toBeUndefined();
+
+    // A beat that carries progress is already proof of it; a status alongside
+    // would be write amplification for no extra signal.
+    await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'the isolate', sequence: 1 },
+    });
+    await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [
+        { tool_call_id: 'call-1', name: 'search_memory', is_error: false, output: 'ok' },
+      ],
+    });
+    const rows = await threadResponses();
+    expect(rows.filter((row) => row.statusUpdate !== undefined)).toHaveLength(1);
   });
 
   it('refuses a delta from a worker that did not claim the run', async () => {

@@ -922,7 +922,7 @@ export const patchApiV1AgentsByAgentId = <ThrowOnError extends boolean = false>(
 /**
  * Subscribe to agent events (SSE)
  *
- * Server-Sent Events stream for real-time agent updates
+ * Server-Sent Events stream for real-time agent updates. Every event carries an `id:` cursor; send it back as the `Last-Event-ID` header (the browser does this automatically on its own reconnect) or as `?since=` to replay only the gap since that event instead of the whole retained backlog.
  */
 export const getApiV1AgentsByAgentIdEvents = <
   ThrowOnError extends boolean = false,

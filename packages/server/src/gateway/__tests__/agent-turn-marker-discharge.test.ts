@@ -3,9 +3,9 @@
  *
  * `MessageConsumer` arms one marker per dispatched turn — the client's only
  * promise of a terminal event — covering the worker-claim horizon plus one
- * `TURN_DEFAULT_DEADLINE_MS` (60s) execution window, and `sweepExpiredTurns`
- * turns a lapsed marker into a terminal WORKER_UNRESPONSIVE. The first
- * heartbeat extension drops it to that 60s execution deadline. Two things
+ * `TURN_DEFAULT_DEADLINE_MS` execution window, and `sweepExpiredTurns` turns a
+ * lapsed marker into a terminal WORKER_UNRESPONSIVE. The first heartbeat
+ * extension drops it to that execution deadline. Two things
  * therefore have to happen, and the subprocess lane did both from
  * `/worker/response`, a route this lane never calls:
  *
@@ -128,7 +128,7 @@ describe("isolate-lane heartbeat vs the turn-liveness marker", () => {
         ${getDb().json(nativeRun(conversationId, messageId).action_input as never)})`;
 
     // Every owner heartbeat extends the WHOLE deployment, so it also collapses
-    // the queued follower's marker to the 60s execution deadline.
+    // the queued follower's marker to the execution deadline.
     await extendTurnDeadlines(deploymentName);
 
     await getDb().begin(async (tx) => {
@@ -174,7 +174,7 @@ describe("isolate-lane heartbeat vs the turn-liveness marker", () => {
         } as never)})
       RETURNING id`;
 
-    // Age the marker past its deadline, as a >60s turn would.
+    // Age the marker past its deadline, as a long turn would.
     await getDb()`
       UPDATE public.runs SET run_at = now() - interval '1 minute'
       WHERE status = 'pending' AND run_type = 'internal'

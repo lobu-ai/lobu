@@ -25,19 +25,22 @@
  *  - Backstop (deadline): {@link sweepExpiredTurns} runs periodically on every
  *    replica and fails markers whose deadline has lapsed. Covers a hung worker
  *    (alive, never replies) and a worker-pod death (the marker outlives the pod
- *    and another replica sweeps it). The deadline is pushed forward
- *    ({@link extendTurnDeadlines}) by any worker-driven liveness signal —
- *    primarily the worker's 20s status_update, plus the 30s SSE-ping ACK and
- *    delivery receipts — so a live-but-slow worker is never falsely failed,
- *    while a silent one lapses.
+ *    and another replica sweeps it). The deadline is pushed forward by any
+ *    worker-driven liveness signal, so a live-but-slow worker is never falsely
+ *    failed while a silent one lapses. On the isolate `agent_turn` lane that
+ *    signal is the run heartbeat ({@link extendHeartbeatedTurnMarker}, every
+ *    `intervals.isolateTurnHeartbeatMs`); the deadline is sized as a multiple
+ *    of that beat, so one slow or dropped beat cannot fail a working turn.
+ *    Other lanes extend through {@link extendTurnDeadlines} on a status update,
+ *    the SSE-ping ACK, or a delivery receipt.
  *
- *    That status_update proves the process is ALIVE, not that the turn is
- *    PROGRESSING (it is an unconditional `setInterval` in `session-runner.ts`),
- *    so on its own it did NOT cover the hung-but-heartbeating worker this
- *    backstop names: a turn wedged after a terminal provider error renewed its
- *    own deadline every 20s and hung the client indefinitely. The gap is closed
- *    by {@link markTurnProviderFailed}, which withdraws the extension once the
- *    proxy has seen the provider answer that turn terminally.
+ *    A beat proves the process is ALIVE, not that the turn is PROGRESSING — it
+ *    is an unconditional interval either way — so on its own it did NOT cover
+ *    the hung-but-heartbeating worker this backstop names: a turn wedged after
+ *    a terminal provider error renewed its own deadline on every beat and hung
+ *    the client indefinitely. The gap is closed by {@link markTurnProviderFailed},
+ *    which withdraws the extension once the proxy has seen the provider answer
+ *    that turn terminally.
  *
  * ## Multi-replica
  * Arming/extending/discharging all happen on the worker's owning pod (worker

@@ -70,6 +70,11 @@ import {
   listOrgActivity,
 } from "../../../tools/admin/manage_operations/activity-feed.js";
 
+/** Cadence of the SSE keepalive. The client's transport watchdog is sized as a
+ *  multiple of this; if you change it, change `SSE_PING_INTERVAL_MS` in
+ *  owletto's `lobu-chat-store.tsx` too. */
+const SSE_PING_INTERVAL_MS = 30_000;
+
 const logger = createLogger("agent-api");
 
 /**
@@ -381,9 +386,24 @@ const getAgentEventsRoute: RouteSpec = {
   path: "/api/v1/agents/{agentId}/events",
   tags: ["Messages"],
   summary: "Subscribe to agent events (SSE)",
-  description: "Server-Sent Events stream for real-time agent updates",
+  description:
+    "Server-Sent Events stream for real-time agent updates. Every event carries "
+    + "an `id:` cursor; send it back as the `Last-Event-ID` header (the browser "
+    + "does this automatically on its own reconnect) or as `?since=` to replay "
+    + "only the gap since that event instead of the whole retained backlog.",
   bearerAuth: true,
-  request: { params: AgentIdParamSchema },
+  request: {
+    params: AgentIdParamSchema,
+    // `token` is the embedded iframe's short-lived SSE ticket, declared here
+    // for the same reason the sibling config route declares it: an undeclared
+    // parameter is an undiscoverable one. Both are optional, and TypeBox object
+    // checks admit unlisted keys, so declaring them cannot reject a caller that
+    // sends neither — the ticket is read off the raw request either way.
+    query: Type.Object({
+      since: Type.Optional(Type.String()),
+      token: Type.Optional(Type.String()),
+    }),
+  },
   responses: {
     200: {
       description: "SSE stream",
@@ -1383,7 +1403,20 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       // broadcast landing during the `connected` write below would be delivered
       // live AND still be in the backlog we replay — duplicating it (and
       // possibly reordering it after later live events) for the client.
-      const backlog = sseManager.getRecentEvents(sseKey);
+      // Resume from the client's cursor so a dropped socket leaves a bounded
+      // gap rather than a guessed one. The browser replays its last `id:` as
+      // `Last-Event-ID` on its OWN auto-reconnect; a reconnect the client
+      // constructs (a half-open socket it detected itself) cannot set that
+      // header, so it carries the same cursor as `?since=`. An absent or
+      // garbage cursor replays the full retained backlog, which is what an
+      // unresumed connect has always received.
+      const resumeCursor = Number(
+        c.req.header("Last-Event-ID") ?? c.req.query("since")
+      );
+      const backlog = sseManager.getRecentEvents(
+        sseKey,
+        Number.isFinite(resumeCursor) ? resumeCursor : undefined
+      );
       sseManager.addConnection(sseKey, stream);
       connectionAdded = true;
 
@@ -1398,6 +1431,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
 
         for (const entry of backlog) {
           await stream.writeSSE({
+            id: String(entry.timestamp),
             event: entry.event,
             data: JSON.stringify(entry.data),
           });
@@ -1412,7 +1446,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
           } catch {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
           }
-        }, 30000);
+        }, SSE_PING_INTERVAL_MS);
 
         while (!stream.aborted && !stream.closed) {
           await stream.sleep(1000);

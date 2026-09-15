@@ -71,4 +71,16 @@ describe("GET /api/v1/agents/:id/events — embedded SSE ticket auth", () => {
       401,
     );
   });
+
+  // The route declares `since` and `token` so both are discoverable in the
+  // OpenAPI document. Declaring a query schema at all is the risk: if it ever
+  // rejected an unlisted or absent parameter, every embedded stream would 400
+  // at the validator, BEFORE the auth gate these tests pin. 401/404 both prove
+  // the request reached the gate; a 400 anywhere here is the regression.
+  test("a resume cursor reaches the auth gate rather than the validator", async () => {
+    expect(await eventsStatus("?since=1700000000001")).toBe(401);
+    expect(
+      await eventsStatus(`?since=1700000000001&token=${encodeURIComponent(ticket("u1"))}`),
+    ).toBe(404);
+  });
 });

@@ -8,10 +8,10 @@ import { describe, expect, test } from "bun:test";
 import { SseManager, type SseConnection } from "../services/sse-manager.js";
 
 function fakeStream(): SseConnection & {
-  events: Array<{ event: string; data: string }>;
+  events: Array<{ event: string; data: string; id?: string }>;
   failOnNextWrite: boolean;
 } {
-  const events: Array<{ event: string; data: string }> = [];
+  const events: Array<{ event: string; data: string; id?: string }> = [];
   return {
     events,
     failOnNextWrite: false,
@@ -217,5 +217,50 @@ describe("SseManager", () => {
 
     expect(mgr.getRecentEvents("agent")).toEqual([]);
     expect(closePublishes).toBe(0);
+  });
+
+  /**
+   * Resume regression. The client used to hand-roll a dedupe by comparing each
+   * payload's timestamp against the newest `connected` stamp, which discarded
+   * the ENTIRE replay after any reconnect — including a terminal `complete`
+   * that the owner gate had retried specifically to deliver. The fix is the
+   * standard SSE primitive: every live write carries `id: <timestamp>`, the
+   * client echoes it back, and only the gap is replayed. If `id` stops being
+   * written, resume silently degrades to "replay everything" and the client
+   * loses its cursor — so assert the cursor itself, not just the payload.
+   */
+  test("every live write carries a timestamp cursor usable as `since`", () => {
+    const mgr = new SseManager();
+    const conn = fakeStream();
+    mgr.addConnection("agent-resume", conn);
+
+    mgr.broadcast("agent-resume", "output", { content: "first" });
+    mgr.broadcast("agent-resume", "complete", { finalText: "done" });
+
+    expect(conn.events).toHaveLength(2);
+    for (const event of conn.events) {
+      expect(typeof event.id).toBe("string");
+      expect(Number.isFinite(Number(event.id))).toBe(true);
+    }
+
+    // The cursor a client would echo back after seeing only the first event.
+    const cursor = Number(conn.events[0]?.id);
+    const replayed = mgr.getRecentEvents("agent-resume", cursor);
+
+    // The gap — and specifically the terminal event — survives; the event the
+    // client already saw does not come back.
+    expect(replayed.map((e) => e.event)).toEqual(["complete"]);
+  });
+
+  test("a resumed client is not handed events it already saw", () => {
+    const mgr = new SseManager();
+    const conn = fakeStream();
+    mgr.addConnection("agent-seen", conn);
+
+    mgr.broadcast("agent-seen", "output", { content: "a" });
+    const cursor = Number(conn.events[0]?.id);
+
+    expect(mgr.getRecentEvents("agent-seen", cursor)).toHaveLength(0);
+    expect(mgr.getRecentEvents("agent-seen")).toHaveLength(1);
   });
 });

@@ -453,6 +453,96 @@ export async function publishTurnDeltaBestEffort(
 	}
 }
 
+/**
+ * Publish a liveness status for an in-flight `agent_turn` whose beat carried
+ * nothing to show.
+ *
+ * The subprocess lane sent an unconditional 20s `status_update`, so a turn that
+ * was thinking or running a tool still said so on the wire. The isolate lane
+ * beats without one, leaving most of a long turn indistinguishable from a dead
+ * worker to anything downstream — the SPA's stream, and the chat platforms'
+ * typing indicator, which is driven entirely by this row
+ * (`chat-response-bridge.handleStatusUpdate`). This restores the signal on the
+ * beat the turn already sends.
+ *
+ * Only for an otherwise-silent beat: a delta or a tool trace is already proof
+ * of progress, and a second signal alongside it would just be write
+ * amplification.
+ *
+ * Routing is read from the run's own row, never the worker's body, exactly as
+ * the delta path does. Non-terminal and best-effort — a dropped status costs a
+ * stale indicator, never an answer.
+ */
+async function publishTurnStatus(
+	runId: number,
+	workerId: string
+): Promise<void> {
+	const sql = getDb();
+	const emitted = await sql.begin(async (tx) => {
+		const owner = await lockAgentTurnRun(tx, runId);
+		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
+		const rows = (await tx`
+      SELECT action_input, organization_id, claimed_at
+      FROM public.runs
+      WHERE id = ${runId}
+        AND run_type = 'agent_turn'
+        ${runLeaseFence(tx, workerId)}
+      LIMIT 1
+    `) as unknown as Array<{
+			action_input: {
+				turn?: { conversation_id?: string };
+				reply?: TurnReply;
+			} | null;
+			organization_id: string | null;
+			claimed_at: Date | string | null;
+		}>;
+		const row = rows[0];
+		if (!row) return false;
+		const envelope = row.action_input ?? {};
+		const reply = envelope.reply;
+		if (!reply) return false;
+		const now = Date.now();
+		const claimedAtMs = row.claimed_at ? new Date(row.claimed_at).getTime() : now;
+		await insertThreadResponseRow(
+			tx,
+			{
+				messageId: reply.message_id,
+				channelId: reply.channel_id,
+				conversationId: String(envelope.turn?.conversation_id ?? ""),
+				userId: reply.user_id,
+				teamId: reply.team_id ?? "api",
+				platform: reply.platform,
+				organizationId: row.organization_id,
+				platformMetadata: reply.platform_metadata,
+				statusUpdate: {
+					elapsedSeconds: Math.max(0, Math.round((now - claimedAtMs) / 1000)),
+					state: "is working",
+				},
+				timestamp: now,
+			},
+			row.organization_id
+		);
+		return true;
+	});
+	if (emitted) await notifyThreadResponse();
+}
+
+/** Never let a status publish fail the heartbeat that carried it. */
+export async function publishTurnStatusBestEffort(
+	runId: number,
+	workerId: string
+): Promise<void> {
+	try {
+		await publishTurnStatus(runId, workerId);
+	} catch (err) {
+		incrementCounter("lobu_turn_status_publish_failed_total");
+		logger.debug(
+			{ runId, err: errorMessage(err) },
+			"Failed to publish an agent turn liveness status"
+		);
+	}
+}
+
 /** Validate native identities only; Pi owns replay and compaction. */
 function inputReceiptError(
   run: NativeTurnRun, body: CompleteAgentTurnRequest, snapshot: TurnSnapshot,

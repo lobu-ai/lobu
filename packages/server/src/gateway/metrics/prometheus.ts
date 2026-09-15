@@ -130,6 +130,11 @@ function initializeMetrics() {
     "Agent-turn tool-trace publishes that failed on the worker heartbeat path",
     "counter"
   );
+  registerMetric(
+    "lobu_turn_status_publish_failed_total",
+    "Agent-turn liveness-status publishes that failed on the worker heartbeat path",
+    "counter"
+  );
   // A conversation whose native session outgrew the snapshot cap. Trimmed to
   // its latest compaction when it has one (no context lost), reset otherwise.
   // Both rare by design; a rising rate says the cap or the tool-result sizes

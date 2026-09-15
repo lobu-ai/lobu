@@ -86,6 +86,7 @@ import {
 import { recordScheduledExecutionFailure } from "../automations/scheduled-failure-policy";
 import {
 	publishTurnDeltaBestEffort,
+	publishTurnStatusBestEffort,
 	publishTurnToolEventsBestEffort,
 } from "./agent-turn";
 import { authorizeRunForWorker } from "./shared";
@@ -332,6 +333,21 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// provider-failed turn, so a wedged run still lapses into the backstop.
 		if (updated.some((row) => row.run_type === 'agent_turn')) {
 			void extendHeartbeatedTurnMarker(run_id);
+			// A beat carrying neither text nor a tool trace is the SILENT case —
+			// thinking, or a tool still running. That is most of a long turn, and
+			// with no signal at all it looks exactly like a dead worker to the
+			// client. Emit the liveness status here, where the run type is already
+			// known, so no other lane pays a query for it. `void` for the same
+			// reason as the marker extension: it must not delay the beat's reply.
+			//
+			// Read off the RAW body, not the sanitized fields above: a beat whose
+			// payload was dropped as malformed/oversize DID carry something, and
+			// the contract for that beat is that it publishes nothing at all.
+			const beatWasSilent =
+				body.turn_delta === undefined && body.turn_tool_events === undefined;
+			if (beatWasSilent) {
+				void publishTurnStatusBestEffort(run_id, worker_id);
+			}
 		}
 		if (updated.length === 0) {
 			// The fence requires `status = 'running'`, so a cancelled run fails it

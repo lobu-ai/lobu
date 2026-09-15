@@ -72,7 +72,7 @@ export interface SseConnection {
   closed?: boolean;
   destroyed?: boolean;
   writableEnded?: boolean;
-  writeSSE?(payload: { event: string; data: string }): unknown;
+  writeSSE?(payload: { event: string; data: string; id?: string }): unknown;
   write?(chunk: string): unknown;
 }
 
@@ -82,6 +82,7 @@ export class SseManager {
   private readonly streamBacklog = new Map<string, SseEvent[]>();
   private publisher?: SseFanoutPublisher;
   private nextSeq = 0;
+  private lastMintedTs = 0;
 
   constructor(
     private readonly backlogLimit = intervals.sseBacklogLimit,
@@ -139,7 +140,7 @@ export class SseManager {
    * client's SSE to one pod. No-op (local-only) when no publisher is wired.
    */
   broadcast(agentId: string, event: string, data: unknown): void {
-    const entry: SseEvent = { event, data, timestamp: Date.now() };
+    const entry: SseEvent = { event, data, timestamp: this.mintTimestamp() };
     this.rememberEvent(agentId, entry);
     this.writeToConnections(agentId, entry);
     this.publisher?.event(agentId, entry);
@@ -173,12 +174,39 @@ export class SseManager {
     this.publisher = publisher;
   }
 
+  /**
+   * Mint a strictly increasing timestamp for a locally-broadcast event.
+   *
+   * The timestamp doubles as the SSE `id:` a client echoes back to resume, and
+   * `getRecentEvents` filters it with `timestamp > since`. Two events broadcast
+   * in the SAME millisecond would therefore share a cursor, and resuming from
+   * the first would silently drop the second — which bites hardest exactly when
+   * it matters, because a terminal `complete` routinely lands in the same tick
+   * as the delta before it. Bumping to `last + 1` on collision keeps the cursor
+   * a total order without changing its type or the filter.
+   *
+   * Scoped to locally-minted events on purpose: `deliverFromPeer` keeps the
+   * originating pod's timestamp, since rewriting it would reorder that pod's
+   * events relative to their own cursors.
+   */
+  private mintTimestamp(): number {
+    const now = Date.now();
+    this.lastMintedTs = now > this.lastMintedTs ? now : this.lastMintedTs + 1;
+    return this.lastMintedTs;
+  }
+
   /** Write an event to every live connection for `agentId`, sweeping dead ones. */
   private writeToConnections(agentId: string, entry: SseEvent): void {
     const connections = this.connections.get(agentId);
     if (!connections || connections.size === 0) return;
 
     const { event, data } = entry;
+    // `id:` is the resume cursor. It MUST be the event's timestamp, because
+    // that is the only field comparable across pods — `seq` is a process-local
+    // counter, so a reconnect that lands on another replica cannot order by it.
+    // `getRecentEvents(agentId, since)` filters on the same field, so the id a
+    // client echoes back as `Last-Event-ID` is directly usable as `since`.
+    const id = String(entry.timestamp);
     const dead = new Set<SseConnection>();
     for (const res of connections) {
       try {
@@ -187,9 +215,9 @@ export class SseManager {
           continue;
         }
         if (typeof res.writeSSE === "function") {
-          res.writeSSE({ event, data: JSON.stringify(data) });
+          res.writeSSE({ id, event, data: JSON.stringify(data) });
         } else if (typeof res.write === "function") {
-          const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+          const message = `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
           res.write(message);
         }
       } catch {

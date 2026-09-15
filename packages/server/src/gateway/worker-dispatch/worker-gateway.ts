@@ -366,13 +366,14 @@ export class WorkerGateway {
         return c.json({ success: true });
       }
 
-      // The worker's 20s status_update (HEARTBEAT_INTERVAL_MS in
-      // session-runner.ts) carries `statusUpdate` and NO `received` flag, so it
-      // falls through the ACK block above. It is the most frequent worker-driven
-      // liveness signal — far more frequent than the 30s SSE-ping ACK — so it
-      // must refresh the turn-liveness deadline too, otherwise a live worker
-      // emitting status updates every 20s could still lapse the 60s deadline on
-      // ~2 consecutive missed ping ACKs and be falsely failed by the sweep.
+      // A worker status update carries `statusUpdate` and NO `received` flag,
+      // so it falls through the ACK block above. It is a worker-driven liveness
+      // signal and more frequent than the SSE-ping ACK, so it must refresh the
+      // turn-liveness deadline too — otherwise a live worker emitting status
+      // updates could still lapse `turnDefaultDeadlineMs` on a couple of
+      // consecutive missed ping ACKs and be falsely failed by the sweep.
+      // (The isolate `agent_turn` lane does not come through here at all; it
+      // extends its marker from the run heartbeat in `run-lifecycle.ts`.)
       // Best-effort, same as the ACK path.
       if (enrichedResponse.statusUpdate) {
         void extendTurnDeadlines(deploymentName);
