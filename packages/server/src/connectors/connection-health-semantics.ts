@@ -129,12 +129,6 @@ export interface ConnectionHealthSemanticsInput {
   feeds: readonly FeedHealthSemantics[];
 }
 
-export interface ConnectionHealthSemantics {
-  attention: ConnectionAttentionState;
-  /** Collector feeds considered by the fold (streaming/source_only excluded). */
-  expectedFeedCount: number;
-}
-
 /**
  * Collector feeds only. `streaming` (chat transcripts) and `source_only`
  * (read-on-demand) have no sync lifecycle, so folding them would dilute every
@@ -176,20 +170,25 @@ function contributesAttention(feed: FeedHealthSemantics): boolean {
  */
 export function deriveConnectionHealthSemantics(
   input: ConnectionHealthSemanticsInput
-): ConnectionHealthSemantics {
+): ConnectionAttentionState {
   const collectors = input.feeds.filter(isCollector);
   const expectedFeedCount = collectors.length;
   const attentionFeedCount = collectors.filter(contributesAttention).length;
 
-  const base = { expectedFeedCount };
-
   // Connection-level blockers outrank anything a feed can say: no feed can
   // collect while the connection itself cannot authenticate.
   if (input.status === "pending_auth" || input.status === "revoked") {
-    return { ...base, attention: "needs_auth" };
+    return "needs_auth";
   }
   if (input.status === "error") {
-    return { ...base, attention: "misconfigured" };
+    return "misconfigured";
+  }
+  // Operator intent, same as the two above. Without this a paused connection
+  // reports its zero-feed shape as `no_feeds` while a paused connection that
+  // HAS feeds reports `paused` (every feed derives paused from
+  // connection_status), so the same intent read two different ways.
+  if (input.status === "paused") {
+    return "paused";
   }
 
   // A chat transport carries no collector feeds by design, a consent-only
@@ -213,10 +212,7 @@ export function deriveConnectionHealthSemantics(
     // feedCount === 0, while "expected feeds = 0" returns healthy separately.
     // Collapsing the two here would flag every working chat connection.
     const hasNoFeedsAtAll = input.feeds.length === 0;
-    return {
-      ...base,
-      attention: isCollectorConnection && hasNoFeedsAtAll ? "no_feeds" : "healthy",
-    };
+    return isCollectorConnection && hasNoFeedsAtAll ? "no_feeds" : "healthy";
   }
 
   const allPaused = collectors.every((feed) => feed.attention === "paused");
@@ -227,21 +223,21 @@ export function deriveConnectionHealthSemantics(
   // Cause before symptom: a feed with no dispatch path has also never run, and
   // saying "never collected" would describe the consequence while hiding the
   // reason. Same ranking the feed-level module applies to no_trigger/never_run.
-  if (allNoTrigger) return { ...base, attention: "no_trigger" };
-  if (allPaused) return { ...base, attention: "paused" };
+  if (allNoTrigger) return "no_trigger";
+  if (allPaused) return "paused";
   // An auth profile can go revoked while `connections.status` still reads
   // 'active' — the status column records intent and nothing rewrites it. Every
   // feed then derives needs_auth, and reporting the connection as merely
   // `degraded` would bury the one state a human can actually act on.
   if (collectors.every((feed) => feed.attention === "needs_auth")) {
-    return { ...base, attention: "needs_auth" };
+    return "needs_auth";
   }
   if (collectors.every((feed) => feed.attention === "never_run")) {
-    return { ...base, attention: "never_collected" };
+    return "never_collected";
   }
-  if (attentionFeedCount > 0) return { ...base, attention: "degraded" };
+  if (attentionFeedCount > 0) return "degraded";
 
-  return { ...base, attention: "healthy" };
+  return "healthy";
 }
 
 /**
@@ -380,7 +376,7 @@ function stringOrNull(value: unknown): string | null {
  */
 export function deriveConnectionHealthFromRow(
   row: ConnectionHealthRow
-): ConnectionHealthSemantics {
+): ConnectionAttentionState {
   const rawFeeds = Array.isArray(row.feed_health) ? row.feed_health : [];
   const feeds: FeedHealthSemantics[] = rawFeeds.map((entry) => {
     const feed = (entry ?? {}) as FeedHealthJsonRow;

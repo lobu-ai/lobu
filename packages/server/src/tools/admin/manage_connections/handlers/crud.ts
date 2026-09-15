@@ -531,7 +531,7 @@ export async function handleList(
       // by anything that runs. `attention` is the observed counterpart, derived
       // from the same feed columns list_feeds derives from, so a connection that
       // cannot collect says so where someone reads it.
-      attention: connectionHealth.attention,
+      attention: connectionHealth,
       facets: deriveConnectionFacets({
         connectorKey: String(row.connector_key),
         isChat: row.declares_chat === true,
@@ -708,7 +708,7 @@ export async function handleGet(
         device_online: getRow.device_online as boolean | null,
         connector_has_auto_syncable_feeds: hasAutoSyncableFeeds as boolean | null,
         feed_health: feedHealth,
-      }).attention,
+      }),
 			error_message: effectiveConnectionErrorMessage({
 				error_message: getRow.error_message as string | null,
 				device_worker_id: getRow.device_worker_id as string | null,

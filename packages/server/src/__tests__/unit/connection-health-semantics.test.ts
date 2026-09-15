@@ -33,42 +33,40 @@ describe("connection attention — the three prod shapes this exists to separate
 	// The abandoned-setup shape: a connection created and never returned to.
 	// 0 feeds, 0 runs, status 'active' — connector-health called it healthy.
 	test("a connection with no feeds at all reports no_feeds", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			connector_has_auto_syncable_feeds: true,
 			feeds: [],
 		});
-		expect(result.attention).toBe("no_feeds");
-		expect(result.expectedFeedCount).toBe(0);
+		expect(attention).toBe("no_feeds");
 	});
 
 	// The all-paused shape: 14 feeds, every one paused with no schedule for two
 	// months. Also previously classified healthy.
 	test("a connection whose every feed is paused reports paused", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: Array.from({ length: 14 }, () =>
 				feed({ status: "paused", schedule: null }),
 			),
 		});
-		expect(result.attention).toBe("paused");
-		expect(result.expectedFeedCount).toBe(14);
+		expect(attention).toBe("paused");
 	});
 
 	// The working shape: verified collecting end-to-end, 6s from inbound message
 	// to stored row.
 	test("a collecting connection reports healthy", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [healthyFeed()],
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 });
 
 describe("never_collected", () => {
 	test("dispatchable feeds that have never produced an item", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [
 				feed({
@@ -78,7 +76,7 @@ describe("never_collected", () => {
 				}),
 			],
 		});
-		expect(result.attention).toBe("never_collected");
+		expect(attention).toBe("never_collected");
 	});
 
 	test("a feed that syncs successfully but collects nothing is NOT never_collected", () => {
@@ -86,15 +84,15 @@ describe("never_collected", () => {
 		// with no mail collects zero forever. The verdict folds the feed-level
 		// never_run, never the item count — same reasoning connector-health.ts
 		// applies before it pages a human.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [healthyFeed()],
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("one feed that has ever collected clears it for the connection", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [
 				healthyFeed(),
@@ -105,7 +103,7 @@ describe("never_collected", () => {
 				}),
 			],
 		});
-		expect(result.attention).toBe("degraded");
+		expect(attention).toBe("degraded");
 	});
 });
 
@@ -133,20 +131,20 @@ describe("verdicts this rollup deliberately does not reach", () => {
 		// would let the connection say degraded about a feed the feed page calls
 		// healthy. The omission is one-directional by design: understate, never
 		// invent. connector-health's no_recent_sync still pages a human.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [overdueFeed()],
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("an overdue feed alongside a paused one still reports degraded", () => {
 		// Ignoring overdue must not swallow a sibling feed's real problem.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [overdueFeed(), feed({ status: "paused", schedule: null })],
 		});
-		expect(result.attention).toBe("degraded");
+		expect(attention).toBe("degraded");
 	});
 });
 
@@ -154,19 +152,19 @@ describe("precedence", () => {
 	test("cause before symptom: no_trigger outranks never_collected", () => {
 		// A feed with no cron, no webhook and no channel has also never run.
 		// Reporting never_collected would name the consequence and hide the cause.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [feed({ status: "active", schedule: null, webhook_driven: false })],
 		});
-		expect(result.attention).toBe("no_trigger");
+		expect(attention).toBe("no_trigger");
 	});
 
 	test("a connection blocked on auth outranks anything its feeds say", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "pending_auth",
 			feeds: [],
 		});
-		expect(result.attention).toBe("needs_auth");
+		expect(attention).toBe("needs_auth");
 	});
 
 	test("a revoked auth profile reports needs_auth, not degraded", () => {
@@ -174,7 +172,7 @@ describe("precedence", () => {
 		// can go revoked under an 'active' connection. Every feed then derives
 		// needs_auth, and calling the connection merely degraded would bury the
 		// one state a human can act on.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [
 				feed({
@@ -189,26 +187,46 @@ describe("precedence", () => {
 				}),
 			],
 		});
-		expect(result.attention).toBe("needs_auth");
+		expect(attention).toBe("needs_auth");
+	});
+
+	test("an operator-paused connection reads the same with or without feeds", () => {
+		// Both shapes are the same intent, so they must not read two ways. With
+		// feeds every feed derives paused from connection_status and the fold says
+		// paused; with none it used to fall through to the zero-feed branch and
+		// report no_feeds, which describes a setup problem the operator does not
+		// have.
+		const withFeeds = deriveConnectionHealthSemantics({
+			status: "paused",
+			connector_has_auto_syncable_feeds: true,
+			feeds: [feed({ status: "active", schedule: "*/5 * * * *" })],
+		});
+		const withoutFeeds = deriveConnectionHealthSemantics({
+			status: "paused",
+			connector_has_auto_syncable_feeds: true,
+			feeds: [],
+		});
+		expect(withFeeds).toBe("paused");
+		expect(withoutFeeds).toBe("paused");
 	});
 
 	test("an errored connection reports misconfigured", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "error",
 			feeds: [healthyFeed()],
 		});
-		expect(result.attention).toBe("misconfigured");
+		expect(attention).toBe("misconfigured");
 	});
 });
 
 describe("connections that legitimately have no collector feeds", () => {
 	test("a chat transport row is not a collector and stays healthy", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			credential_mode: "chat",
 			feeds: [],
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("a consent-only connection is FORBIDDEN feeds, so zero is correct", () => {
@@ -216,38 +234,38 @@ describe("connections that legitimately have no collector feeds", () => {
 		// data lives on their local instance and manage_feeds refuses feeds on one.
 		// Measured on prod 2026-09-15, all 8 active connections of this shape were
 		// already carrying unhealthy_alerted_at — the oldest since 2026-07-09.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			consent_only: true,
 			connector_has_auto_syncable_feeds: true,
 			feeds: [],
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("a connector declaring no auto-syncable feeds stays healthy", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			connector_has_auto_syncable_feeds: false,
 			feeds: [],
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("an unknown connector fails closed and still reports no_feeds", () => {
 		// Undefined means we could not read the definition. Hiding an install
 		// problem is worse than a false positive here.
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [],
 		});
-		expect(result.attention).toBe("no_feeds");
+		expect(attention).toBe("no_feeds");
 	});
 });
 
 describe("only collector feeds are folded", () => {
 	test("streaming and source_only feeds are excluded from the rollup", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			feeds: [
 				feed({ store: "channel_messages", status: "active" }),
@@ -268,12 +286,11 @@ describe("only collector feeds are folded", () => {
 		// carrying only channel feeds is the common shape here, and flagging it
 		// would make this verdict noise on every working chat connection.
 		// connector-health.ts draws the same line.
-		expect(result.expectedFeedCount).toBe(0);
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("a chat connection whose channels are its only feeds stays healthy", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			// No credential_mode, and the connector DOES declare an auto-syncable
 			// feed elsewhere (Slack's `files`) — so neither existing guard rescues
@@ -283,15 +300,15 @@ describe("only collector feeds are folded", () => {
 				feed({ store: "channel_messages", status: "active" }),
 			),
 		});
-		expect(result.attention).toBe("healthy");
+		expect(attention).toBe("healthy");
 	});
 
 	test("a collector connection with no feed rows at all is still no_feeds", () => {
-		const result = deriveConnectionHealthSemantics({
+		const attention = deriveConnectionHealthSemantics({
 			status: "active",
 			connector_has_auto_syncable_feeds: true,
 			feeds: [],
 		});
-		expect(result.attention).toBe("no_feeds");
+		expect(attention).toBe("no_feeds");
 	});
 });
