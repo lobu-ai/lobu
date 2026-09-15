@@ -297,6 +297,22 @@ describe("provider refusals prod was recording as the agent's fault", () => {
     ).toBe(AgentErrorCode.PROVIDER_UNKNOWN_MODEL);
   });
 
+  test("classifies a model that cannot serve the request as a model problem", () => {
+    // Reproduced live on 2026-09-15 by pointing a hosted agent at
+    // `openai/o1-pro` and `openrouter/openai/o1-pro`: both turns failed, and
+    // both were charged to the agent. Nothing about the agent was wrong — the
+    // chosen model cannot serve chat completions / tool use, and the fix is to
+    // pick another model, which is exactly this code's CTA.
+    for (const message of [
+      "404 This model is only supported in v1/responses and not in v1/chat/completions.",
+      '404 No endpoints found that support tool use. Try disabling "search_memory".',
+    ]) {
+      expect(classifyErrorMessage(message), message).toBe(
+        AgentErrorCode.PROVIDER_UNKNOWN_MODEL
+      );
+    }
+  });
+
   test("classifies the isolate executor timeout, in both spellings", () => {
     // The executor's budget kill is a separate path from the host wall-clock
     // kill and went unclassified, so a wedged turn rendered as a raw

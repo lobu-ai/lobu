@@ -167,8 +167,21 @@ export function classifyErrorMessage(
   // model class and not PROVIDER_AUTH: "Choose model" is the remediation that
   // actually unblocks the user, where "Reconnect provider" would send them to
   // re-auth a credential that is already valid.
+  //
+  // The model exists but cannot serve THIS request: OpenAI answers
+  // "404 This model is only supported in v1/responses and not in
+  // v1/chat/completions.", OpenRouter "404 No endpoints found that support tool
+  // use." Both are a model/capability mismatch the user fixes by picking a
+  // different model, so they take the model code and its "Choose model" CTA
+  // rather than reading as an agent crash.
+  //
+  // Unlike the other entries here these were reproduced locally (a live turn
+  // against `openai/o1-pro` and `openrouter/openai/o1-pro` on 2026-09-15), not
+  // observed in prod — the 90-day corpus has no agent-turn 404 of either shape.
+  // Replaying that corpus with these patterns moves nothing, which is the
+  // evidence they do not over-match real traffic.
   if (
-    /not a valid model|unknown model|model [^\n]{0,120}? not found|access to model denied|eligible for using the model/i.test(
+    /not a valid model|unknown model|model [^\n]{0,120}? not found|access to model denied|eligible for using the model|model is only supported in|no endpoints found that support/i.test(
       message
     )
   )
