@@ -666,3 +666,34 @@ describe("POST /api/v1/agents — automation_run intent verification", () => {
     });
   });
 });
+describe("POST /api/v1/agents/approve caller binding", () => {
+	test("passes the authenticated caller to approval consumption", async () => {
+		let claimant: unknown;
+		const app = createAgentApi({
+			queueProducer: {} as never,
+			sessionManager: {} as never,
+			sseManager: {} as never,
+			publicGatewayUrl: "http://localhost:8787",
+			artifactStore: {} as never,
+			approveToolCall: async (_requestId, _decision, observed) => {
+				claimant = observed;
+				return { success: true };
+			},
+		});
+		setAuthProvider(() => ({
+			userId: "caller-user",
+			platform: "api",
+			exp: Date.now() + 60_000,
+		}));
+		const res = await app.request("/api/v1/agents/approve", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ requestId: "ta_target", decision: "1h" }),
+		});
+		expect(res.status).toBe(200);
+		expect(claimant).toEqual({
+			userId: "caller-user",
+			organizationId: undefined,
+		});
+	});
+});

@@ -115,6 +115,7 @@ describe("operations.execute backend lifecycle", () => {
 				echo: {
 					name: "Echo",
 					kind: "write",
+					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },
@@ -130,6 +131,7 @@ describe("operations.execute backend lifecycle", () => {
 				stage_browser: {
 					name: "Stage browser",
 					kind: "write",
+					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { browser_connection_id: { type: "integer" } },

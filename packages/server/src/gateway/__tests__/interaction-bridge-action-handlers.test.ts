@@ -87,7 +87,7 @@ function setup(
 
   registerActionHandlers(
     chat as any,
-    { id: "conn-1", platform: "slack" } as PlatformConnection,
+    { id: "conn-1", platform: "slack", organizationId: "org-1" } as PlatformConnection,
     withGrantStore ? (grantStore as any) : undefined,
     withExecute ? (executeToolDirect as any) : undefined,
     claimApprovalCard as any
@@ -95,7 +95,11 @@ function setup(
 
   if (!captured) throw new Error("onAction handler not registered");
   return {
-    handler: captured,
+    handler: (event: any) => captured!({
+      user: { userId: "user-1", userName: "User One" },
+      conversationId: undefined,
+      ...event,
+    }),
     grantStore,
     executeToolDirect,
     post,
@@ -343,7 +347,7 @@ describe("registerActionHandlers — question (with onQuestionClick)", () => {
 
     registerActionHandlers(
       chat as any,
-      { id: "conn-1", platform: "slack" } as PlatformConnection,
+      { id: "conn-1", platform: "slack", organizationId: "org-1" } as PlatformConnection,
       undefined,
       undefined,
       undefined,
@@ -556,7 +560,7 @@ describe("registerActionHandlers — suggestion", () => {
 
     registerActionHandlers(
       chat as any,
-      { id: "conn-1", platform: "slack" } as PlatformConnection,
+      { id: "conn-1", platform: "slack", organizationId: "org-1" } as PlatformConnection,
       undefined,
       undefined,
       undefined,

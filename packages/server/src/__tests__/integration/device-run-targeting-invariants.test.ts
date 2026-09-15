@@ -89,6 +89,7 @@ describe("device run targeting and execution invariants", () => {
 					[ACTION_KEY]: {
 						name: "Echo",
 						kind: "write",
+						requiresApproval: false,
 						input_schema: {
 							type: "object",
 							required: ["value"],

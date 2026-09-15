@@ -490,7 +490,7 @@ function getLocalActionOperations(
 		description: def.description,
 		kind: getLocalActionKind(def),
 		backend: "local_action",
-		requires_approval: def.requiresApproval ?? false,
+		requires_approval: def.requiresApproval ?? getLocalActionKind(def) === "write",
 		required_scopes: normalizeRequiredScopes(def.requiredScopes),
 		annotations: normalizeAnnotations(def.annotations),
 		input_schema: def.input_schema ?? def.inputSchema,

@@ -167,6 +167,7 @@ describe("connection-to-device operation routing lifecycle", () => {
 				[ACTION_KEY]: {
 					name: "Echo",
 					kind: "write",
+					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },
@@ -404,6 +405,7 @@ describe("connection-to-device operation routing lifecycle", () => {
 				[ACTION_KEY]: {
 					name: "Echo",
 					kind: "write",
+					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },
@@ -479,6 +481,7 @@ describe("connection-to-device operation routing lifecycle", () => {
 				[ACTION_KEY]: {
 					name: "Echo",
 					kind: "write",
+					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },

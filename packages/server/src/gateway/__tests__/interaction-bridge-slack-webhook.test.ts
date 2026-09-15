@@ -65,7 +65,7 @@ function createHarness(options: {
 
   registerActionHandlers(
     chat as any,
-    { id: "conn-1", platform: "slack" } as PlatformConnection,
+    { id: "conn-1", platform: "slack", organizationId: "org-1" } as PlatformConnection,
     grantStore as any,
     executeToolDirect as any
   );
@@ -144,7 +144,7 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
       SIGNING_SECRET,
       blockActionsPayload({
         teamId: "T123",
-        userId: "U_ACTOR",
+        userId: "U_SLACK",
         channelId: "C_CHAN",
         messageTs: "1700000000.000100",
         actionId: "tool:req-slack-1:1h",

@@ -621,7 +621,11 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
 
     expect(response.status).toBe(403);
     expect(requestId).toStartWith("ta_");
-    expect(await takePendingTool(requestId)).toMatchObject({
+    expect(await takePendingTool(requestId, {
+      userId: "U_SLACK",
+      organizationId: "test-org",
+      conversationId: "slack:dm:123",
+    })).toMatchObject({
       userId: "U_SLACK",
       agentId: "agent1",
       organizationId: "test-org",

@@ -152,8 +152,9 @@ function resolveGrantExpiresAt(duration: string): number | null {
  */
 async function takePendingToolInvocation(
 	requestId: string,
+	claimant: { userId: string; organizationId: string; conversationId?: string },
 ): Promise<PendingToolInvocation | null> {
-  return takePendingTool(requestId);
+  return takePendingTool(requestId, claimant);
 }
 
 function actionEventTeamId(
@@ -1216,9 +1217,13 @@ export function registerActionHandlers(
 			// tracked — this is a real first click landing on an expired/missing
 			// pending key, and we MUST surface that to the user. Otherwise the
 			// click looks like it did nothing.
-			const pending = await takePendingToolInvocation(requestId).catch(
-				() => null,
-      );
+			const clickerUserId = event.user?.userId;
+			const organizationId = connection.organizationId;
+			if (!clickerUserId || !organizationId) return;
+			const pending = await takePendingToolInvocation(requestId, {
+				userId: clickerUserId,
+				organizationId,
+			}).catch(() => null);
       if (!pending) {
         const sent = claimApprovalCard?.(requestId);
         if (sent) {

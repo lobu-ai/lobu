@@ -764,7 +764,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 						connection_id: conn.id,
 						config: {
 							action_modes: {
-								create_issue: "auto",
+								create_issue: "approval",
 								list_issues: "approval",
 							},
 						},
@@ -802,7 +802,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 		expect(stored.config).toMatchObject({
 			preserved: true,
 			action_modes: {
-				create_issue: "auto",
+				create_issue: "approval",
 				list_issues: "approval",
 			},
 		});
@@ -878,7 +878,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 					? [
 							{
 								connection_id: expected.id,
-								config: { action_modes: { create_issue: "auto" } },
+								config: { action_modes: { create_issue: "approval" } },
 							},
 						]
 					: undefined,
@@ -1134,4 +1134,18 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			/unknown argument\(s\): connectionid — valid arguments.*connection_id/,
 		);
 	});
+});
+
+it("fails closed when a declared write action omits requiresApproval", async () => {
+	const { org, user } = await setupOwner("Ops Missing Approval Metadata Org");
+	await seedConnector(org.id, KEY_READY, "Missing Approval Metadata Connector");
+	await createTestConnection({
+		organization_id: org.id,
+		connector_key: KEY_READY,
+		status: "active",
+	});
+	const { operations } = await listAll(org.id, user.id, {
+		connector_key: KEY_READY,
+	});
+	expect(getOperation(operations, "create_issue").requires_approval).toBe(true);
 });
