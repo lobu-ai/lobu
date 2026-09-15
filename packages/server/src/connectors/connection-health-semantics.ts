@@ -83,7 +83,10 @@ import {
  *   symptom.
  * - `never_collected` — collector feeds exist and can be dispatched, but not one
  *   of them has ever completed a sync.
- * - `degraded` — some, but not all, collector feeds need attention.
+ * - `degraded` — at least one collector feed needs attention and no all-feeds
+ *   verdict above fits. Not "some but not all": when every feed is, say,
+ *   device_offline there is no all-feeds branch for that state, so the
+ *   connection lands here too.
  * - `paused` — every collector feed is paused. Not running until resumed.
  * - `healthy` — everything else.
  */
@@ -134,6 +137,17 @@ export interface ConnectionHealthSemanticsInput {
  * (read-on-demand) have no sync lifecycle, so folding them would dilute every
  * ratio below — the same reason `classifyFeed` keeps them out of its expected
  * set.
+ */
+/*
+ * One deliberate difference from `connector-health.ts`'s `expected` predicate:
+ * that one requires the feed to declare a `sync` operation, so a feed whose
+ * feed_key the active definition no longer declares (operations resolve to
+ * `[]`) is invisible to the alerter, while this fold counts it and can report
+ * `never_collected`. Both are right for their surface — such a feed genuinely
+ * cannot be dispatched, so saying so on the connection is useful, while the
+ * alerter stays conservative about waking a human over a definition it cannot
+ * resolve. `list_feeds` reads operations from the same feeds_schema path, so
+ * the two READ surfaces still agree with each other.
  */
 function isCollector(feed: FeedHealthSemantics): boolean {
   return (
