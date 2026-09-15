@@ -95,6 +95,19 @@ function isMetricSource(
   return source.kind === 'metric' && source.ref?.type === 'metric';
 }
 
+/**
+ * The two projections the server writes itself — ref-backed sources and the
+ * default query — both select `id` and `occurred_at`. Custom event SQL is only
+ * required to project `id` (`validateAutomationConfig`), so its columns can
+ * only be read defensively.
+ */
+function hasCanonicalEventProjection(source: NormalizedAutomationSource): boolean {
+  return (
+    source.controlledEventProjection === true ||
+    source.query === DEFAULT_AUTOMATION_SOURCE_QUERY
+  );
+}
+
 // Budgeting and normal reads must normalize the same source rows, including
 // duplicate event identities that appear in more than one authored source.
 function normalizeEventSources(
@@ -189,6 +202,11 @@ async function queryContentData(
       .filter((source) => source.controlledEventProjection)
       .map((source) => source.name)
   );
+  const canonicalEventProjectionNames = new Set(
+    normalizedSources
+      .filter(hasCanonicalEventProjection)
+      .map((source) => source.name)
+  );
   const fullFidelitySourceNames = new Set(params.fullFidelitySourceNames ?? []);
   const dynamicEventSourceNames = new Set(
     normalizedSources
@@ -241,9 +259,32 @@ async function queryContentData(
 
           // Event sources retain keyset pagination. Only the named primary source
           // carries a cursor; every event source is still bounded.
+          //
+          // Custom event SQL need not select `occurred_at`, so naming the column
+          // failed the entire read with `column _automation_page.occurred_at does
+          // not exist` — and since this read mints the window token, the run died
+          // as an agent fault rather than a query fault. Read such a projection's
+          // cursor through to_jsonb, which answers NULL for a column that was
+          // never selected. A canonical projection names its columns directly so
+          // sorting never serializes a multi-MB payload_text per row.
+          const isCanonicalProjection = canonicalEventProjectionNames.has(sourceName);
+          const rowJson = 'to_jsonb(_automation_page)';
+          const occurredAtExpr = isCanonicalProjection
+            ? '_automation_page.occurred_at'
+            : `(${rowJson} ->> 'occurred_at')::timestamptz`;
+          const idExpr = isCanonicalProjection
+            ? '_automation_page.id'
+            : `(${rowJson} ->> 'id')::bigint`;
+          // A selected-but-NULL occurred_at cannot be cursored, so it stays out
+          // of the page — the window is scoped on created_at, so those rows do
+          // reach here. A projection that never selects the column is the other
+          // case: it is not chronological at all, and dropping every one of its
+          // rows would be the same outage by another route.
           const where: string[] = [
-            '_automation_page.id IS NOT NULL',
-            '_automation_page.occurred_at IS NOT NULL',
+            `${idExpr} IS NOT NULL`,
+            isCanonicalProjection
+              ? `${occurredAtExpr} IS NOT NULL`
+              : `(NOT jsonb_exists(${rowJson}, 'occurred_at') OR ${occurredAtExpr} IS NOT NULL)`,
           ];
           if (isCursorSource && page.beforeOccurredAt && page.beforeId) {
             nextParams.push(page.beforeOccurredAt);
@@ -251,8 +292,8 @@ async function queryContentData(
             nextParams.push(page.beforeId);
             const idParam = `$${nextParams.length}`;
             where.push(
-              `(_automation_page.occurred_at < ${occurredAtParam}::timestamptz OR ` +
-                `(_automation_page.occurred_at = ${occurredAtParam}::timestamptz AND _automation_page.id < ${idParam}::bigint))`
+              `(${occurredAtExpr} < ${occurredAtParam}::timestamptz OR ` +
+                `(${occurredAtExpr} = ${occurredAtParam}::timestamptz AND ${idExpr} < ${idParam}::bigint))`
             );
           }
           nextParams.push(sourceLimit + 1);
@@ -263,7 +304,7 @@ async function queryContentData(
           const pageSql =
             `SELECT * FROM (${scopedQuery}) AS _automation_page ` +
             `WHERE ${where.join(' AND ')} ` +
-            'ORDER BY _automation_page.occurred_at DESC NULLS LAST, _automation_page.id DESC ' +
+            `ORDER BY ${occurredAtExpr} DESC NULLS LAST, ${idExpr} DESC ` +
             `LIMIT ${limitParam}`;
           return {
             // Ref-backed event sources have a known canonical projection, so
@@ -363,10 +404,9 @@ async function queryContentData(
   if (statsEventSources.length > 0) {
     const statsSources = statsEventSources.map((source, idx) => {
       const alias = `__stats_s_${idx}`;
-      const charsExpr =
-        source.controlledEventProjection || source.query === DEFAULT_AUTOMATION_SOURCE_QUERY
-          ? `${alias}.content_length`
-          : `LENGTH(to_jsonb(${alias})->>'payload_text')`;
+      const charsExpr = hasCanonicalEventProjection(source)
+        ? `${alias}.content_length`
+        : `LENGTH(to_jsonb(${alias})->>'payload_text')`;
       return {
         name: `__stats_${idx}`,
         // security-allowed: source.query is an internally-built SQL fragment
