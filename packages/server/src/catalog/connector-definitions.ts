@@ -506,7 +506,10 @@ function summarizeValidatedActions(
 			// with how the action is actually treated (kind:'read' OR
 			// annotations.readOnlyHint:true → read; else write).
 			kind: getLocalActionKind(a),
-			requires_approval: a.requiresApproval === true,
+			requires_approval:
+				typeof a.requiresApproval === "boolean"
+					? a.requiresApproval
+					: getLocalActionKind(a) === "write",
 			required_scopes: scopes,
 		};
 	}

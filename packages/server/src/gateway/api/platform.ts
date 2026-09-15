@@ -233,12 +233,14 @@ export class ApiPlatform implements PlatformAdapter {
    * Send a message via API platform
    * Creates or reuses a session and queues the message for processing
    *
-   * @param token - Auth token (used to derive userId)
+   * @param _token - Auth token. Unused here: it is part of the shared
+   *   `PlatformAdapter.sendMessage` contract (other adapters route on it), but
+   *   it is NOT an identity. The caller comes from `options.callerUserId`.
    * @param message - Message content
    * @param options - Routing info (agentId = channelId = conversationId for API)
    */
   async sendMessage(
-    token: string,
+    _token: string,
     message: string,
     options: {
       agentId: string;
@@ -246,6 +248,7 @@ export class ApiPlatform implements PlatformAdapter {
       channelId: string;
       conversationId: string;
       teamId: string;
+      callerUserId: string;
       files?: Array<{ buffer: Buffer; filename: string }>;
     }
   ): Promise<{
@@ -261,7 +264,12 @@ export class ApiPlatform implements PlatformAdapter {
     const sessionManager = this.services.getSessionManager();
     const queueProducer = this.services.getQueueProducer();
     const messageId = randomUUID();
-    const userId = `api-${token.slice(0, 8) || "anonymous"}`;
+    // The AUTHENTICATED caller, never a digest of the token. This value is
+    // carried by the worker token and stored as a blocked tool call's pending
+    // claimant; `POST /api/v1/agents/approve` claims with `authContext.userId`,
+    // so a synthetic `api-<token8>` could never be presented by anyone and
+    // every API-platform approval was unclaimable.
+    const userId = options.callerUserId;
 
     // For API platform: agentId = channelId = conversationId (all same)
     // Try to get existing session or create new one

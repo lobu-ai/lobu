@@ -86,6 +86,7 @@ describe("enqueued payload carries the resolved nixConfig", () => {
       agentId: "agent-1",
       channelId: "chan-1",
       teamId: "team-1",
+      callerUserId: "user-real",
     });
 
     expect(enqueued).toHaveLength(1);
@@ -98,6 +99,94 @@ describe("enqueued payload carries the resolved nixConfig", () => {
     expect(
       (payload.agentOptions as Record<string, unknown> | undefined)?.nixConfig,
     ).toBeUndefined();
+  });
+
+  test("routePlatformMessage enqueues the same userId it stored on the session", async () => {
+    // The worker token carries the enqueued userId, and a blocked tool call
+    // stores it as the pending approval's claimant. Enqueueing the channelId
+    // while the session holds a derived id bound approvals to an identity no
+    // caller ever presents, so the approval could never be claimed.
+    const sessions: Array<{ userId: string }> = [];
+    const manager = Object.create(
+      ChatInstanceManager.prototype,
+    ) as ChatInstanceManager;
+
+    Object.assign(manager, {
+      services: {
+        getSessionManager: () => ({
+          setSession: mock(async (session: { userId: string }) => {
+            sessions.push(session);
+          }),
+        }),
+        getQueueProducer: () => ({
+          enqueueMessage: mock(async (payload: MessagePayload) => {
+            enqueued.push(payload);
+          }),
+        }),
+        getAgentSettingsStore: makeAgentSettingsStore,
+      },
+      selectConnectionForPlatform: async () => ({
+        id: "conn-1",
+        organizationId: "org-1",
+      }),
+    });
+
+    await manager.routePlatformMessage("telegram", "token-abcdefgh", "hi", {
+      agentId: "agent-1",
+      channelId: "chan-1",
+      teamId: "team-1",
+      callerUserId: "user-real",
+    });
+
+    expect(sessions).toHaveLength(1);
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.userId).toBe(sessions[0]!.userId);
+    expect(enqueued[0]!.userId).not.toBe("chan-1");
+  });
+
+  test("routePlatformMessage binds the turn to the AUTHENTICATED caller, not a token digest", async () => {
+    // RED before the fix: the session/enqueue userId was
+    // `${platform}-${token.slice(0, 8)}` — an identity derived from the token
+    // bytes. A blocked tool call stores that as the pending approval's
+    // claimant, but the approver presents `authContext.userId`, so the
+    // predicate could never match and the approval was unclaimable.
+    const sessions: Array<{ userId: string }> = [];
+    const manager = Object.create(
+      ChatInstanceManager.prototype,
+    ) as ChatInstanceManager;
+
+    Object.assign(manager, {
+      services: {
+        getSessionManager: () => ({
+          setSession: mock(async (session: { userId: string }) => {
+            sessions.push(session);
+          }),
+        }),
+        getQueueProducer: () => ({
+          enqueueMessage: mock(async (payload: MessagePayload) => {
+            enqueued.push(payload);
+          }),
+        }),
+        getAgentSettingsStore: makeAgentSettingsStore,
+      },
+      selectConnectionForPlatform: async () => ({
+        id: "conn-1",
+        organizationId: "org-1",
+      }),
+    });
+
+    await manager.routePlatformMessage("telegram", "token-abcdefgh", "hi", {
+      agentId: "agent-1",
+      channelId: "chan-1",
+      teamId: "team-1",
+      callerUserId: "user-real",
+    });
+
+    expect(sessions[0]!.userId).toBe("user-real");
+    expect(enqueued[0]!.userId).toBe("user-real");
+    // The old synthetic shape must be gone entirely: no token-derived digest.
+    expect(enqueued[0]!.userId).not.toBe("telegram-token-ab");
+    expect(enqueued[0]!.userId).not.toContain("token-ab");
   });
 
   test("the direct API path unions request and agent packages", async () => {

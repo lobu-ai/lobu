@@ -2516,6 +2516,7 @@ export class ChatInstanceManager {
           channelId: string;
           conversationId?: string;
           teamId: string;
+          callerUserId: string;
           files?: Array<{ buffer: Buffer; filename: string }>;
 				},
       ) => this.routePlatformMessage(name, token, message, options),
@@ -2579,13 +2580,17 @@ export class ChatInstanceManager {
 
   async routePlatformMessage(
     name: string,
-    token: string,
+    // Part of the shared adapter signature, but NOT an identity: the caller
+    // comes from `options.callerUserId`. Routing here is by connection, not
+    // by token.
+    _token: string,
     message: string,
     options: {
       agentId: string;
       channelId: string;
       conversationId?: string;
       teamId: string;
+      callerUserId: string;
       files?: Array<{ buffer: Buffer; filename: string }>;
 		},
   ): Promise<{
@@ -2621,7 +2626,11 @@ export class ChatInstanceManager {
     const messageId = randomUUID();
     const conversationId = options.conversationId || options.channelId;
     const sessionId = `platform-chat:${name}:${options.channelId}:${conversationId}`;
-    const sessionUserId = `${name}-${token.slice(0, 8) || "anonymous"}`;
+    // The AUTHENTICATED caller, never a digest of the token. A blocked tool
+    // call stores this as the pending approval's claimant, and the approver
+    // presents `authContext.userId` — so a synthetic `<platform>-<token8>`
+    // identity was unpresentable and left every approval unclaimable.
+    const sessionUserId = options.callerUserId;
 
     const agentOptions = await resolveAgentOptions(
       options.agentId,
@@ -2643,7 +2652,11 @@ export class ChatInstanceManager {
     });
 
     await queueProducer.enqueueMessage({
-      userId: options.channelId,
+      // MUST match the session's userId. The worker token carries this value,
+      // and a blocked tool call stores it as the pending approval's claimant —
+      // enqueueing the channelId instead bound the approval to an identity the
+      // session never had, so no caller could ever claim it.
+      userId: sessionUserId,
       conversationId,
       messageId,
       channelId: options.channelId,

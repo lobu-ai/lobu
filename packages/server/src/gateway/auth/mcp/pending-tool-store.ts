@@ -111,25 +111,130 @@ export async function listPendingToolsForConversation(
 }
 
 /**
+ * Read a pending invocation WITHOUT consuming it, to recover the routing keys
+ * (agentId / conversationId) an authorization check needs before the claim.
+ *
+ * This is a lookup, not a grant: it returns no tool arguments and authorizes
+ * nothing. The caller MUST still authorize against the returned agent and then
+ * claim through `claimPendingTool`, whose ownership predicate is what actually
+ * gates consumption. A non-owner that peeks still cannot claim.
+ */
+export async function peekPendingTool(
+	requestId: string,
+): Promise<{ agentId: string; conversationId?: string } | null> {
+	const sql = getDb();
+	const rows = await sql`
+    SELECT payload->>'agentId' AS agent_id,
+           payload->>'conversationId' AS conversation_id
+    FROM oauth_states
+    WHERE id = ${requestId}
+      AND scope = ${SCOPE}
+      AND expires_at > now()
+  `;
+	const row = rows[0] as
+		| { agent_id: string | null; conversation_id: string | null }
+		| undefined;
+	if (!row?.agent_id) return null;
+	return {
+		agentId: row.agent_id,
+		conversationId: row.conversation_id || undefined,
+	};
+}
+
+/**
  * Atomically fetch and delete a pending tool invocation. Used by the
  * interaction bridge / CLI approve handler to claim the row exactly
  * once — Slack/Telegram webhook retries that arrive after the first
  * click see null and no-op.
  */
+export interface PendingToolClaimant {
+	userId: string;
+	organizationId?: string;
+	conversationId?: string;
+}
+
+/**
+ * Tri-state claim outcome. `null` from `takePendingTool` conflates "the row is
+ * gone" with "the row is live but belongs to someone else", and the callers
+ * respond very differently: a missing row settles the card as expired, while a
+ * forbidden click must leave the row AND the card untouched so the real
+ * requester can still act on it.
+ */
+export type PendingToolClaim =
+	| { status: "taken"; invocation: PendingToolInvocation }
+	| { status: "missing" }
+	| { status: "forbidden" };
+
+/**
+ * Claim a pending tool invocation, distinguishing taken/missing/forbidden in a
+ * single statement — no peek-then-delete window another claimant can race
+ * through.
+ *
+ * The DELETE carries the full ownership predicate, so a matching claimant
+ * consumes the row under the delete's own row lock; the outcome is never
+ * derived from a separate read that could disagree with it.
+ *
+ * Both CTEs run against the SAME statement-start snapshot, and `denied` does
+ * not observe `claimed`'s delete. So `still_live` means "a live row for this
+ * id existed when the statement began":
+ *   - payload returned                -> taken (payload wins; still_live moot)
+ *   - no payload, still_live true     -> forbidden: the row was live but the
+ *                                        ownership predicate excluded us, i.e.
+ *                                        it belongs to a different caller
+ *   - no payload, still_live false    -> missing: expired, already claimed, or
+ *                                        never stored
+ *
+ * Race note: a claimant that loses a concurrent race against the rightful
+ * owner may still have seen the row live at snapshot time and report
+ * `forbidden` rather than `missing`. That is safe — both non-taken outcomes
+ * leave the row untouched and neither grants the tool, so no card that is
+ * still live for someone else can be settled by the wrong caller.
+ */
+export async function claimPendingTool(
+	requestId: string,
+	claimant: PendingToolClaimant,
+): Promise<PendingToolClaim> {
+	const sql = getDb();
+	const organizationId = claimant.organizationId ?? null;
+	const conversationId = claimant.conversationId ?? null;
+	const rows = await sql`
+    WITH claimed AS (
+      DELETE FROM oauth_states
+      WHERE id = ${requestId}
+        AND scope = ${SCOPE}
+        AND expires_at > now()
+        AND payload->>'userId' = ${claimant.userId}
+        AND (${organizationId}::text IS NULL OR payload->>'organizationId' = ${organizationId})
+        AND (${conversationId}::text IS NULL OR payload->>'conversationId' = ${conversationId})
+      RETURNING payload
+    ),
+    denied AS (
+      SELECT 1
+      FROM oauth_states
+      WHERE id = ${requestId}
+        AND scope = ${SCOPE}
+        AND expires_at > now()
+    )
+    SELECT
+      (SELECT payload FROM claimed) AS payload,
+      EXISTS (SELECT 1 FROM denied) AS still_live
+  `;
+	const row = rows[0] as
+		| { payload: PendingToolInvocation | null; still_live: boolean | null }
+		| undefined;
+	const payload = row?.payload ?? null;
+	if (payload) {
+		return { status: "taken", invocation: withPairedAdminGrant(payload) };
+	}
+	return row?.still_live ? { status: "forbidden" } : { status: "missing" };
+}
+
 export async function takePendingTool(
 	requestId: string,
+	claimant: PendingToolClaimant,
 ): Promise<PendingToolInvocation | null> {
-  const sql = getDb();
-  const rows = await sql`
-    DELETE FROM oauth_states
-    WHERE id = ${requestId}
-      AND scope = ${SCOPE}
-      AND expires_at > now()
-    RETURNING payload
-  `;
-  if (rows.length === 0) return null;
-	const payload = (rows[0] as { payload: PendingToolInvocation }).payload;
-	return payload ? withPairedAdminGrant(payload) : null;
+	const claim = await claimPendingTool(requestId, claimant);
+	return claim.status === "taken" ? claim.invocation : null;
 }
 
 /** Active tool approvals belonging to this Automation run's agent session. */

@@ -38,7 +38,7 @@ async function seed() {
 	await sql`
 		UPDATE connector_definitions
 		SET actions_schema = ${sql.json({
-			prepare_reply: { name: "Prepare reply", kind: "write" },
+			prepare_reply: { name: "Prepare reply", kind: "write", requiresApproval: false },
 		})}
 		WHERE organization_id = ${org.id}
 		  AND key = 'x'
