@@ -394,15 +394,17 @@ export async function searchContentBySingleQuery(
           ORDER BY MIN(dist)
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
     if (hasTextCandidates) {
-      // fulltext GIN — the `@@` is index-served; no `ts_rank` here (that would
-      // rebuild the tsvector per matched row over the whole org). The rank is
-      // computed downstream over just the merged candidate set.
+      // fulltext GIN — `@@` is index-served. Rank the STORED search_tsv before
+      // the cap so the strongest matches survive CANDIDATE_VECTOR_LIMIT; this
+      // costs a top-N sort over FTS-matching rows in the organization.
       branches.push(`SELECT ce.id AS id
           FROM events ce
           JOIN current_event_records f ON f.id = ce.id
           ${candidateFilterJoins}
           WHERE ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})
             AND ${standardFiltersSQL}
+          ORDER BY ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx})) DESC,
+                   ce.id DESC
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
       // trigram GIN — preserves the payload substring match (exact strings, ids).
       branches.push(`SELECT ce.id AS id
@@ -411,6 +413,7 @@ export async function searchContentBySingleQuery(
           ${candidateFilterJoins}
           WHERE ce.payload_text ILIKE '%' || $1 || '%'
             AND ${standardFiltersSQL}
+          ORDER BY ce.id DESC
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
     }
     // Each branch has its own ORDER BY/LIMIT and must therefore be

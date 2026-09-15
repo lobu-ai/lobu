@@ -154,4 +154,34 @@ describe('searchContentByText > exact org-wide score semantics', () => {
 
     expect(result.content.map((c) => c.id)).toEqual([target.id]);
   });
+
+  it('does not truncate a stronger FTS hit behind 200 unordered candidates', async () => {
+    const { org, entity, connection } = await createOrgFixture('Approx Candidate FTS Rank Org');
+    for (let i = 0; i < 205; i++) {
+      await createTestEvent({
+        entity_id: entity.id,
+        connection_id: connection.id,
+        content: `rankneedle weak filler ${i}`,
+        organization_id: org.id,
+        embedding: axisVec(1),
+      });
+    }
+    const strongest = await createTestEvent({
+      entity_id: entity.id,
+      connection_id: connection.id,
+      title: 'rankneedle rankneedle rankneedle rankneedle',
+      content: 'rankneedle rankneedle rankneedle rankneedle decisive target',
+      organization_id: org.id,
+      embedding: axisVec(1),
+    });
+    const result = await searchContentByText('rankneedle', {
+      organization_id: org.id,
+      limit: 10,
+      min_similarity: 0.99,
+      query_embedding: axisVec(0),
+      sort_by: 'score',
+      approximate_candidate_search: true,
+    });
+    expect(result.content.map((c) => c.id)).toContain(strongest.id);
+  });
 });
