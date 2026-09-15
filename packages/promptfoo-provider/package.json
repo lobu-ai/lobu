@@ -1,6 +1,6 @@
 {
   "name": "@lobu/promptfoo-provider",
-  "version": "20.0.1",
+  "version": "20.1.0",
   "description": "promptfoo custom provider for running evals against a Lobu agent",
   "type": "module",
   "main": "dist/index.js",

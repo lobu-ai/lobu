@@ -1,5 +1,42 @@
 # Changelog
 
+## [20.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.0.1...lobu-v20.1.0) (2026-09-15)
+
+
+### Features
+
+* **connectors:** share one file-download primitive and reach Gmail and Outlook attachments ([#3589](https://github.com/lobu-ai/lobu/issues/3589)) ([c29cd07](https://github.com/lobu-ai/lobu/commit/c29cd07ef8bcd6e780c364d0f14e6acbc81c4305))
+* **server:** auto-bind an unlinked DM to the organization's only agent ([#3601](https://github.com/lobu-ai/lobu/issues/3601)) ([882a343](https://github.com/lobu-ai/lobu/commit/882a343bfca60c228a1b288775975fb4f6ab1ccc))
+* **server:** derive and surface connection health at the connection level ([#3617](https://github.com/lobu-ai/lobu/issues/3617)) ([5ac6eff](https://github.com/lobu-ai/lobu/commit/5ac6effbdd406d7d75f79b33ed8bd646252832fb))
+* **server:** drop the self-serve demo-agent surface from hosted chat bots ([#3600](https://github.com/lobu-ai/lobu/issues/3600)) ([37c6e76](https://github.com/lobu-ai/lobu/commit/37c6e76e716431448f294b2ae500d2a8ce9e7794))
+* **server:** let a caller feed a file their own connector run produced into $file ([#3590](https://github.com/lobu-ai/lobu/issues/3590)) ([d11b922](https://github.com/lobu-ai/lobu/commit/d11b92292be5a07d8d59a7f90876ed2c9e14d892))
+* **server:** make chat identity and hosted-chat support per-platform generic ([#3594](https://github.com/lobu-ai/lobu/issues/3594)) ([08e2bde](https://github.com/lobu-ai/lobu/commit/08e2bdea4182902f9d2919924c6173de64bd9860))
+* **server:** standard auth.md discovery names in agent_auth block ([#3610](https://github.com/lobu-ai/lobu/issues/3610)) ([f2a2a88](https://github.com/lobu-ai/lobu/commit/f2a2a887c3545e4dfd9065119e2bb3348506efa0))
+
+
+### Bug Fixes
+
+* **automations:** keep derived entity names in sync ([#3500](https://github.com/lobu-ai/lobu/issues/3500)) ([b4b6632](https://github.com/lobu-ai/lobu/commit/b4b66323a5578182bab2296fc5ca79fc6b570dcf))
+* **cli,server:** webhook automation activation, init name guard, tool exit codes ([#3596](https://github.com/lobu-ai/lobu/issues/3596)) ([ab19d0e](https://github.com/lobu-ai/lobu/commit/ab19d0ef12ceb46a2976717f79ead7f1d2957df8))
+* null platform in search_memory unmounts command palette ([#3597](https://github.com/lobu-ai/lobu/issues/3597)) ([febe5ce](https://github.com/lobu-ai/lobu/commit/febe5cedb15e5d716433b77a963cd9ffabfe00cf))
+* rank full-text candidates before capping ([#3622](https://github.com/lobu-ai/lobu/issues/3622)) ([76eb71a](https://github.com/lobu-ai/lobu/commit/76eb71a58b9e1fb8b692e1e3cd881a5d5df8871f))
+* **runs:** stop charging provider refusals to the agent ([#3619](https://github.com/lobu-ai/lobu/issues/3619)) ([1c79adf](https://github.com/lobu-ai/lobu/commit/1c79adfe9f3ee8d46bb4ba0abcfb7c807f0c9e22))
+* **server:** attribute headless automation entity creates to the automation owner ([#3618](https://github.com/lobu-ai/lobu/issues/3618)) ([c1c4748](https://github.com/lobu-ai/lobu/commit/c1c47482cacc119aa7f0da4a47abc7b8cdd9e335))
+* **server:** charge a gateway-side connector compile failure to its feed ([#3612](https://github.com/lobu-ai/lobu/issues/3612)) ([7bf4336](https://github.com/lobu-ai/lobu/commit/7bf4336817eef4b9cfe732f6ac729e10eb857295))
+* **server:** derive the turn marker's deployment name instead of reading it off the token ([#3620](https://github.com/lobu-ai/lobu/issues/3620)) ([bc0252c](https://github.com/lobu-ai/lobu/commit/bc0252cf883462d02cd9b37a4e4eee0f3f18d0e6))
+* **server:** give the SSE stream a resume cursor and a quiet turn a liveness beat ([#3613](https://github.com/lobu-ai/lobu/issues/3613)) ([66b4bb9](https://github.com/lobu-ai/lobu/commit/66b4bb93fc74cfd9d2810b959fbe7e6986a7651e))
+* **server:** hide $member entities from callers outside the member read policy ([#3616](https://github.com/lobu-ai/lobu/issues/3616)) ([405a0a5](https://github.com/lobu-ai/lobu/commit/405a0a5d9edc612bba69e2ef785b950d2cee76f8))
+* **server:** hint re-consent for member workspaces missing from OAuth grant ([#3609](https://github.com/lobu-ai/lobu/issues/3609)) ([b3251e7](https://github.com/lobu-ai/lobu/commit/b3251e7224cc06b31acc84ecd2a3ae3d1e757464))
+* **server:** name the connection by slug in the unlinked-chat notice, and label gchat links ([#3604](https://github.com/lobu-ai/lobu/issues/3604)) ([fba61c7](https://github.com/lobu-ai/lobu/commit/fba61c7f0b77fa44d2c36933c5a10eb3f5ab548a))
+* **server:** park a subscription-plan quota window instead of auto-pausing ([#3611](https://github.com/lobu-ai/lobu/issues/3611)) ([e8e94ae](https://github.com/lobu-ai/lobu/commit/e8e94ae2e17ebabaa972e45edeec449dcc5ff33b))
+* **server:** read an event source's cursor columns only if it projects them ([#3614](https://github.com/lobu-ai/lobu/issues/3614)) ([ae75e75](https://github.com/lobu-ai/lobu/commit/ae75e7507d9348b8e62cca96744ca2f06520c779))
+* **server:** refuse operator-owned chat connection settings from tenants ([#3598](https://github.com/lobu-ai/lobu/issues/3598)) ([9061ccc](https://github.com/lobu-ai/lobu/commit/9061cccb5882306f3e724052bf161f37c9a2a9db))
+
+
+### Reverts
+
+* **server:** drop message-time auto-bind, keep the notice ([#3602](https://github.com/lobu-ai/lobu/issues/3602)) ([98847e0](https://github.com/lobu-ai/lobu/commit/98847e0307a8bd2e6f11b9ec3ca58cde4879c323))
+
 ## [20.0.1](https://github.com/lobu-ai/lobu/compare/lobu-v20.0.0...lobu-v20.0.1) (2026-09-14)
 
 
