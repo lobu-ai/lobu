@@ -98,10 +98,10 @@ interface CreateNotificationParams {
 	 */
 	deliveryScope?: "targeted" | "org";
 	/**
-	 * Lobu user whose Slack DM is the first chat destination — the owner of the
+	 * Lobu user whose chat DM is the first chat destination — the owner of the
 	 * change under review (field-change approvals), or the requester of an
 	 * approval that has no chat origin. When set, bot delivery tries their DM
-	 * FIRST, resolved via the owner's workspace-scoped Slack identity. When no
+	 * FIRST, resolved via the owner's identity on that platform. When no
 	 * identity resolves at creation, delivery falls back to the configured-target
 	 * or org-wide channel snapshot. Once a DM resolves, durable retries stay on
 	 * that private destination rather than widening to a channel after a transient
@@ -324,19 +324,28 @@ export async function resolveNotificationDeliveryPlan(params: {
 }
 
 /**
- * Owner-routed delivery target: the Slack identity of `ownerUserId` in a
- * workspace one of the org's bot connections lives in. Reverse-looks-up
- * the workspace-scoped Slack identity on the owner's `$member` (team matching
- * the connection's binding team) per candidate connection, most-recently-bound first via
- * resolveBotDeliveryTargets order. Null when the owner has no Slack identity in
- * any connected workspace — the caller falls back to channel delivery.
+ * Owner-routed delivery target: the chat identity of `ownerUserId` on a
+ * platform one of the org's bot connections lives on. Reverse-looks-up the
+ * identity stamped on the owner's `$member`, scoped the way that platform
+ * scopes its keys (Slack by the connection's binding team, Google Chat not at
+ * all), per candidate connection in `resolveBotDeliveryTargets` order —
+ * EARLIEST binding first (`ORDER BY created_at ASC`), the org's primary
+ * channel. That order now also decides the PLATFORM: an org bound to both
+ * Slack and Google Chat DMs the owner on whichever it bound first, so the
+ * destination stays put instead of hopping when a second platform is added.
+ * Null when the owner has no linked identity on any connected platform — the
+ * caller falls back to channel delivery.
  * Exported for testing the tier-selection logic against a real DB.
  */
 export async function resolveOwnerDmTarget(
 	organizationId: string,
 	ownerUserId: string,
 	connectionId?: string | null,
-): Promise<{ connectionId: string; platformUserId: string } | null> {
+): Promise<{
+	connectionId: string;
+	platform: string;
+	platformUserId: string;
+} | null> {
 	const targets = await resolveBotDeliveryTargets(
 		organizationId,
 		connectionId ?? null,
@@ -356,7 +365,11 @@ export async function resolveOwnerDmTarget(
 			target.teamId,
 		);
 		if (platformUserId) {
-			return { connectionId: target.connectionId, platformUserId };
+			return {
+				connectionId: target.connectionId,
+				platform: target.platform,
+				platformUserId,
+			};
 		}
 	}
 	return null;
@@ -1044,7 +1057,11 @@ interface NotificationDeliveryRequest {
 	context: NotificationDeliveryContext;
 	strictAutomationTarget: boolean;
 	targets: BotDeliveryTarget[];
-	ownerDm: { connectionId: string; platformUserId: string } | null;
+	ownerDm: {
+		connectionId: string;
+		platform: string;
+		platformUserId: string;
+	} | null;
 }
 
 export interface NotificationDeliveryTaskPayload {
@@ -1133,7 +1150,7 @@ export async function deliverNotificationTask(
 				{
 					connectionId: request.ownerDm.connectionId,
 					channelKey: "dm",
-					platform: "slack",
+					platform: request.ownerDm.platform,
 					teamId: null,
 				},
 			]
@@ -1271,6 +1288,7 @@ export async function deliverNotificationTask(
 					if (
 						!dm ||
 						dm.connectionId !== request.ownerDm.connectionId ||
+						dm.platform !== request.ownerDm.platform ||
 						dm.platformUserId !== request.ownerDm.platformUserId
 					) {
 						throw new Error("Notification owner destination changed");

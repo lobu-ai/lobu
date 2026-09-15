@@ -1,9 +1,9 @@
 /**
  * Owner-routed approvals: the human who owns the gated fields
- * (entities.field_controls[field].set_by) may decide the run from Slack even
+ * (entities.field_controls[field].set_by) may decide the run from chat even
  * without an admin role; a non-admin member who is NOT the owner keeps getting
- * rejected; admins keep working. Exercises the real propose → click → apply
- * chain against Postgres.
+ * rejected; admins keep working — on any chat platform, not just Slack.
+ * Exercises the real propose → click → apply chain against Postgres.
  */
 
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";

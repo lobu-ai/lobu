@@ -1040,20 +1040,17 @@ export async function createAutomationResultRun(options: {
 }
 
 /**
- * Link a Slack workspace user to a Lobu user the way production does: provision
+ * Link a chat-platform user to a Lobu user the way production does: provision
  * the user's `$member` in the org (which writes the `auth_user_id` identity)
- * and stamp the workspace-scoped `TEAM:USER` `slack_user_id` identity onto it.
+ * and stamp that platform's sender identity onto it, keyed exactly the way the
+ * product keys it — through the platform's own `ChatUserIdentity`. Generic on
+ * purpose: Slack scopes by team, Google Chat does not, and the descriptor owns
+ * that difference so fixtures never re-encode it.
  *
  * This replaces seeding the old `chat_user_identities` table. Going through the
- * real provisioning call matters — the resolver joins `slack_user_id` to
+ * real provisioning call matters — the resolver joins the chat namespace to
  * `auth_user_id` with `source_connector = 'auth:signup'`, so a hand-rolled
  * INSERT that skipped that would pass while production failed.
- */
-/**
- * Stamp a chat-platform sender identity on a member, keyed exactly the way the
- * product keys it: through that platform's own `ChatUserIdentity`. Generic on
- * purpose — Slack scopes by team, Google Chat does not, and the descriptor owns
- * that difference so fixtures never re-encode it.
  */
 export async function linkChatIdentityInGraph(opts: {
   organizationId: string;
