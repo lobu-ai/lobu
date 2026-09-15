@@ -343,9 +343,18 @@ async function connectionCanOpenDm(
 ): Promise<boolean> {
 	const descriptor = getPlatformDescriptor(platform);
 	if (!descriptor?.canOpenDirectMessage) return true;
+	// Both predicates are load-bearing, not defensive noise: they reproduce
+	// `connections_chat_slug_unique` (UNIQUE (slug) WHERE credential_mode IS NOT
+	// NULL AND deleted_at IS NULL) exactly, which is the ONLY thing that makes
+	// slug a unique key. Uniqueness is scoped to live chat rows, so a
+	// soft-deleted connection may carry the same slug — and without these, a
+	// `LIMIT 1` with no ORDER BY could read the dead row's config and decide DM
+	// reachability from a connection that no longer exists.
 	const rows = await getDb()<{ config: Record<string, unknown> | null }>`
     SELECT config FROM connections
     WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
+      AND credential_mode IS NOT NULL
+      AND deleted_at IS NULL
     LIMIT 1
   `;
 	if (rows.length === 0) return true;

@@ -12,6 +12,15 @@
 --
 -- Every pre-existing row is Slack by construction: no other platform could
 -- reach this code path before the change that adds this migration.
+--
+-- Scale, measured on prod 2026-09-15: 4,161,293 rows in `events`, 233 carrying
+-- a `delivery_request`, and 2 in the retired shape. The predicate has no
+-- supporting index, so this is ONE seq scan of `events` in a single
+-- transaction that updates two rows — bounded work, and no narrower indexed
+-- column exists to key it by (`delivery_request` lives in `metadata`, which
+-- carries no GIN index). Writers are unblocked throughout: MVCC means the scan
+-- takes no table lock and the row locks cover only the rows actually rewritten.
+-- Idempotent — the guard names the retired key, so a re-run matches nothing.
 -- migrate:up
 UPDATE events
 SET metadata = jsonb_set(
