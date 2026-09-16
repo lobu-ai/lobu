@@ -151,7 +151,10 @@ describe('Stage 1 — login token carries connections:token', () => {
       headers: { Cookie: session.cookieHeader },
     });
     expect(approve.status).toBe(200);
-    expect((await approve.json()) as { status: string }).toEqual({ status: 'approved' });
+    expect((await approve.json()) as { status: string }).toEqual({
+      status: 'approved',
+      user_code: da.user_code,
+    });
 
     // 4. Exchange the device code for tokens.
     const tokenRes = await call(app, 'POST', '/oauth/token', {

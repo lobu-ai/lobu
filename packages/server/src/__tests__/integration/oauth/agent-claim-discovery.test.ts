@@ -218,7 +218,10 @@ describe('user_claimed flow — full loop', () => {
       headers: { Cookie: session.cookieHeader },
     });
     expect(approve.status).toBe(200);
-    expect((await approve.json()) as { status: string }).toEqual({ status: 'approved' });
+    expect((await approve.json()) as { status: string }).toEqual({
+      status: 'approved',
+      user_code,
+    });
 
     // 5. A mismatched audience is rejected without consuming the one-time
     // device code, so the correctly bound client can still complete.

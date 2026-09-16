@@ -8,6 +8,7 @@
 
 import { Hono } from 'hono';
 import { createDbClientFromEnv } from '../../db/client';
+import logger from '../../utils/logger';
 import type { Env } from '../../index';
 import { getClientIP, getRateLimiter, RateLimitPresets } from '../../utils/rate-limiter';
 import { resolveBaseUrl, safeOrigin, safeParseUrl } from '../base-url';
@@ -36,7 +37,7 @@ import {
   stripNonPublicOAuthScopes,
 } from './scopes';
 import type { AuthorizationParams, OAuthClientMetadata, TokenRequestParams } from './types';
-import { createOAuthError, validateRedirectUri } from './utils';
+import { createOAuthError, deviceCodeCorrelationId, validateRedirectUri } from './utils';
 import {
   canonicalizeGrantedOrganizationIds,
   type GrantedMemberWorkspace,
@@ -1136,6 +1137,21 @@ oauthRoutes.get('/oauth/device/info', requireAuth, async (c) => {
   }
   const provider = getProvider(c);
   const deviceCode = await provider.claimDeviceCodeForUser(userCode, user.id);
+  // Records which verifier bound which code, and is logged on the miss too:
+  // issue #3623 saw a fresh code reported as expired, and only the claim
+  // outcome distinguishes "already owned by another user" from "expired". A
+  // miss has no device code to correlate on, so `userId` + the absent ref is
+  // the whole signal.
+  logger.info(
+    {
+      event: 'oauth.device.claim_result',
+      deviceCodeRef: deviceCode ? deviceCodeCorrelationId(deviceCode.device_code) : null,
+      userId: user.id,
+      clientId: deviceCode?.client_id ?? null,
+      claimed: deviceCode !== null,
+    },
+    deviceCode ? 'Device code claimed by verifier' : 'Device code claim matched no pending row'
+  );
   if (!deviceCode) {
     return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
   }
@@ -1370,7 +1386,10 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
     return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
   }
 
-  return c.json({ status: 'approved' });
+  // The body the browser validates before rendering success. `user_code` is
+  // echoed so the screen can prove it approved the exact code the CLI is
+  // polling (#3623) — a value the caller already sent, not a new disclosure.
+  return c.json({ status: 'approved', user_code: body.user_code });
 });
 
 // ============================================

@@ -6,6 +6,7 @@
  */
 
 import { type DbClient, pgTextArray } from '../../db/client';
+import logger from '../../utils/logger';
 import { findExistingPersonalOrg } from '../personal-org-provisioning';
 import { PersonalAccessTokenService } from '../tokens';
 import { OAuthClientsStore } from './clients';
@@ -35,6 +36,7 @@ import {
   AUTHORIZATION_CODE_LIFETIME_SECONDS,
   calculateExpiry,
   createOAuthError,
+  deviceCodeCorrelationId,
   DEVICE_CODE_LIFETIME_SECONDS,
   DEVICE_CODE_POLL_INTERVAL_SECONDS,
   generateAccessToken,
@@ -770,6 +772,20 @@ export class OAuthProvider {
       )
     `;
 
+    // Joins the CLI's create to the browser's claim/approve and the CLI's own
+    // token polls (issue #3623).
+    logger.info(
+      {
+        event: 'oauth.device.created',
+        clientId,
+        deviceCodeRef: deviceCodeCorrelationId(deviceCode),
+        scope,
+        resource,
+        expiresAt: expiresAt.toISOString(),
+      },
+      'Device authorization created'
+    );
+
     const verificationUri = `${this.baseUrl}/oauth/device`;
 
     return {
@@ -796,6 +812,25 @@ export class OAuthProvider {
     scopeOverride: string | null | undefined,
     grantedOrganizationIds: readonly string[]
   ): Promise<boolean> {
+    // Logs the UPDATE's own result, so a later `authorization_pending` poll for
+    // the same deviceCodeRef is provably a divergence rather than an approval
+    // that never committed (issue #3623). The UPDATE matches on `user_code`, so
+    // the device code comes from its own RETURNING clause — there is nothing to
+    // correlate on when no row matched.
+    const logApproveResult = (rows: { device_code: string }[]): boolean => {
+      const approved = rows.length > 0;
+      logger.info(
+        {
+          event: 'oauth.device.approve_result',
+          deviceCodeRef: approved ? deviceCodeCorrelationId(rows[0].device_code) : null,
+          approved,
+          organizationId,
+          grantedOrganizationCount: grantedOrganizationIds.length,
+        },
+        approved ? 'Device code approved' : 'Device code approval matched no pending row'
+      );
+      return approved;
+    };
     if (scopeOverride !== undefined) {
       const result = await this.sql`
         UPDATE oauth_device_codes
@@ -809,7 +844,7 @@ export class OAuthProvider {
           AND expires_at > NOW()
         RETURNING device_code
       `;
-      return result.length > 0;
+      return logApproveResult(result);
     }
     const result = await this.sql`
       UPDATE oauth_device_codes
@@ -822,7 +857,7 @@ export class OAuthProvider {
         AND expires_at > NOW()
       RETURNING device_code
     `;
-    return result.length > 0;
+    return logApproveResult(result);
   }
 
   /**
@@ -908,6 +943,9 @@ export class OAuthProvider {
     if (!params.device_code) {
       return createOAuthError('invalid_request', 'Missing device_code');
     }
+    // Derived once from the narrowed value: the closure below cannot re-narrow
+    // `params.device_code`, and both log sites must share one correlation key.
+    const deviceCodeRef = deviceCodeCorrelationId(params.device_code);
 
     const clientValidation = await this.validateClientTokenAuthentication(
       params.client_id,
@@ -968,7 +1006,20 @@ export class OAuthProvider {
       throw error;
     }
 
-    if (approvedExchange) return approvedExchange;
+    if (approvedExchange) {
+      // The consume succeeded. Pairs with `oauth.device.approve_result` for the
+      // same deviceCodeRef.
+      logger.info(
+        {
+          event: 'oauth.device.exchange_result',
+          clientId: params.client_id,
+          deviceCodeRef,
+          outcome: 'consumed',
+        },
+        'Device code exchanged for tokens'
+      );
+      return approvedExchange;
+    }
 
     // Atomic claim returned nothing — check why (pending, denied, expired, or unknown)
     const result = await this.sql`
@@ -976,30 +1027,54 @@ export class OAuthProvider {
       WHERE device_code = ${params.device_code}
     `;
 
+    // Records the status actually READ for this exact device_code. An
+    // `authorization_pending` here for a deviceCodeRef that already logged
+    // `approved: true` is the issue #3623 divergence, and is now visible
+    // without a raw code in the logs.
+    const logExchangeMiss = (outcome: string, storedStatus: string | null) => {
+      logger.info(
+        {
+          event: 'oauth.device.exchange_result',
+          clientId: params.client_id,
+          deviceCodeRef,
+          outcome,
+          storedStatus,
+        },
+        'Device code exchange did not consume a row'
+      );
+    };
+
     if (result.length === 0) {
+      logExchangeMiss('unknown_device_code', null);
       return createOAuthError('invalid_grant', 'Unknown device_code');
     }
 
     const deviceCode = result[0] as Pick<StoredDeviceCode, 'status' | 'client_id' | 'expires_at' | 'resource'>;
 
     if (deviceCode.client_id !== params.client_id) {
+      logExchangeMiss('client_mismatch', deviceCode.status);
       return createOAuthError('invalid_grant', 'Client ID mismatch');
     }
 
     if (deviceCode.resource && params.resource !== deviceCode.resource) {
+      logExchangeMiss('resource_mismatch', deviceCode.status);
       return createOAuthError('invalid_grant', 'Token request resource must match the device authorization resource');
     }
 
     if (new Date(deviceCode.expires_at) <= new Date()) {
+      logExchangeMiss('expired', deviceCode.status);
       return createOAuthError('expired_token', 'Device code has expired');
     }
 
     switch (deviceCode.status) {
       case 'pending':
+        logExchangeMiss('authorization_pending', deviceCode.status);
         return createOAuthError('authorization_pending', 'User has not yet authorized');
       case 'denied':
+        logExchangeMiss('access_denied', deviceCode.status);
         return createOAuthError('access_denied', 'User denied the authorization request');
       default:
+        logExchangeMiss('unexpected_status', deviceCode.status);
         return createOAuthError('server_error', 'Unexpected device code status');
     }
   }

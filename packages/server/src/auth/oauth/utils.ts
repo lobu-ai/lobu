@@ -116,6 +116,30 @@ export function hashToken(token: string): string {
 }
 
 /**
+ * Privacy-safe correlation id for a `device_code`.
+ *
+ * Device flow spans four requests across two clients (the CLI's
+ * `/device_authorization` and `/token` polls, the browser's `/device/info` and
+ * `/device/approve`). Correlating them needs one stable key per authorization,
+ * but a raw `device_code` is a bearer credential and must never reach a log
+ * sink. A truncated SHA-256 is stable across those requests and
+ * non-reversible, so a log reader can join the sites without learning a code.
+ *
+ * Only `device_code` is passed here. A `user_code` is short and
+ * human-typeable, so its keyspace is small enough to enumerate offline — a
+ * hash of one is not privacy-preserving and would be a false assurance.
+ * Correlation therefore keys on the device code everywhere, and the sites that
+ * only hold a user code log the device code returned by their own query.
+ *
+ * Every site derives this through THIS function so they all land in one
+ * namespace — a prefix taken off a raw code elsewhere would look right and
+ * join nothing (see root AGENTS.md on shared keys).
+ */
+export function deviceCodeCorrelationId(deviceCode: string): string {
+  return hashToken(deviceCode).slice(0, 12);
+}
+
+/**
  * Get the prefix of a PAT for display
  */
 export function getPATPrefix(key: string): string {
