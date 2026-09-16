@@ -1375,21 +1375,21 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
     // NOT request it simply doesn't get it.
   }
 
-  const approved = await provider.approveDeviceCode(
+  const approvedUserCode = await provider.approveDeviceCode(
     body.user_code,
     user.id,
     organizationId,
     scopeOverride,
     grantedOrganizationIds
   );
-  if (!approved) {
+  if (approvedUserCode === null) {
     return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
   }
 
   // The body the browser validates before rendering success. `user_code` is
-  // echoed so the screen can prove it approved the exact code the CLI is
-  // polling (#3623) — a value the caller already sent, not a new disclosure.
-  return c.json({ status: 'approved', user_code: body.user_code });
+  // comes from the successful database write, so the screen can prove it
+  // approved the exact code the CLI is polling (#3623).
+  return c.json({ status: 'approved', user_code: approvedUserCode });
 });
 
 // ============================================

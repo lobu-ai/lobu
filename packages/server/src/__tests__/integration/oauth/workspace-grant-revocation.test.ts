@@ -138,7 +138,9 @@ describe("connected-app workspace grant revocation", () => {
 			const device = await provider.createDeviceAuthorization(client.client_id, scope, resource ?? null);
 			if ("error" in device) throw new Error(device.error);
 			expect(await provider.claimDeviceCodeForUser(device.user_code, user.id)).toBeTruthy();
-			expect(await provider.approveDeviceCode(device.user_code, user.id, null, scope, grants)).toBe(true);
+			expect(await provider.approveDeviceCode(device.user_code, user.id, null, scope, grants)).toBe(
+				device.user_code
+			);
 			deviceCodes.push(device.device_code);
 		}
 

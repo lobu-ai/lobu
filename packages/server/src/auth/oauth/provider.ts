@@ -811,13 +811,13 @@ export class OAuthProvider {
     organizationId: string | null,
     scopeOverride: string | null | undefined,
     grantedOrganizationIds: readonly string[]
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     // Logs the UPDATE's own result, so a later `authorization_pending` poll for
     // the same deviceCodeRef is provably a divergence rather than an approval
     // that never committed (issue #3623). The UPDATE matches on `user_code`, so
     // the device code comes from its own RETURNING clause — there is nothing to
     // correlate on when no row matched.
-    const logApproveResult = (rows: { device_code: string }[]): boolean => {
+    const logApproveResult = (rows: { device_code: string; user_code: string }[]): string | null => {
       const approved = rows.length > 0;
       logger.info(
         {
@@ -829,7 +829,7 @@ export class OAuthProvider {
         },
         approved ? 'Device code approved' : 'Device code approval matched no pending row'
       );
-      return approved;
+      return approved ? rows[0].user_code : null;
     };
     if (scopeOverride !== undefined) {
       const result = await this.sql`
@@ -842,7 +842,7 @@ export class OAuthProvider {
           AND user_id = ${userId}
           AND status = 'pending'
           AND expires_at > NOW()
-        RETURNING device_code
+        RETURNING device_code, user_code
       `;
       return logApproveResult(result);
     }
@@ -855,7 +855,7 @@ export class OAuthProvider {
         AND user_id = ${userId}
         AND status = 'pending'
         AND expires_at > NOW()
-      RETURNING device_code
+      RETURNING device_code, user_code
     `;
     return logApproveResult(result);
   }
