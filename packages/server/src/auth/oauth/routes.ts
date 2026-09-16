@@ -1386,7 +1386,7 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
     return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
   }
 
-  // The body the browser validates before rendering success. `user_code` is
+  // The body the browser validates before rendering success. `user_code`
   // comes from the successful database write, so the screen can prove it
   // approved the exact code the CLI is polling (#3623).
   return c.json({ status: 'approved', user_code: approvedUserCode });
