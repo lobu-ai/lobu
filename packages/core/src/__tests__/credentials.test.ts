@@ -287,3 +287,68 @@ describe("refreshOAuthToken", () => {
     ).toBeNull();
   });
 });
+
+/**
+ * RFC 8707 resource binding on the refresh grant.
+ *
+ * A resource-scoped grant (`lobu login` against `https://app.lobu.ai/mcp/<ws>`)
+ * stores `resource` on the refresh row. The Lobu issuer rejects any refresh
+ * whose `resource` does not equal the stored one:
+ *   provider.ts — `if (oldRefreshToken.resource && params.resource !== oldRefreshToken.resource)`
+ *     → invalid_grant "Refresh request resource must match the original resource"
+ * Omitting the indicator therefore fails EVERY refresh of a resource-scoped
+ * credential, and because rotation revokes the old row inside the same
+ * transaction, the grant is unrecoverable from then on.
+ */
+describe("refreshOAuthToken resource binding (RFC 8707)", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function captureRefreshBody(): {
+    read: () => Record<string, unknown>;
+  } {
+    let captured: Record<string, unknown> = {};
+    globalThis.fetch = mock(async (_url: unknown, init?: RequestInit) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          access_token: "new-at",
+          refresh_token: "new-rt",
+          expires_in: 3600,
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    return { read: () => captured };
+  }
+
+  test("sends the resource indicator when the grant is resource-scoped", async () => {
+    const resource = "https://app.lobu.ai/mcp/buremba";
+    const body = captureRefreshBody();
+
+    await refreshOAuthToken(
+      "https://app.lobu.ai/oauth/token",
+      { clientId: "c" },
+      "old-rt",
+      {
+        resource,
+      }
+    );
+
+    expect(body.read().resource).toBe(resource);
+  });
+
+  test("omits the resource indicator for an unbound grant", async () => {
+    const body = captureRefreshBody();
+
+    await refreshOAuthToken(
+      "https://app.lobu.ai/oauth/token",
+      { clientId: "c" },
+      "old-rt"
+    );
+
+    expect(body.read()).not.toHaveProperty("resource");
+  });
+});

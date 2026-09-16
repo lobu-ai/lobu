@@ -335,6 +335,9 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
         tokenEndpoint: discovery.tokenEndpoint,
         revocationEndpoint: discovery.revocationEndpoint,
         userinfoEndpoint: discovery.userinfoEndpoint,
+        // Record the audience the issuer bound this grant to (RFC 8707, echoed
+        // on the token response). Refresh must replay it verbatim.
+        ...(tokens.resource ? { resource: tokens.resource } : {}),
       };
 
       await saveCredentials(

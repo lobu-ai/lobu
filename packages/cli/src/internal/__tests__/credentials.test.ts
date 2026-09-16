@@ -454,6 +454,43 @@ describe("credentials", () => {
     );
   });
 
+  /**
+   * A `lobu login` bound to an MCP resource (`https://app.lobu.ai/mcp/<ws>`)
+   * stores that resource on the credential. The issuer rejects a refresh whose
+   * `resource` does not match the one recorded on the refresh row, so dropping
+   * it here makes every refresh of a resource-scoped login fail invalid_grant.
+   */
+  test("getToken forwards the stored MCP resource on refresh", async () => {
+    const resource = "https://app.lobu.ai/mcp/buremba";
+    const creds = buildCreds({
+      accessToken: "expired",
+      refreshToken: "refresh-1",
+      expiresAt: Date.now() - 60_000,
+      oauth: {
+        clientId: "client-id",
+        tokenEndpoint: "https://app.lobu.ai/oauth/token",
+        resource,
+      },
+    });
+    const store = { version: 2, contexts: { [currentContextName]: creds } };
+    readFileSpy.mockResolvedValue(JSON.stringify(store));
+
+    const refreshSpy = spyOn(oauth, "refreshTokens").mockResolvedValue({
+      accessToken: "new-token",
+      refreshToken: "refresh-2",
+      expiresIn: 3600,
+    });
+
+    await getToken();
+
+    expect(refreshSpy).toHaveBeenCalledWith(
+      "https://app.lobu.ai/oauth/token",
+      { clientId: "client-id", clientSecret: undefined },
+      "refresh-1",
+      { resource }
+    );
+  });
+
   test("refreshCredentials returns existing creds when no refresh metadata", async () => {
     const creds = buildCreds({ refreshToken: undefined });
 

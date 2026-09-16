@@ -183,6 +183,9 @@ export async function resolveCloudCredential(
 					clientSecret: stored.oauth.clientSecret,
 				},
 				stored.refreshToken,
+				// Replay the RFC 8707 indicator the grant was minted with, or the
+				// issuer rejects a resource-scoped refresh with invalid_grant.
+				{ resource: stored.oauth.resource },
 			);
 			if (refreshed) {
 				active = {

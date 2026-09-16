@@ -58,6 +58,12 @@ interface TokenResponse {
   accessToken: string;
   refreshToken?: string;
   expiresIn?: number;
+  /**
+   * RFC 8707 resource the issuer bound these tokens to, echoed back on the
+   * token response. Persisted with the credential so every later refresh can
+   * replay it — a resource-scoped grant refreshed without it is rejected.
+   */
+  resource?: string;
 }
 
 interface UserInfo {
@@ -222,16 +228,24 @@ export async function pollDeviceToken(
   };
 }
 
+/**
+ * RFC 6749 §6 refresh grant. `options.resource` MUST carry the RFC 8707
+ * indicator the grant was minted with: the Lobu issuer compares it against the
+ * resource stored on the refresh row and answers `invalid_grant` when it is
+ * absent or different, so a resource-scoped login cannot be renewed without it.
+ */
 export async function refreshTokens(
   tokenEndpoint: string,
   client: RegisteredClient,
-  refreshToken: string
+  refreshToken: string,
+  options: { resource?: string } = {}
 ): Promise<TokenResponse | null> {
   const body = await postJson(
     tokenEndpoint,
     withClient(client, {
       grant_type: GRANT_REFRESH_TOKEN,
       refresh_token: refreshToken,
+      ...(options.resource ? { resource: options.resource } : {}),
     })
   );
   if (!body.ok || typeof body.data.access_token !== "string") return null;
@@ -297,6 +311,7 @@ function parseTokenResponse(data: Record<string, unknown>): TokenResponse {
     accessToken,
     refreshToken: pickString(data, "refresh_token"),
     expiresIn: pickNumber(data, "expires_in"),
+    resource: pickString(data, "resource"),
   };
 }
 

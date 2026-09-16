@@ -339,7 +339,11 @@ async function attemptRefresh(
   const refreshed = await refreshTokens(
     creds.oauth.tokenEndpoint,
     { clientId: creds.oauth.clientId, clientSecret: creds.oauth.clientSecret },
-    creds.refreshToken
+    creds.refreshToken,
+    // Replay the RFC 8707 indicator the grant was minted with. Without it the
+    // issuer rejects a resource-scoped refresh outright (invalid_grant). An
+    // unbound grant must send no indicator at all, so pass nothing.
+    ...(creds.oauth.resource ? [{ resource: creds.oauth.resource }] : [])
   );
   if (!refreshed) return null;
 

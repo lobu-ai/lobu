@@ -29,6 +29,13 @@ export interface OAuthClientInfo {
   tokenEndpoint?: string;
   revocationEndpoint?: string;
   userinfoEndpoint?: string;
+  /**
+   * RFC 8707 resource indicator this grant was minted for (e.g.
+   * `https://app.lobu.ai/mcp/<workspace>`). Recorded at login so every later
+   * refresh can replay it — the issuer rejects a resource-scoped refresh that
+   * omits or changes the indicator.
+   */
+  resource?: string;
 }
 
 /**
@@ -215,11 +222,18 @@ export interface RefreshedToken {
  * body). Returns null on any network / non-2xx / parse failure. The issuer may
  * rotate the refresh token, so callers MUST persist the returned `refreshToken`
  * when present.
+ *
+ * When the grant was minted for a specific protected resource, `options.resource`
+ * MUST be the one recorded at authorization time. The Lobu issuer compares the
+ * refresh request's indicator against the stored one and answers `invalid_grant`
+ * on any mismatch — including an omitted indicator — so a resource-scoped
+ * credential that refreshes without it can never be renewed.
  */
 export async function refreshOAuthToken(
   tokenEndpoint: string,
   client: { clientId: string; clientSecret?: string },
-  refreshToken: string
+  refreshToken: string,
+  options: { resource?: string } = {}
 ): Promise<RefreshedToken | null> {
   const body: Record<string, string> = {
     grant_type: "refresh_token",
@@ -227,6 +241,8 @@ export async function refreshOAuthToken(
     client_id: client.clientId,
   };
   if (client.clientSecret) body.client_secret = client.clientSecret;
+  // RFC 8707: echo the authorized resource so the issuer's audience check passes.
+  if (options.resource) body.resource = options.resource;
 
   let response: Response;
   try {
