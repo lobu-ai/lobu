@@ -339,8 +339,7 @@ export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
           client,
           sanitized.state,
           undefined,
-          false,
-          orgId
+          false
         );
       } catch {
         // Fall back to pre-rollback remote (over-blocks next prune, fail-closed).

@@ -334,8 +334,7 @@ export async function fetchRemoteSnapshot(
   client: ApplyClient,
   state: DesiredState,
   only?: "agents" | "memory",
-  prune = false,
-  orgId?: string
+  prune = false
 ): Promise<RemoteSnapshot> {
   const agents: RemoteAgent[] =
     only === "memory" ? [] : await client.listAgents();
@@ -356,40 +355,8 @@ export async function fetchRemoteSnapshot(
   }
 
   const entityTypes = only === "agents" ? [] : await client.listEntityTypes();
-  // View templates are fetched per-type, NOT streamed in the entity-type list
-  // (the UI/bootstrap calls that endpoint). Fetch for config-declared types
-  // (a declared template, or under prune so an omitted one is a removal) AND,
-  // under prune, for remote-only candidates whose owned/unchanged delete
-  // classification must see the real template — otherwise an unhydrated
-  // `undefined` compares equal to a stale baseline and a UI-authored template
-  // edit is misclassified as unchanged and auto-deleted. Bounded to the org's
-  // own entity-type set.
-  if (entityTypes.length > 0) {
-    const desiredBySlug = new Map(
-      state.memorySchema.entityTypes.map((e) => [e.slug, e])
-    );
-    for (const remote of entityTypes) {
-      const desired = desiredBySlug.get(remote.slug);
-      // The list also surfaces public types owned by OTHER orgs. Fetch a
-      // template only for types this org owns: the fetch resolves by slug in
-      // THIS org, so a foreign public type whose local slug is absent (or
-      // soft-deleted) would 404 and abort the whole apply.
-      if (
-        orgId !== undefined &&
-        remote.organization_id !== undefined &&
-        remote.organization_id !== orgId
-      ) {
-        continue;
-      }
-      // Declared template → always. Otherwise only under prune, where an
-      // omitted template is a removal (declared types) and an unhydrated
-      // `undefined` would make a UI-authored template look unchanged since the
-      // baseline (remote-only delete candidates).
-      if (desired?.viewTemplate === undefined && !prune) continue;
-      const tpl = await client.getEntityTypeViewTemplate(remote.slug);
-      if (tpl) remote.viewTemplate = tpl;
-    }
-  }
+  // View templates are retired with the server tool: no per-type hydration.
+  // (It called the removed manage_view_templates, which aborts the apply.)
   const relationshipTypes =
     only === "agents" ? [] : await client.listRelationshipTypes();
   // The relationship-type `list` action omits rules, so the diff would compare
@@ -1626,13 +1593,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // this (current/stale) catalog — "create" when the key isn't installed,
   // "update" when it is. Connector defs are NOT installed here; that happens in
   // `executePlan`, AFTER plan confirmation.
-  const remote = await fetchRemoteSnapshot(
-    client,
-    state,
-    opts.only,
-    prune,
-    resolvedOrg?.id
-  );
+  const remote = await fetchRemoteSnapshot(client, state, opts.only, prune);
   if (!opts.only && !(await isManagedCloudTarget(apiBaseUrl))) {
     remote.connectorDefinitions = await hydrateManagedConnectorCatalog(
       state,
@@ -1923,8 +1884,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
           client,
           state,
           opts.only,
-          prune,
-          resolvedOrg?.id
+          prune
         );
         baselineRecordForRecording = recordableBaseline(postRemote);
         if (!opts.only) {
