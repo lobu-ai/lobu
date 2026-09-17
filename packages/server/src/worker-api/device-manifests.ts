@@ -542,7 +542,12 @@ function compareManifestWinner(a: StoredDeviceManifest, b: StoredDeviceManifest)
   return a.manifest_hash.localeCompare(b.manifest_hash);
 }
 
-function compareSemverish(a: string, b: string): number {
+/**
+ * Newest-first ordering over two connector version strings. Shared with the
+ * pinned-device artifact selection in `device-connector-readiness.ts` so a
+ * device's "newest advertised contract" is the same order the fleet winner uses.
+ */
+export function compareSemverish(a: string, b: string): number {
   const pa = a.split(/[.-]/).map((p) => Number.parseInt(p, 10));
   const pb = b.split(/[.-]/).map((p) => Number.parseInt(p, 10));
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {

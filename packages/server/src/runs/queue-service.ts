@@ -43,6 +43,7 @@ import {
   describeDeviceConnectorSetupRequired,
   findDeviceConnectorReadiness,
   loadDeviceConnectorReadiness,
+  resolvePinnedDeviceConnectorVersion,
 } from '../worker-api/device-connector-readiness';
 import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
 import { ToolUserError } from '../utils/errors';
@@ -1316,12 +1317,43 @@ export async function createConnectorOperationRun(params: {
       ? DEVICE_ACTION_QUEUE_BUDGET_MS / 1000
       : null;
 
+  // Freeze the run's execution target BEFORE choosing its artifact: an exact
+  // device pin, not the fleet, decides which contract this run is created
+  // against (see resolvePinnedDeviceConnectorVersion).
+  let targetDeviceWorkerId: string | null = null;
+  let targetDeviceOwnerUserId: string | null = null;
+  if (params.connectionId && params.approvalMode !== 'inline') {
+    const connRows = await sql<{
+      device_worker_id: string | null;
+      device_owner_user_id: string | null;
+    }>`
+      SELECT c.device_worker_id, dw.user_id AS device_owner_user_id
+      FROM connections c
+      LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
+      WHERE c.id = ${params.connectionId}
+      LIMIT 1
+    `;
+    targetDeviceWorkerId = connRows[0]?.device_worker_id ?? null;
+    targetDeviceOwnerUserId = connRows[0]?.device_owner_user_id ?? null;
+  }
+  const pinnedDeviceVersion =
+    targetDeviceWorkerId && targetDeviceOwnerUserId
+      ? await resolvePinnedDeviceConnectorVersion({
+          sql,
+          organizationId: params.organizationId,
+          ownerUserId: targetDeviceOwnerUserId,
+          connectorKey: params.connectorKey,
+          deviceWorkerId: targetDeviceWorkerId,
+        })
+      : null;
+
   // Resolve connector version, verifying it is runnable only when the caller
   // requires compiled code (device/inline executors that load the bundle).
   const resolved = await resolveActiveConnectorVersion(sql, {
     orgId: params.organizationId,
     connectorKey: params.connectorKey,
     requireRunnable: params.requireCompiledCode ?? false,
+    pinnedVersion: pinnedDeviceVersion,
   });
   if (!resolved.ok) {
     if (resolved.reason === 'no-definition') {
@@ -1337,16 +1369,6 @@ export async function createConnectorOperationRun(params: {
     );
   }
   const connectorVersion = resolved.version;
-
-  let targetDeviceWorkerId: string | null = null;
-  if (params.connectionId && params.approvalMode !== 'inline') {
-    const connRows = await sql<{ device_worker_id: string | null }>`
-      SELECT device_worker_id FROM connections
-      WHERE id = ${params.connectionId}
-      LIMIT 1
-    `;
-    targetDeviceWorkerId = connRows[0]?.device_worker_id ?? null;
-  }
 
   // Record a new unavailable action as terminal. Keeping the existing INSERT
   // conflict path preserves a completed idempotent result when its device is offline.
