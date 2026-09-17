@@ -266,6 +266,15 @@ export interface ActionResult {
   result: unknown;
 }
 
+/** Mint the per-click interaction id the action tool requires (browser retry
+ *  id on web): a UUID where available, else a time + random fallback. */
+export function mintInteractionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+}
+
 /** A declared action → `invoke_view_action { view, action, value }`. The name
  *  must exist on the CURRENT view definition; a removed button throws here
  *  instead of emitting a stale event. */
@@ -277,10 +286,13 @@ export function useAction(name: string): (value?: Record<string, unknown>) => Pr
   return useCallback(
     async (value: Record<string, unknown> = {}) => {
       try {
+        // The tool requires an interaction id (browser retry id on web):
+        // mint one per click so retries stay idempotent.
         const result = await rt.callTool("invoke_view_action", {
           view: rt.def.key,
           action: name,
           value,
+          interaction_id: mintInteractionId(),
         });
         const err = resultError(result);
         return { ok: !err, error: err, result: result.structuredContent ?? null };

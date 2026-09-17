@@ -12,6 +12,7 @@ export {
   defaultsFor,
   defineView,
   escapeLiteral,
+  mintInteractionId,
   mountView,
   sql,
   tool,

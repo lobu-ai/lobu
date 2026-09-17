@@ -453,7 +453,7 @@ export async function devCommand(
         // config itself) and re-apply on change, so an edited view shows up
         // locally within ~2 s of saving. Best-effort like the apply above: a
         // project with no views, or a watch setup failure, only logs.
-        // Lazy-imported so the watcher graph (esbuild, jiti) stays out of
+        // Lazy-imported so the reapply graph (esbuild, jiti) stays out of
         // `lobu run`'s module-load path — same rule as the auto-apply above.
         void startViewReapplyLoop(cwd, gatewayUrl, localOrgSlug).catch(() => {
           // startViewReapplyLoop logs its own diagnostics; never crash `run`.
@@ -494,14 +494,14 @@ export async function devCommand(
 }
 
 /**
- * Watch the project's view files + their import graph (and `lobu.config.ts`
- * itself) and re-apply on change. The watch set is rebuilt after every apply
+ * Re-apply the project's view files + their import graph (and `lobu.config.ts`
+ * itself) on change. The reapply set is rebuilt after every apply
  * so a new import joins on the next save; the config reloads through jiti on
  * each apply, so config edits take effect without restarting `lobu run`.
  *
  * Best-effort: setup failure only logs (a project with no `views:` still gets
- * the config watched, so adding the first view starts working with no
- * restart). The watcher graph is imported lazily for the same module-load
+ * the config reapplied on edit, so adding the first view starts working with
+ * no restart). The reapply graph is imported lazily for the same module-load
  * reason as the auto-apply above.
  */
 export async function startViewReapplyLoop(
@@ -511,10 +511,10 @@ export async function startViewReapplyLoop(
 ): Promise<{ close: () => void }> {
   const noop = { close: () => {} };
   try {
-    const { collectViewWatchSet, startViewWatcher } = await import(
-      "./_lib/view-watcher.js"
+    const { collectViewReapplySet, startViewReapply } = await import(
+      "./_lib/view-reapply.js"
     );
-    let set = await collectViewWatchSet(cwd);
+    let set = await collectViewReapplySet(cwd);
     const viewFiles = set.files.length - 1;
     if (viewFiles > 0) {
       console.log(
@@ -523,25 +523,25 @@ export async function startViewReapplyLoop(
     }
     const onLog = (message: string) =>
       console.warn(chalk.dim(`  (${message})`));
-    let current = startViewWatcher(set, { onLog, onChange });
+    let current = startViewReapply(set, { onLog, onChange });
     async function onChange(): Promise<void> {
       console.log(chalk.dim("\n  views changed — re-applying…"));
       await autoApplyLocalProject(cwd, gatewayUrl, localOrgSlug);
       try {
-        set = await collectViewWatchSet(cwd);
+        set = await collectViewReapplySet(cwd);
       } catch {
         // A mid-save config may not parse — keep the old set; the next
         // successful apply rebuilds it.
         return;
       }
       current.close();
-      current = startViewWatcher(set, { onLog, onChange });
+      current = startViewReapply(set, { onLog, onChange });
     }
     return { close: () => current.close() };
   } catch (err) {
     console.warn(
       chalk.dim(
-        `  (view watcher off: ${err instanceof Error ? err.message : String(err)})`
+        `  (view reapply off: ${err instanceof Error ? err.message : String(err)})`
       )
     );
     return noop;

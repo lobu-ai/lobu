@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { coerceParams, defaultsFor, defineView, escapeLiteral, sql, tool } from "../api.js";
+import { coerceParams, defaultsFor, defineView, escapeLiteral, mintInteractionId, sql, tool } from "../api.js";
 
 const DEF = defineView({
   key: "pipeline",
@@ -58,6 +58,16 @@ describe("tool()", () => {
     });
     expect(tool("query_sdk")).toEqual({ kind: "tool", name: "query_sdk", args: {} });
     expect(() => tool("")).toThrow("requires a tool name");
+  });
+});
+
+describe("mintInteractionId", () => {
+  test("mints a unique non-empty id per click", () => {
+    const a = mintInteractionId();
+    const b = mintInteractionId();
+    expect(a.length).toBeGreaterThan(0);
+    expect(b.length).toBeGreaterThan(0);
+    expect(a).not.toBe(b);
   });
 });
 

@@ -6420,6 +6420,10 @@ export type ManageViewsData = {
          */
         source_code: string;
         /**
+         * [set] CLI-bundled browser bundle for the source (relative files and npm deps resolved where node_modules exists). When present the server stores it after the size check instead of compiling; when absent the server compiles source_code itself (the chat-agent path).
+         */
+        compiled_code?: string;
+        /**
          * [set] Where the view appears; extracted from the module by the caller.
          */
         attach?: Array<

@@ -1,31 +1,31 @@
 /**
- * `lobu run` view watcher: re-apply the project when a view file, one of its
- * imports, or `lobu.config.ts` changes — so Claude Code in a checkout sees the
- * edited view locally within ~2 s of saving.
+ * `lobu run` view reapply loop: re-apply the project when a view file, one of
+ * its imports, or `lobu.config.ts` changes — so Claude Code in a checkout sees
+ * the edited view locally within ~2 s of saving.
  *
- * Watched set is exactly the listed view files + their import graph (from the
- * esbuild metafile, the same bundler apply uses) + the config file (reloaded
- * through jiti on every apply, so config edits take effect without a
- * restart). Per-file `fs.watch` calls: no recursive directory walk, no
+ * The reapply set is exactly the listed view files + their import graph (from
+ * the esbuild metafile, the same bundler apply uses) + the config file
+ * (reloaded through jiti on every apply, so config edits take effect without
+ * a restart). Per-file `fs.watch` calls: no recursive directory walk, no
  * editor-tempfile noise. Resolved fresh after every apply, so a new import
  * joins the set on the next save.
  */
-import { watch, type FSWatcher } from "node:fs";
+import { watch } from "node:fs";
 import { loadProjectConfig } from "./apply/desired-state.js";
 import { collectViewWatchFiles } from "./view-bundler.js";
 
-export interface ViewWatchSet {
+export interface ViewReapplySet {
   configPath: string;
   files: string[];
 }
 
 /**
- * Resolve the current watch set for `cwd`: the config file plus every listed
- * view's entry and import graph. Throws the config loader's ValidationError
- * when `lobu.config.ts` is missing or malformed — the caller treats that as
- * "no watcher", never as fatal.
+ * Resolve the current reapply set for `cwd`: the config file plus every
+ * listed view's entry and import graph. Throws the config loader's
+ * ValidationError when `lobu.config.ts` is missing or malformed — the caller
+ * treats that as "no reapply loop", never as fatal.
  */
-export async function collectViewWatchSet(cwd: string): Promise<ViewWatchSet> {
+export async function collectViewReapplySet(cwd: string): Promise<ViewReapplySet> {
   const { project, configPath } = await loadProjectConfig(cwd);
   const files = new Set<string>([configPath]);
   for (const src of project.views ?? []) {
@@ -38,23 +38,24 @@ export async function collectViewWatchSet(cwd: string): Promise<ViewWatchSet> {
   return { configPath, files: [...files].sort() };
 }
 
-export interface ViewWatcherEvents {
-  /** A watched file changed (debounced): re-apply, then rebuild the set. */
+export interface ViewReapplyEvents {
+  /** A reapply file changed (debounced): re-apply, then rebuild the set. */
   onChange: () => Promise<void>;
-  /** Log line for operator-visible watcher state. */
+  /** Log line for operator-visible reapply state. */
   onLog?: (message: string) => void;
 }
 
 /**
- * Watch `set.files` and call `onChange` after 750 ms quiet. Returns `close`.
- * Concurrent change bursts collapse into one call; a change DURING a re-apply
- * schedules exactly one follow-up, so rapid saves never stack applies.
+ * Reapply `set.files` on change and call `onChange` after 750 ms quiet.
+ * Returns `close`. Concurrent change bursts collapse into one call; a change
+ * DURING a re-apply schedules exactly one follow-up, so rapid saves never
+ * stack applies.
  */
-export function startViewWatcher(
-  set: ViewWatchSet,
-  events: ViewWatcherEvents
+export function startViewReapply(
+  set: ViewReapplySet,
+  events: ViewReapplyEvents
 ): { close: () => void } {
-  const watchers: FSWatcher[] = [];
+  const subs: Array<ReturnType<typeof watch>> = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let applying = false;
   let dirty = false;
@@ -88,9 +89,9 @@ export function startViewWatcher(
 
   for (const file of set.files) {
     try {
-      watchers.push(watch(file, { persistent: true }, schedule));
+      subs.push(watch(file, { persistent: true }, schedule));
     } catch {
-      // Tempfile/impl races (deleted between collect and watch): the next
+      // Tempfile/impl races (deleted between collect and reapply): the next
       // successful apply rebuilds the set; a missing file never kills `run`.
     }
   }
@@ -100,7 +101,7 @@ export function startViewWatcher(
         clearTimeout(timer);
         timer = null;
       }
-      for (const w of watchers) w.close();
+      for (const sub of subs) sub.close();
     },
   };
 }
