@@ -81,7 +81,7 @@ describe("ClientSDK.org() accessor", () => {
       expect(sdk.operations).toBeDefined();
       expect(sdk.automations).toBeDefined();
       expect(sdk.classifiers).toBeDefined();
-      expect(sdk.viewTemplates).toBeDefined();
+      expect(sdk.views).toBeDefined();
       expect(sdk.knowledge).toBeDefined();
       expect(sdk.organizations).toBeDefined();
       expect(sdk.query).toBeInstanceOf(Function);

@@ -36,7 +36,7 @@ import {
   buildKnowledgeNamespace,
   buildOperationsNamespace,
   buildOrganizationsNamespace,
-  buildViewTemplatesNamespace,
+  buildViewsNamespace,
 } from '../../sandbox/namespaces';
 import { initWorkspaceProvider } from '../../workspace';
 import {
@@ -189,7 +189,7 @@ export class TestApiClient {
   readonly knowledge: ReturnType<typeof buildKnowledgeNamespace>;
   readonly operations: ReturnType<typeof buildOperationsNamespace>;
   readonly organizations: ReturnType<typeof buildOrganizationsNamespace>;
-  readonly view_templates: ReturnType<typeof buildViewTemplatesNamespace>;
+  readonly views: ReturnType<typeof buildViewsNamespace>;
   readonly automations: ReturnType<typeof buildAutomationsNamespace>;
 
   private constructor(
@@ -205,7 +205,7 @@ export class TestApiClient {
     this.knowledge = buildKnowledgeNamespace(ctx, env);
     this.operations = buildOperationsNamespace(ctx, env);
     this.organizations = buildOrganizationsNamespace(ctx);
-    this.view_templates = buildViewTemplatesNamespace(ctx, env);
+    this.views = buildViewsNamespace(ctx, env);
     this.automations = buildAutomationsNamespace(ctx, env);
   }
 

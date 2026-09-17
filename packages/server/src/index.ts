@@ -107,8 +107,10 @@ import {
 	publicRestListConnectors,
 	publicRestSearchKnowledge,
 	restGetAutomations,
+	restGetViewShell,
 	restHealth,
 	restInvokeEventAction,
+	restInvokeViewAction,
 	restListTools,
 	restSearchKnowledge,
 	restToolAction,
@@ -1091,6 +1093,12 @@ app.post(
 	"/api/:orgSlug/events/:eventId/actions/:action",
 	mcpAuth,
 	restInvokeEventAction,
+);
+app.get("/api/:orgSlug/views/:key/shell", mcpAuth, restGetViewShell);
+app.post(
+	"/api/:orgSlug/views/:key/actions/:action",
+	mcpAuth,
+	restInvokeViewAction,
 );
 
 app.get("/api/:orgSlug/knowledge/search", mcpAuth, restSearchKnowledge);

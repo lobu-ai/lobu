@@ -1089,40 +1089,46 @@ export default async (_ctx, client) => {
 			"await client.classifiers.apply({ classifier_slug: 'sentiment', content_ids: [101, 102, 103] });",
 	},
 
-	// viewTemplates
-	"viewTemplates.manage": {
-		summary: "Raw manage_view_templates action wrapper. Prefer named methods.",
+	// views
+	"views.manage": {
+		summary: "Raw manage_views action wrapper. Prefer named methods.",
 		access: "admin",
 	},
-	"viewTemplates.get": {
+	"views.get": {
 		summary:
-			"Get the active view template for a resource. Params: { resource_type: 'entity' | 'entity_type', resource_id, tab_name? } — resource_id is the entity id (number) for resource_type 'entity', or the entity-type slug (string) for 'entity_type'. Both resource_type and resource_id are required.",
+			"Get one view's metadata + source by key. Params: { key }. Metadata only in list; get adds source_code.",
 		access: "read",
+		signature:
+			"views.get(input: { key: string }): Promise<unknown>",
 		example:
-			"await client.viewTemplates.get({ resource_type: 'entity', resource_id: 42 });",
+			"await client.views.get({ key: 'pipeline' });",
 	},
-	"viewTemplates.set": {
+	"views.set": {
 		summary:
-			"Create or update a view template version. Params: { resource_type: 'entity' | 'entity_type', resource_id, json_template, tab_name?, tab_order?, change_notes? }. json_template is a DSL node tree (nodes: text | data | if | each | component; a `text` node carries its string in `content` — not `text`; a `data` node takes an optional `format`: currency|date|url|enum|boolean|number|auto|text) and may nest a `data_sources` key of named read-only SQL queries. The node tree is validated on set — a malformed template is rejected, not stored.",
-		access: "admin",
-		example:
-			"await client.viewTemplates.set({ resource_type: 'entity_type', resource_id: 'deal', tab_name: 'Pipeline', json_template: { type: 'div', data_sources: { rows: { query: \"SELECT name, metadata->>'arr' AS arr FROM entities WHERE entity_type = 'deal'\" } }, children: [ { type: 'each', items: 'rows', as: 'r', render: { type: 'card', children: [ { type: 'data', path: 'r.name' }, { type: 'data', path: 'r.arr', format: 'currency' } ] } } ] } });",
-	},
-	"viewTemplates.rollback": {
-		summary:
-			"Roll back to a previous template version. Takes `version` — the version NUMBER, not a `version_id` row id.",
+			"Store a view: compile source_code server-side and upsert by key. Params: { key, source_code, name?, description?, attach?, params?, actions?, last_writer? }. attach says where the view appears (type/entity/workspace entries); params are declared typed URL params; actions map names to the event kind each emits. Same source is a no-op (written:false).",
 		access: "admin",
 		signature:
-			"viewTemplates.rollback(input: { resource_type: 'entity' | 'entity_type'; resource_id: string | number; version: number; tab_name?: string }): Promise<unknown>",
+			"views.set(input: { key: string; source_code: string; name?: string; description?: string; attach?: object[]; params?: object; actions?: object }): Promise<unknown>",
 		example:
-			"await client.viewTemplates.rollback({ resource_type: 'entity_type', resource_id: 'deal', version: 3 });",
+			"await client.views.set({ key: 'pipeline', source_code: 'export default function Pipeline() { return null; }', attach: [{ type: 'deal', placement: 'tab' }] });",
 	},
-	"viewTemplates.removeTab": {
+	"views.list": {
 		summary:
-			"Remove a named tab from a template. `tab_name` is required; the default/overview tab has no name and is nulled with `viewTemplates.manage({ action: 'clear', ... })` instead.",
+			"List every view's metadata (never bundles or sources). Takes no params.",
+		access: "read",
+		signature:
+			"views.list(): Promise<unknown>",
+		example:
+			"await client.views.list({});",
+	},
+	"views.remove": {
+		summary:
+			"Delete a view by key. Params: { key }.",
 		access: "admin",
 		signature:
-			"viewTemplates.removeTab(input: { resource_type: 'entity' | 'entity_type'; resource_id: string | number; tab_name: string }): Promise<unknown>",
+			"views.remove(input: { key: string }): Promise<unknown>",
+		example:
+			"await client.views.remove({ key: 'pipeline' });",
 	},
 
 	// metrics — governed measures (prefer over client.query / query_sql)

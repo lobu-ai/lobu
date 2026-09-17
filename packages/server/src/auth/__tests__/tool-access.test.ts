@@ -177,10 +177,11 @@ describe('requiresOwnerAdmin', () => {
     expect(requiresOwnerAdmin('manage_automations', { action: 'get_feedback' }, false)).toBe(false);
   });
 
-  it('should require admin for view template mutations while leaving reads as read-tier', () => {
-    expect(requiresOwnerAdmin('manage_view_templates', { action: 'set' }, false)).toBe(true);
-    expect(requiresOwnerAdmin('manage_view_templates', { action: 'rollback' }, false)).toBe(true);
-    expect(requiresOwnerAdmin('manage_view_templates', { action: 'get' }, false)).toBe(false);
+  it('should require admin for view mutations while leaving reads as read-tier', () => {
+    expect(requiresOwnerAdmin('manage_views', { action: 'set' }, false)).toBe(true);
+    expect(requiresOwnerAdmin('manage_views', { action: 'remove' }, false)).toBe(true);
+    expect(requiresOwnerAdmin('manage_views', { action: 'get' }, false)).toBe(false);
+    expect(requiresOwnerAdmin('manage_views', { action: 'list' }, false)).toBe(false);
   });
 
   it('treats manage_catalog list actions as READ-tier so a default mcp:read token can discover connectors', () => {
@@ -751,6 +752,7 @@ search_sdk: read+public ?=read+public
 query_sdk: read ?=read
 query_sql: read ?=read
 run_sdk: write ?=write
+open_view: read ?=read
 manage_entity: create=write update=write list=read+public get=read+public delete=admin link=write unlink=write update_link=write list_links=read+public merge=admin resolve_duplicates=admin unmerge=admin ?=read
 manage_entity_schema: list=read+public get=read+public create=admin update=admin delete=admin audit=read+public add_rule=admin remove_rule=admin list_rules=read+public ?=read
 manage_connections: list_connector_groups=read+public list=read+public get=read+public create=write setup_options=read+public connect=write connect_managed=write update=write apply_chat_connection=admin delete=admin reauthenticate=write test=admin install_connector=admin uninstall_connector=admin get_connector_source=admin validate_connector_source=admin update_connector_source=admin rollback_connector_version=admin toggle_connector_login=admin update_connector_auth=admin update_connector_default_config=admin set_channel_about=admin ?=read
@@ -766,7 +768,7 @@ manage_automations: create=admin list=read+public update=admin create_version=ad
 get_automation: read+public ?=read+public
 read_knowledge: read+public ?=read+public
 manage_classifiers: create=admin list=read+public generate_embeddings=admin delete=admin classify=admin apply=admin ?=read
-manage_view_templates: set=admin get=read+public rollback=admin remove_tab=admin clear=admin ?=read
+manage_views: set=admin get=read+public list=read+public remove=admin ?=read
 list_organizations: read ?=read
 list_metrics: read ?=read
 query_metric: read ?=read

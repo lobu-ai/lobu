@@ -26,6 +26,7 @@ import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-a
 import type { CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
+import { LOBU_VIEWS_RESOURCE_URI } from '../views/views';
 import { ADMIN_TOOLS } from './admin';
 import { ListMetricsSchema, listMetrics } from './admin/list_metrics';
 import { MetricSeriesSchema, metricSeries } from './admin/metric_series';
@@ -44,6 +45,11 @@ import {
   InvokeEventActionSchema,
   invokeEventAction,
 } from './invoke_event_action';
+import {
+  InvokeViewActionSchema,
+  invokeViewActionTool,
+} from './invoke_view_action';
+import { OpenViewResultSchema, OpenViewSchema, openView } from './open_view';
 import { ResolvePathResultSchema, ResolvePathSchema, resolvePath } from './resolve_path';
 import { SaveContentResultSchema, saveContent } from './save_content';
 import {
@@ -378,6 +384,24 @@ const AGENT_TOOLS: ToolDefinition[] = [
     securityScopes: ['mcp:write'],
     handler: runSdkScript,
   },
+  {
+    name: 'open_view',
+    description:
+      'Open a Lobu view. Frame-capable hosts render it inline as an MCP App; the result also carries a web URL that renders the same view with the same params for hosts that cannot show a frame.',
+    inputSchema: OpenViewSchema,
+    outputSchema: OpenViewResultSchema,
+    annotations: { ...READ_ONLY, title: 'Open view' },
+    authorizationReadOnly: true,
+    securityScopes: ['mcp:read'],
+    mcpMeta: {
+      ui: { resourceUri: LOBU_VIEWS_RESOURCE_URI, visibility: ['model', 'app'] },
+      'openai/outputTemplate': LOBU_VIEWS_RESOURCE_URI,
+      'openai/widgetAccessible': true,
+      'openai/toolInvocation/invoking': 'Opening view',
+      'openai/toolInvocation/invoked': 'View ready',
+    },
+    handler: openView,
+  },
 ];
 
 /**
@@ -444,6 +468,28 @@ const MCP_APP_TOOLS: ToolDefinition[] = [
       },
     },
     handler: invokeEventAction,
+  },
+  {
+    name: 'invoke_view_action',
+    scope: 'account',
+    description:
+      'Append the declared event for a view action using the signed-in MCP App user as the actor. The server revalidates the CURRENT view row: an action the view no longer declares is rejected.',
+    inputSchema: InvokeViewActionSchema,
+    outputSchema: InvokeEventActionResultSchema,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+      title: 'Invoke view action',
+    },
+    securityScopes: ['mcp:write'],
+    mcpMeta: {
+      ui: {
+        visibility: ['app'],
+      },
+    },
+    handler: invokeViewActionTool,
   },
 ];
 

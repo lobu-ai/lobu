@@ -21,6 +21,8 @@ import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
 import type { Env } from "./index";
 import { invokeTemplateEventAction } from "./interactions/template-event-actions";
+import { invokeViewAction } from "./interactions/template-event-actions";
+import { getView, isValidViewKey, renderViewShell } from "./views/views";
 import { getOperationsSummary } from "./operations/connector-operations";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";
 import { manageAutomations } from "./tools/admin/manage_automations";
@@ -407,6 +409,112 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 				event_id: result.eventId,
 				event_type: result.eventType,
 			}),
+		);
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * GET /api/:orgSlug/views/:key/shell
+ *
+ * One view's HTML shell with the compiled bundle inlined. Authenticated like
+ * every other org route — the web host fetches it with the session and mounts
+ * it `srcdoc` into the sandboxed frame, so there is deliberately no public
+ * (unauthenticated) shell route.
+ */
+export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
+	try {
+		const ctx = toToolContext(extractAuthContext(c));
+		if (!ctx.isAuthenticated || !ctx.userId) {
+			throw new ToolUserError(
+				"A signed-in Lobu user is required to read views.",
+				401
+			);
+		}
+		const key = c.req.param("key") ?? "";
+		if (!isValidViewKey(key)) {
+			throw new ToolUserError("Invalid view key", 400);
+		}
+		const view = await getView(ctx.organizationId, key);
+		if (!view) {
+			throw new ToolUserError(`Unknown view: ${key}`, 404);
+		}
+		const html = renderViewShell(view);
+		c.header("Content-Type", "text/html; charset=utf-8");
+		c.header("Cache-Control", "no-store");
+		c.header("X-Lobu-View-Hash", view.content_hash);
+		c.header(
+			"X-Lobu-View-Bytes",
+			String(Buffer.byteLength(view.compiled_code, "utf8"))
+		);
+		return c.body(html);
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * POST /api/:orgSlug/views/:key/actions/:action
+ *
+ * Web counterpart of `invoke_view_action`. Identity comes exclusively from
+ * the authenticated session; the body carries the action payload and the
+ * browser retry id.
+ */
+export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
+	try {
+		const ctx = toToolContext(extractAuthContext(c));
+		if (!ctx.isAuthenticated || !ctx.userId) {
+			throw new ToolUserError(
+				"A signed-in Lobu user is required for this interaction.",
+				401
+			);
+		}
+		if (
+			!hasRequiredMcpScope("write", ctx.scopes) ||
+			resolveMaxAccessLevel(ctx.memberRole, ctx.scopes) === "read"
+		) {
+			throw new ToolUserError("This interaction requires write access.", 403);
+		}
+		const key = c.req.param("key") ?? "";
+		const action = c.req.param("action") ?? "";
+		if (!isValidViewKey(key) || !action) {
+			throw new ToolUserError("view key and action are required", 400);
+		}
+		const body = await c.req.json<{
+			value?: unknown;
+			interaction_id?: unknown;
+		}>();
+		if (
+			body.value !== undefined &&
+			body.value !== null &&
+			(typeof body.value !== "object" || Array.isArray(body.value))
+		) {
+			throw new ToolUserError("value must be an object or null", 400);
+		}
+		if (typeof body.interaction_id !== "string" || !body.interaction_id) {
+			throw new ToolUserError("interaction_id is required", 400);
+		}
+		const result = await invokeViewAction({
+			organizationId: ctx.organizationId,
+			viewKey: key,
+			action,
+			value: (body.value ?? null) as Record<string, unknown> | null,
+			interactionId: body.interaction_id,
+			surface: "web",
+			actor: {
+				platform: "lobu",
+				platformUserId: ctx.userId,
+				userId: ctx.userId,
+			},
+			source: { clientId: ctx.clientId ?? null },
+		});
+		return c.json(
+			toJsonSafe({
+				created: result.created,
+				event_id: result.eventId,
+				event_type: result.eventType,
+			})
 		);
 	} catch (error) {
 		return restErrorResponse(c, error);

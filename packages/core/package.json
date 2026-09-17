@@ -141,11 +141,11 @@
       "import": "./dist/contracts/tools/manage-schedules.js",
       "require": "./dist/contracts/tools/manage-schedules.js"
     },
-    "./contracts/tools/manage-view-templates": {
-      "types": "./dist/contracts/tools/manage-view-templates.d.ts",
-      "bun": "./src/contracts/tools/manage-view-templates.ts",
-      "import": "./dist/contracts/tools/manage-view-templates.js",
-      "require": "./dist/contracts/tools/manage-view-templates.js"
+    "./contracts/tools/manage-views": {
+      "types": "./dist/contracts/tools/manage-views.d.ts",
+      "bun": "./src/contracts/tools/manage-views.ts",
+      "import": "./dist/contracts/tools/manage-views.js",
+      "require": "./dist/contracts/tools/manage-views.js"
     },
     "./contracts/tools/manage-auth-profiles": {
       "types": "./dist/contracts/tools/manage-auth-profiles.d.ts",

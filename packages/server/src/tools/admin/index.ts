@@ -68,10 +68,10 @@ import {
 } from "./manage_operations";
 import { ManageSchedulesSchema, manageSchedules } from "./manage_schedules";
 import {
-	ManageViewTemplatesResultSchema,
-	ManageViewTemplatesSchema,
-	manageViewTemplates,
-} from "./manage_view_templates";
+	ManageViewsResultSchema,
+	ManageViewsSchema,
+	manageViews,
+} from "./manage_views";
 import {
 	ManageAutomationsSchema,
 	manageAutomations,
@@ -261,13 +261,13 @@ const ENTRIES: AdminToolEntry[] = [
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage classifiers"),
 	},
 	{
-		name: "manage_view_templates",
+		name: "manage_views",
 		description:
-			"View-template management. SDK alternative: client.viewTemplates.",
-		schema: ManageViewTemplatesSchema,
-		resultSchema: ManageViewTemplatesResultSchema,
-		handler: manageViewTemplates,
-		annotations: DESTRUCTIVE_WITH_TITLE("Manage view templates"),
+			"View management. SDK alternative: client.views.",
+		schema: ManageViewsSchema,
+		resultSchema: ManageViewsResultSchema,
+		handler: manageViews,
+		annotations: DESTRUCTIVE_WITH_TITLE("Manage views"),
 	},
 ];
 

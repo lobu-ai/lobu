@@ -14,14 +14,8 @@ import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
 import { entityLinkMatchSql } from '../utils/content-search';
-import {
-  type DataSourceContext,
-  type DataSourceInput,
-  executeDataSources,
-} from '../utils/execute-data-sources';
 import { ToolUserError } from '../utils/errors';
 import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
-import { stripMemberEmailsFromRows } from '../utils/member-redaction';
 import {
   derivedRowName,
   derivedRowSlug,
@@ -70,6 +64,8 @@ export const ResolvedPathEntitySchema = Type.Object({
 export type ResolvedPathEntity = Static<typeof ResolvedPathEntitySchema>;
 
 const ViewTemplateTabSchema = Type.Object({
+  // Retired with view templates: always empty. The shape stays so older
+  // clients keep working; views resolve client-side from `manage_views`.
   tab_name: Type.String(),
   tab_order: Type.Integer(),
   json_template: Type.Record(Type.String(), Type.Unknown()),
@@ -292,57 +288,6 @@ export type ResolvePathResult = Static<typeof ResolvePathResultSchema>;
 
 const BOOTSTRAP_RECENT_LIMIT = 8;
 
-/**
- * Extract `data_sources` from a json_template, execute them, and return
- * the cleaned template + results.
- */
-async function processTemplateDataSources(
-  jsonTemplate: Record<string, any> | null,
-  context: DataSourceContext,
-  sql: DbClient,
-  options?: { excludeWorkspaceAudit?: boolean }
-): Promise<{
-  cleanTemplate: Record<string, any> | null;
-  templateData: Record<string, unknown[]> | null;
-}> {
-  if (!jsonTemplate || !jsonTemplate.data_sources) {
-    return { cleanTemplate: jsonTemplate, templateData: null };
-  }
-
-  const dataSources = jsonTemplate.data_sources as DataSourceInput;
-  const { data_sources: _, ...cleanTemplate } = jsonTemplate;
-  const templateData = await executeDataSources(dataSources, context, sql, {
-    excludeWorkspaceAudit: options?.excludeWorkspaceAudit,
-  });
-  return { cleanTemplate, templateData };
-}
-
-/**
- * Process data sources for an array of tabs.
- */
-async function processTabsDataSources(
-  tabs: ViewTemplateTab[],
-  context: DataSourceContext,
-  sql: DbClient,
-  options?: { excludeWorkspaceAudit?: boolean }
-): Promise<ViewTemplateTab[]> {
-  return Promise.all(
-    tabs.map(async (tab) => {
-      const { cleanTemplate, templateData } = await processTemplateDataSources(
-        tab.json_template,
-        context,
-        sql,
-        options
-      );
-      return {
-        ...tab,
-        json_template: cleanTemplate ?? tab.json_template,
-        template_data: templateData,
-      };
-    })
-  );
-}
-
 function parsePathAndQuery(rawPath: string): { path: string; query: Record<string, string> } {
   if (!rawPath) return { path: '/', query: {} };
   const [pathPart = '', queryString] = rawPath.split('?', 2);
@@ -373,7 +318,7 @@ async function _resolvePath(
   args: ResolvePathArgs,
   ctx: AccountToolContext
 ): Promise<ResolvePathResult> {
-  const { path: normalized, query: urlQuery } = parsePathAndQuery(args.path);
+  const { path: normalized } = parsePathAndQuery(args.path);
   const segments = normalized
     .replace(/^\/+|\/+$/g, '')
     .split('/')
@@ -576,6 +521,10 @@ async function _resolvePath(
 
     // Leaf entity: fetch core data (without expensive COUNT subqueries).
     // Cross-org tolerance: same widening as the intermediate query, excluding $member.
+    // View templates are retired: the detail page renders the schema-derived
+    // auto-default (or a view, resolved by the client from `manage_views`), so
+    // this query carries no template joins and the tab/template fields below
+    // stay at their empty values.
     const row = await sql`
         SELECT
           e.id,
@@ -586,15 +535,11 @@ async function _resolvePath(
           e.metadata,
           e.field_controls,
           e.created_at,
-          COALESCE(vtv_entity.json_template, vtv_et.json_template) as json_template,
-          COALESCE(vtv_entity.version, vtv_et.version) as json_template_version,
+          NULL as json_template,
+          NULL as json_template_version,
           et.metadata_schema as entity_type_metadata_schema
         FROM entities e
         JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN view_template_versions vtv_entity
-          ON vtv_entity.id = e.current_view_template_version_id
-        LEFT JOIN view_template_versions vtv_et
-          ON vtv_et.id = et.current_view_template_version_id
         LEFT JOIN organization eo ON eo.id = e.organization_id
         WHERE (
             e.organization_id = ${workspace.id}
@@ -655,21 +600,15 @@ async function _resolvePath(
     parentId = entityRow.id;
 
     const createdAt = new Date(entityRow.created_at).toISOString();
-    const entityDataCtx: DataSourceContext = {
-      organizationId: workspace.id,
-      entityIds: [entityRow.id],
-      query: urlQuery,
-    };
 
-    // Run stats, tabs, and template data sources all in parallel
+    // Run stats in parallel. Tabs and template data sources are retired with
+    // view templates: the detail page falls back to the schema-derived
+    // auto-default below, and views resolve client-side from `manage_views`.
     const [
       [eventsCount],
       [connectionsCount],
       [automationsCount],
-      entityTabs,
-      entityTypeTabs,
-      { cleanTemplate: entityCleanTpl, templateData: entityTemplateData },
-    ] = await Sentry.startSpan({ name: 'entity:counts+tabs', op: 'db' }, () =>
+    ] = await Sentry.startSpan({ name: 'entity:counts', op: 'db' }, () =>
       Promise.all([
         sql.unsafe<{ cnt: number }>(
           `SELECT COUNT(*) as cnt FROM current_event_records ev
@@ -691,18 +630,11 @@ async function _resolvePath(
               WHERE ${Number(entityRow.id)}::int = ANY(i.entity_ids)
                 AND i.organization_id = ${workspace.id}
                 AND i.status = 'active'`,
-        fetchTabs(sql, 'entity', String(entityRow.id), workspace.id),
-        fetchTabs(sql, 'entity_type', entityRow.entity_type, workspace.id),
-        processTemplateDataSources(entityRow.json_template, entityDataCtx, sql, {
-          excludeWorkspaceAudit,
-        }),
       ])
     );
-    const mergedTabs = mergeTabs(entityTabs, entityTypeTabs);
-    let processedEntityTabs = await processTabsDataSources(mergedTabs, entityDataCtx, sql, {
-      excludeWorkspaceAudit,
-    });
-    let redactedTemplateData = entityTemplateData;
+    const processedEntityTabs: ViewTemplateTab[] = [];
+    const entityCleanTpl = null;
+    const redactedTemplateData: Record<string, unknown[]> | null = null;
     if (entityRow.entity_type === MEMBER_ENTITY_TYPE_SLUG && !roleInResolvedWorkspace) {
       throw new ToolUserError(
         'Member details are only visible to members of this workspace. Join the workspace to see members.',
@@ -724,21 +656,16 @@ async function _resolvePath(
         const { [emailField]: _drop, ...rest } = safeEntityMetadata;
         safeEntityMetadata = rest;
       }
-      // Also strip member emails that surface via template data sources or tabs
-      // (e.g. a dashboard tab that lists members). Without this, a data-source
-      // query like `SELECT * FROM entities WHERE entity_type='$member'` would
-      // leak emails even when the single-entity redaction above is not tripped.
-      redactedTemplateData = stripMemberEmailsFromRows(entityTemplateData, emailField);
-      processedEntityTabs = processedEntityTabs.map((tab) => ({
-        ...tab,
-        template_data: stripMemberEmailsFromRows(tab.template_data, emailField),
-      }));
+      // Template data sources are retired with view templates, so there is no
+      // tab data left to strip member emails from; the single-entity
+      // redaction above is the whole member-email boundary on this path.
     }
-    // Rendering resolution tail: when neither the entity nor its type declares
-    // a view template, synthesize a default field card from the type's
-    // metadata_schema so a typed/promoted entity never renders bare. A type
-    // with no schema properties yields null → the client keeps the dashboard
-    // overview. Custom tabs (a richer authored view) suppress the auto-default.
+    // Rendering resolution tail: view templates are retired, so always
+    // synthesize the default field card from the type's metadata_schema so a
+    // typed/promoted entity never renders bare. A type with no schema
+    // properties yields null → the client keeps the dashboard overview.
+    // Views resolve client-side from `manage_views` and ride outside this
+    // payload.
     const resolvedTemplate =
       entityCleanTpl ??
       (processedEntityTabs.length === 0
@@ -1496,60 +1423,4 @@ async function listWorkspaceConnectorDefinitions(
       ? String(row.favicon_domain)
       : extractOAuthDomain((row.auth_schema as Record<string, unknown> | null) ?? null),
   }));
-}
-
-async function fetchTabs(
-  sql: DbClient,
-  resourceType: string,
-  resourceId: string,
-  organizationId: string
-): Promise<ViewTemplateTab[]> {
-  const rows = await sql`
-    SELECT
-      vtat.tab_name,
-      vtat.tab_order,
-      vtv.json_template,
-      vtv.version,
-      vtv.id as version_id
-    FROM view_template_active_tabs vtat
-    JOIN view_template_versions vtv ON vtv.id = vtat.current_version_id
-    WHERE vtat.resource_type = ${resourceType}
-      AND vtat.resource_id = ${resourceId}
-      AND vtat.organization_id = ${organizationId}
-    ORDER BY vtat.tab_order ASC, vtat.tab_name ASC
-  `;
-
-  return rows.map((row) => ({
-    tab_name: String(row.tab_name),
-    tab_order: Number(row.tab_order),
-    json_template: row.json_template as Record<string, any>,
-    version: Number(row.version),
-    version_id: Number(row.version_id),
-    template_data: null,
-  }));
-}
-
-/**
- * Merge entity-level tabs with entity-type-level tabs.
- * Entity tabs override same-named entity-type tabs.
- */
-function mergeTabs(
-  entityTabs: ViewTemplateTab[],
-  entityTypeTabs: ViewTemplateTab[]
-): ViewTemplateTab[] {
-  const tabMap = new Map<string, ViewTemplateTab>();
-
-  // Add entity-type tabs first
-  for (const tab of entityTypeTabs) {
-    tabMap.set(tab.tab_name, tab);
-  }
-
-  // Entity tabs override same-named tabs
-  for (const tab of entityTabs) {
-    tabMap.set(tab.tab_name, tab);
-  }
-
-  return Array.from(tabMap.values()).sort(
-    (a, b) => a.tab_order - b.tab_order || a.tab_name.localeCompare(b.tab_name)
-  );
 }

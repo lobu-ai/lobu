@@ -19,4 +19,4 @@ export { buildNotificationsNamespace } from "./notifications";
 export { buildOperationsNamespace } from "./operations";
 export { buildOrganizationsNamespace } from "./organizations";
 export { buildSchedulesNamespace } from "./schedules";
-export { buildViewTemplatesNamespace } from "./view-templates";
+export { buildViewsNamespace } from "./views";

@@ -49,7 +49,7 @@ const ADMIN_TOOL_SDK_NAMESPACE: Record<
 	get_automation: "automations",
 	read_knowledge: "knowledge",
 	manage_classifiers: "classifiers",
-	manage_view_templates: "viewTemplates",
+	manage_views: "views",
 };
 
 const testEnv = { ENVIRONMENT: "test" } as Env;
@@ -72,6 +72,8 @@ describe("tool registry split", () => {
 			[
 				"get_approval",
 				"invoke_event_action",
+				"invoke_view_action",
+				"open_view",
 				"query_sdk",
 				"query_sql",
 				"resolve_approval",
@@ -85,7 +87,7 @@ describe("tool registry split", () => {
 		// of AGENT_TOOL_NAMES, so they never reach generated OpenAPI/ClientSDK.
 		// The MCP handler additionally hides app-only entries from hosts that did
 		// not negotiate MCP Apps support.
-		expect(AGENT_TOOL_NAMES.size).toBe(6);
+		expect(AGENT_TOOL_NAMES.size).toBe(7);
 		expect(isRestDispatchTool("get_approval")).toBe(false);
 		expect(isRestDispatchTool("resolve_approval")).toBe(false);
 		expect(isRestDispatchTool("manage_connections")).toBe(true);

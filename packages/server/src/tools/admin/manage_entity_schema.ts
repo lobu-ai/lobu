@@ -19,7 +19,6 @@ import {
   type ManageEntitySchemaResult,
   type RelationshipTypeRow,
   type RelationshipTypeRuleRow,
-  type ViewTemplateTab,
 } from '@lobu/core/contracts/tools/manage-entity-schema';
 import { Value } from '@sinclair/typebox/value';
 import { validateEntityMetrics } from '@lobu/connector-sdk';
@@ -42,13 +41,7 @@ import { resolveActionOrigin } from '../../notifications/action-origin';
 import { notifyActionApprovalNeeded } from '../../notifications/triggers';
 import { insertToolConfigChange } from './helpers/config-audit';
 import {
-  type DataSourceContext,
-  type DataSourceInput,
-  executeDataSources,
-} from '../../utils/execute-data-sources';
-import {
   enforceRoleScopeAccess,
-  isAdminOrOwnerRole,
   isInProcessSystemCall,
 } from '../access-control';
 import {
@@ -882,13 +875,13 @@ async function compileRulesOrThrow(source: string | null): Promise<string | null
 }
 
 const ENTITY_TYPE_COLUMNS =
-  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, backing_source, metrics_config, rules_source, created_by, organization_id, created_at, updated_at, current_view_template_version_id';
+  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, backing_source, metrics_config, rules_source, created_by, organization_id, created_at, updated_at';
 
 const ENTITY_TYPE_COLUMNS_WITH_ORG = `et.id, et.slug, et.name, et.description, et.icon, et.color,
   et.metadata_schema, et.event_kinds, et.backing_sql, et.backing_source, et.metrics_config,
   et.rules_source,
   et.created_by, et.organization_id,
-  et.created_at, et.updated_at, et.current_view_template_version_id,
+  et.created_at, et.updated_at,
   o.slug AS organization_slug`;
 
 function mapRowToEntityType(row: Record<string, unknown>): EntityTypeRow {
@@ -1182,76 +1175,6 @@ async function etHandleList(
 	};
 }
 
-/**
- * Fetch the entity-TYPE-scoped authored view templates for a type and run each
- * template's `data_sources` LIVE (mirrors resolve_path's fetchTabs +
- * processTabsDataSources, for the list scope). The list context has no specific
- * entity, so `entityIds` is unset — a data source that references `{{entityId}}`
- * simply resolves empty. `data_sources` is stripped from the returned
- * `json_template`; the results ride on `template_data`. Fails soft per-tab: a
- * broken data source yields `template_data: null` rather than failing `get`.
- */
-async function fetchTypeViewTemplates(
-  sql: DbClient,
-  // The entity-type SLUG. view_template_active_tabs keys entity_type-scoped rows
-  // by slug (matching manage_view_templates' `resource_id` and resolve_path's
-  // fetchTabs('entity_type', entityRow.entity_type)), NOT the numeric id.
-  entityTypeSlug: string,
-  organizationId: string,
-  userId: string | null,
-  /** Exclude workspace-identity audit rows for ordinary-member / public reads. */
-  excludeWorkspaceAudit: boolean
-): Promise<ViewTemplateTab[]> {
-  const rows = await sql`
-    SELECT
-      vtat.tab_name,
-      vtat.tab_order,
-      vtv.json_template,
-      vtv.version,
-      vtv.id as version_id
-    FROM view_template_active_tabs vtat
-    JOIN view_template_versions vtv ON vtv.id = vtat.current_version_id
-    WHERE vtat.resource_type = 'entity_type'
-      AND vtat.resource_id = ${entityTypeSlug}
-      AND vtat.organization_id = ${organizationId}
-    ORDER BY vtat.tab_order ASC, vtat.tab_name ASC
-  `;
-
-  const context: DataSourceContext = { organizationId, userId };
-
-  return Promise.all(
-    rows.map(async (row) => {
-      const jsonTemplate = row.json_template as Record<string, unknown>;
-      const dataSources = jsonTemplate.data_sources as DataSourceInput | undefined;
-      let cleanTemplate = jsonTemplate;
-      let templateData: Record<string, unknown[]> | null = null;
-      if (dataSources) {
-        const { data_sources: _dropped, ...rest } = jsonTemplate;
-        cleanTemplate = rest;
-        try {
-          templateData = await executeDataSources(dataSources, context, sql, {
-            excludeWorkspaceAudit,
-          });
-        } catch (err) {
-          logger.warn(
-            { err, tab: String(row.tab_name), entityTypeSlug },
-            'view-template data source failed; returning tab without data'
-          );
-          templateData = null;
-        }
-      }
-      return {
-        tab_name: String(row.tab_name),
-        tab_order: Number(row.tab_order),
-        json_template: cleanTemplate,
-        version: Number(row.version),
-        version_id: Number(row.version_id),
-        template_data: templateData,
-      };
-    })
-  );
-}
-
 async function etHandleGet(
   slug: string | undefined,
   ctx: ToolContext
@@ -1307,16 +1230,10 @@ async function etHandleGet(
       );
   // Classify the view's measure columns on read (never persisted).
   if (mapped.backing_sql) mapped.measure_columns = measureColumns(mapped.backing_sql);
-  // Authored type-level list-view templates, with their data_sources run live.
-  // Workspace-identity audit rows are owner/admin/system-only; type templates
-  // are org-scoped (no entityIds) so an events SELECT would otherwise leak them.
-  mapped.view_templates = await fetchTypeViewTemplates(
-    sql,
-    mapped.slug,
-    ctx.organizationId,
-    ctx.userId,
-    !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole)
-  );
+  // View templates are retired: type views resolve client-side from
+  // `manage_views`. The field stays on the wire as an empty list so older
+  // clients keep rendering the built-in Table/Board/Gallery switcher.
+  mapped.view_templates = [];
 
   return { schema_type: 'entity_type', action: 'get', entity_type: mapped };
 }

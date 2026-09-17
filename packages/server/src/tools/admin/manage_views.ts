@@ -1,0 +1,215 @@
+/**
+ * Tool: manage_views
+ *
+ * View management (the re-key of `manage_view_templates`). Actions:
+ * set/get/list/remove. There are no attach/detach, rollback, versions or
+ * clear verbs: the attach line lives in the module source, git is the only
+ * history of definitions, and removing a view is `remove`.
+ *
+ * `set` compiles `source_code` server-side with esbuild (browser IIFE) and
+ * upserts by (organization_id, key). Same source means the same content hash
+ * and no write. The server never executes view code.
+ */
+
+import {
+  GetViewAction,
+  ListViewsAction,
+  ManageViewsResultSchema,
+  ManageViewsSchema,
+  RemoveViewAction,
+  SetViewAction,
+  type ManageViewsResult,
+} from '@lobu/core/contracts/tools/manage-views';
+import type { Static } from '@sinclair/typebox';
+import { emit } from '../../events/emitter';
+import { ToolUserError } from '../../utils/errors';
+import {
+  RESERVED_VIEW_PARAMS,
+  VIEW_SOURCE_MAX_CHARS,
+  compileView,
+  contentHash,
+  getView,
+  isValidViewKey,
+  listViews,
+  projectView,
+  removeView,
+  setView,
+  type SetViewInput,
+} from '../../views/views';
+import type { ToolContext } from '../registry';
+import { action, defineActionTool } from './action-tool';
+
+export { ManageViewsResultSchema, ManageViewsSchema };
+
+// Variants in the contract's order, so the derived union matches the exposed
+// `ManageViewsSchema`. Each handler receives its own variant's args.
+const manageViewsTool = defineActionTool('manage_views', {
+  set: action(SetViewAction, handleSet),
+  get: action(GetViewAction, handleGet),
+  list: action(ListViewsAction, handleList),
+  remove: action(RemoveViewAction, handleRemove),
+});
+
+export const manageViews = manageViewsTool.run;
+
+// ============================================
+// Helpers
+// ============================================
+
+/** Writes need a signed-in caller; reads ride on the workspace context. */
+function requireWriter(ctx: ToolContext): void {
+  if (!ctx.userId) throw new ToolUserError('Authentication required', 401);
+}
+
+// Event-kind names are `<subject>.<op>` (`deal.won`); the semantic check
+// against the kind registry happens when the action fires, but a malformed
+// name is rejected at authoring so it can never be stored.
+const EMITS_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Validate the caller-declared metadata (`lobu apply` extracts attach/params/
+ * actions from the module file; direct callers declare them). Shape only: the
+ * server does not execute the module to re-derive them.
+ */
+function validateViewMetadata(args: Static<typeof SetViewAction>): void {
+  if (!isValidViewKey(args.key)) {
+    throw new ToolUserError(
+      `Invalid view key '${args.key}': use 1-64 lowercase letters, digits and dashes`
+    );
+  }
+  if (typeof args.source_code !== 'string' || args.source_code.length === 0) {
+    throw new ToolUserError('set requires source_code', 400);
+  }
+  if (args.source_code.length > VIEW_SOURCE_MAX_CHARS) {
+    throw new ToolUserError(
+      `source_code is ${args.source_code.length} chars, over the ${VIEW_SOURCE_MAX_CHARS} char cap`,
+      422
+    );
+  }
+  for (const entry of args.attach ?? []) {
+    const keys = [
+      'type' in entry && entry.type !== undefined,
+      'entity' in entry && entry.entity !== undefined,
+      'workspace' in entry && entry.workspace !== undefined,
+    ].filter(Boolean).length;
+    if (keys !== 1) {
+      throw new ToolUserError(
+        'Each attach entry needs exactly one of type, entity or workspace',
+        400
+      );
+    }
+    if ('type' in entry && entry.type !== undefined && entry.type.trim() === '') {
+      throw new ToolUserError('attach type must not be blank', 400);
+    }
+    if ('entity' in entry && entry.entity !== undefined) {
+      const entity = entry.entity;
+      if (
+        typeof entity !== 'number' &&
+        (typeof entity !== 'string' || entity.trim() === '')
+      ) {
+        throw new ToolUserError('attach entity must be an id or a slug', 400);
+      }
+    }
+  }
+  for (const [name, decl] of Object.entries(args.params ?? {})) {
+    if (RESERVED_VIEW_PARAMS.has(name)) {
+      throw new ToolUserError(
+        `Param '${name}' is reserved on type/record pages and cannot be declared`,
+        400
+      );
+    }
+    // Params ride in the URL / viewState, so defaults are scalars only.
+    const d = decl.default;
+    if (
+      d !== undefined &&
+      d !== null &&
+      typeof d !== 'string' &&
+      typeof d !== 'number' &&
+      typeof d !== 'boolean'
+    ) {
+      throw new ToolUserError(
+        `Param '${name}' default must be a string, number, boolean or null`,
+        400
+      );
+    }
+  }
+  for (const [name, decl] of Object.entries(args.actions ?? {})) {
+    if (!EMITS_NAME_RE.test(decl.emits)) {
+      throw new ToolUserError(
+        `Action '${name}' emits '${decl.emits}': use <subject>.<op> event-kind names`,
+        400
+      );
+    }
+  }
+}
+
+// ============================================
+// Action Handlers
+// ============================================
+
+async function handleSet(
+  args: Static<typeof SetViewAction>,
+  ctx: ToolContext
+): Promise<ManageViewsResult> {
+  requireWriter(ctx);
+  validateViewMetadata(args);
+
+  const hash = contentHash(args.source_code);
+  // Same source, same hash: skip the compile and the write entirely.
+  const current = await getView(ctx.organizationId, args.key);
+  if (current && current.content_hash === hash) {
+    return { action: 'set', view: projectView(current), written: false };
+  }
+
+  const compiled = await compileView(args.source_code);
+  const { view, written } = await setView(ctx.organizationId, {
+    key: args.key,
+    name: args.name?.trim() ? args.name : args.key,
+    description: args.description ?? '',
+    source_code: args.source_code,
+    compiled_code: compiled,
+    content_hash: hash,
+    attach: (args.attach ?? []) as SetViewInput['attach'],
+    params: (args.params ?? {}) as SetViewInput['params'],
+    actions: (args.actions ?? {}) as SetViewInput['actions'],
+    last_writer: args.last_writer ?? (ctx.applyId ? `apply:${ctx.applyId}` : (ctx.userId ?? 'unknown')),
+  });
+
+  // No config-audit emission: the audit trail gains no view resource kind in
+  // phase 1, and `last_writer` (apply_id | user) carries the provenance.
+  // A no-op set changes nothing, so it invalidates nothing.
+  if (written) {
+    emit(ctx.organizationId, { keys: [`view:${args.key}`] });
+  }
+
+  return { action: 'set', view: projectView(view), written };
+}
+
+async function handleGet(
+  args: Static<typeof GetViewAction>,
+  ctx: ToolContext
+): Promise<ManageViewsResult> {
+  const view = await getView(ctx.organizationId, args.key);
+  if (!view) throw new ToolUserError(`Unknown view: ${args.key}`, 404);
+  return { action: 'get', view: projectView(view), source_code: view.source_code };
+}
+
+async function handleList(
+  _args: Static<typeof ListViewsAction>,
+  ctx: ToolContext
+): Promise<ManageViewsResult> {
+  const views = await listViews(ctx.organizationId);
+  return { action: 'list', views: views.map(projectView) };
+}
+
+async function handleRemove(
+  args: Static<typeof RemoveViewAction>,
+  ctx: ToolContext
+): Promise<ManageViewsResult> {
+  requireWriter(ctx);
+  const removed = await removeView(ctx.organizationId, args.key);
+  if (removed) {
+    emit(ctx.organizationId, { keys: [`view:${args.key}`] });
+  }
+  return { action: 'remove', key: args.key, removed };
+}

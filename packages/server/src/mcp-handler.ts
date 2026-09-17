@@ -66,6 +66,14 @@ import { getMcpTools, getTool, isAuthorizationReadOnly } from './tools/registry'
 import { toMcpPublicSdkScriptResult } from './tools/sdk_run';
 import { validateToolResult } from './tools/validate-args';
 import { renderMcpAppTemplate } from './utils/mcp-app-bundle';
+import {
+  LOBU_VIEWS_RESOURCE_URI,
+  getView,
+  renderViewShell,
+  renderViewsLoaderShell,
+  viewKeyFromResourceUri,
+  viewResourceMeta,
+} from './views/views';
 import { resolvePublicOrigin } from './utils/public-origin';
 import { buildWorkspaceInstructions } from './utils/workspace-instructions';
 import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
@@ -248,6 +256,24 @@ const MCP_APP_RESOURCES: Record<
     },
     prefersBorder: true,
   },
+};
+
+/**
+ * The generic views loader's registry entry, shaped like `MCP_APP_RESOURCES`
+ * so `mcpAppResourceMeta` applies unchanged. The loader is inline HTML (no
+ * built bundle), so `appDir` names nothing on disk — it only feeds the meta.
+ */
+const VIEWS_LOADER_META = {
+  name: 'Views',
+  description:
+    'Lobu views: React modules rendered in a sandboxed iframe. Open one with the open_view tool; actions use invoke_view_action.',
+  appDir: 'views',
+  csp: {
+    connectDomains: [] as string[],
+    resourceDomains: [] as string[],
+    frameDomains: [] as string[],
+  },
+  prefersBorder: true,
 };
 
 /**
@@ -450,6 +476,19 @@ function createServerForContext(
         mimeType: MCP_APP_MIME_TYPE,
         _meta: mcpAppResourceMeta(authCtx, meta),
       })),
+      // Views share ONE loader resource. Per-view bundles are NOT listed:
+      // hosts cache the id they capture at connect time, so the listed id
+      // must be stable while views come and go. The loader fetches the
+      // per-view bundle (`ui://lobu/views/<key>`, resolvable on read below)
+      // through the host resource channel.
+      {
+        uri: LOBU_VIEWS_RESOURCE_URI,
+        name: 'Views',
+        description:
+          'Lobu views: React modules rendered in a sandboxed iframe. Open one with the open_view tool; actions use invoke_view_action.',
+        mimeType: MCP_APP_MIME_TYPE,
+        _meta: mcpAppResourceMeta(authCtx, VIEWS_LOADER_META),
+      },
       ...Object.entries(MCP_SKILL_RESOURCES).map(([uri, meta]) => ({
         uri,
         name: meta.name,
@@ -469,6 +508,39 @@ function createServerForContext(
       return {
         contents: [{ uri, mimeType: 'text/markdown', text: skill.text }],
       };
+    }
+    // Views: the generic loader is one stable id; per-view bundles resolve by
+    // key so the loader can fetch them through the host resource channel. An
+    // unknown key (a removed view) is an unknown resource — fail closed rather
+    // than rendering a stale bundle.
+    if (uri === LOBU_VIEWS_RESOURCE_URI) {
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: MCP_APP_MIME_TYPE,
+            text: renderViewsLoaderShell(),
+            _meta: mcpAppResourceMeta(authCtx, VIEWS_LOADER_META),
+          },
+        ],
+      };
+    }
+    const viewKey = viewKeyFromResourceUri(uri);
+    if (viewKey && authCtx.organizationId) {
+      const storedView = await getView(authCtx.organizationId, viewKey);
+      if (storedView) {
+        const meta = viewResourceMeta(storedView);
+        return {
+          contents: [
+            {
+              uri,
+              mimeType: MCP_APP_MIME_TYPE,
+              text: renderViewShell(storedView),
+              _meta: mcpAppResourceMeta(authCtx, meta),
+            },
+          ],
+        };
+      }
     }
     // A host reads the id it captured from `resources/list` at connect time,
     // not the one in the tool result it just received, so a superseded version

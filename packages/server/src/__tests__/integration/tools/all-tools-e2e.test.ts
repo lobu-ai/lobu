@@ -205,16 +205,17 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 				coverage: "reachable",
 				note: "lists scheduled jobs for the org",
 			},
-			manage_view_templates: {
-				// 'get' on an entity_type (resource_id = the type slug) returns null
-				// when no template exists — a structured success, not an error.
-				args: {
-					action: "get",
-					resource_type: "entity_type",
-					resource_id: "brand",
-				},
+			manage_views: {
+				// 'list' returns the org's views as metadata (never bundles) —
+				// a structured success, not an error, when empty.
+				args: { action: "list" },
 				coverage: "round-trip",
-				note: "reads the view template for the brand entity type (null when unset)",
+				note: "lists the org's views metadata (empty when none saved)",
+			},
+			open_view: {
+				args: { key: "coverage-board" },
+				coverage: "round-trip",
+				note: "opens the seeded view: per-view resource + web URL with params",
 			},
 			notify: {
 				// recipients defaults to 'admins' and no connection_id is set, so this
@@ -354,6 +355,18 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 		)) as { automation_id: string };
 		expect(automation.automation_id).toBeDefined();
 		automationId = automation.automation_id;
+
+		// Seed one view so open_view is a real round-trip.
+		await executeTool(
+			"manage_views",
+			{
+				action: "set",
+				key: "coverage-board",
+				source_code: "export default function B() { return null; }",
+			},
+			TEST_ENV,
+			authCtx
+		);
 	});
 
 	it("covers every registry tool in the args fixture (catches new uncovered tools)", () => {

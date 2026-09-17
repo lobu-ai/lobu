@@ -101,7 +101,6 @@ export class EntityRowValidationError extends Error {
  * same `$deleted` name instead of slipping past the seam.
  */
 const UNGOVERNED_COLUMNS: ReadonlySet<string> = new Set([
-	"currentViewTemplateVersionId",
 	"fieldControls",
 	"enabledClassifiers",
 	"embedding",

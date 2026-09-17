@@ -100,15 +100,18 @@ import type {
   ManageSchedulesData,
   ManageSchedulesErrors,
   ManageSchedulesResponses,
-  ManageViewTemplatesData,
-  ManageViewTemplatesErrors,
-  ManageViewTemplatesResponses,
+  ManageViewsData,
+  ManageViewsErrors,
+  ManageViewsResponses,
   MetricSeriesData,
   MetricSeriesErrors,
   MetricSeriesResponses,
   NotifyData,
   NotifyErrors,
   NotifyResponses,
+  OpenViewData,
+  OpenViewErrors,
+  OpenViewResponses,
   PatchApiV1AgentsByAgentIdData,
   PatchApiV1AgentsByAgentIdResponses,
   PostApiBedrockOpenaiAByAgentIdV1ChatCompletionsData,
@@ -289,6 +292,27 @@ export const runSdk = <ThrowOnError extends boolean = false>(
 ): RequestResult<RunSdkResponses, RunSdkErrors, ThrowOnError> =>
   (options.client ?? client).post<RunSdkResponses, RunSdkErrors, ThrowOnError>({
     url: "/api/{orgSlug}/run_sdk",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Open a Lobu view
+ *
+ * Open a Lobu view. Frame-capable hosts render it inline as an MCP App; the result also carries a web URL that renders the same view with the same params for hosts that cannot show a frame.
+ */
+export const openView = <ThrowOnError extends boolean = false>(
+  options: Options<OpenViewData, ThrowOnError>,
+): RequestResult<OpenViewResponses, OpenViewErrors, ThrowOnError> =>
+  (options.client ?? client).post<
+    OpenViewResponses,
+    OpenViewErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/open_view",
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -640,23 +664,19 @@ export const manageClassifiers = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * View-template management
+ * View management
  *
- * View-template management. SDK alternative: client.viewTemplates.
+ * View management. SDK alternative: client.views.
  */
-export const manageViewTemplates = <ThrowOnError extends boolean = false>(
-  options: Options<ManageViewTemplatesData, ThrowOnError>,
-): RequestResult<
-  ManageViewTemplatesResponses,
-  ManageViewTemplatesErrors,
-  ThrowOnError
-> =>
+export const manageViews = <ThrowOnError extends boolean = false>(
+  options: Options<ManageViewsData, ThrowOnError>,
+): RequestResult<ManageViewsResponses, ManageViewsErrors, ThrowOnError> =>
   (options.client ?? client).post<
-    ManageViewTemplatesResponses,
-    ManageViewTemplatesErrors,
+    ManageViewsResponses,
+    ManageViewsErrors,
     ThrowOnError
   >({
-    url: "/api/{orgSlug}/manage_view_templates",
+    url: "/api/{orgSlug}/manage_views",
     ...options,
     headers: {
       "Content-Type": "application/json",

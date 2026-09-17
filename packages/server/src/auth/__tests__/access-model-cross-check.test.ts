@@ -51,7 +51,7 @@ const TIERED_NAMESPACES = [
 	["operations", "manage_operations", "../../tools/admin/manage_operations", "manageOperations"],
 	["automations", "manage_automations", "../../tools/admin/manage_automations", "manageAutomations"],
 	["classifiers", "manage_classifiers", "../../tools/admin/manage_classifiers", "manageClassifiers"],
-	["viewTemplates", "manage_view_templates", "../../tools/admin/manage_view_templates", "manageViewTemplates"],
+	["views", "manage_views", "../../tools/admin/manage_views", "manageViews"],
 	["catalog", "manage_catalog", "../../tools/admin/manage_catalog", "manageCatalog"],
 	["agents", "manage_agents", "../../tools/admin/manage_agents", "manageAgents"],
 	["schedules", "manage_schedules", "../../tools/admin/manage_schedules", "manageSchedules"],
@@ -271,7 +271,7 @@ describe("access-model cross-check", () => {
 				// Only the TIER is derivable. Whether a wrapper is also `external` is
 				// a property of its namespace (does it call out to an external
 				// system?), so entities/entitySchema/agents/schedules/classifiers/
-				// viewTemplates legitimately use a plain tier instead.
+				// views legitimately use a plain tier instead.
 				const expected = OWNER_ADMIN_ACTIONS[tool]?.size ? "admin" : "write";
 				const reported =
 					meta.access === "external" ? meta.enforcedTier : meta.access;

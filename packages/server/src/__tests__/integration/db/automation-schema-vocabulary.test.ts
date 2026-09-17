@@ -309,22 +309,43 @@ describe('Automation schema vocabulary', () => {
       ownerUserId: user.id,
       agentId: 'authored-query-cutover-agent',
     });
-    await sql`
-      INSERT INTO view_template_versions (
-        resource_type, resource_id, organization_id, version,
-        json_template, created_by
-      ) VALUES (
-        'entity_type', 'authored-prose', ${org.id}, 1,
-        ${sql.json({
-          type: 'text',
-          content: 'Customer-authored watchers and behaviors prose',
-          data_sources: { rows: { query: 'SELECT id FROM automations' } },
-        })},
-        ${user.id}
+    // The cutover text still names `view_template_versions` (a frozen,
+    // already-applied migration), while the views migration retires that
+    // table — on fresh installs the cutover runs first, with the table
+    // present. Recreate the retired shape here so this replay keeps proving
+    // the template carrier is guarded; drop it after.
+    await sql.unsafe(`
+      CREATE TABLE public.view_template_versions (
+        id serial PRIMARY KEY,
+        resource_type text NOT NULL,
+        resource_id text NOT NULL,
+        organization_id text NOT NULL,
+        version integer NOT NULL,
+        tab_name text,
+        tab_order integer DEFAULT 0,
+        json_template jsonb NOT NULL,
+        change_notes text,
+        created_by text NOT NULL,
+        created_at timestamptz DEFAULT now()
       )
-    `;
+    `);
+    try {
+      await sql`
+        INSERT INTO view_template_versions (
+          resource_type, resource_id, organization_id, version,
+          json_template, created_by
+        ) VALUES (
+          'entity_type', 'authored-prose', ${org.id}, 1,
+          ${sql.json({
+            type: 'text',
+            content: 'Customer-authored watchers and behaviors prose',
+            data_sources: { rows: { query: 'SELECT id FROM automations' } },
+          })},
+          ${user.id}
+        )
+      `;
 
-    const [authoredAutomation] = await sql<{ id: number }[]>`
+      const [authoredAutomation] = await sql<{ id: number }[]>`
       WITH next_id AS (
         SELECT nextval('automations_id_seq')::int AS id
       )
@@ -381,6 +402,9 @@ describe('Automation schema vocabulary', () => {
     await expect(sql.begin((tx) => tx.unsafe(cutover))).rejects.toThrow(
       /cutover blocked by 1 stored query\/template row/i
     );
+    } finally {
+      await sql.unsafe(`DROP TABLE public.view_template_versions`);
+    }
   });
 
   it('hard-renames persisted connector trait merge policies in definitions and device manifests', async () => {

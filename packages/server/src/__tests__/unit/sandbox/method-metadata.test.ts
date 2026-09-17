@@ -388,7 +388,7 @@ describe("method-metadata", () => {
 			["schedules.update", ["id: string"]],
 			["schedules.pause", ["id: string"]],
 			["schedules.cancel", ["id: string"]],
-			["viewTemplates.rollback", ["version: number"]],
+			["views.remove", ["key: string"]],
 			["automations.setReactionScript", ["reaction_script: string"]],
 			[
 				"notifications.send",
@@ -428,9 +428,9 @@ describe("method-metadata", () => {
 		}
 	});
 
-	it("documents that view-template text nodes carry their string in `content` (not `text`)", () => {
-		expect(METHOD_METADATA["viewTemplates.set"].summary).toContain(
-			"`content`",
+	it("documents that view attach lines live in the module (no attach verbs)", () => {
+		expect(METHOD_METADATA["views.set"].summary).toContain(
+			"attach",
 		);
 	});
 

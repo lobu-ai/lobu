@@ -48,7 +48,7 @@ import {
 	buildOperationsNamespace,
 	buildOrganizationsNamespace,
 	buildSchedulesNamespace,
-	buildViewTemplatesNamespace,
+	buildViewsNamespace,
 } from "./namespaces";
 import type { AgentsNamespace } from "./namespaces/agents";
 import type { AuthProfilesNamespace } from "./namespaces/auth-profiles";
@@ -68,7 +68,7 @@ import type { MetricsNamespace } from "./namespaces/metrics";
 import type { NotificationsNamespace } from "./namespaces/notifications";
 import type { OperationsNamespace } from "./namespaces/operations";
 import type { OrganizationsNamespace } from "./namespaces/organizations";
-import type { ViewTemplatesNamespace } from "./namespaces/view-templates";
+import type { ViewsNamespace } from "./namespaces/views";
 import type { SchedulesNamespace } from "./namespaces/schedules";
 import type { AutomationsNamespace } from "./namespaces/automations";
 
@@ -84,7 +84,7 @@ export interface ClientSDK {
 	operations: OperationsNamespace;
 	automations: AutomationsNamespace;
 	classifiers: ClassifiersNamespace;
-	viewTemplates: ViewTemplatesNamespace;
+	views: ViewsNamespace;
 	knowledge: KnowledgeNamespace;
 	metrics: MetricsNamespace;
 	notifications: NotificationsNamespace;
@@ -241,7 +241,7 @@ export function buildClientSDK(
 		get operations() { return namespace("operations", buildOperationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get automations() { return namespace("automations", buildAutomationsNamespace(requireWorkspaceContext(ctx), env)); },
 		get classifiers() { return namespace("classifiers", buildClassifiersNamespace(requireWorkspaceContext(ctx), env)); },
-		get viewTemplates() { return namespace("viewTemplates", buildViewTemplatesNamespace(requireWorkspaceContext(ctx), env)); },
+		get views() { return namespace("views", buildViewsNamespace(requireWorkspaceContext(ctx), env)); },
 		get knowledge() { return namespace("knowledge", buildKnowledgeNamespace(requireWorkspaceContext(ctx), env)); },
 		get metrics() { return namespace("metrics", buildMetricsNamespace(requireWorkspaceContext(ctx), env)); },
 		get notifications() { return namespace("notifications", buildNotificationsNamespace(requireWorkspaceContext(ctx), env)); },

@@ -254,16 +254,12 @@ export const EntityTypeRowSchema = Type.Object({
   created_at: Type.Union([Type.String(), Type.Unknown()]),
   updated_at: Type.Union([Type.String(), Type.Unknown()]),
   entity_count: Type.Optional(Type.Integer()),
-  current_view_template_version_id: Type.Optional(
-    Type.Union([Type.Integer(), Type.Null()])
-  ),
   /** Derived types only — the view's aggregate columns, classified on read. */
   measure_columns: Type.Optional(Type.Array(Type.String())),
   /**
-   * Authored TYPE-level list view templates (view_template_active_tabs for
-   * resource_type='entity_type'), each with its `data_sources` run LIVE on read.
-   * Populated only by `get`; the list-view switcher lists these alongside the
-   * built-in Table/Board/Gallery. Same shape as resolve_path's tab payload.
+   * Retired with view templates: always empty. Type views resolve client-side
+   * from `manage_views`; the field stays so older clients keep rendering the
+   * built-in Table/Board/Gallery switcher. Removed in the owletto follow-up.
    */
   view_templates: Type.Optional(Type.Array(ViewTemplateTabSchema)),
 });

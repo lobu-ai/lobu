@@ -13,6 +13,8 @@ import {
 	validateSaveContentSemanticType,
 } from "../utils/event-kind-validation";
 import { insertConnectionlessWorkspaceEvent } from "../utils/insert-event";
+import { emit } from "../events/emitter";
+import { getView, isValidViewKey } from "../views/views";
 
 const TEMPLATE_EVENT_ACTION_PREFIX = "event-action";
 const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -50,6 +52,135 @@ export interface InvokedTemplateEventAction {
 	created: boolean;
 	eventId: number;
 	eventType: string;
+}
+
+/**
+ * Second source for the chokepoint: a click on a DECLARED view action.
+ *
+ * Unlike the template path there is no rendered event to match the value
+ * against (no server render) and no delivery binding (views render only in
+ * frame hosts). The declaration on the CURRENT view row is the whole check: a
+ * removed button stops working because the row no longer declares it. Write
+ * rules, workspace scoping and Automation activation are identical to the
+ * template path, and the appended event carries `origin_type =
+ * 'view_interaction'`. There is deliberately no signed offered-action token:
+ * the declaration check is the boundary, not a UX-consistency re-render.
+ */
+export interface InvokeViewActionParams {
+	organizationId: string;
+	viewKey: string;
+	action: string;
+	value: Record<string, unknown> | null;
+	interactionId: string;
+	surface: string;
+	actor: TrustedTemplateActor;
+	source?: TemplateActionSource;
+}
+
+/** View action payloads ride as JSON (e.g. `{ id }`), not rendered strings. */
+const MAX_VIEW_VALUE_JSON_LENGTH = 4_000;
+
+function validateViewInvocation(params: InvokeViewActionParams): void {
+	if (!isValidViewKey(params.viewKey)) {
+		throw new ToolUserError("Invalid view key", 400);
+	}
+	if (!ACTION_NAME.test(params.action)) {
+		throw new ToolUserError("Invalid view action name", 400);
+	}
+	if (!INTERACTION_ID.test(params.interactionId)) {
+		throw new ToolUserError("interaction_id has an invalid format", 400);
+	}
+	if (!params.actor.platformUserId.trim()) {
+		throw new ToolUserError("A verified interaction actor is required", 401);
+	}
+	if (
+		params.value !== null &&
+		JSON.stringify(params.value).length > MAX_VIEW_VALUE_JSON_LENGTH
+	) {
+		throw new ToolUserError(
+			`Interaction value exceeds ${MAX_VIEW_VALUE_JSON_LENGTH} characters`,
+			400,
+		);
+	}
+}
+
+export async function invokeViewAction(
+	params: InvokeViewActionParams,
+): Promise<InvokedTemplateEventAction> {
+	validateViewInvocation(params);
+	const view = await getView(params.organizationId, params.viewKey);
+	if (!view) {
+		throw new ToolUserError(`Unknown view: ${params.viewKey}`, 404);
+	}
+	const declared = view.actions?.[params.action];
+	if (!declared || typeof declared.emits !== "string" || !declared.emits) {
+		throw new ToolUserError(
+			`View "${params.viewKey}" does not declare action "${params.action}"`,
+			403,
+		);
+	}
+
+	const interactionEnvelope = {
+		action: params.action,
+		value: params.value,
+		interaction_id: params.interactionId,
+		surface: params.surface,
+		actor: {
+			platform: params.actor.platform,
+			id: params.actor.platformUserId,
+			...(params.actor.name ? { name: params.actor.name } : {}),
+		},
+		view: view.key,
+		...(params.source?.connectionId
+			? { connection_id: params.source.connectionId }
+			: {}),
+		...(params.source?.messageId ? { message_id: params.source.messageId } : {}),
+		...(params.source?.threadId ? { thread_id: params.source.threadId } : {}),
+	};
+	const eventData = {
+		view: view.key,
+		action: params.action,
+		value: params.value,
+		interaction: interactionEnvelope,
+	};
+	// View actions are not entity-bound, so the kind resolves with no entity
+	// context — exactly as an org-level kind does on the template path.
+	const kindValidation = await validateSaveContentSemanticType(
+		declared.emits,
+		eventData,
+		params.organizationId,
+		[],
+	);
+	if (!kindValidation.valid) {
+		throw new ToolUserError(kindValidation.errors.join("\n"), 422);
+	}
+
+	const idempotencyKey = `view-action:${view.key}:${params.surface}:${params.interactionId}`;
+	const inserted = await insertConnectionlessWorkspaceEvent(
+		{
+			entityIds: [],
+			organizationId: params.organizationId,
+			originId: idempotencyKey,
+			title: `${view.name}: ${params.action}`,
+			payloadType: "empty",
+			semanticType: declared.emits,
+			originType: "view_interaction",
+			parentOriginId: null,
+			authorName: params.actor.name ?? null,
+			createdBy: params.actor.userId ?? null,
+			clientId: params.source?.clientId ?? null,
+			metadata: eventData,
+		},
+		idempotencyKey,
+	);
+	// Views render from their own rows, not from the event fan-out, so the
+	// view's frame needs an explicit invalidation to refetch after a click.
+	emit(params.organizationId, { keys: [`view:${view.key}`] });
+	return {
+		created: inserted.change !== "unchanged",
+		eventId: inserted.id,
+		eventType: declared.emits,
+	};
 }
 
 export function templateEventActionId(
