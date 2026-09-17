@@ -6,7 +6,7 @@
  * termination.
  */
 
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 
 const SUPPORTS_PROCESS_GROUPS = process.platform !== 'win32';
 const TREE_TERM_GRACE_MS = 3000;
@@ -284,6 +284,57 @@ export function signalOwnedPosixProcessGroup(
     if (code === 'EPERM') return true;
     throw err;
   }
+}
+
+/**
+ * Count the members of an owned POSIX process group other than the supervisor
+ * itself. Used to tell "the command cleaned up after itself" apart from "the
+ * command left background work that the group SIGKILL is about to destroy".
+ *
+ * The supervisor is spawned `detached`, so its pgid equals its pid; every
+ * process the command started without deliberately leaving the group shares
+ * that pgid. Anything still listed under it once the target has exited is a
+ * descendant the caller backgrounded, so reaping it is a caller-visible event
+ * rather than routine cleanup (#3629).
+ *
+ * `ps` is the portable way to enumerate a group -- POSIX exposes no syscall to
+ * list one, and kill(-pgid, 0) cannot answer this because the live supervisor
+ * is itself a member and always makes the probe succeed. A failure here is
+ * reported as "no survivors": this drives a report field, never the cleanup
+ * itself, so an unavailable `ps` must not change what gets killed.
+ */
+export function countOwnedGroupSurvivors(
+  owner: ProcessGroupOwner,
+  readProcessTable: () => string = () =>
+    execFileSync('ps', ['-A', '-o', 'pid=,pgid='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+): number {
+  if (
+    !SUPPORTS_PROCESS_GROUPS ||
+    owner.pid == null ||
+    owner.exitCode !== null ||
+    owner.signalCode !== null
+  ) {
+    return 0;
+  }
+  const pgid = owner.pid;
+  let table: string;
+  try {
+    table = readProcessTable();
+  } catch {
+    return 0;
+  }
+  let survivors = 0;
+  for (const line of table.split('\n')) {
+    const [pidField, pgidField] = line.trim().split(/\s+/);
+    if (Number(pgidField) !== pgid) continue;
+    // The supervisor is the anchor, not a survivor; the daemon always reaps it.
+    if (Number(pidField) === pgid) continue;
+    survivors += 1;
+  }
+  return survivors;
 }
 
 /** Ask the supervisor to release its non-reusable group identity and reap it. */

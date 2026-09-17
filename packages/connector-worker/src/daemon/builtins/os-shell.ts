@@ -18,12 +18,24 @@
  * This runs in the daemon's own process, so it REPLACES the environment rather
  * than inheriting it: an inherited env would hand the command the daemon's
  * credentials.
+ *
+ * LIFETIME: a run owns a process group for the duration of the call and no
+ * longer. Everything still in that group when the command returns is killed,
+ * which is what keeps a daemon from leaking processes, and it means `&`,
+ * `nohup` and `setsid` do not buy a caller a surviving daemon. That cleanup is
+ * deliberate; what was a bug (#3629) is doing it QUIETLY -- a run used to
+ * report exit 0 while the poller it had just launched was being killed, so the
+ * loss surfaced as an unrelated failure much later. A run that leaves
+ * background work now reports `reaped_descendants` and fails. Callers that
+ * need a durable process hand it to a host service manager; this contract
+ * deliberately offers no detached-lifetime primitive.
  */
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute } from 'node:path';
 import {
   type TargetExit,
+  countOwnedGroupSurvivors,
   releaseSupervisor,
   signalOwnedPosixProcessGroup,
   spawnSupervisedCli,
@@ -49,7 +61,18 @@ export interface ShellRunOutput {
   exit_signal?: NodeJS.Signals;
   process_error?: string;
   process_error_code?: string;
-  process_stage?: TargetExit['stage'] | 'timeout' | 'shutdown';
+  process_stage?:
+    | TargetExit['stage']
+    | 'timeout'
+    | 'shutdown'
+    | 'descendants_reaped';
+  /**
+   * Set when the command exited while background work it started was still
+   * running inside the owned process group, and that work was therefore killed
+   * during cleanup. Absent -- never `false` -- on the ordinary path, so the
+   * field only ever appears when there is something to report.
+   */
+  reaped_descendants?: boolean;
   success: boolean;
   timed_out: boolean;
   duration_ms: number;
@@ -148,6 +171,7 @@ export async function runShellBuiltin(
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let reapedDescendants = false;
     let settled = false;
     let finishing = false;
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -186,13 +210,20 @@ export async function runShellBuiltin(
         ...(outcome.errorCode
           ? { process_error_code: outcome.errorCode }
           : {}),
-        ...(outcome.stage !== 'target_exit' ||
-        outcome.signalCode ||
-        outcome.error
-          ? { process_stage: outcome.stage }
-          : {}),
+        ...(reapedDescendants
+          ? { process_stage: 'descendants_reaped' as const }
+          : outcome.stage !== 'target_exit' ||
+              outcome.signalCode ||
+              outcome.error
+            ? { process_stage: outcome.stage }
+            : {}),
+        ...(reapedDescendants ? { reaped_descendants: true } : {}),
+        // Killing work the caller deliberately backgrounded is not a success,
+        // whatever the shell's own exit code said. Reporting it as one is the
+        // whole of #3629: the caller banked a launch that no longer exists.
         success:
           !timedOut &&
+          !reapedDescendants &&
           outcome.exitCode === 0 &&
           outcome.signalCode === null &&
           outcome.error === null,
@@ -286,6 +317,9 @@ export async function runShellBuiltin(
       // created it: signalling a numeric PGID we no longer own risks hitting a
       // reused one, so ownership ending is the end of our reach.
       if (process.platform !== 'win32') {
+        // Ask BEFORE the group SIGKILL: afterwards there is nothing left to
+        // count, and the caller would be told a clean exit either way.
+        reapedDescendants = countOwnedGroupSurvivors(child) > 0;
         try {
           if (
             child.pid == null ||

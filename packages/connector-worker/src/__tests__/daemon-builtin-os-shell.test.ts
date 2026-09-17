@@ -458,6 +458,88 @@ describe('daemon-builtin os.shell', () => {
     expect(Date.now() - started).toBeLessThan(4_000);
   });
 
+  // #3629: a successful command that backgrounds a child still has that child
+  // inside the supervisor's owned process group, so the group SIGKILL on target
+  // exit reaps it. Reaping is correct -- the daemon must not leak processes --
+  // but reporting exit 0 with nothing said about it is what made this look like
+  // a nondeterministic disappearance an operation later. The caller has to be
+  // able to SEE that backgrounded work did not survive.
+  test('reports descendants reaped on a successful exit instead of reaping silently', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'lobu-shell-reap-'));
+    let descendantPid = 0;
+    try {
+      const output = await runShellBuiltin({
+        command: `nohup node -e 'const fs = require("node:fs"); fs.writeFileSync("./ready", String(process.pid)); setInterval(() => {}, 1000)' >/dev/null 2>&1 & while [ ! -s ./ready ]; do sleep 0.01; done; cat ./ready`,
+        cwd: testDir,
+        timeout_ms: 10_000,
+      });
+      descendantPid = Number(output.stdout.trim());
+      expect(Number.isInteger(descendantPid)).toBe(true);
+      expect(descendantPid).toBeGreaterThan(0);
+
+      // The command itself succeeded, and that stays true: the shell exited 0.
+      expect(output.exit_code).toBe(0);
+      expect(output.timed_out).toBe(false);
+
+      // The owned-group cleanup still happens -- no leaked daemon.
+      expect(processIsLive(descendantPid)).toBe(false);
+
+      // ...and the caller is told, rather than inferring it a minute later.
+      expect(output.reaped_descendants).toBe(true);
+      expect(output.process_stage).toBe('descendants_reaped');
+      expect(output.success).toBe(false);
+    } finally {
+      if (descendantPid > 0 && processIsLive(descendantPid)) forceKill(descendantPid);
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  // A reaped run exits 0, so the operation error must not fall through to the
+  // exit-code default and report "exited with code 0" as the failure reason.
+  test('explains the reaping in the operation error instead of reporting exit 0', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'lobu-shell-reap-msg-'));
+    let descendantPid = 0;
+    try {
+      const result = await executeDaemonBuiltin({
+        connectorKey: 'os.shell',
+        actionKey: 'run',
+        input: {
+          command: `nohup node -e 'const fs = require("node:fs"); fs.writeFileSync("./ready", String(process.pid)); setInterval(() => {}, 1000)' >/dev/null 2>&1 & while [ ! -s ./ready ]; do sleep 0.01; done; cat ./ready`,
+          cwd: testDir,
+          timeout_ms: 10_000,
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected a failed builtin result');
+      descendantPid = Number((result.output?.stdout as string)?.trim());
+
+      expect(result.code).toBe('operation_execution_failed');
+      expect(result.error).toContain('left background processes running');
+      expect(result.error).not.toBe('Shell command exited with code 0');
+      // The structured output still travels with it.
+      expect(result.output).toMatchObject({ exit_code: 0, reaped_descendants: true });
+    } finally {
+      if (descendantPid > 0 && processIsLive(descendantPid)) forceKill(descendantPid);
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  // The ordinary path must not acquire a false positive: a command whose
+  // children have all exited reports a plain success with no reaping claim.
+  test('does not claim reaping when the command leaves nothing behind', async () => {
+    const output = await runShellBuiltin({
+      command: 'sleep 0.05 & wait; printf done',
+      cwd: process.cwd(),
+      timeout_ms: 10_000,
+    });
+
+    expect(output.stdout).toBe('done');
+    expect(output.success).toBe(true);
+    expect(output.exit_code).toBe(0);
+    expect(output.reaped_descendants).toBeUndefined();
+    expect(output.process_stage).toBeUndefined();
+  });
+
   test('rejects a timeout that exceeds the caller truth budget', async () => {
     await expect(runShellBuiltin({
       command: 'printf nope',

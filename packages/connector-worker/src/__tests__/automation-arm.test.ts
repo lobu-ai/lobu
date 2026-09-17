@@ -16,6 +16,7 @@ import {
   type ExecutorResult,
 } from '../daemon/automation.js';
 import {
+  countOwnedGroupSurvivors,
   signalOwnedPosixProcessGroup,
   terminateWindowsProcessTree,
   waitForTargetExitAfterTermination,
@@ -121,6 +122,48 @@ setInterval(() => {}, 1000);
     expect(() =>
       signalOwnedPosixProcessGroup(owner, 'SIGTERM', failWith('EINVAL')),
     ).toThrow();
+  });
+
+  test('counts owned-group survivors apart from the supervisor anchor', () => {
+    if (process.platform === 'win32') return;
+    const owner = { pid: 4242, exitCode: null, signalCode: null };
+    // pid 4242 IS the group leader, so it is the anchor, not a survivor;
+    // 4243 shares its pgid and is the backgrounded descendant; 5000 belongs
+    // to an unrelated group and must never be counted.
+    const table = ['  4242  4242', '  4243  4242', '  5000  5000', ''].join('\n');
+
+    expect(countOwnedGroupSurvivors(owner, () => table)).toBe(1);
+  });
+
+  test('reports no survivors once only the supervisor is left in the group', () => {
+    if (process.platform === 'win32') return;
+    const owner = { pid: 4242, exitCode: null, signalCode: null };
+    const table = ['  4242  4242', '  5000  5000', ''].join('\n');
+
+    expect(countOwnedGroupSurvivors(owner, () => table)).toBe(0);
+  });
+
+  test('an unreadable process table reports no survivors instead of throwing', () => {
+    if (process.platform === 'win32') return;
+    const owner = { pid: 4242, exitCode: null, signalCode: null };
+
+    // This drives a report field, never the cleanup, so an unavailable `ps`
+    // must degrade quietly rather than break the group SIGKILL that follows.
+    expect(
+      countOwnedGroupSurvivors(owner, () => {
+        throw new Error('ps: command not found');
+      })
+    ).toBe(0);
+  });
+
+  test('an exited supervisor claims no survivors from a group it no longer owns', () => {
+    if (process.platform === 'win32') return;
+    // Same reuse hazard as the signal path: 4242 may already belong to someone
+    // else, so its members are not ours to report.
+    const staleOwner = { pid: 4242, exitCode: 0, signalCode: null };
+    const table = ['  4242  4242', '  4243  4242', ''].join('\n');
+
+    expect(countOwnedGroupSurvivors(staleOwner, () => table)).toBe(0);
   });
 });
 
