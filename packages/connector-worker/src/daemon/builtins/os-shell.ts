@@ -214,7 +214,9 @@ export async function runShellBuiltin(
         // the reaped marker: the marker is only the stage of a run that would
         // otherwise have reported none, and `reaped_descendants` carries the
         // fact either way.
-        ...(outcome.stage !== 'target_exit' || outcome.signalCode || outcome.error
+        ...(outcome.stage !== 'target_exit' ||
+        outcome.signalCode ||
+        outcome.error
           ? { process_stage: outcome.stage }
           : reapedDescendants
             ? { process_stage: 'descendants_reaped' as const }

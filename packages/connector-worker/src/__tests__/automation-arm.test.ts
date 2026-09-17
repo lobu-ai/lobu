@@ -187,11 +187,20 @@ setInterval(() => {}, 1000);
       ],
       { detached: true, stdio: 'ignore' }
     );
+    // A spawn failure has to name itself: without a listener the 'error' event
+    // is unhandled and takes the file down, and a missing pid would otherwise
+    // surface five seconds later as a misleading "expected 1, received 0".
+    let spawnError: Error | undefined;
+    leader.once('error', (error) => {
+      spawnError = error;
+    });
+    expect(leader.pid).toBeDefined();
     const owner = { pid: leader.pid!, exitCode: null, signalCode: null };
     try {
       // Wait for the grandchild to actually exist before counting.
       let survivors = 0;
       for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (spawnError) throw spawnError;
         survivors = countOwnedGroupSurvivors(owner);
         if (survivors > 0) break;
         await new Promise((r) => setTimeout(r, 50));
