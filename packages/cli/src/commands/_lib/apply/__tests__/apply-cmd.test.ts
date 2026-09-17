@@ -647,6 +647,7 @@ describe("fetchRemoteSnapshot — view-template fetch is org-scoped", () => {
       listAuthProfiles: async () => [],
       listConnections: async () => [],
       listInferenceProviders: async () => [],
+      listViews: async () => [],
       getEntityTypeViewTemplate: async (slug: string) => {
         templateCalls.push(slug);
         return { root: { type: "box" } };

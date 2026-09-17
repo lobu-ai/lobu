@@ -25,6 +25,7 @@ import { emit } from '../../events/emitter';
 import { ToolUserError } from '../../utils/errors';
 import {
   RESERVED_VIEW_PARAMS,
+  VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
   contentHash,
@@ -161,7 +162,9 @@ async function handleSet(
     return { action: 'set', view: projectView(current), written: false };
   }
 
-  const compiled = await compileView(args.source_code);
+  const compiled = args.compiled_code
+    ? checkCompiledCode(args.compiled_code)
+    : await compileView(args.source_code);
   const { view, written } = await setView(ctx.organizationId, {
     key: args.key,
     name: args.name?.trim() ? args.name : args.key,
@@ -183,6 +186,26 @@ async function handleSet(
   }
 
   return { action: 'set', view: projectView(view), written };
+}
+
+/**
+ * Validate a CLI-bundled browser bundle: non-empty and under the same cap the
+ * server compiler enforces, so the two set paths store comparable artifacts.
+ * The bundle is author code shipped over an operator credential — the same
+ * trust as `source_code` — so no recompilation, just the size check.
+ */
+function checkCompiledCode(compiledCode: string): string {
+  if (compiledCode.length === 0) {
+    throw new ToolUserError('set requires compiled_code to be non-empty', 400);
+  }
+  const bytes = Buffer.byteLength(compiledCode, 'utf8');
+  if (bytes > VIEW_COMPILED_MAX_BYTES) {
+    throw new ToolUserError(
+      `View bundle is ${bytes} bytes, over the ${VIEW_COMPILED_MAX_BYTES} byte cap`,
+      422
+    );
+  }
+  return compiledCode;
 }
 
 async function handleGet(

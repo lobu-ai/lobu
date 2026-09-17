@@ -70,7 +70,7 @@ const layers = [
   ],
   [
     "contracts",
-    ["plugin-host", "plugin-toolkit", "connector-sdk"].map((name) =>
+    ["plugin-host", "plugin-toolkit", "connector-sdk", "views"].map((name) =>
       packageBuild(name)
     ),
   ],

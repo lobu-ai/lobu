@@ -37,6 +37,7 @@
 		"@lobu/connector-sdk": "workspace:*",
 		"@lobu/connectors": "workspace:*",
 		"@lobu/connector-worker": "workspace:*",
+		"@lobu/views": "workspace:*",
 		"@mariozechner/pi-ai": "^0.73.1",
 		"@mariozechner/pi-coding-agent": "^0.73.1",
 		"@modelcontextprotocol/sdk": "^1.27.1",

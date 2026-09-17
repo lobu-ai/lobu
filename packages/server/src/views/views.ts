@@ -222,12 +222,14 @@ export function projectView(view: StoredView): Omit<
 }
 
 /** Resolve react funds inside the server's own installation, so source
- * compiled from stdin (no file context) still bundles the runtime. Anything
- * else resolves by esbuild's default walk and fails loudly when unresolvable
- * (`@lobu/views` lands in PR2; relative files go through `lobu apply`). */
+ * compiled from stdin (no file context) still bundles the runtime. `@lobu/views`
+ * resolves to the workspace package for the chat-agent path (`manage_views.set`
+ * with plain source); the CLI bundles relative files and npm deps where
+ * node_modules exists and ships the bundle beside the source. Anything else
+ * resolves by esbuild's default walk and fails loudly when unresolvable. */
 function reactResolvePlugin(): Plugin {
   const funds: Record<string, string> = {};
-  for (const specifier of ['react', 'react-dom', 'react/jsx-runtime']) {
+  for (const specifier of ['react', 'react-dom', 'react/jsx-runtime', '@lobu/views']) {
     try {
       funds[specifier] = require.resolve(specifier);
     } catch {
@@ -237,7 +239,7 @@ function reactResolvePlugin(): Plugin {
   return {
     name: 'lobu-view-react',
     setup(b) {
-      b.onResolve({ filter: /^(react|react-dom|react\/jsx-runtime)$/ }, (args) => {
+      b.onResolve({ filter: /^(react|react-dom|react\/jsx-runtime|@lobu\/views)$/ }, (args) => {
         const resolved = funds[args.path];
         return resolved ? { path: resolved } : null;
       });
@@ -340,12 +342,13 @@ export function renderViewShell(view: StoredView): string {
 /**
  * The generic loader shell every `open_view` binds. Hand-written postMessage —
  * no `@modelcontextprotocol/ext-apps`, no React, no framework — so it stays a
- * few kilobytes while per-view bundles carry the 500KB+ guest SDK chain the
- * spike measured. It announces itself to the host and renders the per-view
- * bundle the host hands it (`ui://lobu/views/<key>` read through the host
- * resource channel); with no host message it stays a neutral loading state
- * instead of guessing a protocol. The `@lobu/views` guest bridge (PR2) and
- * the owletto host (PR3) complete the handshake.
+ * few kilobytes while per-view bundles carry the React guest. It runs the
+ * standard `ui/initialize` handshake, then renders the per-view bundle from
+ * whichever delivery the host uses: the standard `sandbox-resource-ready`
+ * push (Claude), a `resources/read` of `ui://lobu/views/<key>` for the key in
+ * the `tool-input` arguments, or the `lobu:views-bundle` message (same-origin
+ * hosts that read the shell over REST). With no delivery it stays an honest
+ * loading state instead of guessing a protocol.
  */
 export function renderViewsLoaderShell(): string {
   return `<!doctype html>
@@ -362,24 +365,108 @@ export function renderViewsLoaderShell(): string {
 <script>
 (function () {
   "use strict";
-  var READY = { type: "lobu:views-loader-ready", version: 1 };
-  function announce() {
-    try {
-      if (window.parent && window.parent !== window) window.parent.postMessage(READY, "*");
-    } catch (err) { /* sandboxed without a host — stay in loading state */ }
+  var PROTOCOL = "2026-01-26";
+  var nextId = 1;
+  var pending = {};
+  var settled = false;
+  function status(text) {
+    var el = document.getElementById("lobu-views-status");
+    if (el) el.textContent = text;
+  }
+  function show(html) {
+    if (settled) return;
+    settled = true;
+    document.open();
+    document.write(html);
+    document.close();
+  }
+  function fail(text) {
+    if (settled) return;
+    settled = true;
+    status(text);
+  }
+  function send(message) {
+    window.parent.postMessage(message, "*");
+  }
+  function request(method, params, onResult) {
+    var id = nextId++;
+    pending[id] = onResult;
+    setTimeout(function () {
+      if (pending[id]) {
+        delete pending[id];
+        onResult(new Error('request "' + method + '" timed out'), null);
+      }
+    }, 60000);
+    send({ jsonrpc: "2.0", id: id, method: method, params: params });
+  }
+  function readViewBundle(key, onDone) {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(key)) {
+      onDone(new Error('unknown view "' + String(key) + '"'));
+      return;
+    }
+    request("resources/read", { uri: "ui://lobu/views/" + key }, function (err, result) {
+      if (err) {
+        onDone(err);
+        return;
+      }
+      var text = result && result.contents && result.contents[0] && result.contents[0].text;
+      if (typeof text !== "string" || !text) {
+        onDone(new Error("view bundle came back empty"));
+        return;
+      }
+      onDone(null, text);
+    });
   }
   window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
     var data = event.data;
-    if (!data || typeof data !== "object") return;
-    // The host delivers the per-view bundle read from ui://lobu/views/<key>.
+    if (!data || typeof data !== "object" || data.jsonrpc !== "2.0") return;
+    // A host request (ping, teardown): acknowledge so it never hangs.
+    if (typeof data.method === "string" && (typeof data.id === "string" || typeof data.id === "number")) {
+      send({ jsonrpc: "2.0", id: data.id, result: {} });
+      return;
+    }
+    if (typeof data.id === "string" || typeof data.id === "number") {
+      var cb = pending[data.id];
+      if (!cb) return;
+      delete pending[data.id];
+      if (data.error) cb(new Error(String((data.error && data.error.message) || "host request failed")), null);
+      else cb(null, data.result);
+      return;
+    }
+    if (typeof data.method !== "string") return;
+    var params = data.params && typeof data.params === "object" ? data.params : {};
+    // Standard push path: the host delivers the per-view HTML itself.
+    if (data.method === "ui/notifications/sandbox-resource-ready" && typeof params.html === "string") {
+      show(params.html);
+      return;
+    }
+    // Standard fetch path: tool-input carries the open_view arguments.
+    if (data.method === "ui/notifications/tool-input") {
+      var args = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+      if (typeof args.key === "string" && args.key) {
+        readViewBundle(args.key, function (err, html) {
+          if (err) fail("Could not load view: " + err.message);
+          else show(html);
+        });
+      }
+      return;
+    }
+    // Same-origin fast path: the host read the shell over REST and posts it.
     if (data.type === "lobu:views-bundle" && typeof data.html === "string") {
-      document.open();
-      document.write(data.html);
-      document.close();
+      show(data.html);
     }
   });
-  if (document.readyState === "complete") announce();
-  else window.addEventListener("load", announce);
+  request("ui/initialize", {
+    appInfo: { name: "Lobu views", version: "0.0.1" },
+    appCapabilities: {},
+    protocolVersion: PROTOCOL
+  }, function () {
+    send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+  });
+  setTimeout(function () {
+    if (!settled) fail("The host did not deliver a view. Reopen it from Lobu.");
+  }, 90000);
 })();
 </script>
 </body>

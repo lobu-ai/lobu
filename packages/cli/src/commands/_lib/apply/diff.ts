@@ -15,6 +15,7 @@ import type {
   RemoteFeed,
   RemoteInferenceProvider,
   RemoteRelationshipType,
+  RemoteView,
   UpdateConnectionPayload,
   UpdateFeedPayload,
 } from "./client.js";
@@ -30,6 +31,7 @@ import type {
   DesiredRelationshipType,
   DesiredState,
   DesiredAutomation,
+  DesiredView,
 } from "./desired-state.js";
 import {
   type AutomationSource,
@@ -171,6 +173,14 @@ export interface InferenceProviderDiffRow
   capabilityModalities?: InferenceModality[];
 }
 
+/** A `viewFromFile` module vs the org's applied view of the same key. */
+export interface ViewDiffRow extends BaseRow {
+  kind: "view";
+  desired?: DesiredView;
+  /** Local key resolved at bundle time; the diff keys on the file hash. */
+  remote?: RemoteView;
+}
+
 /**
  * A blocking drift item: either a field moved remotely or a remote-only
  * definition is not safe to delete. Apply must not converge over it — the
@@ -233,6 +243,7 @@ export type DiffRow =
   | ConnectionDiffRow
   | FeedDiffRow
   | InferenceProviderDiffRow
+  | ViewDiffRow
   | BlockingDriftRow;
 
 export interface DiffPlan {
@@ -1929,6 +1940,8 @@ export interface RemoteSnapshot {
   feedsByConnectionId: Map<number, RemoteFeed[]>;
   /** Org-owned inference providers (from `GET /inference-providers`). */
   inferenceProviders: RemoteInferenceProvider[];
+  /** Applied views (`manage_views list`). Full-apply only. */
+  views: RemoteView[];
 }
 
 /**
@@ -1937,7 +1950,7 @@ export interface RemoteSnapshot {
  */
 type DesiredStateForDiff = Pick<
   DesiredState,
-  "agents" | "memorySchema" | "automations" | "connectors" | "providers"
+  "agents" | "memorySchema" | "automations" | "connectors" | "providers" | "views"
 >;
 
 interface ComputeDiffOptions {
@@ -2433,6 +2446,38 @@ export function computeDiff(
           remote: remoteProvider,
         });
       }
+    }
+  }
+
+  // Views. Full-apply only (neither "agents" nor "memory"). Keyed on the
+  // module's declared key; the FILE hash is the change signal (same source →
+  // same hash → noop, and the server no-writes on top). Remote-only views are
+  // config-owned only under prune; otherwise reported as drift.
+  if (only === undefined) {
+    // `?? []` mirrors the providers default above — test literals build a
+    // partial DesiredStateForDiff.
+    const desiredViews = desired.views ?? [];
+    const remoteViews = remote.views ?? [];
+    const remoteViewByKey = new Map(remoteViews.map((v) => [v.key, v]));
+    const desiredViewKeys = new Set(desiredViews.map((v) => v.key));
+    for (const view of desiredViews) {
+      const r = remoteViewByKey.get(view.key);
+      rows.push({
+        kind: "view",
+        id: view.key,
+        desired: view,
+        remote: r,
+        verb: !r ? "create" : r.content_hash !== view.contentHash ? "update" : "noop",
+      });
+    }
+    for (const r of remoteViews) {
+      if (desiredViewKeys.has(r.key)) continue;
+      rows.push({
+        kind: "view",
+        id: r.key,
+        remote: r,
+        verb: prune ? "delete" : "drift",
+      });
     }
   }
 

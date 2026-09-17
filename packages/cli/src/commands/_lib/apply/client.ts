@@ -144,6 +144,27 @@ export interface RemoteInferenceProvider {
   createdAt: string;
 }
 
+/** An applied view as `manage_views list` reports it (metadata, never bundles). */
+export interface RemoteView {
+  key: string;
+  name: string;
+  content_hash: string;
+  attach: Array<Record<string, unknown>>;
+  last_writer: string;
+  updated_at: string;
+}
+
+export interface SetViewPayload {
+  key: string;
+  name?: string;
+  description?: string;
+  source_code: string;
+  compiled_code?: string;
+  attach: Array<Record<string, unknown>>;
+  params: Record<string, unknown>;
+  actions: Record<string, { emits: string }>;
+}
+
 export interface RemoteAutomation {
   slug: string;
   name?: string;
@@ -692,6 +713,47 @@ export class ApplyClient {
       "DELETE",
       `/api/${this.orgSlug}/agents/inference-providers/${encodeURIComponent(slug)}`
     );
+  }
+
+  // ── Views ─────────────────────────────────────────────────────────────────
+
+  /** Applied views (metadata only — the list never returns bundles). */
+  async listViews(): Promise<RemoteView[]> {
+    const { body } = await this.request<{ views?: RemoteView[] }>(
+      "POST",
+      `/api/${this.orgSlug}/manage_views`,
+      { action: "list" }
+    );
+    return body.views ?? [];
+  }
+
+  /**
+   * Store a view: source + CLI-bundled browser bundle + metadata extracted
+   * from the module itself. Returns whether a write happened (same source
+   * hash is a server-side no-op).
+   */
+  async setView(
+    payload: SetViewPayload
+  ): Promise<{ written: boolean; content_hash: string }> {
+    const { body } = await this.request<{
+      written?: boolean;
+      view?: { content_hash?: string };
+    }>("POST", `/api/${this.orgSlug}/manage_views`, {
+      action: "set",
+      ...payload,
+    });
+    return {
+      written: body.written ?? false,
+      content_hash: body.view?.content_hash ?? "",
+    };
+  }
+
+  /** Delete an applied view by key (prune-gated removal). */
+  async removeView(key: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_views`, {
+      action: "remove",
+      key,
+    });
   }
 
   // ── Memory schema ─────────────────────────────────────────────────────────

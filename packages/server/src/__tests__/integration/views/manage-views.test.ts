@@ -163,6 +163,40 @@ describe("manage_views", () => {
 		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
 	});
 
+	it("compiles source that imports @lobu/views (the chat-agent path)", async () => {
+		const source = `import { defineView, mountView } from "@lobu/views";
+export const view = defineView({ key: "pipeline", attach: [] });
+export default function V() { return null; }
+mountView(view, V);
+`;
+		const set = await setView(source);
+		expect(set.written).toBe(true);
+		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
+	});
+
+	it("set with compiled_code stores the CLI bundle without compiling", async () => {
+		const sentinel = "/*lobu-pr2-sentinel*/console.log(1);";
+		const set = await setView(SIMPLE_SOURCE, { compiled_code: sentinel });
+		expect(set.written).toBe(true);
+		const sql = getTestDb();
+		const rows = await sql<{ compiled_code: string }>`
+      SELECT compiled_code FROM views WHERE organization_id = ${orgId} AND key = 'pipeline'
+    `;
+		expect(rows[0].compiled_code).toBe(sentinel);
+	});
+
+	it("rejects empty and oversized compiled_code", async () => {
+		const empty = await setView(SIMPLE_SOURCE, { compiled_code: "" }).catch(
+			(e) => e
+		);
+		expect(empty).toBeInstanceOf(ToolUserError);
+		const big = await setView(SIMPLE_SOURCE, {
+			compiled_code: `/*x*/${"x".repeat(2 * 1024 * 1024 + 1)}`,
+		}).catch((e) => e);
+		expect(big).toBeInstanceOf(ToolUserError);
+		expect((big as ToolUserError).httpStatus).toBe(422);
+	});
+
 	it("same source is a no-write with updated_at untouched", async () => {
 		await setView(SIMPLE_SOURCE);
 		const sql = getTestDb();

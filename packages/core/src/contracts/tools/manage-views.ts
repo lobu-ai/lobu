@@ -121,6 +121,13 @@ export const SetViewAction = Type.Object({
     maxLength: 1_000_000,
     description: "[set] The view module source (TSX). Compiled server-side.",
   }),
+  compiled_code: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "[set] CLI-bundled browser bundle for the source (relative files and npm deps resolved where node_modules exists). When present the server stores it after the size check instead of compiling; when absent the server compiles source_code itself (the chat-agent path).",
+    })
+  ),
   attach: Type.Optional(
     Type.Array(ViewAttachmentSchema, {
       description:

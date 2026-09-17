@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -22,6 +23,7 @@ import type {
   InferenceModality,
   Project,
   Skill,
+  ViewSource,
 } from "../../../config/index.js";
 import { ValidationError } from "../../memory/_lib/errors.js";
 import {
@@ -262,6 +264,25 @@ export interface DesiredConnectorDefinition {
   sourceFile: string;
 }
 
+/** One `viewFromFile` entry, read but not yet bundled (apply bundles). */
+export interface DesiredView {
+  /**
+   * View key: the `defineView({ key })` string literal when the module has
+   * one, else derived from the path (`views/connection/health.tsx` →
+   * `connection-health`). Provisional — the bundle pass re-derives it and
+   * apply refuses a mismatch.
+   */
+  key: string;
+  /** Absolute path to the module. */
+  sourcePath: string;
+  /** Raw module source, pushed verbatim beside the bundle. */
+  sourceCode: string;
+  /** sha256 (first 16 hex) of `sourceCode` — the diff key against remote. */
+  contentHash: string;
+  /** Config-relative path for messages. */
+  sourceFile: string;
+}
+
 export interface DesiredAgent {
   metadata: DesiredAgentMetadata;
   /**
@@ -332,6 +353,12 @@ export interface DesiredState {
     authProfiles: DesiredAuthProfile[];
     connections: DesiredConnection[];
   };
+  /**
+   * View modules declared via `viewFromFile`. The key is provisional — read
+   * from the `defineView({ key })` literal when present, else derived from the
+   * path — and apply re-derives it from the bundle, refusing a mismatch.
+   */
+  views: DesiredView[];
   /**
    * Names of env vars referenced via `secret()` / `$VAR` (provider keys,
    * auth-profile + mcp credentials). The CLI surfaces these before mutating
@@ -953,6 +980,85 @@ function resolveConnectorSources(
   return defs.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
 }
 
+const VIEW_SOURCE_MAX_BYTES = 1_000_000;
+
+/**
+ * Resolve `viewFromFile` entries to read-but-unbundled views. Same containment
+ * shape as connector sources (relative POSIX path under the config directory,
+ * no `..`/absolute/backslash, must exist, under the server's source cap).
+ * The key is provisional: the `defineView({ key })` literal when the regex
+ * finds one, else the path (`views/connection/health.tsx` →
+ * `connection-health`). The bundle pass re-derives it and apply refuses a
+ * mismatch, so a stale literal can never mis-key a view.
+ */
+function resolveViewSources(sources: ViewSource[], cwd: string): DesiredView[] {
+  const baseDir = resolve(cwd);
+  const views: DesiredView[] = [];
+  const seen = new Set<string>();
+  for (const src of sources) {
+    const rel = src.path.trim();
+    if (
+      !rel ||
+      rel.startsWith("/") ||
+      rel.includes("\\") ||
+      rel.split("/").some((seg) => seg === "..")
+    ) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(src.path)}) must be a relative POSIX path under the config directory (./views/deal/pipeline.tsx)`
+      );
+    }
+    if (!/\.tsx?$/.test(rel)) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) must point at a \`.tsx\` or \`.ts\` file`
+      );
+    }
+    const abs = resolve(baseDir, rel);
+    const relPath = relative(baseDir, abs);
+    if (relPath === ".." || relPath.startsWith(`..${sep}`) || isAbsolute(relPath)) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) resolves outside the config directory (${abs})`
+      );
+    }
+    let sourceCode: string;
+    try {
+      sourceCode = readFileSync(abs, "utf-8");
+    } catch {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) does not exist (resolved to ${abs})`
+      );
+    }
+    if (Buffer.byteLength(sourceCode, "utf8") > VIEW_SOURCE_MAX_BYTES) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) is over the ${VIEW_SOURCE_MAX_BYTES} byte source cap`
+      );
+    }
+    const declared = /defineView\s*\(\s*\{[\s\S]*?\bkey\s*:\s*(["'`])([a-z0-9-]+)\1/.exec(
+      sourceCode
+    )?.[2];
+    const fromPath = rel
+      .replace(/^\.\//, "")
+      .replace(/^views\//, "")
+      .replace(/\.tsx?$/, "")
+      .split("/")
+      .join("-");
+    const key = declared ?? fromPath;
+    if (seen.has(key)) {
+      throw new ValidationError(
+        `duplicate view key "${key}" in lobu.config.ts — each viewFromFile must resolve to a unique key`
+      );
+    }
+    seen.add(key);
+    views.push({
+      key,
+      sourcePath: abs,
+      sourceCode,
+      contentHash: createHash("sha256").update(sourceCode).digest("hex").slice(0, 16),
+      sourceFile: rel.replace(/^\.\//, ""),
+    });
+  }
+  return views.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
+}
+
 const REACTION_SCRIPT_MAX_BYTES = 256 * 1024;
 const ENTITY_RULES_MAX_BYTES = 32 * 1024;
 
@@ -1282,6 +1388,8 @@ export async function loadDesiredStateFromConfig(
       typedProject.connectors ?? [],
       opts.cwd
     );
+    // Views are neither agents nor memory: a targeted apply skips them too.
+    state.views = resolveViewSources(typedProject.views ?? [], opts.cwd);
   }
   // Surface load-time warnings to `lobu apply` (which prints them). #1010's
   // "ignored connectors because [memory] is disabled" case is obsolete here —

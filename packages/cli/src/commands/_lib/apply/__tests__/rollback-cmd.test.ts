@@ -183,6 +183,7 @@ describe("rollback pause ordering", () => {
       listRelationshipTypes: mock(async () => []),
       listAutomations: mock(async () => []),
       listInferenceProviders: mock(async () => []),
+      listViews: mock(async () => []),
       setDeploymentPause: mock(async () => {
         record("pause");
         if (opts.pauseFails) throw new Error("pause unavailable");

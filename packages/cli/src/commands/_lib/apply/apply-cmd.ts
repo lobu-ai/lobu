@@ -452,6 +452,10 @@ export async function fetchRemoteSnapshot(
   const inferenceProviders =
     only === undefined ? await client.listInferenceProviders() : [];
 
+  // Views are org-scoped modules (neither agents nor memory): a full apply
+  // reconciles them against `manage_views list` (metadata only).
+  const views = only === undefined ? await client.listViews() : [];
+
   return {
     agents,
     agentSettings,
@@ -463,6 +467,7 @@ export async function fetchRemoteSnapshot(
     connections,
     feedsByConnectionId,
     inferenceProviders,
+    views,
   };
 }
 
@@ -748,6 +753,9 @@ interface ApplyContext {
   state: DesiredState;
   plan: DiffPlan;
   remote: RemoteSnapshot;
+  /** Origin the apply targets (for printing per-view shell URLs). */
+  apiBaseUrl: string;
+  orgSlug: string;
 }
 
 /**
@@ -882,6 +890,51 @@ export async function executePlan(
     })) {
       printText(chalk.yellow(`Warning: ${warning}`));
     }
+  }
+
+  // 2b) Views — bundle on the CLI, where the project's node_modules is
+  //     available (React, `@lobu/views`, relative files, view npm deps), and
+  //     ship source + bundle + metadata extracted from the module itself.
+  //     Lazy-imported like the connector compiler so esbuild stays off
+  //     apply-cmd's module-load path (same measured justification: esbuild +
+  //     its graph would otherwise ride every `lobu` invocation).
+  for (const row of rowsByKind("view")) {
+    if (row.kind !== "view") continue;
+    if (!row.desired) continue;
+    const { ensureProjectDepsInstalled } = await import(
+      "../ensure-deps-installed.js"
+    );
+    ensureProjectDepsInstalled(row.desired.sourcePath, printText);
+    const { bundleViewFromFile } = await import("../view-bundler.js");
+    const bundled = await bundleViewFromFile(row.desired.sourcePath);
+    if (bundled.metadata.key !== row.id) {
+      throw new ValidationError(
+        `${row.desired.sourceFile}: defineView key "${bundled.metadata.key}" does not match the planned key "${row.id}"`
+      );
+    }
+    const result = await ctx.client.setView({
+      key: row.id,
+      name: bundled.metadata.key,
+      source_code: row.desired.sourceCode,
+      compiled_code: bundled.compiledCode,
+      attach: bundled.metadata.attach,
+      params: bundled.metadata.params,
+      actions: bundled.metadata.actions,
+    });
+    const kb = (Buffer.byteLength(bundled.compiledCode, "utf8") / 1024).toFixed(0);
+    printText(
+      renderProgress(
+        row.verb,
+        "view",
+        row.id,
+        `${result.written ? "(pushed" : "(unchanged"}, ${kb} KB)`
+      )
+    );
+    printText(
+      chalk.dim(
+        `  → ${ctx.apiBaseUrl}/api/${ctx.orgSlug}/views/${row.id}/shell`
+      )
+    );
   }
 
   // 3) Agents
@@ -1298,6 +1351,7 @@ async function deleteRemovedDefinitions(ctx: ApplyContext): Promise<void> {
     ctx.remote.automations.map((w) => [w.slug, w.automation_id])
   );
   const steps: Array<[DiffRow["kind"], (id: string) => Promise<void>]> = [
+    ["view", (id) => ctx.client.removeView(id)],
     [
       "automation",
       async (id) => {
@@ -1822,7 +1876,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     if (hasResourceWork) {
       printText(chalk.bold("\nApplying:"));
       const executed = await executePlan(
-        { client, state, plan, remote },
+        { client, state, plan, remote, apiBaseUrl, orgSlug },
         pendingAuth
       );
       connectorVersions = executed.connectorVersions;
