@@ -288,10 +288,11 @@ export function signalOwnedPosixProcessGroup(
 }
 
 /**
- * The process table as `<pid> <pgid>` lines, however this host will give it up.
- * Linux reads `/proc` directly so the daemon depends on no packaged binary;
- * field 5 of `/proc/<pid>/stat` is the pgid, and it is read after the `)` that
- * closes comm because a process name may itself contain spaces or brackets.
+ * The process table as `<pid> <pgid> <state>` lines, however this host will
+ * give it up. Linux reads `/proc` directly so the daemon depends on no packaged
+ * binary; in `/proc/<pid>/stat` the state and pgid are the 1st and 3rd fields
+ * after the `)` that closes comm, and they are read from there because a
+ * process name may itself contain spaces or brackets.
  */
 function defaultProcessTableReader(): string {
   if (process.platform === 'linux') {
@@ -307,14 +308,19 @@ function defaultProcessTableReader(): string {
       }
       const afterComm = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
       // afterComm[0] is state, then ppid, then pgid.
+      const state = afterComm[0];
       const pgid = afterComm[2];
-      if (pgid) lines.push(`${entry} ${pgid}`);
+      if (pgid) lines.push(`${entry} ${pgid} ${state}`);
     }
     return lines.join('\n');
   }
-  return execFileSync('ps', ['-A', '-o', 'pid=,pgid='], {
+  return execFileSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
+    // The default 1 MiB overflows on a busy host, and an overflow throws --
+    // which the caller degrades to "no survivors", the silent loss #3629 is
+    // here to remove. A line is ~20 bytes; this covers millions of processes.
+    maxBuffer: 64 * 1024 * 1024,
   });
 }
 
@@ -336,6 +342,14 @@ function defaultProcessTableReader(): string {
  * are slim ones that carry no `procps`: shelling out to `ps` there would fail
  * with ENOENT and silently report "nothing was reaped" on exactly the hosts
  * this fix is for. `ps` remains the reader everywhere else (macOS dev hosts).
+ *
+ * Zombies are not survivors. The daemon is PID 1 in the worker image with no
+ * init in front of it, and libuv only reaps the children it spawned itself, so
+ * a grandchild the command backgrounded and that exited before the command
+ * returned is reparented to the daemon and stays a zombie -- still listed
+ * under the supervisor's pgid -- for the life of the container. Counting it
+ * would fail a run that left nothing running, and would later charge it to an
+ * unrelated run when the kernel reuses the pid as a new supervisor's pgid.
  *
  * A failure is reported as "no survivors": this drives a report field, never
  * the cleanup itself, so an unreadable process table must never change what
@@ -362,10 +376,12 @@ export function countOwnedGroupSurvivors(
   }
   let survivors = 0;
   for (const line of table.split('\n')) {
-    const [pidField, pgidField] = line.trim().split(/\s+/);
+    const [pidField, pgidField, stateField] = line.trim().split(/\s+/);
     if (Number(pgidField) !== pgid) continue;
     // The supervisor is the anchor, not a survivor; the daemon always reaps it.
     if (Number(pidField) === pgid) continue;
+    // `Z` from /proc and from `ps -o stat=` alike: already dead, nothing to reap.
+    if (stateField?.startsWith('Z')) continue;
     survivors += 1;
   }
   return survivors;

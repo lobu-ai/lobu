@@ -524,6 +524,31 @@ describe('daemon-builtin os.shell', () => {
     }
   });
 
+  // A death that names its own cause keeps it: the signal is the reason the
+  // run failed, and the reaping travels as structured output rather than
+  // displacing either the message or the real lifecycle stage.
+  test('reports a signal death ahead of the reaping it also caused', async () => {
+    if (process.platform === 'win32') return;
+    const result = await executeDaemonBuiltin({
+      connectorKey: 'os.shell',
+      actionKey: 'run',
+      input: {
+        command: 'sleep 30 & kill -KILL $$',
+        cwd: process.cwd(),
+        timeout_ms: 10_000,
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected a failed builtin result');
+
+    expect(result.error).toBe('Shell command terminated by SIGKILL');
+    expect(result.output).toMatchObject({
+      exit_signal: 'SIGKILL',
+      process_stage: 'target_exit',
+      reaped_descendants: true,
+    });
+  });
+
   // The ordinary path must not acquire a false positive: a command whose
   // children have all exited reports a plain success with no reaping claim.
   test('does not claim reaping when the command leaves nothing behind', async () => {

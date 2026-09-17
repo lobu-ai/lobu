@@ -210,12 +210,14 @@ export async function runShellBuiltin(
         ...(outcome.errorCode
           ? { process_error_code: outcome.errorCode }
           : {}),
-        ...(reapedDescendants
-          ? { process_stage: 'descendants_reaped' as const }
-          : outcome.stage !== 'target_exit' ||
-              outcome.signalCode ||
-              outcome.error
-            ? { process_stage: outcome.stage }
+        // A real lifecycle stage (a signal death, a spawn failure) wins over
+        // the reaped marker: the marker is only the stage of a run that would
+        // otherwise have reported none, and `reaped_descendants` carries the
+        // fact either way.
+        ...(outcome.stage !== 'target_exit' || outcome.signalCode || outcome.error
+          ? { process_stage: outcome.stage }
+          : reapedDescendants
+            ? { process_stage: 'descendants_reaped' as const }
             : {}),
         ...(reapedDescendants ? { reaped_descendants: true } : {}),
         // Killing work the caller deliberately backgrounded is not a success,

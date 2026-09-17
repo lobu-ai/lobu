@@ -143,6 +143,18 @@ setInterval(() => {}, 1000);
     expect(countOwnedGroupSurvivors(owner, () => table)).toBe(0);
   });
 
+  test('a zombie in the owned group is not a survivor', () => {
+    if (process.platform === 'win32') return;
+    const owner = { pid: 4242, exitCode: null, signalCode: null };
+    // 4243 exited already and was never reaped: with the daemon as PID 1 and no
+    // init in front of it, an orphaned grandchild stays a zombie under the
+    // supervisor's pgid. Nothing is running there, so reporting a reap would
+    // fail a run that left nothing behind. 4244 is live and is the one survivor.
+    const table = ['  4242  4242 Ss', '  4243  4242 Z', '  4244  4242 S', ''].join('\n');
+
+    expect(countOwnedGroupSurvivors(owner, () => table)).toBe(1);
+  });
+
   test('an unreadable process table reports no survivors instead of throwing', () => {
     if (process.platform === 'win32') return;
     const owner = { pid: 4242, exitCode: null, signalCode: null };
