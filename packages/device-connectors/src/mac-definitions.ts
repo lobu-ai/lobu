@@ -843,7 +843,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         key: "click",
         name: "Click",
         description:
-          "Click an element id, query, or coordinates. Defaults to background/process-targeted delivery when possible.",
+          "Click an element id, query, or coordinates. Events are delivered to whatever owns the point, so a target that is visible but not frontmost can absorb the click; set foreground:true to raise the target app/window first.",
         requiresApproval: true,
         annotations: {
           destructiveHint: true,

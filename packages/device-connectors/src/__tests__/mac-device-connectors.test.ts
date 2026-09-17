@@ -13,7 +13,7 @@ const expectedOriginHashes: Record<string, string> = {
   "apple.calendar":
     "934f8866eae6b13db330ec784e9f731ac57684726fa9c8d1f57f4de07aa09adc",
   "apple.computer_use":
-    "de92336c43209145199c8155213d7834016b9fcbcccd19979600b0a9a98b8c60",
+    "965fe77a4c08c06d6903a2f62540e19fb9f25c2b90c0db7b0de3c7cc973f0de5",
   "apple.health":
     "95d01cbd942d6af5f201656e2b6ed320e3e6559723ad3f9de619b524451f70e4",
   "apple.photos":
