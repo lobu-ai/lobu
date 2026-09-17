@@ -888,7 +888,9 @@ export async function executePlan(
       params: bundled.metadata.params,
       actions: bundled.metadata.actions,
     });
-    const kb = (Buffer.byteLength(bundled.compiledCode, "utf8") / 1024).toFixed(0);
+    const kb = (Buffer.byteLength(bundled.compiledCode, "utf8") / 1024).toFixed(
+      0
+    );
     printText(
       renderProgress(
         row.verb,

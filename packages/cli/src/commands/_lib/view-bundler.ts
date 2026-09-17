@@ -68,9 +68,8 @@ const metadataStub: Plugin = {
 };
 
 function readRecordedDefinition(): Partial<ViewMetadata> | undefined {
-  return (globalThis as { __lobuViewDefinition?: unknown }).__lobuViewDefinition as
-    | Partial<ViewMetadata>
-    | undefined;
+  return (globalThis as { __lobuViewDefinition?: unknown })
+    .__lobuViewDefinition as Partial<ViewMetadata> | undefined;
 }
 
 /**
@@ -182,7 +181,10 @@ export async function collectViewWatchFiles(entry: string): Promise<string[]> {
  * other machine and leaks machine state). esbuild emits relative names by
  * default; this is the backstop that fails the apply when it does not.
  */
-export function assertBundlePortable(compiledCode: string, entry: string): void {
+export function assertBundlePortable(
+  compiledCode: string,
+  entry: string
+): void {
   const suspects: string[] = [entry, dirname(entry)];
   const home = process.env.HOME ?? process.env.USERPROFILE;
   if (home) suspects.push(home);

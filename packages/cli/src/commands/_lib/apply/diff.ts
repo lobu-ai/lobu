@@ -1950,7 +1950,12 @@ export interface RemoteSnapshot {
  */
 type DesiredStateForDiff = Pick<
   DesiredState,
-  "agents" | "memorySchema" | "automations" | "connectors" | "providers" | "views"
+  | "agents"
+  | "memorySchema"
+  | "automations"
+  | "connectors"
+  | "providers"
+  | "views"
 >;
 
 interface ComputeDiffOptions {
@@ -2467,7 +2472,11 @@ export function computeDiff(
         id: view.key,
         desired: view,
         remote: r,
-        verb: !r ? "create" : r.content_hash !== view.contentHash ? "update" : "noop",
+        verb: !r
+          ? "create"
+          : r.content_hash !== view.contentHash
+            ? "update"
+            : "noop",
       });
     }
     for (const r of remoteViews) {

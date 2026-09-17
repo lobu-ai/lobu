@@ -1014,7 +1014,11 @@ function resolveViewSources(sources: ViewSource[], cwd: string): DesiredView[] {
     }
     const abs = resolve(baseDir, rel);
     const relPath = relative(baseDir, abs);
-    if (relPath === ".." || relPath.startsWith(`..${sep}`) || isAbsolute(relPath)) {
+    if (
+      relPath === ".." ||
+      relPath.startsWith(`..${sep}`) ||
+      isAbsolute(relPath)
+    ) {
       throw new ValidationError(
         `viewFromFile(${JSON.stringify(rel)}) resolves outside the config directory (${abs})`
       );
@@ -1032,9 +1036,10 @@ function resolveViewSources(sources: ViewSource[], cwd: string): DesiredView[] {
         `viewFromFile(${JSON.stringify(rel)}) is over the ${VIEW_SOURCE_MAX_BYTES} byte source cap`
       );
     }
-    const declared = /defineView\s*\(\s*\{[\s\S]*?\bkey\s*:\s*(["'`])([a-z0-9-]+)\1/.exec(
-      sourceCode
-    )?.[2];
+    const declared =
+      /defineView\s*\(\s*\{[\s\S]*?\bkey\s*:\s*(["'`])([a-z0-9-]+)\1/.exec(
+        sourceCode
+      )?.[2];
     const fromPath = rel
       .replace(/^\.\//, "")
       .replace(/^views\//, "")
@@ -1052,7 +1057,10 @@ function resolveViewSources(sources: ViewSource[], cwd: string): DesiredView[] {
       key,
       sourcePath: abs,
       sourceCode,
-      contentHash: createHash("sha256").update(sourceCode).digest("hex").slice(0, 16),
+      contentHash: createHash("sha256")
+        .update(sourceCode)
+        .digest("hex")
+        .slice(0, 16),
       sourceFile: rel.replace(/^\.\//, ""),
     });
   }

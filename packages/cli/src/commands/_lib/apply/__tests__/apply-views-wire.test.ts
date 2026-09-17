@@ -6,7 +6,15 @@
  * Fixtures live next to this test so the view bundle's `@lobu/views` +
  * `react` imports resolve from the worktree's node_modules.
  */
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as context from "../../../../internal/context.js";
@@ -117,9 +125,12 @@ function makeFetch(store: { views: Array<Record<string, unknown>> }) {
     if (urlStr.includes("/manage_entity_schema")) {
       return json({ entity_types: [], relationship_types: [] });
     }
-    if (urlStr.includes("/manage_automations")) return json({ automations: [] });
-    if (urlStr.includes("/manage_auth_profiles")) return json({ auth_profiles: [] });
-    if (urlStr.includes("/manage_catalog")) return json({ installed: { connectors: { items: [] } } });
+    if (urlStr.includes("/manage_automations"))
+      return json({ automations: [] });
+    if (urlStr.includes("/manage_auth_profiles"))
+      return json({ auth_profiles: [] });
+    if (urlStr.includes("/manage_catalog"))
+      return json({ installed: { connectors: { items: [] } } });
     if (urlStr.includes("/agents")) return json({ agents: [] });
     return json({ success: true });
   };
@@ -127,7 +138,13 @@ function makeFetch(store: { views: Array<Record<string, unknown>> }) {
 }
 
 async function runApply(dir: string, fetchImpl: typeof fetch) {
-  await applyCommand({ cwd: dir, yes: true, url: "https://app.lobu.ai", org: "acme", fetchImpl });
+  await applyCommand({
+    cwd: dir,
+    yes: true,
+    url: "https://app.lobu.ai",
+    org: "acme",
+    fetchImpl,
+  });
 }
 
 describe("apply views over the wire", () => {
@@ -166,7 +183,7 @@ describe("apply views over the wire", () => {
     // Portable bytes: the fixture dir leaked nowhere into the bundle.
     expect(compiled as string).not.toContain("views-wire-fixture-");
     expect(typeof sets[0]?.body.source_code).toBe("string");
-    expect((sets[0]?.body.source_code as string)).toContain("defineView");
+    expect(sets[0]?.body.source_code as string).toContain("defineView");
   });
 
   test("an unchanged view sends no set on the second apply", async () => {
@@ -175,7 +192,9 @@ describe("apply views over the wire", () => {
     const first = makeFetch(store);
     await runApply(dir, first.fetchStub);
     expect(
-      first.calls.filter((c) => c.url.includes("/manage_views") && c.body.action === "set")
+      first.calls.filter(
+        (c) => c.url.includes("/manage_views") && c.body.action === "set"
+      )
     ).toHaveLength(1);
     // The stubbed remote now reports the same content hash the loader
     // computes, so the diff is noop and nothing is sent.
@@ -184,13 +203,21 @@ describe("apply views over the wire", () => {
     };
     const { createHash } = await import("node:crypto");
     const { readFileSync } = await import("node:fs");
-    const source = readFileSync(join(dir, "views", "deal", "pipeline.tsx"), "utf-8");
+    const source = readFileSync(
+      join(dir, "views", "deal", "pipeline.tsx"),
+      "utf-8"
+    );
     const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);
-    store.views[0] = { ...(store.views[0] as Record<string, unknown>), content_hash: hash };
+    store.views[0] = {
+      ...(store.views[0] as Record<string, unknown>),
+      content_hash: hash,
+    };
     const second = makeFetch(store);
     await runApply(dir, second.fetchStub);
     expect(
-      second.calls.filter((c) => c.url.includes("/manage_views") && c.body.action === "set")
+      second.calls.filter(
+        (c) => c.url.includes("/manage_views") && c.body.action === "set"
+      )
     ).toEqual([]);
   });
 });

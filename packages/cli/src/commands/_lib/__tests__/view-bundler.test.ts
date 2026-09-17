@@ -26,7 +26,10 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>).__lobuViewDefinition;
 });
 
-function mkView(files: Record<string, string>, entry = "views/deal/pipeline.tsx"): string {
+function mkView(
+  files: Record<string, string>,
+  entry = "views/deal/pipeline.tsx"
+): string {
   // Fixtures live next to this test so the view bundle's `@lobu/views` +
   // `react` imports resolve from the worktree's node_modules (the same
   // walk-up a real project install provides). Removed in afterEach.
@@ -69,52 +72,69 @@ describe("bundleViewFromFile", () => {
     const bundled = await bundleViewFromFile(entry);
     expect(bundled.metadata.key).toBe("pipeline");
     expect(bundled.metadata.attach).toEqual([{ type: "deal" }]);
-    expect(bundled.metadata.params).toEqual({ by: { type: "string", default: "owner" } });
-    expect(bundled.metadata.actions).toEqual({ markWon: { emits: "deal.won" } });
+    expect(bundled.metadata.params).toEqual({
+      by: { type: "string", default: "owner" },
+    });
+    expect(bundled.metadata.actions).toEqual({
+      markWon: { emits: "deal.won" },
+    });
     expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
     // The hand-written bridge ships no ext-apps/zod chain (spike: 378 KB).
     expect(bundled.compiledCode).not.toContain("ext-apps");
     expect(bundled.compiledCode).not.toContain("@modelcontextprotocol");
-    expect(bundled.compiledCode).not.toContain("ui/notifications/tool-input-partial");
+    expect(bundled.compiledCode).not.toContain(
+      "ui/notifications/tool-input-partial"
+    );
     expect(bundled.compiledCode.length).toBeLessThan(300_000);
     // Portable: the temp project path leaked nowhere into the bytes.
     expect(bundled.compiledCode).not.toContain(entry);
   });
 
   test("bundles relative imports into the same artifact", async () => {
-    const entry = mkView({
-      "views/deal/board.tsx": `import { defineView, mountView } from "@lobu/views";
+    const entry = mkView(
+      {
+        "views/deal/board.tsx": `import { defineView, mountView } from "@lobu/views";
 import { Board } from "../_lib/board";
 export const view = defineView({ key: "board", attach: [{ type: "deal" }] });
 export default function BoardView() { return Board({}); }
 mountView(view, BoardView);
 `,
-      "views/_lib/board.tsx": `export function Board(_props: unknown) { return null; }
+        "views/_lib/board.tsx": `export function Board(_props: unknown) { return null; }
 `,
-    }, "views/deal/board.tsx");
+      },
+      "views/deal/board.tsx"
+    );
     const bundled = await bundleViewFromFile(entry);
     expect(bundled.metadata.key).toBe("board");
     expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
   });
 
   test("a module that never calls mountView fails loud", async () => {
-    const entry = mkView({
-      "views/deal/nope.tsx": `import { defineView } from "@lobu/views";
+    const entry = mkView(
+      {
+        "views/deal/nope.tsx": `import { defineView } from "@lobu/views";
 export const view = defineView({ key: "nope", attach: [] });
 export default function Nope() { return null; }
 `,
-    }, "views/deal/nope.tsx");
-    await expect(bundleViewFromFile(entry)).rejects.toThrow("must call mountView");
+      },
+      "views/deal/nope.tsx"
+    );
+    await expect(bundleViewFromFile(entry)).rejects.toThrow(
+      "must call mountView"
+    );
   });
 
   test("an invalid key fails loud", async () => {
-    const entry = mkView({
-      "views/deal/bad.tsx": `import { defineView, mountView } from "@lobu/views";
+    const entry = mkView(
+      {
+        "views/deal/bad.tsx": `import { defineView, mountView } from "@lobu/views";
 export const view = defineView({ key: "Custom_Name", attach: [] });
 export default function Bad() { return null; }
 mountView(view, Bad);
 `,
-    }, "views/deal/bad.tsx");
+      },
+      "views/deal/bad.tsx"
+    );
     await expect(bundleViewFromFile(entry)).rejects.toThrow("must match");
   });
 });
@@ -122,27 +142,31 @@ mountView(view, Bad);
 describe("assertBundlePortable", () => {
   test("rejects embedded checkout paths and encoded file URLs", () => {
     const entry = "/Users/someone/Code/lobu-proj/views/a.tsx";
+    expect(() => assertBundlePortable(`var x = "${entry}";`, entry)).toThrow(
+      "must be portable"
+    );
     expect(() =>
-      assertBundlePortable(`var x = "${entry}";`, entry)
+      assertBundlePortable(
+        `fetch("file:///Users/someone/Code/lobu-proj/x")`,
+        entry
+      )
     ).toThrow("must be portable");
-    expect(() =>
-      assertBundlePortable(`fetch("file:///Users/someone/Code/lobu-proj/x")`, entry)
-    ).toThrow("must be portable");
-    expect(() =>
-      assertBundlePortable("var x = 1;", entry)
-    ).not.toThrow();
+    expect(() => assertBundlePortable("var x = 1;", entry)).not.toThrow();
   });
 });
 
 describe("collectViewWatchFiles", () => {
   test("returns the entry plus its relative imports", async () => {
-    const entry = mkView({
-      "views/deal/board.tsx": `import { x } from "../_lib/board";
+    const entry = mkView(
+      {
+        "views/deal/board.tsx": `import { x } from "../_lib/board";
 export const y = x;
 `,
-      "views/_lib/board.tsx": `export const x = 1;
+        "views/_lib/board.tsx": `export const x = 1;
 `,
-    }, "views/deal/board.tsx");
+      },
+      "views/deal/board.tsx"
+    );
     const files = await collectViewWatchFiles(entry);
     expect(files).toContain(entry);
     expect(files.some((f) => f.endsWith("views/_lib/board.tsx"))).toBe(true);

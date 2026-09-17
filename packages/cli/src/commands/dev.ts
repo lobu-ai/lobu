@@ -509,7 +509,7 @@ export async function startViewReapplyLoop(
   gatewayUrl: string,
   localOrgSlug?: string
 ): Promise<{ close: () => void }> {
-  const noop = { close: () => {} };
+  const noop = { close: () => undefined };
   try {
     const { collectViewReapplySet, startViewReapply } = await import(
       "./_lib/view-reapply.js"
@@ -518,7 +518,9 @@ export async function startViewReapplyLoop(
     const viewFiles = set.files.length - 1;
     if (viewFiles > 0) {
       console.log(
-        chalk.dim(`  watching ${viewFiles} view file${viewFiles === 1 ? "" : "s"} (re-apply on save)`)
+        chalk.dim(
+          `  watching ${viewFiles} view file${viewFiles === 1 ? "" : "s"} (re-apply on save)`
+        )
       );
     }
     const onLog = (message: string) =>
