@@ -10,7 +10,6 @@
  * back over the MCP resource or the shell route and mounted `srcdoc` into the
  * sandboxed frame the MCP apps already use.
  */
-import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
 import { build, type Plugin } from 'esbuild';
@@ -48,10 +47,8 @@ export function viewKeyFromResourceUri(uri: string): string | null {
   return VIEW_KEY_RE.test(key) ? key : null;
 }
 
-/** sha256 of the source, first 16 hex — same source, same hash, no write. */
-export function contentHash(source: string): string {
-  return createHash('sha256').update(source).digest('hex').slice(0, 16);
-}
+/** Shared content identity (server and CLI derive the key from one function). */
+export { contentHash, type ViewContentMetadata } from '@lobu/core/contracts/tools/view-content-hash';
 
 export interface ViewParamDecl {
   type: 'string' | 'number' | 'boolean';

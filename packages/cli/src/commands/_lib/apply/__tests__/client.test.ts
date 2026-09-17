@@ -774,60 +774,6 @@ describe("ApplyClient — prune", () => {
     });
   });
 
-  test("view template get/set/clear POST manage_view_templates with the right action", async () => {
-    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
-    const client = new ApplyClient(
-      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
-      (async (url, init) => {
-        calls.push({
-          url: String(url),
-          body: JSON.parse(String(init?.body)),
-        });
-        return new Response(
-          JSON.stringify({
-            default_tab: { current: { json_template: { type: "card" } } },
-          }),
-          { status: 200 }
-        );
-      }) as typeof fetch
-    );
-
-    const got = await client.getEntityTypeViewTemplate("deal");
-    expect(got).toEqual({ type: "card" });
-    expect(calls[0]?.url).toContain("/manage_view_templates");
-    expect(calls[0]?.body).toMatchObject({
-      action: "get",
-      resource_type: "entity_type",
-      resource_id: "deal",
-    });
-
-    await client.setEntityTypeViewTemplate("deal", { type: "card", id: "x" });
-    expect(calls[1]?.body).toMatchObject({
-      action: "set",
-      resource_type: "entity_type",
-      resource_id: "deal",
-      json_template: { type: "card", id: "x" },
-    });
-
-    await client.clearEntityTypeViewTemplate("deal");
-    expect(calls[2]?.body).toMatchObject({
-      action: "clear",
-      resource_type: "entity_type",
-      resource_id: "deal",
-    });
-  });
-
-  test("getEntityTypeViewTemplate returns null when no default template", async () => {
-    const client = new ApplyClient(
-      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
-      (async () =>
-        new Response(JSON.stringify({ default_tab: { current: null } }), {
-          status: 200,
-        })) as typeof fetch
-    );
-    expect(await client.getEntityTypeViewTemplate("deal")).toBeNull();
-  });
-
   test("listEntityTypes hoists metrics_config to metrics; null/empty stays undefined", async () => {
     const metrics = {
       measures: {

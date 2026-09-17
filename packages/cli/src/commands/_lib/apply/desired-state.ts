@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -72,14 +71,6 @@ export interface DesiredEntityType {
    * The server compiles it; the CLI never ships a compiled artifact.
    */
   rulesSource?: { sourcePath: string; sourceCode: string };
-  /**
-   * Default view template (render-DSL root node) for this type's detail page.
-   * Present only when declared. Applied via manage_view_templates set/clear and
-   * diffed against the remote current default (which apply-cmd fetches per
-   * relevant type — NOT streamed in the entity-type list). Prune-aware: under
-   * prune an absent template clears the remote one; otherwise it is left alone.
-   */
-  viewTemplate?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   /**
    * Present only for derived (SQL-view-backed) entity types; absent ⇒ stored
@@ -264,23 +255,32 @@ export interface DesiredConnectorDefinition {
   sourceFile: string;
 }
 
-/** One `viewFromFile` entry, read but not yet bundled (apply bundles). */
+/** One `viewFromFile` entry, bundled at load (apply reuses the artifacts). */
 export interface DesiredView {
   /**
-   * View key: the `defineView({ key })` string literal when the module has
-   * one, else derived from the path (`views/connection/health.tsx` →
-   * `connection-health`). Provisional — the bundle pass re-derives it and
-   * apply refuses a mismatch.
+   * View key, re-derived from the module's own `defineView({ key })` at bundle
+   * time. The bundle pass refuses a mismatch with nothing to fall back to: a
+   * key is required, so the plan, the bundle and the action agree.
    */
   key: string;
   /** Absolute path to the module. */
   sourcePath: string;
   /** Raw module source, pushed verbatim beside the bundle. */
   sourceCode: string;
-  /** sha256 (first 16 hex) of `sourceCode` — the diff key against remote. */
+  /**
+   * sha256 of source plus declared metadata via the shared
+   * `@lobu/core/contracts/tools/view-content-hash` — the SAME function the
+   * server hashes with, so the diff's noop means the server will no-write.
+   */
   contentHash: string;
   /** Config-relative path for messages. */
   sourceFile: string;
+  /** Browser IIFE bundle (react, bridge, relative files, view npm deps). */
+  compiledCode: string;
+  /** Metadata extracted from the module itself. */
+  attach: Array<Record<string, unknown>>;
+  params: Record<string, unknown>;
+  actions: Record<string, { emits: string }>;
 }
 
 export interface DesiredAgent {
@@ -875,6 +875,11 @@ interface LoadDesiredStateOptions {
    * expansion), so `--only agents` doesn't require connector secrets.
    */
   only?: "agents" | "memory";
+  /**
+   * Operator-visible log line (install notices while resolving views).
+   * Defaults to silent; `lobu apply` passes its printer.
+   */
+  onLog?: (message: string) => void;
 }
 
 /**
@@ -983,18 +988,35 @@ function resolveConnectorSources(
 const VIEW_SOURCE_MAX_BYTES = 1_000_000;
 
 /**
- * Resolve `viewFromFile` entries to read-but-unbundled views. Same containment
- * shape as connector sources (relative POSIX path under the config directory,
- * no `..`/absolute/backslash, must exist, under the server's source cap).
- * The key is provisional: the `defineView({ key })` literal when the regex
- * finds one, else the path (`views/connection/health.tsx` →
- * `connection-health`). The bundle pass re-derives it and apply refuses a
- * mismatch, so a stale literal can never mis-key a view.
+ * Resolve `viewFromFile` entries to bundled views. Same containment shape as
+ * connector sources (relative POSIX path under the config directory, no
+ * `..`/absolute/backslash, must exist, under the server's source cap).
+ *
+ * Bundling happens HERE, not in executePlan, for one reason: the diff key
+ * must be the server's hash (source plus declared metadata, via the shared
+ * content-hash function), and the metadata only exists after the module's own
+ * `mountView(defineView(…))` call runs. The key comes from that call — there
+ * is no path fallback, because a required key has nothing to fall back to.
+ * ExecutePlan ships these artifacts verbatim; it never re-bundles.
+ *
+ * The esbuild + jiti-adjacent imports stay lazy (this async function is the
+ * only importer), so the bundler graph never rides the module-load path.
  */
-function resolveViewSources(sources: ViewSource[], cwd: string): DesiredView[] {
+async function resolveViewSources(
+  sources: ViewSource[],
+  cwd: string,
+  log: (message: string) => void
+): Promise<DesiredView[]> {
   const baseDir = resolve(cwd);
   const views: DesiredView[] = [];
   const seen = new Set<string>();
+  const { ensureProjectDepsInstalled } = await import(
+    "../ensure-deps-installed.js"
+  );
+  const { bundleViewFromFile } = await import("../view-bundler.js");
+  const { contentHash } = await import(
+    "@lobu/core/contracts/tools/view-content-hash"
+  );
   for (const src of sources) {
     const rel = src.path.trim();
     if (
@@ -1036,32 +1058,46 @@ function resolveViewSources(sources: ViewSource[], cwd: string): DesiredView[] {
         `viewFromFile(${JSON.stringify(rel)}) is over the ${VIEW_SOURCE_MAX_BYTES} byte source cap`
       );
     }
-    const declared =
-      /defineView\s*\(\s*\{[\s\S]*?\bkey\s*:\s*(["'`])([a-z0-9-]+)\1/.exec(
-        sourceCode
-      )?.[2];
-    const fromPath = rel
-      .replace(/^\.\//, "")
-      .replace(/^views\//, "")
-      .replace(/\.tsx?$/, "")
-      .split("/")
-      .join("-");
-    const key = declared ?? fromPath;
+    ensureProjectDepsInstalled(abs, log);
+    const bundled = await bundleViewFromFile(abs);
+    const key = bundled.metadata.key;
     if (seen.has(key)) {
       throw new ValidationError(
         `duplicate view key "${key}" in lobu.config.ts — each viewFromFile must resolve to a unique key`
       );
     }
     seen.add(key);
+    // Hash EXACTLY what the server will store: name defaults to the key,
+    // description defaults to empty, metadata JSON-round-tripped (the wire
+    // drops undefined, so hash post-round-trip or equivalent declarations
+    // compare differently). Same function, same inputs: same hash.
+    const name = key;
+    const description = "";
+    const attach = JSON.parse(JSON.stringify(bundled.metadata.attach)) as Array<
+      Record<string, unknown>
+    >;
+    const params = JSON.parse(
+      JSON.stringify(bundled.metadata.params)
+    ) as Record<string, unknown>;
+    const actions = JSON.parse(
+      JSON.stringify(bundled.metadata.actions)
+    ) as Record<string, { emits: string }>;
     views.push({
       key,
       sourcePath: abs,
       sourceCode,
-      contentHash: createHash("sha256")
-        .update(sourceCode)
-        .digest("hex")
-        .slice(0, 16),
+      contentHash: contentHash(sourceCode, {
+        name,
+        description,
+        attach,
+        params,
+        actions,
+      }),
       sourceFile: rel.replace(/^\.\//, ""),
+      compiledCode: bundled.compiledCode,
+      attach,
+      params,
+      actions,
     });
   }
   return views.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
@@ -1397,7 +1433,13 @@ export async function loadDesiredStateFromConfig(
       opts.cwd
     );
     // Views are neither agents nor memory: a targeted apply skips them too.
-    state.views = resolveViewSources(typedProject.views ?? [], opts.cwd);
+    // Bundled here so the diff key is the server's hash (same function, same
+    // inputs); executePlan ships these artifacts verbatim.
+    state.views = await resolveViewSources(
+      typedProject.views ?? [],
+      opts.cwd,
+      opts.onLog ?? (() => undefined)
+    );
   }
   // Surface load-time warnings to `lobu apply` (which prints them). #1010's
   // "ignored connectors because [memory] is disabled" case is obsolete here —

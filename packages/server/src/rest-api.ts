@@ -432,6 +432,9 @@ export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 				401
 			);
 		}
+		if (!hasRequiredMcpScope("read", ctx.scopes)) {
+			throw new ToolUserError("Reading views requires read access.", 403);
+		}
 		const key = c.req.param("key") ?? "";
 		if (!isValidViewKey(key)) {
 			throw new ToolUserError("Invalid view key", 400);
