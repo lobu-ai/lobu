@@ -48,9 +48,42 @@ export function viewKeyFromResourceUri(uri: string): string | null {
   return VIEW_KEY_RE.test(key) ? key : null;
 }
 
-/** sha256 of the source, first 16 hex — same source, same hash, no write. */
-export function contentHash(source: string): string {
-  return createHash('sha256').update(source).digest('hex').slice(0, 16);
+/** Deterministic JSON for hashing: object keys sorted, arrays kept in order. */
+function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** Declared metadata that affects the stored view (everything but provenance). */
+export interface ViewContentMetadata {
+  name: string;
+  description: string;
+  attach: unknown;
+  params: unknown;
+  actions: unknown;
+}
+
+/**
+ * sha256 of the source plus the declared metadata, first 16 hex. Same source
+ * AND same metadata means the row is already current and nothing is written.
+ * `last_writer` is provenance of the last write, not content: including it
+ * would defeat the no-op detection, since every apply run mints a new
+ * apply_id.
+ */
+export function contentHash(source: string, metadata?: ViewContentMetadata): string {
+  return createHash('sha256')
+    .update(source)
+    .update('\n')
+    .update(stableStringify(metadata ?? null))
+    .digest('hex')
+    .slice(0, 16);
 }
 
 export interface ViewParamDecl {
