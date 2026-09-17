@@ -630,16 +630,16 @@ describe("executePlan — entity-type schema fidelity", () => {
   });
 });
 
-describe("fetchRemoteSnapshot — view-template fetch is org-scoped", () => {
-  test("does not fetch a template for a foreign public type whose slug is also config-declared", async () => {
-    const templateCalls: string[] = [];
+describe("fetchRemoteSnapshot — no view-template hydration", () => {
+  test("never calls the retired template tool, even under prune", async () => {
+    // View templates are retired with the server tool: a snapshot fetch that
+    // still hydrated per-type templates would POST the removed
+    // manage_view_templates and abort the apply. The client below has no such
+    // method at all, so any call attempt throws.
     const client = {
       listAgents: async () => [],
       listEntityTypes: async () => [
-        // Foreign public type (owned by another org) — same slug as a config type.
-        { slug: "company", organization_id: "org-market" },
-        // Org-owned type with a declared template.
-        { slug: "task", organization_id: "org-acme" },
+        { slug: "company", organization_id: "org-acme" },
       ],
       listRelationshipTypes: async () => [],
       listAutomations: async () => [],
@@ -647,20 +647,13 @@ describe("fetchRemoteSnapshot — view-template fetch is org-scoped", () => {
       listAuthProfiles: async () => [],
       listConnections: async () => [],
       listInferenceProviders: async () => [],
-      getEntityTypeViewTemplate: async (slug: string) => {
-        templateCalls.push(slug);
-        return { root: { type: "box" } };
-      },
     } as unknown as ApplyClient;
 
     const state: DesiredState = {
       agents: [],
       prune: true,
       memorySchema: {
-        entityTypes: [
-          { slug: "company", viewTemplate: { root: { type: "box" } } },
-          { slug: "task", viewTemplate: { root: { type: "box" } } },
-        ],
+        entityTypes: [{ slug: "company" }],
         relationshipTypes: [],
       },
       automations: [],
@@ -669,22 +662,8 @@ describe("fetchRemoteSnapshot — view-template fetch is org-scoped", () => {
       requiredSecrets: [],
     };
 
-    const remote = await fetchRemoteSnapshot(
-      client,
-      state,
-      undefined,
-      true,
-      "org-acme"
-    );
-    expect(templateCalls).toEqual(["task"]);
-    expect(
-      remote.entityTypes.find((e) => e.slug === "task")?.viewTemplate
-    ).toBeDefined();
-    // The foreign type's slug is still surfaced for visibility, but its template
-    // was never fetched (the org-local copy is absent/deleted and would 404).
-    expect(
-      remote.entityTypes.find((e) => e.slug === "company")?.viewTemplate
-    ).toBeUndefined();
+    const remote = await fetchRemoteSnapshot(client, state, undefined, true);
+    expect(remote.entityTypes.find((e) => e.slug === "company")).toBeDefined();
   });
 });
 

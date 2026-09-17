@@ -2195,6 +2195,7 @@ describe('MCP Authentication', () => {
           'query_sdk',
           'query_sql',
           'get_approval',
+          'open_view',
           'run_sdk',
           'save_memory',
           'search_memory',
