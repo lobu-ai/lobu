@@ -143,20 +143,13 @@ export async function handleListRuns(
     where = sql`${where} AND r.feed_id = ANY(${pgBigintArray(args.feed_ids)}::bigint[])`;
   }
   if (args.device_worker_id) {
+    // Matches the projection above: immutable attribution only. Selecting runs
+    // by the connection's CURRENT pin made this filter answer a different
+    // question than the field it filters on — a re-pin moved historical runs
+    // between devices (#3213).
     where = sql`${where} AND (
       r.executed_by_device_worker_id = ${args.device_worker_id}::uuid
       OR (r.executed_by_device_worker_id IS NULL AND r.target_device_worker_id = ${args.device_worker_id}::uuid)
-      OR (
-        r.executed_by_device_worker_id IS NULL
-        AND r.target_device_worker_id IS NULL
-        AND (r.claimed_by IS NULL OR r.claimed_by NOT LIKE 'gateway-inline-%')
-        AND r.connection_id IN (
-          SELECT id FROM connections
-          WHERE device_worker_id = ${args.device_worker_id}::uuid
-            AND organization_id = ${ctx.organizationId}
-            AND deleted_at IS NULL
-        )
-      )
     )`;
   }
   if (args.connector_key) {
@@ -199,7 +192,12 @@ export async function handleListRuns(
            r.executed_by_device_worker_id,
            CASE
              WHEN r.claimed_by LIKE 'gateway-inline-%' THEN NULL
-             ELSE COALESCE(r.executed_by_device_worker_id, r.target_device_worker_id, c.device_worker_id)
+             -- Immutable attribution ONLY (#3213). Both columns are stamped at
+             -- write time: target at creation, executed_by atomically at claim.
+             -- Never fall back to connections.device_worker_id — that is the
+             -- connection's CURRENT, mutable pin, so re-pinning a connection
+             -- silently rewrote which device already-completed runs reported.
+             ELSE COALESCE(r.executed_by_device_worker_id, r.target_device_worker_id)
            END AS device_worker_id
     FROM runs r
     LEFT JOIN feeds f ON f.id = r.feed_id
@@ -252,7 +250,12 @@ export async function handleGetRun(
            r.executed_by_device_worker_id,
            CASE
              WHEN r.claimed_by LIKE 'gateway-inline-%' THEN NULL
-             ELSE COALESCE(r.executed_by_device_worker_id, r.target_device_worker_id, c.device_worker_id)
+             -- Immutable attribution ONLY (#3213). Both columns are stamped at
+             -- write time: target at creation, executed_by atomically at claim.
+             -- Never fall back to connections.device_worker_id — that is the
+             -- connection's CURRENT, mutable pin, so re-pinning a connection
+             -- silently rewrote which device already-completed runs reported.
+             ELSE COALESCE(r.executed_by_device_worker_id, r.target_device_worker_id)
            END AS device_worker_id,
            c.display_name AS connection_display_name
     FROM runs r

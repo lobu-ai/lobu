@@ -237,4 +237,67 @@ describe("device run targeting and execution invariants", () => {
 		)) as { runs: Array<Record<string, unknown>> };
 		expect(runsB.runs.some((r) => r.id === runRow!.id)).toBe(false);
 	});
+
+	it("does not attribute a server-executed run to a device pinned after it completed", async () => {
+		const sql = getTestDb();
+		// A connection that is NOT device-pinned, running server-side: both
+		// immutable attribution columns stay NULL, which is the normal shape for
+		// every server-executed run.
+		const connection = await createTestConnection({
+			organization_id: org.id,
+			connector_key: CONNECTOR_KEY,
+			created_by_user_id: user.id,
+		});
+		const [inserted] = (await sql`
+			INSERT INTO runs (
+				organization_id, run_type, connection_id, connector_key,
+				action_key, status, approval_status, claimed_by,
+				created_at, completed_at
+			) VALUES (
+				${org.id}, 'action', ${connection.id}, ${CONNECTOR_KEY},
+				${ACTION_KEY}, 'completed', 'auto', 'server-worker-1',
+				now() - interval '1 day', now() - interval '1 day'
+			)
+			RETURNING id
+		`) as unknown as Array<{ id: number }>;
+		const runId = Number(inserted.id);
+
+		const reportedDevice = async () => {
+			const res = (await manageOperations(
+				{ action: "get_run", run_id: runId },
+				{} as Env,
+				ctx,
+			)) as { run: Record<string, unknown> };
+			// The run is terminal and never re-executes across these reads.
+			expect(res.run.status).toBe("completed");
+			return res.run.device_worker_id ?? null;
+		};
+
+		expect(await reportedDevice()).toBeNull();
+
+		// INVARIANT: pinning the connection AFTER the run finished must not
+		// retroactively attribute that run to the newly pinned device (#3213).
+		await sql`
+			UPDATE connections SET device_worker_id = ${deviceB.id}::uuid
+			WHERE id = ${connection.id}
+		`;
+		expect(await reportedDevice()).toBeNull();
+
+		await sql`
+			UPDATE connections SET device_worker_id = ${deviceA.id}::uuid
+			WHERE id = ${connection.id}
+		`;
+		expect(await reportedDevice()).toBeNull();
+
+		// The device filter must agree with the field it filters on: neither pin
+		// may sweep in a run that no device ever claimed.
+		for (const device of [deviceA, deviceB]) {
+			const listed = (await manageOperations(
+				{ action: "list_runs", device_worker_id: device.id },
+				{} as Env,
+				ctx,
+			)) as { runs: Array<Record<string, unknown>> };
+			expect(listed.runs.some((r) => r.id === runId)).toBe(false);
+		}
+	});
 });
