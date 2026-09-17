@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -155,6 +155,42 @@ setInterval(() => {}, 1000);
       })
     ).toBe(0);
   });
+
+  test('the default reader sees a real backgrounded descendant on this host', async () => {
+    if (process.platform === 'win32') return;
+    // Exercises the UNSTUBBED reader -- `/proc` on Linux, `ps` on macOS. A host
+    // that cannot enumerate the process table (a slim image with no procps)
+    // counts zero and silently reports "nothing was reaped": the #3629 bug
+    // shipping inert. Asserting an exact count over a group we really built is
+    // what makes that failure loud here rather than in production.
+    //
+    // The leader is spawned detached, so its pgid is its pid -- the same
+    // invariant the supervisor relies on -- and the grandchild it forks
+    // inherits that group, standing in for work a command backgrounded.
+    const leader = spawn(
+      process.execPath,
+      [
+        '-e',
+        'require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); setInterval(() => {}, 1000);',
+      ],
+      { detached: true, stdio: 'ignore' }
+    );
+    const owner = { pid: leader.pid!, exitCode: null, signalCode: null };
+    try {
+      // Wait for the grandchild to actually exist before counting.
+      let survivors = 0;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        survivors = countOwnedGroupSurvivors(owner);
+        if (survivors > 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Exactly the grandchild: the leader is the anchor and is never counted.
+      expect(survivors).toBe(1);
+    } finally {
+      try { process.kill(-leader.pid!, 'SIGKILL'); } catch {}
+      try { process.kill(leader.pid!, 'SIGKILL'); } catch {}
+    }
+  }, 15_000);
 
   test('an exited supervisor claims no survivors from a group it no longer owns', () => {
     if (process.platform === 'win32') return;

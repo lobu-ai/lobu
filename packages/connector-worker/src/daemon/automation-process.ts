@@ -7,6 +7,7 @@
  */
 
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const SUPPORTS_PROCESS_GROUPS = process.platform !== 'win32';
 const TREE_TERM_GRACE_MS = 3000;
@@ -287,6 +288,37 @@ export function signalOwnedPosixProcessGroup(
 }
 
 /**
+ * The process table as `<pid> <pgid>` lines, however this host will give it up.
+ * Linux reads `/proc` directly so the daemon depends on no packaged binary;
+ * field 5 of `/proc/<pid>/stat` is the pgid, and it is read after the `)` that
+ * closes comm because a process name may itself contain spaces or brackets.
+ */
+function defaultProcessTableReader(): string {
+  if (process.platform === 'linux') {
+    const lines: string[] = [];
+    for (const entry of readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry)) continue;
+      let stat: string;
+      try {
+        stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+      } catch {
+        // The process exited between listing and reading; it is not a survivor.
+        continue;
+      }
+      const afterComm = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
+      // afterComm[0] is state, then ppid, then pgid.
+      const pgid = afterComm[2];
+      if (pgid) lines.push(`${entry} ${pgid}`);
+    }
+    return lines.join('\n');
+  }
+  return execFileSync('ps', ['-A', '-o', 'pid=,pgid='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+}
+
+/**
  * Count the members of an owned POSIX process group other than the supervisor
  * itself. Used to tell "the command cleaned up after itself" apart from "the
  * command left background work that the group SIGKILL is about to destroy".
@@ -297,19 +329,21 @@ export function signalOwnedPosixProcessGroup(
  * descendant the caller backgrounded, so reaping it is a caller-visible event
  * rather than routine cleanup (#3629).
  *
- * `ps` is the portable way to enumerate a group -- POSIX exposes no syscall to
- * list one, and kill(-pgid, 0) cannot answer this because the live supervisor
- * is itself a member and always makes the probe succeed. A failure here is
- * reported as "no survivors": this drives a report field, never the cleanup
- * itself, so an unavailable `ps` must not change what gets killed.
+ * POSIX exposes no syscall to list a group, and kill(-pgid, 0) cannot answer
+ * this because the live supervisor is itself a member and always makes the
+ * probe succeed -- so the group has to be enumerated from the process table.
+ * On Linux that is read from `/proc`, because the images this daemon ships in
+ * are slim ones that carry no `procps`: shelling out to `ps` there would fail
+ * with ENOENT and silently report "nothing was reaped" on exactly the hosts
+ * this fix is for. `ps` remains the reader everywhere else (macOS dev hosts).
+ *
+ * A failure is reported as "no survivors": this drives a report field, never
+ * the cleanup itself, so an unreadable process table must never change what
+ * gets killed.
  */
 export function countOwnedGroupSurvivors(
   owner: ProcessGroupOwner,
-  readProcessTable: () => string = () =>
-    execFileSync('ps', ['-A', '-o', 'pid=,pgid='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
+  readProcessTable: () => string = defaultProcessTableReader
 ): number {
   if (
     !SUPPORTS_PROCESS_GROUPS ||
