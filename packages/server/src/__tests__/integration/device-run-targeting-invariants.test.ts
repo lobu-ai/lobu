@@ -173,6 +173,24 @@ describe("device run targeting and execution invariants", () => {
 		expect(runRow!.target_device_worker_id).toBe(deviceA.id);
 		expect(runRow!.executed_by_device_worker_id).toBeNull();
 
+		// The pin is captured as the target at creation, so a still-pending run is
+		// already attributed to — and listable under — its device before any claim.
+		// This is what keeps pending work visible now that the device filter no
+		// longer consults the connection's live pin (#3213).
+		const pendingDetails = (await manageOperations(
+			{ action: "get_run", run_id: runRow!.id },
+			{} as Env,
+			ctx,
+		)) as { run: Record<string, unknown> };
+		expect(pendingDetails.run.status).toBe("pending");
+		expect(pendingDetails.run.device_worker_id).toBe(deviceA.id);
+		const pendingRunsA = (await manageOperations(
+			{ action: "list_runs", device_worker_id: deviceA.id },
+			{} as Env,
+			ctx,
+		)) as { runs: Array<Record<string, unknown>> };
+		expect(pendingRunsA.runs.some((r) => r.id === runRow!.id)).toBe(true);
+
 		// Device B (even though capable) polls — MUST NOT claim the run targeted to Device A!
 		const bPoll = (await (await poll(deviceB, { computer_use: true })).json()) as { run_id?: number };
 		expect(bPoll.run_id).toBeUndefined();
@@ -246,7 +264,7 @@ describe("device run targeting and execution invariants", () => {
 		const connection = await createTestConnection({
 			organization_id: org.id,
 			connector_key: CONNECTOR_KEY,
-			created_by_user_id: user.id,
+			created_by: user.id,
 		});
 		const [inserted] = (await sql`
 			INSERT INTO runs (
