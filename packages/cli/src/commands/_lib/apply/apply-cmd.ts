@@ -813,21 +813,6 @@ export async function executePlan(
       // Outside prune, keep UI-added property keys when rebuilding the schema.
       !(ctx.state.prune ?? false)
     );
-    // View template is a separate, version-appending tool. Reconcile it only on
-    // create (when declared) or a flagged change — never every run, so the
-    // version history doesn't churn. Declared ⇒ set; omitted-under-prune ⇒ clear.
-    const tpl = row.desired.viewTemplate;
-    const templateChanged =
-      row.verb === "create"
-        ? tpl !== undefined
-        : (row.changedFields?.includes("viewTemplate") ?? false);
-    if (templateChanged) {
-      if (tpl !== undefined) {
-        await ctx.client.setEntityTypeViewTemplate(row.desired.slug, tpl);
-      } else {
-        await ctx.client.clearEntityTypeViewTemplate(row.desired.slug);
-      }
-    }
     printText(renderProgress(row.verb, "entity-type", row.id));
   }
 

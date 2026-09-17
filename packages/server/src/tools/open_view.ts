@@ -127,7 +127,7 @@ async function openViewImpl(
       SELECT id FROM entity_types
       WHERE slug = ${scope.type}
         AND deleted_at IS NULL
-        AND (organization_id = ${target.organizationId} OR organization_id IS NULL)
+        AND organization_id = ${target.organizationId}
       LIMIT 1
     `;
 		if (rows.length === 0) {

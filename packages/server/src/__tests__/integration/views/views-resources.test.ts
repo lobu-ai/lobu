@@ -43,6 +43,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 	let org: Awaited<ReturnType<typeof createTestOrganization>>;
 	let owner: Awaited<ReturnType<typeof createTestUser>>;
 	let token: string;
+	let readlessToken: string;
 	let ownerCtx: AuthContext;
 	let entityId: number;
 
@@ -105,6 +106,11 @@ describe('views resources + open_view + invoke_view_action', () => {
 		token = (
 			await createTestAccessToken(owner.id, org.id, client.client_id, {
 				scope: 'mcp:admin mcp:write mcp:read profile:read',
+			})
+		).token;
+		readlessToken = (
+			await createTestAccessToken(owner.id, org.id, client.client_id, {
+				scope: 'profile:read',
 			})
 		).token;
 		ownerCtx = {
@@ -324,6 +330,13 @@ describe('views resources + open_view + invoke_view_action', () => {
 
 		const missing = await get(`/api/${org.slug}/views/gone/shell`, { token });
 		expect(missing.status).toBe(404);
+	});
+
+	it('rejects the shell route without read scope', async () => {
+		const denied = await get(`/api/${org.slug}/views/board/shell`, {
+			token: readlessToken,
+		});
+		expect(denied.status).toBe(403);
 	});
 
 	it('serves a CLI-supplied bundle verbatim in the shell', async () => {

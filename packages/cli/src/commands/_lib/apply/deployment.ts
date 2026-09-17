@@ -205,7 +205,7 @@ export function toBaseline(record: BaselineRecord | null): Baseline {
  * The post-apply attribution snapshot + owned identities. Attribution records
  * the effective entity/rel/Automation state AFTER a successful apply — config's
  * declared values merged with preserved unmanaged facets (eventKinds /
- * viewTemplate / schemaExtras the config never declared) from the pre-apply
+ * schemaExtras the config never declared) from the pre-apply
  * remote — so `remote == attribution` means "unchanged since last apply".
  *
  * Under `prune`, omitted clearable facets are cleared by executePlan, so the
