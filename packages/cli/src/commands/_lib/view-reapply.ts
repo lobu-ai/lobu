@@ -25,7 +25,9 @@ export interface ViewReapplySet {
  * ValidationError when `lobu.config.ts` is missing or malformed — the caller
  * treats that as "no reapply loop", never as fatal.
  */
-export async function collectViewReapplySet(cwd: string): Promise<ViewReapplySet> {
+export async function collectViewReapplySet(
+  cwd: string
+): Promise<ViewReapplySet> {
   const { project, configPath } = await loadProjectConfig(cwd);
   const files = new Set<string>([configPath]);
   for (const src of project.views ?? []) {

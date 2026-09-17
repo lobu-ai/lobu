@@ -62,7 +62,9 @@ export interface ViewDefinition {
 
 export function defineView(def: ViewDefinition): ViewDefinition {
   if (!def || typeof def.key !== "string" || def.key.length === 0) {
-    throw new Error("defineView({ key, attach, ... }) requires a non-empty key");
+    throw new Error(
+      "defineView({ key, attach, ... }) requires a non-empty key"
+    );
   }
   if (!Array.isArray(def.attach)) {
     throw new Error(`defineView("${def.key}") requires attach to be an array`);
@@ -81,7 +83,10 @@ interface ViewRuntime {
   params: Params;
   setParams: (patch: Partial<Params>) => void;
   theme: "light" | "dark";
-  callTool: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
+  callTool: (
+    name: string,
+    args: Record<string, unknown>
+  ) => Promise<ToolResult>;
 }
 
 const Ctx = createContext<ViewRuntime | null>(null);
@@ -92,7 +97,10 @@ function useRuntime(): ViewRuntime {
   return rt;
 }
 
-export function useParams(): readonly [Params, (patch: Partial<Params>) => void] {
+export function useParams(): readonly [
+  Params,
+  (patch: Partial<Params>) => void,
+] {
   const rt = useRuntime();
   return [rt.params, rt.setParams] as const;
 }
@@ -101,7 +109,11 @@ export function useScope(): Scope {
   return useRuntime().scope;
 }
 
-export function useHost(): { connected: boolean; ready: boolean; theme: "light" | "dark" } {
+export function useHost(): {
+  connected: boolean;
+  ready: boolean;
+  theme: "light" | "dark";
+} {
   const rt = useRuntime();
   return { connected: rt.connected, ready: rt.ready, theme: rt.theme };
 }
@@ -133,7 +145,10 @@ export interface SqlQuery {
   kind: "sql";
   text: string;
 }
-export function sql(strings: TemplateStringsArray, ...values: unknown[]): SqlQuery {
+export function sql(
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+): SqlQuery {
   let text = "";
   strings.forEach((s, i) => {
     text += s;
@@ -145,12 +160,15 @@ export function sql(strings: TemplateStringsArray, ...values: unknown[]): SqlQue
 export function escapeLiteral(value: unknown): string {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("sql: only finite numbers can be bound");
+    if (!Number.isFinite(value))
+      throw new Error("sql: only finite numbers can be bound");
     return String(value);
   }
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   if (typeof value === "string") return `'${value.replaceAll("'", "''")}'`;
-  throw new Error("sql: only string, number, boolean, null values can be bound");
+  throw new Error(
+    "sql: only string, number, boolean, null values can be bound"
+  );
 }
 
 /** Direct tool read: for tools that return their JSON as `structuredContent`
@@ -160,7 +178,10 @@ export interface ToolQuery {
   name: string;
   args: Record<string, unknown>;
 }
-export function tool(name: string, args: Record<string, unknown> = {}): ToolQuery {
+export function tool(
+  name: string,
+  args: Record<string, unknown> = {}
+): ToolQuery {
   if (!name) throw new Error("tool() requires a tool name");
   return { kind: "tool", name, args };
 }
@@ -168,7 +189,8 @@ export function tool(name: string, args: Record<string, unknown> = {}): ToolQuer
 function parseTextJson(result: ToolResult): unknown {
   const content = Array.isArray(result.content) ? result.content : [];
   for (const c of content) {
-    if (!c || typeof c !== "object" || (c as { type?: string }).type !== "text") continue;
+    if (!c || typeof c !== "object" || (c as { type?: string }).type !== "text")
+      continue;
     let text = String((c as { text?: unknown }).text ?? "").trim();
     const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
     if (fence?.[1]) text = fence[1].trim();
@@ -194,7 +216,9 @@ export interface QueryState<T> {
  * fetch waits for the host's first `tool-input`: reads before it run against
  * defaults and double-fetch when the real scope lands.
  */
-export function useQuery<T = unknown>(query: SqlQuery | ToolQuery | string | null): QueryState<T> {
+export function useQuery<T = unknown>(
+  query: SqlQuery | ToolQuery | string | null
+): QueryState<T> {
   const rt = useRuntime();
   const [state, setState] = useState<Omit<QueryState<T>, "refetch">>({
     data: null,
@@ -210,6 +234,7 @@ export function useQuery<T = unknown>(query: SqlQuery | ToolQuery | string | nul
         : query.kind === "tool"
           ? `tool:${query.name}:${JSON.stringify(query.args)}`
           : `sql:${query.text}`;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable and tick is the intentional refetch trigger.
   useEffect(() => {
     // Parked: no query, or the host has not seeded scope/params yet.
     if (key === null || !rt.ready) return;
@@ -232,14 +257,17 @@ export function useQuery<T = unknown>(query: SqlQuery | ToolQuery | string | nul
         }
         // structuredContent when the tool declares an outputSchema (query_sql,
         // query_sdk, every read tool on MCP hosts); otherwise the text body.
-        const sc = (result.structuredContent ?? parseTextJson(result) ?? {}) as Record<
-          string,
-          unknown
-        >;
+        const sc = (result.structuredContent ??
+          parseTextJson(result) ??
+          {}) as Record<string, unknown>;
         // query_sdk → { success, return_value }, query_sql → { rows }, a named
         // tool → its whole body.
         const data = (
-          typeof q === "string" ? sc.return_value : q.kind === "tool" ? sc : sc.rows
+          typeof q === "string"
+            ? sc.return_value
+            : q.kind === "tool"
+              ? sc
+              : sc.rows
         ) as T;
         setState({ data: data ?? null, error: null, loading: false });
       })
@@ -254,7 +282,6 @@ export function useQuery<T = unknown>(query: SqlQuery | ToolQuery | string | nul
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, rt.ready, tick]);
   const refetch = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refetch };
@@ -278,7 +305,9 @@ export function mintInteractionId(): string {
 /** A declared action → `invoke_view_action { view, action, value }`. The name
  *  must exist on the CURRENT view definition; a removed button throws here
  *  instead of emitting a stale event. */
-export function useAction(name: string): (value?: Record<string, unknown>) => Promise<ActionResult> {
+export function useAction(
+  name: string
+): (value?: Record<string, unknown>) => Promise<ActionResult> {
   const rt = useRuntime();
   if (!rt.def.actions?.[name]) {
     throw new Error(`Action "${name}" is not declared on view "${rt.def.key}"`);
@@ -295,9 +324,17 @@ export function useAction(name: string): (value?: Record<string, unknown>) => Pr
           interaction_id: mintInteractionId(),
         });
         const err = resultError(result);
-        return { ok: !err, error: err, result: result.structuredContent ?? null };
+        return {
+          ok: !err,
+          error: err,
+          result: result.structuredContent ?? null,
+        };
       } catch (e) {
-        return { ok: false, error: e instanceof Error ? e.message : String(e), result: null };
+        return {
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+          result: null,
+        };
       }
     },
     [rt, name]
@@ -334,7 +371,8 @@ function coerceScope(raw: unknown): Scope {
   if (!raw || typeof raw !== "object") return {};
   const scope = raw as Record<string, unknown>;
   const out: Scope = {};
-  if (typeof scope.type === "string" && scope.type.length > 0) out.type = scope.type;
+  if (typeof scope.type === "string" && scope.type.length > 0)
+    out.type = scope.type;
   if (typeof scope.entity === "number" || typeof scope.entity === "string") {
     out.entity = scope.entity;
   }
@@ -350,7 +388,15 @@ function applyTheme(theme: "light" | "dark"): void {
   document.documentElement.style.colorScheme = theme;
 }
 
-function Provider({ def, bridge, children }: { def: ViewDefinition; bridge: ViewBridge; children: ReactNode }) {
+function Provider({
+  def,
+  bridge,
+  children,
+}: {
+  def: ViewDefinition;
+  bridge: ViewBridge;
+  children: ReactNode;
+}) {
   const [connected, setConnected] = useState(false);
   const [ready, setReady] = useState(bridge.hasToolInput());
   const [scope, setScope] = useState<Scope>({});
@@ -392,26 +438,40 @@ function Provider({ def, bridge, children }: { def: ViewDefinition; bridge: View
     (patch: Partial<Params>) => {
       setParamsState((prev) => {
         const next = coerceParams(def, { ...prev, ...patch });
-        bridgeRef.current.updateModelContext({ view: def.key, params: next }).catch(() => {
-          /* host without update-model-context: params stay frame-local */
-        });
+        bridgeRef.current
+          .updateModelContext({ view: def.key, params: next })
+          .catch(() => {
+            /* host without update-model-context: params stay frame-local */
+          });
         return next;
       });
     },
     [def]
   );
 
-  const callTool = useCallback(async (name: string, args: Record<string, unknown>) => {
-    const b = bridgeRef.current;
-    if (!b.isConnected()) {
-      // No handshake yet — fail loud instead of queueing into a dead host.
-      throw new Error("Not connected to a host");
-    }
-    return b.callTool(name, args);
-  }, []);
+  const callTool = useCallback(
+    async (name: string, args: Record<string, unknown>) => {
+      const b = bridgeRef.current;
+      if (!b.isConnected()) {
+        // No handshake yet — fail loud instead of queueing into a dead host.
+        throw new Error("Not connected to a host");
+      }
+      return b.callTool(name, args);
+    },
+    []
+  );
 
   const value = useMemo<ViewRuntime>(
-    () => ({ def, connected, ready, scope, params, setParams, theme, callTool }),
+    () => ({
+      def,
+      connected,
+      ready,
+      scope,
+      params,
+      setParams,
+      theme,
+      callTool,
+    }),
     [def, connected, ready, scope, params, setParams, theme, callTool]
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -424,7 +484,11 @@ export interface MountOptions {
 
 /** Entry point the compiled bundle calls once. Mounts the component into
  *  `#root` and connects to the host. */
-export function mountView(def: ViewDefinition, Component: () => ReactNode, opts?: MountOptions): void {
+export function mountView(
+  def: ViewDefinition,
+  Component: () => ReactNode,
+  opts?: MountOptions
+): void {
   const valid = defineView(def);
   const el = document.getElementById("root");
   if (!el) throw new Error("#root missing in view shell");

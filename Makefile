@@ -367,7 +367,7 @@ pre-pr:
 	@# — the identical scripts. Running them twice bought nothing but wall time.
 	@# The per-package loop below has no such twin, so it stays.
 	@echo "🔎 [2/5] Strict typecheck (per-package; root is covered by the commit hook)..."
-	@for pkg in server connector-worker connector-sdk device-connectors plugin-api plugin-host plugin-toolkit plugin-memory plugin-conversations plugin-media plugin-mcp embeddings cli; do \
+	@for pkg in server connector-worker connector-sdk device-connectors plugin-api plugin-host plugin-toolkit plugin-memory plugin-conversations plugin-media plugin-mcp embeddings views cli; do \
 		echo "   typecheck packages/$$pkg..."; \
 		( cd "packages/$$pkg" && bunx tsc --noEmit ) || exit $$?; \
 	done

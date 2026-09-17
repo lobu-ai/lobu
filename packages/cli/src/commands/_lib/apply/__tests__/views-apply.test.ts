@@ -18,7 +18,6 @@ import {
   loadDesiredStateFromConfig,
 } from "../desired-state.js";
 import { ApplyClient } from "../client.js";
-import { executePlan } from "../apply-cmd.js";
 
 const tempDirs: string[] = [];
 
@@ -53,7 +52,9 @@ mountView(view, Pipeline);
 `;
 
 function configWithViews(...viewPaths: string[]): string {
-  const list = viewPaths.map((p) => `viewFromFile(${JSON.stringify(p)})`).join(", ");
+  const list = viewPaths
+    .map((p) => `viewFromFile(${JSON.stringify(p)})`)
+    .join(", ");
   return `import { defineAgent, defineConfig, viewFromFile } from "@lobu/cli/config";
 export default defineConfig({
   agents: [defineAgent({ id: "triage", name: "Triage" })],
@@ -139,7 +140,10 @@ describe("view desired state", () => {
       "lobu.config.ts": configWithViews("./views/deal/pipeline.tsx"),
       "views/deal/pipeline.tsx": VIEW_SOURCE,
     });
-    const { state } = await loadDesiredStateFromConfig({ cwd: dir, only: "agents" });
+    const { state } = await loadDesiredStateFromConfig({
+      cwd: dir,
+      only: "agents",
+    });
     expect(state.views).toEqual([]);
   });
 });
@@ -166,11 +170,27 @@ describe("view diff rows", () => {
     ]);
     const remote = emptyRemote();
     remote.views = [
-      { key: "changed", name: "changed", content_hash: "zzzzzzzzzzzzzzzz", attach: [], last_writer: "w", updated_at: "t" },
-      { key: "same", name: "same", content_hash: "cccccccccccccccc", attach: [], last_writer: "w", updated_at: "t" },
+      {
+        key: "changed",
+        name: "changed",
+        content_hash: "zzzzzzzzzzzzzzzz",
+        attach: [],
+        last_writer: "w",
+        updated_at: "t",
+      },
+      {
+        key: "same",
+        name: "same",
+        content_hash: "cccccccccccccccc",
+        attach: [],
+        last_writer: "w",
+        updated_at: "t",
+      },
     ];
     const plan = computeDiff(desired, remote, {});
-    const byId = new Map(plan.rows.filter((r) => r.kind === "view").map((r) => [r.id, r.verb]));
+    const byId = new Map(
+      plan.rows.filter((r) => r.kind === "view").map((r) => [r.id, r.verb])
+    );
     expect(byId.get("fresh")).toBe("create");
     expect(byId.get("changed")).toBe("update");
     expect(byId.get("same")).toBe("noop");
@@ -180,20 +200,37 @@ describe("view diff rows", () => {
     const desired = stateWithViews([]);
     const remote = emptyRemote();
     remote.views = [
-      { key: "stale", name: "stale", content_hash: "dddddddddddddddd", attach: [], last_writer: "w", updated_at: "t" },
+      {
+        key: "stale",
+        name: "stale",
+        content_hash: "dddddddddddddddd",
+        attach: [],
+        last_writer: "w",
+        updated_at: "t",
+      },
     ];
     const drift = computeDiff(desired, remote, {});
     expect(drift.rows.find((r) => r.kind === "view")?.verb).toBe("drift");
-    const pruned = computeDiff({ ...desired, prune: true }, remote, { prune: true });
+    const pruned = computeDiff({ ...desired, prune: true }, remote, {
+      prune: true,
+    });
     expect(pruned.rows.find((r) => r.kind === "view")?.verb).toBe("delete");
   });
 });
 
 describe("view client", () => {
-  function stubClient(handler: (path: string, body: Record<string, unknown>) => unknown) {
+  function stubClient(
+    handler: (path: string, body: Record<string, unknown>) => unknown
+  ) {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
-    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const fetchImpl = (async (
+      url: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<
+        string,
+        unknown
+      >;
       calls.push({ path: String(url), body });
       return new Response(JSON.stringify(handler(String(url), body)), {
         status: 200,

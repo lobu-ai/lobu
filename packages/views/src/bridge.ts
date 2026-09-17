@@ -65,7 +65,9 @@ export class ViewBridge {
   private appInfo: { name: string; version: string };
   private nextId = 1;
   private pending = new Map<JsonRpcId, Pending>();
-  private toolInputListeners = new Set<(args: Record<string, unknown>) => void>();
+  private toolInputListeners = new Set<
+    (args: Record<string, unknown>) => void
+  >();
   private toolResultListeners = new Set<(result: ToolResult) => void>();
   private toolCancelledListeners = new Set<(reason: string | null) => void>();
   private hostContextListeners = new Set<(ctx: HostContext) => void>();
@@ -78,10 +80,15 @@ export class ViewBridge {
   private onMessage = (event: MessageEvent) => this.handleMessage(event);
   private listening = false;
 
-  constructor(target?: Window, expectedSource?: Window | null, opts?: BridgeOptions) {
+  constructor(
+    target?: Window,
+    expectedSource?: Window | null,
+    opts?: BridgeOptions
+  ) {
     const w = globalThis as unknown as { window?: Window; parent?: Window };
     this.target = target ?? w.window?.parent ?? (w.parent as Window);
-    this.expectedSource = expectedSource ?? (w.window?.parent as Window | null) ?? null;
+    this.expectedSource =
+      expectedSource ?? (w.window?.parent as Window | null) ?? null;
     this.targetOrigin = opts?.targetOrigin ?? "*";
     this.timeoutMs = opts?.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.appInfo = {
@@ -148,7 +155,10 @@ export class ViewBridge {
    *  reads `structuredContent`; the boolean-only hook on the card path is
    *  what this deliberately does not copy). */
   callTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
-    return this.request("tools/call", { name, arguments: args }) as Promise<ToolResult>;
+    return this.request("tools/call", {
+      name,
+      arguments: args,
+    }) as Promise<ToolResult>;
   }
 
   /** Read one `resources/read` URI and return the first text payload. The
@@ -167,7 +177,9 @@ export class ViewBridge {
 
   /** Push `{ structuredContent }` into the model's context. Hosts without the
    *  capability reject; callers keep params frame-local on failure. */
-  updateModelContext(structuredContent: Record<string, unknown>): Promise<void> {
+  updateModelContext(
+    structuredContent: Record<string, unknown>
+  ): Promise<void> {
     return this.request("ui/update-model-context", { structuredContent }).then(
       () => undefined
     );
@@ -211,7 +223,10 @@ export class ViewBridge {
     this.listening = true;
   }
 
-  private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private request(
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
     const id = this.nextId++;
     const message = { jsonrpc: "2.0" as const, id, method, params };
     return new Promise<unknown>((resolve, reject) => {
@@ -228,7 +243,10 @@ export class ViewBridge {
     });
   }
 
-  private notify(message: { method: string; params: Record<string, unknown> }): void {
+  private notify(message: {
+    method: string;
+    params: Record<string, unknown>;
+  }): void {
     this.target.postMessage({ jsonrpc: "2.0", ...message }, this.targetOrigin);
   }
 
@@ -261,7 +279,10 @@ export class ViewBridge {
       return;
     }
     if (typeof data.method !== "string") return;
-    this.handleNotification(data.method, isRecord(data.params) ? data.params : {});
+    this.handleNotification(
+      data.method,
+      isRecord(data.params) ? data.params : {}
+    );
   }
 
   private handleResponse(id: JsonRpcId, data: Record<string, unknown>): void {
@@ -270,13 +291,18 @@ export class ViewBridge {
     this.pending.delete(id);
     clearTimeout(pending.timer);
     if ("error" in data && isRecord(data.error)) {
-      pending.reject(new Error(String(data.error.message ?? "Host request failed")));
+      pending.reject(
+        new Error(String(data.error.message ?? "Host request failed"))
+      );
       return;
     }
     pending.resolve(data.result as never);
   }
 
-  private handleNotification(method: string, params: Record<string, unknown>): void {
+  private handleNotification(
+    method: string,
+    params: Record<string, unknown>
+  ): void {
     switch (method) {
       case "ui/notifications/tool-input": {
         this.toolInputReceived = true;
@@ -291,13 +317,15 @@ export class ViewBridge {
       }
       case "ui/notifications/tool-cancelled": {
         const reason = typeof params.reason === "string" ? params.reason : null;
-        for (const listener of [...this.toolCancelledListeners]) listener(reason);
+        for (const listener of [...this.toolCancelledListeners])
+          listener(reason);
         break;
       }
       case "ui/notifications/host-context-changed": {
         this.hostContext = { ...this.hostContext, ...params };
         const snapshot = this.getHostContext();
-        for (const listener of [...this.hostContextListeners]) listener(snapshot);
+        for (const listener of [...this.hostContextListeners])
+          listener(snapshot);
         break;
       }
       default:

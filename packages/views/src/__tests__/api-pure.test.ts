@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { coerceParams, defaultsFor, defineView, escapeLiteral, mintInteractionId, sql, tool } from "../api.js";
+import {
+  coerceParams,
+  defaultsFor,
+  defineView,
+  escapeLiteral,
+  mintInteractionId,
+  sql,
+  tool,
+} from "../api.js";
 
 const DEF = defineView({
   key: "pipeline",
@@ -24,7 +32,9 @@ describe("defineView", () => {
 describe("sql escaping", () => {
   test("renders scalars as literals, never raw", () => {
     const q = sql`SELECT * FROM deal WHERE stage = ${"open"} AND amount > ${10} AND won = ${false}`;
-    expect(q.text).toBe("SELECT * FROM deal WHERE stage = 'open' AND amount > 10 AND won = FALSE");
+    expect(q.text).toBe(
+      "SELECT * FROM deal WHERE stage = 'open' AND amount > 10 AND won = FALSE"
+    );
   });
 
   test("doubles single quotes so a hostile string cannot break out", () => {
@@ -38,8 +48,12 @@ describe("sql escaping", () => {
     expect(sql`SELECT ${null}`.text).toBe("SELECT NULL");
     expect(() => sql`SELECT ${Number.NaN}`).toThrow("finite numbers");
     expect(() => sql`SELECT ${Infinity}`).toThrow("finite numbers");
-    expect(() => sql`SELECT ${{ a: 1 }}`).toThrow("only string, number, boolean, null");
-    expect(() => sql`SELECT ${[1]}`).toThrow("only string, number, boolean, null");
+    expect(() => sql`SELECT ${{ a: 1 }}`).toThrow(
+      "only string, number, boolean, null"
+    );
+    expect(() => sql`SELECT ${[1]}`).toThrow(
+      "only string, number, boolean, null"
+    );
   });
 
   test("escapeLiteral maps booleans to TRUE/FALSE", () => {
@@ -56,7 +70,11 @@ describe("tool()", () => {
       name: "manage_connections",
       args: { action: "list" },
     });
-    expect(tool("query_sdk")).toEqual({ kind: "tool", name: "query_sdk", args: {} });
+    expect(tool("query_sdk")).toEqual({
+      kind: "tool",
+      name: "query_sdk",
+      args: {},
+    });
     expect(() => tool("")).toThrow("requires a tool name");
   });
 });
@@ -78,18 +96,36 @@ describe("params", () => {
   });
 
   test("coerceParams ignores unknown names and keeps defaults on mismatch", () => {
-    const out = coerceParams(DEF, { by: "stage", limit: "25", open: "true", evil: "1=1", view: "x" });
+    const out = coerceParams(DEF, {
+      by: "stage",
+      limit: "25",
+      open: "true",
+      evil: "1=1",
+      view: "x",
+    });
     expect(out).toEqual({ by: "stage", limit: 25, open: true });
     // "evil" and "view" are undeclared: dropped, never reach SQL or the URL.
     expect("evil" in out).toBe(false);
   });
 
   test("a non-numeric number falls back to its default", () => {
-    expect(coerceParams(DEF, { limit: "lots" })).toEqual({ by: "owner", limit: 50, open: true });
+    expect(coerceParams(DEF, { limit: "lots" })).toEqual({
+      by: "owner",
+      limit: 50,
+      open: true,
+    });
   });
 
   test("non-object input yields defaults", () => {
-    expect(coerceParams(DEF, null)).toEqual({ by: "owner", limit: 50, open: true });
-    expect(coerceParams(DEF, "owner")).toEqual({ by: "owner", limit: 50, open: true });
+    expect(coerceParams(DEF, null)).toEqual({
+      by: "owner",
+      limit: 50,
+      open: true,
+    });
+    expect(coerceParams(DEF, "owner")).toEqual({
+      by: "owner",
+      limit: 50,
+      open: true,
+    });
   });
 });

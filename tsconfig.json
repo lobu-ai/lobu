@@ -64,6 +64,7 @@
     "packages/connector-worker/**/*",
     "packages/connectors/**/*",
     "packages/embeddings/**/*",
-    "packages/owletto/**/*"
+    "packages/owletto/**/*",
+    "packages/views/**/*"
   ]
 }
