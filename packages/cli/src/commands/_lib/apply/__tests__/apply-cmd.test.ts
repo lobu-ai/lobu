@@ -630,6 +630,78 @@ describe("executePlan — entity-type schema fidelity", () => {
   });
 });
 
+describe("executePlan — no dead template-tool calls on the write path", () => {
+  test("entity-type create and update never touch manage_view_templates", async () => {
+    // The server tool is removed: any write-path call would POST a dead tool
+    // and abort the apply. The recording client has no template methods, so a
+    // call attempt throws — and the assertion names it.
+    const calls: string[] = [];
+    const client = new Proxy(
+      {},
+      {
+        get: (_target, prop) => {
+          if (typeof prop !== "string") return undefined;
+          calls.push(prop);
+          if (prop === "upsertEntityType")
+            return async () => ({ updated: true });
+          return async () => null;
+        },
+      }
+    ) as unknown as ApplyClient;
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [],
+    });
+    state.memorySchema.entityTypes = [
+      { slug: "deal", name: "Deal" },
+      { slug: "task", name: "Task" },
+    ];
+    const plan: DiffPlan = {
+      rows: [
+        {
+          kind: "entity-type",
+          verb: "create",
+          id: "deal",
+          // A stale config that still declares the retired facet: the write
+          // path must ignore it, never POST the removed tool.
+          desired: {
+            slug: "deal",
+            name: "Deal",
+            viewTemplate: { type: "card" },
+          } as unknown as { slug: string; name: string },
+        },
+        {
+          kind: "entity-type",
+          verb: "update",
+          id: "task",
+          desired: { slug: "task", name: "Task" },
+          changedFields: ["name"],
+        },
+      ],
+      counts: { create: 1, update: 1, noop: 0, drift: 0, delete: 0 },
+      notes: [],
+    };
+    const remote: RemoteSnapshot = {
+      agents: [],
+      agentSettings: new Map(),
+      entityTypes: [],
+      relationshipTypes: [],
+      automations: [],
+      connectorDefinitions: [],
+      authProfiles: [],
+      connections: [],
+      feedsByConnectionId: new Map(),
+      inferenceProviders: [],
+    };
+
+    await executePlan({ client, state, plan, remote }, []);
+
+    expect(calls).toContain("upsertEntityType");
+    expect(calls.filter((c) => /template/i.test(c))).toEqual([]);
+  });
+});
+
 describe("fetchRemoteSnapshot — no view-template hydration", () => {
   test("never calls the retired template tool, even under prune", async () => {
     // View templates are retired with the server tool: a snapshot fetch that

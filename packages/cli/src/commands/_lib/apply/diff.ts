@@ -670,7 +670,7 @@ function diffEntityType(
         changed: (d, r) => !deepEqual(d.metrics, r.metrics),
       },
       {
-        // event_kinds — prune-aware, like viewTemplate. event_kinds can be
+        // event_kinds — prune-aware. event_kinds can be
         // authored out-of-band via manage_entity_schema (a connector feed, the
         // UI, an agent), so a config that simply doesn't declare them must NOT
         // wipe them. Declared: diff and set on change. Omitted + prune: a
@@ -708,17 +708,6 @@ function diffEntityType(
           d.rulesSource !== undefined
             ? d.rulesSource.sourceCode !== (r.rulesSource ?? undefined)
             : prune && r.rulesSource != null,
-      },
-      {
-        // View template — prune-aware. Declared: diff against the remote current
-        // default (apply sets on change). Omitted + prune: a present remote
-        // template is a removal (apply clears it). Omitted + no prune: unmanaged
-        // (never churns), so a UI-authored template is left alone.
-        name: "viewTemplate",
-        changed: (d, r) =>
-          d.viewTemplate !== undefined
-            ? !deepEqual(d.viewTemplate, r.viewTemplate)
-            : prune && r.viewTemplate !== undefined,
       },
     ],
   }) as EntityTypeDiffRow;
@@ -873,12 +862,6 @@ function compareEntityTypeThreeWay(
       attribution: attribution?.eventKinds,
     },
     {
-      field: "viewTemplate",
-      desired: desired.viewTemplate,
-      remote: remote.viewTemplate,
-      attribution: attribution?.viewTemplate,
-    },
-    {
       field: "resolutionPolicy",
       desired: desired.resolutionPolicy?.["x-lobu-resolution"],
       remote: remote.schemaExtras?.["x-lobu-resolution"],
@@ -903,7 +886,7 @@ function compareEntityTypeThreeWay(
     });
   }
   // Facets the config omits are UNMANAGED outside prune (the server keeps them
-  // — eventKinds/viewTemplate/properties round-trip untouched). Only under
+  // — eventKinds/properties round-trip untouched). Only under
   // prune does omission mean "remove". Without this, an unchanged omitted facet
   // would be misclassified as config-moved and executePlan would clear it.
   // name/description are unmanaged under BOTH prune and non-prune: upsert
@@ -915,7 +898,6 @@ function compareEntityTypeThreeWay(
     "backing",
     "metrics",
     "eventKinds",
-    "viewTemplate",
     "resolutionPolicy",
     "rules",
   ]);
@@ -997,7 +979,7 @@ function diffEntityTypeWithBaseline(
     // the remote. A definition the apply leaves untouched is a noop, so an
     // existing org can establish its first baseline without blocking. The test
     // is prune-aware because the projection is: under prune an omitted
-    // eventKinds/viewTemplate/backing is a removal, so it does not compare
+    // eventKinds/backing is a removal, so it does not compare
     // equal and the ambiguity blocks instead of recording a phantom baseline.
     const inSync = deepEqual(
       effectiveEntityTypeAfterApply(desired, remote, prune),
@@ -1173,7 +1155,6 @@ export interface EntityTypeFacets {
   backing: unknown;
   metrics: unknown;
   eventKinds: unknown;
-  viewTemplate: unknown;
   schemaExtras: Record<string, unknown>;
 }
 
@@ -1185,7 +1166,6 @@ const normalizeEntityFacets = (e: {
   backing?: unknown;
   metrics?: unknown;
   eventKinds?: unknown;
-  viewTemplate?: unknown;
   schemaExtras?: Record<string, unknown>;
 }): EntityTypeFacets => ({
   name: e.name,
@@ -1195,7 +1175,6 @@ const normalizeEntityFacets = (e: {
   backing: e.backing,
   metrics: e.metrics,
   eventKinds: e.eventKinds,
-  viewTemplate: e.viewTemplate,
   schemaExtras: e.schemaExtras ?? {},
 });
 
@@ -1213,7 +1192,7 @@ const remoteEntityTypeFacets = (r: RemoteEntityType): EntityTypeFacets =>
  * Single source for BOTH the recorded attribution baseline and the
  * "already in sync?" test that lets an existing org establish its first
  * baseline: a second, prune-blind projection is what made prune-managed
- * eventKinds/viewTemplate/backing look inherited and recorded a phantom noop.
+ * eventKinds/backing look inherited and recorded a phantom noop.
  */
 export const effectiveEntityTypeAfterApply = (
   d: DesiredEntityType,
@@ -1260,7 +1239,6 @@ export const effectiveEntityTypeAfterApply = (
     backing: inherit(d.backing, r?.backing),
     metrics: inherit(d.metrics, r?.metrics),
     eventKinds: inherit(d.eventKinds, r?.eventKinds),
-    viewTemplate: inherit(d.viewTemplate, r?.viewTemplate),
     schemaExtras,
   });
 };

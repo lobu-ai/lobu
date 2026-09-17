@@ -4,6 +4,8 @@
 -- the payload gets a GIN index like the other jsonb filter columns. Split
 -- from 20260917000000_views because CONCURRENTLY cannot run inside that
 -- file's transactional section (one statement per transaction:false file).
+-- No reader exists in PR1 yet: the index is pre-provisioned for the PR3 mount
+-- points so the stacked rollout adds no later schema change for it.
 -- migrate:up transaction:false
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_views_attach
     ON public.views USING gin (attach);

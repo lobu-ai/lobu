@@ -584,7 +584,6 @@ describe("three-way edge cases", () => {
     remote.entityTypes = [
       remoteTask(1, {
         eventKinds: { note: { description: "ui-authored" } },
-        viewTemplate: { type: "stack" },
       }),
     ];
     const plan = computeDiff(desired, remote, {

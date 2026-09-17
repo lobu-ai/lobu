@@ -78,13 +78,6 @@ export interface RemoteEntityType {
   properties?: Record<string, unknown>;
   /** Event kinds keyed by semantic_type (mirrors {@link DesiredEntityType.eventKinds}); hoisted from the row's `event_kinds`. */
   eventKinds?: Record<string, unknown>;
-  /**
-   * Current default view template (mirrors {@link DesiredEntityType.viewTemplate}).
-   * NOT returned by the entity-type list (kept off that hot path); apply-cmd
-   * fetches it per relevant type via {@link ApplyClient.getEntityTypeViewTemplate}
-   * and attaches it before diffing.
-   */
-  viewTemplate?: Record<string, unknown>;
   /** Present only for derived types (mirrors {@link DesiredEntityType.backing}). */
   backing?: EntityBacking;
   /** Declared metrics (mirrors {@link DesiredEntityType.metrics}); hoisted from the row's `metrics_config`. */
@@ -896,57 +889,6 @@ export class ApplyClient {
       payload.rules_source = rulesSource?.sourceCode ?? null;
     }
     return this.upsertSchemaResource("entity_type", payload);
-  }
-
-  /**
-   * Fetch an entity type's current default view template (`null` if none).
-   * Apply uses this to diff ONLY the types it needs (declared templates, plus
-   * every config type under prune) — the template is deliberately NOT returned
-   * by the entity-type list, which the UI/bootstrap also calls.
-   */
-  async getEntityTypeViewTemplate(
-    slug: string
-  ): Promise<Record<string, unknown> | null> {
-    const { body } = await this.request<{
-      default_tab?: {
-        current?: { json_template?: Record<string, unknown> } | null;
-      };
-    }>("POST", `/api/${this.orgSlug}/manage_view_templates`, {
-      action: "get",
-      resource_type: "entity_type",
-      resource_id: slug,
-    });
-    return body.default_tab?.current?.json_template ?? null;
-  }
-
-  /**
-   * Set the entity type's default view template. A separate, version-appending
-   * tool from the schema upsert, so apply calls this ONLY on create or a changed
-   * template (see apply-cmd) — never every run, which would churn the history.
-   */
-  async setEntityTypeViewTemplate(
-    slug: string,
-    jsonTemplate: Record<string, unknown>
-  ): Promise<void> {
-    await this.request("POST", `/api/${this.orgSlug}/manage_view_templates`, {
-      action: "set",
-      resource_type: "entity_type",
-      resource_id: slug,
-      json_template: jsonTemplate,
-      change_notes: "lobu apply",
-    });
-  }
-
-  /**
-   * Clear the entity type's default view template (prune-gated removal). Nulls
-   * the current-version pointer server-side; history rows stay for rollback.
-   */
-  async clearEntityTypeViewTemplate(slug: string): Promise<void> {
-    await this.request("POST", `/api/${this.orgSlug}/manage_view_templates`, {
-      action: "clear",
-      resource_type: "entity_type",
-      resource_id: slug,
-    });
   }
 
   async listRelationshipTypes(): Promise<RemoteRelationshipType[]> {

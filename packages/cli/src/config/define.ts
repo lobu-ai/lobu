@@ -229,14 +229,6 @@ export interface EntityType {
       onMatch: "auto_merge" | "review";
     }>;
   };
-  /**
-   * Default view template (render-DSL root node, optionally with a `data_sources`
-   * key) for this entity type's detail page. Applied declaratively and
-   * git-audited. Under `prune`, omitting it clears any existing template (the
-   * page falls back to the schema-derived default); without prune, omitting it
-   * leaves a UI-authored template untouched.
-   */
-  viewTemplate?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   /**
    * Present only for DERIVED types — a read-only SQL view (`{ sql }`). Omitted ⇒
@@ -363,6 +355,18 @@ function deriveRequired(
 
 export function defineEntityType(config: Omit<EntityType, "kind">): EntityType {
   const { required, properties, ...rest } = config;
+  // View templates were retired with the server tool: a stale config must fail
+  // loudly here, not silently drop the declaration or die later on a removed
+  // tool call.
+  if ((rest as { viewTemplate?: unknown }).viewTemplate !== undefined) {
+    const key =
+      typeof (rest as { key?: unknown }).key === "string"
+        ? (rest as { key: string }).key
+        : "unknown";
+    throw new Error(
+      `Entity type '${key}' declares 'viewTemplate', which was retired: detail pages now render Lobu views (React modules under views/, applied with 'lobu apply'). Remove 'viewTemplate' from lobu.config.ts.`
+    );
+  }
   const resolvedRequired = deriveRequired(required, properties);
   return {
     ...rest,
