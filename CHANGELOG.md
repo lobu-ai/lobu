@@ -1,5 +1,25 @@
 # Changelog
 
+## [20.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.1.0...lobu-v20.2.0) (2026-09-17)
+
+
+### Features
+
+* **server:** make approvals, owner DMs, and card delivery work on any chat platform ([#3615](https://github.com/lobu-ai/lobu/issues/3615)) ([03aa836](https://github.com/lobu-ai/lobu/commit/03aa836ca6b5f92374ffe04d0dfe1f19fcb61e3b))
+
+
+### Bug Fixes
+
+* bind approvals to callers and fail closed ([#3621](https://github.com/lobu-ai/lobu/issues/3621)) ([c5c5413](https://github.com/lobu-ai/lobu/commit/c5c541372d95d910378a503941acbd48b6298175))
+* **daemon:** report descendants reaped by os.shell group cleanup ([#3650](https://github.com/lobu-ai/lobu/issues/3650)) ([794453e](https://github.com/lobu-ai/lobu/commit/794453e749efef503cf3bce6fe16283cdb2b36a3))
+* **device-connectors:** clarify click foreground delivery and bump owletto ([#3648](https://github.com/lobu-ai/lobu/issues/3648)) ([b6cef30](https://github.com/lobu-ai/lobu/commit/b6cef30697b1e4a5a84c26844c471a5efb250b34))
+* **oauth:** correlate device approval with token polling ([#3628](https://github.com/lobu-ai/lobu/issues/3628)) ([b5d5bb1](https://github.com/lobu-ai/lobu/commit/b5d5bb141233fcac167fc8640115a4e78452bfbc))
+* **oauth:** preserve resource binding across refresh ([#3627](https://github.com/lobu-ai/lobu/issues/3627)) ([54e4907](https://github.com/lobu-ai/lobu/commit/54e49072e4b2937f2ca0a6599269bdd3b959e7f9))
+* **server:** recommend trigger, not claim_next_window, for script Automations ([#3642](https://github.com/lobu-ai/lobu/issues/3642)) ([9df9f66](https://github.com/lobu-ai/lobu/commit/9df9f661d5d43edcce1580b42a158e05436778f9))
+* **server:** reject a device pin outside the fleet freshness window ([#3652](https://github.com/lobu-ai/lobu/issues/3652)) ([4c41748](https://github.com/lobu-ai/lobu/commit/4c417485e6ee309e525ac793b3ee24cbbe14fe1a))
+* **server:** select a pinned device's registered artifact for its runs ([#3643](https://github.com/lobu-ai/lobu/issues/3643)) ([18f9043](https://github.com/lobu-ai/lobu/commit/18f9043babbcf3aaa23ec9a0585d1519e6480b8f))
+* **server:** stop attributing runs to a connection's current device pin ([#3655](https://github.com/lobu-ai/lobu/issues/3655)) ([52cac21](https://github.com/lobu-ai/lobu/commit/52cac2110a2f104fef1e8bad1c885d266e622434))
+
 ## [20.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.0.1...lobu-v20.1.0) (2026-09-15)
 
 
