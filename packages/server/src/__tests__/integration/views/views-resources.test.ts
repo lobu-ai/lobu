@@ -381,10 +381,108 @@ describe('views resources + open_view + invoke_view_action', () => {
     `;
 		expect(rows[0].origin_type).toBe('view_interaction');
 
-	 const missingId = await post(`/api/${org.slug}/views/board/actions/retry`, {
+ 	 const missingId = await post(`/api/${org.slug}/views/board/actions/retry`, {
 			token,
 			body: { value: null },
 		});
 		expect(missingId.status).toBe(400);
+	});
+});
+
+describe('views on a public org stay signed-in-only', () => {
+	let publicSlug: string;
+
+	async function anonymousRpc(method: string, params: unknown) {
+		const initRes = await post(`/mcp/${publicSlug}`, {
+			body: {
+				jsonrpc: '2.0',
+				id: 'anon-init',
+				method: 'initialize',
+				params: {
+					protocolVersion: MCP_PROTOCOL_VERSION,
+					capabilities: {},
+					clientInfo: { name: 'public-visitor', version: '1.0' },
+				},
+			},
+		});
+		const sessionId = initRes.headers.get('mcp-session-id');
+		expect(sessionId).toBeTruthy();
+		const res = await post(`/mcp/${publicSlug}`, {
+			body: { jsonrpc: '2.0', id: 'anon-1', method, params },
+			headers: { 'mcp-session-id': sessionId!, 'mcp-protocol-version': MCP_PROTOCOL_VERSION },
+		});
+		return res.json();
+	}
+
+	beforeAll(async () => {
+		const publicOrg = await createTestOrganization({
+			name: 'Views Public Org',
+			slug: 'views-public-org',
+			visibility: 'public',
+		});
+		publicSlug = publicOrg.slug;
+		const pubOwner = await createTestUser({ email: 'views-public@test.com' });
+		await addUserToOrganization(pubOwner.id, publicOrg.id, 'owner');
+		const pubCtx: AuthContext = {
+			organizationId: publicOrg.id,
+			tokenOrganizationId: publicOrg.id,
+			userId: pubOwner.id,
+			memberRole: 'owner',
+			agentId: null,
+			requestedAgentId: null,
+			isAuthenticated: true,
+			clientId: null,
+			scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
+			tokenType: 'oauth',
+			requestUrl: `http://localhost/api/${publicOrg.id}`,
+			baseUrl: '',
+			scopedToOrg: true,
+			allowCrossOrg: false,
+		};
+		await executeTool(
+			'manage_views',
+			{
+				action: 'set',
+				key: 'board',
+				source_code: VIEW_SOURCE,
+				attach: [{ type: 'company', placement: 'tab' }],
+				actions: { retry: { emits: 'test.poked' } },
+			},
+			TEST_ENV,
+			pubCtx
+		);
+	});
+
+	it('anonymous resources/read cannot retrieve the per-view bundle', async () => {
+		const json = await anonymousRpc('resources/read', {
+			uri: 'ui://lobu/views/board',
+		});
+		expect(json.error?.message ?? '').toMatch(/auth|sign|login/i);
+		expect(JSON.stringify(json.result ?? null)).not.toContain('lobu-view');
+	});
+
+	it('anonymous tools/call cannot read view source via manage_views', async () => {
+		const json = await anonymousRpc('tools/call', {
+			name: 'manage_views',
+			arguments: { action: 'get', key: 'board' },
+		});
+		expect(json.result?.isError ?? json.error).toBeTruthy();
+		expect(JSON.stringify(json)).not.toContain('export default');
+	});
+
+	it('anonymous REST cannot read view source via manage_views', async () => {
+		const res = await post(`/api/${publicSlug}/manage_views`, {
+			body: { action: 'get', key: 'board' },
+		});
+		expect(res.status).not.toBe(200);
+		expect(await res.text()).not.toContain('export default');
+	});
+
+	it('anonymous tools/list hides manage_views', async () => {
+		const json = await anonymousRpc('tools/list', {});
+		const names = (json.result?.tools as Array<{ name: string }>).map(
+			(t) => t.name
+		);
+		expect(names).not.toContain('manage_views');
 	});
 });

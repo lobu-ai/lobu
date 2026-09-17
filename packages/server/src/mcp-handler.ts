@@ -527,8 +527,12 @@ function createServerForContext(
     }
     const viewKey = viewKeyFromResourceUri(uri);
     if (viewKey && authCtx.organizationId) {
-      // Per-view bundles carry the org's view code: read scope required, like
-      // the shell route. The static loader above stays ungated.
+      // Per-view bundles carry the org's view code: a signed-in caller only,
+      // mirroring the shell route. Anonymous sessions present the "*" scope
+      // sentinel, so the scope check below would pass them — identity first.
+      if (!authCtx.isAuthenticated || !authCtx.userId) {
+        throw new Error('Authentication required to read views.');
+      }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
         throw new Error('Reading views requires an MCP session with read access.');
       }

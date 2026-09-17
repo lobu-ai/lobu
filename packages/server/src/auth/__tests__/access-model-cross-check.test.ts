@@ -183,7 +183,13 @@ function declaredRuntimeTier(
 	// expose conversation titles to anonymous callers, so test the distinction.
 	const authenticatedConversationRead = tool === "manage_conversations" &&
 		(action === "list" || action === "get");
+	// Same shape for views: get/list fall through to the read tier for
+	// members, but view source and bundles must never reach anonymous
+	// callers, so they stay out of PUBLIC_READ_ACTIONS.
+	const authenticatedViewsRead = tool === "manage_views" &&
+		(action === "list" || action === "get");
 	const isExplicitlyDeclared = authenticatedConversationRead ||
+		authenticatedViewsRead ||
 		OWNER_ADMIN_ACTIONS[tool]?.has(action) ||
 		MEMBER_WRITE_ACTIONS[tool]?.has(action) ||
 		PUBLIC_READ_ACTIONS[tool]?.has(action);
@@ -199,6 +205,13 @@ describe("access-model cross-check", () => {
 		for (const action of ["list", "get"]) {
 			expect(getRequiredAccessLevel("manage_conversations", { action }, false)).toBe("read");
 			expect(isPublicReadable("manage_conversations", { action })).toBe(false);
+		}
+	});
+
+	it("keeps view reads authenticated while reporting read tier", () => {
+		for (const action of ["list", "get"]) {
+			expect(getRequiredAccessLevel("manage_views", { action }, false)).toBe("read");
+			expect(isPublicReadable("manage_views", { action })).toBe(false);
 		}
 	});
 
