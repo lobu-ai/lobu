@@ -177,7 +177,7 @@ export interface InferenceProviderDiffRow
 export interface ViewDiffRow extends BaseRow {
   kind: "view";
   desired?: DesiredView;
-  /** Local key resolved at bundle time; the diff keys on the file hash. */
+  /** Module key resolved at bundle time; the diff keys on the content hash. */
   remote?: RemoteView;
 }
 
@@ -2433,9 +2433,11 @@ export function computeDiff(
   }
 
   // Views. Full-apply only (neither "agents" nor "memory"). Keyed on the
-  // module's declared key; the FILE hash is the change signal (same source →
-  // same hash → noop, and the server no-writes on top). Remote-only views are
-  // config-owned only under prune; otherwise reported as drift.
+  // module's declared key; the change signal is the server's content hash
+  // (source plus declared metadata, computed at load with the same function
+  // the server hashes with — so a diff noop means the server will no-write).
+  // Remote-only views are config-owned only under prune; otherwise reported
+  // as drift.
   if (only === undefined) {
     // `?? []` mirrors the providers default above — test literals build a
     // partial DesiredStateForDiff.

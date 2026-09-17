@@ -197,17 +197,26 @@ describe("apply views over the wire", () => {
       )
     ).toHaveLength(1);
     // The stubbed remote now reports the same content hash the loader
-    // computes, so the diff is noop and nothing is sent.
+    // computes (server semantics: source plus declared metadata), so the
+    // diff is noop and nothing is sent.
     store.views[0] = {
       ...(store.views[0] as Record<string, unknown>),
     };
-    const { createHash } = await import("node:crypto");
+    const { contentHash } = await import(
+      "@lobu/core/contracts/tools/view-content-hash"
+    );
     const { readFileSync } = await import("node:fs");
     const source = readFileSync(
       join(dir, "views", "deal", "pipeline.tsx"),
       "utf-8"
     );
-    const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);
+    const hash = contentHash(source, {
+      name: "pipeline",
+      description: "",
+      attach: [{ type: "deal" }],
+      params: { by: { type: "string", default: "owner" } },
+      actions: { markWon: { emits: "deal.won" } },
+    });
     store.views[0] = {
       ...(store.views[0] as Record<string, unknown>),
       content_hash: hash,

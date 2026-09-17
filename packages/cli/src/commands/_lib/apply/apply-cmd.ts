@@ -844,38 +844,25 @@ export async function executePlan(
     }
   }
 
-  // 2b) Views — bundle on the CLI, where the project's node_modules is
-  //     available (React, `@lobu/views`, relative files, view npm deps), and
-  //     ship source + bundle + metadata extracted from the module itself.
-  //     Lazy-imported like the connector compiler so esbuild stays off
-  //     apply-cmd's module-load path (same measured justification: esbuild +
-  //     its graph would otherwise ride every `lobu` invocation).
+  // 2b) Views — shipped from the load-time bundle (source + browser bundle +
+  //     metadata extracted from the module itself, hashed with the server's
+  //     function). No re-bundling here: the diff already compared the exact
+  //     hash the server will compute.
   for (const row of rowsByKind("view")) {
     if (row.kind !== "view") continue;
     if (!row.desired) continue;
-    const { ensureProjectDepsInstalled } = await import(
-      "../ensure-deps-installed.js"
-    );
-    ensureProjectDepsInstalled(row.desired.sourcePath, printText);
-    const { bundleViewFromFile } = await import("../view-bundler.js");
-    const bundled = await bundleViewFromFile(row.desired.sourcePath);
-    if (bundled.metadata.key !== row.id) {
-      throw new ValidationError(
-        `${row.desired.sourceFile}: defineView key "${bundled.metadata.key}" does not match the planned key "${row.id}"`
-      );
-    }
     const result = await ctx.client.setView({
       key: row.id,
-      name: bundled.metadata.key,
+      name: row.desired.key,
       source_code: row.desired.sourceCode,
-      compiled_code: bundled.compiledCode,
-      attach: bundled.metadata.attach,
-      params: bundled.metadata.params,
-      actions: bundled.metadata.actions,
+      compiled_code: row.desired.compiledCode,
+      attach: row.desired.attach,
+      params: row.desired.params,
+      actions: row.desired.actions,
     });
-    const kb = (Buffer.byteLength(bundled.compiledCode, "utf8") / 1024).toFixed(
-      0
-    );
+    const kb = (
+      Buffer.byteLength(row.desired.compiledCode, "utf8") / 1024
+    ).toFixed(0);
     printText(
       renderProgress(
         row.verb,
@@ -1411,7 +1398,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   await loadProjectEnvFile(cwd);
 
   // Load desired state from the TypeScript entrypoint (lobu.config.ts).
-  const loadArgs = { cwd, ...(opts.only ? { only: opts.only } : {}) };
+  const loadArgs = {
+    cwd,
+    ...(opts.only ? { only: opts.only } : {}),
+    onLog: (message: string) => printText(chalk.dim(message)),
+  };
   const { state, configPath, warnings } =
     await loadDesiredStateFromConfig(loadArgs);
 

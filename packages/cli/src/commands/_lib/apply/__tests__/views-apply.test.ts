@@ -1,16 +1,16 @@
 /**
- * Views through load → diff → client → executePlan.
+ * Views through load → diff → client.
  *
- * Loader: key from the `defineView` literal, path fallback, duplicates and
- * bad paths fail loud. Diff: create/update/noop keyed on the file hash,
- * remote-only drift vs prune-delete. Client: set/list/remove hit
- * `manage_views` with the apply shape. executePlan: bundles the module where
- * node_modules exists, refuses a key mismatch, prints the shell URL.
+ * Loader: bundles the module at load (key, metadata, server-semantics hash
+ * from the shared function), duplicates and bad paths fail loud. Diff:
+ * create/update/noop keyed on the content hash, remote-only drift vs
+ * prune-delete. Client: set/list/remove hit `manage_views` with the apply
+ * shape.
  */
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { contentHash } from "@lobu/core/contracts/tools/view-content-hash";
 import { computeDiff, type RemoteSnapshot } from "../diff.js";
 import {
   type DesiredState,
@@ -30,7 +30,10 @@ afterEach(() => {
 });
 
 function mkProject(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), "lobu-views-apply-"));
+  // Loader tests bundle real modules (the `@lobu/views` import must
+  // resolve), so fixtures live next to this test, not in tmp. Removed in
+  // afterEach.
+  const dir = mkdtempSync(join(import.meta.dir, "views-apply-fixture-"));
   tempDirs.push(dir);
   for (const [rel, content] of Object.entries(files)) {
     const abs = join(dir, rel);
@@ -70,6 +73,10 @@ function desiredView(key: string, hash: string): DesiredView {
     sourceCode: `// ${key}`,
     contentHash: hash,
     sourceFile: `views/${key}.tsx`,
+    compiledCode: `// bundle ${key}`,
+    attach: [],
+    params: {},
+    actions: {},
   };
 }
 
@@ -90,7 +97,7 @@ function emptyRemote(): RemoteSnapshot {
 }
 
 describe("view desired state", () => {
-  test("key comes from the defineView literal", async () => {
+  test("bundles at load: key, metadata and server-semantics hash", async () => {
     const dir = mkProject({
       "lobu.config.ts": configWithViews("./views/deal/pipeline.tsx"),
       "views/deal/pipeline.tsx": VIEW_SOURCE,
@@ -98,18 +105,32 @@ describe("view desired state", () => {
     });
     const { state } = await loadDesiredStateFromConfig({ cwd: dir });
     expect(state.views).toHaveLength(1);
-    expect(state.views[0]?.key).toBe("pipeline");
-    expect(state.views[0]?.sourceFile).toBe("views/deal/pipeline.tsx");
-    expect(state.views[0]?.contentHash).toHaveLength(16);
+    const view = state.views[0];
+    expect(view?.key).toBe("pipeline");
+    expect(view?.sourceFile).toBe("views/deal/pipeline.tsx");
+    expect(view?.attach).toEqual([{ type: "deal" }]);
+    expect(view?.compiledCode.length).toBeGreaterThan(10_000);
+    // The diff key is what the server will compute: same function, same
+    // inputs (name defaults to key, description to empty).
+    expect(view?.contentHash).toBe(
+      contentHash(view?.sourceCode ?? "", {
+        name: "pipeline",
+        description: "",
+        attach: [{ type: "deal" }],
+        params: { by: { type: "string", default: "owner" } },
+        actions: { markWon: { emits: "deal.won" } },
+      })
+    );
   });
 
-  test("key falls back to the path when the module has no literal", async () => {
+  test("a module without mountView fails loud at load", async () => {
     const dir = mkProject({
       "lobu.config.ts": configWithViews("./views/connection/health.tsx"),
       "views/connection/health.tsx": `export default function H() { return null; }\n`,
     });
-    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
-    expect(state.views[0]?.key).toBe("connection-health");
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      "must call mountView"
+    );
   });
 
   test("duplicate keys, absolute paths and missing files fail loud", async () => {
