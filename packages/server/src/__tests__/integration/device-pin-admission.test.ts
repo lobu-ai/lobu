@@ -406,6 +406,40 @@ describe('manifest-backed device pin admission', () => {
     expect((await createSyncRun(Number(feed.id), {} as Env)).ok).toBe(true);
   });
 
+  it('admits a sync on a pinned device whose registered artifact lost the active definition slot', async () => {
+    // Same class as the action-run case in device-pinned-artifact-selection:
+    // the org's single active definition is the newer 1.0.0 contract, but the
+    // pinned device advertises a registered 0.9.0. A feed with no explicit
+    // pinned_version must still be created against the device's own artifact.
+    const oldManifest = manifest('0.9.0');
+    const fixture = await seedFixture(oldManifest);
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO connector_versions (
+        organization_id, connector_key, version, source_path, compiled_code_hash, created_at
+      ) VALUES (
+        ${fixture.org.id}, ${KEY}, ${oldManifest.version},
+        ${`device-manifest://chrome-extension/${KEY}@${oldManifest.version}`},
+        ${deviceManifestHash(oldManifest)}, NOW()
+      )
+    `;
+    const [feed] = await sql`
+      SELECT id, pinned_version FROM feeds WHERE connection_id = ${fixture.connection.id}
+    `;
+    expect(feed.pinned_version).toBeNull();
+    const result = await createSyncRun(Number(feed.id), {} as Env);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(`Sync was skipped: ${result.reason}`);
+    const [run] = await sql`
+      SELECT connector_version, target_device_worker_id, status FROM runs WHERE id = ${result.runId}
+    `;
+    expect(run).toMatchObject({
+      connector_version: oldManifest.version,
+      target_device_worker_id: fixture.device.id,
+      status: 'pending',
+    });
+  });
+
   it('admits a retained pinned_version sync despite an incompatible newer active definition', async () => {
     const oldManifest = manifest('0.9.0');
     const fixture = await seedFixture(oldManifest);

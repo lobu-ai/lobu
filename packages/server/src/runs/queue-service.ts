@@ -449,11 +449,12 @@ async function createSyncRunWithClient(
   // Get feed details (including pinned_version)
   const feedRows = await sql`
     SELECT f.organization_id, f.connection_id, f.pinned_version, f.schedule, f.timezone,
-           c.connector_key, c.device_worker_id,
+           c.connector_key, c.device_worker_id, dw.user_id AS device_owner_user_id,
            cd.definition_id,
            COALESCE(cd.feed_operations, '[]'::jsonb) AS feed_operations
     FROM feeds f
     JOIN connections c ON c.id = f.connection_id
+    LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
     LEFT JOIN LATERAL (
       SELECT connector_definitions.id AS definition_id,
              connector_definitions.feeds_schema -> f.feed_key -> 'operations' AS feed_operations
@@ -487,6 +488,7 @@ async function createSyncRunWithClient(
     connection_id: number;
     connector_key: string;
     device_worker_id: string | null;
+    device_owner_user_id: string | null;
     pinned_version: string | null;
     schedule: string | null;
     timezone: string | null;
@@ -505,14 +507,33 @@ async function createSyncRunWithClient(
     return { ok: false, reason: 'sync_unsupported' };
   }
 
-  // Resolve connector version: pinned_version → connector_definitions.version,
-  // then verify the version has compiled code or a bundled source for on-demand
-  // compilation.
+  // A device-pinned connection executes the contract ITS device advertises,
+  // not the fleet-elected definition — the same selection the action path
+  // makes (see resolvePinnedDeviceConnectorVersion). An explicit feed
+  // `pinned_version` still wins, and an uninstalled connector (no definition)
+  // keeps the fleet lookup so it is retired below rather than run.
+  const pinnedDeviceVersion =
+    feed.pinned_version == null &&
+    feed.definition_id != null &&
+    feed.device_worker_id &&
+    feed.device_owner_user_id
+      ? await resolvePinnedDeviceConnectorVersion({
+          sql,
+          organizationId: feed.organization_id,
+          ownerUserId: feed.device_owner_user_id,
+          connectorKey: feed.connector_key,
+          deviceWorkerId: feed.device_worker_id,
+        })
+      : null;
+
+  // Resolve connector version: pinned_version → the pinned device's registered
+  // artifact → connector_definitions.version, then verify the version has
+  // compiled code or a bundled source for on-demand compilation.
   const resolved = await resolveActiveConnectorVersion(sql, {
     orgId: feed.organization_id,
     connectorKey: feed.connector_key,
     requireRunnable: true,
-    pinnedVersion: feed.pinned_version,
+    pinnedVersion: feed.pinned_version ?? pinnedDeviceVersion,
   });
   if (!resolved.ok) {
     if (resolved.reason === 'no-definition') {
