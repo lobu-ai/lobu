@@ -71,6 +71,11 @@ export interface ShellRunOutput {
    * running inside the owned process group, and that work was therefore killed
    * during cleanup. Absent -- never `false` -- on the ordinary path, so the
    * field only ever appears when there is something to report.
+   *
+   * Scoped to a run that ended by its own exit. A timeout or a shutdown kills
+   * the group while the command is still IN it, so the group cannot be told
+   * apart from the work it backgrounded there; those paths already fail with
+   * `timeout`/`shutdown` as the named cause.
    */
   reaped_descendants?: boolean;
   success: boolean;

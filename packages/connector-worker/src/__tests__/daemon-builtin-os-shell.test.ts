@@ -565,6 +565,27 @@ describe('daemon-builtin os.shell', () => {
     expect(output.process_stage).toBeUndefined();
   });
 
+  // The reap signal is scoped to a run that ended by its own exit, and this
+  // pins that scope. A timeout kills the group while the command is still a
+  // member of it, so counting survivors there would report the command itself
+  // -- `sleep 30` backgrounds nothing, yet the group holds the live target.
+  // Extending the count to this path without excluding the target's own pid
+  // marks EVERY timeout as having reaped descendants; the timeout already
+  // fails with its own named cause, so the diagnostic must stay silent here.
+  test('does not claim reaping on a timeout, where the target is still in the group', async () => {
+    if (process.platform === 'win32') return;
+    const output = await runShellBuiltin({
+      command: 'sleep 30',
+      cwd: process.cwd(),
+      timeout_ms: 1_000,
+    });
+
+    expect(output.timed_out).toBe(true);
+    expect(output.success).toBe(false);
+    expect(output.process_stage).toBe('timeout');
+    expect(output.reaped_descendants).toBeUndefined();
+  }, 20_000);
+
   test('rejects a timeout that exceeds the caller truth budget', async () => {
     await expect(runShellBuiltin({
       command: 'printf nope',
