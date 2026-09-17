@@ -39,6 +39,33 @@
 export const DEVICE_ONLINE_WINDOW_SECONDS = 120;
 
 /**
+ * How recently a device must have polled to still count as part of the user's
+ * FLEET — the set of devices whose advertised capabilities can serve a
+ * connector at all.
+ *
+ * Deliberately not `DEVICE_ONLINE_WINDOW_SECONDS`. The two windows answer
+ * different questions and must not be collapsed:
+ *
+ *  - 120s "online" = a dispatch issued right now has a real chance of being
+ *    claimed. A laptop closed for an hour fails this, and should.
+ *  - 7 days "fresh" = this machine is still one of mine. A laptop closed for a
+ *    weekend, or a desktop asleep over PTO, is still a legitimate execution
+ *    target; its pin is placement, not a liveness claim, and reconcile is
+ *    required to preserve it across exactly these intervals
+ *    (`worker-api/device-reconcile.ts`). 7 days spans a work week plus a
+ *    weekend, and sits well inside the reaper's 30-day delete window
+ *    (`scheduled/reap-stale-device-workers.ts`) so a device is never
+ *    un-pinnable before it is reapable.
+ *
+ * Expressed as a postgres interval literal because every consumer applies it in
+ * SQL against `device_workers.last_seen_at`. Derived in ONE place: this window
+ * previously existed as three separate `'7 days'` literals (device-reconcile,
+ * two sites in device-manifests), so widening it in one and not the others
+ * would have silently disagreed about which devices are fleet members.
+ */
+export const DEVICE_WORKER_FRESH_INTERVAL = '7 days';
+
+/**
  * Human-readable age of a device's last poll, for `reason` strings and
  * dispatch errors. Deliberately coarse: the caller needs "is this stale and
  * roughly how stale", not milliseconds.

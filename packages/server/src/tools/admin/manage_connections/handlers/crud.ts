@@ -1547,8 +1547,8 @@ export async function handleUpdate(
   // Verify ownership
   const existingRows = await sql`
     SELECT c.id, c.connector_key, c.auth_profile_id, c.app_auth_profile_id, c.created_by,
-           c.config, c.credential_mode, cd.auth_schema, cd.options_schema, cd.feeds_schema,
-           cd.mcp_config
+           c.config, c.credential_mode, c.device_worker_id, cd.auth_schema, cd.options_schema,
+           cd.feeds_schema, cd.mcp_config
     FROM connections c
     LEFT JOIN LATERAL (
       SELECT auth_schema, options_schema, feeds_schema, mcp_config
@@ -1579,6 +1579,7 @@ export async function handleUpdate(
     created_by: string | null;
     config: Record<string, unknown> | null;
 		credential_mode: "byo" | "managed" | null;
+    device_worker_id: string | null;
   };
 
 	const hasAuthProfileArg = Object.hasOwn(args, "auth_profile_slug");
@@ -1732,6 +1733,7 @@ export async function handleUpdate(
       userId: ctx.userId,
       connector: connectorDef,
       deviceWorkerId: args.device_worker_id,
+      currentDeviceWorkerId: existing.device_worker_id,
     });
 		if ("error" in binding) return binding;
     nextDeviceWorkerId = binding.deviceWorkerId;

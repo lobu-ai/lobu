@@ -30,6 +30,7 @@ import {
   IS_DEVICE_CONNECTOR_SQL,
   ORG_INSTALLED_CONNECTOR_ARTIFACT_SQL,
 } from '../utils/device-autowire-suppression';
+import { DEVICE_WORKER_FRESH_INTERVAL } from '../utils/device-liveness';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import {
@@ -50,9 +51,6 @@ interface ManifestFeed {
   name?: string;
   operations?: Array<'sync' | 'read'>;
 }
-
-/** A device worker counts toward "serves capability X" only if seen this recently. */
-const DEVICE_WORKER_FRESH_INTERVAL = '7 days';
 
 /**
  * Install + wire a bundled device connector into the user's personal org:

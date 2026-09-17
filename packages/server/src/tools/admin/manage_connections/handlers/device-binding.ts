@@ -4,6 +4,10 @@
 
 import { getDb } from '../../../../db/client';
 import { getPrimaryAuthProfileForKind } from '../../../../utils/auth-profiles';
+import {
+  DEVICE_WORKER_FRESH_INTERVAL,
+  describeDeviceLastSeen,
+} from '../../../../utils/device-liveness';
 import type { ScopedConnectorDefinitionRow } from '../../../../catalog/connector-definitions';
 
 // ============================================
@@ -59,12 +63,22 @@ export async function isManagedPublicOrgConnect(params: {
  *  - Any other connector may optionally be pinned to a device (run-on-device).
  *  - The requester may only pin a device they own, and only into the workspace
  *    that device is attached to (device_workers.organization_id).
+ *  - The device must still be in the fleet freshness window. Every gate here
+ *    answers "can this device actually serve this connector", and a device the
+ *    fleet no longer contains cannot — see the freshness check below.
  */
 export async function resolveDeviceBinding(params: {
   organizationId: string;
   userId: string | null | undefined;
   connector: ScopedConnectorDefinitionRow;
   deviceWorkerId: string | null | undefined;
+  /**
+   * The connection's CURRENT pin, when re-validating an existing connection
+   * (`update`). Re-sending the pin the connection already has is not a
+   * placement change, so the freshness gate does not apply to it — see below.
+   * Ownership, workspace and capability are still re-checked.
+   */
+  currentDeviceWorkerId?: string | null;
 }): Promise<{ error: string } | { deviceWorkerId: string | null }> {
   const sql = getDb();
   const requiredCapability = params.connector.required_capability ?? null;
@@ -80,7 +94,9 @@ export async function resolveDeviceBinding(params: {
   }
 
   const rows = (await sql`
-    SELECT dw.id, dw.user_id, dw.capabilities, dw.label, dw.organization_id
+    SELECT dw.id, dw.user_id, dw.capabilities, dw.label, dw.organization_id,
+           dw.last_seen_at, now() AS db_now,
+           dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval AS fresh
     FROM device_workers dw
     WHERE dw.id = ${deviceWorkerId}
     LIMIT 1
@@ -90,6 +106,11 @@ export async function resolveDeviceBinding(params: {
     capabilities: unknown;
     label: string | null;
     organization_id: string | null;
+    // `device_workers.last_seen_at` is NOT NULL; `fresh` is computed from it.
+    last_seen_at: Date | string;
+    // Postgres' clock, so the age in the message agrees with the `fresh` verdict.
+    db_now: Date | string;
+    fresh: boolean;
   }>;
   const device = rows[0];
   if (!device) {
@@ -113,5 +134,40 @@ export async function resolveDeviceBinding(params: {
     }
   }
 
-  return { deviceWorkerId };
+  // Freshness is the last gate, so the more specific "not yours" / "wrong
+  // workspace" / "permission not granted" answers win when several apply.
+  //
+  // A device outside the fleet window is one every execution path already
+  // treats as absent: it is not in the capability set reconcile computes, the
+  // poll's unpinned lane cannot match it, and no run pinned to it will ever be
+  // claimed. Accepting the write anyway produced the #3212 report — success
+  // returned, the device echoed back as applied, and the only later signal a
+  // run that silently never starts. Freshness is knowable here, for the same
+  // reason the capability check is, so it is answered here.
+  //
+  // This is the 7-day fleet window, NOT the 120s "online" one: a pin is
+  // placement rather than a liveness claim, and a laptop closed for the
+  // weekend must stay pinnable — reconcile is separately required to preserve
+  // its placement across exactly that interval.
+  //
+  // Only a placement CHANGE is gated. An `update` that round-trips the pin the
+  // connection already holds (read-modify-write of the whole row, or a rename
+  // sent alongside the unchanged `device_worker_id`) is not asking to place
+  // anything, and rejecting it would fail the unrelated edit for a device that
+  // reconcile is about to repair anyway.
+  // Compared on `device.id`, the canonical value postgres returned for this
+  // row, not the caller's raw string: postgres normalizes uuids and compares
+  // them case-insensitively, so a differently-cased id selects this same device
+  // and clears every gate above. Comparing the raw string would disagree with
+  // the database about identity and reject a round-trip that moved nothing.
+  const unchangedPin = device.id === (params.currentDeviceWorkerId ?? null);
+  if (!device.fresh && !unchangedPin) {
+    const dbNow = device.db_now instanceof Date ? device.db_now : new Date(device.db_now);
+    return {
+      error: `Device '${device.label ?? deviceWorkerId}' is offline — it ${describeDeviceLastSeen(device.last_seen_at, dbNow)} and hasn't been seen in the last ${DEVICE_WORKER_FRESH_INTERVAL}, so a run pinned to it would never be claimed. Bring it back online, or pin a device that has checked in within the last ${DEVICE_WORKER_FRESH_INTERVAL}.`,
+    };
+  }
+
+  // The canonical id, so the value echoed back matches the one stored.
+  return { deviceWorkerId: device.id };
 }

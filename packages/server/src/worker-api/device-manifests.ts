@@ -9,7 +9,10 @@ import type { ConnectorMetadata } from '../utils/connector-compiler';
 import {
   isChromeNamespaceConnectorKey,
 } from '../utils/connector-execution-placement';
-import { DEVICE_ONLINE_WINDOW_SECONDS } from '../utils/device-liveness';
+import {
+  DEVICE_ONLINE_WINDOW_SECONDS,
+  DEVICE_WORKER_FRESH_INTERVAL,
+} from '../utils/device-liveness';
 import logger from '../utils/logger';
 
 const MAX_MANIFESTS_PER_POLL = 32;
@@ -177,7 +180,7 @@ export async function getDeviceManifestSourcesForUser(params: {
            last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
     FROM device_workers
     WHERE user_id = ${params.userId}
-      AND last_seen_at > now() - '7 days'::interval
+      AND last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
       AND (
         ${params.connectorKey == null}
         OR connector_manifests ? ${params.connectorKey ?? ''}
@@ -324,7 +327,7 @@ export async function getDeviceManifestClaimAuthorizationsForDevice(params: {
     FROM device_workers
     WHERE id = ${params.deviceId}::uuid
       AND user_id = ${params.userId}
-      AND last_seen_at > now() - '7 days'::interval
+      AND last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
     LIMIT 1
   `) as unknown as Array<{
     platform: string | null;
