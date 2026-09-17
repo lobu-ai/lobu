@@ -121,6 +121,58 @@ describe('Automation script executor', () => {
     ).toEqual([]);
   });
 
+  it('recommends trigger, not the claim it would reject, for a script Automation', async () => {
+    const { workspace, automationId } = await seedScriptAutomation();
+    // Put the arrival mark behind the horizon so a next window genuinely exists;
+    // the recommendation is only emitted when one does.
+    await getTestDb()`
+      UPDATE automations
+      SET next_window_start = now() - interval '1 day'
+      WHERE id = ${automationId}
+    `;
+
+    const detail = (await workspace.owner.automations.get({
+      automation_id: String(automationId),
+    })) as {
+      pending_analysis?: {
+        next_window: { start: string; end: string } | null;
+        next_action: { tool: string } | null;
+      };
+    };
+
+    expect(detail.pending_analysis?.next_window).not.toBeNull();
+    // `claim_next_window` 409s for script executors, so recommending it walked
+    // external clients into a guaranteed error; `trigger` is the working path.
+    expect(detail.pending_analysis?.next_action?.tool).toBe(
+      'client.automations.trigger'
+    );
+  });
+
+  it('still recommends the claim for a non-script Automation', async () => {
+    const { workspace, automationId } = await seedScriptAutomation();
+    // Same window setup, but no script executor: this is the branch the script
+    // carve-out must leave untouched.
+    await getTestDb()`
+      UPDATE automations
+      SET next_window_start = now() - interval '1 day', execution_config = NULL
+      WHERE id = ${automationId}
+    `;
+
+    const detail = (await workspace.owner.automations.get({
+      automation_id: String(automationId),
+    })) as {
+      pending_analysis?: {
+        next_window: { start: string; end: string } | null;
+        next_action: { tool: string } | null;
+      };
+    };
+
+    expect(detail.pending_analysis?.next_window).not.toBeNull();
+    expect(detail.pending_analysis?.next_action?.tool).toBe(
+      'client.automations.claimNextWindow'
+    );
+  });
+
   it('keeps a pinned script run out of the external lane after its live config changes', async () => {
     const { workspace, agentId, automationId } = await seedScriptAutomation();
     const sql = getTestDb();

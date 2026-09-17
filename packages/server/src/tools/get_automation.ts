@@ -952,17 +952,42 @@ async function getAutomationImpl(
         )
       : [];
 
-    // Generate structured next_action for MCP clients
-    const nextAction = nextWindow
-      ? {
-          tool: 'client.automations.claimNextWindow',
-          params: {
-            automation_id: args.automation_id,
-          },
-          description:
-            'Atomically claim this completed period and receive bounded context plus window_token.',
-        }
-      : null;
+    // Generate structured next_action for MCP clients.
+    //
+    // A window existing is not the same as that window being claimable by the
+    // caller. `claim_next_window` rejects script executors outright (409,
+    // `admin/manage_automations/claim-next-window.ts`:
+    // SCRIPT_EXTERNAL_CLAIM_ERROR) because the runtime owns their execution.
+    // Recommending it anyway sent external clients into a guaranteed error,
+    // which they reported back as "already processed" while `trigger` — which
+    // has no such fence — was the path that worked. Read the executor from the
+    // row already in scope rather than re-querying.
+    //
+    // This reads the LIVE config, while claim-next-window prefers a queued
+    // run's pinned `approved_input->'executor'` snapshot when one exists, so
+    // the two disagree while an executor-kind edit straddles a queued window.
+    // That only mis-advises a hint, never gates execution, and it is not worth
+    // an extra per-call query to close.
+    const executorKind = automationRow.execution_config?.executor?.kind;
+    const nextAction = !nextWindow
+      ? null
+      : executorKind === 'script'
+        ? {
+            tool: 'client.automations.trigger',
+            params: {
+              automation_id: args.automation_id,
+            },
+            description:
+              'Script Automations execute through the runtime; trigger a run instead of claiming the window.',
+          }
+        : {
+            tool: 'client.automations.claimNextWindow',
+            params: {
+              automation_id: args.automation_id,
+            },
+            description:
+              'Atomically claim this completed period and receive bounded context plus window_token.',
+          };
 
     pendingAnalysis = {
       unprocessed_content_count: unprocessedContentCount,
