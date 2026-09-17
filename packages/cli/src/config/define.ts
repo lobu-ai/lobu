@@ -364,7 +364,7 @@ export function defineEntityType(config: Omit<EntityType, "kind">): EntityType {
         ? (rest as { key: string }).key
         : "unknown";
     throw new Error(
-      `Entity type '${key}' declares 'viewTemplate', which was retired: detail pages now render Lobu views (React modules under views/, applied with 'lobu apply'). Remove 'viewTemplate' from lobu.config.ts.`
+      `Entity type '${key}' declares 'viewTemplate', which was retired and removed: delete 'viewTemplate' from lobu.config.ts (detail pages fall back to the schema default).`
     );
   }
   const resolvedRequired = deriveRequired(required, properties);

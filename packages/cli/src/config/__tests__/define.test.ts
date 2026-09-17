@@ -313,7 +313,7 @@ describe("authoring producers", () => {
         viewTemplate: { type: "card" },
       } as unknown as Omit<EntityType, "kind">)
     ).toThrow(
-      /viewTemplate.*retired.*Remove 'viewTemplate' from lobu\.config\.ts/
+      /viewTemplate.*retired and removed.*delete 'viewTemplate' from lobu\.config\.ts/
     );
     // A clean config still passes through untouched.
     expect(defineEntityType({ key: "deal", name: "Deal" }).kind).toBe(

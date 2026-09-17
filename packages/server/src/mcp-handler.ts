@@ -527,6 +527,11 @@ function createServerForContext(
     }
     const viewKey = viewKeyFromResourceUri(uri);
     if (viewKey && authCtx.organizationId) {
+      // Per-view bundles carry the org's view code: read scope required, like
+      // the shell route. The static loader above stays ungated.
+      if (!hasRequiredMcpScope('read', authCtx.scopes)) {
+        throw new Error('Reading views requires an MCP session with read access.');
+      }
       const storedView = await getView(authCtx.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);

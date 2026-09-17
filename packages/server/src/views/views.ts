@@ -11,7 +11,10 @@
  * sandboxed frame the MCP apps already use.
  */
 import { createHash } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
 import { build, type Plugin } from 'esbuild';
 import { getDb } from '../db/client';
@@ -254,28 +257,87 @@ export function projectView(view: StoredView): Omit<
   };
 }
 
-/** Resolve react funds inside the server's own installation, so source
- * compiled from stdin (no file context) still bundles the runtime. Anything
- * else resolves by esbuild's default walk and fails loudly when unresolvable
- * (`@lobu/views` lands in PR2; relative files go through `lobu apply`). */
-function reactResolvePlugin(): Plugin {
+/**
+ * The ONLY importable specifiers in phase-1 view compilation. A view author is
+ * an org owner/admin, but the bundle is served to every viewer of the page —
+ * so compilation resolves nothing off disk except these pinned runtime funds.
+ * Relative/absolute imports (which could reach server files) and every other
+ * bare specifier fail closed. PR2 adds `@lobu/views` plus the CLI-bundled path.
+ */
+const VIEW_ALLOWED_BARE_SPECIFIERS = new Set([
+  'react',
+  'react-dom',
+  'react/jsx-runtime',
+]);
+
+/** Resolve the allowed runtime funds inside the server's own installation, so
+ * source compiled from stdin (no file context) still bundles the runtime. */
+function viewResolvePlugin(): Plugin {
   const funds: Record<string, string> = {};
-  for (const specifier of ['react', 'react-dom', 'react/jsx-runtime']) {
+  for (const specifier of VIEW_ALLOWED_BARE_SPECIFIERS) {
     try {
       funds[specifier] = require.resolve(specifier);
     } catch {
       // left absent — esbuild reports the unresolvable import instead
     }
   }
+  // Package roots the allowed funds live under. Imports FROM these files
+  // (react's own `./cjs/...` internals) resolve normally — the gate applies
+  // to the view source's imports, not the runtime's.
+  const fundRoots = new Set<string>();
+  for (const [specifier, file] of Object.entries(funds)) {
+    const scope = specifier.split('/')[0] ?? '';
+    const marker = `node_modules/${scope}/`;
+    const idx = file.lastIndexOf(marker);
+    if (idx >= 0) fundRoots.add(file.slice(0, idx + marker.length - 1));
+  }
   return {
-    name: 'lobu-view-react',
+    name: 'lobu-view-resolve',
     setup(b) {
-      b.onResolve({ filter: /^(react|react-dom|react\/jsx-runtime)$/ }, (args) => {
-        const resolved = funds[args.path];
-        return resolved ? { path: resolved } : null;
+      b.onResolve({ filter: /.*/ }, (args) => {
+        if (
+          args.importer &&
+          [...fundRoots].some(
+            (root) => args.importer === root || args.importer.startsWith(`${root}/`)
+          )
+        ) {
+          return undefined;
+        }
+        if (args.path.startsWith('.') || args.path.startsWith('/')) {
+          return {
+            errors: [
+              {
+                text: `View imports must be bare package specifiers: relative and absolute imports are not supported (got "${args.path}")`,
+              },
+            ],
+          };
+        }
+        if (VIEW_ALLOWED_BARE_SPECIFIERS.has(args.path)) {
+          const resolved = funds[args.path];
+          return resolved ? { path: resolved } : null;
+        }
+        return {
+          errors: [
+            {
+              text: `Unknown view import "${args.path}": phase-1 views bundle react only; other dependencies arrive with @lobu/views in PR2`,
+            },
+          ],
+        };
       });
     },
   };
+}
+
+/**
+ * Inert resolution base for stdin compilation. The resolve plugin above
+ * rejects every relative/absolute path before the filesystem is consulted, so
+ * this directory is never read — it exists only so esbuild never falls back
+ * to the process working directory (which could resolve server files).
+ */
+function inertResolveDir(): string {
+  const dir = join(tmpdir(), 'lobu-views-inert-resolve');
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /**
@@ -293,7 +355,7 @@ export async function compileView(
       stdin: {
         contents: source,
         loader: 'tsx',
-        resolveDir: process.cwd(),
+        resolveDir: inertResolveDir(),
       },
       bundle: true,
       platform: 'browser',
@@ -302,7 +364,7 @@ export async function compileView(
       jsx: 'automatic',
       logLevel: 'silent',
       write: false,
-      plugins: [reactResolvePlugin()],
+      plugins: [viewResolvePlugin()],
     });
     compiled = result.outputFiles?.[0]?.text ?? '';
   } catch (err) {
@@ -402,6 +464,10 @@ export function renderViewsLoaderShell(): string {
     } catch (err) { /* sandboxed without a host — stay in loading state */ }
   }
   window.addEventListener("message", function (event) {
+    // Only the host frame may deliver the bundle. Any other source — another
+    // frame, an opener, or a stray broadcast — is ignored so untrusted content
+    // can never inject HTML into the view.
+    if (event.source !== window.parent) return;
     var data = event.data;
     if (!data || typeof data !== "object") return;
     // The host delivers the per-view bundle read from ui://lobu/views/<key>.

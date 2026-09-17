@@ -69,7 +69,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 		return json.result;
 	}
 
-	async function initSession(): Promise<string> {
+	async function initSession(sessionToken: string = token): Promise<string> {
 		const initResponse = await post(`/mcp/${org.slug}`, {
 			body: {
 				jsonrpc: '2.0',
@@ -81,7 +81,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 					clientInfo: { name: 'lobu-test', version: '1.0' },
 				},
 			},
-			token,
+			token: sessionToken,
 		});
 		const sessionId = initResponse.headers.get('mcp-session-id');
 		expect(sessionId).toBeTruthy();
@@ -91,7 +91,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 				'mcp-session-id': sessionId!,
 				'mcp-protocol-version': MCP_PROTOCOL_VERSION,
 			},
-			token,
+			token: sessionToken,
 		});
 		return sessionId!;
 	}
@@ -195,6 +195,16 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(html.length).toBeLessThan(8192);
 	});
 
+	it('loader only accepts bundle messages from the host frame', async () => {
+		const result = await rpc('resources/read', {
+			uri: LOBU_VIEWS_RESOURCE_URI,
+		});
+		const html = result.contents[0].text as string;
+		// Literal: the listener drops messages from any other source, so a
+		// malicious frame cannot inject bundle HTML into the view.
+		expect(html).toContain('event.source !== window.parent');
+	});
+
 	it('reads a per-view shell with the bundle inlined', async () => {
 		const result = await rpc('resources/read', {
 			uri: 'ui://lobu/views/board',
@@ -203,6 +213,10 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(html).toContain('name="lobu-view" content="board"');
 		expect(html).toContain('name="lobu-view-hash"');
 		expect(html).toContain('<div id="root"></div>');
+		// The inlined bundle is view code plus the react allowlist only: no
+		// server tool names may leak into a served shell.
+		expect(html).not.toContain('invoke_view_action');
+		expect(html).not.toContain('manage_view_templates');
 		// No relative asset URLs and no <base href>: claude.ai hardcodes
 		// base-uri 'self', so both would 404 there.
 		expect(html).not.toMatch(/src="\.\//);
@@ -213,6 +227,25 @@ describe('views resources + open_view + invoke_view_action', () => {
 		await expect(
 			rpc('resources/read', { uri: 'ui://lobu/views/gone' })
 		).rejects.toThrow(/Unknown resource/);
+	});
+
+	it('requires read scope for per-view bundle reads', async () => {
+		const sessionId = await initSession(readlessToken);
+		const response = await post(`/mcp/${org.slug}`, {
+			body: {
+				jsonrpc: '2.0',
+				id: 'readless',
+				method: 'resources/read',
+				params: { uri: 'ui://lobu/views/board' },
+			},
+			headers: {
+				'mcp-session-id': sessionId,
+				'mcp-protocol-version': MCP_PROTOCOL_VERSION,
+			},
+			token: readlessToken,
+		});
+		const json = await response.json();
+		expect(json.error?.message ?? '').toMatch(/read access/);
 	});
 
 	it('lists open_view bound to the loader with an outputSchema', async () => {

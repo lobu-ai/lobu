@@ -284,6 +284,44 @@ describe("manage_views", () => {
 		expect((err as ToolUserError).message).toMatch(/failed to compile/i);
 	});
 
+	it("rejects relative imports reaching for server files", async () => {
+		const err = await setView(
+			`import pkg from "./package.json";\nexport default function B() { return pkg; }`
+		).catch((e) => e);
+		expect(err).toBeInstanceOf(ToolUserError);
+		expect((err as ToolUserError).httpStatus).toBe(422);
+	});
+
+	it("rejects absolute imports reaching for server files", async () => {
+		// An existing server-side file: old code bundled it (red), the
+		// allowlist rejects it before the filesystem is consulted (green).
+		const abs = `${process.cwd()}/package.json`;
+		const err = await setView(
+			`import pkg from ${JSON.stringify(abs)};\nexport default function B() { return pkg; }`
+		).catch((e) => e);
+		expect(err).toBeInstanceOf(ToolUserError);
+		expect((err as ToolUserError).httpStatus).toBe(422);
+	});
+
+	it("rejects bare imports outside the phase-1 allowlist", async () => {
+		const err = await setView(
+			`import { z } from "zod";\nexport default function B() { return z; }`
+		).catch((e) => e);
+		expect(err).toBeInstanceOf(ToolUserError);
+		expect((err as ToolUserError).httpStatus).toBe(422);
+	});
+
+	it("stored bundles never carry server package content", async () => {
+		// 'invoke_view_action' names a server tool file; it must never appear
+		// in a compiled view bundle, which may only contain the view plus the
+		// phase-1 react allowlist.
+		const compiled = await compileView(REACT_SOURCE);
+		expect(compiled).not.toContain("invoke_view_action");
+		expect(compiled).not.toContain("manage_view_templates");
+		const set = await setView(REACT_SOURCE);
+		expect(set.written).toBe(true);
+	});
+
 	it("rejects oversized source and enforces the compiled bundle cap", async () => {
 		const tooBig = `export const blob = "x";\n// ${"x".repeat(1_000_001)}\n`;
 		const err = await setView(tooBig).catch((e) => e);
