@@ -218,6 +218,56 @@ mountView(view, V);
 		expect(second.view.content_hash).not.toBe(first.view.content_hash);
 	});
 
+	it("fixed source with changed attach rewrites with written:true", async () => {
+		await setView(SIMPLE_SOURCE);
+		const changed = await setView(SIMPLE_SOURCE, {
+			attach: [{ type: "deal", placement: "overview" }],
+		});
+		expect(changed.written).toBe(true);
+		const get = (await executeTool(
+			"manage_views",
+			{ action: "get", key: "pipeline" },
+			TEST_ENV,
+			ownerCtx
+		)) as { view: Record<string, unknown> };
+		expect(get.view.attach).toEqual([{ type: "deal", placement: "overview" }]);
+		// Same source AND same metadata is still a no-op.
+		const again = await setView(SIMPLE_SOURCE, {
+			attach: [{ type: "deal", placement: "overview" }],
+		});
+		expect(again.written).toBe(false);
+	});
+
+	it("fixed source with changed actions rewrites with written:true", async () => {
+		await setView(SIMPLE_SOURCE);
+		const changed = await setView(SIMPLE_SOURCE, {
+			actions: { retry: { emits: "test.poked" } },
+		});
+		expect(changed.written).toBe(true);
+		const get = (await executeTool(
+			"manage_views",
+			{ action: "get", key: "pipeline" },
+			TEST_ENV,
+			ownerCtx
+		)) as { view: Record<string, unknown> };
+		expect(get.view.actions).toEqual({ retry: { emits: "test.poked" } });
+	});
+
+	it("fixed source with changed params rewrites with written:true", async () => {
+		await setView(SIMPLE_SOURCE);
+		const changed = await setView(SIMPLE_SOURCE, {
+			params: { by: { type: "string", default: "stage" } },
+		});
+		expect(changed.written).toBe(true);
+		const get = (await executeTool(
+			"manage_views",
+			{ action: "get", key: "pipeline" },
+			TEST_ENV,
+			ownerCtx
+		)) as { view: Record<string, unknown> };
+		expect(get.view.params).toEqual({ by: { type: "string", default: "stage" } });
+	});
+
 	it("remove deletes; second remove reports removed:false; get 404s", async () => {
 		await setView(SIMPLE_SOURCE);
 		const removed = (await executeTool(

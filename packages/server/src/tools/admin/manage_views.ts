@@ -155,8 +155,21 @@ async function handleSet(
   requireWriter(ctx);
   validateViewMetadata(args);
 
-  const hash = contentHash(args.source_code);
-  // Same source, same hash: skip the compile and the write entirely.
+  // Normalize BEFORE hashing: the comparison must see exactly what the row
+  // would store, or equivalent declarations compare differently.
+  const name = args.name?.trim() ? args.name : args.key;
+  const description = args.description ?? '';
+  const attach = (args.attach ?? []) as SetViewInput['attach'];
+  const params = (args.params ?? {}) as SetViewInput['params'];
+  const actions = (args.actions ?? {}) as SetViewInput['actions'];
+  const hash = contentHash(args.source_code, {
+    name,
+    description,
+    attach,
+    params,
+    actions,
+  });
+  // Same source AND same metadata: skip the compile and the write entirely.
   const current = await getView(ctx.organizationId, args.key);
   if (current && current.content_hash === hash) {
     return { action: 'set', view: projectView(current), written: false };
@@ -167,14 +180,14 @@ async function handleSet(
     : await compileView(args.source_code);
   const { view, written } = await setView(ctx.organizationId, {
     key: args.key,
-    name: args.name?.trim() ? args.name : args.key,
-    description: args.description ?? '',
+    name,
+    description,
     source_code: args.source_code,
     compiled_code: compiled,
     content_hash: hash,
-    attach: (args.attach ?? []) as SetViewInput['attach'],
-    params: (args.params ?? {}) as SetViewInput['params'],
-    actions: (args.actions ?? {}) as SetViewInput['actions'],
+    attach,
+    params,
+    actions,
     last_writer: args.last_writer ?? (ctx.applyId ? `apply:${ctx.applyId}` : (ctx.userId ?? 'unknown')),
   });
 

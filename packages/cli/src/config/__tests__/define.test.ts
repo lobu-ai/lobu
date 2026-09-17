@@ -304,4 +304,20 @@ describe("authoring producers", () => {
     expect(project.agents).toHaveLength(1);
     expect(project.agents[0]?.id).toBe("crm");
   });
+
+  test("defineEntityType rejects the retired viewTemplate with a migration error", () => {
+    expect(() =>
+      defineEntityType({
+        key: "deal",
+        name: "Deal",
+        viewTemplate: { type: "card" },
+      } as unknown as Omit<EntityType, "kind">)
+    ).toThrow(
+      /viewTemplate.*retired.*Remove 'viewTemplate' from lobu\.config\.ts/
+    );
+    // A clean config still passes through untouched.
+    expect(defineEntityType({ key: "deal", name: "Deal" }).kind).toBe(
+      "entityType"
+    );
+  });
 });

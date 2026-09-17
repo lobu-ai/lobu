@@ -80,7 +80,8 @@ export const ViewRowSchema = Type.Object({
   name: Type.String(),
   description: Type.String(),
   content_hash: Type.String({
-    description: "First 16 hex of sha256(source_code). Same source, same hash.",
+    description:
+      "First 16 hex of sha256(source plus declared metadata). Same source and same metadata means no write.",
   }),
   attach: Type.Array(ViewAttachmentSchema),
   params: Type.Record(Type.String(), ViewParamDeclSchema),
