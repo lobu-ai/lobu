@@ -32,4 +32,23 @@ describe("ci views build closure", () => {
       expect(section).toContain("cd packages/views && bun run build");
     }
   });
+
+  it("builds the server bundle before the repo-scripts artifact test", () => {
+    // scripts/__tests__/server-views-vendor.test.ts throws "missing build
+    // prerequisite packages/server/dist/server.bundle.mjs" unless the bundle
+    // exists, but the unit job's graph build uses --skip-applications (PR
+    // #3649 run 35402512013: green locally on a stale dist, red in CI on a
+    // clean cache). The unit job must therefore build the server bundle
+    // between the graph build and `bun test scripts`.
+    const yml = readFileSync(CI_YML, "utf8");
+    const graphAt = yml.indexOf(
+      "node scripts/build-packages.mjs --skip-applications"
+    );
+    const scriptsAt = yml.indexOf("bun test scripts --coverage");
+    expect(graphAt).toBeGreaterThanOrEqual(0);
+    expect(scriptsAt).toBeGreaterThan(graphAt);
+    const section = yml.slice(graphAt, scriptsAt);
+    expect(section).toContain("build:server");
+    expect(section).toContain("packages/server/dist/server.bundle.mjs");
+  });
 });

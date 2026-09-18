@@ -213,9 +213,26 @@ jobs:
         # tarball, so pgvector-embedded must build first.
         # Reuse the dependency-layered builder so independent packages build in
         # parallel and new workspace packages cannot drift from an inline list.
-        # Server/Owletto application bundles are not used by the unit suites;
-        # the CLI distribution remains included for cli-ux runtime tests.
+        # Owletto's application bundle is not used by the unit suites; the CLI
+        # distribution remains included for cli-ux runtime tests. The server
+        # bundle IS used by one suite (the runtime-artifact test under
+        # scripts/__tests__) and is built in the next step.
         run: node scripts/build-packages.mjs --skip-applications
+
+      - name: Build server bundle for artifact tests
+        # scripts/__tests__/server-views-vendor.test.ts exercises
+        # buildRuntimeComponents(), which copies
+        # packages/server/dist/server.bundle.mjs (+ server-main + guest) into
+        # the composed artifact. The graph build above uses --skip-applications,
+        # so the bundle is absent on a clean cache and the test fails with
+        # "missing build prerequisite" (PR #3649 run 35402512013). Build just
+        # the server application bundle here; Owletto stays skipped. Runs on
+        # every execution, not just cache misses, because the dist cache only
+        # contains the bundle once some run has built it.
+        run: |
+          if [ ! -f packages/server/dist/server.bundle.mjs ] || [ ! -f packages/server/dist/server-main.bundle.mjs ] || [ ! -f packages/server/dist/guest.bundle.js ]; then
+            cd packages/server && bun run build:server && cd ../..
+          fi
 
       # bunfig.toml routes every `bun test --coverage` run to ./coverage/lcov.info
       # (bun 1.3.x ignores --coverage-dir when bunfig sets coverageDir), so each
