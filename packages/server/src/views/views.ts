@@ -269,8 +269,27 @@ export function projectView(view: StoredView): Omit<
 const VIEW_ALLOWED_BARE_SPECIFIERS = new Set([
   'react',
   'react-dom',
+  'react-dom/client',
   'react/jsx-runtime',
 ]);
+
+/** Virtual specifier carrying the authored source into the bundle. */
+const VIEW_SOURCE_SPECIFIER = 'lobu-view-source';
+
+/**
+ * Server-owned mounting bootstrap. The authored module is bundled as a
+ * separate virtual module; this entry imports its default export and mounts
+ * it into #root. Authors write an ordinary default-export component and never
+ * touch the document themselves.
+ */
+const VIEW_BOOTSTRAP_SOURCE = `import React from "react";
+import { createRoot } from "react-dom/client";
+import View from "${VIEW_SOURCE_SPECIFIER}";
+const mountNode = document.getElementById("root");
+if (mountNode) {
+  createRoot(mountNode).render(React.createElement(View));
+}
+`;
 
 /** Resolve the allowed runtime funds inside the server's own installation, so
  * source compiled from stdin (no file context) still bundles the runtime. */
@@ -283,15 +302,16 @@ function viewResolvePlugin(): Plugin {
       // left absent — esbuild reports the unresolvable import instead
     }
   }
-  // Package roots the allowed funds live under. Imports FROM these files
-  // (react's own `./cjs/...` internals) resolve normally — the gate applies
-  // to the view source's imports, not the runtime's.
-  const fundRoots = new Set<string>();
-  for (const [specifier, file] of Object.entries(funds)) {
-    const scope = specifier.split('/')[0] ?? '';
-    const marker = `node_modules/${scope}/`;
-    const idx = file.lastIndexOf(marker);
-    if (idx >= 0) fundRoots.add(file.slice(0, idx + marker.length - 1));
+  // Installation roots the allowed funds live under. Imports FROM files in
+  // these trees (react's own `./cjs/...` internals, the scheduler react-dom
+  // pulls in bare) resolve by default node resolution — the gate applies to
+  // the view source's imports, not the pinned installation content they
+  // reach. A view author cannot trigger this path: authored imports always
+  // arrive with the stdin importer, which matches no install root.
+  const installRoots = new Set<string>();
+  for (const file of Object.values(funds)) {
+    const idx = file.lastIndexOf('/node_modules/');
+    if (idx >= 0) installRoots.add(file.slice(0, idx + '/node_modules'.length));
   }
   return {
     name: 'lobu-view-resolve',
@@ -299,11 +319,15 @@ function viewResolvePlugin(): Plugin {
       b.onResolve({ filter: /.*/ }, (args) => {
         if (
           args.importer &&
-          [...fundRoots].some(
+          [...installRoots].some(
             (root) => args.importer === root || args.importer.startsWith(`${root}/`)
           )
         ) {
           return undefined;
+        }
+        // The bootstrap's own import of the virtual authored module.
+        if (args.path === VIEW_SOURCE_SPECIFIER) {
+          return { path: args.path, namespace: 'lobu-view-source' };
         }
         if (args.path.startsWith('.') || args.path.startsWith('/')) {
           return {
@@ -326,6 +350,23 @@ function viewResolvePlugin(): Plugin {
           ],
         };
       });
+    },
+  };
+}
+
+/**
+ * Serves the authored source to the bundler as a virtual TSX module. The
+ * module is never imported or executed server-side — it only reaches the
+ * browser bundle through the bootstrap entry above.
+ */
+function viewSourcePlugin(source: string): Plugin {
+  return {
+    name: 'lobu-view-source',
+    setup(b) {
+      b.onLoad(
+        { filter: /.*/, namespace: 'lobu-view-source' },
+        () => ({ contents: source, loader: 'tsx' })
+      );
     },
   };
 }
@@ -355,7 +396,7 @@ export async function compileView(
   try {
     const result = await build({
       stdin: {
-        contents: source,
+        contents: VIEW_BOOTSTRAP_SOURCE,
         loader: 'tsx',
         resolveDir: inertResolveDir(),
       },
@@ -366,7 +407,7 @@ export async function compileView(
       jsx: 'automatic',
       logLevel: 'silent',
       write: false,
-      plugins: [viewResolvePlugin()],
+      plugins: [viewResolvePlugin(), viewSourcePlugin(source)],
     });
     compiled = result.outputFiles?.[0]?.text ?? '';
   } catch (err) {

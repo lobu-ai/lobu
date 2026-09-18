@@ -40,6 +40,11 @@ document.body.innerHTML = "<p>VIEW_RAN</p>";
 export default function Marker() { return null; }
 `;
 
+const BOARD_SOURCE = `export default function Board() {
+  return <div id="review-view-marker">REVIEW_VIEW_RENDERED</div>;
+}
+`;
+
 async function launchChromium() {
 	try {
 		return await chromium.launch({ headless: true });
@@ -55,6 +60,7 @@ describe("view shell never executes on direct navigation", () => {
 	let shellBody = "";
 	let shellHeaders: Record<string, string> = {};
 	let server: Server | null = null;
+	let shellToken = "";
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
@@ -68,6 +74,7 @@ describe("view shell never executes on direct navigation", () => {
 				scope: "mcp:admin mcp:write mcp:read profile:read",
 			})
 		).token;
+		shellToken = token;
 		const ownerCtx: AuthContext = {
 			organizationId: org.id,
 			tokenOrganizationId: org.id,
@@ -87,6 +94,12 @@ describe("view shell never executes on direct navigation", () => {
 		await executeTool(
 			"manage_views",
 			{ action: "set", key: "marker", source_code: MARKER_SOURCE },
+			TEST_ENV,
+			ownerCtx
+		);
+		await executeTool(
+			"manage_views",
+			{ action: "set", key: "mounted", source_code: BOARD_SOURCE },
 			TEST_ENV,
 			ownerCtx
 		);
@@ -159,5 +172,52 @@ describe("view shell never executes on direct navigation", () => {
 		expect(seen.html).toContain("<pre");
 		// The source is still present in the fetched text (fetch-only data).
 		expect(shellBody).toContain("VIEW_RAN");
+	});
+
+	it("visibly mounts an ordinary default-export component in a sandbox frame", async () => {
+		const browser = await launchChromium();
+		if (!browser) {
+			console.warn("shell-no-execute: no Chromium executable, mount skipped");
+			return;
+		}
+		try {
+			// Serve the production shell the way an MCP host executes it.
+			const boardRes = await get(`/api/shell-org/views/mounted/shell`, {
+				token: shellToken,
+			});
+			expect(boardRes.status).toBe(200);
+			const boardHtml = await boardRes.text();
+			server = createServer((_req, res) => {
+				res.setHeader("content-type", "text/html; charset=utf-8");
+				res.setHeader("cache-control", "no-store");
+				res.end(boardHtml);
+			});
+			await new Promise<void>((resolve) =>
+				server!.listen(0, "127.0.0.1", resolve)
+			);
+			const address = server!.address() as AddressInfo;
+			// Top-level navigation like an MCP host executing the shell: the
+			// mount question does not depend on sandbox flags (covered
+			// separately), only on the bundle wiring its default export.
+			const page = await browser.newPage();
+			await page.goto(`http://127.0.0.1:${address.port}/shell`);
+			await page.waitForFunction(
+				() => {
+					const root = document.getElementById("root");
+					return !!root && root.innerHTML.length > 0;
+				},
+				{ timeout: 15000 }
+			);
+			const marker = await page.evaluate(
+				() =>
+					document.getElementById("review-view-marker")?.textContent ?? null
+			);
+			expect(marker).toBe("REVIEW_VIEW_RENDERED");
+			await page.close();
+		} finally {
+			await browser.close();
+			server?.close();
+			server = null;
+		}
 	});
 });
