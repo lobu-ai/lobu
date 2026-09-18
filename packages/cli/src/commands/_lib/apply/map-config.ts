@@ -1053,6 +1053,8 @@ export function mapProjectToDesiredState(
     memorySchema: { entityTypes, relationshipTypes },
     automations,
     connectors: { definitions: [], authProfiles, connections },
+    // View modules resolve in the loader (file IO): the mapper stays pure.
+    views: [],
     providers,
     requiredSecrets: [...required].sort(),
   };

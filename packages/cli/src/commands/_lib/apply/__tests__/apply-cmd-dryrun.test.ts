@@ -194,6 +194,7 @@ describe("applyCommand orchestration", () => {
         if (c.url.includes("manage_connections")) return false;
         if (c.url.includes("manage_feeds")) return false;
         if (c.url.includes("manage_auth_profiles")) return false;
+        if (c.url.includes("manage_views")) return false;
         // POST to /agents (create) is a write
         return true;
       }

@@ -16,6 +16,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "bun:test";
 import { __testing, rewriteWorkspaceRefs } from "../publish-packages.mjs";
+import { canaryVersion, prepareManifests } from "../canary-publish.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -492,4 +494,156 @@ describe("bump-version input validation (subprocess)", () => {
     );
     expect(dirty).toEqual([]);
   });
+});
+
+/**
+ * The public @lobu/views authoring runtime was built in the workspace but
+ * never selected by the release pipeline: not in the publisher list, not in
+ * the canary preparation, and not in the stable version propagation. These
+ * pin all three selections plus the packed artifact a consumer installs.
+ */
+describe("@lobu/views release selection", () => {
+  const viewsEntry = __testing.PACKAGES.find(
+    (p: { dir: string }) => p.dir === "packages/views"
+  );
+
+  it("is published before the CLI entry", () => {
+    expect(viewsEntry).toBeDefined();
+    const dirs = __testing.PACKAGES.map((p: { dir: string }) => p.dir);
+    expect(dirs.indexOf("packages/views")).toBeLessThan(
+      dirs.indexOf("packages/cli")
+    );
+  });
+
+  it("passes the publishability gate on its real manifest", () => {
+    // publishedPackageNames() throws for a missing or private manifest, so a
+    // successful rewrite proves the selection actually resolves @lobu/views.
+    const manifest = JSON.parse(
+      readFileSync(join(REPO_ROOT, "packages/views/package.json"), "utf8")
+    );
+    const rewritten = rewriteWorkspaceRefs(manifest) as { version: string };
+    expect(rewritten.version).toBe(manifest.version);
+  });
+
+  it("receives the generated canary version", () => {
+    const sha = "b".repeat(40);
+    const version = canaryVersion("20.1.0", "1750000000", sha);
+    const manifests = __testing.PACKAGES.map(
+      (entry: { dir: string; transform?: (pkg: unknown) => unknown }) => {
+        const manifest = JSON.parse(
+          readFileSync(join(REPO_ROOT, entry.dir, "package.json"), "utf8")
+        );
+        return entry.transform ? entry.transform(manifest) : manifest;
+      }
+    );
+    const prepared = prepareManifests(manifests, version);
+    const views = prepared.find(
+      (p: { name: string }) => p.name === "@lobu/views"
+    );
+    expect(views?.version).toBe(version);
+  });
+
+  it("participates in the stable version update", () => {
+    const config = JSON.parse(
+      readFileSync(join(REPO_ROOT, "release-please-config.json"), "utf8")
+    );
+    expect(
+      config.packages["."]["extra-files"].some(
+        (f: { path: string }) => f.path === "packages/views/package.json"
+      )
+    ).toBe(true);
+  });
+});
+
+/**
+ * Packs the real @lobu/views dist and loads it the way an external consumer
+ * does: only the tarball contents plus peer dependencies are visible, never
+ * the monorepo fall-through.
+ */
+describe("@lobu/views packed dist (consumer fixture)", () => {
+  it("loads the published export with only peers present", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "lobu-views-consumer-"));
+    try {
+      const packed = join(scratch, "packed");
+      mkdirSync(join(packed, "dist"), { recursive: true });
+      const tsc = spawnSync(
+        process.execPath,
+        [
+          join(REPO_ROOT, "node_modules/typescript/bin/tsc"),
+          "-p",
+          join(REPO_ROOT, "packages/views/tsconfig.json"),
+          "--outDir",
+          join(packed, "dist"),
+          "--incremental",
+          "false",
+        ],
+        { encoding: "utf8" }
+      );
+      expect(tsc.status).toBe(0);
+      const manifest = JSON.parse(
+        readFileSync(join(REPO_ROOT, "packages/views/package.json"), "utf8")
+      );
+      const transformed = rewriteWorkspaceRefs(manifest);
+      writeFileSync(
+        join(packed, "package.json"),
+        `${JSON.stringify(transformed, null, 2)}\n`
+      );
+      // The exports map is the consumer contract: every target must exist
+      // in the packed tree.
+      for (const target of ["dist/index.js", "dist/index.d.ts"]) {
+        expect(existsSync(join(packed, target)), target).toBe(true);
+      }
+      const pack = spawnSync(
+        "npm",
+        ["pack", packed, "--pack-destination", scratch],
+        {
+          encoding: "utf8",
+        }
+      );
+      expect(pack.status).toBe(0);
+      const tarball = join(
+        scratch,
+        (pack.stdout.trim().split("\n").pop() ?? "").trim()
+      );
+      expect(existsSync(tarball)).toBe(true);
+      const listing = spawnSync("tar", ["tzf", tarball], { encoding: "utf8" });
+      expect(listing.status).toBe(0);
+      expect(listing.stdout).toContain("package/dist/index.js");
+      expect(listing.stdout).not.toMatch(/package\/src\//);
+      const extracted = join(scratch, "extracted");
+      mkdirSync(extracted, { recursive: true });
+      expect(
+        spawnSync("tar", ["xzf", tarball, "-C", extracted], {
+          encoding: "utf8",
+        }).status
+      ).toBe(0);
+      const modules = join(scratch, "node_modules");
+      mkdirSync(join(modules, "@lobu"), { recursive: true });
+      symlinkSync(join(extracted, "package"), join(modules, "@lobu", "views"));
+      for (const peer of ["react", "react-dom"]) {
+        symlinkSync(join(REPO_ROOT, "node_modules", peer), join(modules, peer));
+      }
+      writeFileSync(
+        join(scratch, "run.mjs"),
+        [
+          `import { defineView, mountView, sql, tool, useAction, useParams, useQuery, useScope } from "@lobu/views";`,
+          `for (const [name, fn] of Object.entries({ defineView, mountView, sql, tool, useAction, useParams, useQuery, useScope })) {`,
+          `  if (typeof fn !== "function") throw new Error("missing export: " + name);`,
+          `}`,
+          `const view = defineView({ key: "probe", attach: [] });`,
+          `if (view.key !== "probe") throw new Error("defineView broken");`,
+          `console.log("CONSUMER_OK");`,
+          ``,
+        ].join("\n")
+      );
+      const run = spawnSync(process.execPath, [join(scratch, "run.mjs")], {
+        cwd: scratch,
+        encoding: "utf8",
+      });
+      expect(`${run.stdout}${run.stderr}`).toContain("CONSUMER_OK");
+      expect(run.status).toBe(0);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

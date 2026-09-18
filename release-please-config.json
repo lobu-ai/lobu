@@ -67,6 +67,11 @@
           "jsonpath": "$.version"
         },
         {
+          "type": "json",
+          "path": "packages/views/package.json",
+          "jsonpath": "$.version"
+        },
+        {
           "type": "yaml",
           "path": "charts/lobu/Chart.yaml",
           "jsonpath": "$.version"

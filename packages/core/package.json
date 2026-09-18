@@ -147,6 +147,12 @@
       "import": "./dist/contracts/tools/manage-views.js",
       "require": "./dist/contracts/tools/manage-views.js"
     },
+    "./contracts/tools/view-content-hash": {
+      "types": "./dist/contracts/tools/view-content-hash.d.ts",
+      "bun": "./src/contracts/tools/view-content-hash.ts",
+      "import": "./dist/contracts/tools/view-content-hash.js",
+      "require": "./dist/contracts/tools/view-content-hash.js"
+    },
     "./contracts/tools/manage-auth-profiles": {
       "types": "./dist/contracts/tools/manage-auth-profiles.d.ts",
       "bun": "./src/contracts/tools/manage-auth-profiles.ts",

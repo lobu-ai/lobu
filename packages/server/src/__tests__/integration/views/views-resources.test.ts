@@ -188,11 +188,18 @@ describe('views resources + open_view + invoke_view_action', () => {
 		const html = result.contents[0].text as string;
 		expect(result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
 		expect(html).toContain('lobu-views-loader');
-		expect(html).toContain('lobu:views-loader-ready');
+		// Standard handshake + every delivery the loader accepts: the sandbox
+		// push (Claude), the resource fetch for the tool-input key, and the
+		// same-origin posted bundle.
+		expect(html).toContain('ui/initialize');
+		expect(html).toContain('resources/read');
+		expect(html).toContain('ui/notifications/sandbox-resource-ready');
+		expect(html).toContain('ui/notifications/tool-input');
+		expect(html).toContain('lobu:views-bundle');
 		// §10(a): the loader ships no ext-apps/React/framework bytes.
 		expect(html).not.toContain('ext-apps');
 		expect(html).not.toContain('react');
-		expect(html.length).toBeLessThan(8192);
+		expect(html.length).toBeLessThan(12288);
 	});
 
 	it('loader only accepts bundle messages from the host frame', async () => {
@@ -367,6 +374,25 @@ describe('views resources + open_view + invoke_view_action', () => {
 			token: readlessToken,
 		});
 		expect(denied.status).toBe(403);
+	});
+
+	it('serves a CLI-supplied bundle verbatim in the shell', async () => {
+		const sentinel = '/*lobu-pr2-shell-sentinel*/';
+		await executeTool(
+			'manage_views',
+			{
+				action: 'set',
+				key: 'cli-bundle',
+				source_code: 'export default function V() { return null; }\n',
+				compiled_code: `${sentinel}console.log(1);`,
+				attach: [],
+			},
+			TEST_ENV,
+			ownerCtx
+		);
+		const response = await get(`/api/${org.slug}/views/cli-bundle/shell`, { token });
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain(sentinel);
 	});
 
 	it('fires actions over the web route and validates the body', async () => {

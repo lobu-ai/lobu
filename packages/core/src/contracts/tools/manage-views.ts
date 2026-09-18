@@ -81,7 +81,7 @@ export const ViewRowSchema = Type.Object({
   description: Type.String(),
   content_hash: Type.String({
     description:
-      "First 16 hex of sha256(source plus declared metadata). Same source and same metadata means no write.",
+      "First 16 hex of sha256(source, declared metadata, compiled artifact digest). Same executable artifact and same metadata means no write.",
   }),
   attach: Type.Array(ViewAttachmentSchema),
   params: Type.Record(Type.String(), ViewParamDeclSchema),
@@ -122,6 +122,13 @@ export const SetViewAction = Type.Object({
     maxLength: 1_000_000,
     description: "[set] The view module source (TSX). Compiled server-side.",
   }),
+  compiled_code: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "[set] CLI-bundled browser bundle for the source (relative files and npm deps resolved where node_modules exists). When present the server stores it after the size check instead of compiling; when absent the server compiles source_code itself (the chat-agent path).",
+    })
+  ),
   attach: Type.Optional(
     Type.Array(ViewAttachmentSchema, {
       description:
@@ -194,7 +201,8 @@ export const ManageViewsResultSchema = Type.Union([
     action: Type.Literal("set"),
     view: ViewRowSchema,
     written: Type.Boolean({
-      description: "False when the same source was already stored (no write).",
+      description:
+        "False when the same executable artifact was already stored (no write).",
     }),
   }),
   Type.Object({

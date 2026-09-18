@@ -9,10 +9,15 @@
  * is enforced, and members can read but not write.
  */
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import {
+  contentHash,
+  stableStringify,
+} from "@lobu/core/contracts/tools/view-content-hash";
 import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import { ToolUserError } from "../../../utils/errors";
-import { compileView } from "../../../views/views";
+import { compileView, setView as storeView } from "../../../views/views";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -161,6 +166,40 @@ describe("manage_views", () => {
 		const set = await setView(REACT_SOURCE);
 		expect(set.written).toBe(true);
 		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
+	});
+
+	it("compiles source that imports @lobu/views (the chat-agent path)", async () => {
+		const source = `import { defineView, mountView } from "@lobu/views";
+export const view = defineView({ key: "pipeline", attach: [] });
+export default function V() { return null; }
+mountView(view, V);
+`;
+		const set = await setView(source);
+		expect(set.written).toBe(true);
+		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
+	});
+
+	it("set with compiled_code stores the CLI bundle without compiling", async () => {
+		const sentinel = "/*lobu-pr2-sentinel*/console.log(1);";
+		const set = await setView(SIMPLE_SOURCE, { compiled_code: sentinel });
+		expect(set.written).toBe(true);
+		const sql = getTestDb();
+		const rows = await sql<{ compiled_code: string }>`
+      SELECT compiled_code FROM views WHERE organization_id = ${orgId} AND key = 'pipeline'
+    `;
+		expect(rows[0].compiled_code).toBe(sentinel);
+	});
+
+	it("rejects empty and oversized compiled_code", async () => {
+		const empty = await setView(SIMPLE_SOURCE, { compiled_code: "" }).catch(
+			(e) => e
+		);
+		expect(empty).toBeInstanceOf(ToolUserError);
+		const big = await setView(SIMPLE_SOURCE, {
+			compiled_code: `/*x*/${"x".repeat(2 * 1024 * 1024 + 1)}`,
+		}).catch((e) => e);
+		expect(big).toBeInstanceOf(ToolUserError);
+		expect((big as ToolUserError).httpStatus).toBe(422);
 	});
 
 	it("same source is a no-write with updated_at untouched", async () => {
@@ -407,5 +446,86 @@ describe("manage_views", () => {
 		// (same shape as every other admin tool's denial).
 		expect(err).toBeInstanceOf(Error);
 		expect((err as Error).message).toMatch(/requires admin or owner access/);
+	});
+
+	it("bundle-only change writes; identical bundle stays a no-write (PR2 round-1 F1)", async () => {
+		const BUNDLE_A = `globalThis.REVIEW_BUNDLE="A";`;
+		const BUNDLE_B = `globalThis.REVIEW_BUNDLE="B";`;
+		const first = await setView(SIMPLE_SOURCE, { compiled_code: BUNDLE_A });
+		expect(first.written).toBe(true);
+		const second = await setView(SIMPLE_SOURCE, { compiled_code: BUNDLE_B });
+		expect(second.written).toBe(true);
+		expect(second.view.content_hash).not.toBe(first.view.content_hash);
+		const sql = getTestDb();
+		const stored = await sql<{ compiled_code: string }>`
+      SELECT compiled_code FROM views WHERE organization_id = ${orgId} AND key = 'pipeline'
+    `;
+		expect(stored[0].compiled_code).toBe(BUNDLE_B);
+		// Server/contract parity: the stored hash is what the shared function
+		// derives from the same source, normalized metadata and artifact bytes.
+		expect(second.view.content_hash).toBe(
+			contentHash(
+				SIMPLE_SOURCE,
+				{
+					name: "Pipeline",
+					description: "",
+					attach: [{ type: "deal", placement: "tab" }],
+					params: { by: { type: "string", default: "owner" } },
+					actions: { markWon: { emits: "deal.won" } },
+				},
+				BUNDLE_B
+			)
+		);
+		const before = await sql<{ updated_at: Date }>`
+      SELECT updated_at FROM views WHERE organization_id = ${orgId} AND key = 'pipeline'
+    `;
+		const third = await setView(SIMPLE_SOURCE, { compiled_code: BUNDLE_B });
+		expect(third.written).toBe(false);
+		expect(third.view.content_hash).toBe(second.view.content_hash);
+		const after = await sql<{ updated_at: Date }>`
+      SELECT updated_at FROM views WHERE organization_id = ${orgId} AND key = 'pipeline'
+    `;
+		expect(after[0].updated_at.getTime()).toBe(before[0].updated_at.getTime());
+	});
+
+	it("legacy source+metadata identity refreshes once, then stays a no-op (PR2 round-1 F1)", async () => {
+		const legacyMeta = {
+			name: "Pipeline",
+			description: "",
+			attach: [{ type: "deal", placement: "tab" }],
+			params: { by: { type: "string", default: "owner" } },
+			actions: { markWon: { emits: "deal.won" } },
+		};
+		const compiled = await compileView(SIMPLE_SOURCE);
+		// The pre-F1 identity: source plus declared metadata only.
+		const legacyHash = createHash("sha256")
+			.update(SIMPLE_SOURCE)
+			.update("\n")
+			.update(stableStringify(legacyMeta))
+			.digest("hex")
+			.slice(0, 16);
+		expect(legacyHash).not.toBe(
+			contentHash(SIMPLE_SOURCE, legacyMeta, compiled)
+		);
+		await storeView(orgId, {
+			key: "pipeline",
+			name: "Pipeline",
+			description: "",
+			source_code: SIMPLE_SOURCE,
+			compiled_code: compiled,
+			content_hash: legacyHash,
+			attach: [{ type: "deal", placement: "tab" }],
+			params: { by: { type: "string", default: "owner" } },
+			actions: { markWon: { emits: "deal.won" } },
+			last_writer: "migration:view-templates",
+		});
+		// Same executable content refreshes the stored identity exactly once.
+		const refresh = await setView(SIMPLE_SOURCE);
+		expect(refresh.written).toBe(true);
+		expect(refresh.view.content_hash).toBe(
+			contentHash(SIMPLE_SOURCE, legacyMeta, compiled)
+		);
+		const again = await setView(SIMPLE_SOURCE);
+		expect(again.written).toBe(false);
 	});
 });

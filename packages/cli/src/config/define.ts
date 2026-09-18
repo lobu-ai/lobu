@@ -587,6 +587,32 @@ export function connectorFromFile<
 }
 
 // ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+export interface ViewSource {
+  readonly kind: "viewSource";
+  /** Path to a view module (`views/<type>/<key>.tsx`), relative to the config file. */
+  path: string;
+}
+
+/**
+ * Reference a Lobu view module to bundle + ship at apply time.
+ *
+ * The module declares itself with `export const view = defineView({ key,
+ * attach, params, actions })` from `@lobu/views` plus a default-export
+ * component (hooks inside, no document access); the `attach` line in the
+ * file says where it appears, the folder is only a convention. `lobu apply`
+ * bundles the module where the project's node_modules exists (relative files
+ * and npm deps resolved) and ships source + bundle + extracted metadata;
+ * `lobu run` watches the listed files and re-applies on change. Explicit
+ * list, no directory auto-discovery — mirroring `connectorFromFile`.
+ */
+export function viewFromFile(path: string): ViewSource {
+  return { kind: "viewSource", path };
+}
+
+// ---------------------------------------------------------------------------
 // Automations
 // ---------------------------------------------------------------------------
 
@@ -1085,6 +1111,13 @@ export interface Project {
    * auto-discovery; only listed connectors are uploaded.
    */
   connectors?: ConnectorSource[];
+  /**
+   * Local view modules (`views/<type>/<key>.tsx`) to bundle and ship, built
+   * with {@link viewFromFile}. Explicit list, no directory auto-discovery;
+   * only listed views are uploaded. The module's `defineView` says where it
+   * appears; `lobu run` watches the listed files and their import graph.
+   */
+  views?: ViewSource[];
 }
 
 export function defineConfig(config: Omit<Project, "kind">): Project {

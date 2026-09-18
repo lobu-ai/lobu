@@ -44,6 +44,9 @@ COPY packages/connector-sdk/package.json packages/connector-sdk/
 COPY packages/connectors/package.json packages/connectors/
 COPY packages/embeddings/package.json packages/embeddings/
 COPY packages/connector-worker/package.json packages/connector-worker/
+# server depends on @lobu/views (workspace:*); its manifest must be present
+# for bun install to resolve the workspace member (round-1 F4).
+COPY packages/views/package.json packages/views/
 # The CLI ships in this image so self-hosters can run
 # `docker exec <container> lobu ...` (#2231). Real manifest, not a stub, so
 # bun install resolves its dependencies below.
@@ -91,6 +94,7 @@ COPY packages/connector-sdk/ packages/connector-sdk/
 COPY packages/connectors/ packages/connectors/
 COPY packages/embeddings/ packages/embeddings/
 COPY packages/connector-worker/ packages/connector-worker/
+COPY packages/views/ packages/views/
 COPY packages/pgvector-embedded/ packages/pgvector-embedded/
 COPY packages/server/ packages/server/
 COPY packages/cli/ packages/cli/
@@ -114,6 +118,9 @@ RUN cd packages/core && bunx tsc \
     && cd ../plugin-mcp && bunx tsc \
     && cd ../connector-sdk && bunx tsc \
     && cd ../embeddings && bunx tsc \
+    `# @lobu/views ships real guest runtime to server-side compilation;` \
+    `# its exports map points at dist, so compile it like the siblings.` \
+    && cd ../views && bunx tsc \
     `# connector-worker alone needs its full build, not tsc: the script also` \
     `# runs build-guest-bundle, and build:server below copies that bundle out` \
     `# of its dist. .dockerignore keeps dist out of the image, so tsc-only` \
@@ -213,6 +220,9 @@ COPY --from=builder /app/packages/connector-sdk ./packages/connector-sdk
 COPY --from=builder /app/packages/connectors ./packages/connectors
 COPY --from=builder /app/packages/embeddings ./packages/embeddings
 COPY --from=builder /app/packages/connector-worker ./packages/connector-worker
+# Real @lobu/views installation (manifest + source + compiled dist) so the
+# server's require.resolve('@lobu/views') settles inside the image.
+COPY --from=builder /app/packages/views ./packages/views
 COPY --from=builder /app/packages/server ./packages/server
 # The lobu CLI (#2231): self-hosters run `docker exec <container> lobu ...`.
 # bin/lobu.js resolves ../dist relative to its realpath and walks up to the

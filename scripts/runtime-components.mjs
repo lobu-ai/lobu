@@ -311,7 +311,9 @@ export async function buildRuntimeComponents() {
     // release can freeze and test its dependency graph before new sibling
     // versions exist in the registry (including canary versions).
     if (key === "server" || key === "device") {
-      for (const name of ["core", "connector-sdk"]) {
+      for (const name of key === "server"
+        ? ["core", "connector-sdk", "views"]
+        : ["core", "connector-sdk"]) {
         copy(
           join(root, "packages", name, "dist"),
           join(directory, "vendor", name, "dist")

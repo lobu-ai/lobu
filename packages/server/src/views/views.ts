@@ -10,11 +10,10 @@
  * back over the MCP resource or the shell route and mounted `srcdoc` into the
  * sandboxed frame the MCP apps already use.
  */
-import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
 import { build, type Plugin } from 'esbuild';
 import { getDb } from '../db/client';
@@ -53,43 +52,8 @@ export function viewKeyFromResourceUri(uri: string): string | null {
   return VIEW_KEY_RE.test(key) ? key : null;
 }
 
-/** Deterministic JSON for hashing: object keys sorted, arrays kept in order. */
-function stableStringify(value: unknown): string {
-  if (value === null || value === undefined) return 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  if (typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`);
-    return `{${entries.join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
-}
-
-/** Declared metadata that affects the stored view (everything but provenance). */
-export interface ViewContentMetadata {
-  name: string;
-  description: string;
-  attach: unknown;
-  params: unknown;
-  actions: unknown;
-}
-
-/**
- * sha256 of the source plus the declared metadata, first 16 hex. Same source
- * AND same metadata means the row is already current and nothing is written.
- * `last_writer` is provenance of the last write, not content: including it
- * would defeat the no-op detection, since every apply run mints a new
- * apply_id.
- */
-export function contentHash(source: string, metadata?: ViewContentMetadata): string {
-  return createHash('sha256')
-    .update(source)
-    .update('\n')
-    .update(stableStringify(metadata ?? null))
-    .digest('hex')
-    .slice(0, 16);
-}
+/** Shared content identity (server and CLI derive the key from one function). */
+export { contentHash, type ViewContentMetadata } from '@lobu/core/contracts/tools/view-content-hash';
 
 export interface ViewParamDecl {
   type: 'string' | 'number' | 'boolean';
@@ -262,32 +226,64 @@ export function projectView(view: StoredView): Omit<
 /**
  * The ONLY importable specifiers in phase-1 view compilation. A view author is
  * an org owner/admin, but the bundle is served to every viewer of the page —
- * so compilation resolves nothing off disk except these pinned runtime funds.
- * Relative/absolute imports (which could reach server files) and every other
- * bare specifier fail closed. PR2 adds `@lobu/views` plus the CLI-bundled path.
+ * so compilation resolves nothing off disk except these pinned runtime funds:
+ * react for rendering and `@lobu/views` for the hooks bridge (params, scope,
+ * reads, actions). Relative/absolute imports (which could reach server files)
+ * and every other bare specifier fail closed; the CLI bundles relative files
+ * and npm deps where node_modules exists and ships the bundle beside the
+ * source.
  */
 const VIEW_ALLOWED_BARE_SPECIFIERS = new Set([
   'react',
   'react-dom',
   'react-dom/client',
   'react/jsx-runtime',
+  '@lobu/views',
 ]);
-
 /** Virtual specifier carrying the authored source into the bundle. */
 const VIEW_SOURCE_SPECIFIER = 'lobu-view-source';
 
 /**
+ * The package directory a resolved fund file lives in: the gate lets imports
+ * FROM these trees through to default resolution. For installed packages this
+ * is the whole node_modules tree (transitive deps like the scheduler react-dom
+ * pulls in bare live there too); for workspace realpaths outside any
+ * node_modules (a symlinked package's dist) it is the nearest ancestor
+ * holding a package.json, so exactly that package passes.
+ */
+function fundPackageDir(file: string): string | null {
+  const idx = file.lastIndexOf('/node_modules/');
+  if (idx >= 0) return file.slice(0, idx + '/node_modules'.length);
+  let dir = file.slice(0, file.lastIndexOf('/'));
+  for (let i = 0; i < 5; i++) {
+    if (existsSync(join(dir, 'package.json'))) return dir;
+    const parent = dir.slice(0, dir.lastIndexOf('/'));
+    if (!parent || parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
  * Server-owned mounting bootstrap. The authored module is bundled as a
- * separate virtual module; this entry imports its default export and mounts
- * it into #root. Authors write an ordinary default-export component and never
- * touch the document themselves.
+ * separate virtual module; this entry renders its default export inside the
+ * `@lobu/views` provider (params, scope, reads, actions) and mounts it into
+ * #root. Authors write `export const view = defineView({ key, attach, … })`
+ * plus an ordinary default-export component and never touch the document
+ * themselves; a module without a `view` export still renders, with params
+ * defaulted and actions unavailable.
  */
 const VIEW_BOOTSTRAP_SOURCE = `import React from "react";
 import { createRoot } from "react-dom/client";
-import View from "${VIEW_SOURCE_SPECIFIER}";
+import { Provider as LobuViewProvider } from "@lobu/views";
+import * as viewModule from "${VIEW_SOURCE_SPECIFIER}";
+const View = viewModule.default;
+const viewDef = viewModule.view ?? { key: "", attach: [] };
 const mountNode = document.getElementById("root");
-if (mountNode) {
-  createRoot(mountNode).render(React.createElement(View));
+if (mountNode && View) {
+  createRoot(mountNode).render(
+    React.createElement(LobuViewProvider, { def: viewDef }, React.createElement(View))
+  );
 }
 `;
 
@@ -302,25 +298,30 @@ function viewResolvePlugin(): Plugin {
       // left absent — esbuild reports the unresolvable import instead
     }
   }
-  // Installation roots the allowed funds live under. Imports FROM files in
+  // Package directories the allowed funds live in. Imports FROM files in
   // these trees (react's own `./cjs/...` internals, the scheduler react-dom
-  // pulls in bare) resolve by default node resolution — the gate applies to
-  // the view source's imports, not the pinned installation content they
-  // reach. A view author cannot trigger this path: authored imports always
-  // arrive with the stdin importer, which matches no install root.
-  const installRoots = new Set<string>();
+  // pulls in bare, `@lobu/views`'s own sibling modules) resolve by default
+  // node resolution — the gate applies to the view source's imports, not the
+  // pinned installation content they reach. A view author cannot trigger this
+  // path: authored imports always arrive with the stdin/virtual importer,
+  // which lives in no fund package.
+  const fundDirs = new Set<string>();
   for (const file of Object.values(funds)) {
-    const idx = file.lastIndexOf('/node_modules/');
-    if (idx >= 0) installRoots.add(file.slice(0, idx + '/node_modules'.length));
+    const dir = fundPackageDir(file);
+    if (dir) fundDirs.add(dir);
   }
   return {
     name: 'lobu-view-resolve',
     setup(b) {
       b.onResolve({ filter: /.*/ }, (args) => {
+        // Normalize first: esbuild hands over unresolved paths (react-dom
+        // reaches scheduler as `../node_modules/scheduler/index.js`), and an
+        // un-normalized prefix check would miss them.
+        const importer = args.importer ? posix.normalize(args.importer) : null;
         if (
-          args.importer &&
-          [...installRoots].some(
-            (root) => args.importer === root || args.importer.startsWith(`${root}/`)
+          importer &&
+          [...fundDirs].some(
+            (root) => importer === root || importer.startsWith(`${root}/`)
           )
         ) {
           return undefined;
@@ -345,7 +346,7 @@ function viewResolvePlugin(): Plugin {
         return {
           errors: [
             {
-              text: `Unknown view import "${args.path}": phase-1 views bundle react only; other dependencies arrive with @lobu/views in PR2`,
+              text: `Unknown view import "${args.path}": phase-1 views bundle react and @lobu/views only; relative files and other dependencies ship through lobu apply`,
             },
           ],
         };
@@ -478,12 +479,17 @@ export function renderViewShell(view: StoredView): string {
 /**
  * The generic loader shell every `open_view` binds. Hand-written postMessage —
  * no `@modelcontextprotocol/ext-apps`, no React, no framework — so it stays a
- * few kilobytes while per-view bundles carry the 500KB+ guest SDK chain the
- * spike measured. It announces itself to the host and renders the per-view
- * bundle the host hands it (`ui://lobu/views/<key>` read through the host
- * resource channel); with no host message it stays a neutral loading state
- * instead of guessing a protocol. The `@lobu/views` guest bridge (PR2) and
- * the owletto host (PR3) complete the handshake.
+ * few kilobytes while per-view bundles carry the React guest. It runs the
+ * standard `ui/initialize` handshake, then renders the per-view bundle from
+ * whichever delivery the host uses: the standard `sandbox-resource-ready`
+ * push (Claude), a `resources/read` of `ui://lobu/views/<key>` for the key in
+ * the `tool-input` arguments, or the `lobu:views-bundle` message (same-origin
+ * hosts that read the shell over REST). Before replacing its document it
+ * injects the collected bootstrap state (host context, last tool input,
+ * queued event notifications, request counter) as `window.__lobuViewHandoff`,
+ * so the mounted guest continues the session instead of starting unseeded.
+ * With no delivery it stays an honest loading state instead of guessing a
+ * protocol.
  */
 export function renderViewsLoaderShell(): string {
   return `<!doctype html>
@@ -500,11 +506,79 @@ export function renderViewsLoaderShell(): string {
 <script>
 (function () {
   "use strict";
-  var READY = { type: "lobu:views-loader-ready", version: 1 };
-  function announce() {
-    try {
-      if (window.parent && window.parent !== window) window.parent.postMessage(READY, "*");
-    } catch (err) { /* sandboxed without a host — stay in loading state */ }
+  var PROTOCOL = "2026-01-26";
+  var nextId = 1;
+  var pending = {};
+  var settled = false;
+  // Bootstrap state for the mounted guest, collected across this document's
+  // life and injected into the per-view HTML before replacing it. A host that
+  // delivers the opening tool input once has fulfilled that delivery; without
+  // the handoff the new guest would start unseeded and wait forever.
+  var hostContext = {};
+  var toolInput = null;
+  var queue = [];
+  var QUEUE_CAP = 50;
+  function status(text) {
+    var el = document.getElementById("lobu-views-status");
+    if (el) el.textContent = text;
+  }
+  function handoffTag() {
+    var handoff = { v: 1, hostContext: hostContext, toolInput: toolInput, queue: queue, nextId: nextId };
+    var json = JSON.stringify(handoff).replace(/</g, "\\\\u003c");
+    return "<script>window.__lobuViewHandoff=" + json + ";</scr" + "ipt>";
+  }
+  function injectHandoff(html) {
+    var tag = handoffTag();
+    var m = /<head[^>]*>/i.exec(html);
+    if (m) {
+      var end = m.index + m[0].length;
+      return html.slice(0, end) + tag + html.slice(end);
+    }
+    return tag + html;
+  }
+  function show(html) {
+    if (settled) return;
+    settled = true;
+    document.open();
+    document.write(injectHandoff(html));
+    document.close();
+  }
+  function fail(text) {
+    if (settled) return;
+    settled = true;
+    status(text);
+  }
+  function send(message) {
+    window.parent.postMessage(message, "*");
+  }
+  function request(method, params, onResult) {
+    var id = nextId++;
+    pending[id] = onResult;
+    setTimeout(function () {
+      if (pending[id]) {
+        delete pending[id];
+        onResult(new Error('request "' + method + '" timed out'), null);
+      }
+    }, 60000);
+    send({ jsonrpc: "2.0", id: id, method: method, params: params });
+  }
+  function readViewBundle(key, onDone) {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(key)) {
+      onDone(new Error('unknown view "' + String(key) + '"'));
+      return;
+    }
+    request("resources/read", { uri: "ui://lobu/views/" + key }, function (err, result) {
+      if (err) {
+        onDone(err);
+        return;
+      }
+      var text = result && result.contents && result.contents[0] && result.contents[0].text;
+      if (typeof text !== "string" || !text) {
+        onDone(new Error("view bundle came back empty"));
+        return;
+      }
+      onDone(null, text);
+    });
   }
   window.addEventListener("message", function (event) {
     // Only the host frame may deliver the bundle. Any other source — another
@@ -512,16 +586,75 @@ export function renderViewsLoaderShell(): string {
     // can never inject HTML into the view.
     if (event.source !== window.parent) return;
     var data = event.data;
-    if (!data || typeof data !== "object") return;
-    // The host delivers the per-view bundle read from ui://lobu/views/<key>.
+    if (!data || typeof data !== "object" || data.jsonrpc !== "2.0") return;
+    // A host request (ping, teardown): acknowledge so it never hangs.
+    if (typeof data.method === "string" && (typeof data.id === "string" || typeof data.id === "number")) {
+      send({ jsonrpc: "2.0", id: data.id, result: {} });
+      return;
+    }
+    if (typeof data.id === "string" || typeof data.id === "number") {
+      var cb = pending[data.id];
+      if (!cb) return;
+      delete pending[data.id];
+      if (data.error) cb(new Error(String((data.error && data.error.message) || "host request failed")), null);
+      else cb(null, data.result);
+      return;
+    }
+    if (typeof data.method !== "string") return;
+    var params = data.params && typeof data.params === "object" ? data.params : {};
+    // Standard push path: the host delivers the per-view HTML itself.
+    if (data.method === "ui/notifications/sandbox-resource-ready" && typeof params.html === "string") {
+      show(params.html);
+      return;
+    }
+    // Standard fetch path: tool-input carries the open_view arguments. The
+    // input is kept as the handoff even when it carries no view key: the
+    // mounted guest seeds scope and params from it either way.
+    if (data.method === "ui/notifications/tool-input") {
+      var args = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+      toolInput = args;
+      if (typeof args.key === "string" && args.key) {
+        readViewBundle(args.key, function (err, html) {
+          if (err) fail("Could not load view: " + err.message);
+          else show(html);
+        });
+      }
+      return;
+    }
+    // Event notifications that arrive after the opening input are queued for
+    // the mounted guest, which adopts them on connect instead of missing them
+    // across the document replacement. Context merges into the adopted
+    // hostContext (state, not an event) rather than queueing.
+    if (data.method === "ui/notifications/tool-result" || data.method === "ui/notifications/tool-cancelled") {
+      queue.push({ method: data.method, params: params });
+      if (queue.length > QUEUE_CAP) queue.shift();
+      return;
+    }
+    if (data.method === "ui/notifications/host-context-changed") {
+      for (var k in params) {
+        if (k === "__proto__") continue;
+        hostContext[k] = params[k];
+      }
+      return;
+    }
+    // Same-origin fast path: the host read the shell over REST and posts it.
     if (data.type === "lobu:views-bundle" && typeof data.html === "string") {
-      document.open();
-      document.write(data.html);
-      document.close();
+      show(data.html);
     }
   });
-  if (document.readyState === "complete") announce();
-  else window.addEventListener("load", announce);
+  request("ui/initialize", {
+    appInfo: { name: "Lobu views", version: "0.0.1" },
+    appCapabilities: {},
+    protocolVersion: PROTOCOL
+  }, function (err, result) {
+    if (result && typeof result.hostContext === "object" && result.hostContext) {
+      hostContext = result.hostContext;
+    }
+    send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+  });
+  setTimeout(function () {
+    if (!settled) fail("The host did not deliver a view. Reopen it from Lobu.");
+  }, 90000);
 })();
 </script>
 </body>

@@ -449,6 +449,15 @@ export async function devCommand(
         })
       ) {
         await autoApplyLocalProject(cwd, gatewayUrl, localOrgSlug);
+        // Watch the project's listed view files + their import graph (and the
+        // config itself) and re-apply on change, so an edited view shows up
+        // locally within ~2 s of saving. Best-effort like the apply above: a
+        // project with no views, or a watch setup failure, only logs.
+        // Lazy-imported so the reapply graph (esbuild, jiti) stays out of
+        // `lobu run`'s module-load path — same rule as the auto-apply above.
+        void startViewReapplyLoop(cwd, gatewayUrl, localOrgSlug).catch(() => {
+          // startViewReapplyLoop logs its own diagnostics; never crash `run`.
+        });
       }
       // Mint hosted-chat link codes only AFTER the gateway is reachable and the
       // project is applied. printPreviewInstructions POSTs /preview/claims; if
@@ -485,11 +494,62 @@ export async function devCommand(
 }
 
 /**
- * Whether `lobu run` should auto-apply the project. True only when:
- *  - the backend is embedded (never auto-mutate an external/prod DB), AND
- *  - local sign-in registered and credentialed the selected context, AND
- *  - the project actually has a `lobu.config.ts` to apply.
+ * Re-apply the project's view files + their import graph (and `lobu.config.ts`
+ * itself) on change. The reapply set is rebuilt after every apply
+ * so a new import joins on the next save; the config reloads through jiti on
+ * each apply, so config edits take effect without restarting `lobu run`.
+ *
+ * Best-effort: setup failure only logs (a project with no `views:` still gets
+ * the config reapplied on edit, so adding the first view starts working with
+ * no restart). The reapply graph is imported lazily for the same module-load
+ * reason as the auto-apply above.
  */
+export async function startViewReapplyLoop(
+  cwd: string,
+  gatewayUrl: string,
+  localOrgSlug?: string
+): Promise<{ close: () => void }> {
+  const noop = { close: () => undefined };
+  try {
+    const { collectViewReapplySet, startViewReapply } = await import(
+      "./_lib/view-reapply.js"
+    );
+    let set = await collectViewReapplySet(cwd);
+    const viewFiles = set.files.length - 1;
+    if (viewFiles > 0) {
+      console.log(
+        chalk.dim(
+          `  watching ${viewFiles} view file${viewFiles === 1 ? "" : "s"} (re-apply on save)`
+        )
+      );
+    }
+    const onLog = (message: string) =>
+      console.warn(chalk.dim(`  (${message})`));
+    const current = startViewReapply(set, { onLog, onChange });
+    async function onChange(): Promise<void> {
+      console.log(chalk.dim("\n  views changed — re-applying…"));
+      await autoApplyLocalProject(cwd, gatewayUrl, localOrgSlug);
+      try {
+        set = await collectViewReapplySet(cwd);
+      } catch {
+        // A mid-save config may not parse — keep the old set; the next
+        // successful apply rebuilds it.
+        return;
+      }
+      // In-place subscription swap on the same coordinator: a save recorded
+      // while this apply ran keeps its pending timer and still deploys.
+      current.update(set);
+    }
+    return { close: () => current.close() };
+  } catch (err) {
+    console.warn(
+      chalk.dim(
+        `  (view reapply off: ${err instanceof Error ? err.message : String(err)})`
+      )
+    );
+    return noop;
+  }
+}
 export function shouldAutoApplyLocalProject(opts: {
   mode: "external" | "embedded";
   localContextReady: boolean;

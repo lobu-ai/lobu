@@ -47,6 +47,10 @@ const PACKAGES = [
   // CLI's device component carries its own versioned copy of their source.
   { dir: "packages/connector-worker", transform: rewriteWorkspaceRefs },
   { dir: "packages/promptfoo-provider", transform: rewriteWorkspaceRefs },
+  // The public authoring runtime for Lobu views. CLI bundling resolves its
+  // real package, so it must publish like every other runtime dependency —
+  // ahead of the CLI entry, which is published last.
+  { dir: "packages/views", transform: rewriteWorkspaceRefs },
   // Advance the CLI entry point only after every sibling package succeeds.
   { dir: "packages/cli", transform: rewriteWorkspaceRefs },
 ];

@@ -7,7 +7,8 @@
  * history of definitions, and removing a view is `remove`.
  *
  * `set` compiles `source_code` server-side with esbuild (browser IIFE) and
- * upserts by (organization_id, key). Same source means the same content hash
+ * upserts by (organization_id, key). Same executable artifact (source,
+ * declared metadata AND compiled bundle digest) means the same content hash
  * and no write. The server never executes view code.
  */
 
@@ -26,6 +27,7 @@ import { ToolUserError } from '../../utils/errors';
 import {
   RESERVED_VIEW_PARAMS,
   VIEW_ACTION_NAME_RE,
+  VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
   contentHash,
@@ -168,20 +170,33 @@ async function handleSet(
   const attach = (args.attach ?? []) as SetViewInput['attach'];
   const params = (args.params ?? {}) as SetViewInput['params'];
   const actions = (args.actions ?? {}) as SetViewInput['actions'];
-  const hash = contentHash(args.source_code, {
-    name,
-    description,
-    attach,
-    params,
-    actions,
-  });
-  // Same source AND same metadata: skip the compile and the write entirely.
+  // Resolve the executable artifact BEFORE the identity: a supplied bundle is
+  // validated (non-empty, under the cap) and source-only input is compiled,
+  // so the no-op comparison below sees the same bytes `setView` would store.
+  // Comparing a source/metadata-only hash first would discard bundle-only
+  // fixes before they reach the compiled-bytes comparison.
+  const compiled = args.compiled_code
+    ? checkCompiledCode(args.compiled_code)
+    : await compileView(args.source_code);
+  const hash = contentHash(
+    args.source_code,
+    {
+      name,
+      description,
+      attach,
+      params,
+      actions,
+    },
+    compiled
+  );
+  // Same source AND same metadata AND same executable bundle: no write.
+  // A legacy row (source/metadata-only hash) never matches, so it refreshes
+  // exactly once on the next set and is a no-op after that.
   const current = await getView(ctx.organizationId, args.key);
   if (current && current.content_hash === hash) {
     return { action: 'set', view: projectView(current), written: false };
   }
 
-  const compiled = await compileView(args.source_code);
   const { view, written } = await setView(ctx.organizationId, {
     key: args.key,
     name,
@@ -203,6 +218,26 @@ async function handleSet(
   }
 
   return { action: 'set', view: projectView(view), written };
+}
+
+/**
+ * Validate a CLI-bundled browser bundle: non-empty and under the same cap the
+ * server compiler enforces, so the two set paths store comparable artifacts.
+ * The bundle is author code shipped over an operator credential — the same
+ * trust as `source_code` — so no recompilation, just the size check.
+ */
+function checkCompiledCode(compiledCode: string): string {
+  if (compiledCode.length === 0) {
+    throw new ToolUserError('set requires compiled_code to be non-empty', 400);
+  }
+  const bytes = Buffer.byteLength(compiledCode, 'utf8');
+  if (bytes > VIEW_COMPILED_MAX_BYTES) {
+    throw new ToolUserError(
+      `View bundle is ${bytes} bytes, over the ${VIEW_COMPILED_MAX_BYTES} byte cap`,
+      422
+    );
+  }
+  return compiledCode;
 }
 
 async function handleGet(

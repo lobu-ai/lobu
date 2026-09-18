@@ -22,6 +22,7 @@ import type {
   InferenceModality,
   Project,
   Skill,
+  ViewSource,
 } from "../../../config/index.js";
 import { ValidationError } from "../../memory/_lib/errors.js";
 import {
@@ -254,6 +255,37 @@ export interface DesiredConnectorDefinition {
   sourceFile: string;
 }
 
+/** One `viewFromFile` entry, bundled at load (apply reuses the artifacts). */
+export interface DesiredView {
+  /**
+   * View key, re-derived from the module's own `defineView({ key })` at bundle
+   * time. The bundle pass refuses a mismatch with nothing to fall back to: a
+   * key is required, so the plan, the bundle and the action agree.
+   */
+  key: string;
+  /** Absolute path to the module. */
+  sourcePath: string;
+  /** Raw module source, pushed verbatim beside the bundle. */
+  sourceCode: string;
+  /**
+   * sha256 of source plus declared metadata plus the compiled artifact's
+   * digest, via the shared `@lobu/core/contracts/tools/view-content-hash` —
+   * the SAME function the server hashes with, so the diff's noop means the
+   * server will no-write. The bundle is an input (not just a payload)
+   * because it carries the relative imports and view npm deps the entry
+   * source alone does not name.
+   */
+  contentHash: string;
+  /** Config-relative path for messages. */
+  sourceFile: string;
+  /** Browser IIFE bundle (react, bridge, relative files, view npm deps). */
+  compiledCode: string;
+  /** Metadata extracted from the module itself. */
+  attach: Array<Record<string, unknown>>;
+  params: Record<string, unknown>;
+  actions: Record<string, { emits: string }>;
+}
+
 export interface DesiredAgent {
   metadata: DesiredAgentMetadata;
   /**
@@ -324,6 +356,12 @@ export interface DesiredState {
     authProfiles: DesiredAuthProfile[];
     connections: DesiredConnection[];
   };
+  /**
+   * View modules declared via `viewFromFile`. The key is provisional — read
+   * from the `defineView({ key })` literal when present, else derived from the
+   * path — and apply re-derives it from the bundle, refusing a mismatch.
+   */
+  views: DesiredView[];
   /**
    * Names of env vars referenced via `secret()` / `$VAR` (provider keys,
    * auth-profile + mcp credentials). The CLI surfaces these before mutating
@@ -840,6 +878,11 @@ interface LoadDesiredStateOptions {
    * expansion), so `--only agents` doesn't require connector secrets.
    */
   only?: "agents" | "memory";
+  /**
+   * Operator-visible log line (install notices while resolving views).
+   * Defaults to silent; `lobu apply` passes its printer.
+   */
+  onLog?: (message: string) => void;
 }
 
 /**
@@ -943,6 +986,131 @@ function resolveConnectorSources(
     });
   }
   return defs.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
+}
+
+const VIEW_SOURCE_MAX_BYTES = 1_000_000;
+
+/**
+ * Resolve `viewFromFile` entries to bundled views. Same containment shape as
+ * connector sources (relative POSIX path under the config directory, no
+ * `..`/absolute/backslash, must exist, under the server's source cap).
+ *
+ * Bundling happens HERE, not in executePlan, for one reason: the diff key
+ * must be the server's hash (source plus declared metadata plus the compiled
+ * artifact's digest, via the shared content-hash function), and the metadata
+ * only exists after the module's `view` export is read. The key comes from
+ * that export — there is no path fallback, because a required key has nothing
+ * to fall back to.
+ * ExecutePlan ships these artifacts verbatim; it never re-bundles.
+ *
+ * The esbuild + jiti-adjacent imports stay lazy (this async function is the
+ * only importer), so the bundler graph never rides the module-load path.
+ */
+async function resolveViewSources(
+  sources: ViewSource[],
+  cwd: string,
+  log: (message: string) => void
+): Promise<DesiredView[]> {
+  const baseDir = resolve(cwd);
+  const views: DesiredView[] = [];
+  const seen = new Set<string>();
+  const { ensureProjectDepsInstalled } = await import(
+    "../ensure-deps-installed.js"
+  );
+  const { bundleViewFromFile } = await import("../view-bundler.js");
+  const { contentHash } = await import(
+    "@lobu/core/contracts/tools/view-content-hash"
+  );
+  for (const src of sources) {
+    const rel = src.path.trim();
+    if (
+      !rel ||
+      rel.startsWith("/") ||
+      rel.includes("\\") ||
+      rel.split("/").some((seg) => seg === "..")
+    ) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(src.path)}) must be a relative POSIX path under the config directory (./views/deal/pipeline.tsx)`
+      );
+    }
+    if (!/\.tsx?$/.test(rel)) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) must point at a \`.tsx\` or \`.ts\` file`
+      );
+    }
+    const abs = resolve(baseDir, rel);
+    const relPath = relative(baseDir, abs);
+    if (
+      relPath === ".." ||
+      relPath.startsWith(`..${sep}`) ||
+      isAbsolute(relPath)
+    ) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) resolves outside the config directory (${abs})`
+      );
+    }
+    let sourceCode: string;
+    try {
+      sourceCode = readFileSync(abs, "utf-8");
+    } catch {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) does not exist (resolved to ${abs})`
+      );
+    }
+    if (Buffer.byteLength(sourceCode, "utf8") > VIEW_SOURCE_MAX_BYTES) {
+      throw new ValidationError(
+        `viewFromFile(${JSON.stringify(rel)}) is over the ${VIEW_SOURCE_MAX_BYTES} byte source cap`
+      );
+    }
+    ensureProjectDepsInstalled(abs, log);
+    const bundled = await bundleViewFromFile(abs);
+    const key = bundled.metadata.key;
+    if (seen.has(key)) {
+      throw new ValidationError(
+        `duplicate view key "${key}" in lobu.config.ts — each viewFromFile must resolve to a unique key`
+      );
+    }
+    seen.add(key);
+    // Hash EXACTLY what the server will store: name defaults to the key,
+    // description defaults to empty, metadata JSON-round-tripped (the wire
+    // drops undefined, so hash post-round-trip or equivalent declarations
+    // compare differently), plus the digest of the bundle produced above
+    // (which carries the relative imports the entry source alone omits).
+    // Same function, same inputs: same hash.
+    const name = key;
+    const description = "";
+    const attach = JSON.parse(JSON.stringify(bundled.metadata.attach)) as Array<
+      Record<string, unknown>
+    >;
+    const params = JSON.parse(
+      JSON.stringify(bundled.metadata.params)
+    ) as Record<string, unknown>;
+    const actions = JSON.parse(
+      JSON.stringify(bundled.metadata.actions)
+    ) as Record<string, { emits: string }>;
+    views.push({
+      key,
+      sourcePath: abs,
+      sourceCode,
+      contentHash: contentHash(
+        sourceCode,
+        {
+          name,
+          description,
+          attach,
+          params,
+          actions,
+        },
+        bundled.compiledCode
+      ),
+      sourceFile: rel.replace(/^\.\//, ""),
+      compiledCode: bundled.compiledCode,
+      attach,
+      params,
+      actions,
+    });
+  }
+  return views.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
 }
 
 const REACTION_SCRIPT_MAX_BYTES = 256 * 1024;
@@ -1273,6 +1441,14 @@ export async function loadDesiredStateFromConfig(
     state.connectors.definitions = resolveConnectorSources(
       typedProject.connectors ?? [],
       opts.cwd
+    );
+    // Views are neither agents nor memory: a targeted apply skips them too.
+    // Bundled here so the diff key is the server's hash (same function, same
+    // inputs); executePlan ships these artifacts verbatim.
+    state.views = await resolveViewSources(
+      typedProject.views ?? [],
+      opts.cwd,
+      opts.onLog ?? (() => undefined)
     );
   }
   // Surface load-time warnings to `lobu apply` (which prints them). #1010's

@@ -719,6 +719,7 @@ describe("fetchRemoteSnapshot — no view-template hydration", () => {
       listAuthProfiles: async () => [],
       listConnections: async () => [],
       listInferenceProviders: async () => [],
+      listViews: async () => [],
     } as unknown as ApplyClient;
 
     const state: DesiredState = {

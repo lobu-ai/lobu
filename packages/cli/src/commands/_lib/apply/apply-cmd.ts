@@ -419,6 +419,10 @@ export async function fetchRemoteSnapshot(
   const inferenceProviders =
     only === undefined ? await client.listInferenceProviders() : [];
 
+  // Views are org-scoped modules (neither agents nor memory): a full apply
+  // reconciles them against `manage_views list` (metadata only).
+  const views = only === undefined ? await client.listViews() : [];
+
   return {
     agents,
     agentSettings,
@@ -430,6 +434,7 @@ export async function fetchRemoteSnapshot(
     connections,
     feedsByConnectionId,
     inferenceProviders,
+    views,
   };
 }
 
@@ -715,6 +720,9 @@ interface ApplyContext {
   state: DesiredState;
   plan: DiffPlan;
   remote: RemoteSnapshot;
+  /** Origin the apply targets (for printing per-view shell URLs). */
+  apiBaseUrl: string;
+  orgSlug: string;
 }
 
 /**
@@ -834,6 +842,40 @@ export async function executePlan(
     })) {
       printText(chalk.yellow(`Warning: ${warning}`));
     }
+  }
+
+  // 2b) Views — shipped from the load-time bundle (source + browser bundle +
+  //     metadata extracted from the module itself, hashed with the server's
+  //     function). No re-bundling here: the diff already compared the exact
+  //     hash the server will compute.
+  for (const row of rowsByKind("view")) {
+    if (row.kind !== "view") continue;
+    if (!row.desired) continue;
+    const result = await ctx.client.setView({
+      key: row.id,
+      name: row.desired.key,
+      source_code: row.desired.sourceCode,
+      compiled_code: row.desired.compiledCode,
+      attach: row.desired.attach,
+      params: row.desired.params,
+      actions: row.desired.actions,
+    });
+    const kb = (
+      Buffer.byteLength(row.desired.compiledCode, "utf8") / 1024
+    ).toFixed(0);
+    printText(
+      renderProgress(
+        row.verb,
+        "view",
+        row.id,
+        `${result.written ? "(pushed" : "(unchanged"}, ${kb} KB)`
+      )
+    );
+    printText(
+      chalk.dim(
+        `  → ${ctx.apiBaseUrl}/api/${ctx.orgSlug}/views/${row.id}/shell`
+      )
+    );
   }
 
   // 3) Agents
@@ -1250,6 +1292,7 @@ async function deleteRemovedDefinitions(ctx: ApplyContext): Promise<void> {
     ctx.remote.automations.map((w) => [w.slug, w.automation_id])
   );
   const steps: Array<[DiffRow["kind"], (id: string) => Promise<void>]> = [
+    ["view", (id) => ctx.client.removeView(id)],
     [
       "automation",
       async (id) => {
@@ -1355,7 +1398,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   await loadProjectEnvFile(cwd);
 
   // Load desired state from the TypeScript entrypoint (lobu.config.ts).
-  const loadArgs = { cwd, ...(opts.only ? { only: opts.only } : {}) };
+  const loadArgs = {
+    cwd,
+    ...(opts.only ? { only: opts.only } : {}),
+    onLog: (message: string) => printText(chalk.dim(message)),
+  };
   const { state, configPath, warnings } =
     await loadDesiredStateFromConfig(loadArgs);
 
@@ -1768,7 +1815,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     if (hasResourceWork) {
       printText(chalk.bold("\nApplying:"));
       const executed = await executePlan(
-        { client, state, plan, remote },
+        { client, state, plan, remote, apiBaseUrl, orgSlug },
         pendingAuth
       );
       connectorVersions = executed.connectorVersions;

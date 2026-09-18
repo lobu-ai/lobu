@@ -143,7 +143,7 @@ export function sanitizeSnapshotState(
 export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
   const newApplyId = mintApplyId();
-  const { client, orgSlug } = await resolveApplyClient({
+  const { client, apiBaseUrl, orgSlug } = await resolveApplyClient({
     url: opts.url,
     org: opts.org,
     applyId: newApplyId,
@@ -304,7 +304,7 @@ export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
       printText(chalk.bold("\nApplying snapshot:"));
       const pendingAuth: PendingAuthEntry[] = [];
       await executePlan(
-        { client, state: sanitized.state, plan, remote },
+        { client, state: sanitized.state, plan, remote, apiBaseUrl, orgSlug },
         pendingAuth
       );
     }
