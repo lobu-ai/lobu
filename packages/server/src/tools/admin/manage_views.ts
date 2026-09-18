@@ -25,6 +25,7 @@ import { emit } from '../../events/emitter';
 import { ToolUserError } from '../../utils/errors';
 import {
   RESERVED_VIEW_PARAMS,
+  VIEW_ACTION_NAME_RE,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
   contentHash,
@@ -118,22 +119,28 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
         400
       );
     }
-    // Params ride in the URL / viewState, so defaults are scalars only.
+    // Defaults must match their declared scalar type: the reader fills them
+    // in verbatim, so a mistyped default would surface as a wrong-typed
+    // param (or a 500) instead of failing at authoring.
     const d = decl.default;
     if (
       d !== undefined &&
-      d !== null &&
-      typeof d !== 'string' &&
-      typeof d !== 'number' &&
-      typeof d !== 'boolean'
+      (typeof d !== decl.type ||
+        (typeof d === 'number' && !Number.isFinite(d)))
     ) {
       throw new ToolUserError(
-        `Param '${name}' default must be a string, number, boolean or null`,
+        `Param '${name}' default must be a ${decl.type}`,
         400
       );
     }
   }
   for (const [name, decl] of Object.entries(args.actions ?? {})) {
+    if (!VIEW_ACTION_NAME_RE.test(name)) {
+      throw new ToolUserError(
+        `Action '${name}' must start with a letter and contain only letters, digits, underscores or dashes (1-64 characters)`,
+        400
+      );
+    }
     if (!EMITS_NAME_RE.test(decl.emits)) {
       throw new ToolUserError(
         `Action '${name}' emits '${decl.emits}': use <subject>.<op> event-kind names`,

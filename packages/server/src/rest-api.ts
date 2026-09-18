@@ -444,7 +444,7 @@ export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 			throw new ToolUserError(`Unknown view: ${key}`, 404);
 		}
 		const html = renderViewShell(view);
-		c.header("Content-Type", "text/html; charset=utf-8");
+		c.header("Content-Type", "text/plain; charset=utf-8");
 		c.header("Cache-Control", "no-store");
 		c.header("X-Lobu-View-Hash", view.content_hash);
 		c.header(

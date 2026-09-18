@@ -14,7 +14,7 @@ import {
 } from "../utils/event-kind-validation";
 import { insertConnectionlessWorkspaceEvent } from "../utils/insert-event";
 import { emit } from "../events/emitter";
-import { getView, isValidViewKey } from "../views/views";
+import { getView, isValidViewKey, VIEW_ACTION_NAME_RE } from "../views/views";
 
 const TEMPLATE_EVENT_ACTION_PREFIX = "event-action";
 const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -84,7 +84,7 @@ function validateViewInvocation(params: InvokeViewActionParams): void {
 	if (!isValidViewKey(params.viewKey)) {
 		throw new ToolUserError("Invalid view key", 400);
 	}
-	if (!ACTION_NAME.test(params.action)) {
+	if (!VIEW_ACTION_NAME_RE.test(params.action)) {
 		throw new ToolUserError("Invalid view action name", 400);
 	}
 	if (!INTERACTION_ID.test(params.interactionId)) {

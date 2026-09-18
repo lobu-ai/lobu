@@ -26,6 +26,8 @@ const require = createRequire(import.meta.url);
 
 /** View keys match the migration CHECK: lowercase, dashes, 1-64 chars. */
 export const VIEW_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** View action names are identifiers and may use camelCase. */
+export const VIEW_ACTION_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 /** Stable generic loader every `open_view` binds (one tool, one resource). */
 export const LOBU_VIEWS_RESOURCE_URI = 'ui://lobu/views';
 const VIEW_RESOURCE_PREFIX = 'ui://lobu/views/';

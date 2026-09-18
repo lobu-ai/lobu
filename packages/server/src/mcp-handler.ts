@@ -533,6 +533,9 @@ function createServerForContext(
       if (!authCtx.isAuthenticated || !authCtx.userId) {
         throw new Error('Authentication required to read views.');
       }
+      if (!authCtx.memberRole) {
+        throw new Error('Workspace membership is required to read views.');
+      }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
         throw new Error('Reading views requires an MCP session with read access.');
       }

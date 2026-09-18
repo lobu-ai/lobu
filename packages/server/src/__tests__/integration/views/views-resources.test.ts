@@ -348,7 +348,11 @@ describe('views resources + open_view + invoke_view_action', () => {
 	it('serves the shell over the authenticated route with hash headers', async () => {
 		const response = await get(`/api/${org.slug}/views/board/shell`, { token });
 		expect(response.status).toBe(200);
-		expect(response.headers.get('content-type')).toContain('text/html');
+		// Fetch-only data: text/plain plus nosniff so direct navigation can
+		// never execute the authored bundle as application-origin script. The
+		// web host fetches response.text() into its sandboxed srcdoc.
+		expect(response.headers.get('content-type')).toContain('text/plain');
+		expect(response.headers.get('x-content-type-options')).toBe('nosniff');
 		expect(response.headers.get('x-lobu-view-hash')).toMatch(/^[0-9a-f]{16}$/);
 		expect(Number(response.headers.get('x-lobu-view-bytes'))).toBeGreaterThan(0);
 		const html = await response.text();
@@ -386,6 +390,35 @@ describe('views resources + open_view + invoke_view_action', () => {
 			body: { value: null },
 		});
 		expect(missingId.status).toBe(400);
+	});
+
+	it('runs a camelCase action end to end over the web route', async () => {
+		await executeTool(
+			'manage_views',
+			{
+				action: 'set',
+				key: 'pipeline2',
+				source_code: VIEW_SOURCE,
+				actions: { markWon: { emits: 'test.poked' } },
+			},
+			TEST_ENV,
+			ownerCtx
+		);
+		const fired = await post(`/api/${org.slug}/views/pipeline2/actions/markWon`, {
+			token,
+			body: { value: { id: entityId }, interaction_id: 'web-markwon' },
+		});
+		expect(fired.status).toBe(200);
+		const body = await fired.json();
+		expect(body.event_type).toBe('test.poked');
+		const sql = getTestDb();
+		const rows = await sql`
+      SELECT semantic_type, origin_type FROM events WHERE id = ${body.event_id}
+    `;
+		expect(rows[0]).toMatchObject({
+			semantic_type: 'test.poked',
+			origin_type: 'view_interaction',
+		});
 	});
 });
 
@@ -484,5 +517,70 @@ describe('views on a public org stay signed-in-only', () => {
 			(t) => t.name
 		);
 		expect(names).not.toContain('manage_views');
+	});
+
+	it('signed-in OAuth nonmember cannot read per-view bundles on a public org', async () => {
+		// A user who is a member only of a different workspace: admitted to
+		// the public endpoint for discovery, but not a member of the target.
+		const otherOrg = await createTestOrganization({
+			name: 'Views Other Org',
+			slug: 'views-other-org',
+		});
+		const outsider = await createTestUser({ email: 'views-outsider@test.com' });
+		await addUserToOrganization(outsider.id, otherOrg.id, 'member');
+		const outsiderClient = await createTestOAuthClient();
+		const outsiderToken = (
+			await createTestAccessToken(outsider.id, otherOrg.id, outsiderClient.client_id, {
+				scope: 'mcp:read profile:read',
+			})
+		).token;
+		const initRes = await post(`/mcp/${publicSlug}`, {
+			body: {
+				jsonrpc: '2.0',
+				id: 'outsider-init',
+				method: 'initialize',
+				params: {
+					protocolVersion: MCP_PROTOCOL_VERSION,
+					capabilities: {},
+					clientInfo: { name: 'outsider', version: '1.0' },
+				},
+			},
+			token: outsiderToken,
+		});
+		const sessionId = initRes.headers.get('mcp-session-id');
+		expect(sessionId).toBeTruthy();
+		const readRes = await post(`/mcp/${publicSlug}`, {
+			body: {
+				jsonrpc: '2.0',
+				id: 'outsider-read',
+				method: 'resources/read',
+				params: { uri: 'ui://lobu/views/board' },
+			},
+			headers: {
+				'mcp-session-id': sessionId!,
+				'mcp-protocol-version': MCP_PROTOCOL_VERSION,
+			},
+			token: outsiderToken,
+		});
+		const readJson = await readRes.json();
+		expect(readJson.error?.message ?? '').toMatch(/membership|member/i);
+		expect(JSON.stringify(readJson.result ?? null)).not.toContain('lobu-view');
+		// Same caller is rejected by manage_views.get as well.
+		const callRes = await post(`/mcp/${publicSlug}`, {
+			body: {
+				jsonrpc: '2.0',
+				id: 'outsider-call',
+				method: 'tools/call',
+				params: { name: 'manage_views', arguments: { action: 'get', key: 'board' } },
+			},
+			headers: {
+				'mcp-session-id': sessionId!,
+				'mcp-protocol-version': MCP_PROTOCOL_VERSION,
+			},
+			token: outsiderToken,
+		});
+		const callJson = await callRes.json();
+		expect(callJson.result?.isError ?? callJson.error).toBeTruthy();
+		expect(JSON.stringify(callJson)).not.toContain('export default');
 	});
 });

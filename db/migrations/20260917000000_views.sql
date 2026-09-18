@@ -20,8 +20,9 @@
 -- Lock safety: the dropped tables are small org-config tables (tens of rows;
 -- 17 version rows measured on prod 2026-09-16), so the ACCESS EXCLUSIVE lock
 -- on DROP is held for milliseconds and no concurrent writer blocks on it.
--- The conversion is one INSERT ... SELECT; re-running the migration is a
--- no-op for already-converted keys via ON CONFLICT DO NOTHING. The attach GIN
+-- The conversion is one INSERT ... SELECT, fail-closed: key collisions fall
+-- back to deterministic `legacy-view-<id>` keys, and any unexpected conflict
+-- aborts the transaction instead of discarding authored data. The attach GIN
 -- index ships in the follow-up 20260917000001 migration (CONCURRENTLY cannot
 -- run inside this transactional file).
 -- migrate:up
@@ -195,11 +196,11 @@ final AS (
 ),
 deduped AS (
   SELECT f.*,
-    ROW_NUMBER() OVER (
+    CASE WHEN f.is_active THEN f.plain_key ELSE f.versioned_key END AS candidate_key,
+    COUNT(*) OVER (
       PARTITION BY f.organization_id,
         CASE WHEN f.is_active THEN f.plain_key ELSE f.versioned_key END
-      ORDER BY f.version DESC, f.id DESC
-    ) AS key_rn
+    ) AS key_count
   FROM final f
 )
 INSERT INTO public.views (
@@ -207,16 +208,15 @@ INSERT INTO public.views (
   content_hash, attach, params, actions, last_writer
 )
 SELECT d.organization_id,
-  LEFT(
-    CASE WHEN d.is_active THEN d.plain_key ELSE d.versioned_key END
-    || CASE WHEN d.key_rn > 1 THEN '-dup' || d.key_rn::text ELSE '' END,
-    64
-  ),
+  CASE
+    WHEN d.key_count > 1 OR d.candidate_key ~ '^legacy-view-[0-9]+$'
+      THEN 'legacy-view-' || d.id::text
+    ELSE d.candidate_key
+  END,
   d.view_name, d.view_description, d.source_code, '',
   d.source_hash, d.attach, '{}'::jsonb, d.actions,
   'migration:view-templates'
-FROM deduped d
-ON CONFLICT (organization_id, key) DO NOTHING;
+FROM deduped d;
 
 -- Retire the template tables and their default-template pointers. The foreign
 -- keys go first so the table drops do not depend on drop order.

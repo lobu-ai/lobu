@@ -277,6 +277,61 @@ describe("manage_views", () => {
 		).rejects.toThrow(/emits/);
 	});
 
+	it("rejects uninvokable action names at authoring", async () => {
+		for (const actions of [
+			{ "": { emits: "deal.won" } },
+			{ "mark won": { emits: "deal.won" } },
+			{ ["a".repeat(65)]: { emits: "deal.won" } },
+		]) {
+			const err = await setView(SIMPLE_SOURCE, { actions }).catch((e) => e);
+			expect(err).toBeInstanceOf(ToolUserError);
+			expect((err as ToolUserError).httpStatus).toBe(400);
+			expect((err as ToolUserError).message).toMatch(/must start with a letter/);
+		}
+		// camelCase stays valid.
+		const ok = await setView(SIMPLE_SOURCE, {
+			actions: { markWon: { emits: "deal.won" } },
+		});
+		expect(ok.written).toBe(true);
+	});
+
+	it("rejects defaults that contradict their declared type, storing nothing", async () => {
+		for (const params of [
+			{ by: { type: "string", default: null } },
+			{ n: { type: "number", default: "not-a-number" } },
+			{ flag: { type: "boolean", default: 42 } },
+		]) {
+			const err = await setView(SIMPLE_SOURCE, { params }).catch((e) => e);
+			expect(err).toBeInstanceOf(ToolUserError);
+			expect((err as ToolUserError).httpStatus).toBe(400);
+		}
+		const get = await executeTool(
+			"manage_views",
+			{ action: "get", key: "pipeline" },
+			TEST_ENV,
+			ownerCtx
+		).catch((e) => e);
+		expect(get).toBeInstanceOf(ToolUserError);
+		expect((get as ToolUserError).httpStatus).toBe(404);
+	});
+
+	it("round-trips numeric, false, and empty-string defaults without coercion", async () => {
+		const params = {
+			n: { type: "number", default: 7 },
+			flag: { type: "boolean", default: false },
+			label: { type: "string", default: "" },
+		};
+		const set = await setView(SIMPLE_SOURCE, { params });
+		expect(set.written).toBe(true);
+		const opened = (await executeTool(
+			"open_view",
+			{ key: "pipeline" },
+			TEST_ENV,
+			ownerCtx
+		)) as { params: Record<string, unknown> };
+		expect(opened.params).toEqual({ n: 7, flag: false, label: "" });
+	});
+
 	it("rejects source that does not compile", async () => {
 		const err = await setView(UNRESOLVABLE_SOURCE).catch((e) => e);
 		expect(err).toBeInstanceOf(ToolUserError);
