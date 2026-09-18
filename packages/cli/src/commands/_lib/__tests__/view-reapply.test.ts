@@ -186,6 +186,7 @@ describe("startViewReapply", () => {
         `console.log("FILES:" + JSON.stringify(files));`,
         `let calls = 0;`,
         `const loop = startViewReapply({ configPath: entry, files }, { onChange: async () => { calls++; } });`,
+        `console.log("READY");`,
         `setTimeout(() => { loop.close(); console.log("CALLS:" + calls); process.exit(0); }, 6000);`,
         ``,
       ].join("\n")
@@ -200,15 +201,21 @@ describe("startViewReapply", () => {
       const decoder = new TextDecoder();
       let buf = "";
       let files: string[] | null = null;
+      let ready = false;
       const deadline = Date.now() + 12_000;
-      while (files === null && Date.now() < deadline) {
+      while ((files === null || !ready) && Date.now() < deadline) {
         const { value, done } = await reader.read();
         if (done) break;
         buf += decoder.decode(value);
         const match = buf.match(/FILES:(.*)/);
-        if (match) files = JSON.parse(match[1]) as string[];
+        if (match && files === null) files = JSON.parse(match[1]) as string[];
+        if (buf.includes("READY")) ready = true;
       }
       expect(files).toEqual([entry, helper].sort());
+      // READY is printed after startViewReapply subscribes: editing before
+      // the watch exists loses the event (FILES is printed before the
+      // subscription, so it cannot gate the edit on slow/loaded runners).
+      expect(ready).toBe(true);
       for (const file of files ?? []) {
         expect(existsSync(file)).toBe(true);
       }

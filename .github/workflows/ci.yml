@@ -792,6 +792,10 @@ jobs:
           cd packages/plugin-conversations && bun run build && cd ../..
           cd packages/plugin-media && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
+          # @lobu/views ships real guest runtime to server-side compilation
+          # (packages/server/src/views/views.ts require.resolve); its exports
+          # map points at dist, so compile it like the siblings.
+          cd packages/views && bun run build && cd ../..
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
@@ -923,6 +927,10 @@ jobs:
           cd packages/plugin-conversations && bun run build && cd ../..
           cd packages/plugin-media && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
+          # @lobu/views ships real guest runtime to server-side compilation
+          # (packages/server/src/views/views.ts require.resolve); its exports
+          # map points at dist, so compile it like the siblings.
+          cd packages/views && bun run build && cd ../..
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
           cd packages/pgvector-embedded && bun run build && cd ../..
