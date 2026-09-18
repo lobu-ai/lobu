@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import config from "../lobu.config";
 
 describe("Lobu Team configuration", () => {
@@ -115,5 +117,18 @@ describe("Lobu Team configuration", () => {
       kind: "scriptSource",
       path: "./product-activity-digest.script.ts",
     });
+  });
+
+  test("ships the three dogfood views as an explicit file list", () => {
+    expect(config.views?.map((view) => view.path)).toEqual([
+      "./views/connection/health.tsx",
+      "./views/automation/runs.tsx",
+      "./views/pages/refusals.tsx",
+    ]);
+    // Every listed view resolves to a real module on disk (the apply-time
+    // bundler reads these paths relative to lobu.config.ts).
+    for (const view of config.views ?? []) {
+      expect(existsSync(join(import.meta.dir, "..", view.path))).toBe(true);
+    }
   });
 });
