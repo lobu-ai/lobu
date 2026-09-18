@@ -156,6 +156,9 @@ const config: KnipConfig = {
         "examples/**/lobu.config.ts",
         "examples/**/*.connector.ts",
         "examples/**/*.reaction.ts",
+        // View modules are loaded by file path at apply time (viewFromFile),
+        // like connectors and reactions — treat them as entries.
+        "examples/**/views/**/*.tsx",
         "examples/**/evals/**/*.ts",
         // Standalone example run scripts (`bun run seed`, `bun run compose`,
         // etc. in an example's package.json) are file-path entrypoints, not

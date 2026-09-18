@@ -15,6 +15,7 @@ import {
   secret,
   skillFromFile,
   Type,
+  viewFromFile,
 } from "@lobu/cli/config";
 import type DeliverooConnector from "./deliveroo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
@@ -488,5 +489,10 @@ export default defineConfig({
     lunchFinalize,
     productActivityDigest,
     engineeringTaskRunner,
+  ],
+  views: [
+    viewFromFile("./views/connection/health.tsx"),
+    viewFromFile("./views/automation/runs.tsx"),
+    viewFromFile("./views/pages/refusals.tsx"),
   ],
 });
