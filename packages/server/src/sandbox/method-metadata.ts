@@ -896,7 +896,7 @@ export default async (_ctx, client) => {
 	},
 	"operations.execute": {
 		summary:
-			"Execute a connector action. OBJECT signature: execute({ connection_id: number, operation_key: string, input?: object, idempotency_key?: string, automation_source?: { automation_id: number, run_id: number } }). connector_key is not accepted. A durable idempotency_key replays the original run instead of repeating the external request.",
+			"Execute a connector action. OBJECT signature: execute({ connection_id: number, operation_key: string, input?: object, idempotency_key?: string, automation_source?: { automation_id: number, run_id: number } }). connector_key is not accepted. operation_key is an opaque manifest identifier: copy it exactly from operations.listAvailable and never derive it from the display name. A durable idempotency_key replays the original run instead of repeating the external request.",
 		access: "external",
 		enforcedTier: "write",
 		cost: "expensive",

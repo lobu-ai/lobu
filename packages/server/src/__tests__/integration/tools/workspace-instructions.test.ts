@@ -291,6 +291,14 @@ describe('buildWorkspaceInstructions render fixes', () => {
     );
   });
 
+  it('requires exact manifest operation keys instead of deriving them from display names', async () => {
+    const out = await buildWorkspaceInstructions(org.id);
+    expect(out).toContain(
+      'Treat `operation_key` as an opaque manifest identifier: copy it exactly from `operations.listAvailable`'
+    );
+    expect(out).toContain('Never derive it from an operation display name');
+  });
+
   it('renders disconnected connector capabilities so agents can discover setup', async () => {
     const out = await buildWorkspaceInstructions(org.id);
     expect(out).toContain(

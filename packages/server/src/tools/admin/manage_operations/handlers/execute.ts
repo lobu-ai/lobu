@@ -606,7 +606,7 @@ export async function handleExecute(
 	);
 	if (!resolved) {
 		return {
-			error: `Invalid operation_key '${args.operation_key}' for this connection.`,
+			error: `Invalid operation_key '${args.operation_key}' for this connection. Call operations.listAvailable({ connection_id: ${args.connection_id} }) and copy the returned operation_key exactly; do not derive it from the display name.`,
 		};
 	}
 

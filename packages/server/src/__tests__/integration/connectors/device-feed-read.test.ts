@@ -1292,7 +1292,7 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
     // Refused because the key is not in `actions_schema` — the same gate any
     // undeclared operation hits, which is exactly the property being pinned.
     expect(String(executed.error ?? '')).toBe(
-      `Invalid operation_key '${DEVICE_FEED_READ_ACTION_KEY}' for this connection.`
+      `Invalid operation_key '${DEVICE_FEED_READ_ACTION_KEY}' for this connection. Call operations.listAvailable({ connection_id: ${lifecycleConnectionId} }) and copy the returned operation_key exactly; do not derive it from the display name.`
     );
     // And no run was enqueued behind the refusal.
     expect(await lifecycleRuns()).toHaveLength(0);
