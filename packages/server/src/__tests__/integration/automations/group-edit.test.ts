@@ -417,6 +417,49 @@ describe('automation group edit contract', () => {
     expect(rows[1].reaction_script).toBeNull();
   });
 
+  it('set_reaction_script identical save emits no extra group audit events', async () => {
+    const sql = getTestDb();
+    const workspace = await TestWorkspace.create({ name: 'Group Script Noop Org' });
+    const { automationId: rootId } = await seedRootAutomation(workspace, 'script-noop');
+    const [rootBefore] = await sql`
+      SELECT current_version_id FROM automations WHERE id = ${rootId}
+    `;
+    const siblingEntity = await createTestEntity({
+      name: 'Script Noop Sibling',
+      organization_id: workspace.org.id,
+      created_by: workspace.users.owner.id,
+    });
+    const siblingId = await assignToEntity(
+      workspace,
+      Number(rootBefore.current_version_id),
+      siblingEntity.id
+    );
+    const script = 'export default async function reaction() { return; }';
+    await manageAutomations(
+      { action: 'set_reaction_script', automation_id: String(rootId), reaction_script: script } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    );
+    const [{ count: beforeCount }] = await sql`
+      SELECT COUNT(*)::int AS count FROM events
+      WHERE metadata->>'category' = 'config'
+        AND metadata->>'action' = 'set_reaction_script'
+        AND metadata->>'resource_id' IN (${String(rootId)}, ${String(siblingId)})
+    `;
+    await manageAutomations(
+      { action: 'set_reaction_script', automation_id: String(siblingId), reaction_script: script } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    );
+    const [{ count: afterCount }] = await sql`
+      SELECT COUNT(*)::int AS count FROM events
+      WHERE metadata->>'category' = 'config'
+        AND metadata->>'action' = 'set_reaction_script'
+        AND metadata->>'resource_id' IN (${String(rootId)}, ${String(siblingId)})
+    `;
+    expect(Number(afterCount)).toBe(Number(beforeCount));
+  });
+
   it('createAutomationRun snapshots current_version_id; mid-run group edit does not change the run', async () => {
     const sql = getTestDb();
     const workspace = await TestWorkspace.create({ name: 'Run Snapshot Org' });

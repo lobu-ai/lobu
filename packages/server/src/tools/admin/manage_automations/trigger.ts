@@ -424,7 +424,7 @@ export async function handleSetReactionScript(
     const targetSchema = reactionInputSchema ?? null;
     const isTrueNoop = locked.every((row) =>
       row.reaction_script === script &&
-      row.reaction_script_compiled === compiledCode &&
+      row.reaction_script_compiled != null &&
       JSON.stringify(row.reaction_input_schema ?? null) === JSON.stringify(targetSchema)
     );
     if (isTrueNoop) return;
