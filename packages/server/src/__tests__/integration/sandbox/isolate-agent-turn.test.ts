@@ -1717,14 +1717,13 @@ describe("agent turn on the isolate lane", () => {
 		expect(summaryFinished).toBe(true);
 		expect(sessionEntries(run.output).find(entry => entry.type === "compaction")).toMatchObject({ type: "compaction", summary: expect.stringContaining("delayed native summary") });
 		// TWO user messages are answered here (the steered input queues a
-		// second round), and the host delivers `text` ONCE — to Slack at
-		// completion, and to history. Both answers have to be in it: taking the
-		// newest message alone dropped the first answer from both, and the
-		// earlier version of this assertion could not tell, because both rounds
-		// answered with the same words.
-		expect(run.output.text).toBe("main answer\n\nsteered answer");
+		// second round). Each answer stays with its own input (#3662): the
+		// turn text carries the owner's answer and the steered receipt carries
+		// its own — joining them into one string is what dropped the first
+		// answer from Slack and history when only the newest message was read.
+		expect(run.output.text).toBe("main answer");
 		expect(run.output.consumedInputs).toHaveLength(1);
-		expect(run.output.consumedInputs[0].runId).toBe(7);
+		expect(run.output.consumedInputs[0]).toMatchObject({ runId: 7, responseText: 'steered answer' });
 		expect(sessionEntries(run.output).find((entry) => entry.id === run.output.consumedInputs[0].sessionEntryId))
 			.toMatchObject({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'remember this input' }] } });
 	}, 120_000);

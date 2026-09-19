@@ -12,6 +12,7 @@ import {
   type AgentTurnPollPayload,
   type PollResponse,
   TURN_DELTA_MAX_CHARS,
+  TURN_TOOL_EVENT_QUEUE_MAX,
 } from "@lobu/core/contracts/worker/protocol";
 import { executeAgentTurnRun } from "../daemon/agent-turn.js";
 import { DEFAULT_CONFIG, type ExecutorConfig } from "../daemon/executor.js";
@@ -52,9 +53,11 @@ interface HeartbeatCall {
 /**
  * How the fake gateway answers a delta batch.
  *
- * The arm retires a batch only on an ack naming ITS sequence, so this is the
- * knob every streaming test turns: `ack` is the healthy gateway, `silent` is
- * one that published nothing it will admit to, `throw` is one that is down.
+ * The arm retires a batch only on an ack naming ITS sequence, and retires
+ * tool traces only on `turn_tool_ack`, so this is the knob every streaming
+ * test turns: `ack` is the healthy gateway (acknowledging whatever the beat
+ * carried), `silent` is one that published nothing it will admit to, `throw`
+ * is one that is down.
  */
 type DeltaAck = "ack" | "silent" | "throw";
 
@@ -82,10 +85,15 @@ function fakeClient(
       const mode = typeof ackMode === "function" ? ackMode(beatCount) : ackMode;
       beatCount += 1;
       if (mode === "throw") throw new Error("gateway unreachable");
-      if (mode === "silent" || !turnDelta) return { continue: true };
+      if (mode === "silent") return { continue: true };
+      // The healthy gateway acknowledges whatever the beat carried: the
+      // delta by sequence, the traces by count. A beat that carried neither
+      // acknowledges nothing — liveness success never retires evidence.
+      if (!turnDelta && !toolEvents) return { continue: true };
       return {
         continue: true,
-        turn_delta_ack: { sequence: turnDelta.sequence, published: true },
+        ...(turnDelta ? { turn_delta_ack: { sequence: turnDelta.sequence, published: true } } : {}),
+        ...(toolEvents ? { turn_tool_ack: { received: toolEvents.length } } : {}),
       };
     },
     completeAgentTurn: async (req: CompleteAgentTurnRequest) => {
@@ -1026,6 +1034,118 @@ describe("executeAgentTurnRun streaming", () => {
       name: "search_memory",
       is_error: false,
       output: "3 results",
+    });
+  });
+
+  /**
+   * Unacknowledged traces are evidence, not exhaust. A gateway that answers
+   * beats without `turn_tool_ack` (older build, or a publish that threw
+   * server-side) must see the traces again on the next beat — and on the
+   * completion, which is the write that cannot lose the lease fence to
+   * itself — rather than have them silently dropped.
+   */
+  test("re-sends unacknowledged tool traces instead of dropping them", async () => {
+    const reported: Reported = { calls: [] };
+    const beats: HeartbeatCall[] = [];
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        hooks?.onTurnEvent?.({
+          type: "tool_call_start",
+          toolCallId: "call-9",
+          name: "send_message",
+          args: {},
+        });
+        hooks?.onTurnEvent?.({
+          type: "tool_call_end",
+          toolCallId: "call-9",
+          name: "send_message",
+          isError: true,
+          output: "Error: Not authorized for this conversation",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return {
+          mode: "agent_turn",
+          turn: { text: "done", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL },
+        };
+      },
+    };
+
+    await executeAgentTurnRun(
+      fakeClient(reported, beats, "silent") as never,
+      turnJob(),
+      {},
+      { ...cfgWith(executor), heartbeatIntervalMs: 10 }
+    );
+
+    // Re-sent on beat after beat, never retired without an ack.
+    const traces = beats.flatMap((beat) => beat.toolEvents ?? []);
+    expect(traces.length).toBeGreaterThan(1);
+    for (const trace of traces) {
+      expect(trace).toMatchObject({ tool_call_id: "call-9", is_error: true });
+    }
+    // And nothing is lost at the end: whatever the beats could not place
+    // rides the completion.
+    expect(reported.calls[0]?.turn_tool_events).toHaveLength(1);
+    expect(reported.calls[0]?.turn_tool_events?.[0]).toMatchObject({
+      tool_call_id: "call-9",
+      is_error: true,
+      output: "Error: Not authorized for this conversation",
+    });
+  });
+
+  /**
+   * A turn that outgrows its retained receipt capacity fails honestly instead
+   * of silently dropping the oldest (or newest) traces. The retained oldest
+   * prefix rides the FAILED completion as the evidence, and the error states
+   * that external effects past it are unknown — never a completed turn with a
+   * hole in it.
+   */
+  test("fails honestly when tool traces exceed the retained receipt capacity instead of dropping them", async () => {
+    const reported: Reported = { calls: [] };
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        for (let i = 0; i < TURN_TOOL_EVENT_QUEUE_MAX + 5; i += 1) {
+          hooks?.onTurnEvent?.({
+            type: "tool_call_start",
+            toolCallId: `call-${i}`,
+            name: "bash",
+            args: {},
+          });
+          hooks?.onTurnEvent?.({
+            type: "tool_call_end",
+            toolCallId: `call-${i}`,
+            name: "bash",
+            isError: false,
+            output: `out-${i}`,
+          });
+        }
+        return {
+          mode: "agent_turn",
+          turn: { text: "done", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL },
+        };
+      },
+    };
+
+    // Silent beats, so nothing drains: the queue itself must hold the line.
+    const outcome = await executeAgentTurnRun(
+      fakeClient(reported, undefined, "silent") as never,
+      turnJob(),
+      {},
+      cfgWith(executor)
+    );
+
+    expect(outcome.error).toMatch(/retained tool receipt capacity/);
+    expect(reported.calls).toHaveLength(1);
+    const completion = reported.calls[0]!;
+    expect(completion.status).toBe("failed");
+    expect(completion.error).toMatch(/5 trace\(s\) could not be retained/);
+    expect(completion.error).toMatch(/starting with call-20 \(bash\)/);
+    expect(completion.error).toMatch(/external effects past the retained prefix are unknown/);
+    // The oldest prefix is retained as the evidence — nothing silently lost.
+    expect(completion.turn_tool_events).toHaveLength(TURN_TOOL_EVENT_QUEUE_MAX);
+    expect(completion.turn_tool_events?.[0]).toMatchObject({ tool_call_id: "call-0", output: "out-0" });
+    expect(completion.turn_tool_events?.at(-1)).toMatchObject({
+      tool_call_id: `call-${TURN_TOOL_EVENT_QUEUE_MAX - 1}`,
     });
   });
 

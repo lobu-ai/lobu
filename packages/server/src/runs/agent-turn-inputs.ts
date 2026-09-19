@@ -21,6 +21,14 @@ export interface NativeTurnRun {
   run_metadata: {
     native_session_base?: { version: number; session_id: string; final_stored_entry_id: string | null } | null;
     cancel_requested_at?: string;
+    /**
+     * Semantic identity of the terminal completion this run durably recorded
+     * (`agentTurnCompletionHash`), stamped by the completion route. A retry
+     * presenting the same hash is acknowledged without a second write; a
+     * conflicting one is rejected without a second terminal. Absent on rows
+     * completed before the marker existed, which keep legacy idempotence.
+     */
+    turn_completion_hash?: string;
   } | null;
 }
 
@@ -221,6 +229,15 @@ export async function extendHeartbeatedTurnMarker(
 export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun, result: {
   finalText?: string; error?: string; errorCode?: string; errorContext?: AgentErrorContext;
   repliedInBand?: boolean; processedMessageIds?: string[]; toolsUsed?: string[];
+  /**
+   * The input's first tool error, quoted exactly as the tool returned it.
+   * Stored alongside the reply (not merged into it) so history keeps the
+   * actionable message even when the model's prose paraphrases the failure.
+   * Retained like the row itself: readable while the response outbox retains
+   * it (currently the runs retention window, ~30d default, unverified
+   * deployed value), never reconstructed after pruning.
+   */
+  firstToolError?: string;
 }): Promise<boolean> {
   const envelope = run.action_input;
   const reply = envelope?.reply;

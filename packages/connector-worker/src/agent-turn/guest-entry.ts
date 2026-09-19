@@ -394,6 +394,44 @@ export async function runAgentTurn(
   let toolCalls = 0;
   /** Insertion-ordered, so the ledger reads in first-call order. */
   const toolsUsed = new Set<string>();
+  /**
+   * Per-input attribution for the tools above. The owner input's own calls
+   * stay in `toolsUsed`; each steered input run id owns its own ledger. A
+   * terminal reply is stamped with its input's ledger only, never the
+   * execution-wide union — otherwise a sibling input's calls would be reported
+   * as this reply's evidence (#3662).
+   */
+  const steeredToolsUsed = new Map<number, Set<string>>();
+  /**
+   * First tool error per input, quoted exactly as the tool returned it. Bound
+   * at call START to the input the call was made for, so a result that lands
+   * after a mid-turn follow-up stays with its initiating message.
+   */
+  let ownerFirstError: string | undefined;
+  const steeredFirstErrors = new Map<number, string>();
+  /** Accepted input run id the active tool call was started for (`undefined` = owner). */
+  let activeInputRunId: number | undefined;
+  /**
+   * The input that emitted the current tool batch: captured on every assistant
+   * `message_end` (the message that carries the calls), because a steered
+   * follow-up can be appended — moving `activeInputRunId` — between the model
+   * emitting a call and the worker starting or finishing it. The result stays
+   * with the message that initiated it, never with whichever input is active
+   * when it lands.
+   */
+  let emitInputRunId: number | undefined;
+  const toolInputRun = new Map<string, number | undefined>();
+  const toolsFor = (runId: number | undefined): Set<string> => {
+    if (runId === undefined) return toolsUsed;
+    let set = steeredToolsUsed.get(runId);
+    if (!set) { set = new Set<string>(); steeredToolsUsed.set(runId, set); }
+    return set;
+  };
+  const noteToolError = (runId: number | undefined, output: string): void => {
+    if (!output) return;
+    if (runId === undefined) { ownerFirstError ??= output; return; }
+    if (!steeredFirstErrors.has(runId)) steeredFirstErrors.set(runId, output);
+  };
 
   // `ask_user` hands the conversation back to the human: the question is posted
   // as buttons and the click returns as a NEW inbound message, which is a new
@@ -518,12 +556,26 @@ export async function runAgentTurn(
     // arrived at exactly those points — after an assistant message, after a tool
     // result — and queue it as the user message it is.
     const steeredMessages = new Map<AgentMessage, number>();
+    // Steered input run ids in arrival order. A user `message_end` closes the
+    // answer to the message before it: the first one closes the owner's, each
+    // later one hands the active input to the next steered run. FIFO, not
+    // identity: pi rewrites messages on the way to the provider, so the event
+    // object is not reliably the one `agent.steer` was handed (see the
+    // `messageContext` note above).
+    const steeredRunOrder: number[] = [];
     // The turn's answer(s), one per user message the model replied to. Tracked
     // from events rather than read back out of `agent.state.messages` at the
     // end: compaction replaces that array mid-turn, and the newest message is
     // the wrong one to read anyway — see the `text` field of the result.
-    const answers: string[] = [];
+    let ownerAnswer: string | null = null;
+    const inputAnswers = new Map<number, string>();
+    let sawInitialUser = false;
     let answer: string | null = null;
+    const settleAnswer = () => {
+      if (!answer) return;
+      if (activeInputRunId === undefined) ownerAnswer = answer;
+      else inputAnswers.set(activeInputRunId, answer);
+    };
     const steer = () => {
       if (flushing) return;
       for (const message of takeSteering()) {
@@ -531,6 +583,7 @@ export async function runAgentTurn(
           role: 'user', content: [{ type: 'text', text: message.text }], timestamp: Date.now(),
         };
         steeredMessages.set(nativeMessage, message.runId);
+        steeredRunOrder.push(message.runId);
         // Its own block, beside its own message. Recorded BEFORE the steer so
         // the loader can never see the message without its context.
         // Last writer wins on identical text. Two follow-ups with the SAME
@@ -576,13 +629,20 @@ export async function runAgentTurn(
         // A user message — the prompt, or a steered follow-up Pi injected —
         // closes the answer to the message before it.
         if (message.role === 'user') {
-          if (answer) answers.push(answer);
+          settleAnswer();
+          if (sawInitialUser) activeInputRunId = steeredRunOrder.shift();
+          else sawInitialUser = true;
           answer = null;
           return;
         }
         // Tool results end a message too; only the assistant's own carry the
         // turn's outcome.
         if (message.role !== 'assistant') return;
+        // The calls this message emitted belong to the input it is answering,
+        // whatever steers the turn before they run. Captured here rather than
+        // at call start: `steer()` above may already have queued a follow-up
+        // whose user message lands before the first call starts.
+        emitInputRunId = activeInputRunId;
         // The LAST assistant message with text answers its user message: a
         // narration before a tool call is superseded by the message that
         // follows the result. An EMPTY one (an aborted or errored request)
@@ -600,6 +660,11 @@ export async function runAgentTurn(
         return;
       }
       if (event.type === 'tool_execution_start') {
+        // Bound now, read at END: a call emitted for one input may start and
+        // finish after a follow-up steered the turn elsewhere, and the result
+        // belongs to the message that initiated it. The binding is the input
+        // of the assistant message that emitted the call, not the live input.
+        toolInputRun.set(event.toolCallId, emitInputRunId ?? activeInputRunId);
         emit({ type: 'tool_call_start', toolCallId: event.toolCallId, name: event.toolName, args: event.args });
         return;
       }
@@ -608,18 +673,26 @@ export async function runAgentTurn(
         // matching what the retired lane stamped (`recordToolUsed`, from its
         // own `tool_use` event). A failed call still counts as attempted; the
         // guardrail asks whether the tool was reached, not whether it worked.
-        toolsUsed.add(event.toolName);
+        const inputRunId = toolInputRun.get(event.toolCallId) ?? activeInputRunId;
+        toolInputRun.delete(event.toolCallId);
+        toolsFor(inputRunId).add(event.toolName);
         const result = event.result as { content?: Array<{ type?: string; text?: string }> };
         // Summarised BEFORE the clip, from the result as the tool returned it:
         // a retrieval body over the display cap would otherwise parse to
         // nothing and the turn would carry no evidence for its own answer.
         const resultSummary = event.isError ? null : summarizeToolTrace(event.toolName, event.result);
+        const output = clip(joinText(result?.content));
+        // The first failure of each input, verbatim: the durable record of
+        // what actually went wrong, independent of how the model paraphrases
+        // it in prose.
+        if (event.isError) noteToolError(inputRunId, output);
         emit({
           type: 'tool_call_end',
           toolCallId: event.toolCallId,
           name: event.toolName,
           isError: event.isError,
-          output: clip(joinText(result?.content)),
+          output,
+          ...(inputRunId !== undefined ? { inputRunId } : {}),
           ...(resultSummary ? { resultSummary } : {}),
         });
       }
@@ -692,7 +765,7 @@ export async function runAgentTurn(
     }
 
     if (ended) throw new Error(ended);
-    if (answer) answers.push(answer);
+    settleAnswer();
 
     return {
       // The answer is the last assistant message WITH TEXT after each user
@@ -713,17 +786,32 @@ export async function runAgentTurn(
       // turn on one — so the answer that did settle is still delivered.
       //
       // Falls back to the stream when no assistant message settled: a turn
-      // aborted mid-answer still owes the user what it managed to say.
-      text: answers.length > 0 ? answers.join('\n\n') : text,
+      // aborted mid-answer still owes the user what it managed to say. The
+      // fallback is the owner's only: a steered input without its own settled
+      // answer fails below rather than borrowing a sibling's text.
+      text: ownerAnswer ?? text,
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),
       toolsUsed: [...toolsUsed],
+      ...(ownerFirstError ? { firstError: ownerFirstError } : {}),
       // Pi emits message events before persistence. Receipt identity comes from
       // the finished native branch after retries/compaction have drained.
       consumedInputs: session.sessionManager.getBranch().flatMap((entry) => {
         const runId = entry.type === 'message' ? steeredMessages.get(entry.message) : undefined;
-        return runId === undefined ? [] : [{ runId, sessionEntryId: entry.id }];
+        if (runId === undefined) return [];
+        // Fail closed: a steered input the turn never answered must not be
+        // completed with another input's text. The server turns this throw
+        // into a failed turn, which the reaper then terminalizes honestly.
+        const responseText = inputAnswers.get(runId);
+        if (!responseText?.trim()) throw new Error(`steered input ${runId} completed without its own answer`);
+        return [{
+          runId,
+          sessionEntryId: entry.id,
+          responseText,
+          toolsUsed: [...(steeredToolsUsed.get(runId) ?? [])],
+          ...(steeredFirstErrors.get(runId) ? { firstError: steeredFirstErrors.get(runId)! } : {}),
+        }];
       }),
       ...(repliedInBand ? { repliedInBand: true } : {}),
     };

@@ -67,12 +67,16 @@ export async function executeAgentTurnRun(
   const runId = job.run_id;
   if (!runId) return { itemsCollected: 0, error: 'agent turn run missing its run id' };
 
-  const fail = async (error: string) => {
+  const fail = async (error: string, trailing?: AgentTurnToolEvent[]) => {
     const receipt = await client.completeAgentTurn({
       run_id: runId,
       worker_id: client.id,
       status: 'failed',
       error,
+      // Whatever evidence was retained rides the failure, so the server holds
+      // the prefix that explains the turn. Bounded by construction (the queue
+      // below never exceeds the cap); the overflow error names what did not fit.
+      ...(trailing?.length ? { turn_tool_events: trailing } : {}),
       exit_reason: 'error_message',
     });
     return { itemsCollected: 0, ...(receipt.status === 'completed' ? {} : { error }) };
@@ -110,11 +114,26 @@ export async function executeAgentTurnRun(
   let deltaSequence = 0;
   let sending = false;
   // Tool traces waiting for the next beat, oldest first.
+  //
+  // Bounded and fail-closed: a trace is mandatory external-effect evidence,
+  // not a view the turn may shed. The queue (plus the batch in flight) never
+  // exceeds `TURN_TOOL_EVENT_QUEUE_MAX`; a turn that would need more latches
+  // `toolReceiptOverflow` and fails honestly instead of silently dropping the
+  // oldest (the previous `shift()`) or the newest (the previous tail slice).
   let toolEvents: AgentTurnToolEvent[] = [];
   // Traces handed to a beat that has not answered yet. A beat is fire-and-
   // forget from the delta timer, so one can still be in flight when the turn
   // completes; these come back rather than vanishing in that window.
   let tracesInFlight: AgentTurnToolEvent[] = [];
+  /**
+   * Latched when the turn produces more unacknowledged tool traces than the
+   * retained receipt capacity holds. The first trace that did not fit is named
+   * (its call id and tool), with how many traces could not be retained after
+   * it. Once latched the turn cannot complete: the evidence prefix stays
+   * queued for the failure report, and the error states that external effects
+   * past it are unknown.
+   */
+  let toolReceiptOverflow: { toolCallId: string; name: string; dropped: number } | null = null;
   /** The delta timer's most recent beat, awaited before the turn completes. */
   let beatInFlight: Promise<void> = Promise.resolve();
   /** Arguments of the calls still running, by call id, for the trace their end produces. */
@@ -171,8 +190,17 @@ export async function executeAgentTurnRun(
       if (batch && ack?.turn_delta_ack?.sequence === batch.sequence) inFlight = null;
       if (ack?.continue === false) stopTurn(ack.stop_reason);
       queueSteering(ack?.steer);
-      // The beat was answered, so its traces are the server's now.
-      tracesInFlight = [];
+      // The beat was answered, but its traces are the server's only when the
+      // server says so: `turn_tool_ack.received` names how many of the sent
+      // traces it durably stored. Anything unacknowledged stays queued for the
+      // next beat (or the completion below) instead of being dropped — a
+      // liveness-only beat carries no ack and retires nothing.
+      const received = ack?.turn_tool_ack?.received;
+      if (received !== undefined && received >= traces.length) {
+        tracesInFlight = [];
+      } else if (received !== undefined && received > 0) {
+        tracesInFlight = traces.slice(received);
+      }
     } catch (err) {
       // The batch stays in flight and is re-sent under the same sequence, and
       // so do the traces — but only back onto the queue, never re-sent here.
@@ -182,11 +210,17 @@ export async function executeAgentTurnRun(
     } finally {
       // Anything this beat could not retire goes back to the front of the
       // queue: it is older than whatever arrived while the beat was in flight.
+      // Never truncated silently: the push-time capacity check below keeps the
+      // retained total within the cap, so an excess here is a bookkeeping
+      // surprise — latch it as overflow (fail closed) rather than slicing it
+      // away.
       if (tracesInFlight.length) {
         toolEvents = [...tracesInFlight, ...toolEvents];
         tracesInFlight = [];
         if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) {
-          toolEvents = toolEvents.slice(-TURN_TOOL_EVENT_QUEUE_MAX);
+          const excess = toolEvents.length - TURN_TOOL_EVENT_QUEUE_MAX;
+          toolEvents = toolEvents.slice(0, TURN_TOOL_EVENT_QUEUE_MAX);
+          noteToolReceiptOverflow("(requeued)", "requeued tool traces", excess);
         }
       }
       sending = false;
@@ -270,6 +304,27 @@ export async function executeAgentTurnRun(
     log.info(`[agent-turn] run ${runId} stopping: ${reason ?? 'the gateway said stop'}`);
     cancel.abort();
   };
+  /**
+   * Latch receipt-capacity overflow and stop the turn. The queue itself stays
+   * bounded (the trace that did not fit is NOT queued); its identity and the
+   * running dropped count are retained here so the failure report names the
+   * evidence that is missing instead of dropping it silently.
+   */
+  const noteToolReceiptOverflow = (toolCallId: string, name: string, dropped = 1): void => {
+    if (toolReceiptOverflow) toolReceiptOverflow.dropped += dropped;
+    else toolReceiptOverflow = { toolCallId, name, dropped };
+    stopTurn('tool receipt capacity exceeded');
+  };
+  /**
+   * The honest failure for a turn that outgrew its retained receipt capacity:
+   * the retained prefix is the evidence, and the error states that external
+   * effects past it are unknown — never a completed turn with a hole in it.
+   */
+  const toolOverflowError = (): string =>
+    `agent turn exceeded its retained tool receipt capacity (${TURN_TOOL_EVENT_QUEUE_MAX} traces): ` +
+    `${toolReceiptOverflow?.dropped ?? 0} trace(s) could not be retained, starting with ` +
+    `${toolReceiptOverflow?.toolCallId ?? 'unknown'} (${toolReceiptOverflow?.name ?? 'unknown'}); ` +
+    `external effects past the retained prefix are unknown`;
   try {
     const guestCode = await agentGuestBundle();
     // Same executor seam every other lane uses (`resolveJobExecution`): an
@@ -473,20 +528,31 @@ export async function executeAgentTurnRun(
             // The server turns it into the established `tool_use` custom event,
             // so the SPA, promptfoo provider and menubar keep one trace shape.
             //
-            // Bounded, and the newest are the ones kept: a tool trace is a view
-            // of the turn, not its answer, and a turn that spends its budget on
-            // tool calls must not grow an unbounded queue in the worker.
+            // Bounded and fail-closed: the queue plus the batch in flight never
+            // exceed the cap. A trace that would not fit latches overflow and
+            // stops the turn instead of dropping evidence — the retained prefix
+            // rides the failure report, and the error names what is missing.
+            // Traces already latched as overflow are counted, not queued, so
+            // the queue stays bounded after the latch too.
             const input = toolArgs.get(event.toolCallId);
             toolArgs.delete(event.toolCallId);
+            if (toolReceiptOverflow) {
+              toolReceiptOverflow.dropped += 1;
+              return;
+            }
+            if (toolEvents.length + tracesInFlight.length >= TURN_TOOL_EVENT_QUEUE_MAX) {
+              noteToolReceiptOverflow(event.toolCallId, event.name);
+              return;
+            }
             toolEvents.push({
               tool_call_id: event.toolCallId,
               name: event.name,
+              ...(event.inputRunId !== undefined ? { input_run_id: event.inputRunId } : {}),
               ...(input !== undefined ? { input } : {}),
               is_error: event.isError,
               output: event.output,
               ...(event.resultSummary ? { result_summary: event.resultSummary } : {}),
             });
-            if (toolEvents.length > TURN_TOOL_EVENT_QUEUE_MAX) toolEvents.shift();
           }
         },
       }
@@ -509,6 +575,16 @@ export async function executeAgentTurnRun(
     clearInterval(heartbeat);
     await beatInFlight;
     await drainDeltas();
+    // A turn that outgrew its retained receipt capacity cannot complete: the
+    // retained prefix rides a FAILED completion whose error states that
+    // external effects past it are unknown. Completing it would deliver an
+    // answer with a hole in its evidence.
+    if (toolReceiptOverflow) {
+      const retained = [...tracesInFlight, ...toolEvents].slice(0, TURN_TOOL_EVENT_QUEUE_MAX);
+      tracesInFlight = [];
+      toolEvents = [];
+      return fail(toolOverflowError(), retained);
+    }
     // Whatever drainDeltas could not place rides the completion instead of
     // being dropped. A trace can remain when no text delta triggered a drain
     // or its beat could not deliver. Heartbeat publishing requires the run
@@ -527,8 +603,12 @@ export async function executeAgentTurnRun(
       usage: result.turn.usage,
       session_jsonl: result.turn.sessionJsonl,
       tools_used: result.turn.toolsUsed,
+      ...(result.turn.firstError ? { first_error: result.turn.firstError } : {}),
       consumed_inputs: result.turn.consumedInputs.map((input) => ({
         run_id: input.runId, session_entry_id: input.sessionEntryId,
+        response_text: input.responseText,
+        ...(input.toolsUsed.length ? { tools_used: input.toolsUsed } : {}),
+        ...(input.firstError ? { first_error: input.firstError } : {}),
       })),
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
       exit_reason: 'ok',
@@ -539,6 +619,13 @@ export async function executeAgentTurnRun(
     );
     return { itemsCollected: 0 };
   } catch (error) {
+    // An overflowed turn reports its retained evidence even when the abort
+    // stops the guest with an error: the catch-all below would otherwise file
+    // the abort reason and drop the prefix the turn managed to retain.
+    if (toolReceiptOverflow) {
+      const retained = [...tracesInFlight, ...toolEvents].slice(0, TURN_TOOL_EVENT_QUEUE_MAX);
+      return fail(toolOverflowError(), retained);
+    }
     return fail(error instanceof Error ? error.message : String(error));
   } finally {
     clearInterval(deltaTimer);

@@ -985,6 +985,14 @@ export const TurnToolEventSchema = Type.Object({
   tool_call_id: Type.String({ maxLength: 256 }),
   name: Type.String({ maxLength: 256 }),
   /**
+   * The accepted input run this call was started for, so a result that lands
+   * after a mid-turn follow-up stays attributed to the message that initiated
+   * it rather than to whichever input is active when it finishes. Absent on
+   * traces from workers that predate per-input attribution; the completion
+   * route then attributes them to the owning input.
+   */
+  input_run_id: Type.Optional(Type.Integer({ minimum: 1 })),
+  /**
    * The call's arguments, as the model sent them. The SPA renders `input` as
    * the tool row's args. Absent when the start of the call was not observed.
    */
@@ -1017,10 +1025,12 @@ export const TurnToolEventSchema = Type.Object({
  * How many finished tool traces a turn holds at once, on the worker's queue and
  * as the bound on the completion body's trailing batch.
  *
- * One definition because it is now both: the worker drops the oldest past this
- * cap, and the completion route rejects a body that exceeds it. A trace is a
- * view of the turn, so a turn that spends its budget on tool calls sheds the
- * oldest rather than growing an unbounded queue or an unbounded request.
+ * One definition because it is now both: the worker fails the turn rather than
+ * exceed this cap, and the completion route rejects a body that exceeds it. A
+ * trace is mandatory external-effect evidence, so a turn that spends its budget
+ * on tool calls fails honestly with its retained prefix instead of growing an
+ * unbounded queue, shedding the oldest silently, or filing an unbounded
+ * request.
  */
 export const TURN_TOOL_EVENT_QUEUE_MAX = 20;
 
@@ -1047,6 +1057,33 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
       Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         session_entry_id: Type.String({ minLength: 1 }),
+        /**
+         * This input's own answer text, not the execution's. Present on
+         * receipts from workers with per-input attribution; absent on
+         * receipts from older workers, which the completion route delivers
+         * as one execution-wide reply (the pre-#3662 contract those claims
+         * were admitted under).
+         */
+        response_text: Type.Optional(
+          Type.String({ minLength: 1, maxLength: 32_000 })
+        ),
+        /**
+         * The tools this input's answer actually used, in first-call order.
+         * Per-input like the answer: never the execution-wide ledger, which
+         * would attribute a sibling input's calls to this reply.
+         */
+        tools_used: Type.Optional(
+          Type.Array(Type.String({ maxLength: 256 }), { maxItems: 50 })
+        ),
+        /**
+         * The first tool error attributed to this input, quoted exactly as the
+         * tool returned it. Preserved independently of how the model paraphrases
+         * the failure in prose, so the durable record keeps the actionable
+         * message even when the reply does not.
+         */
+        first_error: Type.Optional(
+          Type.String({ minLength: 1, maxLength: TURN_TOOL_OUTPUT_MAX_CHARS })
+        ),
       }),
       { maxItems: AGENT_TURN_INPUT_MAX }
     )
@@ -1058,6 +1095,16 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * must send the array even when it called nothing.
    */
   tools_used: Type.Optional(Type.Array(Type.String())),
+  /**
+   * The owner input's first tool error, quoted exactly as the tool returned
+   * it. Steered inputs carry theirs on their `consumed_inputs` receipts, so
+   * every terminal reply is stamped with its own input's failure rather than
+   * the execution-wide first one. Preserved independently of how the model
+   * paraphrases the failure in prose.
+   */
+  first_error: Type.Optional(
+    Type.String({ minLength: 1, maxLength: TURN_TOOL_OUTPUT_MAX_CHARS })
+  ),
   /**
    * The turn already posted its answer INTO the conversation it is replying to,
    * through the `send_message`/`present_event` conversation tool. The user has
@@ -1332,6 +1379,12 @@ export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
  * already passed acknowledges without publishing, and the worker retires the
  * batch — there is nothing more it can do about it. Only the ABSENCE of an ack
  * keeps the text queued.
+ *
+ * `turn_tool_ack` is the same honesty for the tool traces that rode the beat:
+ * `received` names how many of the sent traces the server durably stored. The
+ * worker retires only that prefix and re-sends the rest. A liveness-only beat
+ * carries no ack and acknowledges nothing; only its absence keeps evidence
+ * queued.
  */
 export const HeartbeatResponseSchema = Type.Object({
   continue: Type.Optional(Type.Boolean()),
@@ -1366,6 +1419,11 @@ export const HeartbeatResponseSchema = Type.Object({
     Type.Object({
       sequence: Type.Integer({ minimum: 0 }),
       published: Type.Boolean(),
+    })
+  ),
+  turn_tool_ack: Type.Optional(
+    Type.Object({
+      received: Type.Integer({ minimum: 0 }),
     })
   ),
 });

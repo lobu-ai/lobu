@@ -730,6 +730,14 @@ describe('agent turn producer', () => {
       }
       const result = await running;
       if (timing === 'cancel') expect(result.error).toBeTruthy();
+      else if (timing === 'mid') {
+        // The first completion landed (terminal stored, reply delivered) but
+        // its response was destroyed, so the worker never heard the ack. Its
+        // failure report is a CONFLICTING completion — rejected without a
+        // second terminal — and the worker surfaces that instead of claiming
+        // success it cannot confirm.
+        expect(result.error).toMatch(/409|conflict/i);
+      }
       else expect(result.error).toBeUndefined();
       if (timing === 'mid') {
         expect(droppedBeat && droppedCompletion).toBe(true);
@@ -737,13 +745,20 @@ describe('agent turn producer', () => {
         expect((await runRow(followerId)).status).toBe('completed');
         const [row] = await sql`SELECT run_metadata, action_input FROM runs WHERE id = ${followerId}`;
         const completion = completions[0].request;
-        expect(completion.consumed_inputs).toEqual([{ run_id: followerId, session_entry_id: row.run_metadata.session_entry_id }]);
+        // Per-input receipts (#3662): the steered input carries its own
+        // answer, never the execution text.
+        expect(completion.consumed_inputs).toEqual([{ run_id: followerId,
+          session_entry_id: row.run_metadata.session_entry_id, response_text: 'Follow-up answered.' }]);
         expect(row.run_metadata.consumed_by_run_id).toBe(ownerId);
         expect(row.action_input).not.toHaveProperty('result');
         const entry = completion.session_jsonl.trim().split('\n').map((line: string) => JSON.parse(line))
           .find((entry: { id: string }) => entry.id === row.run_metadata.session_entry_id);
         expect(entry.message).toMatchObject({ role: 'user', content: [{ type: 'text', text: followUp.messageText }] });
-        expect(completions.at(-1)!.response).toMatchObject({ status: 'completed', idempotent: true });
+        // The retry is the worker's failure report for a turn that already
+        // completed — a conflicting completion, rejected without a second
+        // terminal rather than acknowledged as idempotent.
+        expect(completions.at(-1)!.request.status).toBe('failed');
+        expect(completions.at(-1)!.response).toMatchObject({ error: expect.stringMatching(/conflict/i) });
       } else {
         expect((await runRow(followerId)).status).toBe('pending');
         if (timing === 'late') {
@@ -763,7 +778,17 @@ describe('agent turn producer', () => {
       expect(JSON.stringify(providerRequests[1].messages).split(followUp.messageText)).toHaveLength(2);
       const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->'processedMessageIds' ? 'http-follow-up'`;
       expect(replies).toHaveLength(1);
-      if (timing === 'mid') expect(replies[0].action_input.processedMessageIds).toEqual([first.messageId, followUp.messageId]);
+      if (timing === 'mid') {
+        // Per-input terminals (#3662): the follower's row covers its own
+        // message with its own answer; the owner's row covers the prompt with
+        // the initial answer — never one row covering both.
+        expect(replies[0].action_input.processedMessageIds).toEqual([followUp.messageId]);
+        expect(replies[0].action_input.finalText).toBe('Follow-up answered.');
+        const ownerReplies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = ${first.messageId} AND action_input ? 'processedMessageIds'`;
+        expect(ownerReplies).toHaveLength(1);
+        expect(ownerReplies[0].action_input.processedMessageIds).toEqual([first.messageId]);
+        expect(ownerReplies[0].action_input.finalText).toBe('Initial answer.');
+      }
       expect(errors).toEqual([]);
     } finally {
       releaseProvider(); releaseCleanup(); server.closeAllConnections();
@@ -1872,8 +1897,13 @@ describe('agent turn producer', () => {
       expect(row.completed_at).not.toBeNull();
       expect(row.action_input).not.toHaveProperty('result');
     }
+    const exact = await postAsFleet('/api/workers/complete-agent-turn', body);
+    expect(await exact.json()).toEqual({ ok: true, status: 'completed', idempotent: true });
+    // A conflicting retry (flipped status, new error) is rejected without a
+    // second terminal — not acknowledged as idempotent.
     const retry = await postAsFleet('/api/workers/complete-agent-turn', { ...body, status: 'failed', error: 'lost response' });
-    expect(await retry.json()).toEqual({ ok: true, status: 'completed', idempotent: true });
+    expect(retry.status).toBe(409);
+    expect(await retry.json()).toMatchObject({ error: expect.stringMatching(/conflict/i) });
     expect(await sql`SELECT id FROM agent_transcript_snapshot WHERE run_id = ${owner.id}`).toHaveLength(1);
     const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'`;
     expect(replies).toHaveLength(1);
@@ -3285,18 +3315,33 @@ describe('agent turn completion', () => {
       session_jsonl,
     });
 
-    // A retry (worker reconnect, at-least-once delivery) must not re-transition.
+    // An exact retry (worker reconnect, at-least-once delivery) is
+    // acknowledged without re-transitioning.
+    const exact = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'the isolate answer',
+      stop_reason: 'stop',
+      usage: { input: 11, output: 7 },
+      session_jsonl,
+      exit_reason: 'ok',
+    });
+    expect(await exact.json()).toEqual({
+      ok: true,
+      status: 'completed',
+      idempotent: true,
+    });
+    // A conflicting retry (flipped status, new error) is rejected without a
+    // second terminal — never acknowledged as idempotent.
     const retry = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId,
       worker_id: workerId,
       status: 'failed',
       error: 'a late duplicate report',
     });
-    expect(await retry.json()).toEqual({
-      ok: true,
-      status: 'completed',
-      idempotent: true,
-    });
+    expect(retry.status).toBe(409);
+    expect(await retry.json()).toMatchObject({ error: expect.stringMatching(/conflict/i) });
     expect((await runRow(runId)).status).toBe('completed');
   });
 
@@ -3324,7 +3369,8 @@ describe('agent turn completion', () => {
     const late = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId, worker_id: workerId, status: 'completed', text: 'late overwrite', session_jsonl: nativeSession(),
     });
-    expect(await late.json()).toMatchObject({ idempotent: true });
+    expect(late.status).toBe(409);
+    expect(await late.json()).toMatchObject({ error: expect.stringMatching(/conflict/i) });
     const snapshots = await sql`SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}`;
     expect(snapshots.map((row) => row.snapshot_jsonl)).toEqual([session]);
     expect(await threadResponses()).toHaveLength(1);

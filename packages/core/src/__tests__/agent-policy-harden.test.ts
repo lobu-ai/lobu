@@ -38,6 +38,32 @@ describe("renderBaselineAgentPolicy", () => {
   test("is deterministic across calls", () => {
     expect(renderBaselineAgentPolicy()).toBe(renderBaselineAgentPolicy());
   });
+
+  test("grounds each reply in its own input's results, quoting the first error verbatim", () => {
+    // #3662: a result that arrived for an earlier message must not become
+    // evidence for a later one, and the first actionable connector error must
+    // survive verbatim instead of dissolving into a vaguer problem.
+    const policy = renderBaselineAgentPolicy();
+    expect(policy).toMatch(/stays with that message|its own tool results/i);
+    expect(policy).toMatch(
+      /quote the first actionable error .* exactly as received/i
+    );
+    expect(policy).toMatch(
+      /do not report a different action than the one that actually ran/i
+    );
+  });
+
+  test("cites run ids only from returned tool receipts, never from digits in the conversation", () => {
+    // #3662: the approval run id invented from a phone/JID.
+    const policy = renderBaselineAgentPolicy();
+    expect(policy).toMatch(
+      /only when a tool result .* returned that exact id/i
+    );
+    expect(policy).toMatch(/never derive a run id from a phone number/i);
+    expect(policy).toMatch(
+      /never reuse digits quoted inside an error message/i
+    );
+  });
 });
 
 // ── renderAlwaysOnToolPolicyRulesFor ─────────────────────────────────────────

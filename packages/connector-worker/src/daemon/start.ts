@@ -151,9 +151,13 @@ export async function startDaemonCommand(
   // new run type from handing one to a worker binary that predates the lane:
   // the two sides agree by string equality, so an old worker never matches and
   // its dispatch default (a connector sync) is never reached.
+  // `agent_turn_per_input_responses` marks per-input attribution (#3662): one
+  // terminal reply, tool ledger, and verbatim first error per consumed input.
+  // The server negotiates by receipt presence, not by this flag, so old claims
+  // keep draining under the single-reply contract they were admitted with.
   const workerCapabilities: Record<string, boolean> = platform
     ? Object.fromEntries(capabilities.map((name) => [name, true]))
-    : { db_egress_hardening: true, agent_turn: true };
+    : { db_egress_hardening: true, agent_turn: true, agent_turn_per_input_responses: true };
   // Auto-discover device identity from the host when not passed: a device
   // worker defaults to `<platform>:<short-hostname>` and a hostname label. An
   // interactive daemon instead derives its id from the exact inherited

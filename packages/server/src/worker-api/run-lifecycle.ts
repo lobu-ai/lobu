@@ -258,25 +258,31 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		const turnDeltaAck = turn_delta
 			? await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta)
 			: undefined;
-		// Tool traces ride the same beat. They are not acknowledged: a trace is a
-		// VIEW of the turn, not its answer, so the worker drops one it could not
-		// deliver rather than growing a queue against a failing gateway.
-		if (turn_tool_events && turn_tool_events.length > 0) {
-			await publishTurnToolEventsBestEffort(
+		// Tool traces ride the same beat. Unlike the liveness signal itself they
+		// ARE acknowledged: `turn_tool_ack.received` names how many of the sent
+		// traces the server durably stored, and the worker re-sends the rest. A
+		// beat that sent no traces acknowledges none — liveness success never
+		// retires evidence — and a failed publish yields no ack at all, which is
+		// what keeps the worker's queue intact.
+		const turnToolAck = turn_tool_events && turn_tool_events.length > 0
+			? await publishTurnToolEventsBestEffort(
 				run_id,
 				worker_id,
 				turn_tool_events
-			);
-		}
-		const ackBody: Pick<HeartbeatResponse, "turn_delta_ack"> =
+			)
+			: undefined;
+		const ackBody: Pick<HeartbeatResponse, "turn_delta_ack" | "turn_tool_ack"> =
 			turn_delta && turnDeltaAck
 				? {
 						turn_delta_ack: {
 							sequence: turn_delta.sequence,
 							published: turnDeltaAck.published,
 						},
+						...(turnToolAck !== undefined ? { turn_tool_ack: { received: turnToolAck } } : {}),
 					}
-				: {};
+				: turnToolAck !== undefined
+					? { turn_tool_ack: { received: turnToolAck } }
+					: {};
 
 		const sql = getDb();
 		// Stamped with the reporting worker so poll can only resume an agent

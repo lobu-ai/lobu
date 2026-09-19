@@ -22,6 +22,8 @@ import {
 	CompleteAgentTurnRequestSchema,
 } from "@lobu/core/contracts/worker/protocol";
 import { Value } from "@sinclair/typebox/value";
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { CURRENT_SESSION_VERSION, type SessionEntry, type SessionHeader } from "@mariozechner/pi-coding-agent";
 import type { Context } from "hono";
 import { type DbClient, getDb } from "../db/client";
@@ -281,19 +283,35 @@ async function publishTurnDelta(
  * a second event name or a second consumer.
  *
  * Routing is read from the run's own row, exactly as the delta path does.
- * There is no sequence fence here and none is needed: a trace is idempotent per `toolCallId` from the client's point of
- * view, and unlike the reply it is never reconstructed by appending.
+ *
+ * Keyed and idempotent, not merely client-idempotent: every trace is stored
+ * under its canonical (organization, conversation, initiating input message,
+ * tool call id) key — derived from the STORED owner/offered rows, never from
+ * the worker's body — and the key carries an all-state unique index
+ * (`idx_runs_turn_tool_event_uniq`, covering pending/claimed/failed/delivered
+ * alike, where the pre-existing `runs_idempotency_key_uniq` only covers live
+ * rows). A heartbeat retry of the same trace collides on the key and is
+ * recognised as an exact duplicate; a conflicting same-key payload (same key,
+ * different trace body) throws, so the `BestEffort` caller answers no ack and
+ * the worker keeps the evidence queued instead of retiring it unwritten.
+ *
+ * Returns how many traces were durably stored, so the heartbeat can answer
+ * `turn_tool_ack`: the worker retires only acknowledged traces and re-sends
+ * the rest. The count names a fully durably known prefix — every returned
+ * trace is newly inserted or an exact duplicate — never a conflicting one.
+ * Throws on failure or conflict — the `BestEffort` caller absorbs it into a
+ * missing ack, which is what keeps the worker's evidence queued.
  */
 async function publishTurnToolEvents(
 	runId: number,
 	workerId: string,
 	events: readonly AgentTurnToolEvent[]
-): Promise<void> {
-	if (events.length === 0) return;
+): Promise<number> {
+	if (events.length === 0) return 0;
 	const sql = getDb();
-	const emitted = await sql.begin(async (tx) => {
+	const stored = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
+		if (!owner || owner.run_metadata?.cancel_requested_at) return 0;
 		const rows = (await tx`
       SELECT action_input, organization_id
       FROM public.runs
@@ -309,24 +327,89 @@ async function publishTurnToolEvents(
 			organization_id: string | null;
 		}>;
 		const row = rows[0];
-		if (!row) return false;
+		if (!row) return 0;
 		const envelope = row.action_input ?? {};
 		const reply = envelope.reply;
-		if (!reply) return false;
-		await insertTurnToolEventRows(tx, {
+		if (!reply) return 0;
+		// Route each trace under its initiating input's reply, read off stored
+		// pending rows — never off the worker's body. An explicit unknown input
+		// is rejected below rather than attributed to an unrelated owner.
+		const offered = await pendingAgentTurnInputs(tx, owner);
+		const repliesByInputRunId = new Map<number, TurnReply>(
+			offered.map((input) => [input.run_id, { ...reply, message_id: input.message_id }]),
+		);
+		return insertTurnToolEventRows(tx, {
 			reply,
 			conversationId: String(envelope.turn?.conversation_id ?? ""),
 			organizationId: row.organization_id,
 			events,
+			repliesByInputRunId,
 		});
-		return true;
 	});
-	if (emitted) await notifyThreadResponse();
+	if (stored) await notifyThreadResponse();
+	return stored;
+}
+
+/**
+ * The canonical key for one tool trace: organization, conversation and
+ * initiating input message are the STORED routing (the owner's reply envelope
+ * or the offered pending row it resolves to), never caller strings; the tool
+ * call id is the event's own identity within that input. Two heartbeats
+ * carrying the same trace compute the same key; two different traces for the
+ * same call compute the same key with different bodies, which is the conflict
+ * the insert path rejects.
+ */
+function turnToolEventKey(args: {
+	organizationId: string | null;
+	conversationId: string;
+	messageId: string;
+	toolCallId: string;
+}): string {
+	// Hash the length-prefixed JSON tuple instead of concatenating raw values:
+	// delimiters may occur inside every identifier, and a raw key can exceed
+	// PostgreSQL's btree entry limit. The version prefix keeps future key
+	// schemes independently migratable.
+	const tuple = JSON.stringify([
+		args.organizationId,
+		args.conversationId,
+		args.messageId,
+		args.toolCallId,
+	]);
+	return `turn-tool:v1:${createHash("sha256").update(tuple).digest("hex")}`;
+}
+
+/**
+ * Whether a stored `thread_response` row carries exactly the trace `payload`
+ * would write. `timestamp` is deliberately excluded: a retry is stamped when
+ * it lands, so it can never match, and it says nothing about the trace.
+ *
+ * `payload` is JSON-normalised before comparing: the driver drops
+ * `undefined`-valued keys on the way into the stored row, so a retry whose
+ * in-memory object still carries them must not compare as conflicting.
+ */
+function sameToolTracePayload(stored: unknown, payload: Record<string, unknown>): boolean {
+	if (typeof stored !== "object" || stored === null) return false;
+	const normalised = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>;
+	const s = stored as Record<string, unknown>;
+	return (
+		s.messageId === normalised.messageId &&
+		s.channelId === normalised.channelId &&
+		s.conversationId === normalised.conversationId &&
+		s.userId === normalised.userId &&
+		s.teamId === normalised.teamId &&
+		s.platform === normalised.platform &&
+		isDeepStrictEqual(s.platformMetadata ?? null, normalised.platformMetadata ?? null) &&
+		isDeepStrictEqual(s.customEvent ?? null, normalised.customEvent ?? null)
+	);
+}
+
+function isUniqueViolation(err: unknown): boolean {
+	return (err as { code?: unknown } | null)?.code === "23505";
 }
 
 /**
  * Insert one `tool_use` row per trace, on a transaction the caller already
- * owns.
+ * owns — keyed and idempotent.
  *
  * Shared by the heartbeat path above and the completion route, which is the
  * only reason a trace is not lost when a turn's LAST tool finishes: the
@@ -338,6 +421,16 @@ async function publishTurnToolEvents(
  * One builder rather than two call sites writing the same object: the SPA, the
  * menubar and the promptfoo provider all read this shape, and a second
  * hand-written copy is how the two paths start disagreeing about it.
+ *
+ * Idempotence is by the canonical key, in order, with no silent cleanup:
+ * each trace is preflighted against the stored row for its key across ALL
+ * delivery states (the lookup is by the indexed key, never a numeric-ID
+ * scan). A missing key is inserted; an exact duplicate is recognised without
+ * a second row; a conflicting same-key payload throws, so the caller answers
+ * no ack and the worker retries rather than retiring evidence unwritten. The
+ * returned count therefore always names a fully durably known prefix. A
+ * unique-violation race between two holders of the conversation lock is
+ * re-read inside a savepoint and resolved the same way, never swallowed.
  */
 async function insertTurnToolEventRows(
 	tx: DbClient,
@@ -346,65 +439,119 @@ async function insertTurnToolEventRows(
 		conversationId: string;
 		organizationId: string | null;
 		events: readonly AgentTurnToolEvent[];
+		/** Reply envelope by initiating input run id, derived from stored rows. */
+		repliesByInputRunId?: ReadonlyMap<number, TurnReply>;
+		/** Failed completion may omit an explicitly attributed trace whose input vanished. */
+		skipUnknownInput?: boolean;
 	}
-): Promise<void> {
+): Promise<number> {
+	let durablyKnown = 0;
 	for (const event of args.events) {
-		await insertThreadResponseRow(
-			tx,
-			{
-				messageId: args.reply.message_id,
-				channelId: args.reply.channel_id,
-				conversationId: args.conversationId,
-				userId: args.reply.user_id,
-				teamId: args.reply.team_id ?? "api",
-				platform: args.reply.platform,
-				organizationId: args.organizationId,
-				platformMetadata: args.reply.platform_metadata,
-				customEvent: {
-					name: "tool_use",
-					data: {
-						toolCallId: event.tool_call_id,
-						name: event.name,
-						// `buildToolUseEventPayload`'s shape: the SPA reads the args here.
-						input: event.input ?? null,
-						isError: event.is_error,
-						// An error's summary is its message; a successful call's is the
-						// retrieval evidence the worker summarised from the unclipped
-						// result. The promptfoo provider reads `snippets` to build
-						// `metadata.retrievedContext`, so dropping it on success left
-						// every RAG assertion with nothing to assert against.
-						result_summary: event.is_error
-							? { error: event.output }
-							: event.result_summary,
-					},
+		const routed = event.input_run_id !== undefined ? args.repliesByInputRunId?.get(event.input_run_id) : undefined;
+		if (event.input_run_id !== undefined && !routed) {
+			if (args.skipUnknownInput) continue;
+			throw new Error(`agent turn tool trace names unknown input ${event.input_run_id}`);
+		}
+		// Missing attribution is the legacy worker contract and belongs to the
+		// owner. Explicit attribution must resolve above; it never falls back.
+		const reply = routed ?? args.reply;
+		const payload = {
+			messageId: reply.message_id,
+			channelId: args.reply.channel_id,
+			conversationId: args.conversationId,
+			userId: reply.user_id,
+			teamId: reply.team_id ?? "api",
+			platform: reply.platform,
+			organizationId: args.organizationId,
+			platformMetadata: reply.platform_metadata,
+			customEvent: {
+				name: "tool_use",
+				data: {
+					toolCallId: event.tool_call_id,
+					name: event.name,
+					// `buildToolUseEventPayload`'s shape: the SPA reads the args here.
+					input: event.input ?? null,
+					isError: event.is_error,
+					// An error's summary is its message; a successful call's is the
+					// retrieval evidence the worker summarised from the unclipped
+					// result. The promptfoo provider reads `snippets` to build
+					// `metadata.retrievedContext`, so dropping it on success left
+					// every RAG assertion with nothing to assert against.
+					result_summary: event.is_error
+						? { error: event.output }
+						: event.result_summary,
 				},
-				timestamp: Date.now(),
 			},
-			args.organizationId
-		);
+			timestamp: Date.now(),
+		};
+		const key = turnToolEventKey({
+			organizationId: args.organizationId,
+			conversationId: args.conversationId,
+			messageId: reply.message_id,
+			toolCallId: event.tool_call_id,
+		});
+		// Preflight across every delivery state: the key's unique index has no
+		// status predicate, so a delivered row still collides. Nothing is
+		// deleted or updated here — a stored row is either the same trace
+		// (recognised, no second row) or a conflicting one (rejected, no ack).
+		const existing = (await tx`
+      SELECT action_input FROM public.runs WHERE idempotency_key = ${key} LIMIT 1
+    `) as unknown as Array<{ action_input: unknown }>;
+		if (existing[0]) {
+			if (!sameToolTracePayload(existing[0].action_input, payload)) {
+				throw new Error(
+					`agent turn tool trace ${event.tool_call_id} conflicts with the stored trace for its conversation/input`
+				);
+			}
+			durablyKnown += 1;
+			continue;
+		}
+		const insert = (db: DbClient) =>
+			insertThreadResponseRow(db, payload, args.organizationId, { idempotencyKey: key });
+		try {
+			if (typeof tx.savepoint === "function") await tx.savepoint(insert);
+			else await insert(tx);
+		} catch (err) {
+			if (!isUniqueViolation(err)) throw err;
+			const raced = (await tx`
+        SELECT action_input FROM public.runs WHERE idempotency_key = ${key} LIMIT 1
+      `) as unknown as Array<{ action_input: unknown }>;
+			if (!raced[0] || !sameToolTracePayload(raced[0].action_input, payload)) {
+				throw new Error(
+					`agent turn tool trace ${event.tool_call_id} conflicts with the stored trace for its conversation/input`
+				);
+			}
+		}
+		durablyKnown += 1;
 	}
+	return durablyKnown;
 }
 
 /**
- * Publish an in-flight turn's tool traces, absorbing any failure.
+ * Publish an in-flight turn's tool traces, absorbing any failure into a
+ * missing acknowledgement.
  *
  * Same contract as the delta path and for the same reason: a view of the turn
  * must never fail the heartbeat that keeps the turn alive. Counted rather than
- * silenced, so a broken trace path is visible.
+ * silenced, so a broken trace path is visible. The caller gets `undefined` —
+ * no ack — and the worker keeps the traces queued and re-sends them; only a
+ * positive `turn_tool_ack` retires them. A liveness-only beat sends no traces
+ * and therefore acknowledges none.
  */
 export async function publishTurnToolEventsBestEffort(
 	runId: number,
 	workerId: string,
 	events: readonly AgentTurnToolEvent[]
-): Promise<void> {
+): Promise<number | undefined> {
 	try {
-		await publishTurnToolEvents(runId, workerId, events);
+		return await publishTurnToolEvents(runId, workerId, events);
 	} catch (err) {
 		incrementCounter("lobu_turn_tool_event_publish_failed_total");
 		logger.debug(
 			{ runId, err: errorMessage(err) },
 			"Failed to publish agent turn tool traces"
 		);
+		return undefined;
 	}
 }
 
@@ -543,6 +690,78 @@ export async function publishTurnStatusBestEffort(
 	}
 }
 
+/**
+ * Canonical JSON: sorted object keys, recursed, so the same semantic
+ * completion always hashes the same no matter how the worker ordered its
+ * fields. `undefined` stays undefined (dropped by the stringifier exactly as
+ * `tx.json` drops it on the way into the stored row); callers normalise
+ * absent-vs-empty themselves with explicit `null`.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`);
+  return `{${entries.join(",")}}`;
+}
+
+/**
+ * The stable semantic identity of one agent-turn completion: everything the
+ * terminal transition durably records, normalised the way it is stored
+ * (`stripNul` on prose, `null` for absent optionals, receipts and traces in
+ * order). Transport noise — timestamps, attempt counters — is excluded, so an
+ * at-least-once retry of the same completion hashes identically while a
+ * rewritten answer, a different receipt set, or a flipped status does not.
+ *
+ * Persisted on `run_metadata.turn_completion_hash` by the terminal transition
+ * below (an existing run row, no new table). A retry that presents the same
+ * hash is acknowledged without a second write; one that presents a different
+ * hash is rejected without a second terminal. Rows completed before the marker
+ * existed carry no hash and keep the legacy accept-any-retry idempotence, so
+ * mixed-version claims still drain.
+ */
+function agentTurnCompletionHash(body: CompleteAgentTurnRequest): string {
+  const nul = (value: string | undefined | null): string | null =>
+    typeof value === "string" ? stripNul(value) : null;
+  const canonical = {
+    status: body.status,
+    text: nul(body.text ?? null),
+    stop_reason: body.stop_reason ?? null,
+    usage: body.usage ?? null,
+    session_jsonl: typeof body.session_jsonl === "string" ? body.session_jsonl : null,
+    consumed_inputs:
+      body.consumed_inputs === undefined
+        ? null
+        : body.consumed_inputs.map((receipt) => ({
+            run_id: receipt.run_id,
+            session_entry_id: receipt.session_entry_id,
+            response_text: nul(receipt.response_text ?? null),
+            tools_used: receipt.tools_used ?? null,
+            first_error: nul(receipt.first_error ?? null),
+          })),
+    tools_used: body.tools_used ?? null,
+    first_error: nul(body.first_error ?? null),
+    replied_in_band: body.replied_in_band ?? null,
+    turn_tool_events:
+      body.turn_tool_events === undefined
+        ? null
+        : body.turn_tool_events.map((event) => ({
+            tool_call_id: event.tool_call_id,
+            name: event.name,
+            input_run_id: event.input_run_id ?? null,
+            input: event.input ?? null,
+            is_error: event.is_error,
+            output: event.output,
+            result_summary: event.result_summary ?? null,
+          })),
+    error: nul(typeof body.error === "string" ? body.error : null),
+    exit_reason: body.exit_reason ?? null,
+  };
+  return createHash("sha256").update(stableStringify(canonical)).digest("hex");
+}
+
 /** Validate native identities only; Pi owns replay and compaction. */
 function inputReceiptError(
   run: NativeTurnRun, body: CompleteAgentTurnRequest, snapshot: TurnSnapshot,
@@ -568,6 +787,11 @@ function inputReceiptError(
     && entry.type === 'message' && entry.message.role === 'user'
     && transcriptText(entry.message.content) === run.action_input?.turn?.message_text);
   if (previous < 0) return "agent turn input receipts precede its initial user entry";
+  // Per-input attribution is all-or-nothing: a worker that attributes one
+  // input must attribute them all, so no reply ever borrows a sibling's text.
+  // Receipts without `response_text` are the older single-reply contract those
+  // claims were admitted under, delivered as one execution-wide reply.
+  const perInput = receipts.some((receipt) => receipt.response_text !== undefined);
   const usedRuns = new Set<number>();
   for (const [index, receipt] of receipts.entries()) {
     const input = offered[index];
@@ -577,6 +801,9 @@ function inputReceiptError(
       || position <= previous || !branch.has(receipt.session_entry_id) || entry.type !== 'message'
       || entry.message.role !== 'user' || transcriptText(entry.message.content) !== input.text
       || (Array.isArray(entry.message.content) && entry.message.content.some((part) => part.type !== 'text'))) {
+      return "agent turn returned invalid consumed input receipts";
+    }
+    if (perInput && !receipt.response_text?.trim()) {
       return "agent turn returned invalid consumed input receipts";
     }
     usedRuns.add(receipt.run_id);
@@ -604,7 +831,19 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     if (!run) return { error: 'Agent turn run not found', code: 404 as const };
     if (run.claimed_by !== body.worker_id) return { error: 'Run is not owned by this worker', code: 409 as const };
     if (!['claimed', 'running', 'pending'].includes(run.status)) {
-      return { status: run.status === 'completed' ? 'completed' : run.status === 'cancelled' ? 'cancelled' : 'failed', idempotent: true };
+      const terminal = run.status === 'completed' ? 'completed' : run.status === 'cancelled' ? 'cancelled' : 'failed';
+      // Exact-retry idempotence, checked BEFORE any new-write/seal work: the
+      // terminal transition stamped the semantic hash of what it durably
+      // recorded, so a retry presenting the same completion is acknowledged
+      // without touching anything, while a conflicting one is rejected without
+      // a second terminal. Rows completed before the marker existed carry no
+      // hash and keep the legacy accept-any-retry idempotence, so
+      // mixed-version claims still drain instead of 409ing forever.
+      const known = typeof run.run_metadata?.turn_completion_hash === 'string'
+        ? run.run_metadata.turn_completion_hash : null;
+      if (known === null) return { status: terminal, idempotent: true };
+      if (agentTurnCompletionHash(body) === known) return { status: terminal, idempotent: true };
+      return { error: 'Agent turn completion conflicts with the stored terminal result', code: 409 as const };
     }
     if (run.status !== 'running' && !(run.status === 'claimed' && run.run_metadata?.cancel_requested_at)) {
       return { error: 'Run is not in progress', code: 409 as const };
@@ -613,8 +852,24 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     if (!envelope.reply) return { error: 'Agent turn has no reply envelope', code: 409 as const };
     const cancelling = !!run.run_metadata?.cancel_requested_at;
     const offered = !cancelling && body.status === 'completed' ? await pendingAgentTurnInputs(tx, run) : [];
-    const invalid = typeof snapshot === 'string' ? snapshot
+    let invalid = typeof snapshot === 'string' ? snapshot
       : !cancelling && body.status === 'completed' && snapshot ? inputReceiptError(run, body, snapshot, offered) : undefined;
+    // A follower lost to a cancel/reaper race between admission and this
+    // commit fails the turn honestly rather than completing it around a hole:
+    // the owner lands `failed` with an error terminal below, the surviving
+    // followers stay pending for the next turn, and nothing is delivered for
+    // an input the turn can no longer attribute. Rows are locked in receipt
+    // (id) order under the conversation lock, so no writer can interleave.
+    if (!invalid && !cancelling && body.status === 'completed' && body.consumed_inputs?.length) {
+      for (const receipt of body.consumed_inputs) {
+        const [follower] = await tx<Pick<NativeTurnRun, 'id' | 'status'>>`
+          SELECT id, status FROM runs WHERE id = ${receipt.run_id} FOR UPDATE`;
+        if (!follower || follower.status !== 'pending') {
+          invalid = 'agent turn lost a consumed input before delivery';
+          break;
+        }
+      }
+    }
     const error = cancelling ? 'agent turn cancelled' : invalid ?? (typeof body.error === 'string' ? stripNul(body.error).trim() : '');
     const status = cancelling ? 'cancelled' : body.status === 'failed' || invalid ? 'failed' : 'completed';
     // Rendering needs the code; `classifyRunOutcome` deliberately does NOT get
@@ -629,11 +884,16 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     // so the run row and the snapshot table keep the same thing.
     const stored = status === 'completed' && snapshot && typeof snapshot !== 'string'
       ? boundSnapshot(snapshot, body.session_jsonl!, { runId: body.run_id, conversationId }) : undefined;
+    // Stamp the semantic identity of THIS completion on the run row, so an
+    // at-least-once retry is answered exactly (same hash) or rejected
+    // (conflict) without ever writing a second terminal.
+    const completionHash = agentTurnCompletionHash(body);
     await tx`UPDATE runs SET status = ${status}, completed_at = now(),
       outcome = ${classifyRunOutcome({ status, errorMessage: error })},
       error_message = ${status === 'completed' ? null : error || 'agent turn failed'},
       output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
       exit_reason = ${cancelling ? 'cancelled' : invalid ? 'error_message' : body.exit_reason ?? (status === 'completed' ? 'ok' : 'error_message')},
+      run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({ turn_completion_hash: completionHash })}::jsonb,
       action_input = ${tx.json({ ...envelope, result: {
         text, stop_reason: body.stop_reason ?? null, usage: body.usage ?? null,
         ...(stored !== undefined ? { session_jsonl: stored } : {}),
@@ -641,12 +901,28 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       WHERE id = ${run.id}`;
     // Offered rows are newer than the owner and ordered by ID. The conversation
     // lock prevents another admission/cancel/claim from racing these completions.
+    //
+    // One terminal outbox row per input, each stamped with its own input's
+    // text, tools, and first error — never the execution-wide values, which
+    // would attribute a sibling input's work to this reply (#3662). Receipts
+    // without `response_text` are the older single-reply contract: one owner
+    // row covering every message, exactly as before, so old claims drain
+    // under the contract they were admitted with.
+    const perInput = status === 'completed' && consumed.some((receipt) => receipt.response_text !== undefined);
+    const completedFollowers: NativeTurnRun[] = [];
     for (const receipt of consumed) {
-      await tx`UPDATE runs SET status = 'completed', completed_at = now(), outcome = 'scoreable', exit_reason = 'ok',
-        output_tail = ${text ? text.slice(-MAX_OUTPUT_TAIL) : null},
+      const responseText = perInput ? stripNul(receipt.response_text ?? '') : text;
+      const [follower] = await tx<NativeTurnRun>`UPDATE runs SET status = 'completed', completed_at = now(), outcome = 'scoreable', exit_reason = 'ok',
+        output_tail = ${responseText ? responseText.slice(-MAX_OUTPUT_TAIL) : null},
         run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({
           consumed_by_run_id: Number(run.id), session_entry_id: receipt.session_entry_id,
-        })}::jsonb WHERE id = ${receipt.run_id} AND status = 'pending'`;
+        })}::jsonb WHERE id = ${receipt.run_id} AND status = 'pending'
+        RETURNING id, organization_id, parent_run_id, status, claimed_by, action_input, run_metadata`;
+      // Verified pending above under the same lock, so a miss here is a
+      // lock-ordering surprise, not a race: fail closed and roll everything
+      // back rather than delivering a partial turn.
+      if (!follower) throw new Error('agent turn lost a consumed input before delivery');
+      completedFollowers.push(follower);
     }
     await releaseNextAgentTurn(tx, run);
     const reply = envelope.reply!;
@@ -659,14 +935,29 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     // rows ahead of the reply they explain. The heartbeat path cannot land
     // these: it fences on `status = 'running'`, which this transaction has
     // already changed.
+    //
+    // Routed per initiating input off the receipt's `input_run_id`, resolved
+    // against the offered rows stored above — never off caller strings. A
+    // delayed tool result that landed after a mid-turn follow-up is delivered
+    // under the message that initiated it.
     if (body.turn_tool_events?.length) {
+      const repliesByInputRunId = new Map<number, TurnReply>(
+        offered.slice(0, consumed.length).map((input) => [input.run_id, { ...reply, message_id: input.message_id }]),
+      );
       await insertTurnToolEventRows(tx, {
         reply,
         conversationId,
         organizationId: run.organization_id,
         events: body.turn_tool_events,
+        repliesByInputRunId,
+        // A cancel/reaper can remove an input before a failed completion. Its
+        // explicitly attributed trace cannot be routed safely, so quarantine
+        // it instead of attaching it to the owner. Healthy completions reject
+        // an unknown attribution and roll back.
+        ...(status !== 'completed' ? { skipUnknownInput: true } : {}),
       });
     }
+    const ownerFirstError = typeof body.first_error === 'string' ? stripNul(body.first_error).trim() : '';
     await insertAgentTurnResponse(tx, run, {
       // `tools_used` is forwarded as sent, NOT defaulted to `[]`. Absent and
       // empty are different claims downstream: `requireTool` passes on absent
@@ -675,18 +966,50 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
       // worker that reported nothing into "called nothing" would invent that
       // claim. The guest always sends the array, so absent means a genuinely
       // older worker.
+      //
+      // Per-input workers scope this ledger to the owner input; each steered
+      // input's own ledger rides its receipt below. Stamping one execution-wide
+      // union onto every reply is what let a Draft-less turn report a Draft.
       ...(status === 'completed'
         ? {
             finalText: text,
             ...(body.tools_used ? { toolsUsed: body.tools_used } : {}),
+            ...(ownerFirstError ? { firstToolError: ownerFirstError } : {}),
+            // `replied_in_band` is an execution-wide signal the guest cannot
+            // attribute per input, so it stays on the owner's row only:
+            // stamping it everywhere would suppress every steered reply on the
+            // strength of one in-band post.
             ...(body.replied_in_band ? { repliedInBand: true } : {}),
           }
         : {
             error: error || 'agent turn failed',
             ...(errorCode ? { errorCode, errorContext: envelope.reply!.error_context } : {}),
           }),
-      processedMessageIds: [reply.message_id, ...offered.slice(0, consumed.length).map((input) => input.message_id)],
+      processedMessageIds: perInput ? [reply.message_id] : [reply.message_id, ...offered.slice(0, consumed.length).map((input) => input.message_id)],
     });
+    // Each consumed steered input gets its own terminal outbox row, routed by
+    // its STORED reply envelope — the trusted scope — carrying its own answer,
+    // its own tool ledger, and its own verbatim first error. Committed in the
+    // same transaction as the owner row above, so crash recovery reads one
+    // terminal per input or none at all. Legacy single-reply receipts write no
+    // follower rows at all: the owner's row already covers every message, and
+    // an extra row per follower would deliver the same reply N times.
+    if (!perInput) return { status, notify: true };
+    for (const [index, follower] of completedFollowers.entries()) {
+      const receipt = consumed[index]!;
+      const followerReply = follower.action_input?.reply;
+      const followerResponse = stripNul(receipt.response_text ?? '').trim();
+      if (!followerReply || !followerResponse) {
+        throw new Error('consumed input has no reply envelope or response');
+      }
+      await insertAgentTurnResponse(tx, follower, {
+        finalText: followerResponse,
+        ...(receipt.tools_used ? { toolsUsed: receipt.tools_used } : {}),
+        ...(typeof receipt.first_error === 'string' && stripNul(receipt.first_error).trim()
+          ? { firstToolError: stripNul(receipt.first_error).trim() } : {}),
+        processedMessageIds: [followerReply.message_id],
+      });
+    }
     return { status, notify: true };
   });
   if ('error' in result) return c.json({ error: result.error }, result.code);

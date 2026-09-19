@@ -67,8 +67,10 @@ export function startEmbeddedConnectorWorker(
       // folds in the gateway's authoritative db_egress_policy.
       // ...and the agent-turn lane, which runs Lobu's own guest bundle through
       // the same isolate executor. Advertising it is what lets the gateway
-      // hand this process an `agent_turn` row at all.
-      capabilities: { db_egress_hardening: true, agent_turn: true },
+      // hand this process an `agent_turn` row at all. Per-input attribution
+      // (#3662) rides along: the bundled guest always attributes one reply,
+      // tool ledger, and verbatim first error per consumed input.
+      capabilities: { db_egress_hardening: true, agent_turn: true, agent_turn_per_input_responses: true },
       pollIntervalMs: intervals.embeddedWorkerPollIntervalMs,
       maxConcurrentJobs: 1,
     },

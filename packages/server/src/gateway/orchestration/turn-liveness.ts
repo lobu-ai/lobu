@@ -640,25 +640,36 @@ export async function sweepExpiredTurns(
  * chat_message), with the elevated retry budget terminal rows need to survive
  * the owner-gate re-queue (see TERMINAL_DELIVERY_SEND_OPTS). The caller does the
  * `pg_notify` after the transaction commits.
+ *
+ * `options.idempotencyKey`, when set, stamps `runs.idempotency_key` so a retry
+ * of the same canonical payload collides instead of duplicating. It is only a
+ * collision signal: callers that need exact-duplicate-vs-conflict semantics
+ * (agent-turn tool traces) preflight on the key first and compare the stored
+ * row, because the column's pre-existing partial uniqueness only covers live
+ * statuses while the keyed shape carries its own all-state index.
  */
 export async function insertThreadResponseRow(
   tx: DbClient,
   payload: unknown,
-  organizationId: string | null
+  organizationId: string | null,
+  options?: { idempotencyKey?: string }
 ): Promise<void> {
+  const key = options?.idempotencyKey ?? null;
   await tx.unsafe(
     `INSERT INTO public.runs (
        run_type, queue_name, action_input, status, run_at,
-       max_attempts, attempts, priority, retry_delay_seconds, organization_id
+       max_attempts, attempts, priority, retry_delay_seconds, organization_id,
+       idempotency_key
      ) VALUES (
        'chat_message', 'thread_response', $1, 'pending', now(),
-       $2, 0, 0, $3, $4
+       $2, 0, 0, $3, $4, $5
      )`,
     [
       tx.json(payload),
       TERMINAL_DELIVERY_SEND_OPTS.retryLimit ?? 30,
       TERMINAL_DELIVERY_SEND_OPTS.retryDelay ?? 1,
       organizationId,
+      key,
     ]
   );
 }

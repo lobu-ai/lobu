@@ -333,6 +333,12 @@ export type AgentTurnEvent =
       isError: boolean;
       output: string;
       /**
+       * The accepted input run the call was STARTED for. A result that lands
+       * after a mid-turn follow-up stays with its initiating message: the
+       * guest binds this at call start, never at call end.
+       */
+      inputRunId?: number;
+      /**
        * Retrieval evidence, summarised from the result as the tool returned
        * it. Built in the guest because `output` above is clipped for display:
        * a retrieval body over that cap parses to nothing, so the host cannot
@@ -354,14 +360,41 @@ export interface AgentTurnOutput {
   usage: { input: number; output: number } | null;
   /** Pi's native session, including message IDs, summaries and custom state. */
   sessionJsonl: string;
-  consumedInputs: Array<{ runId: number; sessionEntryId: string }>;
+  consumedInputs: Array<{
+    runId: number;
+    sessionEntryId: string;
+    /**
+     * This input's own answer: the last assistant message WITH TEXT after its
+     * user message, never the execution-wide stream. The host delivers one
+     * terminal reply per input from these, so a missing answer fails the turn
+     * rather than borrowing a sibling's text.
+     */
+    responseText: string;
+    /** The tools this input's answer actually used, first-call order. */
+    toolsUsed: string[];
+    /**
+     * The first tool error attributed to this input, quoted exactly as the
+     * tool returned it. Empty when none of its calls failed.
+     */
+    firstError?: string;
+  }>;
   /**
-   * Every tool this turn invoked, in first-call order. Always present, and
-   * `[]` for a turn that called none: the `requireTool` output guardrail
-   * treats an ABSENT ledger as "cannot prove a miss" and passes, so omitting
-   * it silently disables that check.
+   * The tools the OWNER input's answer used, in first-call order. Always
+   * present, and `[]` for an answer that called none: the `requireTool`
+   * output guardrail treats an ABSENT ledger as "cannot prove a miss" and
+   * passes, so omitting it silently disables that check. Steered inputs carry
+   * their own ledgers on their `consumedInputs` receipts — this field is
+   * never the execution-wide union, which would attribute a sibling input's
+   * calls to the owner's reply.
    */
   toolsUsed: string[];
+  /**
+   * The owner's first tool error, quoted exactly as the tool returned it.
+   * Per-input siblings ride each `consumedInputs` receipt instead, so every
+   * terminal reply is stamped with its own input's failure rather than the
+   * execution-wide first one.
+   */
+  firstError?: string;
   /**
    * The turn posted its answer INTO the conversation it is replying to, with
    * `send_message`/`present_event`. `text` is then a report about a message the
