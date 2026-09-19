@@ -62,10 +62,13 @@ function isRootSafeWorkingDirectory(value: unknown): boolean {
   if (typeof value !== "string") {
     return false;
   }
-  const trimmed = value.trim();
-  return (
-    trimmed === "." || trimmed === "./" || trimmed === GITHUB_WORKSPACE_ROOT
-  );
+  // Compare the raw parsed string directly: a quoted YAML scalar such as
+  // " . " retains its spaces and denotes a directory literally named
+  // space-dot-space, not the workspace root. The runner does not trim.
+  if (value !== value.trim()) {
+    return false;
+  }
+  return value === "." || value === "./" || value === GITHUB_WORKSPACE_ROOT;
 }
 
 type WorkflowDoc = {
@@ -893,6 +896,58 @@ describe("ci views build closure", () => {
         });
         expect(parsedEffectiveWd(rejected)).toBe(bad);
         expect(() => assertViewsGuestSelection(rejected)).toThrow(
+          /repo root|working-directory/
+        );
+      }
+    });
+
+    it("rejects padded working directories through the full suite", () => {
+      // F16 (round 14): quoted padded scalars such as " . " retain their
+      // spaces after YAML parsing and denote a directory literally named
+      // space-dot-space, not the workspace root. The runner does not trim,
+      // so the raw parsed string must match exactly. Each padded value is
+      // installed at step, job-default, and workflow-default level;
+      // inherited controls delete more-specific fields first so the padded
+      // value is the raw effective value, then fail both the selection
+      // predicate and the complete suite.
+      const paddedValues = [" . ", ". ", "./ ", ` ${GITHUB_WORKSPACE_ROOT} `];
+      for (const padded of paddedValues) {
+        const stepWd = mutateLive((doc) => {
+          guestStepOf(doc)["working-directory"] = padded;
+        });
+        expect(parsedEffectiveWd(stepWd)).toBe(padded);
+        expect(() => assertViewsGuestSelection(stepWd)).toThrow(
+          /repo root|working-directory/
+        );
+        expect(() => assertFullSuite(stepWd)).toThrow(
+          /repo root|working-directory/
+        );
+        const jobWd = mutateLive((doc) => {
+          delete guestStepOf(doc)["working-directory"];
+          ensureJobRun(doc)["working-directory"] = padded;
+        });
+        expect(parsedEffectiveWd(jobWd)).toBe(padded);
+        expect(() => assertViewsGuestSelection(jobWd)).toThrow(
+          /repo root|working-directory/
+        );
+        expect(() => assertFullSuite(jobWd)).toThrow(
+          /repo root|working-directory/
+        );
+        const workflowWd = mutateLive((doc) => {
+          delete guestStepOf(doc)["working-directory"];
+          const jobRun = doc.jobs.unit.defaults?.run as
+            | Record<string, any>
+            | undefined;
+          if (jobRun && typeof jobRun === "object") {
+            delete jobRun["working-directory"];
+          }
+          ensureWorkflowRun(doc)["working-directory"] = padded;
+        });
+        expect(parsedEffectiveWd(workflowWd)).toBe(padded);
+        expect(() => assertViewsGuestSelection(workflowWd)).toThrow(
+          /repo root|working-directory/
+        );
+        expect(() => assertFullSuite(workflowWd)).toThrow(
           /repo root|working-directory/
         );
       }
