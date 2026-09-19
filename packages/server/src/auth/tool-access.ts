@@ -25,6 +25,10 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 	// source template. The handler derives the actor from OAuth/session context
 	// and accepts no caller-supplied identity.
 	invoke_event_action: null,
+	// View-action counterpart: same write-tier contract as invoke_event_action
+	// (advertised `mcp:write`, non-read-only). The handler still revalidates
+	// the CURRENT view row, so a removed action stays rejected.
+	invoke_view_action: null,
 	// `run_sdk` reaches admin handlers inside the script; per-call gates fire
 	// on each SDK method, so the entry-point check is just write-tier.
 	run_sdk: null,

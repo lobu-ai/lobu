@@ -210,6 +210,20 @@ describe('member write access', () => {
     expect(getRequiredAccessLevel('run_sdk', {}, false)).toBe('write');
   });
 
+  it('treats invoke_view_action as member-write like invoke_event_action (F13)', () => {
+    // Both tools advertise `mcp:write` with readOnlyHint false; the gate must
+    // resolve them at write tier, never fall through to the admin default-deny.
+    const args = { view: 'poke-view', action: 'retry', interaction_id: 'click-1' };
+    for (const tool of ['invoke_event_action', 'invoke_view_action']) {
+      expect(requiresOwnerAdmin(tool, args, false)).toBe(false);
+      expect(requiresMemberWrite(tool, args, false)).toBe(true);
+      expect(getRequiredAccessLevel(tool, args, false)).toBe('write');
+    }
+    // A declared view action is still not public: anonymous/nonmember callers
+    // must be denied at the gate.
+    expect(isPublicReadable('invoke_view_action', args)).toBe(false);
+  });
+
   it('should allow members to create and update entities without admin role', () => {
     expect(requiresMemberWrite('manage_entity', { action: 'create' }, false)).toBe(true);
     expect(requiresMemberWrite('manage_entity', { action: 'update' }, false)).toBe(true);
@@ -556,6 +570,41 @@ describe('checkToolAccess', () => {
         }
       )
     ).not.toThrow();
+  });
+
+  it('gates invoke_view_action at write tier for write-scoped members and owners (F13)', () => {
+    const args = { view: 'poke-view', action: 'retry', interaction_id: 'click-1' };
+    // Member and owner callers with mcp:read + mcp:write resolve to write.
+    expect(
+      checkToolAccess('invoke_view_action', args, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:read', 'mcp:write'],
+      })
+    ).toBe('write');
+    expect(
+      checkToolAccess('invoke_view_action', args, {
+        ...baseAuth,
+        memberRole: 'owner',
+        scopes: ['mcp:read', 'mcp:write'],
+      })
+    ).toBe('write');
+    // Read-only member is denied at the scope gate.
+    expect(() =>
+      checkToolAccess('invoke_view_action', args, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:read'],
+      })
+    ).toThrow(/MCP session is read-only/i);
+    // Authenticated nonmember is denied: a view action is not public-readable.
+    expect(() =>
+      checkToolAccess('invoke_view_action', args, {
+        ...baseAuth,
+        memberRole: null,
+        scopes: ['mcp:read', 'mcp:write'],
+      })
+    ).toThrow(/public workspace is read-only/i);
   });
 
   it('exposes admin tools on external MCP uniformly (no internal-tool hiding)', () => {

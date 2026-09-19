@@ -48,6 +48,8 @@ describe("view actions", () => {
 	let orgId: string;
 	let ownerId: string;
 	let ownerCtx: AuthContext;
+	let memberCtx: AuthContext;
+	let readOnlyMemberCtx: AuthContext;
 
 	const baseCtx = (userId: string): AuthContext => ({
 		organizationId: orgId,
@@ -92,6 +94,18 @@ describe("view actions", () => {
 		ownerId = owner.id;
 		await addUserToOrganization(owner.id, org.id, "owner");
 		ownerCtx = baseCtx(owner.id);
+		const member = await createTestUser({ email: "view-actions-member@test.com" });
+		await addUserToOrganization(member.id, org.id, "member");
+		memberCtx = {
+			...baseCtx(member.id),
+			memberRole: "member",
+			scopes: ["mcp:read", "mcp:write"],
+		};
+		readOnlyMemberCtx = {
+			...baseCtx(member.id),
+			memberRole: "member",
+			scopes: ["mcp:read"],
+		};
 		// Declare the kinds under test on the org-wide $member registry so
 		// the chokepoint exercises real kind validation, not permissive mode.
 		// ensureMemberEntityType primes the pod cache with the DEFAULT kinds,
@@ -281,5 +295,77 @@ describe("view actions", () => {
 		).catch((e) => e);
 		expect(err).toBeInstanceOf(ToolUserError);
 		expect((err as ToolUserError).httpStatus).toBe(401);
+	});
+
+	it("lets a write-scoped member invoke a declared action over the MCP tool (F13)", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const result = (await executeTool(
+			"invoke_view_action",
+			{
+				view: "poke-view",
+				action: "retry",
+				value: { id: 7 },
+				interaction_id: "member-1",
+			},
+			TEST_ENV,
+			memberCtx
+		)) as { created: boolean; event_id: number; event_type: string };
+		expect(result.created).toBe(true);
+		expect(result.event_type).toBe("test.poked");
+		expect(result.event_id).toBeGreaterThan(0);
+
+		const sql = getTestDb();
+		const rows = await sql`
+      SELECT origin_type, semantic_type
+      FROM events
+      WHERE id = ${result.event_id}
+    `;
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			origin_type: "view_interaction",
+			semantic_type: "test.poked",
+		});
+	});
+
+	it("rejects a read-only member on the MCP tool without touching events (F13)", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const err = await executeTool(
+			"invoke_view_action",
+			{ view: "poke-view", action: "retry", interaction_id: "member-readonly-1" },
+			TEST_ENV,
+			readOnlyMemberCtx
+		).catch((e) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect((err as Error).message).toMatch(/read-only/i);
+	});
+
+	it("rejects undeclared and removed actions for a write-scoped member (F13)", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		// Missing action: never declared on the CURRENT view row.
+		const missing = await executeTool(
+			"invoke_view_action",
+			{ view: "poke-view", action: "launch", interaction_id: "member-missing-1" },
+			TEST_ENV,
+			memberCtx
+		).catch((e) => e);
+		expect(missing).toBeInstanceOf(ToolUserError);
+		expect((missing as ToolUserError).httpStatus).toBe(403);
+		expect((missing as ToolUserError).message).toMatch(/does not declare/);
+
+		// Removed action: declared, then resaved without it.
+		const resaved = await setView(
+			"poke-view",
+			`${VIEW_SOURCE}\n// action removed\n`,
+			{}
+		);
+		expect(resaved.written).toBe(true);
+		const removed = await executeTool(
+			"invoke_view_action",
+			{ view: "poke-view", action: "retry", interaction_id: "member-removed-1" },
+			TEST_ENV,
+			memberCtx
+		).catch((e) => e);
+		expect(removed).toBeInstanceOf(ToolUserError);
+		expect((removed as ToolUserError).httpStatus).toBe(403);
 	});
 });
