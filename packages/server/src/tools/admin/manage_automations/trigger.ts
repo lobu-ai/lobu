@@ -408,19 +408,9 @@ export async function handleSetReactionScript(
   // so the worker is told the exact shape the reaction will Value.Parse. NULL
   // when the reaction declares no `input` (free-form `{ summary }` fallback).
   const reactionInputSchema = await extractReactionInputSchema(script);
-  if ([...beforeById.values()].every((v) => v === script)) {
-    return {
-      action: "set_reaction_script",
-      automation_id: String(args.automation_id),
-      has_script: true,
-      message:
-        "Reaction script compiled and saved. It will auto-execute on future complete_window calls.",
-    };
-  }
-
   await sql.begin(async (tx) => {
     const locked = await tx`
-      SELECT id, reaction_script, reaction_input_schema FROM automations
+      SELECT id, reaction_script, reaction_script_compiled, reaction_input_schema FROM automations
       WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
       ORDER BY id
       FOR UPDATE
@@ -431,6 +421,13 @@ export async function handleSetReactionScript(
     const lockedBeforeSchema = new Map<number, unknown>(
       locked.map((r) => [Number(r.id), (r.reaction_input_schema as unknown) ?? null]),
     );
+    const targetSchema = reactionInputSchema ?? null;
+    const isTrueNoop = locked.every((row) =>
+      row.reaction_script === script &&
+      row.reaction_script_compiled === compiledCode &&
+      JSON.stringify(row.reaction_input_schema ?? null) === JSON.stringify(targetSchema)
+    );
+    if (isTrueNoop) return;
     await tx`
     UPDATE automations
     SET reaction_script = ${script}, reaction_script_compiled = ${compiledCode},

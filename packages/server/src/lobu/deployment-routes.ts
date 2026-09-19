@@ -234,6 +234,9 @@ routes.get("/", async (c) => {
 	const limit = clampLimit(c.req.query("limit"), 50, 100);
 	const beforeId = Number.parseInt(c.req.query("before_id") ?? "", 10);
 	const useCursor = Number.isFinite(beforeId);
+	const resourceKind = c.req.query("resource_kind") ?? null;
+	const resourceId = c.req.query("resource_id") ?? null;
+	const resourceFiltered = resourceKind != null && resourceId != null;
 
 	const sql = getDb();
 	const rows = await sql`
@@ -242,8 +245,15 @@ routes.get("/", async (c) => {
 		WHERE organization_id = ${organizationId}
 		  AND semantic_type = 'change'
 		  AND (
-		    metadata->>'category' = 'deployment'
-		    OR (metadata->>'category' = 'config' AND metadata->>'apply_id' IS NULL)
+		    ${resourceFiltered}
+		    AND metadata->>'category' = 'config'
+		    AND metadata->>'resource_kind' = ${resourceKind}
+		    AND metadata->>'resource_id' = ${resourceId}
+		    OR ${!resourceFiltered}
+		    AND (
+		      metadata->>'category' = 'deployment'
+		      OR (metadata->>'category' = 'config' AND metadata->>'apply_id' IS NULL)
+		    )
 		  )
 		  ${useCursor ? sql`AND id < ${beforeId}` : sql``}
 		ORDER BY id DESC

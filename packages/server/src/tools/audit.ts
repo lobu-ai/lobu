@@ -138,13 +138,23 @@ function manageAutomationsIdentity(args: Record<string, unknown>): {
   automation_id: string | null;
   automation_ids: string[];
 } {
-  const action = typeof args.action === 'string' ? args.action : null;
-  const automationId =
-    typeof args.automation_id === 'string' || typeof args.automation_id === 'number'
-      ? String(args.automation_id)
-      : null;
+  const validActions = new Set([
+    'list', 'create', 'update', 'create_version', 'create_from_version',
+    'claim_next_window', 'complete_window', 'trigger', 'delete',
+    'set_reaction_script', 'get_versions', 'get_version_details',
+    'get_component_reference', 'submit_feedback', 'get_feedback', 'list_promoted',
+  ]);
+  const action = typeof args.action === 'string' && validActions.has(args.action)
+    ? args.action
+    : null;
+  const validId = (value: unknown): string | null => {
+    if (typeof value !== 'string' && typeof value !== 'number') return null;
+    const text = String(value);
+    return /^[1-9]\d*$/.test(text) ? text : null;
+  };
+  const automationId = validId(args.automation_id);
   const ids = Array.isArray(args.automation_ids)
-    ? args.automation_ids.filter((v): v is string | number => typeof v === 'string' || typeof v === 'number').map(String)
+    ? args.automation_ids.map(validId).filter((v): v is string => v != null)
     : [];
   return { action, automation_id: automationId ?? ids[0] ?? null, automation_ids: ids };
 }
