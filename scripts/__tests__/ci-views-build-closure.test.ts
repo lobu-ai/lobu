@@ -51,4 +51,50 @@ describe("ci views build closure", () => {
     expect(section).toContain("build:server");
     expect(section).toContain("packages/server/dist/server.bundle.mjs");
   });
+
+  it("executes the views guest suite in its own failing-closed unit step", () => {
+    // F15 (round 10): the 29-test packages/views guest suite (F10/F14) was
+    // built but never selected by any CI `bun test` invocation. This pins
+    // the separate `views guest runtime` step immediately after core/cli so
+    // the guest DOM globals stay out of the core/CLI process, and pins
+    // fail-closed execution (no continue-on-error, no opt-in condition, no
+    // failure-swallowing suffix).
+    const yml = readFileSync(CI_YML, "utf8");
+    const coreAt = yml.indexOf("- name: core / cli (bun:test)");
+    const viewsAt = yml.indexOf("- name: views guest runtime (bun:test)");
+    const scriptsAt = yml.indexOf("- name: repo scripts (bun:test)");
+    expect(coreAt).toBeGreaterThanOrEqual(0);
+    expect(viewsAt).toBeGreaterThan(coreAt);
+    expect(scriptsAt).toBeGreaterThan(viewsAt);
+    const nextStepAt = yml.indexOf("- name:", viewsAt + 1);
+    expect(nextStepAt).toBeGreaterThan(viewsAt);
+    const step = yml.slice(viewsAt, nextStepAt);
+    expect(step).toContain(
+      "bun test packages/views/src --coverage --timeout 30000"
+    );
+    expect(step).toContain("mv coverage/lcov.info coverage/views.lcov.info");
+    // Separate process: the core/cli invocation must not absorb views, and
+    // the views invocation must not absorb core/cli.
+    const coreStep = yml.slice(coreAt, viewsAt);
+    expect(coreStep).not.toContain("packages/views");
+    expect(step).not.toContain("packages/core");
+    expect(step).not.toContain("packages/cli");
+    // Fail closed: no continue-on-error, no conditional run, no swallowed exit.
+    expect(step).not.toContain("continue-on-error");
+    expect(step).not.toContain("if:");
+    expect(step).not.toContain("|| true");
+    expect(step).not.toContain("|| :");
+    expect(step).not.toContain("; exit 0");
+  });
+
+  it("uploads the views guest coverage artifact", () => {
+    // The unit Upload coverage step uses an explicit `files:` list; an
+    // omitted entry silently drops the artifact. This pins
+    // coverage/views.lcov.info alongside the other unit reports.
+    const yml = readFileSync(CI_YML, "utf8");
+    const uploadAt = yml.indexOf("- name: Upload coverage");
+    expect(uploadAt).toBeGreaterThanOrEqual(0);
+    const section = yml.slice(uploadAt, uploadAt + 1200);
+    expect(section).toContain("coverage/views.lcov.info");
+  });
 });

@@ -252,6 +252,11 @@ jobs:
           bun test packages/core packages/cli --coverage --timeout 30000
           mv coverage/lcov.info coverage/core-cli.lcov.info
 
+      - name: views guest runtime (bun:test)
+        run: |
+          bun test packages/views/src --coverage --timeout 30000
+          mv coverage/lcov.info coverage/views.lcov.info
+
       # Repo tooling guards (merge integrity, release ordering, migration
       # checks, naming gates, the sandbox credential reader). These live in
       # scripts/__tests__ and matched no `bun test` path above, so the whole
@@ -338,7 +343,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v7
         with:
-          files: coverage/core-cli.lcov.info,coverage/scripts.lcov.info,coverage/plugin-runtime.lcov.info,coverage/server-units.lcov.info,coverage/server-units-auth.lcov.info,coverage/server-units-activity.lcov.info,coverage/server-units-compiler.lcov.info,coverage/connector-worker.lcov.info,coverage/client-promptfoo.lcov.info,coverage/connector-sdk.lcov.info,coverage/connectors.lcov.info,coverage/embeddings.lcov.info
+          files: coverage/core-cli.lcov.info,coverage/scripts.lcov.info,coverage/plugin-runtime.lcov.info,coverage/server-units.lcov.info,coverage/server-units-auth.lcov.info,coverage/server-units-activity.lcov.info,coverage/server-units-compiler.lcov.info,coverage/connector-worker.lcov.info,coverage/client-promptfoo.lcov.info,coverage/connector-sdk.lcov.info,coverage/connectors.lcov.info,coverage/embeddings.lcov.info,coverage/views.lcov.info
           flags: unit
           fail_ci_if_error: false
 
