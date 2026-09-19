@@ -443,6 +443,7 @@ export async function handleCreateVersion(
         action: 'create_version',
         summary: `Automation '${args.name ?? (prev.name as string) ?? args.automation_id}' version ${lockedNextVersion} created`,
         before: {
+          name: (prev.name as string) ?? null,
           version: previousVersion,
           prompt: prev.prompt ?? null,
           sources: storedSources,

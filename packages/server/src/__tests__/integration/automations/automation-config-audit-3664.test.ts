@@ -361,6 +361,28 @@ describe('automation config audit #3664', () => {
     expect(payload.state.prompt).toBe('v2 prompt');
   });
 
+  it('create_version rename preserves the previous name in audit history', async () => {
+    const created = (await owner.automations.create({
+      slug: 'audit-version-rename',
+      name: 'Original Name',
+      prompt: 'v1 prompt',
+      triggers: [],
+      managed_agent_id: agentId,
+    })) as { automation_id: string };
+    await owner.automations.createVersion({
+      automation_id: created.automation_id,
+      name: 'Renamed Automation',
+      prompt: 'v2 prompt',
+    });
+    const rows = await configEvents(orgId, created.automation_id);
+    const last = rows[rows.length - 1];
+    expect(last.metadata.action).toBe('create_version');
+    expect(last.metadata.changed_fields).toContain('name');
+    const payload = last.payload_data as Record<string, any>;
+    expect(payload.before.name).toBe('Original Name');
+    expect(payload.state.name).toBe('Renamed Automation');
+  });
+
   it('create_version draft (set_as_current=false) omits cadence state/fields', async () => {
     const created = (await owner.automations.create({
       slug: 'audit-version-draft',
