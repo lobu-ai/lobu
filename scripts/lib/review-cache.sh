@@ -26,9 +26,17 @@ review_cache_root() {
   fi
 }
 
+review_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum
+  else
+    shasum -a 256
+  fi
+}
+
 review_diff_hash() {
   local base="$1"
-  git diff "$base"...HEAD 2>/dev/null | sha256sum | cut -d' ' -f1
+  git diff "$base"...HEAD 2>/dev/null | review_sha256 | cut -d' ' -f1
 }
 
 # A verdict is only reusable for the same reviewer identity. Any knob that can
