@@ -1,5 +1,7 @@
 import { getDb } from './db/client';
 
+export const MCP_SESSION_MAX_AGE_MS = 60 * 60 * 1000;
+
 export interface PersistedMcpSession {
   sessionId: string;
   userId: string | null;
@@ -104,9 +106,22 @@ export class McpSessionStore {
         scoped_to_org = ${session.scopedToOrg},
         supports_mcp_apps = ${session.supportsMcpApps},
         supports_app_sandbox_domain = ${session.supportsAppSandboxDomain},
-        last_accessed_at = ${new Date(session.lastAccessedAt)},
-        expires_at = ${new Date(session.expiresAt)}
+        last_accessed_at = GREATEST(last_accessed_at, ${new Date(session.lastAccessedAt)}),
+        expires_at = GREATEST(expires_at, ${new Date(session.expiresAt)})
       WHERE session_id = ${session.sessionId}
+      RETURNING session_id
+    `;
+    return rows.length > 0;
+  }
+
+  /** Transport activity must neither overwrite newer auth nor recreate revoked rows. */
+  async refreshActivity(sessionId: string): Promise<boolean> {
+    const sql = getDb();
+    const rows = await sql`
+      UPDATE mcp_sessions SET
+        last_accessed_at = GREATEST(last_accessed_at, NOW()),
+        expires_at = GREATEST(expires_at, NOW() + ${MCP_SESSION_MAX_AGE_MS} * interval '1 millisecond')
+      WHERE session_id = ${sessionId}
       RETURNING session_id
     `;
     return rows.length > 0;
@@ -151,6 +166,19 @@ export class McpSessionStore {
 
   async deleteExpiredSessions(): Promise<void> {
     const sql = getDb();
-    await sql`DELETE FROM mcp_sessions WHERE expires_at <= NOW()`;
+    // Lock candidates in the deleting statement: cleanup skips rows already
+    // being refreshed, while a later refresh sees any committed deletion.
+    // Cap each scheduler tick's work so later ticks can continue the backlog.
+    await sql`
+      WITH expired AS (
+        SELECT session_id FROM mcp_sessions
+        WHERE expires_at <= NOW()
+        ORDER BY expires_at, session_id
+        LIMIT 500
+        FOR UPDATE SKIP LOCKED
+      )
+      DELETE FROM mcp_sessions s USING expired
+      WHERE s.session_id = expired.session_id
+    `;
   }
 }
