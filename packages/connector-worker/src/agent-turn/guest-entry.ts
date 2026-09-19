@@ -546,6 +546,9 @@ export async function runAgentTurn(
     // turn, in order. It drives the live typing indicator and is the fallback
     // answer for a turn that never settles a message.
     let text = '';
+    // Owner-only fallback stream. The aggregate `text` includes steered
+    // replies too, so it cannot safely stand in for an unsettled owner answer.
+    let ownerText = '';
     let stopReason: string | null = null;
     let usage: AgentTurnOutput['usage'] = null;
     // While the pre-compaction memory flush runs, nothing it produces is the
@@ -612,6 +615,7 @@ export async function runAgentTurn(
         const partial = event.assistantMessageEvent as { type?: string; delta?: string };
         if (partial.type === 'text_delta' && typeof partial.delta === 'string') {
           text += partial.delta;
+          if (activeInputRunId === undefined) ownerText += partial.delta;
           emit({ type: 'text_delta', delta: partial.delta });
         } else if (partial.type === 'thinking_delta' && typeof partial.delta === 'string') {
           emit({ type: 'thinking_delta', delta: partial.delta });
@@ -664,7 +668,9 @@ export async function runAgentTurn(
         // finish after a follow-up steered the turn elsewhere, and the result
         // belongs to the message that initiated it. The binding is the input
         // of the assistant message that emitted the call, not the live input.
-        toolInputRun.set(event.toolCallId, emitInputRunId ?? activeInputRunId);
+        // `undefined` is a real owner binding, not a missing value. Preserve
+        // it so a later steer cannot claim an owner tool that starts late.
+        toolInputRun.set(event.toolCallId, emitInputRunId);
         emit({ type: 'tool_call_start', toolCallId: event.toolCallId, name: event.toolName, args: event.args });
         return;
       }
@@ -673,7 +679,9 @@ export async function runAgentTurn(
         // matching what the retired lane stamped (`recordToolUsed`, from its
         // own `tool_use` event). A failed call still counts as attempted; the
         // guardrail asks whether the tool was reached, not whether it worked.
-        const inputRunId = toolInputRun.get(event.toolCallId) ?? activeInputRunId;
+        const inputRunId = toolInputRun.has(event.toolCallId)
+          ? toolInputRun.get(event.toolCallId)
+          : activeInputRunId;
         toolInputRun.delete(event.toolCallId);
         toolsFor(inputRunId).add(event.toolName);
         const result = event.result as { content?: Array<{ type?: string; text?: string }> };
@@ -789,7 +797,7 @@ export async function runAgentTurn(
       // aborted mid-answer still owes the user what it managed to say. The
       // fallback is the owner's only: a steered input without its own settled
       // answer fails below rather than borrowing a sibling's text.
-      text: ownerAnswer ?? text,
+      text: ownerAnswer ?? ownerText,
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),
