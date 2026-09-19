@@ -15,12 +15,17 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { AnyObjectSchema, SchemaOutput } from '@modelcontextprotocol/sdk/server/zod-compat.js';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
+  type Notification as McpNotification,
+  type Request as McpRequest,
+  type Result as McpResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Context } from 'hono';
 import { OAuthClientsStore } from './auth/oauth/clients';
@@ -207,8 +212,23 @@ export async function revokeInMemoryMcpSessionsForClient(
 // Build a low-level Server wired to our tool registry + auth context
 // ---------------------------------------------------------------------------
 
-/** Request-local response formatting; concurrent MCP sessions must never race. */
-const mcpRequestFormat = new AsyncLocalStorage<{ rawJson: boolean }>();
+/** HTTP context follows SDK dispatch without sharing state between requests. */
+const mcpRequestContext = new AsyncLocalStorage<{
+  rawJson: boolean;
+  signal: AbortSignal;
+  renewActivity?: () => Promise<boolean>;
+}>();
+
+class SessionServer extends Server {
+  override setRequestHandler<T extends AnyObjectSchema>(
+    schema: T,
+    handler: (request: SchemaOutput<T>, extra: RequestHandlerExtra<McpRequest, McpNotification>) => McpResult | Promise<McpResult>
+  ): void {
+    // This also wraps the SDK's built-in handlers registered by super().
+    super.setRequestHandler(schema, (request, extra) =>
+      withRequestActivity(extra.signal, () => handler(request, extra)));
+  }
+}
 
 /**
  * MCP Apps UI resources (interactive iframe payloads a host renders in a
@@ -395,7 +415,7 @@ function createServerForContext(
   authCtx: SessionAuthContext,
   mcpAppsSupported: boolean
 ): Server {
-  const server = new Server(
+  const server = new SessionServer(
     { name: 'lobu-mcp', version: '0.2.0' },
     {
       capabilities: { tools: {}, resources: {} },
@@ -648,7 +668,7 @@ function createServerForContext(
         name === 'run_sdk' || name === 'query_sdk'
           ? toMcpPublicSdkScriptResult(result)
           : result;
-      const text = mcpRequestFormat.getStore()?.rawJson
+      const text = mcpRequestContext.getStore()?.rawJson
         ? JSON.stringify(publicResult)
         : formatToolResult(name, publicResult, { includeRawJson: false });
       // When the tool declares an `outputSchema`, also return the result as
@@ -1304,29 +1324,26 @@ async function refreshTransportActivity(
   return true;
 }
 
-// Wrap transport.handleRequest. POST responses are always JSON (the transport
-// is built with `enableJsonResponse: true`); only the standalone GET
-// notification stream is SSE, and that is what the heartbeat below keeps alive.
-async function handleTransportRequest(
-  transport: WebStandardStreamableHTTPServerTransport,
-  req: Request
-): Promise<Response> {
-  const rawJson = req.headers.get('x-mcp-format')?.toLowerCase() === 'json';
+async function withRequestActivity<T>(signal: AbortSignal, handler: () => T | Promise<T>): Promise<T> {
+  const context = mcpRequestContext.getStore();
+  if (!context?.renewActivity) return handler();
+  const { renewActivity } = context;
   let timer: ReturnType<typeof setInterval> | undefined;
   let refreshing = false;
   const stop = () => {
     if (timer) clearInterval(timer);
     timer = undefined;
+    signal.removeEventListener('abort', stop);
+    context.signal.removeEventListener('abort', stop);
   };
-  // JSON POSTs do not return a Response until the tool finishes. Renew their
-  // existing row while in flight, independently of a notification GET stream.
-  // Initialization has no persisted row yet and must not create one here.
-  if (req.method === 'POST' && transport.sessionId && !req.signal.aborted) {
+  // SDK cancellation/transport close aborts the handler signal but suppresses
+  // its JSON response, leaving handleRequest pending. Own renewal here instead.
+  if (!signal.aborted && !context.signal.aborted) {
     timer = setInterval(async () => {
       if (refreshing || !timer) return;
       refreshing = true;
       try {
-        if (!(await refreshTransportActivity(transport))) stop();
+        if (!(await renewActivity())) stop();
       } catch (err) {
         logger.warn({ err }, 'Failed to refresh in-flight MCP session activity');
       } finally {
@@ -1334,15 +1351,28 @@ async function handleTransportRequest(
       }
     }, SSE_HEARTBEAT_INTERVAL_MS);
     timer.unref();
-    req.signal.addEventListener('abort', stop, { once: true });
+    signal.addEventListener('abort', stop, { once: true });
+    context.signal.addEventListener('abort', stop, { once: true });
   }
-  let response: Response;
   try {
-    response = await mcpRequestFormat.run({ rawJson }, () => transport.handleRequest(req));
+    return await handler();
   } finally {
     stop();
-    req.signal.removeEventListener('abort', stop);
   }
+}
+
+// POST responses are JSON; only the standalone GET notification stream is SSE.
+async function handleTransportRequest(
+  transport: WebStandardStreamableHTTPServerTransport,
+  req: Request
+): Promise<Response> {
+  const response = await mcpRequestContext.run({
+    rawJson: req.headers.get('x-mcp-format')?.toLowerCase() === 'json',
+    signal: req.signal,
+    // Initialization has no persisted row yet and must not create one here.
+    renewActivity: req.method === 'POST' && transport.sessionId
+      ? () => refreshTransportActivity(transport) : undefined,
+  }, () => transport.handleRequest(req));
   // Inject SSE heartbeat pings to keep the stream alive through proxies.
   // Thread the inbound request's AbortSignal so abnormal disconnects clear
   // the interval (same root cause as PR #833/#845).

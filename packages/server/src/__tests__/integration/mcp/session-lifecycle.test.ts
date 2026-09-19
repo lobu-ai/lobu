@@ -1,4 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -217,12 +219,13 @@ describe('MCP active transport lifetime', () => {
     await response.body!.cancel().catch(() => undefined);
   });
 
-  it.each(['completion', 'abort'] as const)('refreshes in-flight JSON POSTs and stops after %s', async ending => {
+  it.each(['completion', 'throw', 'abort'] as const)('refreshes in-flight JSON POSTs and stops after %s', async ending => {
     const started = deferred();
     const release = deferred();
     entry.server.setRequestHandler(PingRequestSchema, async () => {
       started.resolve();
       await release.promise;
+      if (ending === 'throw') throw new Error('handler failed');
       return {};
     });
     const ctrl = new AbortController();
@@ -235,7 +238,11 @@ describe('MCP active transport lifetime', () => {
       if (ending === 'abort') ctrl.abort();
       else {
         release.resolve();
-        expect((await pending).status).toBe(200);
+        const response = await pending;
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        if (ending === 'throw') expect(body.error.message).toBe('handler failed');
+        else expect(body.result).toEqual({});
       }
       expect(vi.getTimerCount()).toBe(0);
       const stale = await ageRow();
@@ -246,6 +253,194 @@ describe('MCP active transport lifetime', () => {
       release.resolve();
       await pending;
       ctrl.abort();
+    }
+  });
+
+  it.each(['pre-aborted HTTP', 'deleted shared row'] as const)('does not keep renewing with %s', async ending => {
+    const started = deferred();
+    const release = deferred();
+    entry.server.setRequestHandler(PingRequestSchema, async () => {
+      started.resolve();
+      await release.promise;
+      return {};
+    });
+    const ctrl = new AbortController();
+    if (ending === 'pre-aborted HTTP') ctrl.abort();
+    const pending = app.fetch(request('POST', ctrl.signal, { jsonrpc: '2.0', id: 2, method: 'ping' }), env);
+    const refresh = vi.spyOn(McpSessionStore.prototype, 'refreshActivity');
+    try {
+      await started.promise;
+      if (ending === 'deleted shared row') {
+        await store.deleteSession(sessionId);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.waitFor(() => { expect(vi.getTimerCount()).toBe(0); });
+        expect(refresh).toHaveBeenCalledTimes(1);
+        expect(await store.getSession(sessionId)).toBeNull();
+        refresh.mockClear();
+      }
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(refresh).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      expect((await pending).status).toBe(200);
+      ctrl.abort();
+    }
+  });
+
+  it('does not start renewal when the SDK cancels before handler dispatch', async () => {
+    const started = deferred();
+    const release = deferred();
+    let signal!: AbortSignal;
+    entry.server.setRequestHandler(PingRequestSchema, async (_, extra) => {
+      signal = extra.signal;
+      started.resolve();
+      await release.promise;
+      return {};
+    });
+    const ctrl = new AbortController();
+    // The SDK accepts this protocol-version's batch and aborts before invoking
+    // the handler microtask. No payload parsing is mocked by the test.
+    const pending = app.fetch(request('POST', ctrl.signal, [
+      { jsonrpc: '2.0', id: 2, method: 'ping' },
+      { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } },
+    ]), env);
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await started.promise;
+      expect(signal.aborted).toBe(true);
+      expect(ctrl.signal.aborted).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      release.resolve();
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(settled).toBe(false);
+    } finally {
+      release.resolve();
+      ctrl.abort();
+    }
+  });
+
+  it.each(['protocol cancellation', 'transport close', 'DELETE'] as const)(
+    'stops renewal on %s even when the JSON response never settles', async ending => {
+      const started = deferred();
+      const release = deferred();
+      let handlerSignal!: AbortSignal;
+      let returned = false;
+      let settled = false;
+      entry.server.setRequestHandler(PingRequestSchema, async (_, extra) => {
+        handlerSignal = extra.signal;
+        started.resolve();
+        await release.promise;
+        returned = true;
+        return {};
+      });
+      const ctrl = new AbortController();
+      const pending = app.fetch(request('POST', ctrl.signal, { jsonrpc: '2.0', id: 2, method: 'ping' }), env);
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      try {
+        await started.promise;
+        expect(vi.getTimerCount()).toBe(1);
+        if (ending === 'protocol cancellation') {
+          // An unrelated cancellation must not stop this request.
+          const notify = (requestId: number) => app.fetch(request('POST', new AbortController().signal, {
+            jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId },
+          }), env);
+          expect((await notify(999)).status).toBe(202);
+          expect(handlerSignal.aborted).toBe(false);
+          expect(vi.getTimerCount()).toBe(1);
+          expect((await notify(2)).status).toBe(202);
+        } else if (ending === 'transport close') {
+          await entry.transport.close();
+        } else {
+          expect((await app.fetch(request('DELETE', new AbortController().signal), env)).status).toBe(200);
+        }
+        await vi.waitFor(() => { expect(handlerSignal.aborted).toBe(true); });
+        // Stop at cancellation, even before a cooperative handler returns.
+        expect(vi.getTimerCount()).toBe(0);
+        release.resolve();
+        await vi.waitFor(() => { expect(returned).toBe(true); });
+        expect(ctrl.signal.aborted).toBe(false);
+        expect(settled).toBe(false); // SDK suppresses the cancelled JSON response.
+        const refresh = vi.spyOn(McpSessionStore.prototype, 'refreshActivity');
+        if (ending !== 'DELETE') await ageRow();
+        await vi.advanceTimersByTimeAsync(45_000);
+        expect(refresh).not.toHaveBeenCalled();
+        await store.deleteExpiredSessions();
+        expect(await store.getSession(sessionId)).toBeNull();
+      } finally {
+        release.resolve();
+        ctrl.abort();
+      }
+    }
+  );
+
+  it('real SDK client cancellations preserve the GET heartbeat and a concurrent active request', async () => {
+    const sent: Request[] = [];
+    const transport = new StreamableHTTPClientTransport(new URL(url), {
+      fetch: async (input, options) => {
+        const req = new Request(input, options);
+        if (req.method === 'POST' && (await req.clone().json()).method === 'ping') sent.push(req);
+        return app.fetch(req, env);
+      },
+    });
+    const client = new Client({ name: 'lifecycle-client', version: '1' });
+    const siblingStarted = deferred();
+    const siblingRelease = deferred();
+    let release = deferred();
+    try {
+      await client.connect(transport);
+      sessionId = transport.sessionId!;
+      entry = mcpSessionMap.get(sessionId) as typeof entry;
+      await vi.waitFor(() => { expect(vi.getTimerCount()).toBe(1); });
+      entry.server.setRequestHandler(PingRequestSchema, async () => {
+        siblingStarted.resolve();
+        await siblingRelease.promise;
+        return {};
+      });
+      const sibling = client.ping().catch(error => error);
+      await siblingStarted.promise;
+      for (let n = 0; n < 3; n++) {
+        const started = deferred();
+        release = deferred();
+        const currentRelease = release;
+        let signal!: AbortSignal;
+        let returned = false;
+        entry.server.setRequestHandler(PingRequestSchema, async (_, extra) => {
+          signal = extra.signal;
+          started.resolve();
+          await currentRelease.promise;
+          returned = true;
+          return {};
+        });
+        const cancel = new AbortController();
+        const call = client.ping({ signal: cancel.signal });
+        const rejected = expect(call).rejects.toThrow('user cancelled');
+        await started.promise;
+        expect(vi.getTimerCount()).toBe(3);
+        cancel.abort('user cancelled');
+        await rejected;
+        await vi.waitFor(() => { expect(signal.aborted).toBe(true); });
+        release.resolve();
+        await vi.waitFor(() => { expect(returned).toBe(true); });
+        expect(vi.getTimerCount()).toBe(2);
+      }
+      expect(sent).toHaveLength(4);
+      expect(sent.every(req => !req.signal.aborted)).toBe(true);
+      await ageRow();
+      const stale = Date.now() - HOUR - 1;
+      entry.lastAccessedAt = stale;
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expectRefreshed();
+      expect(entry.lastAccessedAt).toBeGreaterThan(stale);
+      siblingRelease.resolve();
+      expect(await sibling).toEqual({});
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      release.resolve();
+      siblingRelease.resolve();
+      await client.close();
+      await vi.waitFor(() => { expect(vi.getTimerCount()).toBe(0); });
     }
   });
 
