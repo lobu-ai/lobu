@@ -38,6 +38,12 @@ import {
 } from '../../../automations/classifier-extraction';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
 import { enqueueAutomationReaction } from '../../../automations/reaction-enqueue';
+import { enqueueAutomationDigest } from '../../../automations/digest-enqueue';
+import {
+  automationChangeSetIdempotencyKey,
+  fingerprintMaterialDigestChanges,
+  materialDigestChanges,
+} from '../../../automations/digest';
 import { getNextNumericId } from '../helpers/db-helpers';
 import type { Outputs } from '../../../types/automations';
 import type { ToolContext } from '../../registry';
@@ -671,8 +677,9 @@ export async function handleCompleteWindow(
     const [lockedAutomation] = await tx<{
       schedule: string | null;
       reaction_script_compiled: string | null;
+      delivery_target: { connection_id: number; channel_id: string } | null;
     }>`
-      SELECT schedule, reaction_script_compiled FROM automations
+      SELECT schedule, reaction_script_compiled, delivery_target FROM automations
       WHERE id = ${automationId} AND organization_id = ${automationOrgId}
       FOR UPDATE
     `;
@@ -838,7 +845,10 @@ export async function handleCompleteWindow(
       const updatedCount = entityChanges.filter((c) => c.kind === 'updated').length;
       const deniedCount = entityChanges.filter((c) => c.kind === 'denied').length;
       const deniedSuffix = deniedCount > 0 ? ` + ${deniedCount} denied` : '';
-      const changeSetIdempotencyKey = `automation:${automationId}:run:${runId}:change_set`;
+      const changeSetIdempotencyKey = automationChangeSetIdempotencyKey(
+        Number(automationId),
+        runId
+      );
       const findChangeSet = () => tx<{ id: number }>`
         SELECT id FROM events
         WHERE organization_id = ${automationOrgId}
@@ -969,6 +979,41 @@ export async function handleCompleteWindow(
         },
         reactionScriptSnapshot
       );
+    }
+
+    // Built-in material-change digest (#3663), committed WITH the window under
+    // the same single-transition gate: exactly one handoff per material run,
+    // idempotent replays never reach here. Only applied writes count — denied
+    // rows and zero-change runs enqueue nothing and stay silent. The digest
+    // content and channel resolution happen in the post-commit task
+    // (`automations/digest-task.ts`), so a delivery failure can never roll
+    // back these entity writes.
+    const digestTarget = lockedAutomation.delivery_target;
+    const digestConnectionId =
+      digestTarget && typeof digestTarget.connection_id === 'number'
+        ? digestTarget.connection_id
+        : null;
+    const digestChannelId =
+      digestTarget && typeof digestTarget.channel_id === 'string'
+        ? digestTarget.channel_id
+        : null;
+    if (
+      digestConnectionId != null &&
+      Number.isSafeInteger(digestConnectionId) &&
+      digestConnectionId > 0 &&
+      digestChannelId
+    ) {
+      const digestMaterial = materialDigestChanges(entityChanges);
+      if (digestMaterial.length > 0) {
+        await enqueueAutomationDigest(tx, {
+          organizationId: automationOrgId,
+          automationId: Number(automationId),
+          sourceRunId: runId,
+          connectionId: digestConnectionId,
+          channelId: digestChannelId,
+          fingerprint: fingerprintMaterialDigestChanges(entityChanges),
+        });
+      }
     }
 
     logger.info(

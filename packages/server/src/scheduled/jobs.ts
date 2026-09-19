@@ -21,6 +21,8 @@ import { runAutomationTick } from '../automations/automation';
 import { runAutomationAutoPauseNotificationSweep } from '../automations/auto-pause-notifications';
 import type { AutomationReactionTaskPayload } from '../automations/reaction-enqueue';
 import { runAutomationReactionTask } from '../automations/reaction-task';
+import type { AutomationDigestTaskPayload } from '../automations/digest-enqueue';
+import { runAutomationDigestTask } from '../automations/digest-task';
 import type { AutomationScriptTaskPayload } from '../automations/script-enqueue';
 import { runAutomationScriptTask } from '../automations/script-task';
 import { checkStalledExecutions } from './check-stalled-executions';
@@ -37,6 +39,7 @@ import {
 import { TaskScheduler } from './task-scheduler';
 import {
   AUTOMATION_REACTION_TASK,
+  AUTOMATION_DIGEST_TASK,
   AUTOMATION_SCRIPT_TASK,
   NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
@@ -515,6 +518,32 @@ function registerMaintenanceTasks(
     await deliverNotificationTask(
       ctx.payload as NotificationDeliveryTaskPayload,
     );
+  });
+
+  // The Automation material-change digest (#3663). Queued inside
+  // `complete_window`'s window transaction only for runs that committed
+  // material entity changes with a stored delivery target, so zero-change
+  // runs stay silent. The handler throws on a TRANSIENT failure or a CHANGED
+  // destination — that is what asks this scheduler for another attempt within
+  // its bounded `maxAttempts: 3` budget; settled outcomes are
+  // recorded on `automation_reactions` as `digest_queued` / `digest_failed` /
+  // `digest_skipped` (the changed-destination `digest_failed` is recorded
+  // before the throw, so the retry is visible), and the actual channel post lives on the separate
+  // `deliver-notification` task (observable via its runs row + the event's
+  // delivery receipts), never on the source run.
+  scheduler.register(AUTOMATION_DIGEST_TASK, async (ctx) => {
+    const outcome = await runAutomationDigestTask(
+      ctx.payload as AutomationDigestTaskPayload,
+      env,
+      ctx.taskRunId,
+      ctx.attempt,
+    );
+    if (outcome.status !== 'success') {
+      logger.info(
+        { ...outcome, payload: ctx.payload },
+        '[task] automation-digest settled',
+      );
+    }
   });
 
   // scheduled_jobs ticker: scans the table every minute, spawns due rows
