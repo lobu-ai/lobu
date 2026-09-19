@@ -343,6 +343,15 @@ describe('buildWorkspaceInstructions render fixes', () => {
     expect(out).not.toContain('Direct MCP Instructions Org');
   });
 
+  it('requires direct MCP clients to copy exact manifest operation keys', async () => {
+    const directOrg = await createTestOrganization({ name: 'Direct Operation Key Org' });
+    const out = await buildWorkspaceInstructions(directOrg.id, { audience: 'direct-mcp' });
+
+    expect(out).toContain('copy it exactly from `operations.listAvailable`');
+    expect(out).toContain('never derive it from the display name');
+    expect(out).toContain('refresh discovery instead of inventing a key');
+  });
+
   it('documents the search_memory workspace narrowing argument to the direct MCP audience', async () => {
     // The managed-agent text explains the singular `workspace` argument in a
     // sentence addressed to "a direct bare OAuth connection" — precisely the

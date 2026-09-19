@@ -73,6 +73,7 @@ const DIRECT_MCP_INSTRUCTIONS = [
   '### Writes and approvals',
   '- `save_memory` stores a requested fact or note. Use it only when the user asks to remember or save information, or explicitly confirms a proposed save.',
   '- `run_sdk` can create, update, or delete workspace data and can invoke connector operations. Use it only for a user-requested action; use `query_sdk` for reads and `dry_run=true` to preview supported writes.',
+  '- For connector operations, treat `operation_key` as an opaque manifest identifier: copy it exactly from `operations.listAvailable` and never derive it from the display name. If no returned operation matches, refresh discovery instead of inventing a key.',
   '- A policy-gated operation returns `status: "pending_approval"` and a `run_id`. Call `get_approval` with that run id to show the canonical review card. Treat a pending operation as waiting, not failed.',
   '- Do not infer permission to store conversation details, preferences, personal information, relationships, or files merely because they were mentioned.',
   '- Do not request, expose, or return authentication secrets.',
