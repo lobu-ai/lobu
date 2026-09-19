@@ -6,7 +6,7 @@
 import { getDb, parsePgNumberArray } from '../../../db/client';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { ToolUserError } from '../../../utils/errors';
-import { recordToolConfigChange } from '../helpers/config-audit';
+import { insertToolConfigChange } from '../helpers/config-audit';
 import { nextRunAt } from '../../../utils/cron';
 import { resolveUsernames } from '../../../utils/resolve-usernames';
 import { getNextNumericId } from '../helpers/db-helpers';
@@ -61,6 +61,7 @@ export async function handleCreateVersion(
   if (!args.automation_id) {
     throw new ToolUserError('automation_id is required for create_version action', 400);
   }
+  const auditAutomationId: string | number = args.automation_id;
 
   // Get current automation + resolve the group root. Versioned config
   // (prompt/schema/template/classifiers) is shared across the entire group
@@ -338,6 +339,17 @@ export async function handleCreateVersion(
     lockedNextVersion =
       latestRows.length > 0 && latestRows[0].v != null ? Number(latestRows[0].v) + 1 : nextVersion;
 
+    // Locked preimage for the audit state: when set_as_current=false the
+    // automations row is untouched, so the audit must report the persisted
+    // current_version_id rather than null/undefined.
+    const preimageRows = await tx`
+      SELECT current_version_id FROM automations WHERE id = ${args.automation_id} LIMIT 1 FOR UPDATE
+    `;
+    const persistedCurrentVersionId =
+      preimageRows.length > 0 && preimageRows[0].current_version_id != null
+        ? Number(preimageRows[0].current_version_id)
+        : null;
+
     // The new version row is owned by the group root, not the assignment
     // the caller named. Every automation in the group will later point at
     // this row via current_version_id.
@@ -418,6 +430,58 @@ export async function handleCreateVersion(
         WHERE id = ${args.automation_id}
       `;
     }
+    if (versionOrganizationId) {
+      // Cadence writes land on the live row only when the new version becomes
+      // current. A draft (set_as_current=false) leaves schedule/timezone/
+      // triggers untouched, so the audit must not claim them.
+      const touchesCadenceForAudit = setAsCurrent && args.triggers !== undefined;
+      await insertToolConfigChange(ctx, {
+        organizationId: versionOrganizationId,
+        resourceKind: 'automation',
+        resourceId: auditAutomationId,
+        op: 'updated',
+        action: 'create_version',
+        summary: `Automation '${args.name ?? (prev.name as string) ?? args.automation_id}' version ${lockedNextVersion} created`,
+        before: {
+          name: (prev.name as string) ?? null,
+          version: previousVersion,
+          prompt: prev.prompt ?? null,
+          sources: storedSources,
+          outputs: prev.outputs ?? null,
+          classifiers: prev.classifiers ?? null,
+          reactions_guidance: (prev.reactions_guidance as string) ?? null,
+          schedule: (automationRows[0].schedule as string | null) ?? null,
+          timezone: (automationRows[0].timezone as string | null) ?? null,
+          triggers: previousTriggers,
+        },
+        state: {
+          id: args.automation_id,
+          name: args.name ?? (prev.name as string) ?? 'Automation',
+          version: lockedNextVersion,
+          current_version_id: setAsCurrent ? versionId : persistedCurrentVersionId,
+          prompt,
+          sources,
+          outputs: outputs ?? null,
+          classifiers: classifiers ?? null,
+          reactions_guidance: args.reactions_guidance ?? (prev.reactions_guidance as string) ?? null,
+          change_notes: args.change_notes ?? null,
+          ...(touchesCadenceForAudit ? { schedule: triggerWrite.schedule } : {}),
+          ...(touchesCadenceForAudit ? { timezone: triggerWrite.timezone } : {}),
+          ...(touchesCadenceForAudit ? { triggers: triggerWrite.triggers } : {}),
+        },
+        changedFields: [
+          'version',
+          ...(promptEdited ? ['prompt'] : []),
+          ...(args.name !== undefined ? ['name'] : []),
+          ...(args.sources !== undefined ? ['sources'] : []),
+          ...(args.outputs !== undefined ? ['outputs'] : []),
+          ...(args.classifiers !== undefined ? ['classifiers'] : []),
+          ...(args.reactions_guidance !== undefined ? ['reactions_guidance'] : []),
+          ...(touchesCadenceForAudit ? ['schedule', 'timezone'] : []),
+          ...(touchesCadenceForAudit ? ['triggers'] : []),
+        ],
+      }, tx);
+    }
   });
 
   if (versionOrganizationId && setAsCurrent && triggersChanged) {
@@ -426,44 +490,6 @@ export async function handleCreateVersion(
       before: previousTriggers,
       after: triggerWrite.triggers,
       sql,
-    });
-  }
-
-  if (versionOrganizationId) {
-    recordToolConfigChange(ctx, {
-      organizationId: versionOrganizationId,
-      resourceKind: 'automation',
-      resourceId: args.automation_id,
-      op: 'updated',
-      summary: `Automation '${args.name ?? (prev.name as string) ?? args.automation_id}' version ${lockedNextVersion} created`,
-      // Composed from the values just written (automation row not refetched);
-      // carries the new version-bound fields.
-      state: {
-        id: args.automation_id,
-        name: args.name ?? (prev.name as string) ?? 'Automation',
-        version: lockedNextVersion,
-        current_version_id: setAsCurrent ? versionId : undefined,
-        prompt,
-        sources,
-        outputs: outputs ?? null,
-        classifiers: classifiers ?? null,
-        reactions_guidance: args.reactions_guidance ?? (prev.reactions_guidance as string) ?? null,
-        change_notes: args.change_notes ?? null,
-        ...(args.triggers !== undefined ? { schedule: triggerWrite.schedule } : {}),
-        ...(args.triggers !== undefined ? { timezone: triggerWrite.timezone } : {}),
-        ...(args.triggers !== undefined ? { triggers: triggerWrite.triggers } : {}),
-      },
-      changedFields: [
-        'version',
-        ...(promptEdited ? ['prompt'] : []),
-        ...(args.name !== undefined ? ['name'] : []),
-        ...(args.sources !== undefined ? ['sources'] : []),
-        ...(args.outputs !== undefined ? ['outputs'] : []),
-        ...(args.classifiers !== undefined ? ['classifiers'] : []),
-        ...(args.reactions_guidance !== undefined ? ['reactions_guidance'] : []),
-        ...(args.triggers !== undefined ? ['schedule', 'timezone'] : []),
-        ...(args.triggers !== undefined ? ['triggers'] : []),
-      ],
     });
   }
 

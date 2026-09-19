@@ -119,6 +119,7 @@ export function redactUriCredentials(value: string): string {
  * non-denylisted key.
  */
 export function deepRedactSecrets(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(deepRedactSecrets);
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};

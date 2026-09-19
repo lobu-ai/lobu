@@ -234,16 +234,26 @@ routes.get("/", async (c) => {
 	const limit = clampLimit(c.req.query("limit"), 50, 100);
 	const beforeId = Number.parseInt(c.req.query("before_id") ?? "", 10);
 	const useCursor = Number.isFinite(beforeId);
+	const resourceKind = c.req.query("resource_kind") ?? null;
+	const resourceId = c.req.query("resource_id") ?? null;
+	const resourceFiltered = resourceKind != null && resourceId != null;
 
 	const sql = getDb();
 	const rows = await sql`
-		SELECT id, created_at, title, metadata, created_by
+		SELECT id, created_at, title, metadata, created_by, client_id
 		FROM events
 		WHERE organization_id = ${organizationId}
 		  AND semantic_type = 'change'
 		  AND (
-		    metadata->>'category' = 'deployment'
-		    OR (metadata->>'category' = 'config' AND metadata->>'apply_id' IS NULL)
+		    ${resourceFiltered}
+		    AND metadata->>'category' = 'config'
+		    AND metadata->>'resource_kind' = ${resourceKind}
+		    AND metadata->>'resource_id' = ${resourceId}
+		    OR ${!resourceFiltered}
+		    AND (
+		      metadata->>'category' = 'deployment'
+		      OR (metadata->>'category' = 'config' AND metadata->>'apply_id' IS NULL)
+		    )
 		  )
 		  ${useCursor ? sql`AND id < ${beforeId}` : sql``}
 		ORDER BY id DESC
@@ -278,9 +288,21 @@ routes.get("/", async (c) => {
 			resourceKind: canonicalConfigResourceKind(metadata.resource_kind),
 			resourceId: metadata.resource_id ?? null,
 			op: metadata.op ?? null,
+			action: metadata.action ?? null,
 			changedFields: metadata.changed_fields ?? null,
 			actorSource: metadata.actor_source ?? null,
 			createdBy: row.created_by ?? null,
+			clientId: row.client_id ?? null,
+			agentId: metadata.agent_id ?? null,
+			actingAutomationId: metadata.acting_automation_id ?? null,
+			actingRunId: metadata.acting_run_id ?? null,
+			mcpSessionId: metadata.mcp_session_id ?? null,
+			mcpConversationId: metadata.mcp_conversation_id ?? null,
+			tokenType: metadata.token_type ?? null,
+			requestedBy: metadata.requested_by ?? null,
+			approvedBy: metadata.approved_by ?? null,
+			approvalRunId: metadata.approval_run_id ?? null,
+			approvalReference: metadata.approval_reference ?? null,
 		};
 	});
 
@@ -300,7 +322,7 @@ async function fetchChangesWithBefore(
 	const sql = getDb();
 	return sql`
 		SELECT
-			e.id, e.created_at, e.title, e.metadata, e.payload_data, e.created_by,
+			e.id, e.created_at, e.title, e.metadata, e.payload_data, e.created_by, e.client_id,
 			prev.payload_data AS before_payload
 		FROM events e
 		LEFT JOIN LATERAL (
@@ -334,6 +356,14 @@ function toChangeDetail(row: Record<string, any>) {
 		string,
 		unknown
 	> | null;
+	// Explicit `before` on the row wins — including an explicit null for
+	// creates; otherwise fall back to the event-sourced fold (previous state
+	// for the same resource). Presence (hasOwn), not nullishness, decides:
+	// legacy rows predate the field entirely, while creates stamp before:null
+	// to assert "no predecessor". Falling back on explicit null would attach
+	// the previous resource's state to a create.
+	const hasExplicitBefore = Object.prototype.hasOwnProperty.call(payload, 'before');
+	const explicitBefore = (hasExplicitBefore ? payload.before : undefined) as Record<string, unknown> | null | undefined;
 	return {
 		id: row.id,
 		createdAt: row.created_at,
@@ -341,11 +371,23 @@ function toChangeDetail(row: Record<string, any>) {
 		resourceKind: canonicalConfigResourceKind(metadata.resource_kind),
 		resourceId: metadata.resource_id ?? null,
 		op: metadata.op ?? null,
+		action: metadata.action ?? null,
 		changedFields: metadata.changed_fields ?? null,
 		actorSource: metadata.actor_source ?? null,
 		applyId: metadata.apply_id ?? null,
 		createdBy: row.created_by ?? null,
-		before: beforePayload?.state ?? null,
+		clientId: row.client_id ?? null,
+		agentId: metadata.agent_id ?? null,
+		actingAutomationId: metadata.acting_automation_id ?? null,
+		actingRunId: metadata.acting_run_id ?? null,
+		mcpSessionId: metadata.mcp_session_id ?? null,
+		mcpConversationId: metadata.mcp_conversation_id ?? null,
+		tokenType: metadata.token_type ?? null,
+		requestedBy: metadata.requested_by ?? null,
+		approvedBy: metadata.approved_by ?? null,
+		approvalRunId: metadata.approval_run_id ?? null,
+		approvalReference: metadata.approval_reference ?? null,
+		before: hasExplicitBefore ? (explicitBefore ?? null) : (beforePayload?.state ?? null),
 		after: payload.state ?? null,
 	};
 }

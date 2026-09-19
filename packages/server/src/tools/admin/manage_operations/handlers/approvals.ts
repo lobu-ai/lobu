@@ -595,9 +595,15 @@ async function tryApproveBuilderRun(
 			}
 
 			transaction.attempt = { nounLabel: claim.handler.nounLabel, desc };
+			const approvalCtx = {
+				...ctx,
+				approvalRunId: args.run_id,
+				approvalRequesterId: claim.requesterUserId ?? null,
+				approvalApproverId: ctx.userId ?? null,
+			};
 			const output = await applyInTransaction(
 				claim.proposal,
-				ctx,
+				approvalCtx,
 				env,
 				claim.requesterUserId,
 				input,
@@ -683,9 +689,15 @@ async function tryApproveBuilderRun(
 	// failBuilderRun.
 	let output: unknown;
 	try {
+		const approvalCtx = {
+			...ctx,
+			approvalRunId: args.run_id,
+			approvalRequesterId: requesterUserId ?? null,
+			approvalApproverId: ctx.userId ?? null,
+		};
 		output = await apply(
 			proposal,
-			ctx,
+			approvalCtx,
 			env,
 			requesterUserId,
 			input,

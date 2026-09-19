@@ -11,6 +11,13 @@ import {
 } from '../connection-config-redaction';
 
 describe('redactConfigState', () => {
+  it('preserves Date audit fields as ISO strings', () => {
+    const at = new Date('2026-09-19T08:00:00.000Z');
+    expect(redactConfigState('automation', { schedule_auto_paused_at: at, next_run_at: at })).toEqual({
+      schedule_auto_paused_at: '2026-09-19T08:00:00.000Z',
+      next_run_at: '2026-09-19T08:00:00.000Z',
+    });
+  });
   it('redacts denylisted keys at any depth, any case style', () => {
     const out = redactConfigState('connection', {
       name: 'slack-main',

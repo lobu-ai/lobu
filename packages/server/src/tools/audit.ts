@@ -133,6 +133,70 @@ function errorNameOnly(error: unknown, fallbackName: string): Record<string, unk
   return typeof record.code === 'string' ? { name, code: record.code } : { name };
 }
 
+function manageAutomationsIdentity(args: Record<string, unknown>): {
+  action: string | null;
+  automation_id: string | null;
+  automation_ids: string[];
+} {
+  const validActions = new Set([
+    'list', 'create', 'update', 'create_version', 'create_from_version',
+    'claim_next_window', 'complete_window', 'trigger', 'delete',
+    'set_reaction_script', 'get_versions', 'get_version_details',
+    'get_component_reference', 'submit_feedback', 'get_feedback', 'list_promoted',
+  ]);
+  const action = typeof args.action === 'string' && validActions.has(args.action)
+    ? args.action
+    : null;
+  const validId = (value: unknown): string | null => {
+    if (typeof value !== 'string' && typeof value !== 'number') return null;
+    const text = String(value);
+    return /^[1-9]\d*$/.test(text) ? text : null;
+  };
+  const automationId = validId(args.automation_id);
+  const ids = Array.isArray(args.automation_ids)
+    ? args.automation_ids.map(validId).filter((v): v is string => v != null)
+    : [];
+  return { action, automation_id: automationId ?? ids[0] ?? null, automation_ids: ids };
+}
+
+function buildManageAutomationsInvocationPayload(
+  params: ToolInvocationAuditParams,
+  result: Record<string, unknown>
+): Record<string, unknown> | null {
+  const identity = manageAutomationsIdentity(params.args as Record<string, unknown>);
+  const sanitizedArgsJson = JSON.stringify(
+    sanitizeAuditArgs(params.args, getTool(params.toolName)?.inputSchema)
+  );
+  // Delete returns an aggregate summary, not a top-level success flag: an
+  // all-failed batch (failed>0 && successful=0) is a failure, while a partial
+  // batch (successful>0) remains completed with per-ID failures in the summary.
+  const summary = asObject(result.summary);
+  const deleteAllFailed =
+    typeof summary.failed === 'number' &&
+    summary.failed > 0 &&
+    summary.successful === 0;
+  const reportedFailure =
+    result.error != null ||
+    result.success === false ||
+    result.status === 'failed' ||
+    result.status === 'error' ||
+    result.status === 'timeout' ||
+    deleteAllFailed;
+  const softError = reportedFailure ? errorNameOnly(result.error, 'ToolError') ?? { name: 'ToolError' } : null;
+  const thrownError = errorNameOnly(params.error, 'Error');
+  return {
+    tool_name: params.toolName,
+    action: identity.action,
+    automation_id: identity.automation_id,
+    automation_ids: identity.automation_ids,
+    args_sha256: sha256(sanitizedArgsJson),
+    args_preview_redacted: sanitizedArgsJson.slice(0, MAX_PREVIEW_CHARS),
+    success: !(thrownError || softError),
+    error: thrownError ?? softError,
+    duration_ms: params.durationMs,
+  };
+}
+
 function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown> | null {
   const result = asObject(params.result);
   const toolError = params.error ? errorPayload(params.error) : null;
@@ -188,6 +252,15 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
     };
   }
 
+  // manage_automations invocations are the distinguishable record for
+  // failed/denied attempts (#3664): applied mutations emit category='config'
+  // events, while every invocation — including web/session and denied ones —
+  // lands here as category='audit' with the structured action + automation id.
+  // This never touches the config fold.
+  if (params.toolName === 'manage_automations') {
+    return buildManageAutomationsInvocationPayload(params, result);
+  }
+
   // Browser-session and anonymous generic reads stay out of Activity. Power
   // tools are retained because their invocation history is the audit product.
   if (
@@ -235,6 +308,10 @@ export async function recordToolInvocationAudit(
     const request = captureRequest(params);
     if (request) Object.assign(payload, request);
     const success = payload.success === true;
+    const identity =
+      params.toolName === 'manage_automations'
+        ? manageAutomationsIdentity(params.args as Record<string, unknown>)
+        : null;
     await insertEvent({
       entityIds: [],
       organizationId: params.ctx.organizationId,
@@ -250,6 +327,9 @@ export async function recordToolInvocationAudit(
         tool_name: params.toolName,
         token_type: params.ctx.tokenType,
         agent_id: params.ctx.agentId ?? null,
+        ...(identity?.action ? { action: identity.action } : {}),
+        ...(identity?.automation_id ? { automation_id: identity.automation_id } : {}),
+        ...(identity && identity.automation_ids.length > 0 ? { automation_ids: identity.automation_ids } : {}),
         ...currentMcpActivityEventMetadata(params.ctx),
       },
       createdBy: params.ctx.userId ?? null,
