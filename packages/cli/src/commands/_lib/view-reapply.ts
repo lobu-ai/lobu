@@ -10,7 +10,7 @@
  * editor-tempfile noise. Resolved fresh after every apply, so a new import
  * joins the set on the next save.
  */
-import { watch } from "node:fs";
+import { statSync, watch } from "node:fs";
 import { loadProjectConfig } from "./apply/desired-state.js";
 import { collectViewWatchFiles } from "./view-bundler.js";
 
@@ -64,9 +64,28 @@ export interface ViewReapplyEvents {
  * applies. When `update` adds a file that was not watched before, one
  * follow-up is requested through the same dirty/schedule mechanism: a save
  * to that file may have landed after the apply read it but before its new
- * subscription existed, so no file subscription could have observed it. The next
- * stable graph adds nothing and schedules nothing further.
+ * subscription existed, so no file subscription could have observed it. The
+ * same holds when an existing path changes native file identity (an atomic
+ * rename replaces the inode while the old Node per-file subscription stays
+ * attached to the replaced file). The next
+ * stable graph and unchanged identities add nothing and schedule nothing
+ * further.
+ *
+ * Native file identity for a watched path (`dev:ino`). An atomic rename
+ * replaces the inode at the same path while the old Node per-file
+ * subscription stays attached to the replaced file, so path equality alone
+ * cannot detect the swap. A missing file maps to null so a later reappearance
+ * also reconciles.
  */
+function fileIdentity(path: string): string | null {
+  try {
+    const st = statSync(path);
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
+
 export function startViewReapply(
   set: ViewReapplySet,
   events: ViewReapplyEvents
@@ -77,6 +96,9 @@ export function startViewReapply(
   let dirty = false;
   let closed = false;
   let watchedFiles = new Set(set.files);
+  let watchedIdentities = new Map(
+    set.files.map((file) => [file, fileIdentity(file)] as const)
+  );
 
   const fire = () => {
     timer = null;
@@ -123,10 +145,22 @@ export function startViewReapply(
   return {
     update: (next: ViewReapplySet) => {
       if (closed) return;
-      const filesAdded = next.files.some((file) => !watchedFiles.has(file));
+      const nextIdentities = new Map(
+        next.files.map((file) => [file, fileIdentity(file)] as const)
+      );
+      let reconcile = next.files.some((file) => !watchedFiles.has(file));
+      if (!reconcile) {
+        for (const file of next.files) {
+          if (nextIdentities.get(file) !== watchedIdentities.get(file)) {
+            reconcile = true;
+            break;
+          }
+        }
+      }
       watchedFiles = new Set(next.files);
+      watchedIdentities = nextIdentities;
       subscribe(next.files);
-      if (filesAdded) {
+      if (reconcile) {
         if (applying) dirty = true;
         else schedule();
       }
