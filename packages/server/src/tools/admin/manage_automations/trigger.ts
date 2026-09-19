@@ -8,6 +8,7 @@ import type { Env } from "../../../index";
 import { isLobuGatewayRunning } from "../../../lobu/gateway";
 import { ToolUserError } from "../../../utils/errors";
 import logger from "../../../utils/logger";
+import { stableJson } from "../../../utils/insert-event";
 import {
   dispatchPendingAutomationRuns,
   enqueueAutomationRunForAutomationInTransaction,
@@ -425,7 +426,7 @@ export async function handleSetReactionScript(
     const isTrueNoop = locked.every((row) =>
       row.reaction_script === script &&
       row.reaction_script_compiled != null &&
-      JSON.stringify(row.reaction_input_schema ?? null) === JSON.stringify(targetSchema)
+      stableJson(row.reaction_input_schema ?? null) === stableJson(targetSchema)
     );
     if (isTrueNoop) return;
     await tx`

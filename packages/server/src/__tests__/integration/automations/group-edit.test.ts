@@ -460,6 +460,43 @@ describe('automation group edit contract', () => {
     expect(Number(afterCount)).toBe(Number(beforeCount));
   });
 
+  it('set_reaction_script treats reordered stored schema keys as unchanged', async () => {
+    const sql = getTestDb();
+    const workspace = await TestWorkspace.create({ name: 'Script Schema Noop Org' });
+    const { automationId } = await seedRootAutomation(workspace, 'schema-noop');
+    const script = 'export const input = { type: "object", properties: { item: { type: "object", properties: { a: { type: "string" }, b: { type: "number" } } } } }; export default async function reaction() { return; }';
+    await manageAutomations(
+      { action: 'set_reaction_script', automation_id: String(automationId), reaction_script: script } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    );
+    // Simulate PostgreSQL returning the same JSONB document with another key order.
+    await sql`
+      UPDATE automations SET reaction_input_schema = ${sql.json({
+        properties: { item: { properties: { b: { type: 'number' }, a: { type: 'string' } }, type: 'object' } },
+        type: 'object',
+      })} WHERE id = ${automationId}
+    `;
+    const [{ count: beforeCount }] = await sql`
+      SELECT COUNT(*)::int AS count FROM events
+      WHERE metadata->>'category' = 'config'
+        AND metadata->>'action' = 'set_reaction_script'
+        AND metadata->>'resource_id' = ${String(automationId)}
+    `;
+    await manageAutomations(
+      { action: 'set_reaction_script', automation_id: String(automationId), reaction_script: script } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    );
+    const [{ count: afterCount }] = await sql`
+      SELECT COUNT(*)::int AS count FROM events
+      WHERE metadata->>'category' = 'config'
+        AND metadata->>'action' = 'set_reaction_script'
+        AND metadata->>'resource_id' = ${String(automationId)}
+    `;
+    expect(Number(afterCount)).toBe(Number(beforeCount));
+  });
+
   it('createAutomationRun snapshots current_version_id; mid-run group edit does not change the run', async () => {
     const sql = getTestDb();
     const workspace = await TestWorkspace.create({ name: 'Run Snapshot Org' });
