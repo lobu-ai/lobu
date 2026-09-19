@@ -450,9 +450,11 @@ export async function handleCreateVersion(
           outputs: prev.outputs ?? null,
           classifiers: prev.classifiers ?? null,
           reactions_guidance: (prev.reactions_guidance as string) ?? null,
-          schedule: (automationRows[0].schedule as string | null) ?? null,
-          timezone: (automationRows[0].timezone as string | null) ?? null,
-          triggers: previousTriggers,
+          ...(touchesCadenceForAudit ? {
+            schedule: (automationRows[0].schedule as string | null) ?? null,
+            timezone: (automationRows[0].timezone as string | null) ?? null,
+            triggers: previousTriggers,
+          } : {}),
         },
         state: {
           id: args.automation_id,

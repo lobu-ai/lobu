@@ -7,6 +7,7 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { parsePositiveIntegerId } from '../../../utils/errors';
 import { redactConfigState } from '../../../utils/config-redaction';
 import { resetScheduledFailureState, recordScheduledExecutionFailure } from '../../../automations/scheduled-failure-policy';
 import type { Env } from '../../../index';
@@ -383,38 +384,45 @@ describe('automation config audit #3664', () => {
     expect(payload.state.name).toBe('Renamed Automation');
   });
 
-  it('create_version draft (set_as_current=false) omits cadence state/fields', async () => {
+  it.each([
+    { label: 'draft proposed cadence', publish: false, propose: true },
+    { label: 'published prompt only', publish: true, propose: false },
+    { label: 'published cadence', publish: true, propose: true },
+  ])('F6 coherent snapshots for $label', async ({ label, publish, propose }) => {
+    const cadence = { kind: 'schedule' as const, cron: '0 9 * * *', timezone: 'Europe/London' };
+    const proposed = { ...cadence, cron: '0 10 * * *', timezone: 'America/New_York' };
     const created = (await owner.automations.create({
-      slug: 'audit-version-draft',
-      name: 'Audit Version Draft',
-      prompt: 'v1 prompt',
-      triggers: [],
-      managed_agent_id: agentId,
+      slug: label.replaceAll(' ', '-'), name: label, prompt: 'v1 prompt',
+      triggers: [cadence], managed_agent_id: agentId,
     })) as { automation_id: string };
-    const beforeCount = (await configEvents(orgId, created.automation_id)).length;
     await owner.automations.createVersion({
-      automation_id: created.automation_id,
-      prompt: 'v2 draft',
-      triggers: [{ kind: 'schedule', cron: '0 10 * * *' }],
-      set_as_current: false,
-    } as any);
-    const rows = await configEvents(orgId, created.automation_id);
-    expect(rows.length).toBe(beforeCount + 1);
-    const last = rows[rows.length - 1];
+      automation_id: created.automation_id, prompt: 'v2 prompt',
+      ...(propose ? { triggers: [proposed] } : {}), set_as_current: publish,
+    });
+    const last = (await configEvents(orgId, created.automation_id)).at(-1)!;
     expect(last.metadata.action).toBe('create_version');
-    const payload = last.payload_data as Record<string, any>;
-    expect(payload.state.prompt).toBe('v2 draft');
-    // Draft leaves the live row untouched: no cadence in state or changedFields.
-    expect(payload.state).not.toHaveProperty('schedule');
-    expect(payload.state).not.toHaveProperty('timezone');
-    expect(payload.state).not.toHaveProperty('triggers');
-    expect(last.metadata.changed_fields).not.toContain('schedule');
-    expect(last.metadata.changed_fields).not.toContain('timezone');
-    expect(last.metadata.changed_fields).not.toContain('triggers');
-    // Live row still has no schedule.
+    const { before, state } = last.payload_data;
+    expect(before.prompt).toBe('v1 prompt');
+    expect(state.prompt).toBe('v2 prompt');
+    const touched = publish && propose;
+    for (const field of ['schedule', 'timezone', 'triggers']) {
+      // Full-document diff consumers must see the same projection on both sides.
+      expect(Object.hasOwn(before, field)).toBe(Object.hasOwn(state, field));
+      if (!touched) {
+        expect(before[field]).toEqual(state[field]);
+        expect(last.metadata.changed_fields).not.toContain(field);
+      } else {
+        expect(last.metadata.changed_fields).toContain(field);
+      }
+    }
+    if (touched) {
+      expect(before).toMatchObject({ schedule: cadence.cron, timezone: cadence.timezone, triggers: [cadence] });
+      expect(state).toMatchObject({ schedule: proposed.cron, timezone: proposed.timezone, triggers: [proposed] });
+    }
     const sql = getTestDb();
-    const [live] = await sql`SELECT schedule FROM automations WHERE id = ${Number(created.automation_id)}`;
-    expect(live.schedule).toBeNull();
+    const [live] = await sql`SELECT schedule, timezone, triggers FROM automations WHERE id = ${Number(created.automation_id)}`;
+    const expected = touched ? proposed : cadence;
+    expect(live).toMatchObject({ schedule: expected.cron, timezone: expected.timezone, triggers: [expected] });
   });
 
   it('delete invocation audit: all-failed is failure, partial stays success', async () => {
@@ -542,6 +550,37 @@ describe('automation config audit #3664', () => {
     expect((deniedRow!.payload_data as any).automation_ids).toContain(created.automation_id);
     // Denied/failed invocations stay category='audit' — never category='config'.
     expect((deniedRow!.metadata as any).category).toBe('audit');
+  });
+
+  it.each(['9007199254740992', '900719925474099312345678901234567890', 'raw-id-canary'])('F1 rejects %s from the entire invocation event', async (rejected) => {
+    const { recordToolInvocationAudit } = await import('../../../tools/audit');
+    expect(() => parsePositiveIntegerId(rejected, 'automation_id')).toThrow();
+    const maximum = '9007199254740991';
+    expect(parsePositiveIntegerId(maximum, 'automation_id')).toBe(Number.MAX_SAFE_INTEGER);
+    for (const args of [
+      { action: 'update', automation_id: rejected },
+      { action: 'delete', automation_ids: [rejected] },
+      { action: 'delete', automation_id: rejected, automation_ids: [rejected, maximum, '42'] },
+      { action: rejected, automation_id: maximum },
+    ]) {
+      const before = (await invocationEvents(orgId)).at(-1)?.id ?? 0;
+      await recordToolInvocationAudit({
+        toolName: 'manage_automations', args,
+        error: new Error(`Rejected ${rejected}`), durationMs: 1,
+        ctx: { organizationId: orgId, userId, tokenType: 'session' },
+      });
+      const sql = getTestDb();
+      const rows = await sql`SELECT * FROM events WHERE organization_id = ${orgId}
+        AND metadata->>'category' = 'audit' AND id > ${before} ORDER BY id`;
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0])).not.toContain(rejected);
+      const expectedIds = args.automation_ids?.includes(maximum) ? [maximum, '42'] : [];
+      const expectedId = args.automation_id === maximum ? maximum : expectedIds[0] ?? null;
+      expect(rows[0].payload_data.automation_id).toBe(expectedId);
+      expect(rows[0].metadata.automation_id ?? null).toBe(expectedId);
+      expect(rows[0].payload_data.automation_ids).toEqual(expectedIds);
+      expect(rows[0].metadata.automation_ids ?? []).toEqual(expectedIds);
+    }
   });
 
   it('failed validation emits no config event', async () => {

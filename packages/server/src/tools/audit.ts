@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { REDACTED_SENTINEL } from '@lobu/core';
 import { currentMcpActivityEventMetadata } from '../lobu/stores/mcp-client-conversations';
+import { parsePositiveIntegerId } from '../utils/errors';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { sanitizeAuditArgs } from './audit-args';
@@ -150,7 +151,12 @@ function manageAutomationsIdentity(args: Record<string, unknown>): {
   const validId = (value: unknown): string | null => {
     if (typeof value !== 'string' && typeof value !== 'number') return null;
     const text = String(value);
-    return /^[1-9]\d*$/.test(text) ? text : null;
+    try {
+      parsePositiveIntegerId(text, 'automation_id');
+      return text;
+    } catch {
+      return null;
+    }
   };
   const automationId = validId(args.automation_id);
   const ids = Array.isArray(args.automation_ids)

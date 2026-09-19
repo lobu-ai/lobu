@@ -3,6 +3,7 @@
  *   trigger, set_reaction_script
  */
 
+import { transform } from "esbuild";
 import { getDb, type DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
 import { isLobuGatewayRunning } from "../../../lobu/gateway";
@@ -259,6 +260,13 @@ export async function handleTrigger(
 // handleSetReactionScript
 // ============================================
 
+// Compare the current compiler output, not just source/schema presence. Parse
+// comments/whitespace away so temporary build paths cannot turn a healthy save
+// into a write; string literals and executable code remain significant.
+async function comparableReactionCode(code: string): Promise<string> {
+  return (await transform(code, { minifyWhitespace: true })).code;
+}
+
 export async function handleSetReactionScript(
   args: ManageAutomationsArgs,
   _env: Env,
@@ -405,6 +413,7 @@ export async function handleSetReactionScript(
 
   const compiledCode = await compileReactionScript(script);
   await validateReactionDefaultExport(compiledCode);
+  const targetCode = await comparableReactionCode(compiledCode);
   // Derive the reaction's extraction contract from its exported `input` schema,
   // so the worker is told the exact shape the reaction will Value.Parse. NULL
   // when the reaction declares no `input` (free-form `{ summary }` fallback).
@@ -416,31 +425,26 @@ export async function handleSetReactionScript(
       ORDER BY id
       FOR UPDATE
     `;
-    const lockedBefore = new Map<number, string | null>(
-      locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
-    );
-    const lockedBeforeSchema = new Map<number, unknown>(
-      locked.map((r) => [Number(r.id), (r.reaction_input_schema as unknown) ?? null]),
-    );
     const targetSchema = reactionInputSchema ?? null;
-    const isTrueNoop = locked.every((row) =>
-      row.reaction_script === script &&
-      row.reaction_script_compiled != null &&
-      stableJson(row.reaction_input_schema ?? null) === stableJson(targetSchema)
-    );
-    if (isTrueNoop) return;
-    await tx`
-    UPDATE automations
-    SET reaction_script = ${script}, reaction_script_compiled = ${compiledCode},
-        reaction_input_schema = ${reactionInputSchema ? tx.json(reactionInputSchema) : null}
-    WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
-  `;
-    const written = await tx`
-      SELECT id, reaction_script, reaction_input_schema FROM automations
-      WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
-    `;
-    for (const row of written) {
+    for (const row of locked) {
       const rowId = Number(row.id);
+      const definitionChanged = row.reaction_script !== script ||
+        stableJson(row.reaction_input_schema ?? null) !== stableJson(targetSchema);
+      if (!definitionChanged) {
+        try {
+          if (await comparableReactionCode(row.reaction_script_compiled ?? "") === targetCode) continue;
+        } catch {
+          // A corrupt artifact must be repaired, not block a valid new save.
+        }
+      }
+      await tx`
+        UPDATE automations
+        SET reaction_script = ${script}, reaction_script_compiled = ${compiledCode},
+            reaction_input_schema = ${reactionInputSchema ? tx.json(reactionInputSchema) : null}
+        WHERE id = ${rowId} AND organization_id = ${ctx.organizationId}
+      `;
+      // Executable refreshes are derived-state repairs, not definition edits.
+      if (!definitionChanged) continue;
       await insertToolConfigChange(ctx, {
         resourceKind: "automation",
         resourceId: rowId,
@@ -450,14 +454,14 @@ export async function handleSetReactionScript(
         before: {
           id: rowId,
           automation_group_id: groupId,
-          reaction_script: lockedBefore.get(rowId) ?? null,
-          reaction_input_schema: lockedBeforeSchema.get(rowId) ?? null,
+          reaction_script: row.reaction_script ?? null,
+          reaction_input_schema: row.reaction_input_schema ?? null,
         },
         state: {
           id: rowId,
           automation_group_id: groupId,
           reaction_script: script,
-          reaction_input_schema: (row.reaction_input_schema as unknown) ?? null,
+          reaction_input_schema: targetSchema,
         },
         changedFields: ["reaction_script", "reaction_input_schema"],
       }, tx);

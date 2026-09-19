@@ -16,6 +16,9 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { transform } from 'esbuild';
+import { compileReactionScript, validateReactionDefaultExport } from '../../../automations/reaction-executor';
+import { runScript } from '../../../sandbox/run-script';
 import type { Env } from '../../../index';
 import { manageAutomations } from '../../../tools/admin/manage_automations';
 import type { ToolContext } from '../../../tools/registry';
@@ -495,6 +498,62 @@ describe('automation group edit contract', () => {
         AND metadata->>'resource_id' = ${String(automationId)}
     `;
     expect(Number(afterCount)).toBe(Number(beforeCount));
+  });
+
+  it.each(['stale', 'older-build', 'missing', 'invalid', 'schema', 'source', 'healthy'])('F2 repairs %s state in a mixed group and executes CURRENT', async (drift) => {
+    const sql = getTestDb();
+    const workspace = await TestWorkspace.create({ name: 'Artifact Repair Org' });
+    const { automationId: rootId } = await seedRootAutomation(workspace, `repair-${drift}`);
+    const [root] = await sql`SELECT current_version_id FROM automations WHERE id = ${rootId}`;
+    const entity = await createTestEntity({ name: 'Repair Sibling', organization_id: workspace.org.id, created_by: workspace.users.owner.id });
+    const siblingId = await assignToEntity(workspace, Number(root.current_version_id), entity.id);
+    const script = 'export const input = { type: "object", properties: { summary: { type: "string" } } }; export default async () => ({ summary: "CURRENT" });';
+    const save = () => manageAutomations(
+      { action: 'set_reaction_script', automation_id: String(rootId), reaction_script: script } as never,
+      {} as Env, ownerCtx(workspace),
+    );
+    await save();
+    if (drift === 'stale') {
+      const old = await compileReactionScript(script.replace('CURRENT', 'OLD'));
+      await validateReactionDefaultExport(old);
+      const executed = await runScript({ source: old, sdk: {} as never, context: {}, allowCrossOrg: false });
+      expect(executed.returnValue).toEqual({ summary: 'OLD' });
+      await sql`UPDATE automations SET reaction_script_compiled = ${old} WHERE id = ${siblingId}`;
+    } else if (drift === 'older-build') {
+      const compiled = await compileReactionScript(script);
+      const older = (await transform(compiled, { target: 'es2015' })).code;
+      await validateReactionDefaultExport(older);
+      const executed = await runScript({ source: older, sdk: {} as never, context: {}, allowCrossOrg: false });
+      expect(executed.returnValue).toEqual({ summary: 'CURRENT' });
+      await sql`UPDATE automations SET reaction_script_compiled = ${older} WHERE id = ${siblingId}`;
+    } else if (drift === 'missing' || drift === 'invalid') {
+      await sql`UPDATE automations SET reaction_script_compiled = ${drift === 'missing' ? null : 'invalid {'} WHERE id = ${siblingId}`;
+    } else if (drift === 'schema') {
+      await sql`UPDATE automations SET reaction_input_schema = NULL WHERE id = ${siblingId}`;
+    } else if (drift === 'source') {
+      await sql`UPDATE automations SET reaction_script = ${script.replace('CURRENT', 'OLD')} WHERE id = ${siblingId}`;
+    }
+    const before = await sql`SELECT id, xmin::text AS revision FROM automations WHERE id IN (${rootId}, ${siblingId}) ORDER BY id`;
+    const audits = () => sql`SELECT id, metadata FROM events WHERE organization_id = ${workspace.org.id}
+      AND metadata->>'category' = 'config' AND metadata->>'action' = 'set_reaction_script' ORDER BY id`;
+    const beforeAudits = await audits();
+    await save();
+    const after = await sql`SELECT id, xmin::text AS revision, reaction_script, reaction_script_compiled, reaction_input_schema
+      FROM automations WHERE id IN (${rootId}, ${siblingId}) ORDER BY id`;
+    for (const row of after) {
+      const result = await runScript({ source: row.reaction_script_compiled, sdk: {} as never, context: {}, allowCrossOrg: false });
+      expect(result.success).toBe(true);
+      expect(result.returnValue).toEqual({ summary: 'CURRENT' });
+      expect(row.reaction_script).toBe(script);
+      expect(row.reaction_input_schema).toEqual({ type: 'object', properties: { summary: { type: 'string' } } });
+      const oldRevision = before.find((r) => r.id === row.id)!.revision;
+      if (Number(row.id) === rootId || drift === 'healthy') expect(row.revision).toBe(oldRevision);
+      else expect(row.revision).not.toBe(oldRevision);
+    }
+    const afterAudits = await audits();
+    const definitionChanged = drift === 'schema' || drift === 'source';
+    expect(afterAudits.length).toBe(beforeAudits.length + (definitionChanged ? 1 : 0));
+    if (definitionChanged) expect(afterAudits.at(-1)!.metadata.resource_id).toBe(String(siblingId));
   });
 
   it('createAutomationRun snapshots current_version_id; mid-run group edit does not change the run', async () => {
