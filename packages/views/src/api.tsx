@@ -265,6 +265,22 @@ export function useQuery<T = unknown>(
         const sc = (result.structuredContent ??
           parseTextJson(result) ??
           {}) as Record<string, unknown>;
+        if (typeof q === "string" && sc.success === false) {
+          const sdkError = sc.error;
+          const message =
+            sdkError && typeof sdkError === "object"
+              ? (sdkError as Record<string, unknown>).message
+              : undefined;
+          setState({
+            data: null,
+            error:
+              typeof message === "string" && message.length > 0
+                ? message
+                : "Query script failed",
+            loading: false,
+          });
+          return;
+        }
         // query_sdk → { success, return_value }, query_sql → { rows }, a named
         // tool → its whole body.
         const data = (
