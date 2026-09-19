@@ -69,18 +69,42 @@ git -C "$repo" checkout -q -b work
 printf 'a\n' > "$repo/f.txt"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m one
-# macOS ships shasum but not GNU sha256sum. Exercise that exact command set.
-mac_bin="$(mktemp -d /tmp/lobu-review-cache-macos-bin.XXXXXX)"
-trap 'rm -rf "$cache_root" "$repo" "$mac_bin"' EXIT
-ln -s "$(command -v git)" "$mac_bin/git"
-ln -s "$(command -v cut)" "$mac_bin/cut"
-ln -s "$(command -v shasum)" "$mac_bin/shasum"
-mac_h1="$(cd "$repo" && PATH="$mac_bin" review_diff_hash main)"
-[ -n "$mac_h1" ] || fail "diff hash failed with macOS shasum-only command set"
-
 h1="$(cd "$repo" && review_diff_hash main)"
 h2="$(cd "$repo" && review_diff_hash main)"
 [ "$h1" = "$h2" ] && [ -n "$h1" ] || fail "diff hash not stable"
+
+# Exercise the native fallback when installed; it is not a test dependency.
+if shasum_path="$(command -v shasum)"; then
+  mac_bin="$cache_root/mac-bin"
+  mkdir "$mac_bin"
+  ln -s "$(command -v git)" "$mac_bin/git"
+  ln -s "$(command -v cut)" "$mac_bin/cut"
+  ln -s "$shasum_path" "$mac_bin/shasum"
+  mac_h1="$(cd "$repo" && PATH="$mac_bin" review_diff_hash main)"
+  [ "$mac_h1" = "$h1" ] || fail "native shasum diff hash differs"
+else
+  echo "SKIP: native shasum integration (shasum not installed)"
+fi
+
+# Controlled backends cover selection regardless of the host's installed tools.
+primary_bin="$cache_root/primary-bin"
+fallback_bin="$cache_root/fallback-bin"
+mkdir "$primary_bin" "$fallback_bin"
+cat > "$primary_bin/sha256sum" <<'SH'
+#!/bin/sh
+[ "$#" -eq 0 ] || exit 1
+printf 'primary\n'
+SH
+cat > "$fallback_bin/shasum" <<'SH'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -a ] && [ "$2" = 256 ] || exit 1
+printf 'fallback\n'
+SH
+chmod +x "$primary_bin/sha256sum" "$fallback_bin/shasum"
+[ "$(PATH="$primary_bin" review_sha256)" = primary ] || fail "primary-only selection failed"
+[ "$(PATH="$fallback_bin" review_sha256)" = fallback ] || fail "fallback-only selection failed"
+[ "$(PATH="$fallback_bin:$primary_bin" review_sha256)" = primary ] || fail "primary backend not preferred"
+
 printf 'a\nb\n' > "$repo/f.txt"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m two
