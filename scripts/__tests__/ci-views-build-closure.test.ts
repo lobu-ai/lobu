@@ -49,6 +49,24 @@ const GUEST_BUN_COMMAND =
   "bun test packages/views/src --coverage --timeout 30000";
 const GUEST_LCOV_RENAME = "mv coverage/lcov.info coverage/views.lcov.info";
 const GUEST_COVERAGE_ENTRY = "coverage/views.lcov.info";
+// Bounded root-safe working-directory forms: unset (inherited repo root),
+// "." / "./" (explicit repo root), and the exact GitHub workspace-root
+// expression. Anything else (packages/..., unresolved or general
+// expressions) is rejected — no general expression evaluator.
+const GITHUB_WORKSPACE_ROOT = "${{ github.workspace }}";
+
+function isRootSafeWorkingDirectory(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  return (
+    trimmed === "." || trimmed === "./" || trimmed === GITHUB_WORKSPACE_ROOT
+  );
+}
 
 type WorkflowDoc = {
   defaults?: { run?: Record<string, unknown> };
@@ -199,12 +217,14 @@ function assertViewsGuestSelection(ymlText: string): void {
   }
   // coverage/ paths below are relative to the checkout root, so the
   // effective working directory (step > job default > workflow default)
-  // must stay unset.
+  // must stay root-safe: unset, ".", "./", or the exact GitHub
+  // workspace-root expression. Package directories and unresolved/general
+  // expressions are rejected.
   const effectiveWd = effectiveGuestWorkingDirectory(doc, guestStep);
-  if (effectiveWd !== undefined) {
+  if (!isRootSafeWorkingDirectory(effectiveWd)) {
     throw new Error(
       "ci views guard: guest step must run in the repo root " +
-        `(no working-directory override), got effective ${JSON.stringify(effectiveWd)}`
+        `(unset, ".", "./", or ${GITHUB_WORKSPACE_ROOT}), got effective ${JSON.stringify(effectiveWd)}`
     );
   }
   const commands = executableCommands(guestStep.run);
@@ -375,6 +395,34 @@ describe("ci views build closure", () => {
         );
       }
       return hits[0] as Record<string, any>;
+    }
+
+    function ensureJobRun(doc: MutableDoc): Record<string, any> {
+      const jobs = doc.jobs as Record<string, any>;
+      const unit = jobs.unit as Record<string, any>;
+      const defaultsRaw: unknown = unit.defaults;
+      if (typeof defaultsRaw !== "object" || defaultsRaw === null) {
+        unit.defaults = {};
+      }
+      const unitDefaults = unit.defaults as Record<string, any>;
+      const runRaw: unknown = unitDefaults.run;
+      if (typeof runRaw !== "object" || runRaw === null) {
+        unitDefaults.run = {};
+      }
+      return unitDefaults.run as Record<string, any>;
+    }
+
+    function ensureWorkflowRun(doc: MutableDoc): Record<string, any> {
+      const rootRaw: unknown = doc.defaults;
+      if (typeof rootRaw !== "object" || rootRaw === null) {
+        doc.defaults = {};
+      }
+      const root = doc.defaults as Record<string, any>;
+      const runRaw: unknown = root.run;
+      if (typeof runRaw !== "object" || runRaw === null) {
+        root.run = {};
+      }
+      return root.run as Record<string, any>;
     }
 
     function reparsed(yml: string): MutableDoc {
@@ -662,15 +710,30 @@ describe("ci views build closure", () => {
     });
 
     it("rejects inherited job and workflow default shells", () => {
+      // Expose the intended unsafe default: a more-specific safe shell
+      // would otherwise shadow it (step > job > workflow), so delete
+      // step shell before setting the job default, and step + job shells
+      // before setting the workflow default. Unrelated defaults.run keys
+      // are retained via merge (never wholesale replacement).
       const jobShell = mutateLive((doc) => {
-        doc.jobs.unit.defaults = { run: { shell: "bash {0}" } };
+        delete guestStepOf(doc).shell;
+        const run = ensureJobRun(doc);
+        run.shell = "bash {0}";
       });
       expect(parsedEffectiveShell(jobShell)).toBe("bash {0}");
       expect(() => assertViewsGuestSelection(jobShell)).toThrow(
         /fail-closed shell/
       );
       const workflowShell = mutateLive((doc) => {
-        doc.defaults = { run: { shell: "bash {0}" } };
+        delete guestStepOf(doc).shell;
+        const jobRun = doc.jobs.unit.defaults?.run as
+          | Record<string, any>
+          | undefined;
+        if (jobRun && typeof jobRun === "object") {
+          delete jobRun.shell;
+        }
+        const run = ensureWorkflowRun(doc);
+        run.shell = "bash {0}";
       });
       expect(parsedEffectiveShell(workflowShell)).toBe("bash {0}");
       expect(() => assertViewsGuestSelection(workflowShell)).toThrow(
@@ -679,17 +742,28 @@ describe("ci views build closure", () => {
     });
 
     it("rejects inherited working directories", () => {
+      // Same precedence rule as shells: delete more-specific
+      // working-directory values first so the intended unsafe default is
+      // the effective value. Unrelated run keys are retained.
       const jobWd = mutateLive((doc) => {
-        doc.jobs.unit.defaults = {
-          run: { "working-directory": "packages/cli" },
-        };
+        delete guestStepOf(doc)["working-directory"];
+        const run = ensureJobRun(doc);
+        run["working-directory"] = "packages/cli";
       });
       expect(parsedEffectiveWd(jobWd)).toBe("packages/cli");
       expect(() => assertViewsGuestSelection(jobWd)).toThrow(
         /repo root|working-directory/
       );
       const workflowWd = mutateLive((doc) => {
-        doc.defaults = { run: { "working-directory": "packages/cli" } };
+        delete guestStepOf(doc)["working-directory"];
+        const jobRun = doc.jobs.unit.defaults?.run as
+          | Record<string, any>
+          | undefined;
+        if (jobRun && typeof jobRun === "object") {
+          delete jobRun["working-directory"];
+        }
+        const run = ensureWorkflowRun(doc);
+        run["working-directory"] = "packages/cli";
       });
       expect(parsedEffectiveWd(workflowWd)).toBe("packages/cli");
       expect(() => assertViewsGuestSelection(workflowWd)).toThrow(
@@ -704,15 +778,124 @@ describe("ci views build closure", () => {
       );
     });
 
+    // Full-suite assertion: selection + coverage together. Predicate-only
+    // positives miss F16 fixture false positives, so every safe baseline
+    // below runs the complete suite.
+    function assertFullSuite(yml: string): void {
+      assertViewsGuestSelection(yml);
+      assertViewsCoverageUpload(yml);
+    }
+
     it("prefers an explicit safe guest shell over an unsafe default", () => {
       // Precedence is step > job default > workflow default: pinning
       // `shell: bash` on the guest genuinely overrides `bash {0}`.
+      // Runs the complete suite, not just the predicate.
       const overridden = mutateLive((doc) => {
-        doc.jobs.unit.defaults = { run: { shell: "bash {0}" } };
+        ensureJobRun(doc).shell = "bash {0}";
         guestStepOf(doc).shell = "bash";
       });
       expect(parsedEffectiveShell(overridden)).toBe("bash");
-      expect(() => assertViewsGuestSelection(overridden)).not.toThrow();
+      expect(() => assertFullSuite(overridden)).not.toThrow();
+      // Job bash over an unsafe workflow default: same precedence rule
+      // one level down. Delete the more-specific guest shell first so the
+      // job default is the effective value.
+      const jobOverWorkflow = mutateLive((doc) => {
+        delete guestStepOf(doc).shell;
+        ensureJobRun(doc).shell = "bash";
+        ensureWorkflowRun(doc).shell = "bash {0}";
+      });
+      expect(parsedEffectiveShell(jobOverWorkflow)).toBe("bash");
+      expect(() => assertFullSuite(jobOverWorkflow)).not.toThrow();
+    });
+
+    it("accepts safe explicit Bash baselines through the full suite", () => {
+      // Safe step / job / workflow Bash keeps fail-closed -e/-o pipefail
+      // and must pass the entire suite, including the inherited-default
+      // negative fixtures (which delete more-specific shells first).
+      const stepBash = mutateLive((doc) => {
+        guestStepOf(doc).shell = "bash";
+      });
+      expect(parsedEffectiveShell(stepBash)).toBe("bash");
+      expect(() => assertFullSuite(stepBash)).not.toThrow();
+      const jobBash = mutateLive((doc) => {
+        delete guestStepOf(doc).shell;
+        ensureJobRun(doc).shell = "bash";
+      });
+      expect(parsedEffectiveShell(jobBash)).toBe("bash");
+      expect(() => assertFullSuite(jobBash)).not.toThrow();
+      const workflowBash = mutateLive((doc) => {
+        delete guestStepOf(doc).shell;
+        const jobRun = doc.jobs.unit.defaults?.run as
+          | Record<string, any>
+          | undefined;
+        if (jobRun && typeof jobRun === "object") {
+          delete jobRun.shell;
+        }
+        ensureWorkflowRun(doc).shell = "bash";
+      });
+      expect(parsedEffectiveShell(workflowBash)).toBe("bash");
+      expect(() => assertFullSuite(workflowBash)).not.toThrow();
+    });
+
+    it("accepts root-safe working directories through the full suite", () => {
+      // Bounded root-safe forms: ".", "./", and the exact GitHub
+      // workspace-root expression. Each runs the complete suite.
+      for (const wd of [".", "./", GITHUB_WORKSPACE_ROOT]) {
+        const stepWd = mutateLive((doc) => {
+          guestStepOf(doc)["working-directory"] = wd;
+        });
+        expect(parsedEffectiveWd(stepWd)).toBe(wd);
+        expect(() => assertFullSuite(stepWd)).not.toThrow();
+      }
+      const jobDot = mutateLive((doc) => {
+        delete guestStepOf(doc)["working-directory"];
+        ensureJobRun(doc)["working-directory"] = ".";
+      });
+      expect(parsedEffectiveWd(jobDot)).toBe(".");
+      expect(() => assertFullSuite(jobDot)).not.toThrow();
+      // Safe overrides of unsafe inherited defaults: step dot over job
+      // packages/cli, job dot over workflow packages/cli.
+      const stepOverJob = mutateLive((doc) => {
+        ensureJobRun(doc)["working-directory"] = "packages/cli";
+        guestStepOf(doc)["working-directory"] = ".";
+      });
+      expect(parsedEffectiveWd(stepOverJob)).toBe(".");
+      expect(() => assertFullSuite(stepOverJob)).not.toThrow();
+      const jobOverWorkflow = mutateLive((doc) => {
+        delete guestStepOf(doc)["working-directory"];
+        ensureJobRun(doc)["working-directory"] = ".";
+        ensureWorkflowRun(doc)["working-directory"] = "packages/cli";
+      });
+      expect(parsedEffectiveWd(jobOverWorkflow)).toBe(".");
+      expect(() => assertFullSuite(jobOverWorkflow)).not.toThrow();
+      // Bounded rejection: package directories, unresolved and general
+      // expressions are never root-safe.
+      for (const bad of [
+        "packages/cli",
+        "packages/views",
+        "${{ matrix.os }}",
+        "$GITHUB_WORKSPACE",
+      ]) {
+        const rejected = mutateLive((doc) => {
+          delete guestStepOf(doc)["working-directory"];
+          const jobRun = doc.jobs.unit.defaults?.run as
+            | Record<string, any>
+            | undefined;
+          if (jobRun && typeof jobRun === "object") {
+            delete jobRun["working-directory"];
+          }
+          const root = doc.defaults as Record<string, any> | undefined;
+          const rootRun = root?.run as Record<string, any> | undefined;
+          if (rootRun && typeof rootRun === "object") {
+            delete rootRun["working-directory"];
+          }
+          guestStepOf(doc)["working-directory"] = bad;
+        });
+        expect(parsedEffectiveWd(rejected)).toBe(bad);
+        expect(() => assertViewsGuestSelection(rejected)).toThrow(
+          /repo root|working-directory/
+        );
+      }
     });
 
     it("rejects omitted or comment-only coverage entries", () => {
