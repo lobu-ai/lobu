@@ -619,14 +619,12 @@ export async function executeAgentTurnRun(
     );
     return { itemsCollected: 0 };
   } catch (error) {
-    // An overflowed turn reports its retained evidence even when the abort
-    // stops the guest with an error: the catch-all below would otherwise file
-    // the abort reason and drop the prefix the turn managed to retain.
-    if (toolReceiptOverflow) {
-      const retained = [...tracesInFlight, ...toolEvents].slice(0, TURN_TOOL_EVENT_QUEUE_MAX);
-      return fail(toolOverflowError(), retained);
-    }
-    return fail(error instanceof Error ? error.message : String(error));
+    // Any failure reports the retained receipt prefix. A provider/runtime
+    // error after a tool finished must not erase mandatory external-effect
+    // evidence merely because the queue did not overflow.
+    const retained = [...tracesInFlight, ...toolEvents].slice(0, TURN_TOOL_EVENT_QUEUE_MAX);
+    if (toolReceiptOverflow) return fail(toolOverflowError(), retained);
+    return fail(error instanceof Error ? error.message : String(error), retained);
   } finally {
     clearInterval(deltaTimer);
     clearInterval(heartbeat);
