@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startViewReapply } from "../view-reapply.js";
+import { startViewReapply, fileIdentity } from "../view-reapply.js";
 
 const tempDirs: string[] = [];
 
@@ -317,4 +317,32 @@ describe("startViewReapply", () => {
       loop.close();
     }
   }, 20_000);
+
+  // F12 follow-up: `dev:ino` alone aliases on Linux (overlayfs/tmpfs reuses a
+  // freed inode immediately, so two rapid atomic renames can return to the
+  // same `dev:ino`) and misses truncate-in-place saves (same inode, new
+  // bytes). Identity must disambiguate via size+mtimeMs. Deterministic, no
+  // subscription timing: same-size truncate keeps dev+ino+size equal, so only
+  // mtimeMs distinguishes; a dev:ino-only implementation returns equal.
+  test("file identity changes on same-inode content rewrite", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lobu-view-reapply-identity-"));
+    tempDirs.push(dir);
+    const file = join(dir, "probe.ts");
+    writeFileSync(file, "AAAA");
+    const before = fileIdentity(file);
+    expect(before).not.toBeNull();
+    // Distinct mtimeMs even for back-to-back writes (sub-ms float); sleep
+    // past filesystem timestamp granularity before rewriting in place.
+    await sleep(25);
+    writeFileSync(file, "BBBB");
+    const after = fileIdentity(file);
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
+  });
+
+  test("file identity is null for a missing path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lobu-view-reapply-missing-"));
+    tempDirs.push(dir);
+    expect(fileIdentity(join(dir, "does-not-exist.ts"))).toBeNull();
+  });
 });

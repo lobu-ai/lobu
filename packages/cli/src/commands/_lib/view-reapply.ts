@@ -67,20 +67,27 @@ export interface ViewReapplyEvents {
  * subscription existed, so no file subscription could have observed it. The
  * same holds when an existing path changes native file identity (an atomic
  * rename replaces the inode while the old Node per-file subscription stays
- * attached to the replaced file). The next
+ * attached to the replaced file). The baseline advances at fire time to the
+ * disk state the apply is about to read, so the triggering save itself never
+ * reconciles; only a save that lands DURING the apply does. The next
  * stable graph and unchanged identities add nothing and schedule nothing
  * further.
  *
- * Native file identity for a watched path (`dev:ino`). An atomic rename
- * replaces the inode at the same path while the old Node per-file
- * subscription stays attached to the replaced file, so path equality alone
- * cannot detect the swap. A missing file maps to null so a later reappearance
+ * Native file identity for a watched path (`dev:ino:size:mtimeMs`). An
+ * atomic rename replaces the inode at the same path while the old Node
+ * per-file subscription stays attached to the replaced file, so path
+ * equality alone cannot detect the swap. `dev:ino` alone is insufficient:
+ * Linux (overlayfs/tmpfs) reuses a freed inode number immediately, so two
+ * rapid atomic renames can alias back to the same `dev:ino`, and a
+ * truncate-in-place save keeps the same `dev:ino` with new bytes. `size`
+ * plus `mtimeMs` (sub-millisecond float, distinct even ~0.3 ms apart)
+ * disambiguate both. A missing file maps to null so a later reappearance
  * also reconciles.
  */
-function fileIdentity(path: string): string | null {
+export function fileIdentity(path: string): string | null {
   try {
     const st = statSync(path);
-    return `${st.dev}:${st.ino}`;
+    return `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`;
   } catch {
     return null;
   }
@@ -106,6 +113,18 @@ export function startViewReapply(
     if (applying) {
       dirty = true;
       return;
+    }
+    // Advance the identity baseline to the disk state this apply is about to
+    // read. The triggering save landed before the debounce expired, so it is
+    // already on disk and will be deployed by this apply: without this, its
+    // own size/mtime diff versus the last post-apply baseline would look like
+    // an unobserved mid-apply save and schedule a spurious no-op follow-up
+    // (every truncate-in-place save keeps its inode). Post-apply `update`
+    // then reconciles only saves that landed DURING the apply, including an
+    // atomic rename the old per-file subscription could not observe — even
+    // when Linux reuses the freed inode number and `dev:ino` aliases.
+    for (const file of watchedFiles) {
+      watchedIdentities.set(file, fileIdentity(file));
     }
     applying = true;
     events
