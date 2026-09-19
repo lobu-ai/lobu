@@ -69,6 +69,15 @@ git -C "$repo" checkout -q -b work
 printf 'a\n' > "$repo/f.txt"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m one
+# macOS ships shasum but not GNU sha256sum. Exercise that exact command set.
+mac_bin="$(mktemp -d /tmp/lobu-review-cache-macos-bin.XXXXXX)"
+trap 'rm -rf "$cache_root" "$repo" "$mac_bin"' EXIT
+ln -s "$(command -v git)" "$mac_bin/git"
+ln -s "$(command -v cut)" "$mac_bin/cut"
+ln -s "$(command -v shasum)" "$mac_bin/shasum"
+mac_h1="$(cd "$repo" && PATH="$mac_bin" review_diff_hash main)"
+[ -n "$mac_h1" ] || fail "diff hash failed with macOS shasum-only command set"
+
 h1="$(cd "$repo" && review_diff_hash main)"
 h2="$(cd "$repo" && review_diff_hash main)"
 [ "$h1" = "$h2" ] && [ -n "$h1" ] || fail "diff hash not stable"
