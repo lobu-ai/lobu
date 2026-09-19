@@ -748,7 +748,7 @@ describe('agent turn producer', () => {
         // Per-input receipts (#3662): the steered input carries its own
         // answer, never the execution text.
         expect(completion.consumed_inputs).toEqual([{ run_id: followerId,
-          session_entry_id: row.run_metadata.session_entry_id, response_text: 'Follow-up answered.' }]);
+          session_entry_id: row.run_metadata.session_entry_id, response_text: 'Follow-up answered.', tools_used: [] }]);
         expect(row.run_metadata.consumed_by_run_id).toBe(ownerId);
         expect(row.action_input).not.toHaveProperty('result');
         const entry = completion.session_jsonl.trim().split('\n').map((line: string) => JSON.parse(line))
