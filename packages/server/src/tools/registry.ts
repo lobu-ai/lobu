@@ -191,6 +191,15 @@ export interface ToolContext {
   requestUrl?: string;
   /** PUBLIC_GATEWAY_URL env var fallback for URL generation when requestUrl is unreliable */
   baseUrl?: string;
+  /**
+   * Approval apply linkage (#3664, internal only): when a human-approved
+   * proposal is being applied, the approval run id and the original requester.
+   * Threaded by the approval handler, read by config-audit — never a public
+   * API field.
+   */
+  approvalRunId?: number | null;
+  approvalRequesterId?: string | null;
+  approvalApproverId?: string | null;
 }
 
 /** Account dispatch may have no execution workspace; leaf handlers remain workspace-bound. */

@@ -10,7 +10,7 @@ import { isUniqueViolation } from '../../../utils/pg-errors';
 import { nextRunAt } from '../../../utils/cron';
 import { intervals } from '../../../config/intervals';
 import { recordChangeEvent, recordLifecycleEvent } from '../../../utils/insert-event';
-import { recordToolConfigChange } from '../helpers/config-audit';
+import { insertToolConfigChange } from '../helpers/config-audit';
 import logger from '../../../utils/logger';
 import { buildAutomationUrl, getOrganizationSlug, getPublicWebUrl } from '../../../utils/url-builder';
 import {
@@ -24,7 +24,7 @@ import {
   assertValidExecutionConfig,
   automationScriptExecutor,
 } from '../automation-execution-config';
-import { assertEntityIdsInOrg, getNextNumericId, requireExists } from '../helpers/db-helpers';
+import { assertEntityIdsInOrg, getNextNumericId } from '../helpers/db-helpers';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs } from '../manage_automations';
 import {
@@ -94,6 +94,34 @@ function stripChatLinkTriggers(triggers: unknown): unknown {
     }
     return true;
   });
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value ?? null);
+}
+
+function automationAuditSnapshot(row: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!row) return null;
+  const pick = (k: string) => (k in row ? row[k] : null);
+  return {
+    id: pick('id'),
+    agent_kind: pick('agent_kind'),
+    device_worker_id: pick('device_worker_id'),
+    managed_agent_id: pick('managed_agent_id'),
+    execution_config: pick('execution_config'),
+    model_config: pick('model_config'),
+    delivery_target: pick('delivery_target'),
+    triggers: pick('triggers'),
+    schedule: pick('schedule'),
+    timezone: pick('timezone'),
+    tags: pick('tags'),
+    min_cooldown_seconds: pick('min_cooldown_seconds'),
+    status: pick('status'),
+    reaction_script: pick('reaction_script'),
+    consecutive_scheduled_failures: pick('consecutive_scheduled_failures'),
+    schedule_auto_paused_at: pick('schedule_auto_paused_at'),
+    next_run_at: pick('next_run_at'),
+  };
 }
 
 // ============================================
@@ -328,6 +356,35 @@ export async function handleCreate(
   let automationId!: number;
   let versionId!: number;
 
+  const createAfterState = (): Record<string, unknown> => ({
+    id: automationId,
+    name: args.name ?? args.slug,
+    slug: args.slug,
+    status: 'active',
+    version: 1,
+    current_version_id: versionId,
+    entity_ids: entityId ? [entityId] : [],
+    schedule: triggerWrite.schedule,
+    timezone: triggerWrite.timezone,
+    triggers: triggerWrite.triggers,
+    managed_agent_id: args.managed_agent_id ?? null,
+    agent_kind: args.agent_kind ?? null,
+    device_worker_id: args.device_worker_id ?? null,
+    model_config: args.model_config ?? {},
+    execution_config: args.execution_config ?? null,
+    sources,
+    tags: args.tags ?? [],
+    delivery_target: deliveryTarget,
+    min_cooldown_seconds: args.min_cooldown_seconds ?? 0,
+    prompt: args.prompt ?? '',
+    description: args.description ?? null,
+    outputs: outputs ?? null,
+    classifiers: classifiers ?? null,
+    reactions_guidance: args.reactions_guidance ?? null,
+    reaction_script: reactionScript,
+    reaction_input_schema: reactionInputSchema ?? null,
+  });
+
   try {
     await sql.begin(async (tx) => {
       automationId = await getNextNumericId(tx, 'automations');
@@ -413,6 +470,33 @@ export async function handleCreate(
         const slugs = (classifiers as any[]).map((d: any) => d.slug);
         await enableClassifiersOnEntity(tx, entityId, slugs);
       }
+
+      // 5. Immutable config audit shares the commit (#3664): a failed audit
+      // rolls the create back rather than diverging from it.
+      if (organizationId) {
+        await insertToolConfigChange(ctx, {
+          organizationId,
+          resourceKind: 'automation',
+          resourceId: automationId,
+          op: 'created',
+          action: 'create',
+          summary: `Automation '${args.name ?? args.slug}' created`,
+          before: null,
+          state: createAfterState(),
+          changedFields: [
+            'agent_kind',
+            'device_worker_id',
+            'managed_agent_id',
+            'execution_config',
+            'model_config',
+            'delivery_target',
+            'triggers',
+            'schedule',
+            'timezone',
+            'reaction_script',
+          ],
+        }, tx);
+      }
     });
   } catch (err) {
     // The slug precheck above is not a lock: two concurrent replicas can both
@@ -454,44 +538,6 @@ export async function handleCreate(
       summary: `Automation "${args.name ?? args.slug}" created`,
       extra: { slug: args.slug, managed_agent_id: args.managed_agent_id ?? null },
     });
-
-    recordToolConfigChange(ctx, {
-      organizationId,
-      resourceKind: 'automation',
-      resourceId: automationId,
-      op: 'created',
-      summary: `Automation '${args.name ?? args.slug}' created`,
-      // Post-insert state composed from the inserted values (the row is not
-      // refetched); includes the v1 version-bound fields (prompt, sources, …).
-      state: {
-        id: automationId,
-        name: args.name ?? args.slug,
-        slug: args.slug,
-        status: 'active',
-        version: 1,
-        current_version_id: versionId,
-        entity_ids: entityId ? [entityId] : [],
-        schedule: triggerWrite.schedule,
-        timezone: triggerWrite.timezone,
-        triggers: triggerWrite.triggers,
-        managed_agent_id: args.managed_agent_id ?? null,
-        agent_kind: args.agent_kind ?? null,
-        device_worker_id: args.device_worker_id ?? null,
-        model_config: args.model_config ?? {},
-        execution_config: args.execution_config ?? null,
-        sources,
-        tags: args.tags ?? [],
-        delivery_target: deliveryTarget,
-        min_cooldown_seconds: args.min_cooldown_seconds ?? 0,
-        prompt: args.prompt ?? '',
-        description: args.description ?? null,
-        outputs: outputs ?? null,
-        classifiers: classifiers ?? null,
-        reactions_guidance: args.reactions_guidance ?? null,
-        reaction_script: reactionScript,
-        reaction_input_schema: reactionInputSchema ?? null,
-      },
-    });
   }
 
   return {
@@ -524,19 +570,27 @@ export async function handleUpdate(
   // undefined = unchanged and null = clear the pin both pass without a lookup.
   await assertDeviceWorkerAccess(sql, args.device_worker_id, ctx);
 
-  await requireExists(sql, 'automations', args.automation_id, 'Automation');
+  // Org-scoped existence replaces the unfenced requireExists oracle: a
+  // cross-org id reads as not-found here and can never drive the UPDATE.
   const currentRows = await sql`
-    SELECT w.organization_id, w.managed_agent_id, w.schedule, w.timezone, w.triggers,
+    SELECT w.id, w.name, w.status, w.organization_id, w.managed_agent_id, w.schedule, w.timezone, w.triggers,
            w.device_worker_id::text AS device_worker_id, w.agent_kind,
-           w.delivery_target, w.reaction_script, w.execution_config,
+           w.delivery_target, w.reaction_script, w.execution_config, w.model_config, w.tags,
+           w.min_cooldown_seconds, w.consecutive_scheduled_failures, w.schedule_auto_paused_at, w.next_run_at,
            cv.prompt AS current_prompt, cv.skills AS current_skills,
            cv.outputs AS current_outputs, cv.classifiers AS current_classifiers
     FROM automations w
     LEFT JOIN automation_versions cv ON cv.id = w.current_version_id
-    WHERE w.id = ${args.automation_id}
+    WHERE w.id = ${args.automation_id} AND w.organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
+  if (currentRows.length === 0) {
+    throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
+  }
   const currentRow = currentRows[0] as {
+    id: number | string;
+    name: string | null;
+    status: string | null;
     organization_id: string;
     managed_agent_id: string | null;
     device_worker_id: string | null;
@@ -547,6 +601,12 @@ export async function handleUpdate(
     delivery_target: ManageAutomationsArgs['delivery_target'];
     reaction_script: string | null;
     execution_config: unknown;
+    model_config: unknown;
+    tags: unknown;
+    min_cooldown_seconds: number | null;
+    consecutive_scheduled_failures: number | null;
+    schedule_auto_paused_at: unknown;
+    next_run_at: unknown;
     current_prompt: string | null;
     current_skills: Array<{ name: string; content: string }> | null;
     current_outputs: Record<string, unknown> | null;
@@ -666,18 +726,18 @@ export async function handleUpdate(
     );
   }
 
-  const updatedFields: string[] = [];
-  if (args.model_config !== undefined) updatedFields.push('model_config');
-  if (args.execution_config !== undefined) updatedFields.push('execution_config');
-  if (args.triggers !== undefined) updatedFields.push('triggers');
-  if (args.managed_agent_id !== undefined) updatedFields.push('managed_agent_id');
-  if (args.tags !== undefined) updatedFields.push('tags');
-  if (args.device_worker_id !== undefined) updatedFields.push('device_worker_id');
-  if (args.agent_kind !== undefined) updatedFields.push('agent_kind');
-  if (args.delivery_target !== undefined) updatedFields.push('delivery_target');
-  if (args.min_cooldown_seconds !== undefined) updatedFields.push('min_cooldown_seconds');
+  const requestedFields: string[] = [];
+  if (args.model_config !== undefined) requestedFields.push('model_config');
+  if (args.execution_config !== undefined) requestedFields.push('execution_config');
+  if (args.triggers !== undefined) requestedFields.push('triggers');
+  if (args.managed_agent_id !== undefined) requestedFields.push('managed_agent_id');
+  if (args.tags !== undefined) requestedFields.push('tags');
+  if (args.device_worker_id !== undefined) requestedFields.push('device_worker_id');
+  if (args.agent_kind !== undefined) requestedFields.push('agent_kind');
+  if (args.delivery_target !== undefined) requestedFields.push('delivery_target');
+  if (args.min_cooldown_seconds !== undefined) requestedFields.push('min_cooldown_seconds');
 
-  if (updatedFields.length === 0) {
+  if (requestedFields.length === 0) {
     return {
       action: 'update',
       automation_id: args.automation_id,
@@ -698,38 +758,97 @@ export async function handleUpdate(
     patch.delivery_target = normalizedDeliveryTarget;
   }
   const has = (k: keyof AutomationUpdatePatch) => k in patch;
-  // Recompute next_run_at when the cadence OR its zone changes; the effective
-  // pair mixes the incoming args with the stored row for whichever side was
-  // omitted, so a timezone-only update re-anchors the pending firing.
-  const touchesCadence = args.triggers !== undefined;
-  const effectiveSchedule = touchesCadence ? triggerWrite.schedule : currentRow.schedule;
-  const effectiveTimezone = touchesCadence ? triggerWrite.timezone : currentRow.timezone;
-  const cadenceChanged =
-    touchesCadence &&
-    (effectiveSchedule !== currentRow.schedule ||
-      effectiveTimezone !== currentRow.timezone);
-  const projectionNow = new Date();
-  const nextRunAtVal =
-    touchesCadence && effectiveSchedule
-      ? nextRunAt(effectiveSchedule, projectionNow, effectiveTimezone)
-      : null;
+  // Write intent only: the value diff is recomputed inside the mutation
+  // transaction from the FOR UPDATE preimage (TOCTOU fix below), so a
+  // concurrent writer between validation and commit cannot turn a no-op into
+  // a false change or vice versa.
+  const auditAutomationId: string | number = args.automation_id;
+  let updatedRow: Record<string, unknown> | null = null;
+  let committedChangedFields: string[] = [];
+  let committedRequestedFields: string[] = [];
+  let committedNoOp = false;
+  let committedOrgId = currentRow.organization_id;
+  let committedBeforeTriggers = currentRow.triggers ?? [];
+  await sql.begin(async (tx) => {
+    const lockedRows = await tx`
+      SELECT id, name, status, organization_id, managed_agent_id, schedule, timezone, triggers,
+             device_worker_id::text AS device_worker_id, agent_kind,
+             delivery_target, reaction_script, execution_config, model_config, tags,
+             min_cooldown_seconds, consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at
+      FROM automations
+      WHERE id = ${args.automation_id} AND organization_id = ${ctx.organizationId}
+      LIMIT 1
+      FOR UPDATE
+    `;
+    if (lockedRows.length === 0) {
+      throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
+    }
+    const locked = lockedRows[0] as unknown as typeof currentRow;
+    const lockedTriggersValueEqual =
+      args.triggers === undefined ||
+      automationTriggersEqual(locked.triggers ?? [], triggerWrite.triggers);
+    const lockedTouchesCadence = args.triggers !== undefined && !lockedTriggersValueEqual;
+    const lockedEffectiveSchedule = lockedTouchesCadence ? triggerWrite.schedule : locked.schedule;
+    const lockedEffectiveTimezone = lockedTouchesCadence ? triggerWrite.timezone : locked.timezone;
+    const lockedCadenceChanged =
+      lockedTouchesCadence &&
+      (lockedEffectiveSchedule !== locked.schedule ||
+        lockedEffectiveTimezone !== locked.timezone);
+    const lockedNextRunAtVal =
+      lockedTouchesCadence && lockedEffectiveSchedule
+        ? nextRunAt(lockedEffectiveSchedule, new Date(), lockedEffectiveTimezone)
+        : null;
 
-  const updatedRows = await sql`
+    // No-op by value (#3664): arg presence alone must not emit a config event.
+    // Null model_config compares as {} on both sides (normalize coerces
+    // null→{} on write, legacy rows may store null) so null-vs-{} is not a
+    // false change.
+    const valueChangedFields: string[] = [];
+    if (has('model_config') && stableJson(patch.model_config ?? {}) !== stableJson((locked as unknown as Record<string, unknown>).model_config ?? {})) valueChangedFields.push('model_config');
+    if (has('execution_config') && stableJson(patch.execution_config ?? null) !== stableJson(locked.execution_config ?? null)) valueChangedFields.push('execution_config');
+    if (has('triggers') && !lockedTriggersValueEqual) valueChangedFields.push('triggers');
+    if (has('managed_agent_id') && (patch.managed_agent_id ?? null) !== (locked.managed_agent_id ?? null)) valueChangedFields.push('managed_agent_id');
+    if (has('tags')) {
+      const lockedTags = parsePgTextArray((locked as unknown as Record<string, unknown>).tags as string | string[] | null);
+      const nextTags = patch.tags ?? [];
+      if (stableJson([...lockedTags].sort()) !== stableJson([...nextTags].sort())) valueChangedFields.push('tags');
+    }
+    if (has('device_worker_id') && (patch.device_worker_id ?? null) !== (locked.device_worker_id ?? null)) valueChangedFields.push('device_worker_id');
+    if (has('agent_kind') && (patch.agent_kind ?? null) !== (locked.agent_kind ?? null)) valueChangedFields.push('agent_kind');
+    if (has('delivery_target') && stableJson(patch.delivery_target ?? null) !== stableJson(locked.delivery_target ?? null)) valueChangedFields.push('delivery_target');
+    if (has('min_cooldown_seconds') && Number(patch.min_cooldown_seconds ?? 0) !== Number((locked as unknown as Record<string, unknown>).min_cooldown_seconds ?? 0)) valueChangedFields.push('min_cooldown_seconds');
+    if (lockedTouchesCadence) {
+      if (lockedEffectiveSchedule !== locked.schedule) valueChangedFields.push('schedule');
+      if (lockedEffectiveTimezone !== locked.timezone) valueChangedFields.push('timezone');
+    }
+    if (lockedCadenceChanged) {
+      valueChangedFields.push('consecutive_scheduled_failures', 'schedule_auto_paused_at', 'next_run_at');
+    } else if (lockedTouchesCadence && lockedEffectiveSchedule) {
+      valueChangedFields.push('next_run_at');
+    }
+
+    if (valueChangedFields.length === 0) {
+      committedNoOp = true;
+      return;
+    }
+
+    const beforeSnapshot = automationAuditSnapshot(locked as unknown as Record<string, unknown>);
+    const updatedRows = await tx`
     UPDATE automations SET
       updated_at = NOW(),
-      model_config = CASE WHEN ${has('model_config')} THEN ${toJsonParam(sql, patch.model_config)} ELSE model_config END,
-      execution_config = CASE WHEN ${has('execution_config')} THEN ${toJsonParam(sql, patch.execution_config)} ELSE execution_config END,
-      schedule = CASE WHEN ${touchesCadence} THEN ${triggerWrite.schedule ?? null} ELSE schedule END,
-      timezone = CASE WHEN ${touchesCadence} THEN ${triggerWrite.timezone ?? null} ELSE timezone END,
-      triggers = CASE WHEN ${has('triggers')} THEN ${toJsonParam(sql, patch.triggers)} ELSE triggers END,
-      next_run_at = CASE WHEN ${touchesCadence} THEN ${nextRunAtVal}::timestamptz ELSE next_run_at END,
-      consecutive_scheduled_failures = CASE WHEN ${cadenceChanged} THEN 0 ELSE consecutive_scheduled_failures END,
-      schedule_auto_paused_at = CASE WHEN ${cadenceChanged} THEN NULL ELSE schedule_auto_paused_at END,
+      model_config = CASE WHEN ${has('model_config')} THEN ${toJsonParam(tx, patch.model_config)} ELSE model_config END,
+      execution_config = CASE WHEN ${has('execution_config')} THEN ${toJsonParam(tx, patch.execution_config)} ELSE execution_config END,
+      schedule = CASE WHEN ${lockedTouchesCadence} THEN ${triggerWrite.schedule ?? null} ELSE schedule END,
+      timezone = CASE WHEN ${lockedTouchesCadence} THEN ${triggerWrite.timezone ?? null} ELSE timezone END,
+      triggers = CASE WHEN ${has('triggers')} THEN ${toJsonParam(tx, patch.triggers)} ELSE triggers END,
+      next_run_at = CASE WHEN ${lockedTouchesCadence} THEN ${lockedNextRunAtVal}::timestamptz ELSE next_run_at END,
+      consecutive_scheduled_failures = CASE WHEN ${lockedCadenceChanged} THEN 0 ELSE consecutive_scheduled_failures END,
+      schedule_auto_paused_at = CASE WHEN ${lockedCadenceChanged} THEN NULL ELSE schedule_auto_paused_at END,
       managed_agent_id = CASE WHEN ${has('managed_agent_id')} THEN ${patch.managed_agent_id ?? null} ELSE managed_agent_id END,
       tags = CASE WHEN ${has('tags')} THEN ${toTextArrayParam(patch.tags ?? [])}::text[] ELSE tags END,
       device_worker_id = CASE WHEN ${has('device_worker_id')} THEN ${patch.device_worker_id ?? null}::uuid ELSE device_worker_id END,
       agent_kind = CASE WHEN ${has('agent_kind')} THEN ${patch.agent_kind ?? null} ELSE agent_kind END,
-      delivery_target = CASE WHEN ${has('delivery_target')} THEN ${toJsonParam(sql, patch.delivery_target)} ELSE delivery_target END,
+      delivery_target = CASE WHEN ${has('delivery_target')} THEN ${toJsonParam(tx, patch.delivery_target)} ELSE delivery_target END,
       -- A 0-cooldown reply Automation stamps this cursor for observability.
       -- Enabling debounce must start with a fresh window, exactly as it did
       -- before zero-cooldown stamping; positive -> positive keeps its window.
@@ -744,30 +863,48 @@ export async function handleUpdate(
     WHERE id = ${args.automation_id} AND organization_id = ${ctx.organizationId}
     RETURNING *
   `;
+    updatedRow = (updatedRows[0] ?? null) as Record<string, unknown> | null;
+    await insertToolConfigChange(ctx, {
+      organizationId: (updatedRow?.organization_id as string | null) ?? ctx.organizationId,
+      resourceKind: 'automation',
+      resourceId: auditAutomationId,
+      op: 'updated',
+      action: 'update',
+      summary: `Automation '${updatedRow?.name ?? auditAutomationId}' updated`,
+      before: beforeSnapshot,
+      state: automationAuditSnapshot(updatedRow),
+      changedFields: [...new Set(valueChangedFields)],
+    }, tx);
+    committedChangedFields = [...new Set(valueChangedFields)];
+    // updated_fields answers "which of YOUR fields changed" — caller-requested
+    // only. The audit changed_fields above keeps the derived schedule/reset
+    // fields for the history fold.
+    committedRequestedFields = committedChangedFields.filter((f) => requestedFields.includes(f));
+    committedOrgId = (updatedRow?.organization_id as string | null) ?? locked.organization_id;
+    committedBeforeTriggers = locked.triggers ?? [];
+  });
 
-  logger.info(`[manage_automations] Updated automation ${args.automation_id}: ${updatedFields.join(', ')}`);
+  if (committedNoOp) {
+    return {
+      action: 'update',
+      automation_id: args.automation_id,
+      updated_fields: [],
+    };
+  }
 
-  const updatedRow = (updatedRows[0] ?? null) as Record<string, unknown> | null;
+  logger.info(`[manage_automations] Updated automation ${args.automation_id}: ${committedChangedFields.join(', ')}`);
+
   await syncAutomationChannelFeedsBestEffort({
-    organizationId: currentRow.organization_id,
-    before: currentRow.triggers ?? [],
+    organizationId: committedOrgId,
+    before: committedBeforeTriggers,
     after: triggerWrite.triggers,
     sql,
-  });
-  recordToolConfigChange(ctx, {
-    organizationId: (updatedRow?.organization_id as string | null) ?? ctx.organizationId,
-    resourceKind: 'automation',
-    resourceId: args.automation_id,
-    op: 'updated',
-    summary: `Automation '${updatedRow?.name ?? args.automation_id}' updated`,
-    state: updatedRow,
-    changedFields: updatedFields,
   });
 
   return {
     action: 'update',
     automation_id: args.automation_id,
-    updated_fields: updatedFields,
+    updated_fields: committedRequestedFields,
   };
 }
 
@@ -797,7 +934,25 @@ export async function handleDelete(
       // in-org at check time fall through to this aggregate, and automation ids are
       // sequential integers — so a racing cross-tenant insert between check and
       // write must not be archivable. organization_id fences that TOCTOU.
-      const updated = await sql`
+      // The preimage SELECT lives INSIDE the mutation tx (FOR UPDATE) so the
+      // before snapshot, the archive write, and the audit share one commit.
+      let automation: Record<string, unknown> | null = null;
+      await sql.begin(async (tx) => {
+        const beforeRows = await tx`
+        SELECT id, name, status, organization_id, managed_agent_id, agent_kind,
+               device_worker_id::text AS device_worker_id, execution_config, model_config,
+               delivery_target, triggers, schedule, timezone, tags, min_cooldown_seconds,
+               consecutive_scheduled_failures, schedule_auto_paused_at, next_run_at,
+               reaction_script, entity_ids
+        FROM automations
+        WHERE id = ${automationId} AND organization_id = ${ctx.organizationId}
+        LIMIT 1
+        FOR UPDATE
+      `;
+        const beforeRow = (beforeRows[0] ?? null) as Record<string, unknown> | null;
+        if (!beforeRow || beforeRow.status === 'archived') return;
+        const beforeSnapshot = automationAuditSnapshot(beforeRow);
+        const updated = await tx`
         UPDATE automations
         SET status = 'archived', updated_at = NOW()
         WHERE id = ${automationId}
@@ -805,57 +960,62 @@ export async function handleDelete(
           AND status != 'archived'
         RETURNING id, name, entity_ids, organization_id, triggers
       `;
+        if (updated.length === 0) return;
+        automation = updated[0] as Record<string, unknown>;
+        await insertToolConfigChange(ctx, {
+          organizationId: automation.organization_id as string,
+          resourceKind: 'automation',
+          resourceId: automationId,
+          op: 'deleted',
+          action: 'delete',
+          summary: `Automation '${automation.name || automationId}' archived`,
+          before: beforeSnapshot,
+          state: null,
+          changedFields: ['status'],
+        }, tx);
+      });
 
-      if (updated.length === 0) {
+      if (!automation) {
         results.push({
           automation_id: automationId,
           success: false,
           message: 'Automation not found or already archived',
         });
       } else {
-        const automation = updated[0];
-        const entityIds = Array.isArray(automation.entity_ids) ? automation.entity_ids : [];
+        const entityIdsRaw = (automation as Record<string, unknown>).entity_ids;
+        const entityIds = Array.isArray(entityIdsRaw) ? entityIdsRaw : [];
 
         // Record change event in knowledge for audit trail
-        if (entityIds.length > 0 && automation.organization_id) {
+        if (entityIds.length > 0 && (automation as Record<string, unknown>).organization_id) {
           recordChangeEvent({
-            entityIds: entityIds.map(Number),
-            organizationId: automation.organization_id as string,
+            entityIds: (entityIds as unknown[]).map(Number),
+            organizationId: (automation as Record<string, unknown>).organization_id as string,
             subject: 'automation',
             // `deleted`, not `archived`: the lifecycle and config writers for
             // this same action below already stamp `automation.deleted`, and
             // one action must not fork the shared vocabulary.
             op: 'deleted',
-            title: `Automation archived: ${automation.name || automationId}`,
-            content: `Automation "${automation.name || automationId}" (id: ${automationId}) was archived.`,
+            title: `Automation archived: ${(automation as Record<string, unknown>).name || automationId}`,
+            content: `Automation "${(automation as Record<string, unknown>).name || automationId}" (id: ${automationId}) was archived.`,
             metadata: {
               action: 'automation_archived',
               automation_id: automationId,
-              automation_name: automation.name,
+              automation_name: (automation as Record<string, unknown>).name,
             },
           });
         }
-        if (automation.organization_id) {
+        if ((automation as Record<string, unknown>).organization_id) {
           await syncAutomationChannelFeedsBestEffort({
-            organizationId: automation.organization_id as string,
-            before: (automation.triggers ?? []) as ManageAutomationsArgs['triggers'],
+            organizationId: (automation as Record<string, unknown>).organization_id as string,
+            before: ((automation as Record<string, unknown>).triggers ?? []) as ManageAutomationsArgs['triggers'],
             sql,
           });
           recordLifecycleEvent({
-            organizationId: automation.organization_id as string,
+            organizationId: (automation as Record<string, unknown>).organization_id as string,
             entityType: 'automation',
             op: 'deleted',
             entityId: automationId,
-            summary: `Automation "${automation.name || automationId}" archived`,
-          });
-
-          recordToolConfigChange(ctx, {
-            organizationId: automation.organization_id as string,
-            resourceKind: 'automation',
-            resourceId: automationId,
-            op: 'deleted',
-            summary: `Automation '${automation.name || automationId}' archived`,
-            state: null,
+            summary: `Automation "${(automation as Record<string, unknown>).name || automationId}" archived`,
           });
         }
 
@@ -1106,6 +1266,38 @@ export async function handleCreateFromVersion(
           sharedVersionId,
           groupId,
         });
+        await insertToolConfigChange(ctx, {
+          organizationId,
+          resourceKind: 'automation',
+          resourceId: automationId,
+          op: 'created',
+          action: 'create_from_version',
+          summary: `Automation '${automationName}' created from version ${args.version_id}`,
+          before: null,
+          state: {
+            id: automationId,
+            name: automationName,
+            slug: automationSlug,
+            status: 'active',
+            entity_ids: [entityId],
+            schedule: version.schedule ?? null,
+            timezone: version.timezone ?? null,
+            triggers: cloneTriggers,
+            managed_agent_id: version.managed_agent_id ?? null,
+            device_worker_id: (version.device_worker_id as string | null) ?? null,
+            agent_kind: (version.agent_kind as string | null) ?? null,
+            version: (version.version as number) ?? 1,
+            current_version_id: sharedVersionId,
+            automation_group_id: groupId,
+            source_automation_id: version.automation_id,
+            sources: clonedSources,
+            prompt: version.prompt ?? null,
+            outputs: version.outputs ?? null,
+            classifiers: version.classifiers ?? null,
+            reactions_guidance: version.reactions_guidance ?? null,
+          },
+          changedFields: ['triggers', 'schedule', 'timezone'],
+        }, tx);
         // This runs inside the clone transaction, so projection failure must
         // roll the clone back with it.
         await syncAutomationChannelFeeds({
@@ -1130,7 +1322,8 @@ export async function handleCreateFromVersion(
     throw err;
   }
 
-  // Post-commit: emit lifecycle + audit events now that the rows are durable.
+  // Post-commit: emit lifecycle events now that the rows are durable.
+  // Config audit already committed inside the transaction above.
   for (const p of auditPayloads) {
     recordLifecycleEvent({
       organizationId,
@@ -1139,38 +1332,6 @@ export async function handleCreateFromVersion(
       entityId: p.automationId,
       summary: `Automation "${p.automationName}" created`,
       extra: { slug: p.automationSlug, via: 'create_from_version' },
-    });
-
-    recordToolConfigChange(ctx, {
-      organizationId,
-      resourceKind: 'automation',
-      resourceId: p.automationId,
-      op: 'created',
-      summary: `Automation '${p.automationName}' created from version ${args.version_id}`,
-      // Composed from the cloned insert values (row not refetched); the
-      // version-bound fields come from the shared source version row.
-      state: {
-        id: p.automationId,
-        name: p.automationName,
-        slug: p.automationSlug,
-        status: 'active',
-        entity_ids: [p.entityId],
-        schedule: version.schedule ?? null,
-        timezone: version.timezone ?? null,
-        triggers: version.triggers ?? [],
-        managed_agent_id: version.managed_agent_id ?? null,
-        device_worker_id: (version.device_worker_id as string | null) ?? null,
-        agent_kind: (version.agent_kind as string | null) ?? null,
-        version: (version.version as number) ?? 1,
-        current_version_id: p.sharedVersionId,
-        automation_group_id: p.groupId,
-        source_automation_id: version.automation_id,
-        sources: p.sources,
-        prompt: version.prompt ?? null,
-        outputs: version.outputs ?? null,
-        classifiers: version.classifiers ?? null,
-        reactions_guidance: version.reactions_guidance ?? null,
-      },
     });
   }
 

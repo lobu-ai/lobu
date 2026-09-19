@@ -1611,12 +1611,33 @@ interface StateChangeEventParams<ResourceKind extends AuditResourceKind> {
    * secret-only endpoints. Redacted by this writer before insert.
    */
   state: Record<string, unknown> | null;
+  /**
+   * Explicit pre-change snapshot for the audited fields (#3664). Redacted by
+   * this writer. Null for creates. When omitted the deployments detail still
+   * derives `before` from the event-sourced fold — this field never replaces
+   * the fold, it makes the pair explicit on the row.
+   */
+  before?: Record<string, unknown> | null;
+  /** Tool-level action that produced this change (e.g. `update`, `create_version`). */
+  action?: string | null;
   changedFields?: string[];
   /** `x-lobu-apply-id` when the mutation came from a `lobu apply` run. */
   applyId?: string | null;
   actorSource?: ConfigActorSource;
   createdBy?: string | null;
   clientId?: string | null;
+  /** Authenticated actor provenance (#3664) — all optional, all metadata-only. */
+  agentId?: string | null;
+  actingAutomationId?: number | string | null;
+  actingRunId?: number | string | null;
+  mcpSessionId?: string | null;
+  mcpConversationId?: string | null;
+  tokenType?: string | null;
+  /** Approval linkage: original requester + approval run/reference. */
+  requestedBy?: string | null;
+  approvedBy?: string | null;
+  approvalRunId?: number | string | null;
+  approvalReference?: string | null;
 }
 
 export interface ConfigChangeEventParams extends StateChangeEventParams<ConfigResourceKind> {}
@@ -1636,12 +1657,52 @@ export interface WorkspaceChangeEventParams
  * Workspace identity mutations use `metadata.category='workspace'`, keeping
  * them out of the Deployments feed while still showing them in All activity.
  */
+function stateChangeMetadata(
+  params: StateChangeEventParams<AuditResourceKind>,
+  category: 'config' | 'workspace'
+): Record<string, unknown> {
+  return {
+    category,
+    // Server-owned discriminator for workspace-identity audit rows.
+    // `category` alone is NOT a safe gate: save_memory accepts caller
+    // metadata, so a member could stamp category='workspace' on a
+    // legitimate event and lose read access. `_lobu_` is the reserved
+    // server namespace callers cannot spoof — all exclusion predicates
+    // gate on this key, not the human-readable category.
+    ...(category === 'workspace' ? { _lobu_workspace_audit: true } : {}),
+    resource_kind: params.resourceKind,
+    resource_id: String(params.resourceId),
+    op: params.op,
+    ...(params.action ? { action: params.action } : {}),
+    ...(params.changedFields?.length ? { changed_fields: params.changedFields } : {}),
+    ...(params.applyId ? { apply_id: params.applyId } : {}),
+    ...(params.actorSource ? { actor_source: params.actorSource } : {}),
+    ...(params.agentId ? { agent_id: params.agentId } : {}),
+    ...(params.actingAutomationId != null ? { acting_automation_id: String(params.actingAutomationId) } : {}),
+    ...(params.actingRunId != null ? { acting_run_id: String(params.actingRunId) } : {}),
+    ...(params.mcpSessionId ? { mcp_session_id: params.mcpSessionId } : {}),
+    ...(params.mcpConversationId ? { mcp_conversation_id: params.mcpConversationId } : {}),
+    ...(params.tokenType ? { token_type: params.tokenType } : {}),
+    ...(params.requestedBy ? { requested_by: params.requestedBy } : {}),
+    ...(params.approvedBy ? { approved_by: params.approvedBy } : {}),
+    ...(params.approvalRunId != null ? { approval_run_id: String(params.approvalRunId) } : {}),
+    ...(params.approvalReference ? { approval_reference: params.approvalReference } : {}),
+  };
+}
+
+function stateChangePayload(
+  params: StateChangeEventParams<AuditResourceKind>
+): Record<string, unknown> {
+  const state = redactConfigState(params.resourceKind, params.state);
+  const before = params.before === undefined ? undefined : redactConfigState(params.resourceKind, params.before);
+  return before === undefined ? { state } : { state, before };
+}
+
 function recordStateChangeEvent(
   params: StateChangeEventParams<AuditResourceKind>,
   category: 'config' | 'workspace'
 ): void {
   const externalId = `${category}_${params.resourceKind}_${params.op}_${params.resourceId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const state = redactConfigState(params.resourceKind, params.state);
 
   retryWithBackoff(
     () =>
@@ -1653,23 +1714,8 @@ function recordStateChangeEvent(
         semanticType: 'change',
         originType: `${category}_${params.resourceKind}_${params.op}`,
         payloadType: 'empty',
-        payloadData: { state },
-        metadata: {
-          category,
-          // Server-owned discriminator for workspace-identity audit rows.
-          // `category` alone is NOT a safe gate: save_memory accepts caller
-          // metadata, so a member could stamp category='workspace' on a
-          // legitimate event and lose read access. `_lobu_` is the reserved
-          // server namespace callers cannot spoof — all exclusion predicates
-          // gate on this key, not the human-readable category.
-          ...(category === 'workspace' ? { _lobu_workspace_audit: true } : {}),
-          resource_kind: params.resourceKind,
-          resource_id: String(params.resourceId),
-          op: params.op,
-          ...(params.changedFields?.length ? { changed_fields: params.changedFields } : {}),
-          ...(params.applyId ? { apply_id: params.applyId } : {}),
-          ...(params.actorSource ? { actor_source: params.actorSource } : {}),
-        },
+        payloadData: stateChangePayload(params),
+        metadata: stateChangeMetadata(params, category),
         createdBy: params.createdBy ?? null,
         clientId: params.clientId ?? null,
       },
@@ -1725,7 +1771,6 @@ async function insertStateChangeEventInTransaction(
   sql: DbClient
 ): Promise<InsertedEvent> {
   const originId = `${category}_${params.resourceKind}_${params.op}_${params.resourceId}_${crypto.randomUUID()}`;
-  const state = redactConfigState(params.resourceKind, params.state);
   return insertConnectionlessAuditEvent(
     {
       entityIds: [],
@@ -1735,17 +1780,8 @@ async function insertStateChangeEventInTransaction(
       semanticType: 'change',
       originType: `${category}_${params.resourceKind}_${params.op}`,
       payloadType: 'empty',
-      payloadData: { state },
-      metadata: {
-        category,
-        ...(category === 'workspace' ? { _lobu_workspace_audit: true } : {}),
-        resource_kind: params.resourceKind,
-        resource_id: String(params.resourceId),
-        op: params.op,
-        ...(params.changedFields?.length ? { changed_fields: params.changedFields } : {}),
-        ...(params.applyId ? { apply_id: params.applyId } : {}),
-        ...(params.actorSource ? { actor_source: params.actorSource } : {}),
-      },
+      payloadData: stateChangePayload(params),
+      metadata: stateChangeMetadata(params, category),
       createdBy: params.createdBy ?? null,
       clientId: params.clientId ?? null,
     },

@@ -26,8 +26,7 @@ import type {
   AutomationTriggerResult,
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { ToolContext } from "../../registry";
-import { recordToolConfigChange } from "../helpers/config-audit";
-import { requireExists } from "../helpers/db-helpers";
+import { insertToolConfigChange } from "../helpers/config-audit";
 import type { ManageAutomationsArgs } from "../manage_automations";
 import {
   encodeExternalAutomationClaimOwner,
@@ -275,19 +274,46 @@ export async function handleSetReactionScript(
     throw new ToolUserError("automation_id is required for set_reaction_script", 400);
   }
 
-  await requireExists(sql, "automations", args.automation_id, "Automation");
+  // Org-scoped existence: the row, its group, and its preimage are all fenced
+  // to the caller's org so a cross-org id reads as not-found (never leaks
+  // existence) and can never drive a group UPDATE.
+  const ownerRows = await sql`
+    SELECT id, automation_group_id, reaction_script FROM automations
+    WHERE id = ${args.automation_id} AND organization_id = ${ctx.organizationId}
+    LIMIT 1
+  `;
+  if (ownerRows.length === 0) {
+    throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
+  }
 
   // Reaction script is a group-shared field — every assignment in the
   // group runs the same reactions after completion. Resolve the group once
   // and cascade across all assignments so we don't silently fork.
+  const groupId = Number(ownerRows[0].automation_group_id);
+  // Group membership is resolved org-scoped: a group id never spans orgs, but
+  // the fence keeps a racing cross-tenant insert out of the cascade.
   const groupRows = await sql`
-    SELECT automation_group_id FROM automations WHERE id = ${args.automation_id} LIMIT 1
+    SELECT id, reaction_script FROM automations
+    WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
   `;
-  const groupId = Number(groupRows[0].automation_group_id);
+  if (groupRows.length === 0) {
+    throw new ToolUserError(`Automation ${args.automation_id} not found`, 404);
+  }
 
   const script = args.reaction_script;
+  const beforeById = new Map<number, string | null>(
+    groupRows.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
+  );
 
   if (!script || script.trim() === "") {
+    if ([...beforeById.values()].every((v) => v == null)) {
+      return {
+        action: "set_reaction_script",
+        automation_id: String(args.automation_id),
+        has_script: false,
+        message: "Reaction script removed.",
+      };
+    }
     // Clearing the reaction can orphan a prompt-less Automation: removing the
     // only instruction source leaves a schedule/window/manual Automation with
     // nothing to run on. Re-run the instruction rule against every assignment's
@@ -298,7 +324,7 @@ export async function handleSetReactionScript(
       SELECT w.id, w.triggers, cv.prompt, cv.skills, w.execution_config->'executor'->>'source' AS executor_source
       FROM automations w
       LEFT JOIN automation_versions cv ON cv.id = w.current_version_id
-      WHERE w.automation_group_id = ${groupId}
+      WHERE w.automation_group_id = ${groupId} AND w.organization_id = ${ctx.organizationId}
     `;
     for (const assignment of groupState) {
       try {
@@ -319,24 +345,50 @@ export async function handleSetReactionScript(
         throw err;
       }
     }
-    await sql`
+    await sql.begin(async (tx) => {
+      // Lock the group rows first so the UPDATE + per-row audits share one
+      // commit and concurrent writers serialize on the same rows.
+      const locked = await tx`
+        SELECT id, reaction_script FROM automations
+        WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
+        ORDER BY id
+        FOR UPDATE
+      `;
+      const lockedBefore = new Map<number, string | null>(
+        locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
+      );
+      await tx`
       UPDATE automations
       SET reaction_script = NULL, reaction_script_compiled = NULL,
           reaction_input_schema = NULL
-      WHERE automation_group_id = ${groupId}
+      WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
     `;
-    recordToolConfigChange(ctx, {
-      resourceKind: "automation",
-      resourceId: args.automation_id,
-      op: "updated",
-      summary: `Automation ${args.automation_id} reaction script removed`,
-      state: {
-        id: args.automation_id,
-        automation_group_id: groupId,
-        reaction_script: null,
-        reaction_input_schema: null,
-      },
-      changedFields: ["reaction_script"],
+      const cleared = await tx`
+        SELECT id, reaction_script, reaction_input_schema FROM automations
+        WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
+      `;
+      for (const row of cleared) {
+        const rowId = Number(row.id);
+        await insertToolConfigChange(ctx, {
+          resourceKind: "automation",
+          resourceId: rowId,
+          op: "updated",
+          action: "set_reaction_script",
+          summary: `Automation ${rowId} reaction script removed`,
+          before: {
+            id: rowId,
+            automation_group_id: groupId,
+            reaction_script: lockedBefore.get(rowId) ?? null,
+          },
+          state: {
+            id: rowId,
+            automation_group_id: groupId,
+            reaction_script: null,
+            reaction_input_schema: null,
+          },
+          changedFields: ["reaction_script"],
+        }, tx);
+      }
     });
     return {
       action: "set_reaction_script",
@@ -352,33 +404,63 @@ export async function handleSetReactionScript(
   // so the worker is told the exact shape the reaction will Value.Parse. NULL
   // when the reaction declares no `input` (free-form `{ summary }` fallback).
   const reactionInputSchema = await extractReactionInputSchema(script);
+  if ([...beforeById.values()].every((v) => v === script)) {
+    return {
+      action: "set_reaction_script",
+      automation_id: String(args.automation_id),
+      has_script: true,
+      message:
+        "Reaction script compiled and saved. It will auto-execute on future complete_window calls.",
+    };
+  }
 
-  await sql`
+  await sql.begin(async (tx) => {
+    const locked = await tx`
+      SELECT id, reaction_script FROM automations
+      WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
+      ORDER BY id
+      FOR UPDATE
+    `;
+    const lockedBefore = new Map<number, string | null>(
+      locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
+    );
+    await tx`
     UPDATE automations
     SET reaction_script = ${script}, reaction_script_compiled = ${compiledCode},
-        reaction_input_schema = ${reactionInputSchema ? sql.json(reactionInputSchema) : null}
-    WHERE automation_group_id = ${groupId}
+        reaction_input_schema = ${reactionInputSchema ? tx.json(reactionInputSchema) : null}
+    WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
   `;
+    const written = await tx`
+      SELECT id, reaction_script, reaction_input_schema FROM automations
+      WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
+    `;
+    for (const row of written) {
+      const rowId = Number(row.id);
+      await insertToolConfigChange(ctx, {
+        resourceKind: "automation",
+        resourceId: rowId,
+        op: "updated",
+        action: "set_reaction_script",
+        summary: `Automation ${rowId} reaction script updated`,
+        before: {
+          id: rowId,
+          automation_group_id: groupId,
+          reaction_script: lockedBefore.get(rowId) ?? null,
+        },
+        state: {
+          id: rowId,
+          automation_group_id: groupId,
+          reaction_script: script,
+          reaction_input_schema: (row.reaction_input_schema as unknown) ?? null,
+        },
+        changedFields: ["reaction_script"],
+      }, tx);
+    }
+  });
 
   logger.info(
     `[manage_automations] Set reaction script for automation ${args.automation_id}`,
   );
-
-  recordToolConfigChange(ctx, {
-    resourceKind: "automation",
-    resourceId: args.automation_id,
-    op: "updated",
-    summary: `Automation ${args.automation_id} reaction script updated`,
-    // Snapshot of the fields just written (row not refetched); compiled code
-    // is intentionally omitted to keep the state small.
-    state: {
-      id: args.automation_id,
-      automation_group_id: groupId,
-      reaction_script: script,
-      reaction_input_schema: reactionInputSchema ?? null,
-    },
-    changedFields: ["reaction_script"],
-  });
 
   return {
     action: "set_reaction_script",

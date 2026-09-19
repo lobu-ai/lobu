@@ -89,5 +89,35 @@ export function redactConfigState(
   if (kind === 'auth-profile' && redacted.credentials != null) {
     redacted.credentials = REDACTED_SENTINEL;
   }
+  if (kind === 'automation') {
+    // Delivery target retains only the bounded routing ids — never secret
+    // connector config. Stored values already carry just these keys, but the
+    // audit snapshot is the enforcement point, not the writer.
+    // connection_id is numeric per the contract (legacy string rows kept);
+    // channel arrives as channel_id (contract) with a bare `channel` alias
+    // tolerated for forward-compat.
+    const target = redacted.delivery_target;
+    if (target != null && typeof target === 'object' && !Array.isArray(target)) {
+      const t = target as Record<string, unknown>;
+      const connectionId =
+        typeof t.connection_id === 'number' && Number.isFinite(t.connection_id)
+          ? { connection_id: t.connection_id }
+          : typeof t.connection_id === 'string'
+            ? { connection_id: t.connection_id }
+            : {};
+      const channelId =
+        typeof t.channel_id === 'string'
+          ? { channel_id: t.channel_id }
+          : typeof t.channel === 'string'
+            ? { channel: t.channel }
+            : {};
+      redacted.delivery_target = { ...connectionId, ...channelId };
+    }
+    // Never persist compiled reaction bytes or credential-bearing executor
+    // material — the source script + redacted config are sufficient for audit.
+    if (redacted.reaction_script_compiled != null) {
+      redacted.reaction_script_compiled = REDACTED_SENTINEL;
+    }
+  }
   return redacted;
 }

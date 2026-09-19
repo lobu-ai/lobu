@@ -890,8 +890,19 @@ export async function applyManageAutomationsProposal(
 ): Promise<ManageAutomationsResult> {
   const args = proposal.args;
   const writeAction = automationWriteAction(args.action);
+  const approverUserId = ctx.userId ?? null;
   // create attributes ownership to the ORIGINAL requester, not the approver.
-  const applyCtx: ToolContext = writeAction === 'create' ? { ...ctx, userId: ownerUserId } : ctx;
+  // Approval linkage (#3664) rides on ctx: original requester + approval run
+  // (threaded by the approval handler) + approver. Handlers forward ctx to
+  // config-audit, so the apply event carries requester AND approver, not only
+  // the approver.
+  const applyCtx: ToolContext = {
+    ...ctx,
+    ...(writeAction === 'create' ? { userId: ownerUserId } : {}),
+    approvalRequesterId: ownerUserId ?? ctx.approvalRequesterId ?? null,
+    approvalApproverId: approverUserId ?? ctx.approvalApproverId ?? null,
+    approvalRunId: ctx.approvalRunId ?? null,
+  };
   // Lock + re-gate under the same session advisory lock as the request path so
   // a concurrent reassign can't slip between the ownership re-check and the write.
   return withAutomationGroupLock(args, applyCtx, async () => {
