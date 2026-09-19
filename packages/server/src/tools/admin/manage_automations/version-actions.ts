@@ -431,6 +431,10 @@ export async function handleCreateVersion(
       `;
     }
     if (versionOrganizationId) {
+      // Cadence writes land on the live row only when the new version becomes
+      // current. A draft (set_as_current=false) leaves schedule/timezone/
+      // triggers untouched, so the audit must not claim them.
+      const touchesCadenceForAudit = setAsCurrent && args.triggers !== undefined;
       await insertToolConfigChange(ctx, {
         organizationId: versionOrganizationId,
         resourceKind: 'automation',
@@ -460,9 +464,9 @@ export async function handleCreateVersion(
           classifiers: classifiers ?? null,
           reactions_guidance: args.reactions_guidance ?? (prev.reactions_guidance as string) ?? null,
           change_notes: args.change_notes ?? null,
-          ...(args.triggers !== undefined ? { schedule: triggerWrite.schedule } : {}),
-          ...(args.triggers !== undefined ? { timezone: triggerWrite.timezone } : {}),
-          ...(args.triggers !== undefined ? { triggers: triggerWrite.triggers } : {}),
+          ...(touchesCadenceForAudit ? { schedule: triggerWrite.schedule } : {}),
+          ...(touchesCadenceForAudit ? { timezone: triggerWrite.timezone } : {}),
+          ...(touchesCadenceForAudit ? { triggers: triggerWrite.triggers } : {}),
         },
         changedFields: [
           'version',
@@ -472,8 +476,8 @@ export async function handleCreateVersion(
           ...(args.outputs !== undefined ? ['outputs'] : []),
           ...(args.classifiers !== undefined ? ['classifiers'] : []),
           ...(args.reactions_guidance !== undefined ? ['reactions_guidance'] : []),
-          ...(args.triggers !== undefined ? ['schedule', 'timezone'] : []),
-          ...(args.triggers !== undefined ? ['triggers'] : []),
+          ...(touchesCadenceForAudit ? ['schedule', 'timezone'] : []),
+          ...(touchesCadenceForAudit ? ['triggers'] : []),
         ],
       }, tx);
     }

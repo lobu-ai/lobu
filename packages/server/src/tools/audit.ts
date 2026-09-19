@@ -157,12 +157,21 @@ function buildManageAutomationsInvocationPayload(
   const sanitizedArgsJson = JSON.stringify(
     sanitizeAuditArgs(params.args, getTool(params.toolName)?.inputSchema)
   );
+  // Delete returns an aggregate summary, not a top-level success flag: an
+  // all-failed batch (failed>0 && successful=0) is a failure, while a partial
+  // batch (successful>0) remains completed with per-ID failures in the summary.
+  const summary = asObject(result.summary);
+  const deleteAllFailed =
+    typeof summary.failed === 'number' &&
+    summary.failed > 0 &&
+    summary.successful === 0;
   const reportedFailure =
     result.error != null ||
     result.success === false ||
     result.status === 'failed' ||
     result.status === 'error' ||
-    result.status === 'timeout';
+    result.status === 'timeout' ||
+    deleteAllFailed;
   const softError = reportedFailure ? errorNameOnly(result.error, 'ToolError') ?? { name: 'ToolError' } : null;
   const thrownError = errorNameOnly(params.error, 'Error');
   return {

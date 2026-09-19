@@ -349,13 +349,16 @@ export async function handleSetReactionScript(
       // Lock the group rows first so the UPDATE + per-row audits share one
       // commit and concurrent writers serialize on the same rows.
       const locked = await tx`
-        SELECT id, reaction_script FROM automations
+        SELECT id, reaction_script, reaction_input_schema FROM automations
         WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
         ORDER BY id
         FOR UPDATE
       `;
       const lockedBefore = new Map<number, string | null>(
         locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
+      );
+      const lockedBeforeSchema = new Map<number, unknown>(
+        locked.map((r) => [Number(r.id), (r.reaction_input_schema as unknown) ?? null]),
       );
       await tx`
       UPDATE automations
@@ -379,6 +382,7 @@ export async function handleSetReactionScript(
             id: rowId,
             automation_group_id: groupId,
             reaction_script: lockedBefore.get(rowId) ?? null,
+            reaction_input_schema: lockedBeforeSchema.get(rowId) ?? null,
           },
           state: {
             id: rowId,
@@ -386,7 +390,7 @@ export async function handleSetReactionScript(
             reaction_script: null,
             reaction_input_schema: null,
           },
-          changedFields: ["reaction_script"],
+          changedFields: ["reaction_script", "reaction_input_schema"],
         }, tx);
       }
     });
@@ -416,13 +420,16 @@ export async function handleSetReactionScript(
 
   await sql.begin(async (tx) => {
     const locked = await tx`
-      SELECT id, reaction_script FROM automations
+      SELECT id, reaction_script, reaction_input_schema FROM automations
       WHERE automation_group_id = ${groupId} AND organization_id = ${ctx.organizationId}
       ORDER BY id
       FOR UPDATE
     `;
     const lockedBefore = new Map<number, string | null>(
       locked.map((r) => [Number(r.id), (r.reaction_script as string | null) ?? null]),
+    );
+    const lockedBeforeSchema = new Map<number, unknown>(
+      locked.map((r) => [Number(r.id), (r.reaction_input_schema as unknown) ?? null]),
     );
     await tx`
     UPDATE automations
@@ -446,6 +453,7 @@ export async function handleSetReactionScript(
           id: rowId,
           automation_group_id: groupId,
           reaction_script: lockedBefore.get(rowId) ?? null,
+          reaction_input_schema: lockedBeforeSchema.get(rowId) ?? null,
         },
         state: {
           id: rowId,
@@ -453,7 +461,7 @@ export async function handleSetReactionScript(
           reaction_script: script,
           reaction_input_schema: (row.reaction_input_schema as unknown) ?? null,
         },
-        changedFields: ["reaction_script"],
+        changedFields: ["reaction_script", "reaction_input_schema"],
       }, tx);
     }
   });

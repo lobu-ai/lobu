@@ -96,8 +96,20 @@ function stripChatLinkTriggers(triggers: unknown): unknown {
   });
 }
 
+function canonicalizeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeJson);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      out[key] = canonicalizeJson((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
 function stableJson(value: unknown): string {
-  return JSON.stringify(value ?? null);
+  return JSON.stringify(canonicalizeJson(value ?? null));
 }
 
 function automationAuditSnapshot(row: Record<string, unknown> | null): Record<string, unknown> | null {
@@ -484,16 +496,30 @@ export async function handleCreate(
           before: null,
           state: createAfterState(),
           changedFields: [
-            'agent_kind',
-            'device_worker_id',
-            'managed_agent_id',
-            'execution_config',
-            'model_config',
-            'delivery_target',
-            'triggers',
+            'name',
+            'slug',
+            'status',
+            'version',
+            'entity_ids',
             'schedule',
             'timezone',
+            'triggers',
+            'managed_agent_id',
+            'agent_kind',
+            'device_worker_id',
+            'model_config',
+            'execution_config',
+            'sources',
+            'tags',
+            'delivery_target',
+            'min_cooldown_seconds',
+            'prompt',
+            'description',
+            'outputs',
+            'classifiers',
+            'reactions_guidance',
             'reaction_script',
+            'reaction_input_schema',
           ],
         }, tx);
       }
@@ -1286,17 +1312,44 @@ export async function handleCreateFromVersion(
             managed_agent_id: version.managed_agent_id ?? null,
             device_worker_id: (version.device_worker_id as string | null) ?? null,
             agent_kind: (version.agent_kind as string | null) ?? null,
+            model_config: (version.model_config as unknown) ?? null,
+            execution_config: (version.execution_config as unknown) ?? null,
             version: (version.version as number) ?? 1,
             current_version_id: sharedVersionId,
             automation_group_id: groupId,
             source_automation_id: version.automation_id,
             sources: clonedSources,
+            tags: cloneTags,
             prompt: version.prompt ?? null,
             outputs: version.outputs ?? null,
             classifiers: version.classifiers ?? null,
             reactions_guidance: version.reactions_guidance ?? null,
+            reaction_script: (version.reaction_script as string | null) ?? null,
+            reaction_input_schema: (version.reaction_input_schema as unknown) ?? null,
           },
-          changedFields: ['triggers', 'schedule', 'timezone'],
+          changedFields: [
+            'name',
+            'slug',
+            'status',
+            'version',
+            'entity_ids',
+            'schedule',
+            'timezone',
+            'triggers',
+            'managed_agent_id',
+            'device_worker_id',
+            'agent_kind',
+            'model_config',
+            'execution_config',
+            'sources',
+            'tags',
+            'prompt',
+            'outputs',
+            'classifiers',
+            'reactions_guidance',
+            'reaction_script',
+            'reaction_input_schema',
+          ],
         }, tx);
         // This runs inside the clone transaction, so projection failure must
         // roll the clone back with it.

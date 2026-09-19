@@ -16,6 +16,7 @@ import { initWorkspaceProvider } from '../../../workspace';
 import {
   addUserToOrganization,
   createTestAgent,
+  createTestEntity,
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
@@ -114,6 +115,16 @@ describe('automation config audit #3664', () => {
     expect(payload.state.agent_kind).toBe('claude-code');
     // Secrets never persist, even under non-denylisted nesting.
     expect(JSON.stringify(payload.state)).not.toContain('secret-should-redact');
+    // Create changedFields covers every config field in the after-state.
+    for (const field of [
+      'name', 'slug', 'status', 'version', 'entity_ids', 'schedule', 'timezone',
+      'triggers', 'managed_agent_id', 'agent_kind', 'device_worker_id',
+      'model_config', 'execution_config', 'sources', 'tags', 'delivery_target',
+      'min_cooldown_seconds', 'prompt', 'description', 'outputs', 'classifiers',
+      'reactions_guidance', 'reaction_script', 'reaction_input_schema',
+    ]) {
+      expect(meta.changed_fields).toContain(field);
+    }
   });
 
   it('update emits before/after + changed fields; no-op emits nothing', async () => {
@@ -148,6 +159,29 @@ describe('automation config audit #3664', () => {
     expect(rows.length).toBe(beforeCount + 1);
   });
 
+  it('update treats reversed-key JSONB as unchanged (canonical deep equality)', async () => {
+    const created = (await owner.automations.create({
+      slug: 'audit-noop-keyorder',
+      name: 'Audit Noop Keyorder',
+      prompt: 'v1',
+      triggers: [],
+      managed_agent_id: agentId,
+      model_config: { z: 1, a: { d: 4, c: 3 }, m: 2 } as any,
+      execution_config: { timeout_seconds: 60, max_budget_usd: 1.5 } as any,
+    })) as { automation_id: string };
+    const beforeCount = (await configEvents(orgId, created.automation_id)).length;
+
+    // Same values, reversed key order at both levels → no new config event.
+    const res = (await owner.automations.update({
+      automation_id: created.automation_id,
+      model_config: { m: 2, a: { c: 3, d: 4 }, z: 1 } as any,
+      execution_config: { max_budget_usd: 1.5, timeout_seconds: 60 } as any,
+    })) as { updated_fields: string[] };
+    expect(res.updated_fields).toEqual([]);
+    const rows = await configEvents(orgId, created.automation_id);
+    expect(rows.length).toBe(beforeCount);
+  });
+
   it('delivery_target retains numeric connection id + channel, drops secrets', () => {
     const redacted = redactConfigState('automation', {
       delivery_target: { connection_id: 541, channel_id: 'slack:C_TASKS', token: 'shh', secret: 'shh2' },
@@ -176,10 +210,93 @@ describe('automation config audit #3664', () => {
     expect(rows.length).toBe(beforeCount + 1);
     expect(rows[rows.length - 1].metadata.action).toBe('set_reaction_script');
     expect(rows[rows.length - 1].metadata.changed_fields).toContain('reaction_script');
+    expect(rows[rows.length - 1].metadata.changed_fields).toContain('reaction_input_schema');
     // Per-row cascade audit: the row carries its own before/after.
     const payload = rows[rows.length - 1].payload_data as Record<string, any>;
     expect(payload.before.reaction_script).toBeNull();
+    expect(payload.before.reaction_input_schema).toBeNull();
     expect(payload.state.reaction_script).toContain('summary');
+    expect(payload.state).toHaveProperty('reaction_input_schema');
+  });
+
+  it('set_reaction_script clear audits prior input schema', async () => {
+    const created = (await owner.automations.create({
+      slug: 'audit-reaction-clear',
+      name: 'Audit Reaction Clear',
+      prompt: 'react',
+      triggers: [],
+      managed_agent_id: agentId,
+    })) as { automation_id: string };
+    await owner.automations.setReactionScript({
+      automation_id: created.automation_id,
+      reaction_script: 'export const input = { type: "object" }; export default async () => ({ summary: "hi" });',
+    });
+    const beforeClear = (await configEvents(orgId, created.automation_id)).length;
+    await owner.automations.setReactionScript({
+      automation_id: created.automation_id,
+      reaction_script: '',
+    });
+    const rows = await configEvents(orgId, created.automation_id);
+    expect(rows.length).toBe(beforeClear + 1);
+    const last = rows[rows.length - 1];
+    expect(last.metadata.action).toBe('set_reaction_script');
+    expect(last.metadata.changed_fields).toContain('reaction_script');
+    expect(last.metadata.changed_fields).toContain('reaction_input_schema');
+    const payload = last.payload_data as Record<string, any>;
+    expect(payload.before.reaction_script).toContain('summary');
+    expect(payload.before).toHaveProperty('reaction_input_schema');
+    expect(payload.state.reaction_script).toBeNull();
+    expect(payload.state.reaction_input_schema).toBeNull();
+  });
+
+  it('create_from_version audits every copied config field', async () => {
+    const source = (await owner.automations.create({
+      slug: 'audit-cfv-source',
+      name: 'Audit CFV Source',
+      prompt: 'source prompt',
+      triggers: [{ kind: 'schedule', cron: '0 9 * * *' }],
+      managed_agent_id: agentId,
+      model_config: { model: 'm1' } as any,
+      execution_config: { timeout_seconds: 30 } as any,
+      tags: ['cfv-tag'],
+    })) as { automation_id: string };
+    await owner.automations.setReactionScript({
+      automation_id: source.automation_id,
+      reaction_script: 'export default async () => ({ summary: "cfv" });',
+    });
+    const sql = getTestDb();
+    const [srcRow] = await sql`SELECT current_version_id FROM automations WHERE id = ${Number(source.automation_id)}`;
+    const entity = await createTestEntity({
+      name: 'CFV Target',
+      organization_id: orgId,
+      created_by: userId,
+    });
+    const cloned = (await owner.automations.createFromVersion({
+      version_id: String(srcRow.current_version_id),
+      entity_ids: [entity.id],
+    })) as { created: Array<{ automation_id: string }> };
+    const newId = cloned.created[0].automation_id;
+    const rows = await configEvents(orgId, newId);
+    expect(rows.length).toBe(1);
+    const meta = rows[0].metadata as Record<string, any>;
+    expect(meta.action).toBe('create_from_version');
+    const payload = rows[0].payload_data as Record<string, any>;
+    // Every copied field is represented in state…
+    expect(payload.state.model_config).toEqual({ model: 'm1' });
+    expect(payload.state.execution_config).toEqual({ timeout_seconds: 30 });
+    expect(payload.state.tags).toContain('cfv-tag');
+    expect(payload.state.reaction_script).toContain('cfv');
+    expect(payload.state).toHaveProperty('reaction_input_schema');
+    expect(payload.state.prompt).toBe('source prompt');
+    // …and covered by changedFields. No overclaim: uncopied settings stay out.
+    for (const field of [
+      'model_config', 'execution_config', 'tags', 'reaction_script',
+      'reaction_input_schema', 'triggers', 'schedule', 'timezone',
+    ]) {
+      expect(meta.changed_fields).toContain(field);
+    }
+    expect(meta.changed_fields).not.toContain('delivery_target');
+    expect(meta.changed_fields).not.toContain('min_cooldown_seconds');
   });
 
   it('cross-org set_reaction_script reads as not-found and writes nothing', async () => {
@@ -242,6 +359,84 @@ describe('automation config audit #3664', () => {
     const payload = last.payload_data as Record<string, any>;
     expect(payload.before.prompt).toBe('v1 prompt');
     expect(payload.state.prompt).toBe('v2 prompt');
+  });
+
+  it('create_version draft (set_as_current=false) omits cadence state/fields', async () => {
+    const created = (await owner.automations.create({
+      slug: 'audit-version-draft',
+      name: 'Audit Version Draft',
+      prompt: 'v1 prompt',
+      triggers: [],
+      managed_agent_id: agentId,
+    })) as { automation_id: string };
+    const beforeCount = (await configEvents(orgId, created.automation_id)).length;
+    await owner.automations.createVersion({
+      automation_id: created.automation_id,
+      prompt: 'v2 draft',
+      triggers: [{ kind: 'schedule', cron: '0 10 * * *' }],
+      set_as_current: false,
+    } as any);
+    const rows = await configEvents(orgId, created.automation_id);
+    expect(rows.length).toBe(beforeCount + 1);
+    const last = rows[rows.length - 1];
+    expect(last.metadata.action).toBe('create_version');
+    const payload = last.payload_data as Record<string, any>;
+    expect(payload.state.prompt).toBe('v2 draft');
+    // Draft leaves the live row untouched: no cadence in state or changedFields.
+    expect(payload.state).not.toHaveProperty('schedule');
+    expect(payload.state).not.toHaveProperty('timezone');
+    expect(payload.state).not.toHaveProperty('triggers');
+    expect(last.metadata.changed_fields).not.toContain('schedule');
+    expect(last.metadata.changed_fields).not.toContain('timezone');
+    expect(last.metadata.changed_fields).not.toContain('triggers');
+    // Live row still has no schedule.
+    const sql = getTestDb();
+    const [live] = await sql`SELECT schedule FROM automations WHERE id = ${Number(created.automation_id)}`;
+    expect(live.schedule).toBeNull();
+  });
+
+  it('delete invocation audit: all-failed is failure, partial stays success', async () => {
+    const { recordToolInvocationAudit } = await import('../../../tools/audit');
+    const baseCtx = {
+      organizationId: orgId, userId, tokenType: 'oauth',
+      clientId: null, agentId: null, mcpSessionId: null, mcpConversationId: null,
+    } as any;
+    const countInv = async () => (await invocationEvents(orgId)).length;
+
+    const beforeAll = await countInv();
+    await recordToolInvocationAudit({
+      toolName: 'manage_automations',
+      args: { action: 'delete', automation_ids: ['1', '2'] },
+      result: {
+        action: 'delete',
+        results: [
+          { automation_id: '1', success: false, message: 'nope' },
+          { automation_id: '2', success: false, message: 'nope' },
+        ],
+        summary: { total: 2, successful: 0, failed: 2 },
+      },
+      durationMs: 1,
+      ctx: baseCtx,
+    });
+    await recordToolInvocationAudit({
+      toolName: 'manage_automations',
+      args: { action: 'delete', automation_ids: ['1', '2'] },
+      result: {
+        action: 'delete',
+        results: [
+          { automation_id: '1', success: true, message: 'ok' },
+          { automation_id: '2', success: false, message: 'nope' },
+        ],
+        summary: { total: 2, successful: 1, failed: 1 },
+      },
+      durationMs: 1,
+      ctx: baseCtx,
+    });
+    const inv = await invocationEvents(orgId);
+    expect(inv.length).toBe(beforeAll + 2);
+    const [allFailed, partial] = inv.slice(-2);
+    expect((allFailed.payload_data as any).success).toBe(false);
+    expect((partial.payload_data as any).success).toBe(true);
   });
 
   it('delete emits deleted with before snapshot', async () => {
