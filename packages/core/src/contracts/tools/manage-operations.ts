@@ -352,6 +352,48 @@ export const RejectBatchAction = Type.Object({
  * the same schema exposed as the tool's `outputSchema`. Operation/run rows are
  * wide snapshots, so they're honestly `Record<string, unknown>`.
  */
+const DeliveryStatusSchema = Type.Union([
+  Type.Literal("queued"),
+  Type.Literal("dispatched"),
+  Type.Literal("provider_accepted"),
+  Type.Literal("delivered"),
+  Type.Literal("failed"),
+]);
+
+export const NotificationDeliverySchema = Type.Object({
+  outcome: Type.Union([
+    DeliveryStatusSchema,
+    Type.Literal("no_target"),
+    Type.Literal("partial"),
+  ]),
+  event_id: Type.Integer(),
+  automation_id: Type.Union([Type.Integer(), Type.Null()]),
+  run_id: Type.Union([Type.Integer(), Type.Null()]),
+  targets: Type.Array(
+    Type.Object({
+      connection_id: Type.String(),
+      channel: Type.String(),
+      platform: Type.String(),
+      attempts: Type.Array(
+        Type.Object({
+          attempt: Type.Integer(),
+          idempotency_key: Type.String(),
+          status: DeliveryStatusSchema,
+          observed_at: Type.String(),
+          provider_timestamp: Type.Union([Type.String(), Type.Null()]),
+          provider_message_id: Type.Union([Type.String(), Type.Null()]),
+          error: Type.Union([
+            Type.Object({ code: Type.String(), retryable: Type.Boolean() }),
+            Type.Null(),
+          ]),
+        })
+      ),
+    })
+  ),
+});
+
+export type NotificationDelivery = Static<typeof NotificationDeliverySchema>;
+
 export const ManageOperationsResultSchema = Type.Union([
   Type.Object({ error: Type.String() }),
   Type.Object({
@@ -428,6 +470,7 @@ export const ManageOperationsResultSchema = Type.Union([
         href: Type.Union([Type.String(), Type.Null()]),
         unread: Type.Optional(Type.Boolean()),
         notification_id: Type.Optional(Type.Integer()),
+        delivery: Type.Optional(NotificationDeliverySchema),
         browser_url: Type.Optional(Type.String()),
         browser_handoff: Type.Optional(
           Type.Object({
