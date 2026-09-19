@@ -532,9 +532,8 @@ export async function startViewReapplyLoop(
       try {
         set = await collectViewReapplySet(cwd);
       } catch {
-        // A mid-save config may not parse — keep the old set; the next
-        // successful apply rebuilds it.
-        return;
+        // Keep the last good paths, but reopen subscriptions after an
+        // atomic save replaces a file that currently does not parse.
       }
       // In-place subscription swap on the same coordinator: a save recorded
       // while this apply ran keeps its pending timer and still deploys.
