@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
+  type DeliveryRecord,
+  type DeliveryTaskContext,
+  deliveryAttempt,
+  deliveryError,
+  NotificationDeliveryError,
+  projectDelivery,
+  storedDeliveryRecords,
+} from "./delivery";
+import {
 	type AdapterPostableMessage,
 	type CardElement,
 } from "chat";
@@ -476,35 +485,21 @@ export async function findNotificationByIdempotencyKey(
  * Durable rather than in-memory on purpose: the pod that edits or replies is
  * frequently not the pod that posted.
  */
-interface NotificationDeliveryRecord {
-	connectionId: string;
-	/** Platform-prefixed channel id, or `dm` for the owner-routed tier. */
-	channelKey: string;
-	/** Trusted flat conversation id; present for conversation-scoped delivery. */
-	conversationId?: string;
-	messageId: string;
-	threadId: string;
-}
-
 /**
  * Delivery metadata read back from `events`. Readers validate only the
  * addressing triple because every consumer can address the message without a
  * channel key; preserve `channelKey` when the stored JSON includes it.
  */
-type PersistedNotificationDeliveryRecord = Omit<
-	NotificationDeliveryRecord,
-	"channelKey"
-> & {
-	channelKey?: string;
+type PersistedNotificationDeliveryRecord = DeliveryRecord & {
+	messageId: string;
+	threadId: string;
 };
 
 /**
- * Stamp where the notification was delivered onto the event that represents it.
- *
- * Post-hoc metadata UPDATE, matching the routing stamp in
- * `gateway/routes/internal/interactions.ts`: `events` is append-only for
- * DELETE, and this touches delivery metadata only — never payload. It has to
- * run after each post because the platform ids do not exist before it returns.
+ * Persist delivery lifecycle and addressing metadata on the owning event.
+ * Like the routing stamp in `gateway/routes/internal/interactions.ts`, this
+ * updates metadata only, never the event payload. Dispatch commits before
+ * egress; provider IDs are added only after the post returns.
  *
  * Best-effort by default: losing the record costs a later in-place edit, not
  * the notification itself. `present_event` and durable delivery require
@@ -512,25 +507,14 @@ type PersistedNotificationDeliveryRecord = Omit<
  */
 async function persistDeliveryMetadata(
 	eventId: number,
-	deliveries: PersistedNotificationDeliveryRecord[],
+	deliveries: DeliveryRecord[],
 	card?: CardElement,
 	options?: { db?: DbClient; required?: boolean },
 ): Promise<void> {
-	// A record exists to be addressed later, and `editMessage(threadId, messageId)`
-	// cannot address an empty id — an adapter that returned no message id has
-	// given us nothing to point at. Dropping it here rather than at each caller
-	// keeps the one rule in the one place that writes the record.
-	const addressable = deliveries.filter((entry) => entry.messageId !== "");
-	if (addressable.length === 0) {
-		if (options?.required) {
-			throw new Error("Delivery did not return an addressable message id");
-		}
-		return;
-	}
 	const db = options?.db ?? getDb();
 	try {
 		const deliveryMetadata = {
-			delivery: addressable,
+			delivery: deliveries,
 			...(card ? { card } : {}),
 		};
 		const updated = await db<{ id: number }>`
@@ -687,10 +671,11 @@ async function presentStoredEventToConversationLocked(
 		content: { card, fallbackText },
 		subscribe: true,
 	});
+	if (!sent.messageId) throw new Error("Delivery did not return an addressable message id");
 	await persistDeliveryMetadata(
 		params.eventId,
 		[
-			...deliveryRecords(metadata),
+			...storedDeliveryRecords(metadata),
 			{
 				connectionId: params.connectionId,
 				channelKey: params.channelKey,
@@ -733,6 +718,7 @@ function deliveryRecords(
 				messageId !== "" &&
 				typeof threadId === "string"
 				? [{
+						...(row as unknown as DeliveryRecord),
 						connectionId,
 						...(typeof channelKey === "string" ? { channelKey } : {}),
 						...(typeof conversationId === "string" ? { conversationId } : {}),
@@ -1163,6 +1149,52 @@ function sameDeliveryTarget(a: BotDeliveryTarget, b: BotDeliveryTarget): boolean
 	);
 }
 
+/** Commit dispatch evidence before egress, using the same event row as the send lock. */
+async function startDeliveryAttempt(
+	input: NotificationDeliveryTaskPayload,
+	target: BotDeliveryTarget,
+	context?: DeliveryTaskContext,
+): Promise<number | undefined> {
+	return getDb().begin(async (tx) => {
+		const [row] = await tx<{ metadata: Record<string, unknown>; superseded_by: number | null }>`
+			SELECT metadata, superseded_by FROM events
+			WHERE id = ${input.eventId} AND organization_id = ${input.organizationId}
+			FOR UPDATE
+		`;
+		if (!row) throw new Error("Notification event disappeared");
+		if (row.superseded_by !== null) return;
+		const records = storedDeliveryRecords(row.metadata);
+		let record = records.find((entry) => entry.connectionId === target.connectionId && entry.channelKey === target.channelKey);
+		if (!record) {
+			record = { connectionId: target.connectionId, channelKey: target.channelKey, platform: target.platform };
+			records.push(record);
+		}
+		if (record.messageId) return;
+		if (context && record.taskRunId != null &&
+			(context.taskRunId < record.taskRunId || (context.taskRunId === record.taskRunId &&
+				context.attempt < (record.taskAttempt ?? 0)))) return;
+		const latest = record.attempts?.at(-1);
+		if (latest?.error?.retryable === false) return;
+		// Concurrent replays share a dispatched attempt. A queue retry after a crash
+		// has a different claim attempt and retains the interrupted attempt as evidence.
+		if (!latest || latest.status === "failed" || (latest.status === "dispatched" && context &&
+			(record.taskRunId !== context.taskRunId || record.taskAttempt !== context.attempt))) {
+			(record.attempts ??= []).push(deliveryAttempt(input.eventId, target, (latest?.attempt ?? 0) + 1, "queued"));
+		}
+		const attempt = record.attempts!.at(-1)!;
+		if (attempt.status !== "dispatched") {
+			attempt.status = "dispatched";
+			attempt.observed_at = new Date().toISOString();
+		}
+		if (context) {
+			record.taskRunId = context.taskRunId;
+			record.taskAttempt = context.attempt;
+		}
+		await persistDeliveryMetadata(input.eventId, records, undefined, { db: tx, required: true });
+		return attempt.attempt;
+	});
+}
+
 /**
  * The inbox and this task commit together. A queue retry rehydrates the saved
  * notification and posts only destinations without durable receipts. Selected
@@ -1174,6 +1206,7 @@ function sameDeliveryTarget(a: BotDeliveryTarget, b: BotDeliveryTarget): boolean
  */
 export async function deliverNotificationTask(
 	input: NotificationDeliveryTaskPayload,
+	context?: DeliveryTaskContext,
 ): Promise<void> {
 	const sql = getDb();
 	const [saved] = await sql<{ metadata: Record<string, unknown> }>`
@@ -1207,6 +1240,7 @@ export async function deliverNotificationTask(
 	let approvalRunIdToRefresh = request.context.decisionRunId ?? null;
 	for (const target of destinations) {
 		try {
+			const startedAttempt = await startDeliveryAttempt(input, target, context);
 			// Reuse the event-row receipt boundary used by presentStoredEventToConversation.
 			// Each destination commits separately; a failure must not roll back a prior
 			// successful post's receipt and cause it to be sent again on retry.
@@ -1230,187 +1264,207 @@ export async function deliverNotificationTask(
 				if (!row) throw new Error("Notification event disappeared");
 				if (row.superseded_by !== null) return;
 				const receipts = deliveryRecords(row.metadata);
-
-				const context = request.context;
-				// A delayed approval or browser handoff may already have been resolved.
-				// The event resource is also checked for approval families with no buttons.
-				const resourceId =
-					row.metadata.resource_type === "event" &&
-					typeof row.metadata.resource_id === "string" &&
-					/^\d+$/.test(row.metadata.resource_id)
-						? Number(row.metadata.resource_id)
-						: null;
-				const [resource] =
-					resourceId != null && Number.isSafeInteger(resourceId)
-						? await tx<{
-								run_id: number | null;
-								interaction_type: string | null;
-								interaction_status: string | null;
-								superseded_by: number | null;
-							}>`
-								SELECT run_id, interaction_type, interaction_status, superseded_by
-								FROM events
-								WHERE id = ${resourceId}
-								  AND organization_id = ${input.organizationId}
-							`
-						: [];
-				const decisionRunId = context.decisionRunId ??
-					(resource?.interaction_type === "approval" ? resource.run_id : null);
-				approvalRunIdToRefresh ??= decisionRunId;
-				if (
-					receipts.some(
-						(receipt) =>
-							receipt.connectionId === target.connectionId &&
-							receipt.channelKey === target.channelKey,
-					)
-				) {
-					hasDelivery = true;
-					return;
-				}
-				if (
-					resource?.interaction_type &&
-					(resource.superseded_by !== null ||
-						resource.interaction_status !== "pending")
-				) {
-					return;
-				}
-				const browserRunId = typeof row.metadata.browser_handoff_run_id === "number"
-					? row.metadata.browser_handoff_run_id : null;
-				if (decisionRunId != null || browserRunId != null) {
-					const runIds = [decisionRunId, browserRunId].filter(
-						(id): id is number => id != null,
-					);
-					// Match the inbox and page-activation endpoint's ready contract.
-					// A browser handoff and an approval can reference different runs.
-					const states = await tx<{
-						id: number;
-						approval_status: string;
-						browser_ready: boolean;
-					}>`
-						SELECT id, approval_status, COALESCE(
-							run_type = 'action' AND status = 'pending'
-							AND approval_status = 'auto'
-							AND activation_kind = 'page_visit'
-							AND run_metadata->>'page_activation_identity' = 'exact'
-							AND activated_at IS NULL
-							AND expires_at > current_timestamp,
-							false
-						) AS browser_ready
-						FROM runs
-						WHERE organization_id = ${input.organizationId}
-						  AND id = ANY(${pgBigintArray(runIds)}::bigint[])
-					`;
-					const decision = states.find((state) => Number(state.id) === decisionRunId);
-					const browser = states.find((state) => Number(state.id) === browserRunId);
-					if ((decisionRunId != null && !decision) || (browserRunId != null && !browser)) {
-						throw new Error("Notification decision run is unavailable");
-					}
+				const records = storedDeliveryRecords(row.metadata);
+				const record = records.find((entry) => entry.connectionId === target.connectionId && entry.channelKey === target.channelKey);
+				const attempt = record?.attempts?.at(-1);
+				if (attempt?.error?.retryable === false) return;
+				let card: CardElement | undefined;
+				try {
+					const context = request.context;
+					// A delayed approval or browser handoff may already have been resolved.
+					// The event resource is also checked for approval families with no buttons.
+					const resourceId =
+						row.metadata.resource_type === "event" &&
+						typeof row.metadata.resource_id === "string" &&
+						/^\d+$/.test(row.metadata.resource_id)
+							? Number(row.metadata.resource_id)
+							: null;
+					const [resource] =
+						resourceId != null && Number.isSafeInteger(resourceId)
+							? await tx<{
+									run_id: number | null;
+									interaction_type: string | null;
+									interaction_status: string | null;
+									superseded_by: number | null;
+								}>`
+									SELECT run_id, interaction_type, interaction_status, superseded_by
+									FROM events
+									WHERE id = ${resourceId}
+									  AND organization_id = ${input.organizationId}
+								`
+							: [];
+					const decisionRunId = context.decisionRunId ??
+						(resource?.interaction_type === "approval" ? resource.run_id : null);
+					approvalRunIdToRefresh ??= decisionRunId;
 					if (
-						(decisionRunId != null && decision?.approval_status !== "pending") ||
-						(browserRunId != null && !browser?.browser_ready)
+						receipts.some(
+							(receipt) =>
+								receipt.connectionId === target.connectionId &&
+								receipt.channelKey === target.channelKey,
+						)
 					) {
+						hasDelivery = true;
 						return;
 					}
-				}
-
-				const current = await resolveNotificationDeliveryPlan({
-					...context,
-					organizationId: input.organizationId,
-				});
-				if (request.strictAutomationTarget && !current.strictAutomationTarget) {
-					throw new Error("Automation notification target changed");
-				}
-				if (request.ownerDm) {
-					if (
-						!context.ownerUserId ||
-						!(await ownerIsMember(input.organizationId, context.ownerUserId))
-					) {
-						throw new Error("Notification owner is no longer a workspace member");
+					if (attempt && startedAttempt !== attempt.attempt) {
+						throw new NotificationDeliveryError("attempt_superseded", "Delivery attempt was superseded");
 					}
-					const dm = await resolveOwnerDmTarget(
-						input.organizationId,
-						context.ownerUserId,
-						context.connectionId,
-					);
-					if (
-						!dm ||
-						dm.connectionId !== request.ownerDm.connectionId ||
-						dm.platform !== request.ownerDm.platform ||
-						dm.platformUserId !== request.ownerDm.platformUserId
-					) {
-						throw new Error("Notification owner destination changed");
+					if (attempt?.status === "failed") {
+						failures.push(new Error(attempt.error?.code ?? "delivery_unknown"));
+						return;
 					}
-				} else if (
-					!current.targets.some((currentTarget) =>
-						sameDeliveryTarget(target, currentTarget),
-					)
-				) {
-					throw new Error("Notification destination is no longer authorized");
-				}
-				const manager = getChatInstanceManager();
-				if (!manager) throw new Error("Notification chat gateway is unavailable");
-				const params: Omit<CreateNotificationParams, "userId"> = {
-					...context,
-					organizationId: input.organizationId,
-					type: row.metadata.notification_type as CreateNotificationParams["type"],
-					title: row.title,
-					body: row.payload_text,
-					semanticType:
-						row.semantic_type === "notification" ? undefined : row.semantic_type,
-					payloadData: row.payload_data,
-					entityIds: parsePgNumberArray(row.entity_ids),
-					resourceUrl:
-						typeof row.metadata.resource_url === "string"
-							? row.metadata.resource_url
-							: null,
-				};
-				const baseCard = isCard(row.metadata.card)
-					? row.metadata.card
-					: await resolveNotificationKindCard(params, input.eventId);
-				const card = baseCard
-					? receipts.length
-						? baseCard
-						: addActionOrigin(baseCard, context.actionOrigin)
-					: undefined;
-				const body = row.payload_text
-					? `${row.title}\n\n${row.payload_text}`
-					: row.title;
-				const link = toAbsolutePermalink(params.resourceUrl);
-				const content = card
-					? { card }
-					: { markdown: link ? `${body}\n\n${link}` : body };
-				const sent = request.ownerDm
-					? await manager.postDirectMessage(
-							target.connectionId,
-							request.ownerDm.platformUserId,
-							content,
-						)
-					: await manager.postMessageToChannel(
-							target.connectionId,
-							target.channelKey,
-							content,
+					if (
+						resource?.interaction_type &&
+						(resource.superseded_by !== null ||
+							resource.interaction_status !== "pending")
+					) {
+						throw new NotificationDeliveryError("notification_inactive", "Notification is no longer actionable", false);
+					}
+					const browserRunId = typeof row.metadata.browser_handoff_run_id === "number"
+						? row.metadata.browser_handoff_run_id : null;
+					if (decisionRunId != null || browserRunId != null) {
+						const runIds = [decisionRunId, browserRunId].filter(
+							(id): id is number => id != null,
 						);
-				if (!sent.messageId) {
-					throw new Error("Delivery did not return an addressable message id");
+						// Match the inbox and page-activation endpoint's ready contract.
+						// A browser handoff and an approval can reference different runs.
+						const states = await tx<{
+							id: number;
+							approval_status: string;
+							browser_ready: boolean;
+						}>`
+							SELECT id, approval_status, COALESCE(
+								run_type = 'action' AND status = 'pending'
+								AND approval_status = 'auto'
+								AND activation_kind = 'page_visit'
+								AND run_metadata->>'page_activation_identity' = 'exact'
+								AND activated_at IS NULL
+								AND expires_at > current_timestamp,
+								false
+							) AS browser_ready
+							FROM runs
+							WHERE organization_id = ${input.organizationId}
+							  AND id = ANY(${pgBigintArray(runIds)}::bigint[])
+						`;
+						const decision = states.find((state) => Number(state.id) === decisionRunId);
+						const browser = states.find((state) => Number(state.id) === browserRunId);
+						if ((decisionRunId != null && !decision) || (browserRunId != null && !browser)) {
+							throw new NotificationDeliveryError("decision_unavailable", "Notification decision run is unavailable");
+						}
+						if (
+							(decisionRunId != null && decision?.approval_status !== "pending") ||
+							(browserRunId != null && !browser?.browser_ready)
+						) {
+							throw new NotificationDeliveryError("notification_inactive", "Notification is no longer actionable", false);
+						}
+					}
+
+					const current = await resolveNotificationDeliveryPlan({
+						...context,
+						organizationId: input.organizationId,
+					});
+					if (request.strictAutomationTarget && !current.strictAutomationTarget) {
+						throw new NotificationDeliveryError("binding_changed", "Automation notification target changed");
+					}
+					if (request.ownerDm) {
+						if (
+							!context.ownerUserId ||
+							!(await ownerIsMember(input.organizationId, context.ownerUserId))
+						) {
+							throw new NotificationDeliveryError("owner_unavailable", "Notification owner is no longer a workspace member");
+						}
+						const dm = await resolveOwnerDmTarget(
+							input.organizationId,
+							context.ownerUserId,
+							context.connectionId,
+						);
+						if (
+							!dm ||
+							dm.connectionId !== request.ownerDm.connectionId ||
+							dm.platform !== request.ownerDm.platform ||
+							dm.platformUserId !== request.ownerDm.platformUserId
+						) {
+							throw new NotificationDeliveryError("binding_changed", "Notification owner destination changed");
+						}
+					} else if (
+						!current.targets.some((currentTarget) =>
+							sameDeliveryTarget(target, currentTarget),
+						)
+					) {
+						throw new NotificationDeliveryError("binding_unavailable", "Notification destination is no longer authorized");
+					}
+					const manager = getChatInstanceManager();
+					if (!manager) throw new NotificationDeliveryError("gateway_unavailable", "Notification chat gateway is unavailable");
+					const params: Omit<CreateNotificationParams, "userId"> = {
+						...context,
+						organizationId: input.organizationId,
+						type: row.metadata.notification_type as CreateNotificationParams["type"],
+						title: row.title,
+						body: row.payload_text,
+						semanticType:
+							row.semantic_type === "notification" ? undefined : row.semantic_type,
+						payloadData: row.payload_data,
+						entityIds: parsePgNumberArray(row.entity_ids),
+						resourceUrl:
+							typeof row.metadata.resource_url === "string"
+								? row.metadata.resource_url
+								: null,
+					};
+					const baseCard = isCard(row.metadata.card)
+						? row.metadata.card
+						: await resolveNotificationKindCard(params, input.eventId);
+					card = baseCard
+						? receipts.length
+							? baseCard
+							: addActionOrigin(baseCard, context.actionOrigin)
+						: undefined;
+					const body = row.payload_text
+						? `${row.title}\n\n${row.payload_text}`
+						: row.title;
+					const link = toAbsolutePermalink(params.resourceUrl);
+					const content = card
+						? { card }
+						: { markdown: link ? `${body}\n\n${link}` : body };
+					const sent = request.ownerDm
+						? await manager.postDirectMessage(
+								target.connectionId,
+								request.ownerDm.platformUserId,
+								content,
+							)
+						: await manager.postMessageToChannel(
+								target.connectionId,
+								target.channelKey,
+								content,
+							);
+					if (!sent.messageId) {
+						throw new NotificationDeliveryError("provider_receipt_missing", "Delivery did not return an addressable message id");
+					}
+					if (!record || !attempt) throw new Error("Notification dispatch receipt disappeared");
+					record.messageId = sent.messageId;
+					record.threadId = sent.threadId;
+					attempt.status = "provider_accepted";
+					attempt.observed_at = new Date().toISOString();
+					attempt.provider_message_id = sent.messageId;
+					// Chat SDK synthesizes metadata.dateSent locally for sent messages;
+					// it is not a provider timestamp or a delivered acknowledgement.
+					hasDelivery = true;
+				} catch (error) {
+					if (!attempt || startedAttempt !== attempt.attempt) throw error;
+					attempt.status = "failed";
+					attempt.observed_at = new Date().toISOString();
+					attempt.error = deliveryError(error);
+					logger.warn({ eventId: input.eventId, connectionId: target.connectionId, ...attempt.error },
+						"[Notifications] Delivery attempt failed");
+					if (attempt.error.retryable) {
+						failures.push(new Error(attempt.error.code));
+					}
 				}
-				await persistDeliveryMetadata(
-					input.eventId,
-					[
-						...receipts,
-						{
-							connectionId: target.connectionId,
-							channelKey: target.channelKey,
-							messageId: sent.messageId,
-							threadId: sent.threadId,
-						},
-					],
-					card,
-					{ db: tx, required: true },
-				);
-				hasDelivery = true;
+				// Commit failures as well as success. A lost COMMIT leaves the durable
+				// dispatched state ambiguous, never a false provider rejection.
+				await persistDeliveryMetadata(input.eventId, records, card, { db: tx, required: true });
 			});
 		} catch (error) {
-			failures.push(error);
+			failures.push(new Error(deliveryError(error).code));
 		}
 	}
 	// Close the decision-during-post race: after receipt commit a concurrent
@@ -1516,6 +1570,17 @@ export async function createNotificationForUsers(
 				},
 				{ sql: tx },
 			);
+
+			const request = metadata.delivery_request as NotificationDeliveryRequest;
+			const targets = request.ownerDm
+				? [{ connectionId: request.ownerDm.connectionId, channelKey: "dm", platform: request.ownerDm.platform }]
+				: request.targets;
+			await persistDeliveryMetadata(event.id, targets.map((target) => ({
+				connectionId: target.connectionId,
+				channelKey: target.channelKey,
+				platform: target.platform,
+				attempts: [deliveryAttempt(event.id, target, 1, "queued")],
+			})), undefined, { db: tx, required: true });
 
 			await tx`
       INSERT INTO notification_targets (event_id, user_id, browser_url, browser_run_id)
@@ -1626,6 +1691,8 @@ export async function listNotifications(opts: {
       e.id,
       e.organization_id,
       t.user_id,
+      e.metadata AS delivery_metadata,
+      e.run_id AS delivery_run_id,
       COALESCE(e.metadata->>'notification_type', 'generic') AS type,
       CASE WHEN ${authorization.isRequest} THEN
         CASE WHEN ${authorization.pending} THEN 'Connection "' || COALESCE(auth_request.display_name, 'Account') || '" needs authorization'
@@ -1831,7 +1898,12 @@ export async function listNotifications(opts: {
   `) as unknown as Array<{ id: number } & Record<string, unknown>>;
 
 	const hasMore = rows.length > limit;
-	const notifications = hasMore ? rows.slice(0, limit) : rows;
+	const notifications = (hasMore ? rows.slice(0, limit) : rows).map((row) => {
+		const { delivery_metadata, delivery_run_id, ...notification } = row;
+		const delivery = projectDelivery(Number(row.id), row.automation_id == null ? null : Number(row.automation_id),
+			delivery_run_id == null ? null : Number(delivery_run_id), jsonRecord(delivery_metadata));
+		return { ...notification, ...(delivery ? { delivery } : {}) };
+	});
 	// No cursor for the attention read: handing one back would advertise a next
 	// page the guard above refuses to serve.
 	const nextCursor =

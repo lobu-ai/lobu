@@ -311,8 +311,10 @@ describe("automation material-change digest", () => {
       `automation:${ctx.automationId}:run:${runId}:digest`,
     );
     expect(outcome.eventId).toBe(Number(notification.id));
-    // No channel receipt yet — actual delivery has not run.
-    expect(notification.metadata.delivery ?? null).toBeNull();
+    // A queued destination is not evidence of provider acceptance.
+    expect(notification.metadata.delivery).toMatchObject([
+      { attempts: [{ status: "queued", provider_message_id: null }] },
+    ]);
 
     // The queued delivery task is the existing notification path, linked from
     // the digest outcome and history.

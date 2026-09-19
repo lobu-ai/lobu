@@ -517,6 +517,7 @@ function registerMaintenanceTasks(
   scheduler.register(NOTIFICATION_DELIVERY_TASK, async (ctx) => {
     await deliverNotificationTask(
       ctx.payload as NotificationDeliveryTaskPayload,
+      { taskRunId: ctx.taskRunId, attempt: ctx.attempt },
     );
   });
 
