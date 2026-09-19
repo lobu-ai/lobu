@@ -607,7 +607,7 @@ export async function executeAgentTurnRun(
       consumed_inputs: result.turn.consumedInputs.map((input) => ({
         run_id: input.runId, session_entry_id: input.sessionEntryId,
         response_text: input.responseText,
-        ...(input.toolsUsed.length ? { tools_used: input.toolsUsed } : {}),
+        tools_used: input.toolsUsed,
         ...(input.firstError ? { first_error: input.firstError } : {}),
       })),
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),

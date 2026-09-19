@@ -365,7 +365,7 @@ function turnToolEventKey(args: {
 	messageId: string;
 	toolCallId: string;
 }): string {
-	// Hash the length-prefixed JSON tuple instead of concatenating raw values:
+	// Hash the structured JSON tuple instead of concatenating raw values:
 	// delimiters may occur inside every identifier, and a raw key can exceed
 	// PostgreSQL's btree entry limit. The version prefix keeps future key
 	// schemes independently migratable.

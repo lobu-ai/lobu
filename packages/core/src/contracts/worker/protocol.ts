@@ -977,9 +977,9 @@ export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
  * The server renders this into the established `tool_use` custom event, so the
  * SPA, promptfoo provider and menubar keep one tool-trace shape.
  *
- * Best-effort like the delta it rides with, and for the same reason: a tool
- * trace is a VIEW of the turn, never the turn's answer, so a dropped one costs
- * visibility and nothing else.
+ * Mandatory external-effect evidence. The worker retains each trace until the
+ * server explicitly acknowledges durable storage; capacity overflow fails the
+ * turn honestly rather than dropping evidence.
  */
 export const TurnToolEventSchema = Type.Object({
   tool_call_id: Type.String({ maxLength: 256 }),
@@ -1032,7 +1032,7 @@ export const TurnToolEventSchema = Type.Object({
  * unbounded queue, shedding the oldest silently, or filing an unbounded
  * request.
  */
-export const TURN_TOOL_EVENT_QUEUE_MAX = 20;
+export const TURN_TOOL_EVENT_QUEUE_MAX = 50;
 
 /** Per-execution input bound shared by repeatable offers and committed receipts. */
 export const AGENT_TURN_INPUT_MAX = 32;
@@ -1266,7 +1266,9 @@ export const HeartbeatRequestSchema = Type.Object({
    * the same reason: the turn already reports on this interval, and where the
    * traces are delivered is read from the run's own row, never from this body.
    */
-  turn_tool_events: Type.Optional(Type.Array(TurnToolEventSchema)),
+  turn_tool_events: Type.Optional(
+    Type.Array(TurnToolEventSchema, { maxItems: TURN_TOOL_EVENT_QUEUE_MAX })
+  ),
 });
 
 /**

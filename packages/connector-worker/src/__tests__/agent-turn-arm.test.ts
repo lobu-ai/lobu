@@ -1044,6 +1044,28 @@ describe("executeAgentTurnRun streaming", () => {
    * completion, which is the write that cannot lose the lease fence to
    * itself — rather than have them silently dropped.
    */
+  test("serializes an explicit empty tool ledger for a steered input", async () => {
+    const reported: Reported = { calls: [] };
+    const executor: SyncExecutor = {
+      execute: async () => ({
+        mode: "agent_turn",
+        turn: {
+          text: "owner",
+          stopReason: "stop",
+          usage: null,
+          sessionJsonl: SESSION_JSONL,
+          toolsUsed: [],
+          consumedInputs: [{ runId: 77, sessionEntryId: "entry-77", responseText: "steered", toolsUsed: [] }],
+        },
+      }),
+    };
+    await executeAgentTurnRun(fakeClient(reported, []) as never, turnJob(), {}, cfgWith(executor));
+    expect(reported.calls[0]?.consumed_inputs?.[0]).toMatchObject({
+      run_id: 77,
+      tools_used: [],
+    });
+  });
+
   test("re-sends unacknowledged tool traces instead of dropping them", async () => {
     const reported: Reported = { calls: [] };
     const beats: HeartbeatCall[] = [];
@@ -1139,7 +1161,7 @@ describe("executeAgentTurnRun streaming", () => {
     const completion = reported.calls[0]!;
     expect(completion.status).toBe("failed");
     expect(completion.error).toMatch(/5 trace\(s\) could not be retained/);
-    expect(completion.error).toMatch(/starting with call-20 \(bash\)/);
+    expect(completion.error).toContain(`starting with call-${TURN_TOOL_EVENT_QUEUE_MAX} (bash)`);
     expect(completion.error).toMatch(/external effects past the retained prefix are unknown/);
     // The oldest prefix is retained as the evidence — nothing silently lost.
     expect(completion.turn_tool_events).toHaveLength(TURN_TOOL_EVENT_QUEUE_MAX);

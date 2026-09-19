@@ -40,7 +40,7 @@ BEGIN
   END IF;
 END $$;
 
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_turn_tool_event_uniq
+CREATE UNIQUE INDEX CONCURRENTLY idx_runs_turn_tool_event_uniq
   ON public.runs (idempotency_key)
   WHERE queue_name = 'thread_response'
     AND action_input->'customEvent'->>'name' = 'tool_use'
