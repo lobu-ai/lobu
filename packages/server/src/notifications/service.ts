@@ -1236,6 +1236,12 @@ export async function deliverNotificationTask(
 			]
 		: request.targets;
 	const failures: unknown[] = [];
+	const addFailure = (error: unknown, code = deliveryError(error).code) => {
+		failures.push(new Error(
+			`${code}: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		));
+	};
 	let hasDelivery = false;
 	let approvalRunIdToRefresh = request.context.decisionRunId ?? null;
 	for (const target of destinations) {
@@ -1456,7 +1462,7 @@ export async function deliverNotificationTask(
 					logger.warn({ eventId: input.eventId, connectionId: target.connectionId, ...attempt.error },
 						"[Notifications] Delivery attempt failed");
 					if (attempt.error.retryable) {
-						failures.push(new Error(attempt.error.code));
+						addFailure(error, attempt.error.code);
 					}
 				}
 				// Commit failures as well as success. A lost COMMIT leaves the durable
@@ -1464,7 +1470,7 @@ export async function deliverNotificationTask(
 				await persistDeliveryMetadata(input.eventId, records, card, { db: tx, required: true });
 			});
 		} catch (error) {
-			failures.push(new Error(deliveryError(error).code));
+			addFailure(error);
 		}
 	}
 	// Close the decision-during-post race: after receipt commit a concurrent

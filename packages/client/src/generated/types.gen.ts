@@ -4568,6 +4568,41 @@ export type ManageOperationsResponses = {
           href: string | null;
           unread?: boolean;
           notification_id?: number;
+          delivery?: {
+            outcome:
+              | "queued"
+              | "dispatched"
+              | "provider_accepted"
+              | "delivered"
+              | "failed"
+              | "no_target"
+              | "partial";
+            event_id: number;
+            automation_id: number | null;
+            run_id: number | null;
+            targets: Array<{
+              connection_id: string;
+              channel: string;
+              platform: string;
+              attempts: Array<{
+                attempt: number;
+                idempotency_key: string;
+                status:
+                  | "queued"
+                  | "dispatched"
+                  | "provider_accepted"
+                  | "delivered"
+                  | "failed";
+                observed_at: string;
+                provider_timestamp: string | null;
+                provider_message_id: string | null;
+                error: {
+                  code: string;
+                  retryable: boolean;
+                } | null;
+              }>;
+            }>;
+          };
           browser_url?: string;
           browser_handoff?: {
             run_id: number | null;

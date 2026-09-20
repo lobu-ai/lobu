@@ -208,8 +208,12 @@ describe("durable notification delivery", () => {
       ...h.params, channelId: "slack:C_FIRST", deliveryScope: "targeted",
     });
     const input = { organizationId: h.org.id, eventId: Number(event.eventId) };
-    h.post.mockRejectedValueOnce(Object.assign(new Error("SYNTHETIC_SECRET and extra provider body"), { status: 503 }));
-    await expect(deliverNotificationTask(input)).rejects.toThrow("provider_unavailable");
+    const providerError = Object.assign(new Error("SYNTHETIC_SECRET and extra provider body"), { status: 503 });
+    h.post.mockRejectedValueOnce(providerError);
+    await expect(deliverNotificationTask(input)).rejects.toMatchObject({
+      message: "Notification delivery failed: provider_unavailable: SYNTHETIC_SECRET and extra provider body",
+      errors: [expect.objectContaining({ cause: providerError })],
+    });
     await deliverNotificationTask(input);
     await deliverNotificationTask(input);
     const [row] = await getTestDb()`SELECT metadata FROM events WHERE id = ${input.eventId}`;
@@ -222,6 +226,32 @@ describe("durable notification delivery", () => {
     expect(JSON.stringify(row.metadata)).not.toContain("extra provider body");
     expect(h.post).toHaveBeenCalledTimes(2);
   });
+
+  it.each([new Error("synthetic provider outage"), "synthetic provider outage"])(
+    "preserves an unclassified provider cause without copying it into receipts: %s",
+    async (providerError) => {
+      const h = await setup();
+      const event = await createNotificationForUsers([h.user.id], {
+        ...h.params, channelId: "slack:C_FIRST", deliveryScope: "targeted",
+      });
+      h.post.mockRejectedValueOnce(providerError);
+      await expect(deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) }))
+        .rejects.toMatchObject({
+          message: "Notification delivery failed: delivery_unknown: synthetic provider outage",
+          errors: [expect.objectContaining({ cause: providerError })],
+        });
+      const [row] = await getTestDb()`SELECT metadata FROM events WHERE id = ${Number(event.eventId)}`;
+      expect(row.metadata.delivery[0].attempts[0]).toMatchObject({
+        status: "failed", error: { code: "delivery_unknown", retryable: true },
+      });
+      expect(JSON.stringify(row.metadata)).not.toContain("synthetic provider outage");
+      const activity = await listOrgActivity({
+        organizationId: h.org.id, userId: h.user.id, ownerSlug: "synthetic-workspace", includeRuns: false,
+      });
+      expect(activity.items[0].delivery).toMatchObject({ outcome: "failed" });
+      expect(JSON.stringify(activity)).not.toContain("synthetic provider outage");
+    },
+  );
 
   it("keeps dispatch evidence if provider acceptance cannot commit, and records the queue retry separately", async () => {
     const h = await setup();
@@ -243,7 +273,12 @@ describe("durable notification delivery", () => {
       CREATE TRIGGER test_reject_provider_receipt BEFORE UPDATE ON events
       FOR EACH ROW EXECUTE FUNCTION test_reject_provider_receipt();`);
     try {
-      await expect(deliverNotificationTask(input, { taskRunId, attempt: 1 })).rejects.toThrow();
+      await expect(deliverNotificationTask(input, { taskRunId, attempt: 1 })).rejects.toMatchObject({
+        message: "Notification delivery failed: delivery_unknown: synthetic receipt commit failure",
+        errors: [expect.objectContaining({
+          cause: expect.objectContaining({ message: "synthetic receipt commit failure", code: "P0001" }),
+        })],
+      });
       await expect(deliverNotificationTask(input, { taskRunId, attempt: 2 })).rejects.toThrow();
       await expect(deliverNotificationTask(input, { taskRunId, attempt: 1 })).rejects.toThrow("attempt_superseded");
       const [row] = await sql`SELECT metadata FROM events WHERE id = ${input.eventId}`;
