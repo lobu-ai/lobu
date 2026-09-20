@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
 import { recordMcpConversationActivity } from '../../../lobu/stores/mcp-client-conversations';
+import { McpSessionStore } from '../../../mcp-session-store';
 import type { ToolContext } from '../../../tools/registry';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
@@ -159,6 +160,69 @@ describe('client activity scopes route', () => {
       { conversation_id: 'chatgpt-transport-only', activity_kind: 'session' },
       { conversation_id: 'claude-transport', activity_kind: 'session' },
     ]);
+  });
+
+  it('marks only a recorded live transport as active without removing ended history', async () => {
+    const store = new McpSessionStore();
+    const sessionId = 'chatgpt-transport-only';
+    const reconnectedSessionId = 'reconnected-live-transport';
+    const readScope = async () => {
+      const response = await get(
+        `/api/me/clients/activity-scopes?client_ids=${chatgptClientId}&activity_kind=session`,
+        { token }
+      );
+      expect(response.status).toBe(200);
+      const { scopes } = await response.json();
+      expect(scopes).toHaveLength(1);
+      return scopes[0];
+    };
+
+    const historical = await readScope();
+    expect(historical).toMatchObject({ activityId: sessionId, isLive: false });
+    try {
+      await getDb()`
+        INSERT INTO mcp_sessions (session_id, user_id, client_id, expires_at)
+        VALUES (${reconnectedSessionId}, ${userId}, ${chatgptClientId}, NOW() + interval '1 hour')
+      `;
+      expect(await readScope()).toEqual(historical);
+
+      await getDb()`
+        UPDATE mcp_client_conversations
+        SET transport_session_ids = transport_session_ids || jsonb_build_array(${reconnectedSessionId}::text)
+        WHERE user_id = ${userId} AND client_id = ${chatgptClientId}
+          AND conversation_id = ${sessionId}
+      `;
+      expect(await readScope()).toEqual({ ...historical, isLive: true });
+      await store.deleteSession(reconnectedSessionId);
+      expect(await readScope()).toEqual(historical);
+
+      await store.upsertSession({
+        sessionId,
+        userId,
+        clientId: chatgptClientId,
+        organizationId,
+        memberRole: 'owner',
+        requestedAgentId: null,
+        isAuthenticated: true,
+        scopedToOrg: true,
+        supportsMcpApps: false,
+        supportsAppSandboxDomain: false,
+        lastAccessedAt: Date.now() - 7_200_000,
+        expiresAt: Date.now() - 60_000,
+      });
+      expect(await readScope()).toEqual(historical);
+
+      // The same renewal used by active handlers/heartbeats in #3678 makes
+      // this session live without changing its recorded tool activity.
+      expect(await store.refreshActivity(sessionId)).toBe(true);
+      expect(await readScope()).toEqual({ ...historical, isLive: true });
+
+      await store.deleteSession(sessionId);
+      expect(await readScope()).toEqual(historical);
+    } finally {
+      await store.deleteSession(sessionId);
+      await store.deleteSession(reconnectedSessionId);
+    }
   });
 
   it('filters conversation and transport-session scopes explicitly', async () => {

@@ -28,6 +28,7 @@ interface ActivityScopeRow {
 	failed_count: number | string;
 	tools: unknown;
 	unread_notification_count: number;
+	is_live: boolean;
 }
 
 function stringArray(value: unknown): string[] {
@@ -102,6 +103,14 @@ routes.get("/", mcpAuth, async (c) => {
     SELECT mc.activity_kind, mc.conversation_id, mc.client_id, oc.client_name,
       mc.title, mc.last_action, mc.first_activity_at, mc.last_activity_at,
       mc.call_count, mc.failed_count,
+      EXISTS (
+        SELECT 1
+        FROM public.mcp_sessions session
+        WHERE session.user_id = mc.user_id
+          AND session.client_id = mc.client_id
+          AND session.expires_at > NOW()
+          AND mc.transport_session_ids ? session.session_id
+      ) AS is_live,
       jsonb_path_query_array(mc.tools, '$[0 to 7]') AS tools,
       COALESCE(notification_count.unread_notification_count, 0)::integer
         AS unread_notification_count
@@ -132,6 +141,7 @@ routes.get("/", mcpAuth, async (c) => {
 		scopes: rows.map((row) => ({
 			activityId: row.conversation_id,
 			activityKind: row.activity_kind,
+			isLive: row.is_live,
 			clientId: row.client_id,
 			clientName: row.client_name,
 			title: row.title,
