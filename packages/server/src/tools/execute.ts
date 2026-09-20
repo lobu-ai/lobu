@@ -68,8 +68,8 @@ export interface AuthContext {
   /** Bare OAuth MCP search uses its granted workspace set without an anchor. */
   directSearchFederation: boolean;
   /**
-   * Persistent MCP session id (`mcp-session-id` header) when the call arrived
-   * through an MCP transport session; null for REST-proxy and internal calls.
+   * Persistent MCP session id from an MCP transport or a validated REST header;
+   * absent for correlation-free REST-proxy and internal calls.
    * Audit rows carry it so a client's activity can be grouped per session.
    */
   mcpSessionId?: string | null;

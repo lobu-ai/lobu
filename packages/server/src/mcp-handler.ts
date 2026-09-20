@@ -80,6 +80,7 @@ import {
   viewResourceMeta,
 } from './views/views';
 import { resolvePublicOrigin } from './utils/public-origin';
+import { ToolUserError } from './utils/errors';
 import { buildWorkspaceInstructions } from './utils/workspace-instructions';
 import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
 import logger from './utils/logger';
@@ -1128,6 +1129,26 @@ async function recoverSessionAuthContext(
   restrictBoundIdentityWorkspaceAccess(authCtx);
   authCtx.instructions = await buildSessionInstructions(authCtx);
 
+  return authCtx;
+}
+
+/** REST may continue an existing MCP activity, but the header is not authentication. */
+export async function resolveRestToolAuthContext(c: Context<{ Bindings: Env }>): Promise<AuthContext> {
+  const sessionId = c.req.header('mcp-session-id');
+  if (sessionId === undefined) return extractAuthContext(c);
+
+  // Always use persisted recovery, even on the pod owning the MCP transport:
+  // current request auth and the shared row are authoritative for every call.
+  const authCtx = await recoverSessionAuthContext(c, sessionId);
+  if (authCtx === RECOVERY_OAUTH_BEARER_REQUIRED) {
+    throw new ToolUserError('A valid OAuth bearer token is required to use this MCP session.', 401);
+  }
+  // Update-only: a revoke committed during validation must deny execution,
+  // never recreate the session. A mismatch must not revoke the owner's row.
+  if (!authCtx || !(await refreshSessionState(sessionId, authCtx))) {
+    throw new ToolUserError('MCP session expired or not recognized. Initialize a new MCP session.', 404);
+  }
+  authCtx.mcpSessionId = sessionId;
   return authCtx;
 }
 

@@ -22,6 +22,7 @@ import { fixedActionArgs } from "./http/rest-tool-routes";
 import type { Env } from "./index";
 import { invokeTemplateEventAction } from "./interactions/template-event-actions";
 import { invokeViewAction } from "./interactions/template-event-actions";
+import { resolveRestToolAuthContext } from "./mcp-handler";
 import { getView, isValidViewKey, renderViewShell } from "./views/views";
 import { getOperationsSummary } from "./operations/connector-operations";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";
@@ -333,7 +334,7 @@ export async function restToolProxy(
 			throw new ToolNotRegisteredError(toolName);
 		}
 		const args: Record<string, unknown> = explicitArgs ?? (await c.req.json());
-		const authCtx = extractAuthContext(c);
+		const authCtx = await resolveRestToolAuthContext(c);
 		const result = await executeTool(toolName, args, c.env, authCtx);
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
 	} catch (error) {
