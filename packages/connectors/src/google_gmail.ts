@@ -100,12 +100,20 @@ interface GmailCheckpoint {
   /** Serialized search + person filter the two fields below were produced under. */
   scope?: string;
   last_sync_at?: string;
+  /** Undecodable threads, keyed by thread ID; retained until a later successful read. */
+  skipped_threads?: Record<string, { message_id: string; error: string }>;
   /** Set while a window is only part-walked: the run hit `max_results`, or a page came back empty with a cursor. */
   pending?: {
     query: string;
     started_at: string;
     page_token: string;
   };
+}
+
+class GmailBodyDecodeError extends Error {
+  constructor(readonly messageId: string, encoding: string, cause: unknown) {
+    super(`Gmail body decode (${encoding}): ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+  }
 }
 
 interface GmailConfig {
@@ -486,6 +494,8 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     let staleCursorRecoverable = pageToken !== undefined;
     const http = this.createClient(token);
     const events: EventEnvelope[] = [];
+    const skippedThreads = { ...checkpoint.skipped_threads };
+    let itemsSkipped = 0;
     // Bounds the threads FETCHED per run (each costs at least one API call),
     // independent of how many survive the person filter — a narrow feed must not
     // scan the whole window just because most threads are rejected. It also sizes
@@ -562,6 +572,13 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
               ...(attribution.fromName ? { from_name: attribution.fromName } : {}),
             },
           });
+          delete skippedThreads[threadStub.id];
+        } catch (error) {
+          // Only decoding failures are permanent for these bytes. Fetch and
+          // conversion failures must still retry the window without advancing.
+          if (!(error instanceof GmailBodyDecodeError)) throw error;
+          skippedThreads[threadStub.id] = { message_id: error.messageId, error: error.message };
+          itemsSkipped++;
         } finally {
           await sleep(this.RATE_LIMIT_MS);
         }
@@ -587,12 +604,14 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           pending: { query, started_at: windowStart, page_token: pageToken },
         }
       : { schema_version: 3, scope: scopeKey, last_sync_at: windowStart };
+    if (Object.keys(skippedThreads).length) newCheckpoint.skipped_threads = skippedThreads;
 
     return {
       events,
       checkpoint: newCheckpoint,
       metadata: {
         items_found: events.length,
+        items_skipped: itemsSkipped,
       },
     };
   }
@@ -1356,7 +1375,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     if (mimeType !== 'text/plain' && mimeType !== 'text/html') return '';
     let text = '';
     if (payload.body?.data) {
-      text = this.base64UrlDecode(payload.body.data, payload);
+      text = this.base64UrlDecode(payload.body.data, payload, messageId);
     } else if (payload.body?.attachmentId) {
       // Gmail may externalize the body itself, even under format=full. A
       // failed fetch must not silently replace that body with its alternative.
@@ -1364,7 +1383,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       if (!response.ok) throw new Error(`Gmail message body error (${response.status}): ${await response.text()}`);
       const body = (await response.json()) as { data?: string };
       if (typeof body.data !== 'string') throw new Error('Gmail returned a message body without data');
-      text = this.base64UrlDecode(body.data, payload);
+      text = this.base64UrlDecode(body.data, payload, messageId);
     }
     if (!text && payload.body?.size) throw new Error('Gmail returned a nonempty message body without data');
     // Convert each HTML leaf after charset decoding, preserving plain parts,
@@ -1374,14 +1393,18 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     return text.trim() ? text : '';
   }
 
-  private base64UrlDecode(data: string, payload: GmailMessagePayload): string {
+  private base64UrlDecode(data: string, payload: GmailMessagePayload, messageId: string): string {
     const padded = data.replace(/-/g, '+').replace(/_/g, '/');
     const contentType = payload.headers?.find((header) => header.name.toLowerCase() === 'content-type')?.value;
     const charset = contentType?.match(/;\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]+))/i);
     const encoding = (charset?.[1] ?? charset?.[2] ?? charset?.[3] ?? 'utf-8').trim();
     // MIME bodies contain bytes in the part's declared charset. Invalid bytes
     // or unsupported labels must fail the read instead of persisting corruption.
-    return new TextDecoder(encoding, { fatal: true }).decode(Buffer.from(padded, 'base64'));
+    try {
+      return new TextDecoder(encoding, { fatal: true }).decode(Buffer.from(padded, 'base64'));
+    } catch (cause) {
+      throw new GmailBodyDecodeError(messageId, encoding, cause);
+    }
   }
 
   private base64UrlEncode(str: string): string {

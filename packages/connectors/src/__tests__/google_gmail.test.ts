@@ -1068,6 +1068,89 @@ describe('Gmail MIME syntax', () => {
   }
 });
 
+describe('Gmail poison-thread quarantine', () => {
+  test.each([false, true])('quarantines an undecodable thread and completes the window (poison first: %s)', async (poisonFirst) => {
+    const connector = new GmailConnector();
+    const good = toThreadResponse({ id: 'good-thread', messages: [
+      { id: 'good-message', body: 'A perfectly readable body.' },
+    ] });
+    const poison = toThreadResponse({ id: 'poison-thread', messages: [
+      { id: 'readable-message', body: 'Do not emit a partial thread.' },
+      { id: 'poison-message', date: '2026-07-02T10:00:00Z' },
+    ] });
+    const bytes = Buffer.from([0x1b, 0x24, 0x42, 0xff, 0xfe, 0x1b, 0x28, 0x42]);
+    poison.messages[1].payload = {
+      mimeType: 'text/plain',
+      headers: [{ name: 'Content-Type', value: 'text/plain; charset=iso-2022-jp' }],
+      body: { data: bytes.toString('base64url') },
+    };
+    const threads = poisonFirst ? [poison, good] : [good, poison];
+    const urls: string[] = [];
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      const id = new URL(url).pathname.match(/\/threads\/([^/]+)$/)?.[1];
+      return { ok: true, status: 200, json: async () => id
+        ? threads.find((thread) => thread.id === id)
+        : { threads: threads.map((thread) => ({ id: thread.id })) },
+      };
+    } });
+    const checkpoint = {
+      schema_version: 3,
+      scope: JSON.stringify(['label:INBOX', false]),
+      last_sync_at: '2026-07-01T00:00:00Z',
+    };
+    const result = await connector.sync({
+      feedKey: 'threads', config: {}, checkpoint,
+      credentials: { accessToken: 'synthetic-token' },
+    });
+
+    expect(result.events.map((event: { origin_id: string }) => event.origin_id)).toEqual(['good-thread']);
+    expect(result.events[0].payload_text).toContain('A perfectly readable body.');
+    expect(result.checkpoint.skipped_threads).toEqual({
+      'poison-thread': { message_id: 'poison-message', error: expect.stringContaining('iso-2022-jp') },
+    });
+    expect(Date.parse(result.checkpoint.last_sync_at)).toBeGreaterThan(Date.parse(checkpoint.last_sync_at));
+    expect(result.checkpoint.pending).toBeUndefined();
+    expect(result.metadata.items_skipped).toBe(1);
+    expect(urls).toHaveLength(3);
+    expect(checkpoint).not.toHaveProperty('skipped_threads');
+
+    // Rewalking the boundary deduplicates diagnostics without mutating state.
+    const context = { feedKey: 'threads', config: {}, credentials: { accessToken: 'synthetic-token' } };
+    const replay = await connector.sync({ ...context, checkpoint: result.checkpoint });
+    expect(replay.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
+
+    // A capped window records the poison but cannot advance past unread pages.
+    const capped = fakeHttp([
+      { id: 'poison-thread', messages: [] },
+      { id: 'good-thread', messages: [] },
+    ]);
+    const original = connector.createClient();
+    connector.createClient = () => ({ raw: (url: string) => new URL(url).pathname.endsWith('/threads')
+      ? capped.raw(url) : original.raw(url),
+    });
+    const first = await connector.sync({ ...context, config: { max_results: 1 }, checkpoint });
+    expect(first.events).toEqual([]);
+    expect(first.checkpoint.last_sync_at).toBe(checkpoint.last_sync_at);
+    expect(first.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
+    expect(first.checkpoint.pending.page_token).toBe('1');
+    const second = await connector.sync({ ...context, config: { max_results: 1 }, checkpoint: first.checkpoint });
+    expect(second.events.map((event: { origin_id: string }) => event.origin_id)).toEqual(['good-thread']);
+    expect(second.checkpoint.last_sync_at).toBe(first.checkpoint.pending.started_at);
+    expect(second.checkpoint.pending).toBeUndefined();
+    expect(second.checkpoint.skipped_threads).toEqual(first.checkpoint.skipped_threads);
+
+    connector.createClient = () => fakeHttp([]);
+    const empty = await connector.sync({ ...context, checkpoint: second.checkpoint });
+    expect(empty.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
+    connector.createClient = () => fakeHttp([{ id: 'poison-thread', messages: [{ id: 'poison-message', body: 'Repaired body.' }] }]);
+    const repaired = await connector.sync({ ...context, checkpoint: empty.checkpoint });
+    expect(repaired.events[0].origin_id).toBe('poison-thread');
+    expect(repaired.checkpoint.skipped_threads).toBeUndefined();
+    expect(empty.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
+  });
+});
+
 describe('Gmail MIME body charset', () => {
   const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials: { accessToken: 'synthetic-token' } };
 
@@ -1106,8 +1189,17 @@ describe('Gmail MIME body charset', () => {
     test.each([
       ['invalid UTF-8', Buffer.from([0xc3, 0x28]), 'text/plain; charset=utf-8'],
       ['unsupported charset', Buffer.from('body'), 'text/plain; charset=unknown-charset'],
-    ] as const)(`does not checkpoint past %s ${external ? 'external' : 'inline'} bytes`, async (_name, bytes, contentType) => {
-      await expect(setup(bytes, contentType, external).sync(context)).rejects.toThrow();
+    ] as const)(`quarantines %s ${external ? 'external' : 'inline'} bytes without persisting corrupt content`, async (_name, bytes, contentType) => {
+      const connector = setup(bytes, contentType, external);
+      const result = await connector.sync(context);
+      expect(result.events).toEqual([]);
+      expect(result.checkpoint.skipped_threads).toEqual({
+        'encoded-thread': { message_id: 'encoded-message', error: expect.stringContaining('Gmail body decode') },
+      });
+      expect(result.checkpoint.last_sync_at).toBeDefined();
+      const read = await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'encoded-thread' }, credentials: context.credentials });
+      expect(read.success).toBe(false);
+      expect(read.error).toContain('Gmail body decode');
     });
   }
 });
