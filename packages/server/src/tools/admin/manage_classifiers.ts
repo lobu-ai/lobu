@@ -137,7 +137,29 @@ async function hydrateAttributeEmbeddings(
   }
 
   if (valuesToEmbed.length > 0) {
-    const embeddings = await generateEmbeddingsViaService(valuesToEmbed, env, targetModel);
+    // A stored entry is NOT guaranteed to carry `description`/`examples`.
+    // Migration 20260720120000 rebuilds the map with `elem - 'value' -
+    // 'embedding'`, so an element that held only `{value}` becomes a bare `{}`,
+    // and `stripEmbeddingsFromAttributeValues` round-trips scalar entries as
+    // plain strings. Both reach here typed as `{description, examples}` only
+    // because that cast is unchecked — the declared type is a claim about these
+    // rows, not a guarantee. The label key is the one field always present;
+    // absent text contributes nothing rather than throwing and taking the whole
+    // regeneration down.
+    const texts = valuesToEmbed.map((value) => {
+      const entry = updated[value] as { description?: unknown; examples?: unknown };
+      const parts: string[] = [value];
+      if (typeof entry.description === 'string') {
+        parts.push(entry.description);
+      }
+      if (Array.isArray(entry.examples)) {
+        parts.push(
+          ...entry.examples.filter((example): example is string => typeof example === 'string')
+        );
+      }
+      return parts.join('\n');
+    });
+    const embeddings = await generateEmbeddingsViaService(texts, env, targetModel);
     valuesToEmbed.forEach((value, index) => {
       updated[value] = {
         ...updated[value],
