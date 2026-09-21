@@ -1,5 +1,29 @@
 # Changelog
 
+## [20.3.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.2.0...lobu-v20.3.0) (2026-09-21)
+
+
+### Features
+
+* **automations:** audit runtime config changes ([#3672](https://github.com/lobu-ai/lobu/issues/3672)) ([1d72e80](https://github.com/lobu-ai/lobu/commit/1d72e803196bb136af42667a197e46ecfd48ae62))
+* **automations:** deliver material change digests ([#3671](https://github.com/lobu-ai/lobu/issues/3671)) ([23f0229](https://github.com/lobu-ai/lobu/commit/23f0229feb5d271927b7f892434ba859d47cec0d))
+* **server:** Lobu views phase 1 — views table, manage_views, open_view, view actions ([#3645](https://github.com/lobu-ai/lobu/issues/3645)) ([8ebe479](https://github.com/lobu-ai/lobu/commit/8ebe479582dd9457c79d5e8b45aa86b2f1bb9854))
+* **views:** PR2 @lobu/views guest bridge, CLI apply/watcher, loader handshake ([#3649](https://github.com/lobu-ai/lobu/issues/3649)) ([6033bb5](https://github.com/lobu-ai/lobu/commit/6033bb550c2ea64d716497dd3c70c9b7d6028aa7))
+
+
+### Bug Fixes
+
+* **agent-turn:** preserve per-input response receipts ([#3668](https://github.com/lobu-ai/lobu/issues/3668)) ([45a3ba2](https://github.com/lobu-ai/lobu/commit/45a3ba21e4cbd398c2a9a529bee13162307e6c03))
+* **agent:** require exact connector operation keys ([#3670](https://github.com/lobu-ai/lobu/issues/3670)) ([462df8b](https://github.com/lobu-ai/lobu/commit/462df8b7843f71fad0789b637e02d74370afaffb))
+* **classifiers:** embed label descriptions and examples ([#3679](https://github.com/lobu-ai/lobu/issues/3679)) ([#3681](https://github.com/lobu-ai/lobu/issues/3681)) ([35dbb60](https://github.com/lobu-ai/lobu/commit/35dbb60a6225e13c532760338540c319c3756b7f))
+* **connectors:** execute action preview with visible receipts ([#3669](https://github.com/lobu-ai/lobu/issues/3669)) ([2d4614f](https://github.com/lobu-ai/lobu/commit/2d4614fc18ab515b804152c9727922203e8945ae))
+* **gmail:** quarantine undecodable threads ([#3680](https://github.com/lobu-ai/lobu/issues/3680)) ([#3682](https://github.com/lobu-ai/lobu/issues/3682)) ([28f45fe](https://github.com/lobu-ai/lobu/commit/28f45feaf4cea661dd70d060e7d1d414bda57371))
+* **mcp:** preserve active transports during session cleanup ([#3678](https://github.com/lobu-ai/lobu/issues/3678)) ([cc068b2](https://github.com/lobu-ai/lobu/commit/cc068b278ce6f82c02d0f0b9f8d14a52d8b98ac6))
+* **notifications:** persist provider delivery attempts ([#3676](https://github.com/lobu-ai/lobu/issues/3676)) ([4edb549](https://github.com/lobu-ai/lobu/commit/4edb54984676221775a4d6bd2bb62790c683d50e))
+* **review:** support macOS sha256 hashing ([#3675](https://github.com/lobu-ai/lobu/issues/3675)) ([136f951](https://github.com/lobu-ai/lobu/commit/136f951e862517685a83b7c5330dad9bce341b4d))
+* **server:** honor validated MCP sessions in REST tools ([#3677](https://github.com/lobu-ai/lobu/issues/3677)) ([#3683](https://github.com/lobu-ai/lobu/issues/3683)) ([1108aba](https://github.com/lobu-ai/lobu/commit/1108abad3fb08a1f9bc799105bb80f07188d113c))
+* **sessions:** label ended MCP transports ([#3674](https://github.com/lobu-ai/lobu/issues/3674)) ([#3684](https://github.com/lobu-ai/lobu/issues/3684)) ([28da35f](https://github.com/lobu-ai/lobu/commit/28da35f56f887b1bf40035ab67fa4a4522555dd4))
+
 ## [20.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.1.0...lobu-v20.2.0) (2026-09-17)
 
 
