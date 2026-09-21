@@ -1,6 +1,6 @@
 /**
  * Structural validation for a json_template (the JSON-UI DSL authored via
- * manage_entity_schema event kinds / the config `viewTemplate`).
+ * manage_entity_schema event kinds).
  *
  * WHY server-side: storage is opaque JSONB, so without this a malformed template
  * saves fine and fails silently at render (in the browser). This validates the

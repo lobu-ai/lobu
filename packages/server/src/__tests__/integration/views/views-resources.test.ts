@@ -188,14 +188,13 @@ describe('views resources + open_view + invoke_view_action', () => {
 		const html = result.contents[0].text as string;
 		expect(result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
 		expect(html).toContain('lobu-views-loader');
-		// Standard handshake + every delivery the loader accepts: the sandbox
-		// push (Claude), the resource fetch for the tool-input key, and the
-		// same-origin posted bundle.
+		// Standard handshake + both deliveries the loader accepts: the sandbox
+		// push (Claude) and the resource fetch for the tool-input key.
 		expect(html).toContain('ui/initialize');
 		expect(html).toContain('resources/read');
 		expect(html).toContain('ui/notifications/sandbox-resource-ready');
 		expect(html).toContain('ui/notifications/tool-input');
-		expect(html).toContain('lobu:views-bundle');
+		expect(html).not.toContain('lobu:views-bundle');
 		// §10(a): the loader ships no ext-apps/React/framework bytes.
 		expect(html).not.toContain('ext-apps');
 		expect(html).not.toContain('react');

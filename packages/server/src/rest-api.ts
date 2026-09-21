@@ -20,8 +20,10 @@ import { getDb } from "./db/client";
 import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
 import type { Env } from "./index";
-import { invokeTemplateEventAction } from "./interactions/template-event-actions";
-import { invokeViewAction } from "./interactions/template-event-actions";
+import {
+	invokeTemplateEventAction,
+	invokeViewAction,
+} from "./interactions/template-event-actions";
 import { getView, isValidViewKey, renderViewShell } from "./views/views";
 import { getOperationsSummary } from "./operations/connector-operations";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";

@@ -340,9 +340,8 @@ export function renderViewShell(view: StoredView): string {
  * standard `ui/initialize` handshake, then renders the per-view bundle from
  * whichever delivery the host uses: the standard `sandbox-resource-ready`
  * push (Claude), a `resources/read` of `ui://lobu/views/<key>` for the key in
- * the `tool-input` arguments, or the `lobu:views-bundle` message (same-origin
- * hosts that read the shell over REST). With no delivery it stays an honest
- * loading state instead of guessing a protocol.
+ * the `tool-input` arguments. With no delivery it stays an honest loading
+ * state instead of guessing a protocol.
  */
 export function renderViewsLoaderShell(): string {
   return `<!doctype html>
@@ -445,10 +444,6 @@ export function renderViewsLoaderShell(): string {
         });
       }
       return;
-    }
-    // Same-origin fast path: the host read the shell over REST and posts it.
-    if (data.type === "lobu:views-bundle" && typeof data.html === "string") {
-      show(data.html);
     }
   });
   request("ui/initialize", {
