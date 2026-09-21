@@ -34,11 +34,11 @@ Each session forgets.                       +-------------------+
 
 ## See it in ChatGPT
 
-The 86-second narrated demo shows ChatGPT using Lobu over MCP to pull connected context and call
+The 86-second muted demo shows ChatGPT using Lobu over MCP to pull connected context and call
 governed tools without leaving the conversation. The same shared context remains available to
 Claude, Codex, and custom agents.
 
-https://github.com/user-attachments/assets/c07e7c23-a29b-4b05-895e-51dcb935bac4
+https://github.com/user-attachments/assets/26e6329a-1bc6-4480-8e57-e9388e38dde9
 
 ## Start with the agent you already use
 
