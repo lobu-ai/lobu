@@ -14,7 +14,10 @@ import {
 import { Value } from "@sinclair/typebox/value";
 import { manageViews } from "../../tools/admin/manage_views";
 import { getAllTools } from "../../tools/registry";
-import { validateToolArgs } from "../../tools/validate-args";
+import {
+	getArgsValidator,
+	validateToolArgs,
+} from "../../tools/validate-args";
 import { ToolUserError } from "../../utils/errors";
 
 const validate = (args: unknown) =>
@@ -31,6 +34,10 @@ function messageOf(fn: () => unknown): string {
 }
 
 describe("manage_views union contract", () => {
+	it("retains the validator used by the ClientSDK views namespace", () => {
+		expect(getArgsValidator(manageViews)).toBeFunction();
+	});
+
 	it("requires source_code for set and key for get/remove, at the schema", () => {
 		expect(messageOf(() => validate({ action: "set", key: "pipeline" }))).toMatch(
 			/source_code/
@@ -73,6 +80,8 @@ describe("manage_views union contract", () => {
 	});
 
 	it("requires defaults to be non-null scalars of the declared type", () => {
+		const validateManageViews = getArgsValidator(manageViews);
+		expect(validateManageViews).toBeFunction();
 		for (const [type, value] of [
 			["string", 1],
 			["number", "1"],
@@ -83,16 +92,12 @@ describe("manage_views union contract", () => {
 				Value.Check(ViewParamDeclSchema, { type, default: value }),
 			).toBe(false);
 			expect(() =>
-				manageViews(
-					{
-						action: "set",
-						key: "pipeline",
-						source_code: "export default function P() { return null; }",
-						params: { by: { type, default: value } },
-					} as never,
-					{} as never,
-					{} as never,
-				),
+				validateManageViews?.({
+					action: "set",
+					key: "pipeline",
+					source_code: "export default function P() { return null; }",
+					params: { by: { type, default: value } },
+				}),
 			).toThrow(ToolUserError);
 		}
 		expect(

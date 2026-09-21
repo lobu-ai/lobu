@@ -18,9 +18,10 @@ import {
   ManageViewsSchema,
   RemoveViewAction,
   SetViewAction,
+  ViewParamDeclSchema,
   type ManageViewsResult,
 } from '@lobu/core/contracts/tools/manage-views';
-import type { Static } from '@sinclair/typebox';
+import { Type, type Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
 import { ToolUserError } from '../../utils/errors';
 import {
@@ -42,19 +43,28 @@ import { action, defineActionTool } from './action-tool';
 
 export { ManageViewsResultSchema, ManageViewsSchema };
 
+// Defaults are authored metadata, so keep their declared scalar types exact.
+// Double negation validates identically while preventing Value.Convert from
+// descending into the declaration and rewriting a mismatched default.
+const StrictSetViewAction = Type.Object({
+  ...SetViewAction.properties,
+  params: Type.Optional(
+    Type.Record(Type.String(), Type.Not(Type.Not(ViewParamDeclSchema)), {
+      description: '[set] Declared URL params.',
+    })
+  ),
+});
+
 // Variants in the contract's order, so the derived union matches the exposed
 // `ManageViewsSchema`. Each handler receives its own variant's args.
 const manageViewsTool = defineActionTool('manage_views', {
-  set: action(SetViewAction, handleSet),
+  set: action(StrictSetViewAction, handleSet),
   get: action(GetViewAction, handleGet),
   list: action(ListViewsAction, handleList),
   remove: action(RemoveViewAction, handleRemove),
 });
 
-export const manageViews: typeof manageViewsTool.run = (args, env, ctx) => {
-  validateRawParamDefaults(args);
-  return manageViewsTool.run(args, env, ctx);
-};
+export const manageViews = manageViewsTool.run;
 
 // ============================================
 // Helpers
@@ -180,6 +190,7 @@ async function handleSet(
   args: Static<typeof SetViewAction>,
   ctx: ToolContext
 ): Promise<ManageViewsResult> {
+  validateRawParamDefaults(args);
   requireWriter(ctx);
   validateViewMetadata(args);
 
