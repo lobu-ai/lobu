@@ -119,6 +119,7 @@ describe("view desired state", () => {
         attach: [{ type: "deal" }],
         params: { by: { type: "string", default: "owner" } },
         actions: { markWon: { emits: "deal.won" } },
+        compiledCode: view?.compiledCode,
       })
     );
   });

@@ -2,13 +2,13 @@
 --
 -- New table `views`: one row per view with its current source, compiled
 -- browser bundle, content hash, extracted attach/params/actions metadata and
--- `last_writer` (apply_id | tool call | user). Same source means the same
--- hash and no write. Git is the only history of definitions, so there is no
--- versions table. Deleted: `view_template_versions`,
+-- `last_writer` (apply_id | tool call | user). The same source and metadata
+-- mean the same hash and no write. Git is the only history of definitions, so
+-- there is no versions table. Deleted: `view_template_versions`,
 -- `view_template_active_tabs`, plus the default-template pointer columns on
 -- `entity_types` and `entities`. Nothing else in the schema changes.
 --
--- The 17 stored demo template rows are converted, never cleared: every
+-- Stored demo template rows are converted, never cleared: every
 -- `view_template_versions` row becomes one `views` row. The active version of
 -- each (resource, tab) group keeps the plain derived key; superseded versions
 -- keep `-v<version>` suffixed keys so no authored content is lost. The
@@ -17,13 +17,11 @@
 -- store an empty `compiled_code` and are inert until re-saved through
 -- `manage_views` with a real TSX module, which compiles and fills the bundle.
 --
--- Lock safety: the dropped tables are small org-config tables (tens of rows;
--- 17 version rows measured on prod 2026-09-16), so the ACCESS EXCLUSIVE lock
--- on DROP is held for milliseconds and no concurrent writer blocks on it.
--- The conversion is one INSERT ... SELECT; re-running the migration is a
--- no-op for already-converted keys via ON CONFLICT DO NOTHING. The attach GIN
--- index ships in the follow-up 20260917000001 migration (CONCURRENTLY cannot
--- run inside this transactional file).
+-- The conversion is one INSERT ... SELECT. A replay after the source tables
+-- have already been dropped skips the conversion, and existing destination
+-- keys are left alone via ON CONFLICT DO NOTHING. The attach GIN index ships
+-- in the follow-up 20260917000001 migration (CONCURRENTLY cannot run inside
+-- this transactional file).
 -- migrate:up
 CREATE TABLE IF NOT EXISTS public.views (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -49,6 +47,9 @@ CREATE TABLE IF NOT EXISTS public.views (
 -- plain key and superseded versions keep `-v<version>` keys. Active means the
 -- parent pointer column for default tabs, `view_template_active_tabs` for
 -- named tabs, and the latest version when no pointer names one.
+DO $$
+BEGIN
+IF to_regclass('public.view_template_versions') IS NOT NULL THEN
 WITH ranked AS (
   SELECT v.*,
     ROW_NUMBER() OVER (
@@ -208,15 +209,16 @@ INSERT INTO public.views (
 )
 SELECT d.organization_id,
   LEFT(
-    CASE WHEN d.is_active THEN d.plain_key ELSE d.versioned_key END
-    || CASE WHEN d.key_rn > 1 THEN '-dup' || d.key_rn::text ELSE '' END,
-    64
-  ),
+    CASE WHEN d.is_active THEN d.plain_key ELSE d.versioned_key END,
+    64 - LENGTH(CASE WHEN d.key_rn > 1 THEN '-dup' || d.key_rn::text ELSE '' END)
+  ) || CASE WHEN d.key_rn > 1 THEN '-dup' || d.key_rn::text ELSE '' END,
   d.view_name, d.view_description, d.source_code, '',
   d.source_hash, d.attach, '{}'::jsonb, d.actions,
   'migration:view-templates'
 FROM deduped d
 ON CONFLICT (organization_id, key) DO NOTHING;
+END IF;
+END $$;
 
 -- Retire the template tables and their default-template pointers. The foreign
 -- keys go first so the table drops do not depend on drop order.

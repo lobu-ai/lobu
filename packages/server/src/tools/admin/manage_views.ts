@@ -162,22 +162,23 @@ async function handleSet(
   const attach = (args.attach ?? []) as SetViewInput['attach'];
   const params = (args.params ?? {}) as SetViewInput['params'];
   const actions = (args.actions ?? {}) as SetViewInput['actions'];
+  // Compile/validate before comparing identity: dependency-only changes keep
+  // entry source stable but change the browser bundle and must not no-op.
+  const compiled = args.compiled_code
+    ? checkCompiledCode(args.compiled_code)
+    : await compileView(args.source_code);
   const hash = contentHash(args.source_code, {
     name,
     description,
     attach,
     params,
     actions,
+    compiledCode: compiled,
   });
-  // Same source AND same metadata: skip the compile and the write entirely.
   const current = await getView(ctx.organizationId, args.key);
   if (current && current.content_hash === hash) {
     return { action: 'set', view: projectView(current), written: false };
   }
-
-  const compiled = args.compiled_code
-    ? checkCompiledCode(args.compiled_code)
-    : await compileView(args.source_code);
   const { view, written } = await setView(ctx.organizationId, {
     key: args.key,
     name,

@@ -188,15 +188,22 @@ export function assertBundlePortable(
   const suspects: string[] = [entry, dirname(entry)];
   const home = process.env.HOME ?? process.env.USERPROFILE;
   if (home) suspects.push(home);
+  const lowerCode = compiledCode.toLowerCase();
   for (const suspect of suspects) {
-    if (suspect && compiledCode.includes(suspect)) {
+    const encoded = suspect ? encodeURIComponent(suspect) : "";
+    if (
+      suspect &&
+      (compiledCode.includes(suspect) ||
+        lowerCode.includes(encoded.toLowerCase()))
+    ) {
       throw new Error(
         `view bundle embeds the local path ${JSON.stringify(suspect)} — bundles must be portable`
       );
     }
   }
-  const encoded = compiledCode.match(/file:\/\/[^"'\s]*/g) ?? [];
-  for (const url of encoded) {
+  const fileUrls =
+    compiledCode.match(/(?:file:\/\/|file%3a(?:%2f){2})[^"'\s]*/gi) ?? [];
+  for (const url of fileUrls) {
     // A browser bundle has no business with file URLs: any of them embeds a
     // build-machine path (or its encoding), so reject the bundle outright
     // rather than trying to tell ours from a legitimate one.

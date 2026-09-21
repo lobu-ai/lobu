@@ -210,12 +210,16 @@ describe("apply views over the wire", () => {
       join(dir, "views", "deal", "pipeline.tsx"),
       "utf-8"
     );
+    const compiledCode = first.calls.find(
+      (c) => c.url.includes("/manage_views") && c.body.action === "set"
+    )?.body.compiled_code;
     const hash = contentHash(source, {
       name: "pipeline",
       description: "",
       attach: [{ type: "deal" }],
       params: { by: { type: "string", default: "owner" } },
       actions: { markWon: { emits: "deal.won" } },
+      compiledCode,
     });
     store.views[0] = {
       ...(store.views[0] as Record<string, unknown>),

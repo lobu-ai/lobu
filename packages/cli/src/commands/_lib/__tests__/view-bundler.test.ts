@@ -151,6 +151,18 @@ describe("assertBundlePortable", () => {
         entry
       )
     ).toThrow("must be portable");
+    expect(() =>
+      assertBundlePortable(
+        `fetch("file%3A%2F%2F%2FUsers%2Fsomeone%2FCode%2Flobu-proj%2Fx")`,
+        entry
+      )
+    ).toThrow("must be portable");
+    expect(() =>
+      assertBundlePortable(
+        `var x = "${encodeURIComponent(entry).toLowerCase()}";`,
+        entry
+      )
+    ).toThrow("must be portable");
     expect(() => assertBundlePortable("var x = 1;", entry)).not.toThrow();
   });
 });

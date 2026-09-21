@@ -1092,6 +1092,7 @@ async function resolveViewSources(
         attach,
         params,
         actions,
+        compiledCode: bundled.compiledCode,
       }),
       sourceFile: rel.replace(/^\.\//, ""),
       compiledCode: bundled.compiledCode,
