@@ -1,4 +1,4 @@
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, Type, type TSchema } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
 
 // ============================================
@@ -49,16 +49,33 @@ export type ViewAttachment = Static<typeof ViewAttachmentSchema>;
 
 // Declared, typed URL params. Unknown params are ignored; `view` and
 // `version` are reserved on type/record pages and cannot be declared.
-export const ViewParamDeclSchema = Type.Object({
-  type: Type.Union(
-    [Type.Literal("string"), Type.Literal("number"), Type.Literal("boolean")],
-    { description: "Param type used to validate the URL value." }
+function viewParamDecl<
+  T extends "string" | "number" | "boolean",
+  D extends TSchema,
+>(type: T, defaultSchema: D) {
+  return Type.Object({
+    type: Type.Literal(type, {
+      description: "Param type used to validate the URL value.",
+    }),
+    default: Type.Optional(defaultSchema),
+    description: Type.Optional(Type.String()),
+  });
+}
+
+export const ViewParamDeclSchema = Type.Union([
+  viewParamDecl(
+    "string",
+    Type.String({ description: "Default when the URL omits the param." })
   ),
-  default: Type.Optional(
-    Type.Unknown({ description: "Default when the URL omits the param." })
+  viewParamDecl(
+    "number",
+    Type.Number({ description: "Default when the URL omits the param." })
   ),
-  description: Type.Optional(Type.String()),
-});
+  viewParamDecl(
+    "boolean",
+    Type.Boolean({ description: "Default when the URL omits the param." })
+  ),
+]);
 export type ViewParamDecl = Static<typeof ViewParamDeclSchema>;
 
 // Actions a view declares as metadata; each emits an event kind through the

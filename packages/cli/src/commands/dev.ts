@@ -24,6 +24,10 @@ import { prepareRuntime } from "../internal/runtime-components.js";
 import { checkNodeSupport } from "../internal/node-version.js";
 import { loadProjectLink } from "../internal/project-link.js";
 import { loadProjectConfig } from "./_lib/apply/desired-state.js";
+import {
+  collectViewReapplySet,
+  startViewReapply,
+} from "./_lib/view-reapply.js";
 
 interface DevOptions {
   port?: string;
@@ -453,8 +457,6 @@ export async function devCommand(
         // config itself) and re-apply on change, so an edited view shows up
         // locally within ~2 s of saving. Best-effort like the apply above: a
         // project with no views, or a watch setup failure, only logs.
-        // Lazy-imported so the reapply graph (esbuild, jiti) stays out of
-        // `lobu run`'s module-load path — same rule as the auto-apply above.
         void startViewReapplyLoop(cwd, gatewayUrl, localOrgSlug).catch(() => {
           // startViewReapplyLoop logs its own diagnostics; never crash `run`.
         });
@@ -501,8 +503,7 @@ export async function devCommand(
  *
  * Best-effort: setup failure only logs (a project with no `views:` still gets
  * the config reapplied on edit, so adding the first view starts working with
- * no restart). The reapply graph is imported lazily for the same module-load
- * reason as the auto-apply above.
+ * no restart).
  */
 export async function startViewReapplyLoop(
   cwd: string,
@@ -511,9 +512,6 @@ export async function startViewReapplyLoop(
 ): Promise<{ close: () => void }> {
   const noop = { close: () => undefined };
   try {
-    const { collectViewReapplySet, startViewReapply } = await import(
-      "./_lib/view-reapply.js"
-    );
     let set = await collectViewReapplySet(cwd);
     const viewFiles = set.files.length - 1;
     if (viewFiles > 0) {

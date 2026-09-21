@@ -51,7 +51,10 @@ const manageViewsTool = defineActionTool('manage_views', {
   remove: action(RemoveViewAction, handleRemove),
 });
 
-export const manageViews = manageViewsTool.run;
+export const manageViews: typeof manageViewsTool.run = (args, env, ctx) => {
+  validateRawParamDefaults(args);
+  return manageViewsTool.run(args, env, ctx);
+};
 
 // ============================================
 // Helpers
@@ -66,6 +69,36 @@ function requireWriter(ctx: ToolContext): void {
 // against the kind registry happens when the action fires, but a malformed
 // name is rejected at authoring so it can never be stored.
 const EMITS_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Tool argument validation normally coerces compatible scalar values before a
+ * handler sees them. View defaults are declarations, not ordinary arguments:
+ * accepting `1` for a string default would silently rewrite the authored
+ * metadata. Check this nested field before the shared coercion boundary.
+ */
+function validateRawParamDefaults(args: unknown): void {
+  if (!args || typeof args !== 'object') return;
+  const raw = args as { action?: unknown; params?: unknown };
+  if (raw.action !== 'set' || !raw.params || typeof raw.params !== 'object') {
+    return;
+  }
+  for (const [name, value] of Object.entries(raw.params)) {
+    if (!value || typeof value !== 'object') continue;
+    const decl = value as { type?: unknown; default?: unknown };
+    const d = decl.default;
+    if (
+      d === null ||
+      (d !== undefined &&
+        (decl.type === 'string' || decl.type === 'number' || decl.type === 'boolean') &&
+        typeof d !== decl.type)
+    ) {
+      throw new ToolUserError(
+        `Param '${name}' default must match declared type '${String(decl.type)}'`,
+        400
+      );
+    }
+  }
+}
 
 /**
  * Validate the caller-declared metadata (`lobu apply` extracts attach/params/
@@ -119,17 +152,12 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
         400
       );
     }
-    // Params ride in the URL / viewState, so defaults are scalars only.
+    // Params ride in the URL / viewState, so defaults exactly match the
+    // declared scalar type. Null is not a value for any declared type.
     const d = decl.default;
-    if (
-      d !== undefined &&
-      d !== null &&
-      typeof d !== 'string' &&
-      typeof d !== 'number' &&
-      typeof d !== 'boolean'
-    ) {
+    if (d === null || (d !== undefined && typeof d !== decl.type)) {
       throw new ToolUserError(
-        `Param '${name}' default must be a string, number, boolean or null`,
+        `Param '${name}' default must match declared type '${decl.type}'`,
         400
       );
     }

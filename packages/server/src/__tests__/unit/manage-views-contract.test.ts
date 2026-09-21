@@ -7,7 +7,12 @@
  * access filtering keeps the write actions out of a read-scope listing.
  */
 import { describe, expect, it } from "bun:test";
-import { ManageViewsSchema } from "@lobu/core/contracts/tools/manage-views";
+import {
+	ManageViewsSchema,
+	ViewParamDeclSchema,
+} from "@lobu/core/contracts/tools/manage-views";
+import { Value } from "@sinclair/typebox/value";
+import { manageViews } from "../../tools/admin/manage_views";
 import { getAllTools } from "../../tools/registry";
 import { validateToolArgs } from "../../tools/validate-args";
 import { ToolUserError } from "../../utils/errors";
@@ -65,6 +70,43 @@ describe("manage_views union contract", () => {
 			action: "remove",
 			key: "pipeline",
 		});
+	});
+
+	it("requires defaults to be non-null scalars of the declared type", () => {
+		for (const [type, value] of [
+			["string", 1],
+			["number", "1"],
+			["boolean", 1],
+			["string", null],
+		] as const) {
+			expect(
+				Value.Check(ViewParamDeclSchema, { type, default: value }),
+			).toBe(false);
+			expect(() =>
+				manageViews(
+					{
+						action: "set",
+						key: "pipeline",
+						source_code: "export default function P() { return null; }",
+						params: { by: { type, default: value } },
+					} as never,
+					{} as never,
+					{} as never,
+				),
+			).toThrow(ToolUserError);
+		}
+		expect(
+			validate({
+				action: "set",
+				key: "pipeline",
+				source_code: "export default function P() { return null; }",
+				params: {
+					text: { type: "string", default: "owner" },
+					count: { type: "number", default: 1 },
+					flag: { type: "boolean", default: false },
+				},
+			}),
+		).toMatchObject({ action: "set" });
 	});
 });
 

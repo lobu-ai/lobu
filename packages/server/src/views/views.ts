@@ -11,12 +11,15 @@
  * sandboxed frame the MCP apps already use.
  */
 import { createRequire } from 'node:module';
-import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
+import type {
+  ViewAttachment,
+  ViewParamDecl,
+} from '@lobu/core/contracts/tools/manage-views';
 import { build, type Plugin } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 
-export type { ViewAttachment };
+export type { ViewAttachment, ViewParamDecl };
 
 const require = createRequire(import.meta.url);
 
@@ -49,12 +52,6 @@ export function viewKeyFromResourceUri(uri: string): string | null {
 
 /** Shared content identity (server and CLI derive the key from one function). */
 export { contentHash, type ViewContentMetadata } from '@lobu/core/contracts/tools/view-content-hash';
-
-export interface ViewParamDecl {
-  type: 'string' | 'number' | 'boolean';
-  default?: unknown;
-  description?: string;
-}
 
 export interface ViewActionDecl {
   emits: string;

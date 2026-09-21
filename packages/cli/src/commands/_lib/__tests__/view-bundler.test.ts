@@ -8,8 +8,14 @@
  * project install provides).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   assertBundlePortable,
   bundleViewFromFile,
@@ -181,6 +187,7 @@ export const y = x;
     );
     const files = await collectViewWatchFiles(entry);
     expect(files).toContain(entry);
-    expect(files.some((f) => f.endsWith("views/_lib/board.tsx"))).toBe(true);
+    expect(files).toContain(resolve(dirname(entry), "../_lib/board.tsx"));
+    expect(files.every((file) => existsSync(file))).toBe(true);
   });
 });

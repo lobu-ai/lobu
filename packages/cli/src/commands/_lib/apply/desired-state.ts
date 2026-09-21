@@ -15,6 +15,7 @@ import type {
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
+import { contentHash } from "@lobu/core/contracts/tools/view-content-hash";
 import type Ajv from "ajv";
 import type {
   ConnectorSource,
@@ -25,6 +26,8 @@ import type {
   ViewSource,
 } from "../../../config/index.js";
 import { ValidationError } from "../../memory/_lib/errors.js";
+import { ensureProjectDepsInstalled } from "../ensure-deps-installed.js";
+import { bundleViewFromFile } from "../view-bundler.js";
 import {
   type AgentMarkdown,
   mapProjectToDesiredState,
@@ -263,8 +266,6 @@ export interface DesiredView {
    * key is required, so the plan, the bundle and the action agree.
    */
   key: string;
-  /** Absolute path to the module. */
-  sourcePath: string;
   /** Raw module source, pushed verbatim beside the bundle. */
   sourceCode: string;
   /**
@@ -999,8 +1000,6 @@ const VIEW_SOURCE_MAX_BYTES = 1_000_000;
  * is no path fallback, because a required key has nothing to fall back to.
  * ExecutePlan ships these artifacts verbatim; it never re-bundles.
  *
- * The esbuild + jiti-adjacent imports stay lazy (this async function is the
- * only importer), so the bundler graph never rides the module-load path.
  */
 async function resolveViewSources(
   sources: ViewSource[],
@@ -1010,13 +1009,6 @@ async function resolveViewSources(
   const baseDir = resolve(cwd);
   const views: DesiredView[] = [];
   const seen = new Set<string>();
-  const { ensureProjectDepsInstalled } = await import(
-    "../ensure-deps-installed.js"
-  );
-  const { bundleViewFromFile } = await import("../view-bundler.js");
-  const { contentHash } = await import(
-    "@lobu/core/contracts/tools/view-content-hash"
-  );
   for (const src of sources) {
     const rel = src.path.trim();
     if (
@@ -1084,7 +1076,6 @@ async function resolveViewSources(
     ) as Record<string, { emits: string }>;
     views.push({
       key,
-      sourcePath: abs,
       sourceCode,
       contentHash: contentHash(sourceCode, {
         name,

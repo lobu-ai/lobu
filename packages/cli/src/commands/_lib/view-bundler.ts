@@ -16,10 +16,8 @@
  * Component)`. Anything else (a bare `view` export, no mount call) fails loud
  * here rather than rendering a blank frame in prod.
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, resolve } from "node:path";
+import { runInThisContext } from "node:vm";
 import { build, type Metafile, type Plugin } from "esbuild";
 
 export interface ViewMetadata {
@@ -102,7 +100,7 @@ export async function bundleViewFromFile(entry: string): Promise<BundledView> {
     entryPoints: [entry],
     bundle: true,
     write: false,
-    format: "esm",
+    format: "iife",
     platform: "node",
     target: ["node22"],
     jsx: "automatic",
@@ -110,43 +108,35 @@ export async function bundleViewFromFile(entry: string): Promise<BundledView> {
     define: { "process.env.NODE_ENV": '"production"' },
     logLevel: "silent",
   });
-  const dir = await mkdtemp(join(tmpdir(), "lobu-view-meta-"));
-  try {
-    const file = join(dir, "view.mjs");
-    await writeFile(file, node.outputFiles?.[0]?.text ?? "");
-    const g = globalThis as { __lobuViewDefinition?: unknown };
-    g.__lobuViewDefinition = undefined;
-    // A fresh temp path per call, so the ESM cache never returns a stale module.
-    await import(pathToFileURL(file).href);
-    const def = readRecordedDefinition();
-    if (!def || typeof def.key !== "string") {
-      throw new Error(
-        `${entry}: the module must call mountView(defineView({ key, attach, ... }), Component)`
-      );
-    }
-    if (!VIEW_KEY_RE.test(def.key)) {
-      throw new Error(
-        `${entry}: defineView key ${JSON.stringify(def.key)} must match /^[a-z0-9][a-z0-9-]{0,63}$/`
-      );
-    }
-    return {
-      compiledCode,
-      metadata: {
-        key: def.key,
-        attach: Array.isArray(def.attach) ? def.attach : [],
-        params:
-          def.params && typeof def.params === "object"
-            ? (def.params as Record<string, unknown>)
-            : {},
-        actions:
-          def.actions && typeof def.actions === "object"
-            ? (def.actions as Record<string, { emits: string }>)
-            : {},
-      },
-    };
-  } finally {
-    await rm(dir, { recursive: true, force: true });
+  const g = globalThis as { __lobuViewDefinition?: unknown };
+  g.__lobuViewDefinition = undefined;
+  runInThisContext(node.outputFiles?.[0]?.text ?? "", { filename: entry });
+  const def = readRecordedDefinition();
+  if (!def || typeof def.key !== "string") {
+    throw new Error(
+      `${entry}: the module must call mountView(defineView({ key, attach, ... }), Component)`
+    );
   }
+  if (!VIEW_KEY_RE.test(def.key)) {
+    throw new Error(
+      `${entry}: defineView key ${JSON.stringify(def.key)} must match /^[a-z0-9][a-z0-9-]{0,63}$/`
+    );
+  }
+  return {
+    compiledCode,
+    metadata: {
+      key: def.key,
+      attach: Array.isArray(def.attach) ? def.attach : [],
+      params:
+        def.params && typeof def.params === "object"
+          ? (def.params as Record<string, unknown>)
+          : {},
+      actions:
+        def.actions && typeof def.actions === "object"
+          ? (def.actions as Record<string, { emits: string }>)
+          : {},
+    },
+  };
 }
 
 /**
@@ -155,8 +145,10 @@ export async function bundleViewFromFile(entry: string): Promise<BundledView> {
  * an imported file rebuilds the view. Returned as absolute paths.
  */
 export async function collectViewWatchFiles(entry: string): Promise<string[]> {
+  const workingDir = process.cwd();
   const result = await build({
     entryPoints: [entry],
+    absWorkingDir: workingDir,
     bundle: true,
     write: false,
     format: "esm",
@@ -167,10 +159,9 @@ export async function collectViewWatchFiles(entry: string): Promise<string[]> {
   });
   const metafile: Metafile | undefined = result.metafile;
   if (!metafile) return [entry];
-  const dir = dirname(resolve(entry));
   const files = new Set<string>([resolve(entry)]);
   for (const input of Object.keys(metafile.inputs)) {
-    files.add(resolve(dir, input));
+    files.add(resolve(workingDir, input));
   }
   return [...files].sort();
 }
