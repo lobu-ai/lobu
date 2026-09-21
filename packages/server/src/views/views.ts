@@ -10,6 +10,7 @@
  * back over the MCP resource or the shell route and mounted `srcdoc` into the
  * sandboxed frame the MCP apps already use.
  */
+import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import type {
   ViewAttachment,
@@ -215,27 +216,79 @@ export function projectView(view: StoredView): Omit<
   };
 }
 
-/** Resolve react funds inside the server's own installation, so source
- * compiled from stdin (no file context) still bundles the runtime. `@lobu/views`
- * resolves to the workspace package for the chat-agent path (`manage_views.set`
- * with plain source); the CLI bundles relative files and npm deps where
- * node_modules exists and ships the bundle beside the source. Anything else
- * resolves by esbuild's default walk and fails loudly when unresolvable. */
-function reactResolvePlugin(): Plugin {
+/** The only specifiers a view module may import. Everything else is a
+ * resolution error, so the compiler can never reach the server's filesystem. */
+const VIEW_RUNTIME_SPECIFIERS = [
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+  'react/jsx-dev-runtime',
+  '@lobu/views',
+] as const;
+
+/**
+ * Resolve the view runtime inside the server's own installation, so source
+ * compiled from stdin (no file context) still bundles React and `@lobu/views`
+ * for the chat-agent path (`manage_views.set` with plain source).
+ *
+ * The entry module is UNTRUSTED author source and the compiler runs in the
+ * server process, so this plugin is the import boundary, not a convenience.
+ * esbuild's default resolution would walk the real filesystem from
+ * `resolveDir`: `./package.json`, `../../package.json`, an absolute path or a
+ * bare npm dependency of the server all resolve and get inlined verbatim into
+ * a browser bundle the whole org reads back over the shell route. So the entry
+ * resolves through an explicit allowlist and nothing else — a rejected
+ * specifier is reported by name rather than silently emptied.
+ *
+ * Imports raised from INSIDE a resolved runtime package are a different
+ * namespace: those files are ours, already on disk, and their own relative and
+ * dependency imports must keep resolving normally or React does not bundle.
+ * They are gated on the importer being a file we resolved, never on the
+ * specifier text.
+ */
+function viewRuntimeResolvePlugin(): Plugin {
   const funds: Record<string, string> = {};
-  for (const specifier of ['react', 'react-dom', 'react/jsx-runtime', '@lobu/views']) {
+  for (const specifier of VIEW_RUNTIME_SPECIFIERS) {
     try {
       funds[specifier] = require.resolve(specifier);
     } catch {
-      // left absent — esbuild reports the unresolvable import instead
+      // left absent — the import is reported as denied rather than resolved
     }
   }
+  // Directory of every resolved runtime entry: the roots whose own internal
+  // graph esbuild may keep walking.
+  const runtimeRoots = new Set(
+    Object.values(funds).map((file) => dirname(file))
+  );
+  const insideRuntime = (importer: string): boolean => {
+    if (!importer) return false;
+    for (const root of runtimeRoots) {
+      if (importer === root || importer.startsWith(`${root}/`)) return true;
+    }
+    // A runtime package pulling a sibling dependency lands outside its own
+    // directory but still inside a node_modules tree we resolved into.
+    return importer.includes('/node_modules/');
+  };
   return {
-    name: 'lobu-view-react',
+    name: 'lobu-view-runtime',
     setup(b) {
-      b.onResolve({ filter: /^(react|react-dom|react\/jsx-runtime|@lobu\/views)$/ }, (args) => {
+      b.onResolve({ filter: /.*/ }, (args) => {
         const resolved = funds[args.path];
-        return resolved ? { path: resolved } : null;
+        if (resolved) return { path: resolved };
+        // Entry-side import (the untrusted module, or anything it reached):
+        // denied unless it named an allowlisted runtime specifier above.
+        if (!insideRuntime(args.importer)) {
+          return {
+            errors: [
+              {
+                text: `Import of "${args.path}" is not allowed in a view. A view may import only ${VIEW_RUNTIME_SPECIFIERS.join(', ')}.`,
+              },
+            ],
+          };
+        }
+        // Inside the runtime's own package graph — esbuild's default walk.
+        return null;
       });
     },
   };
@@ -256,7 +309,10 @@ export async function compileView(
       stdin: {
         contents: source,
         loader: 'tsx',
-        resolveDir: process.cwd(),
+        // No `resolveDir`: the entry has no filesystem context to walk from,
+        // so every entry-side import must go through the allowlist plugin.
+        // The plugin resolves the runtime to absolute paths, which is what
+        // lets React bundle without giving the author a directory to escape.
       },
       bundle: true,
       platform: 'browser',
@@ -265,7 +321,7 @@ export async function compileView(
       jsx: 'automatic',
       logLevel: 'silent',
       write: false,
-      plugins: [reactResolvePlugin()],
+      plugins: [viewRuntimeResolvePlugin()],
     });
     compiled = result.outputFiles?.[0]?.text ?? '';
   } catch (err) {

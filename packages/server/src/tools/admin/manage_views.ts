@@ -23,6 +23,7 @@ import {
 } from '@lobu/core/contracts/tools/manage-views';
 import { Type, type Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
+import { ACTION_NAME } from '../../interactions/template-event-actions';
 import { ToolUserError } from '../../utils/errors';
 import {
   RESERVED_VIEW_PARAMS,
@@ -173,6 +174,16 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
     }
   }
   for (const [name, decl] of Object.entries(args.actions ?? {})) {
+    // The action KEY is the identity `invoke_view_action` dispatches on, and
+    // `invokeViewAction` gates it on this exact grammar. Validating against the
+    // same regex here — not a second copy of it — is what keeps `set` from
+    // storing a button whose every click 400s.
+    if (!ACTION_NAME.test(name)) {
+      throw new ToolUserError(
+        `Invalid view action name '${name}': use 1-64 chars, lowercase letter first, then letters, digits, '_' or '-'`,
+        400
+      );
+    }
     if (!EMITS_NAME_RE.test(decl.emits)) {
       throw new ToolUserError(
         `Action '${name}' emits '${decl.emits}': use <subject>.<op> event-kind names`,

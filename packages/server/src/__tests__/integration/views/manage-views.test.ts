@@ -109,7 +109,7 @@ describe("manage_views", () => {
 				source_code: source,
 				attach: [{ type: "deal", placement: "tab" }],
 				params: { by: { type: "string", default: "owner" } },
-				actions: { markWon: { emits: "deal.won" } },
+				actions: { mark_won: { emits: "deal.won" } },
 				...extra,
 			},
 			TEST_ENV,
@@ -130,7 +130,7 @@ describe("manage_views", () => {
 		expect(typeof set.view.content_hash).toBe("string");
 		expect((set.view.content_hash as string).length).toBe(16);
 		expect(set.view.attach).toEqual([{ type: "deal", placement: "tab" }]);
-		expect(set.view.actions).toEqual({ markWon: { emits: "deal.won" } });
+		expect(set.view.actions).toEqual({ mark_won: { emits: "deal.won" } });
 		expect(set.view.last_writer).toBe(ownerId);
 		expect(set.view).not.toHaveProperty("source_code");
 		expect(set.view).not.toHaveProperty("compiled_code");
@@ -309,6 +309,24 @@ mountView(view, V);
 		await expect(
 			setView(SIMPLE_SOURCE, { actions: { go: { emits: "not a kind!" } } })
 		).rejects.toThrow(/emits/);
+	});
+
+	// The action KEY is the identity `invoke_view_action` dispatches on, and the
+	// invocation path gates it on `ACTION_NAME`. A key that grammar rejects can
+	// never fire, so storing one only ships a button that 400s on click. Reject
+	// it at set-time, against the same grammar, so it never reaches the row.
+	it("rejects action names the invocation grammar cannot dispatch", async () => {
+		for (const name of ["markWon", "Delete It!", "1up", "__proto__", "a".repeat(65)]) {
+			await expect(
+				setView(SIMPLE_SOURCE, { actions: { [name]: { emits: "deal.won" } } })
+			).rejects.toThrow(/action name/i);
+		}
+		// The grammar's own shape still stores.
+		const ok = await setView(SIMPLE_SOURCE, {
+			key: "action-name-ok",
+			actions: { mark_won: { emits: "deal.won" }, "mark-lost": { emits: "deal.lost" } },
+		});
+		expect(Object.keys(ok.view.actions).sort()).toEqual(["mark-lost", "mark_won"]);
 	});
 
 	it("rejects source that does not compile", async () => {
