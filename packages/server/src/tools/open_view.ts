@@ -3,6 +3,7 @@ import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
 import type { Env } from "../index";
 import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
+import { formatViewSelection } from "@lobu/core/contracts/tools/view-selection";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { getView, viewResourceUri } from "../views/views";
 import { getDb } from "../db/client";
@@ -141,7 +142,12 @@ async function openViewImpl(
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
-	const search = new URLSearchParams({ view: args.key });
+	// Same formatter the web host parses with: the `?view=` encoding is derived
+	// in one place, so an authored key and a built-in mode can never be read as
+	// each other.
+	const search = new URLSearchParams({
+		view: formatViewSelection({ kind: "view", key: args.key }),
+	});
 	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
 	return {
 		view: args.key,

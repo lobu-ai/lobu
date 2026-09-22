@@ -1,6 +1,6 @@
 {
   "name": "@lobu/core",
-  "version": "20.1.0",
+  "version": "20.3.0",
   "license": "Apache-2.0",
   "description": "Core types and utilities for Lobu agent platform",
   "repository": {
@@ -236,6 +236,12 @@
       "bun": "./src/agent-tooling.ts",
       "import": "./dist/agent-tooling.js",
       "require": "./dist/agent-tooling.js"
+    },
+    "./contracts/tools/view-selection": {
+      "types": "./dist/contracts/tools/view-selection.d.ts",
+      "bun": "./src/contracts/tools/view-selection.ts",
+      "import": "./dist/contracts/tools/view-selection.js",
+      "require": "./dist/contracts/tools/view-selection.js"
     }
   },
   "scripts": {
