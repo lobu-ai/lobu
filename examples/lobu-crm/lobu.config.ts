@@ -14,6 +14,7 @@ import {
   skillFromFile,
   field,
   Type,
+  viewFromFile,
 } from "@lobu/cli/config";
 import type NpmDownloadsConnector from "./npm-downloads.connector.ts";
 import type funnelDigestReaction from "./funnel-digest.reaction.ts";
@@ -386,4 +387,5 @@ export default defineConfig({
     lobu_dbAuth,
   ],
   automations: [funnelDigestAutomation, inboundTriageAutomation],
+  views: [viewFromFile("./views/pilot/account-360.tsx")],
 });

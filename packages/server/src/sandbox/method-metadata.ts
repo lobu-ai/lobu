@@ -1119,7 +1119,7 @@ export default async (_ctx, client) => {
 		signature:
 			"views.list(): Promise<unknown>",
 		example:
-			"await client.views.list({});",
+			"await client.views.list();",
 	},
 	"views.remove": {
 		summary:

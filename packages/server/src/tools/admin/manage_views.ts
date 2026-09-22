@@ -18,10 +18,12 @@ import {
   ManageViewsSchema,
   RemoveViewAction,
   SetViewAction,
+  ViewParamDeclSchema,
   type ManageViewsResult,
 } from '@lobu/core/contracts/tools/manage-views';
-import type { Static } from '@sinclair/typebox';
+import { Type, type Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
+import { ACTION_NAME } from '../../interactions/template-event-actions';
 import { ToolUserError } from '../../utils/errors';
 import {
   RESERVED_VIEW_PARAMS,
@@ -42,10 +44,22 @@ import { action, defineActionTool } from './action-tool';
 
 export { ManageViewsResultSchema, ManageViewsSchema };
 
+// Defaults are authored metadata, so keep their declared scalar types exact.
+// Double negation validates identically while preventing Value.Convert from
+// descending into the declaration and rewriting a mismatched default.
+const StrictSetViewAction = Type.Object({
+  ...SetViewAction.properties,
+  params: Type.Optional(
+    Type.Record(Type.String(), Type.Not(Type.Not(ViewParamDeclSchema)), {
+      description: '[set] Declared URL params.',
+    })
+  ),
+});
+
 // Variants in the contract's order, so the derived union matches the exposed
 // `ManageViewsSchema`. Each handler receives its own variant's args.
 const manageViewsTool = defineActionTool('manage_views', {
-  set: action(SetViewAction, handleSet),
+  set: action(StrictSetViewAction, handleSet),
   get: action(GetViewAction, handleGet),
   list: action(ListViewsAction, handleList),
   remove: action(RemoveViewAction, handleRemove),
@@ -66,6 +80,36 @@ function requireWriter(ctx: ToolContext): void {
 // against the kind registry happens when the action fires, but a malformed
 // name is rejected at authoring so it can never be stored.
 const EMITS_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Tool argument validation normally coerces compatible scalar values before a
+ * handler sees them. View defaults are declarations, not ordinary arguments:
+ * accepting `1` for a string default would silently rewrite the authored
+ * metadata. Check this nested field before the shared coercion boundary.
+ */
+function validateRawParamDefaults(args: unknown): void {
+  if (!args || typeof args !== 'object') return;
+  const raw = args as { action?: unknown; params?: unknown };
+  if (raw.action !== 'set' || !raw.params || typeof raw.params !== 'object') {
+    return;
+  }
+  for (const [name, value] of Object.entries(raw.params)) {
+    if (!value || typeof value !== 'object') continue;
+    const decl = value as { type?: unknown; default?: unknown };
+    const d = decl.default;
+    if (
+      d === null ||
+      (d !== undefined &&
+        (decl.type === 'string' || decl.type === 'number' || decl.type === 'boolean') &&
+        typeof d !== decl.type)
+    ) {
+      throw new ToolUserError(
+        `Param '${name}' default must match declared type '${String(decl.type)}'`,
+        400
+      );
+    }
+  }
+}
 
 /**
  * Validate the caller-declared metadata (`lobu apply` extracts attach/params/
@@ -119,22 +163,27 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
         400
       );
     }
-    // Params ride in the URL / viewState, so defaults are scalars only.
+    // Params ride in the URL / viewState, so defaults exactly match the
+    // declared scalar type. Null is not a value for any declared type.
     const d = decl.default;
-    if (
-      d !== undefined &&
-      d !== null &&
-      typeof d !== 'string' &&
-      typeof d !== 'number' &&
-      typeof d !== 'boolean'
-    ) {
+    if (d === null || (d !== undefined && typeof d !== decl.type)) {
       throw new ToolUserError(
-        `Param '${name}' default must be a string, number, boolean or null`,
+        `Param '${name}' default must match declared type '${decl.type}'`,
         400
       );
     }
   }
   for (const [name, decl] of Object.entries(args.actions ?? {})) {
+    // The action KEY is the identity `invoke_view_action` dispatches on, and
+    // `invokeViewAction` gates it on this exact grammar. Validating against the
+    // same regex here — not a second copy of it — is what keeps `set` from
+    // storing a button whose every click 400s.
+    if (!ACTION_NAME.test(name)) {
+      throw new ToolUserError(
+        `Invalid view action name '${name}': use 1-64 chars, lowercase letter first, then letters, digits, '_' or '-'`,
+        400
+      );
+    }
     if (!EMITS_NAME_RE.test(decl.emits)) {
       throw new ToolUserError(
         `Action '${name}' emits '${decl.emits}': use <subject>.<op> event-kind names`,
@@ -152,6 +201,7 @@ async function handleSet(
   args: Static<typeof SetViewAction>,
   ctx: ToolContext
 ): Promise<ManageViewsResult> {
+  validateRawParamDefaults(args);
   requireWriter(ctx);
   validateViewMetadata(args);
 
@@ -162,22 +212,23 @@ async function handleSet(
   const attach = (args.attach ?? []) as SetViewInput['attach'];
   const params = (args.params ?? {}) as SetViewInput['params'];
   const actions = (args.actions ?? {}) as SetViewInput['actions'];
+  // Compile/validate before comparing identity: dependency-only changes keep
+  // entry source stable but change the browser bundle and must not no-op.
+  const compiled = args.compiled_code
+    ? checkCompiledCode(args.compiled_code)
+    : await compileView(args.source_code);
   const hash = contentHash(args.source_code, {
     name,
     description,
     attach,
     params,
     actions,
+    compiledCode: compiled,
   });
-  // Same source AND same metadata: skip the compile and the write entirely.
   const current = await getView(ctx.organizationId, args.key);
   if (current && current.content_hash === hash) {
     return { action: 'set', view: projectView(current), written: false };
   }
-
-  const compiled = args.compiled_code
-    ? checkCompiledCode(args.compiled_code)
-    : await compileView(args.source_code);
   const { view, written } = await setView(ctx.organizationId, {
     key: args.key,
     name,

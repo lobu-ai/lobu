@@ -11,6 +11,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { contentHash } from "@lobu/core/contracts/tools/view-content-hash";
+import { buildDeploymentManifest, computeManifestHash } from "../deployment.js";
 import { computeDiff, type RemoteSnapshot } from "../diff.js";
 import {
   type DesiredState,
@@ -69,7 +70,6 @@ export default defineConfig({
 function desiredView(key: string, hash: string): DesiredView {
   return {
     key,
-    sourcePath: `/synthetic/${key}.tsx`,
     sourceCode: `// ${key}`,
     contentHash: hash,
     sourceFile: `views/${key}.tsx`,
@@ -119,8 +119,27 @@ describe("view desired state", () => {
         attach: [{ type: "deal" }],
         params: { by: { type: "string", default: "owner" } },
         actions: { markWon: { emits: "deal.won" } },
+        compiledCode: view?.compiledCode,
       })
     );
+  });
+
+  test("local checkout paths stay out of desired state and deployment artifacts", async () => {
+    const files = {
+      "lobu.config.ts": configWithViews("./views/deal/pipeline.tsx"),
+      "views/deal/pipeline.tsx": VIEW_SOURCE,
+      "agents/triage/SOUL.md": "triage",
+    };
+    const firstDir = mkProject(files);
+    const secondDir = mkProject(files);
+    const first = (await loadDesiredStateFromConfig({ cwd: firstDir })).state;
+    const second = (await loadDesiredStateFromConfig({ cwd: secondDir })).state;
+
+    expect(first.views[0]).not.toHaveProperty("sourcePath");
+    expect(computeManifestHash(first)).toBe(computeManifestHash(second));
+    const manifest = JSON.stringify(buildDeploymentManifest(first, {}));
+    expect(manifest).not.toContain(firstDir);
+    expect(manifest).not.toContain(secondDir);
   });
 
   test("a module without mountView fails loud at load", async () => {

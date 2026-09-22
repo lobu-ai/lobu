@@ -52,6 +52,12 @@ describe("contentHash", () => {
     expect(after).not.toBe(before);
   });
 
+  test("a dependency-only bundle change rehashes", () => {
+    const before = contentHash(SOURCE, meta({ compiledCode: "bundle-a" }));
+    const after = contentHash(SOURCE, meta({ compiledCode: "bundle-b" }));
+    expect(after).not.toBe(before);
+  });
+
   test("key order does not rehash (wire order is not content)", () => {
     const a = contentHash(SOURCE, meta({ params: { x: { type: "string" } } }));
     const reordered = JSON.parse(

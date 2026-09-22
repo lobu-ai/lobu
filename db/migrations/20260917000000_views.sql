@@ -2,13 +2,13 @@
 --
 -- New table `views`: one row per view with its current source, compiled
 -- browser bundle, content hash, extracted attach/params/actions metadata and
--- `last_writer` (apply_id | tool call | user). Same source means the same
--- hash and no write. Git is the only history of definitions, so there is no
--- versions table. Deleted: `view_template_versions`,
+-- `last_writer` (apply_id | tool call | user). The same source and metadata
+-- mean the same hash and no write. Git is the only history of definitions, so
+-- there is no versions table. Deleted: `view_template_versions`,
 -- `view_template_active_tabs`, plus the default-template pointer columns on
 -- `entity_types` and `entities`. Nothing else in the schema changes.
 --
--- The 17 stored demo template rows are converted, never cleared: every
+-- Stored demo template rows are converted, never cleared: every
 -- `view_template_versions` row becomes one `views` row. The active version of
 -- each (resource, tab) group keeps the plain derived key; superseded versions
 -- keep `-v<version>` suffixed keys so no authored content is lost. The
@@ -17,13 +17,20 @@
 -- store an empty `compiled_code` and are inert until re-saved through
 -- `manage_views` with a real TSX module, which compiles and fills the bundle.
 --
--- Lock safety: the dropped tables are small org-config tables (tens of rows;
--- 17 version rows measured on prod 2026-09-16), so the ACCESS EXCLUSIVE lock
--- on DROP is held for milliseconds and no concurrent writer blocks on it.
--- The conversion is one INSERT ... SELECT; re-running the migration is a
--- no-op for already-converted keys via ON CONFLICT DO NOTHING. The attach GIN
--- index ships in the follow-up 20260917000001 migration (CONCURRENTLY cannot
--- run inside this transactional file).
+-- Derived keys are data-dependent (resource ids are free text), so collisions
+-- are ordinary. This file drops the source tables in the SAME transaction that
+-- converts them, which makes conversion the only copy: a row that fails to
+-- land is authored content destroyed with no in-deploy recovery. So a
+-- contested key falls back to `view-r<source row id>`, a shape the natural
+-- derivation cannot produce, and the INSERT carries NO `ON CONFLICT` clause —
+-- N template versions in must be N views rows out, and anything else stops the
+-- deploy instead of discarding work. See
+-- `views-template-conversion-migration.test.ts`.
+--
+-- The conversion is one INSERT ... SELECT. A replay after the source tables
+-- have already been dropped skips the conversion. The attach GIN index ships
+-- in the follow-up 20260917000001 migration (CONCURRENTLY cannot run inside
+-- this transactional file).
 -- migrate:up
 CREATE TABLE IF NOT EXISTS public.views (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -49,6 +56,9 @@ CREATE TABLE IF NOT EXISTS public.views (
 -- plain key and superseded versions keep `-v<version>` keys. Active means the
 -- parent pointer column for default tabs, `view_template_active_tabs` for
 -- named tabs, and the latest version when no pointer names one.
+DO $$
+BEGIN
+IF to_regclass('public.view_template_versions') IS NOT NULL THEN
 WITH ranked AS (
   SELECT v.*,
     ROW_NUMBER() OVER (
@@ -193,30 +203,63 @@ final AS (
     s.attach, s.actions, s.created_by
   FROM sourced s
 ),
-deduped AS (
+-- Candidate key per row, before collision handling.
+candidate AS (
   SELECT f.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY f.organization_id,
-        CASE WHEN f.is_active THEN f.plain_key ELSE f.versioned_key END
-      ORDER BY f.version DESC, f.id DESC
-    ) AS key_rn
+    CASE WHEN f.is_active THEN f.plain_key ELSE f.versioned_key END AS want_key
   FROM final f
+),
+-- A row keeps its clean key only when it is the SOLE claimant of it. Every
+-- other row is keyed from its own `view_template_versions.id`, which is unique
+-- per source row and stable across replays.
+--
+-- The suffix must NOT be a counter relative to a partition, and the two key
+-- spaces must not overlap:
+--
+--  * A partition-local `-dupN` can reproduce a DIFFERENT partition's clean key
+--    exactly (resource `deal!` folds to `...-deal` rank 2 -> `...-deal-dup2`,
+--    while resource `deal-dup2` folds to `...-deal-dup2` rank 1). The window
+--    function cannot see across partitions, so the collision reaches the
+--    insert and silently costs a row.
+--  * A suffix appended to a natural base can also equal some OTHER row's
+--    uncontested natural key, however unique the suffix itself is.
+--
+-- So a contested row does not decorate its natural key at all: it takes
+-- `view-r<id>`, a shape the natural path can never produce, because `slug` is
+-- built from `<tab>-<resource_type>-<resource_id>` and `resource_type` is
+-- CHECKed to `entity_type`/`entity` — a natural key therefore always contains
+-- `-entity-type-` or `-entity-`, and never matches `^view-r[0-9]+$`. Uniqueness
+-- inside the suffixed space follows from `id` being a primary key, so the two
+-- spaces are each collision-free and disjoint from one another.
+keyed_final AS (
+  SELECT c.*,
+    COUNT(*) OVER (PARTITION BY c.organization_id, c.want_key) AS claimants
+  FROM candidate c
+),
+resolved AS (
+  SELECT k.*,
+    CASE
+      WHEN k.claimants = 1 THEN LEFT(k.want_key, 64)
+      ELSE 'view-r' || k.id::text
+    END AS final_key
+  FROM keyed_final k
 )
 INSERT INTO public.views (
   organization_id, key, name, description, source_code, compiled_code,
   content_hash, attach, params, actions, last_writer
 )
-SELECT d.organization_id,
-  LEFT(
-    CASE WHEN d.is_active THEN d.plain_key ELSE d.versioned_key END
-    || CASE WHEN d.key_rn > 1 THEN '-dup' || d.key_rn::text ELSE '' END,
-    64
-  ),
-  d.view_name, d.view_description, d.source_code, '',
-  d.source_hash, d.attach, '{}'::jsonb, d.actions,
+-- No ON CONFLICT: the source tables are dropped in this same transaction, so
+-- conversion is the only copy of this content. A key collision must fail the
+-- migration loudly rather than discard authored work. `final_key` is unique by
+-- construction above; a duplicate here means the derivation regressed, and the
+-- deploy stopping is the correct outcome.
+SELECT r.organization_id, r.final_key,
+  r.view_name, r.view_description, r.source_code, '',
+  r.source_hash, r.attach, '{}'::jsonb, r.actions,
   'migration:view-templates'
-FROM deduped d
-ON CONFLICT (organization_id, key) DO NOTHING;
+FROM resolved r;
+END IF;
+END $$;
 
 -- Retire the template tables and their default-template pointers. The foreign
 -- keys go first so the table drops do not depend on drop order.

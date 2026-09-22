@@ -8,8 +8,14 @@
  * project install provides).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   assertBundlePortable,
   bundleViewFromFile,
@@ -151,6 +157,18 @@ describe("assertBundlePortable", () => {
         entry
       )
     ).toThrow("must be portable");
+    expect(() =>
+      assertBundlePortable(
+        `fetch("file%3A%2F%2F%2FUsers%2Fsomeone%2FCode%2Flobu-proj%2Fx")`,
+        entry
+      )
+    ).toThrow("must be portable");
+    expect(() =>
+      assertBundlePortable(
+        `var x = "${encodeURIComponent(entry).toLowerCase()}";`,
+        entry
+      )
+    ).toThrow("must be portable");
     expect(() => assertBundlePortable("var x = 1;", entry)).not.toThrow();
   });
 });
@@ -169,6 +187,7 @@ export const y = x;
     );
     const files = await collectViewWatchFiles(entry);
     expect(files).toContain(entry);
-    expect(files.some((f) => f.endsWith("views/_lib/board.tsx"))).toBe(true);
+    expect(files).toContain(resolve(dirname(entry), "../_lib/board.tsx"));
+    expect(files.every((file) => existsSync(file))).toBe(true);
   });
 });

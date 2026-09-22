@@ -30,11 +30,14 @@ export interface ViewContentMetadata {
   attach: unknown;
   params: unknown;
   actions: unknown;
+  /** Browser bundle bytes. Dependency-only changes must change identity. */
+  compiledCode?: string;
 }
 
 /**
- * sha256 of the source plus the declared metadata, first 16 hex. Same source
- * AND same metadata means the row is already current and nothing is written.
+ * sha256 of the source, browser bundle, and declared metadata, first 16 hex.
+ * Same source, bundle, and metadata means the row is current. Including the
+ * bundle makes a relative-import-only change observable to diff/apply.
  */
 export function contentHash(
   source: string,

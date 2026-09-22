@@ -11,6 +11,7 @@
  * joins the set on the next save.
  */
 import { watch } from "node:fs";
+import { resolve } from "node:path";
 import { loadProjectConfig } from "./apply/desired-state.js";
 import { collectViewWatchFiles } from "./view-bundler.js";
 
@@ -33,7 +34,6 @@ export async function collectViewReapplySet(
   for (const src of project.views ?? []) {
     const rel = src.path.trim();
     if (!rel || rel.startsWith("/") || rel.includes("\\")) continue;
-    const { resolve } = await import("node:path");
     const abs = resolve(cwd, rel);
     for (const file of await collectViewWatchFiles(abs)) files.add(file);
   }

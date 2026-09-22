@@ -17,7 +17,14 @@ import { emit } from "../events/emitter";
 import { getView, isValidViewKey } from "../views/views";
 
 const TEMPLATE_EVENT_ACTION_PREFIX = "event-action";
-const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
+/**
+ * The one grammar an interaction action name is dispatched on, for both
+ * template events and views. Exported so the AUTHORING paths (`manage_views`,
+ * `manage_entity_schema`) validate against the same source they will later be
+ * invoked through — a name only one side accepts stores a control that can
+ * never fire.
+ */
+export const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 const INTERACTION_ID = /^[A-Za-z0-9._:-]{1,256}$/;
 const MAX_VALUE_LENGTH = 1_000;
 

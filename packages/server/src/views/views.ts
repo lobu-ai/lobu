@@ -10,13 +10,17 @@
  * back over the MCP resource or the shell route and mounted `srcdoc` into the
  * sandboxed frame the MCP apps already use.
  */
+import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
-import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
+import type {
+  ViewAttachment,
+  ViewParamDecl,
+} from '@lobu/core/contracts/tools/manage-views';
 import { build, type Plugin } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 
-export type { ViewAttachment };
+export type { ViewAttachment, ViewParamDecl };
 
 const require = createRequire(import.meta.url);
 
@@ -49,12 +53,6 @@ export function viewKeyFromResourceUri(uri: string): string | null {
 
 /** Shared content identity (server and CLI derive the key from one function). */
 export { contentHash, type ViewContentMetadata } from '@lobu/core/contracts/tools/view-content-hash';
-
-export interface ViewParamDecl {
-  type: 'string' | 'number' | 'boolean';
-  default?: unknown;
-  description?: string;
-}
 
 export interface ViewActionDecl {
   emits: string;
@@ -218,27 +216,79 @@ export function projectView(view: StoredView): Omit<
   };
 }
 
-/** Resolve react funds inside the server's own installation, so source
- * compiled from stdin (no file context) still bundles the runtime. `@lobu/views`
- * resolves to the workspace package for the chat-agent path (`manage_views.set`
- * with plain source); the CLI bundles relative files and npm deps where
- * node_modules exists and ships the bundle beside the source. Anything else
- * resolves by esbuild's default walk and fails loudly when unresolvable. */
-function reactResolvePlugin(): Plugin {
+/** The only specifiers a view module may import. Everything else is a
+ * resolution error, so the compiler can never reach the server's filesystem. */
+const VIEW_RUNTIME_SPECIFIERS = [
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+  'react/jsx-dev-runtime',
+  '@lobu/views',
+] as const;
+
+/**
+ * Resolve the view runtime inside the server's own installation, so source
+ * compiled from stdin (no file context) still bundles React and `@lobu/views`
+ * for the chat-agent path (`manage_views.set` with plain source).
+ *
+ * The entry module is UNTRUSTED author source and the compiler runs in the
+ * server process, so this plugin is the import boundary, not a convenience.
+ * esbuild's default resolution would walk the real filesystem from
+ * `resolveDir`: `./package.json`, `../../package.json`, an absolute path or a
+ * bare npm dependency of the server all resolve and get inlined verbatim into
+ * a browser bundle the whole org reads back over the shell route. So the entry
+ * resolves through an explicit allowlist and nothing else — a rejected
+ * specifier is reported by name rather than silently emptied.
+ *
+ * Imports raised from INSIDE a resolved runtime package are a different
+ * namespace: those files are ours, already on disk, and their own relative and
+ * dependency imports must keep resolving normally or React does not bundle.
+ * They are gated on the importer being a file we resolved, never on the
+ * specifier text.
+ */
+function viewRuntimeResolvePlugin(): Plugin {
   const funds: Record<string, string> = {};
-  for (const specifier of ['react', 'react-dom', 'react/jsx-runtime', '@lobu/views']) {
+  for (const specifier of VIEW_RUNTIME_SPECIFIERS) {
     try {
       funds[specifier] = require.resolve(specifier);
     } catch {
-      // left absent — esbuild reports the unresolvable import instead
+      // left absent — the import is reported as denied rather than resolved
     }
   }
+  // Directory of every resolved runtime entry: the roots whose own internal
+  // graph esbuild may keep walking.
+  const runtimeRoots = new Set(
+    Object.values(funds).map((file) => dirname(file))
+  );
+  const insideRuntime = (importer: string): boolean => {
+    if (!importer) return false;
+    for (const root of runtimeRoots) {
+      if (importer === root || importer.startsWith(`${root}/`)) return true;
+    }
+    // A runtime package pulling a sibling dependency lands outside its own
+    // directory but still inside a node_modules tree we resolved into.
+    return importer.includes('/node_modules/');
+  };
   return {
-    name: 'lobu-view-react',
+    name: 'lobu-view-runtime',
     setup(b) {
-      b.onResolve({ filter: /^(react|react-dom|react\/jsx-runtime|@lobu\/views)$/ }, (args) => {
+      b.onResolve({ filter: /.*/ }, (args) => {
         const resolved = funds[args.path];
-        return resolved ? { path: resolved } : null;
+        if (resolved) return { path: resolved };
+        // Entry-side import (the untrusted module, or anything it reached):
+        // denied unless it named an allowlisted runtime specifier above.
+        if (!insideRuntime(args.importer)) {
+          return {
+            errors: [
+              {
+                text: `Import of "${args.path}" is not allowed in a view. A view may import only ${VIEW_RUNTIME_SPECIFIERS.join(', ')}.`,
+              },
+            ],
+          };
+        }
+        // Inside the runtime's own package graph — esbuild's default walk.
+        return null;
       });
     },
   };
@@ -259,7 +309,10 @@ export async function compileView(
       stdin: {
         contents: source,
         loader: 'tsx',
-        resolveDir: process.cwd(),
+        // No `resolveDir`: the entry has no filesystem context to walk from,
+        // so every entry-side import must go through the allowlist plugin.
+        // The plugin resolves the runtime to absolute paths, which is what
+        // lets React bundle without giving the author a directory to escape.
       },
       bundle: true,
       platform: 'browser',
@@ -268,7 +321,7 @@ export async function compileView(
       jsx: 'automatic',
       logLevel: 'silent',
       write: false,
-      plugins: [reactResolvePlugin()],
+      plugins: [viewRuntimeResolvePlugin()],
     });
     compiled = result.outputFiles?.[0]?.text ?? '';
   } catch (err) {
@@ -315,6 +368,67 @@ html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 system-
 *{box-sizing:border-box}
 `;
 
+/**
+ * The network-denying policy every view shell carries.
+ *
+ * A view bundle is UNTRUSTED author code — `manage_views.set` takes plain
+ * source from a chat agent, `lobu apply` ships whatever a repo's `.tsx` holds
+ * — and the compiler is only an IMPORT boundary. Nothing in the bundle's own
+ * runtime stops `fetch`, a WebSocket, or a remote `<img src>`. The sandboxed
+ * frame gives the document an opaque origin, which prevents it reading our
+ * origin but permits egress: an opaque-origin document can POST anywhere, and
+ * every row the view legitimately read is sitting in its heap. Reads are
+ * mediated through the host broker (`isViewReadTool`) precisely so that data
+ * access is reviewable; an unrestricted `fetch` routes around that, and a
+ * remote image URL alone is enough to exfiltrate.
+ *
+ * `default-src 'none'` closes every fetch directive by default. Only the two
+ * things an inlined bundle genuinely needs are reopened, and only for content
+ * that is already part of this document: inline script (the bundle) and inline
+ * style (the theme tokens plus React's own style props). `connect-src`,
+ * `img-src`, `media-src`, `frame-src`, `object-src`, `base-uri` and
+ * `form-action` are named explicitly as `'none'` rather than left to the
+ * default, so a later edit that adds one of them has to state its intent.
+ *
+ * `frame-ancestors` is deliberately absent: the shell exists to be framed by
+ * the host. `base-uri 'none'` matches what claude.ai hardcodes anyway.
+ */
+const VIEW_SHELL_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src 'none'",
+  "media-src 'none'",
+  "font-src 'none'",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "child-src 'none'",
+  "worker-src 'none'",
+  "object-src 'none'",
+  "manifest-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join('; ');
+
+/** The CSP `<meta>`, first in `<head>` so it governs everything after it. */
+const VIEW_SHELL_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${VIEW_SHELL_CSP}">`;
+
+/**
+ * Escape a stored value for an HTML attribute. View name/key/hash are author-
+ * controlled and are interpolated into `<head>`, where an unescaped `"` closes
+ * the attribute and lets the rest be read as markup — including a SECOND
+ * `Content-Security-Policy` meta, which the browser would then apply for any
+ * directive the first one omits.
+ */
+function attr(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 /** One view's shell: the compiled bundle inlined, no relative asset URLs and
  * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
 export function renderViewShell(view: StoredView): string {
@@ -323,10 +437,11 @@ export function renderViewShell(view: StoredView): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${VIEW_SHELL_CSP_META}
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="lobu-view" content="${view.key}">
-<meta name="lobu-view-hash" content="${view.content_hash}">
-<title>Lobu — ${view.name.replaceAll('<', '&lt;')}</title>
+<meta name="lobu-view" content="${attr(view.key)}">
+<meta name="lobu-view-hash" content="${attr(view.content_hash)}">
+<title>Lobu — ${attr(view.name)}</title>
 <style>${BASE_CSS}</style>
 </head>
 <body>
@@ -343,15 +458,33 @@ export function renderViewShell(view: StoredView): string {
  * standard `ui/initialize` handshake, then renders the per-view bundle from
  * whichever delivery the host uses: the standard `sandbox-resource-ready`
  * push (Claude), a `resources/read` of `ui://lobu/views/<key>` for the key in
- * the `tool-input` arguments, or the `lobu:views-bundle` message (same-origin
- * hosts that read the shell over REST). With no delivery it stays an honest
- * loading state instead of guessing a protocol.
+ * the `tool-input` arguments. With no delivery it stays an honest loading
+ * state instead of guessing a protocol.
+ *
+ * REPLACING THE DOCUMENT DISCARDS THE HOST'S OPENING STATE. The loader and the
+ * view it mounts are two different documents: `document.write` tears down the
+ * loader's `message` listener along with everything it had already received.
+ * The host's `tool-input` is one-shot (Claude sends it once per tool result)
+ * and it is what carries `scope` + `params` AND what unparks every `useQuery`
+ * in `@lobu/views` (`bridge.ts: toolInputReceived`), so a guest that never
+ * sees it renders an empty state forever with no second delivery to recover
+ * from. Host context (theme, display mode) arrives only in the `ui/initialize`
+ * RESULT, which likewise only the loader sees.
+ *
+ * So the loader records what it received and replays it into the guest once
+ * the replacement document has registered its own listener: the captured host
+ * context, the latest `tool-input`, and any notification that arrived while
+ * the `resources/read` round trip was still in flight. Replay is a
+ * `postMessage` to our own window rather than a synchronous dispatch, so it
+ * lands after the guest's listener exists and arrives through exactly the same
+ * inbox as a live host message — the guest needs no loader-specific path.
  */
 export function renderViewsLoaderShell(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${VIEW_SHELL_CSP_META}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="lobu-views-loader" content="1">
 <title>Lobu views</title>
@@ -366,9 +499,58 @@ export function renderViewsLoaderShell(): string {
   var nextId = 1;
   var pending = {};
   var settled = false;
+  // Opening state the host delivered to the LOADER. The mounted guest is a new
+  // document with a new listener, so each of these has to be replayed to it.
+  var hostContext = null;
+  var lastToolInput = null;
+  var queued = [];
   function status(text) {
     var el = document.getElementById("lobu-views-status");
     if (el) el.textContent = text;
+  }
+  // Re-deliver one notification to the mounted guest.
+  //
+  // The guest drops any message whose \`event.source\` is not the window it
+  // expects the host on — \`@lobu/views\` defaults that to \`window.parent\`
+  // (\`bridge.ts: expectedSource\`), and Claude's own AppBridge guard is the
+  // same. A plain \`window.postMessage\` to ourselves arrives with
+  // \`source === window\`, so the guest would discard every replayed message
+  // and the reseed would be silently inert. Dispatching a constructed
+  // MessageEvent lets us set \`source\` to \`window.parent\`, which is what the
+  // host's own notifications carry, so the guest needs no loader-specific
+  // path. Dispatch is deferred to a task so it lands after the replacement
+  // document's inline script has registered its listener.
+  function replay(method, params) {
+    var payload = { jsonrpc: "2.0", method: method, params: params || {} };
+    setTimeout(function () {
+      var event;
+      try {
+        event = new MessageEvent("message", {
+          data: payload,
+          source: window.parent,
+          origin: "*"
+        });
+      } catch (e) {
+        event = null;
+      }
+      if (event) {
+        window.dispatchEvent(event);
+        return;
+      }
+      // No MessageEvent constructor (very old engine): fall back to a
+      // self-post. A guest that pins \`expectedSource\` will ignore it, which
+      // is the pre-existing behaviour rather than a new failure mode.
+      window.postMessage(payload, "*");
+    }, 0);
+  }
+  // Hand the guest everything the host already said. Order mirrors a live
+  // host: context first, then the tool input that unparks reads, then
+  // whatever arrived while the bundle was still in flight.
+  function reseed() {
+    if (hostContext) replay("ui/notifications/host-context-changed", hostContext);
+    if (lastToolInput) replay("ui/notifications/tool-input", { arguments: lastToolInput });
+    for (var i = 0; i < queued.length; i++) replay(queued[i].method, queued[i].params);
+    queued = [];
   }
   function show(html) {
     if (settled) return;
@@ -376,6 +558,7 @@ export function renderViewsLoaderShell(): string {
     document.open();
     document.write(html);
     document.close();
+    reseed();
   }
   function fail(text) {
     if (settled) return;
@@ -433,14 +616,31 @@ export function renderViewsLoaderShell(): string {
     }
     if (typeof data.method !== "string") return;
     var params = data.params && typeof data.params === "object" ? data.params : {};
+    // Once the guest owns the document it is the only listener that matters,
+    // so anything still arriving here is a message the host meant for it.
+    if (settled) {
+      if (data.method !== "ui/notifications/sandbox-resource-ready") {
+        replay(data.method, params);
+      }
+      return;
+    }
     // Standard push path: the host delivers the per-view HTML itself.
     if (data.method === "ui/notifications/sandbox-resource-ready" && typeof params.html === "string") {
       show(params.html);
       return;
     }
-    // Standard fetch path: tool-input carries the open_view arguments.
+    // Host context is delivered to whoever is mounted; keep the latest so the
+    // guest opens with the host's real theme rather than the default.
+    if (data.method === "ui/notifications/host-context-changed") {
+      hostContext = params;
+      return;
+    }
+    // Standard fetch path: tool-input carries the open_view arguments. Keep
+    // the newest one: a param change that lands mid-fetch supersedes it, and
+    // replaying the stale copy would open the view on the wrong params.
     if (data.method === "ui/notifications/tool-input") {
       var args = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+      lastToolInput = args;
       if (typeof args.key === "string" && args.key) {
         readViewBundle(args.key, function (err, html) {
           if (err) fail("Could not load view: " + err.message);
@@ -449,16 +649,20 @@ export function renderViewsLoaderShell(): string {
       }
       return;
     }
-    // Same-origin fast path: the host read the shell over REST and posts it.
-    if (data.type === "lobu:views-bundle" && typeof data.html === "string") {
-      show(data.html);
-    }
+    // Anything else that arrives while the bundle is still in flight is
+    // addressed to the view, so hold it until the view can hear it.
+    queued.push({ method: data.method, params: params });
   });
   request("ui/initialize", {
     appInfo: { name: "Lobu views", version: "0.0.1" },
     appCapabilities: {},
     protocolVersion: PROTOCOL
-  }, function () {
+  }, function (err, result) {
+    // The handshake RESULT is the only place the initial host context appears.
+    if (!err && result && typeof result === "object" && result.hostContext &&
+        typeof result.hostContext === "object") {
+      hostContext = result.hostContext;
+    }
     send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
   });
   setTimeout(function () {
