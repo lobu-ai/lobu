@@ -2,22 +2,26 @@
  * Dogfood view: connection health card for the team workspace.
  *
  * Overview card on every `engineering-task` record: one row per health rule
- * from #3617 (`attention` on `manage_connections` list), an all/attention
- * filter param, and a Retry button per unhealthy connection. The button emits
- * the declared `retry` action through `invoke_view_action`, which appends one
- * `connection.retry_requested` event through the template-action chokepoint.
+ * from #3617 (`attention` on `manage_connections` list) plus an all/attention
+ * filter param.
+ *
+ * READ-ONLY on purpose. An earlier draft shipped a per-connection Retry button
+ * emitting `connection.retry_requested`, but no such event kind exists in any
+ * registry and no Automation consumes it — the button appended an event
+ * nothing would ever read, so it reported success while retrying nothing.
+ * Making it work means designing the event kind and its consumer, which is a
+ * platform change and its own PR, not something an example may invent. An
+ * example declares only actions the workspace actually handles.
  *
  * Reads go through the tool with an `outputSchema` (`manage_connections`);
  * `connections` rows are wide snapshots, so every field is read defensively.
  * Failure classification stays server-side: this module never parses error
  * text, it only displays what the tool returned.
  */
-import { useState } from "react";
 import {
   defineView,
   mountView,
   tool,
-  useAction,
   useHost,
   useParams,
   useQuery,
@@ -28,7 +32,6 @@ export const view = defineView({
   key: "connection-health",
   attach: [{ type: "engineering-task", placement: "overview" }],
   params: { only: { type: "string", default: "all" } },
-  actions: { retry: { emits: "connection.retry_requested" } },
 });
 
 type Tone = "ok" | "warn" | "bad" | "muted";
@@ -120,9 +123,6 @@ function ConnectionHealth() {
         : { action: "list", limit: 50 }
     )
   );
-  const retry = useAction("retry");
-  const [actionLog, setActionLog] = useState<string[]>([]);
-
   const rows: ConnectionRow[] = q.data?.connections ?? [];
   const onlyAttention = params.only === "attention";
   const visible = onlyAttention
@@ -132,17 +132,6 @@ function ConnectionHealth() {
   for (const r of rows) {
     const k = String(r.attention ?? "unknown");
     counts.set(k, (counts.get(k) ?? 0) + 1);
-  }
-
-  async function onRetry(row: ConnectionRow) {
-    const res = await retry({ connection_id: row.id });
-    setActionLog((l) =>
-      [
-        `${new Date().toLocaleTimeString()} retry #${row.id}: ${res.ok ? "ok" : `error: ${res.error}`}`,
-        ...l.slice(0, 4),
-      ].slice(0, 5)
-    );
-    q.refetch();
   }
 
   return (
@@ -296,43 +285,11 @@ function ConnectionHealth() {
               >
                 {rule?.label ?? row.attention ?? "unknown"}
               </span>
-              {row.attention !== "healthy" && (
-                <button
-                  type="button"
-                  data-testid={`retry-${row.id}`}
-                  onClick={() => void onRetry(row)}
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 6,
-                    border: "1px solid var(--border)",
-                    background: "transparent",
-                    color: "var(--accent)",
-                    cursor: "pointer",
-                  }}
-                >
-                  Retry
-                </button>
-              )}
             </div>
           );
         })}
       </div>
 
-      {actionLog.length > 0 && (
-        <pre
-          data-testid="action-log"
-          style={{
-            marginTop: 8,
-            padding: 8,
-            fontSize: 11,
-            background: "color-mix(in srgb, var(--muted) 12%, transparent)",
-            borderRadius: 6,
-            whiteSpace: "pre-wrap",
-          }}
-        >
-          {actionLog.join("\n")}
-        </pre>
-      )}
       <footer style={{ marginTop: 8, color: "var(--muted)", fontSize: 11 }}>
         scope {JSON.stringify(scope)} · params {JSON.stringify(params)} ·{" "}
         {connected ? "connected" : "connecting…"}

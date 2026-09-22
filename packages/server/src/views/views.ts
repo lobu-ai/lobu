@@ -368,6 +368,67 @@ html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 system-
 *{box-sizing:border-box}
 `;
 
+/**
+ * The network-denying policy every view shell carries.
+ *
+ * A view bundle is UNTRUSTED author code — `manage_views.set` takes plain
+ * source from a chat agent, `lobu apply` ships whatever a repo's `.tsx` holds
+ * — and the compiler is only an IMPORT boundary. Nothing in the bundle's own
+ * runtime stops `fetch`, a WebSocket, or a remote `<img src>`. The sandboxed
+ * frame gives the document an opaque origin, which prevents it reading our
+ * origin but permits egress: an opaque-origin document can POST anywhere, and
+ * every row the view legitimately read is sitting in its heap. Reads are
+ * mediated through the host broker (`isViewReadTool`) precisely so that data
+ * access is reviewable; an unrestricted `fetch` routes around that, and a
+ * remote image URL alone is enough to exfiltrate.
+ *
+ * `default-src 'none'` closes every fetch directive by default. Only the two
+ * things an inlined bundle genuinely needs are reopened, and only for content
+ * that is already part of this document: inline script (the bundle) and inline
+ * style (the theme tokens plus React's own style props). `connect-src`,
+ * `img-src`, `media-src`, `frame-src`, `object-src`, `base-uri` and
+ * `form-action` are named explicitly as `'none'` rather than left to the
+ * default, so a later edit that adds one of them has to state its intent.
+ *
+ * `frame-ancestors` is deliberately absent: the shell exists to be framed by
+ * the host. `base-uri 'none'` matches what claude.ai hardcodes anyway.
+ */
+const VIEW_SHELL_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src 'none'",
+  "media-src 'none'",
+  "font-src 'none'",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "child-src 'none'",
+  "worker-src 'none'",
+  "object-src 'none'",
+  "manifest-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join('; ');
+
+/** The CSP `<meta>`, first in `<head>` so it governs everything after it. */
+const VIEW_SHELL_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${VIEW_SHELL_CSP}">`;
+
+/**
+ * Escape a stored value for an HTML attribute. View name/key/hash are author-
+ * controlled and are interpolated into `<head>`, where an unescaped `"` closes
+ * the attribute and lets the rest be read as markup — including a SECOND
+ * `Content-Security-Policy` meta, which the browser would then apply for any
+ * directive the first one omits.
+ */
+function attr(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 /** One view's shell: the compiled bundle inlined, no relative asset URLs and
  * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
 export function renderViewShell(view: StoredView): string {
@@ -376,10 +437,11 @@ export function renderViewShell(view: StoredView): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${VIEW_SHELL_CSP_META}
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="lobu-view" content="${view.key}">
-<meta name="lobu-view-hash" content="${view.content_hash}">
-<title>Lobu — ${view.name.replaceAll('<', '&lt;')}</title>
+<meta name="lobu-view" content="${attr(view.key)}">
+<meta name="lobu-view-hash" content="${attr(view.content_hash)}">
+<title>Lobu — ${attr(view.name)}</title>
 <style>${BASE_CSS}</style>
 </head>
 <body>
@@ -398,12 +460,31 @@ export function renderViewShell(view: StoredView): string {
  * push (Claude), a `resources/read` of `ui://lobu/views/<key>` for the key in
  * the `tool-input` arguments. With no delivery it stays an honest loading
  * state instead of guessing a protocol.
+ *
+ * REPLACING THE DOCUMENT DISCARDS THE HOST'S OPENING STATE. The loader and the
+ * view it mounts are two different documents: `document.write` tears down the
+ * loader's `message` listener along with everything it had already received.
+ * The host's `tool-input` is one-shot (Claude sends it once per tool result)
+ * and it is what carries `scope` + `params` AND what unparks every `useQuery`
+ * in `@lobu/views` (`bridge.ts: toolInputReceived`), so a guest that never
+ * sees it renders an empty state forever with no second delivery to recover
+ * from. Host context (theme, display mode) arrives only in the `ui/initialize`
+ * RESULT, which likewise only the loader sees.
+ *
+ * So the loader records what it received and replays it into the guest once
+ * the replacement document has registered its own listener: the captured host
+ * context, the latest `tool-input`, and any notification that arrived while
+ * the `resources/read` round trip was still in flight. Replay is a
+ * `postMessage` to our own window rather than a synchronous dispatch, so it
+ * lands after the guest's listener exists and arrives through exactly the same
+ * inbox as a live host message — the guest needs no loader-specific path.
  */
 export function renderViewsLoaderShell(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${VIEW_SHELL_CSP_META}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="lobu-views-loader" content="1">
 <title>Lobu views</title>
@@ -418,9 +499,58 @@ export function renderViewsLoaderShell(): string {
   var nextId = 1;
   var pending = {};
   var settled = false;
+  // Opening state the host delivered to the LOADER. The mounted guest is a new
+  // document with a new listener, so each of these has to be replayed to it.
+  var hostContext = null;
+  var lastToolInput = null;
+  var queued = [];
   function status(text) {
     var el = document.getElementById("lobu-views-status");
     if (el) el.textContent = text;
+  }
+  // Re-deliver one notification to the mounted guest.
+  //
+  // The guest drops any message whose \`event.source\` is not the window it
+  // expects the host on — \`@lobu/views\` defaults that to \`window.parent\`
+  // (\`bridge.ts: expectedSource\`), and Claude's own AppBridge guard is the
+  // same. A plain \`window.postMessage\` to ourselves arrives with
+  // \`source === window\`, so the guest would discard every replayed message
+  // and the reseed would be silently inert. Dispatching a constructed
+  // MessageEvent lets us set \`source\` to \`window.parent\`, which is what the
+  // host's own notifications carry, so the guest needs no loader-specific
+  // path. Dispatch is deferred to a task so it lands after the replacement
+  // document's inline script has registered its listener.
+  function replay(method, params) {
+    var payload = { jsonrpc: "2.0", method: method, params: params || {} };
+    setTimeout(function () {
+      var event;
+      try {
+        event = new MessageEvent("message", {
+          data: payload,
+          source: window.parent,
+          origin: "*"
+        });
+      } catch (e) {
+        event = null;
+      }
+      if (event) {
+        window.dispatchEvent(event);
+        return;
+      }
+      // No MessageEvent constructor (very old engine): fall back to a
+      // self-post. A guest that pins \`expectedSource\` will ignore it, which
+      // is the pre-existing behaviour rather than a new failure mode.
+      window.postMessage(payload, "*");
+    }, 0);
+  }
+  // Hand the guest everything the host already said. Order mirrors a live
+  // host: context first, then the tool input that unparks reads, then
+  // whatever arrived while the bundle was still in flight.
+  function reseed() {
+    if (hostContext) replay("ui/notifications/host-context-changed", hostContext);
+    if (lastToolInput) replay("ui/notifications/tool-input", { arguments: lastToolInput });
+    for (var i = 0; i < queued.length; i++) replay(queued[i].method, queued[i].params);
+    queued = [];
   }
   function show(html) {
     if (settled) return;
@@ -428,6 +558,7 @@ export function renderViewsLoaderShell(): string {
     document.open();
     document.write(html);
     document.close();
+    reseed();
   }
   function fail(text) {
     if (settled) return;
@@ -485,14 +616,31 @@ export function renderViewsLoaderShell(): string {
     }
     if (typeof data.method !== "string") return;
     var params = data.params && typeof data.params === "object" ? data.params : {};
+    // Once the guest owns the document it is the only listener that matters,
+    // so anything still arriving here is a message the host meant for it.
+    if (settled) {
+      if (data.method !== "ui/notifications/sandbox-resource-ready") {
+        replay(data.method, params);
+      }
+      return;
+    }
     // Standard push path: the host delivers the per-view HTML itself.
     if (data.method === "ui/notifications/sandbox-resource-ready" && typeof params.html === "string") {
       show(params.html);
       return;
     }
-    // Standard fetch path: tool-input carries the open_view arguments.
+    // Host context is delivered to whoever is mounted; keep the latest so the
+    // guest opens with the host's real theme rather than the default.
+    if (data.method === "ui/notifications/host-context-changed") {
+      hostContext = params;
+      return;
+    }
+    // Standard fetch path: tool-input carries the open_view arguments. Keep
+    // the newest one: a param change that lands mid-fetch supersedes it, and
+    // replaying the stale copy would open the view on the wrong params.
     if (data.method === "ui/notifications/tool-input") {
       var args = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+      lastToolInput = args;
       if (typeof args.key === "string" && args.key) {
         readViewBundle(args.key, function (err, html) {
           if (err) fail("Could not load view: " + err.message);
@@ -501,12 +649,20 @@ export function renderViewsLoaderShell(): string {
       }
       return;
     }
+    // Anything else that arrives while the bundle is still in flight is
+    // addressed to the view, so hold it until the view can hear it.
+    queued.push({ method: data.method, params: params });
   });
   request("ui/initialize", {
     appInfo: { name: "Lobu views", version: "0.0.1" },
     appCapabilities: {},
     protocolVersion: PROTOCOL
-  }, function () {
+  }, function (err, result) {
+    // The handshake RESULT is the only place the initial host context appears.
+    if (!err && result && typeof result === "object" && result.hostContext &&
+        typeof result.hostContext === "object") {
+      hostContext = result.hostContext;
+    }
     send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
   });
   setTimeout(function () {

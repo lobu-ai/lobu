@@ -21,7 +21,7 @@ async function bundle(rel: string, base: string) {
 }
 
 describe("dogfood views", () => {
-  test("connection-health card declares its key, attach, filter and retry", async () => {
+  test("connection-health card declares its key, attach and filter", async () => {
     const bundled = await bundle(join("connection", "health.tsx"), TEAM_VIEWS);
     expect(bundled.metadata.key).toBe("connection-health");
     expect(bundled.metadata.attach).toEqual([
@@ -30,9 +30,12 @@ describe("dogfood views", () => {
     expect(bundled.metadata.params).toEqual({
       only: { type: "string", default: "all" },
     });
-    expect(bundled.metadata.actions).toEqual({
-      retry: { emits: "connection.retry_requested" },
-    });
+    // Read-only: an example may only declare an action the workspace actually
+    // handles. The earlier `retry: { emits: "connection.retry_requested" }`
+    // named an event kind that exists in no registry and that no Automation
+    // consumes, so invoking it appended a row nothing would ever read while
+    // reporting success to the user.
+    expect(bundled.metadata.actions ?? {}).toEqual({});
   });
 
   test("automation-runs tab declares its key, attach and status/window params", async () => {
@@ -81,6 +84,68 @@ describe("dogfood views", () => {
       // Portable: neither the repo root nor the entry path leaked into bytes.
       expect(bundled.compiledCode).not.toContain(REPO_ROOT);
       expect(bundled.compiledCode).not.toContain(join(base, rel));
+    }
+  });
+  /**
+   * Class-wide guard for the defect that shipped in `connection-health`: a
+   * declared action whose `emits` names an event kind nothing registers and no
+   * Automation consumes. `invoke_view_action` will happily append it, so the
+   * button reports success while doing nothing — the failure is silent and
+   * only visible by reading the config.
+   *
+   * An example may only emit an event kind its own config declares. This walks
+   * every shipped example view rather than the one that regressed, so the next
+   * view to invent an event fails here instead of in a review round.
+   */
+  test("no example view emits an unregistered event kind", async () => {
+    const configs = [
+      {
+        config: await import(
+          "../../../../../../examples/lobu-team/lobu.config.js"
+        ),
+        views: TEAM_VIEWS,
+        files: [
+          join("connection", "health.tsx"),
+          join("automation", "runs.tsx"),
+          join("pages", "refusals.tsx"),
+        ],
+      },
+      {
+        config: await import(
+          "../../../../../../examples/lobu-crm/lobu.config.js"
+        ),
+        views: CRM_VIEWS,
+        files: [join("pilot", "account-360.tsx")],
+      },
+    ];
+    for (const entry of configs) {
+      const cfg = (entry.config as { default: Record<string, unknown> })
+        .default;
+      const registered = new Set<string>();
+      for (const entity of (cfg.entities ?? []) as Array<{
+        eventKinds?: Record<string, unknown>;
+      }>) {
+        for (const kind of Object.keys(entity.eventKinds ?? {}))
+          registered.add(kind);
+      }
+      for (const rel of entry.files) {
+        const bundled = await bundle(rel, entry.views);
+        const actions = (bundled.metadata.actions ?? {}) as Record<
+          string,
+          { emits?: string }
+        >;
+        for (const [name, decl] of Object.entries(actions)) {
+          const emits = decl?.emits;
+          expect(
+            typeof emits,
+            `${rel} action "${name}" must declare emits`
+          ).toBe("string");
+          expect(
+            registered.has(emits as string),
+            `${rel} action "${name}" emits "${emits}", which no entity in this example registers as an event kind`
+          ).toBe(true);
+        }
+      }
     }
   });
 });
