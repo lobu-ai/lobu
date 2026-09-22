@@ -176,6 +176,7 @@ export {
 export type {
   CreateHttpClientOptions,
   HttpClient,
+  HttpRequestInit,
   RequireBearerClientOptions,
 } from './http-client.js';
 export { createHttpClient, HttpStatusError, requireBearerClient } from './http-client.js';

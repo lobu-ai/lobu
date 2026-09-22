@@ -1,9 +1,12 @@
 /**
  * HTTP retry helper for connector SDK.
  *
- * Exponential backoff with full jitter (5 retries, 1s → 16s), retry on
- * transient network/rate-limit/server errors, abort on permanent client errors
- * (401/403/404/etc.).
+ * Exponential backoff with full jitter (5 retries, 1s → 16s). Whether an error
+ * is worth retrying is decided by `classifyToolError`, the one catalog shared
+ * with the server: an HTTP status or SQLSTATE the error carries always wins,
+ * and message text is consulted only when it carries neither. A response
+ * body or URL is never evidence — a 503 whose body says "invalid" is still a
+ * 503.
  *
  * The backoff loop lives here rather than being imported from `@lobu/core`:
  * core's root entry drags winston, Sentry and OpenTelemetry into every
@@ -12,6 +15,11 @@
  * configuration `withHttpRetry` uses: exponential, capped, full jitter.
  */
 
+import {
+  classifyToolError,
+  isRetryable,
+  type ToolErrorSignal,
+} from '@lobu/core/connector-query-errors';
 import { sdkLogger } from './logger.js';
 
 interface BackoffOptions {
@@ -55,69 +63,53 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, options: BackoffOptions
   throw lastError;
 }
 
-const TRANSIENT_KEYWORDS = [
-  // network
-  'network',
-  'econnrefused',
-  'etimedout',
-  'enotfound',
-  'econnreset',
-  'fetch failed',
-  'socket',
-  'dns',
-  // database
-  'connection pool',
-  'too many connections',
-  'connection limit',
-  'connection reset',
-  'connection refused',
-  'server closed',
-  'connection terminated',
-  'connection timeout',
-  'deadlock',
-  'lock timeout',
-  'query timeout',
-  'statement timeout',
-  'transaction',
-  'postgres',
-  'postgresql',
-  'pg_',
-  'relation does not exist',
-  'syntax error',
-  // rate limit
-  'rate limit',
-  '429',
-  'too many requests',
-  // server
-  '500',
-  '502',
-  '503',
-  '504',
-  'server error',
-  'service unavailable',
-  'gateway timeout',
-];
+/**
+ * The structured signal an error carries, read off the error itself. An
+ * `HttpStatusError` carries `status`; a postgres.js error carries a SQLSTATE
+ * `code`. The message rides along only as the catalog's last resort, for
+ * errors that arrive as text alone (a failed fetch inside the isolate is a
+ * bare `TypeError('fetch failed: …')`).
+ */
+function errorSignal(error: unknown): ToolErrorSignal {
+  if (!(error instanceof Error)) return { message: String(error) };
+  const fields = error as Error & { status?: unknown; code?: unknown };
+  return {
+    httpStatus: typeof fields.status === 'number' ? fields.status : undefined,
+    pgCode: typeof fields.code === 'string' ? fields.code : undefined,
+    message: error.message,
+  };
+}
 
-const PERMANENT_KEYWORDS = [
-  'not found',
-  '404',
-  'unauthorized',
-  '401',
-  'forbidden',
-  '403',
-  'invalid',
-  'bad request',
-  '400',
-];
+/** Whether a response with this HTTP status may succeed if the request is repeated. */
+export function isTransientStatus(status: number): boolean {
+  return isRetryable(classifyToolError({ httpStatus: status }));
+}
 
-function errorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).toLowerCase();
+/** Whether `error` may succeed if the identical call is repeated. */
+function isTransientError(error: unknown): boolean {
+  return isRetryable(classifyToolError(errorSignal(error)));
+}
+
+/**
+ * Whether `error` proves the server refused the request without acting on it.
+ * Only a 429 says so; a 5xx or a dropped connection says nothing about whether
+ * a write landed.
+ */
+function isUnprocessed(error: unknown): boolean {
+  return classifyToolError(errorSignal(error)) === 'RATE_LIMITED';
 }
 
 interface RetryOptions {
   operation?: string;
   context?: Record<string, any>;
   onRetry?: (error: Error, attempt: number) => void;
+  /**
+   * Whether repeating the call is safe when an earlier attempt may already have
+   * taken effect. Default `true`. Pass `false` for a write (a send, a create): it
+   * is then retried only on a 429, which proves the server did not act on it —
+   * never on a 5xx or a dropped connection (RFC 9110 §9.2.2).
+   */
+  repeatable?: boolean;
 }
 
 /**
@@ -134,11 +126,8 @@ export async function withHttpRetry<T>(fn: () => Promise<T>, options?: RetryOpti
     maxRetries: totalRetries,
     baseDelay: 1000,
     maxDelay: 16000,
-    shouldRetry: (error) => {
-      const msg = errorMessage(error);
-      if (PERMANENT_KEYWORDS.some((k) => msg.includes(k))) return false;
-      return TRANSIENT_KEYWORDS.some((k) => msg.includes(k));
-    },
+    shouldRetry:
+      options?.repeatable === false ? isUnprocessed : isTransientError,
     onRetry: (attempt, error) => {
       options?.onRetry?.(error, attempt);
       sdkLogger.debug(

@@ -35,7 +35,7 @@ export type ToolErrorCode =
   | "RATE_LIMITED"
   /** Upstream request or DB statement timed out (e.g. PG 57014). */
   | "UPSTREAM_TIMEOUT"
-  /** Upstream server error (HTTP 500/502/503/504). */
+  /** Upstream server error (HTTP 5xx). */
   | "UPSTREAM_5XX"
   /** Network-level failure reaching the upstream (econnrefused/reset/dns/socket). */
   | "NETWORK"
@@ -184,6 +184,8 @@ const NETWORK_MESSAGE_KEYWORDS = [
   "etimedout",
   "enotfound",
   "econnreset",
+  "epipe",
+  "eai_again",
   "fetch failed",
   "socket",
   "connection reset",
@@ -197,8 +199,8 @@ const NETWORK_MESSAGE_KEYWORDS = [
 
 /**
  * Map a structured signal (preferred) — or, as a last resort, a message string —
- * to a `ToolErrorCode`. Precedence: explicit `transient` HTTP judgment → HTTP
- * status → PG code → run exit reason → message keywords → `INTERNAL`.
+ * to a `ToolErrorCode`. Precedence: HTTP status → PG code → run exit reason
+ * → explicit `transient` judgment → message keywords → `INTERNAL`.
  *
  * This replaces the duplicated keyword lists in connector-sdk/src/retry.ts; those
  * should source their retry decision from `isRetryable(classifyToolError(...))`.
@@ -219,7 +221,10 @@ export function classifyToolError(signal: ToolErrorSignal): ToolErrorCode {
   // surfaces connection-level failures with a non-SQLSTATE `code` (e.g.
   // 'ECONNREFUSED', 'CONNECTION_CLOSED') — those must fall through to the message
   // matching below so a transient DB-connection drop stays NETWORK, not VALIDATION.
-  if (pgCode && /^[0-9A-Z]{5}$/.test(pgCode)) {
+  // A five-letter errno such as 'EPIPE' fits the SQLSTATE shape too. Generic
+  // `Error.code` callers cannot prove an E-prefixed value came from PostgreSQL,
+  // so let those ambiguous codes fall through to message matching.
+  if (pgCode && /^[0-9A-Z]{5}$/.test(pgCode) && !pgCode.startsWith("E")) {
     if (pgCode === "57014") return "UPSTREAM_TIMEOUT"; // query_canceled / statement_timeout
     // 08xxx = connection exceptions (transient); 40001 = serialization failure; 40P01 = deadlock.
     if (pgCode.startsWith("08") || pgCode === "40001" || pgCode === "40P01")

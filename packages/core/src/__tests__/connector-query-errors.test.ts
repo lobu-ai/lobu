@@ -132,6 +132,14 @@ describe("classifyToolError", () => {
         message: "connection terminated",
       })
     ).toBe("NETWORK");
+    // A generic five-letter `Error.code` can have the SQLSTATE shape without
+    // coming from PostgreSQL: a broken pipe is transient, not the caller's fault.
+    expect(classifyToolError({ pgCode: "EPIPE", message: "write EPIPE" })).toBe(
+      "NETWORK"
+    );
+    expect(
+      classifyToolError({ message: "getaddrinfo EAI_AGAIN api.example.com" })
+    ).toBe("NETWORK");
     // A non-SQLSTATE code with no transient message hint → INTERNAL, not VALIDATION.
     expect(
       classifyToolError({ pgCode: "SOME_DRIVER_CODE", message: "weird" })

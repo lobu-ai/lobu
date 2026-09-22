@@ -157,4 +157,68 @@ describe('createHttpClient', () => {
     expect(response.status).toBe(403);
     expect(await response.text()).toBe('forbidden');
   });
+
+  test('retries a GET 503 whose body contains a word that sounds permanent', async () => {
+    let attempt = 0;
+    const fetchMock = mock(async () => {
+      attempt++;
+      if (attempt < 2) return new Response('invalid upstream state', { status: 503 });
+      return jsonResponse({ ok: true });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await createHttpClient().get<{ ok: boolean }>('https://api.example.com/x');
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  }, 30000);
+
+  test('does not retry a POST on a 5xx: it may already have been applied', async () => {
+    const fetchMock = mock(async () => new Response('unavailable', { status: 503 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const error = await createHttpClient()
+      .post('https://api.example.com/messages/send', { raw: 'x' })
+      .then(
+        () => null,
+        (e) => e
+      );
+    expect(error).toBeInstanceOf(HttpStatusError);
+    expect(error.status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('retries a POST on a 429: the server refused it unprocessed', async () => {
+    let attempt = 0;
+    const fetchMock = mock(async () => {
+      attempt++;
+      if (attempt < 2) return new Response('slow down', { status: 429 });
+      return jsonResponse({ ok: true });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await createHttpClient().post<{ ok: boolean }>('https://api.example.com/send', {});
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  }, 30000);
+
+  test('retries a POST the caller marks idempotent (a GraphQL query), and never sends the hint', async () => {
+    let attempt = 0;
+    const seen: RequestInit[] = [];
+    const fetchMock = mock(async (_url: string, init?: RequestInit) => {
+      seen.push(init ?? {});
+      attempt++;
+      if (attempt < 2) return new Response('unavailable', { status: 503 });
+      return jsonResponse({ data: { ok: true } });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await createHttpClient().post<{ data: { ok: boolean } }>(
+      'https://api.example.com/graphql',
+      { query: '{ ok }' },
+      { idempotent: true }
+    );
+    expect(result).toEqual({ data: { ok: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(seen.every((init) => !('idempotent' in init))).toBe(true);
+  }, 30000);
 });

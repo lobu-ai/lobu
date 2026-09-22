@@ -63,6 +63,12 @@
       "import": "./dist/errors.js",
       "require": "./dist/errors.js"
     },
+    "./connector-query-errors": {
+      "types": "./dist/connector-query-errors.d.ts",
+      "bun": "./src/connector-query-errors.ts",
+      "import": "./dist/connector-query-errors.js",
+      "require": "./dist/connector-query-errors.js"
+    },
     "./ajv": {
       "types": "./dist/utils/ajv.d.ts",
       "bun": "./src/utils/ajv.ts",

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { HttpStatusError } from '../http-client.js';
 import { withHttpRetry } from '../retry.js';
 
 // Speed up tests: p-retry honors minTimeout but tests can still take a few hundred ms.
@@ -106,17 +107,27 @@ describe('withHttpRetry', () => {
     expect(fn).toHaveBeenCalledTimes(2);
   }, 30000);
 
-  test('retries on database error then succeeds', async () => {
+  test('retries a database error by its SQLSTATE, not its wording', async () => {
     let attempt = 0;
     const fn = mock(async () => {
       attempt++;
-      if (attempt < 2) throw new Error('postgres: deadlock detected');
+      if (attempt < 2) {
+        throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+      }
       return 'ok';
     });
     const result = await withHttpRetry(fn);
     expect(result).toBe('ok');
     expect(fn).toHaveBeenCalledTimes(2);
   }, 30000);
+
+  test('does not retry a permanent SQLSTATE even when its text sounds transient', async () => {
+    const fn = mock(async () => {
+      throw Object.assign(new Error('syntax error at or near "timeout"'), { code: '42601' });
+    });
+    await expect(withHttpRetry(fn)).rejects.toThrow(/syntax error/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 
   test('handles non-Error throwable values', async () => {
     const fn = mock(async () => {
@@ -126,4 +137,71 @@ describe('withHttpRetry', () => {
     await expect(withHttpRetry(fn)).rejects.toBeDefined();
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  // The status an HttpStatusError carries is the whole answer. Its message embeds
+  // the URL and response body, and those words used to decide: a 503 whose body
+  // happened to say "invalid" was treated as permanent and never retried.
+  function statusError(status: number, url: string, bodyText: string) {
+    return new HttpStatusError({
+      prefix: 'API',
+      method: 'GET',
+      url,
+      status,
+      statusText: '',
+      bodyText,
+    });
+  }
+
+  for (const [label, status, url, body] of [
+    ['503 whose body says "invalid"', 503, 'https://api.example.com/items', 'invalid request parameter'],
+    ['500 whose body says "not found"', 500, 'https://api.example.com/items', 'record not found upstream'],
+    ['503 whose URL contains 404', 503, 'https://api.example.com/e/404', 'service unavailable'],
+    ['429 whose body says "Bad Request"', 429, 'https://api.example.com/items', 'Bad Request: quota'],
+  ] as const) {
+    test(`retries a ${label}`, async () => {
+      let attempt = 0;
+      const fn = mock(async () => {
+        attempt++;
+        if (attempt < 2) throw statusError(status, url, body);
+        return 'ok';
+      });
+      expect(await withHttpRetry(fn)).toBe('ok');
+      expect(fn).toHaveBeenCalledTimes(2);
+    }, 30000);
+  }
+
+  test('does not retry a 404 even when its body sounds transient', async () => {
+    const fn = mock(async () => {
+      throw statusError(404, 'https://api.example.com/items', 'service unavailable, try again');
+    });
+    await expect(withHttpRetry(fn)).rejects.toBeInstanceOf(HttpStatusError);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test('a non-repeatable call is not retried on a 5xx: the write may have landed', async () => {
+    const fn = mock(async () => {
+      throw statusError(503, 'https://api.example.com/send', 'unavailable');
+    });
+    await expect(withHttpRetry(fn, { repeatable: false })).rejects.toBeInstanceOf(HttpStatusError);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test('a non-repeatable call is not retried on a dropped connection', async () => {
+    const fn = mock(async () => {
+      throw new TypeError('fetch failed: socket hang up');
+    });
+    await expect(withHttpRetry(fn, { repeatable: false })).rejects.toThrow(/fetch failed/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test('a non-repeatable call is still retried on a 429: the server did not act on it', async () => {
+    let attempt = 0;
+    const fn = mock(async () => {
+      attempt++;
+      if (attempt < 2) throw statusError(429, 'https://api.example.com/send', 'slow down');
+      return 'ok';
+    });
+    expect(await withHttpRetry(fn, { repeatable: false })).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  }, 30000);
 });

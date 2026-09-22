@@ -131,8 +131,10 @@ async function fetchReviewsPage(
 
   let res: Response;
   try {
+    // A review listing sent as POST (batchexecute): a read, safe to repeat.
     res = await http.request(url, {
       method: "POST",
+      idempotent: true,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
       },

@@ -265,10 +265,12 @@ export default class ProductHuntConnector extends ConnectorRuntime {
 
         let result: ProductHuntPostsResponse;
         try {
-          result = await http.post<ProductHuntPostsResponse>(this.API_URL, {
-            query: LIST_POSTS_QUERY,
-            variables,
-          });
+          // A GraphQL query sent as POST: safe to repeat on a 5xx.
+          result = await http.post<ProductHuntPostsResponse>(
+            this.API_URL,
+            { query: LIST_POSTS_QUERY, variables },
+            { idempotent: true }
+          );
         } catch (error) {
           if (error instanceof HttpStatusError && error.status === 401) {
             // PH v2 API requires auth. Fail the run instead of returning an

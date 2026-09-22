@@ -297,7 +297,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
         pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
         nodes?: LinearIssueNode[];
       };
-    } = await this.graphql(ctx.credentials, gql);
+    } = await this.graphql(ctx.credentials, gql, undefined, { idempotent: true });
 
     const rows = (response.issues?.nodes ?? [])
       .map((node) => this.issueRow(node))
@@ -348,7 +348,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
           pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
           nodes?: LinearIssueNode[];
         };
-      }>(ctx.credentials, query);
+      }>(ctx.credentials, query, undefined, { idempotent: true });
 
       const nodes = response.issues?.nodes ?? [];
       for (const node of nodes) {
@@ -463,10 +463,16 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
   // GraphQL transport
   // -------------------------------------------------------------------------
 
+  /**
+   * `idempotent` marks a read: a GraphQL query goes out as POST, so without it
+   * the client never repeats the request on a 5xx. Leave it off for mutations —
+   * a 5xx does not say whether the webhook was already created.
+   */
   private async graphql<T>(
     credentials: SyncCredentials | null,
     query: string,
-    variables?: Record<string, unknown>
+    variables?: Record<string, unknown>,
+    options: { idempotent?: boolean } = {}
   ): Promise<T> {
     const http = requireBearerClient(credentials, {
       errorPrefix: 'Linear API',
@@ -478,6 +484,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, variables: variables ?? {} }),
+        idempotent: options.idempotent,
       }
     );
 

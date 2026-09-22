@@ -9,15 +9,11 @@
  */
 
 import type { SyncCredentials } from './connector-types.js';
-import { withHttpRetry } from './retry.js';
+import { isTransientStatus, withHttpRetry } from './retry.js';
 import { sleep } from './sleep.js';
 
-/**
- * Statuses treated as transient: the client throws an `HttpStatusError` for
- * these so `withHttpRetry` can retry them (its keyword classifier recognizes
- * the status code embedded in the message).
- */
-const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+/** Methods RFC 9110 §9.2.2 defines as idempotent: repeating one has the effect of sending it once. */
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE']);
 
 const BODY_PREVIEW_CHARS = 500;
 const DEFAULT_MAX_RETRY_AFTER_MS = 30_000;
@@ -57,6 +53,17 @@ interface HttpClientRetryOptions {
   onRetry?: (error: Error, attempt: number) => void;
 }
 
+/** `RequestInit` plus the one hint retrying needs from the caller. */
+export interface HttpRequestInit extends RequestInit {
+  /**
+   * The request is safe to repeat although its method is not idempotent — a
+   * GraphQL query or a search sent as POST. Without it a POST/PATCH is retried
+   * only on a 429, never on a 5xx or a dropped connection, because those do not
+   * say whether the server already acted on it (a sent email, a created issue).
+   */
+  idempotent?: boolean;
+}
+
 export interface CreateHttpClientOptions {
   /**
    * Static bearer token shorthand: sent as `Authorization: Bearer <token>`
@@ -84,18 +91,19 @@ export interface HttpClient {
   /**
    * Fetch with auth + retry, resolving with the raw `Response` for non-2xx
    * statuses so callers can keep their own `response.ok` handling. Transient
-   * statuses (429/5xx) still throw to drive the retry loop, so they surface
-   * as a thrown `HttpStatusError` once retries are exhausted.
+   * statuses (408, 429, 5xx — see `classifyToolError`) still throw to drive the
+   * retry loop, so they surface as a thrown `HttpStatusError` once retries are
+   * exhausted.
    */
-  raw(url: string, init?: RequestInit): Promise<Response>;
+  raw(url: string, init?: HttpRequestInit): Promise<Response>;
   /** Fetch with auth + retry; throws `HttpStatusError` on any non-2xx status. */
-  request(url: string, init?: RequestInit): Promise<Response>;
+  request(url: string, init?: HttpRequestInit): Promise<Response>;
   /** `request()` + parse the response body as JSON (any method via `init`). */
-  json<T>(url: string, init?: RequestInit): Promise<T>;
+  json<T>(url: string, init?: HttpRequestInit): Promise<T>;
   /** GET returning parsed JSON. */
-  get<T>(url: string, init?: RequestInit): Promise<T>;
+  get<T>(url: string, init?: HttpRequestInit): Promise<T>;
   /** POST `body` as JSON (unless a Content-Type is supplied) returning parsed JSON. */
-  post<T>(url: string, body?: unknown, init?: RequestInit): Promise<T>;
+  post<T>(url: string, body?: unknown, init?: HttpRequestInit): Promise<T>;
 }
 
 function parseRetryAfterMs(value: string | null): number | null {
@@ -114,7 +122,7 @@ export function createHttpClient(options: CreateHttpClientOptions = {}): HttpCli
   const retryEnabled = options.retry !== false;
   const retryOptions = options.retry === false ? undefined : options.retry;
 
-  async function buildHeaders(init?: RequestInit): Promise<Headers> {
+  async function buildHeaders(init?: HttpRequestInit): Promise<Headers> {
     const headers = new Headers(options.headers);
     new Headers(init?.headers).forEach((value, key) => {
       headers.set(key, value);
@@ -152,15 +160,16 @@ export function createHttpClient(options: CreateHttpClientOptions = {}): HttpCli
 
   async function attempt(
     url: string,
-    init: RequestInit | undefined,
+    init: HttpRequestInit | undefined,
     throwOnAnyError: boolean
   ): Promise<Response> {
     const method = (init?.method ?? 'GET').toUpperCase();
     const headers = await buildHeaders(init);
-    const response = await fetch(url, { ...init, headers });
+    const { idempotent: _idempotent, ...fetchInit } = init ?? {};
+    const response = await fetch(url, { ...fetchInit, headers });
     if (response.ok) return response;
 
-    if (TRANSIENT_STATUSES.has(response.status)) {
+    if (isTransientStatus(response.status)) {
       const error = await statusError(response, method, url);
       if (response.status === 429 && retryEnabled) {
         const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'));
@@ -173,23 +182,33 @@ export function createHttpClient(options: CreateHttpClientOptions = {}): HttpCli
     return response;
   }
 
-  function withRetry(fn: () => Promise<Response>): Promise<Response> {
+  function withRetry(
+    init: HttpRequestInit | undefined,
+    fn: () => Promise<Response>
+  ): Promise<Response> {
     if (!retryEnabled) return fn();
-    return withHttpRetry(fn, { operation: `${errorPrefix} request`, ...retryOptions });
+    const method = (init?.method ?? 'GET').toUpperCase();
+    return withHttpRetry(fn, {
+      operation: `${errorPrefix} request`,
+      ...retryOptions,
+      repeatable: IDEMPOTENT_METHODS.has(method) || init?.idempotent === true,
+    });
   }
 
-  const raw = (url: string, init?: RequestInit) => withRetry(() => attempt(url, init, false));
-  const request = (url: string, init?: RequestInit) => withRetry(() => attempt(url, init, true));
+  const raw = (url: string, init?: HttpRequestInit) =>
+    withRetry(init, () => attempt(url, init, false));
+  const request = (url: string, init?: HttpRequestInit) =>
+    withRetry(init, () => attempt(url, init, true));
 
-  const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
+  const json = async <T>(url: string, init?: HttpRequestInit): Promise<T> => {
     const response = await request(url, init);
     return (await response.json()) as T;
   };
 
-  const get = <T>(url: string, init?: RequestInit): Promise<T> =>
+  const get = <T>(url: string, init?: HttpRequestInit): Promise<T> =>
     json<T>(url, { ...init, method: 'GET' });
 
-  const post = <T>(url: string, body?: unknown, init: RequestInit = {}): Promise<T> => {
+  const post = <T>(url: string, body?: unknown, init: HttpRequestInit = {}): Promise<T> => {
     const headers = new Headers(init.headers);
     if (!headers.has('content-type')) headers.set('Content-Type', 'application/json');
     return json<T>(url, {

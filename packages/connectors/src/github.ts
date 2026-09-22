@@ -2090,6 +2090,9 @@ export default class GitHubConnector extends ConnectorRuntime {
         query: params.query,
         variables: params.variables ?? {},
       },
+      // Every caller sends a query (discussion reads), which is safe to repeat
+      // on a 5xx even though it goes out as POST. A mutation must not set this.
+      idempotent: true,
     });
   }
 
@@ -2101,6 +2104,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     token: string | null;
     body?: Record<string, unknown>;
     accept?: string;
+    idempotent?: boolean;
   }): Promise<T> {
     const headers: Record<string, string> = {
       Accept: params.accept ?? 'application/vnd.github+json',
@@ -2115,6 +2119,7 @@ export default class GitHubConnector extends ConnectorRuntime {
       method: params.method ?? 'GET',
       headers,
       body: params.body ? JSON.stringify(params.body) : undefined,
+      idempotent: params.idempotent,
     });
   }
 }
