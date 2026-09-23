@@ -70,7 +70,59 @@ export interface DataSourceContext {
 
 /** Operations that bypass READ ONLY transactions or have side-effects. */
 const FORBIDDEN_OPS = /\b(COPY|IMPORT|PRAGMA|CALL)\b/i;
-const FORBIDDEN_QUERY_FUNCTIONS = new Set(['set_config']);
+/**
+ * Functions caller SQL may never call, whatever the table scoping says. Org
+ * scoping shadows table NAMES; it cannot see a table that a function reads by
+ * a string or regclass argument, or a query a function runs from text. So the
+ * check is on the function: anything that executes a query string or reads a
+ * relation, database, file or large object by name, and anything that changes
+ * session or server state even inside a READ ONLY transaction.
+ */
+const FORBIDDEN_QUERY_FUNCTIONS = new Set([
+  // Run a query given as text.
+  'ts_stat',
+  'crosstab',
+  'crosstab2',
+  'crosstab3',
+  'crosstab4',
+  'connectby',
+  // Session state: a custom GUC or an advisory lock outlives the request on a
+  // pooled connection.
+  'set_config',
+  // Server side effects.
+  'pg_notify',
+  'pg_logical_emit_message',
+  'pg_cancel_backend',
+  'pg_terminate_backend',
+  'pg_reload_conf',
+  'pg_rotate_logfile',
+  'pg_switch_wal',
+  'pg_create_restore_point',
+  'pg_stat_file',
+  'loread',
+  'lowrite',
+]);
+/** Families matched by prefix, so a sibling (`pg_read_binary_file`, `dblink_exec`) cannot slip by. */
+const FORBIDDEN_QUERY_FUNCTION_PREFIXES = [
+  'dblink',
+  'pg_read_',
+  'pg_ls_',
+  'lo_',
+  'pg_advisory',
+  'pg_try_advisory',
+  'pg_sleep',
+];
+/** `query_to_xml`, `table_to_xml`, `schema_to_xml`, `database_to_xml`, `cursor_to_xml` and their `xmlschema` variants. */
+const FORBIDDEN_QUERY_FUNCTION_INFIX = '_to_xml';
+
+function isForbiddenQueryFunction(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    FORBIDDEN_QUERY_FUNCTIONS.has(lower) ||
+    lower.includes(FORBIDDEN_QUERY_FUNCTION_INFIX) ||
+    FORBIDDEN_QUERY_FUNCTION_PREFIXES.some((prefix) => lower.startsWith(prefix))
+  );
+}
 export const MAX_DATA_SOURCE_ROWS = 1000;
 const QUERY_TIMEOUT_MS = 5000;
 
@@ -101,9 +153,9 @@ function identName(value: unknown): string | null {
 }
 
 /**
- * Reject functions that mutate the database session even inside a read-only
- * transaction. `set_config` can persist a custom GUC on a pooled connection;
- * that would let caller SQL forge server-only transaction flags used by database
+ * Reject every `FORBIDDEN_QUERY_FUNCTIONS` call anywhere in the tree. For
+ * example `set_config` can persist a custom GUC on a pooled connection, which
+ * would let caller SQL forge server-only transaction flags used by database
  * triggers on a later request.
  */
 function assertNoForbiddenFunctions(root: unknown): void {
@@ -123,7 +175,7 @@ function assertNoForbiddenFunctions(root: unknown): void {
     const functionNode = record.function as Record<string, unknown> | undefined;
     const methodNode = record.method_call as Record<string, unknown> | undefined;
     const name = identName(functionNode?.name) ?? identName(methodNode?.method);
-    if (name && FORBIDDEN_QUERY_FUNCTIONS.has(name.toLowerCase())) {
+    if (name && isForbiddenQueryFunction(name)) {
       throw new Error(`Function '${name}' is not allowed in read-only queries.`);
     }
     for (const child of Object.values(record)) stack.push(child);

@@ -142,6 +142,43 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     ).toThrow(/Function 'set_config'.*not allowed/i);
   });
 
+  // Scoping shadows table NAMES; these functions read a relation named by a
+  // string or regclass, or run a query given as text, so the scoped CTEs never
+  // see what they touch. Each position is a separate parse shape.
+  it.each([
+    ["SELECT query_to_xml('SELECT count(*) FROM public.entities', true, false, '') FROM entities WHERE id = 1"],
+    ["SELECT id FROM entities WHERE query_to_xml('SELECT 1 FROM public.organization', true, false, '')::text LIKE '%1%'"],
+    ["SELECT * FROM query_to_xml('SELECT * FROM public.oauth_tokens', true, false, '') AS x"],
+    ["SELECT pg_catalog.\"query_to_xml\"('SELECT 1', true, false, '')"],
+    ["SELECT QUERY_TO_XML('SELECT 1', true, false, '')"],
+    ["SELECT table_to_xml('public.entities'::regclass, true, false, '')"],
+    ["SELECT query_to_xml_and_xmlschema('SELECT 1', true, false, '')"],
+    ["SELECT schema_to_xml('public', true, false, '')"],
+    ["SELECT database_to_xml(true, false, '')"],
+    ["SELECT * FROM ts_stat('SELECT to_tsvector(name) FROM public.entities')"],
+    ["SELECT * FROM crosstab('SELECT 1, 2, 3') AS t(a int, b int)"],
+    ["SELECT * FROM dblink('dbname=x', 'SELECT 1') AS t(a int)"],
+    ["SELECT pg_read_file('/etc/passwd')"],
+    ["SELECT pg_read_binary_file('/etc/passwd')"],
+    ["SELECT * FROM pg_ls_dir('.')"],
+    ["SELECT lo_get(1)"],
+    ["SELECT pg_advisory_lock(1)"],
+    ["SELECT pg_try_advisory_lock(1)"],
+    ["SELECT pg_sleep(10)"],
+    ["SELECT pg_notify('c', 'x')"],
+    ["SELECT pg_terminate_backend(1)"],
+  ])('rejects %s', (sql) => {
+    expect(() => scopeAsMember(sql)).toThrow(/not allowed/i);
+  });
+
+  it.each([
+    ["SELECT lower(name), to_char(created_at, 'YYYY'), date_trunc('day', created_at) FROM entities"],
+    ["SELECT coalesce(metadata->>'tier', 'none'), jsonb_array_length(coalesce(metadata->'tags', '[]'::jsonb)) FROM entities"],
+    ["SELECT count(*), max(created_at), log(2, 8), to_tsvector(name) FROM entities GROUP BY 4"],
+  ])('still allows ordinary functions: %s', (sql) => {
+    expect(() => scopeAsMember(sql)).not.toThrow();
+  });
+
   it('rejects the PostgreSQL `TABLE <name>` shorthand (member)', () => {
     expect(() => scopeAsMember('TABLE oauth_tokens')).toThrow(/SELECT \/ WITH/i);
   });
