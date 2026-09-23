@@ -1297,10 +1297,19 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 				// A connector that could not reach a required execution dependency never
 				// reached the source. Preserve the last real source-health result, do not
 				// consume the hard-pause budget, and keep the ordinary schedule armed.
+				// The claim overwrote that result with 'pending', so restore it from the
+				// columns only a real outcome writes: a failure increments
+				// consecutive_failures, a success resets it, and both stamp last_sync_at.
 				if (dependencyUnavailable) {
 					await tx`
 	          UPDATE feeds
-	          SET last_error = ${recordedError},
+	          SET last_sync_status = CASE
+	                WHEN last_sync_status <> 'pending' THEN last_sync_status
+	                WHEN consecutive_failures > 0 THEN 'failed'
+	                WHEN last_sync_at IS NOT NULL THEN 'success'
+	                ELSE NULL
+	              END,
+	              last_error = ${recordedError},
 	              next_run_at = ${nextRun},
 	              updated_at = current_timestamp
 	          WHERE id = ${feedId}

@@ -44,9 +44,13 @@
  * 30-day retention).
  */
 
-import type { ReservedSql } from 'postgres';
 import { intervals } from '../config/intervals';
-import { type DbClient, getDb } from '../db/client';
+import {
+  announceFeedAutoPause,
+  applyFeedSyncFailure,
+  type RecordedFeedSyncFailure,
+} from '../connectors/feed-sync-failure';
+import { type DbClient, getDb, getLockDb, pgBigintArray } from '../db/client';
 import { incrementCounter } from '../gateway/metrics/prometheus';
 import type { Env } from '../index';
 import {
@@ -232,18 +236,16 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
 
   // pg_try_advisory_lock is session-scoped — the connection holds the lock
   // until we explicitly release. With postgres.js any random pool connection
-  // could serve the lock SELECT and the unlock; we wrap in a single
-  // .reserve() so both run on the same physical connection. DbClient doesn't
-  // type `reserve()` (it's only on the raw postgres.js surface), so we cast
-  // through `unknown` to the postgres.js ReservedSql shape.
-  const reserved = (await (
-    sql as unknown as { reserve: () => Promise<ReservedSql> }
-  ).reserve()) as ReservedSql;
+  // could serve the lock SELECT and the unlock; reserve one physical
+  // connection from the dedicated lock pool. The work below uses the main
+  // pool, so holding this lock there would deadlock when DB_POOL_MAX=1.
+  const reserved = await getLockDb().reserve();
+  let acquired = false;
   try {
     const lockRows = (await reserved`
       SELECT pg_try_advisory_lock(${REAPER_ADVISORY_LOCK_KEY}) AS acquired
     `) as unknown as Array<{ acquired: boolean }>;
-    const acquired = !!lockRows[0]?.acquired;
+    acquired = !!lockRows[0]?.acquired;
     if (!acquired) {
       return { acquired: false, reaped: 0, retriesCreated: 0, dispatchFailures: [] };
     }
@@ -254,7 +256,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       // retention guarantee, not a queue-health one, so it runs even when
       // nothing else is stale.
       try {
-        const scrubbed = await sweepAbandonedDeviceFeedReadRuns(reserved);
+        const scrubbed = await sweepAbandonedDeviceFeedReadRuns(sql);
         if (scrubbed > 0) {
           logger.warn(
             { scrubbed },
@@ -278,10 +280,10 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       // sync retries or other stale actions. The UPDATE reasserts the complete
       // staleness predicate, so a worker heartbeat/completion that wins after
       // the candidate read makes this a no-op rather than being overwritten.
-      const approvedActionCandidates = (await reserved`
+      const approvedActionCandidates = (await sql`
         SELECT id, organization_id, action_key, action_output, claimed_by
         FROM public.runs
-        WHERE ${reserved.unsafe(staleWhereSql)}
+        WHERE ${sql.unsafe(staleWhereSql)}
           AND run_type = 'action'
           AND approval_status = 'approved'
         ORDER BY id
@@ -379,56 +381,192 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         }
       }
 
-      // Reap + recover in a single statement using CTEs. Claimed/running sync
-      // rows get one fresh retry. Never-claimed rows are audit-only dispatch
-      // failures: connector code never ran, so they must not mutate source
-      // health, consume its failure budget, or auto-pause its feed. Doing the
-      // timeout + claimed-run retry in one statement makes
-      // the timeout + retry atomic — if the process crashes after the
-      // statement returns, both writes are durable; if it crashes
-      // before, neither is. The previous shape (bulk UPDATE RETURNING +
-      // per-row INSERT loop) could leave a row in `timeout` with no
-      // retry queued when a crash landed between the two writes (lobu#862).
+      // Reap, charge and recover in one transaction. Claimed/running sync rows
+      // entered execution ownership for their feed, so they are charged to its
+      // failure budget (connectors/feed-backoff.ts) exactly like a
+      // worker-reported failure, and get one fresh retry while the feed is still
+      // active and not deleted. The charge bounds the retry chain: a worker
+      // that dies mid-sync every time consumes its failure budget and
+      // auto-pauses it at the threshold. The immediate recovery run precedes the
+      // feed's backed-off schedule, and a paused feed gets no retry.
+      // Never-claimed rows are audit-only dispatch failures: connector code
+      // never ran, so they must not mutate source health, consume its failure
+      // budget, or auto-pause its feed. One transaction makes the timeout,
+      // charge and retry atomic. The previous bulk UPDATE RETURNING plus
+      // per-row INSERT loop outside a transaction could leave a row in
+      // `timeout` with no retry queued when a crash landed between the two
+      // writes (lobu#862).
       //
-      // The retry INSERT uses `WHERE NOT EXISTS (SELECT 1 FROM runs ...)`
-      // to dedupe against any currently-active sync run on the same
-      // feed. The partial unique index `idx_runs_active_sync_per_feed`
-      // still backs this (it's the same predicate, and the index is
-      // what makes the check cheap); the NOT EXISTS shape avoids
-      // PostgreSQL `ON CONFLICT` inference quirks against partial
-      // unique indexes inside a CTE — which can throw the constraint
-      // violation instead of DO NOTHING. NOT EXISTS evaluates the
-      // dedup predicate against the same snapshot as the surrounding
-      // CTE, so the cross-CTE visibility rule that breaks ON CONFLICT
-      // doesn't apply here.
-      //
-      // The advisory lock still serialises cross-pod sweeps — the CTE
-      // narrows the window to "one transaction tick" but doesn't replace
-      // the lock.
-      const reaped = (await reserved`
-        WITH stale_candidates AS (
-          SELECT id, status AS stale_status
-          FROM public.runs
-          WHERE ${reserved.unsafe(staleWhereSql)}
-            AND NOT (run_type = 'action' AND approval_status = 'approved')
-          FOR UPDATE SKIP LOCKED
-        ),
-        timed_out AS (
-          UPDATE public.runs r
-          SET status = 'timeout',
-              outcome = ${classifyRunOutcome({ status: "timeout" })},
-              completed_at = current_timestamp,
-              error_message = CASE
-                WHEN c.stale_status = 'pending' THEN ${claimErrorMessage}
-                ELSE ${heartbeatErrorMessage}
-              END
-          FROM stale_candidates c
-          WHERE r.id = c.id
-          RETURNING r.id, r.run_type, r.feed_id, r.connection_id, r.connector_key,
-                    r.connector_version, r.organization_id, r.dry_run, r.created_at,
-                    r.action_key, c.stale_status
-        ),
-        retries AS (
+      // The advisory lock still serialises cross-pod sweeps — the transaction
+      // narrows the window but doesn't replace the lock. A reserved connection
+      // cannot open a transaction, so this one runs on the pool while the
+      // reserved session keeps holding the lock.
+      let recordedFailures: RecordedFeedSyncFailure[] = [];
+      const reaped = await sql.begin(async (tx) => {
+        recordedFailures = [];
+        const [reapedRow] = (await tx`
+          WITH stale_candidates AS (
+            SELECT id, status AS stale_status
+            FROM public.runs
+            WHERE ${tx.unsafe(staleWhereSql)}
+              AND NOT (run_type = 'action' AND approval_status = 'approved')
+            FOR UPDATE SKIP LOCKED
+          ),
+          timed_out AS (
+            UPDATE public.runs r
+            SET status = 'timeout',
+                outcome = ${classifyRunOutcome({ status: "timeout" })},
+                completed_at = current_timestamp,
+                error_message = CASE
+                  WHEN c.stale_status = 'pending' THEN ${claimErrorMessage}
+                  ELSE ${heartbeatErrorMessage}
+                END
+            FROM stale_candidates c
+            WHERE r.id = c.id
+            RETURNING r.id, r.run_type, r.feed_id, r.connection_id, r.connector_key,
+                      r.connector_version, r.organization_id, r.dry_run, r.created_at,
+                      r.action_key, c.stale_status
+          ),
+          dispatch_failures AS (
+            SELECT
+              t.id,
+              t.run_type,
+              t.connector_key,
+              t.connection_id,
+              c.device_worker_id,
+              dw.platform,
+              EXTRACT(EPOCH FROM (current_timestamp - t.created_at)) AS pending_age_seconds,
+              dw.last_seen_at,
+              cd.run_required_capability AS required_capability,
+              CASE
+                WHEN c.device_worker_id IS NULL
+                  THEN 'fleet_or_unpinned_no_claim'
+                WHEN dw.id IS NULL
+                  THEN 'pinned_device_missing'
+                WHEN ${delegatedBrowserAffinitySql(tx, {
+                  platform: tx`dw.platform`,
+                  connectorKey: tx`t.connector_key`,
+                })}
+                  THEN 'fleet_or_browser_affinity_no_claim'
+                WHEN dw.last_seen_at < t.created_at
+                  THEN 'no_device_poll_during_pending_window'
+                WHEN cd.run_required_capability IS NOT NULL
+                  AND NOT COALESCE(
+                    dw.capabilities @> jsonb_build_array(cd.run_required_capability),
+                    false
+                  )
+                  THEN 'device_ineligible_required_capability'
+                ELSE 'device_activity_seen_but_unclaimed'
+              END AS reason
+            FROM timed_out t
+            LEFT JOIN public.connections c ON c.id = t.connection_id
+            LEFT JOIN public.device_workers dw ON dw.id = c.device_worker_id
+            LEFT JOIN LATERAL (
+              SELECT
+                definitions.required_capability AS run_required_capability
+              FROM public.connector_definitions definitions
+              WHERE definitions.key = t.connector_key
+                AND definitions.organization_id = t.organization_id
+                AND definitions.version = t.connector_version
+                AND definitions.status = 'active'
+              ORDER BY definitions.updated_at DESC, definitions.id DESC
+              LIMIT 1
+            ) cd ON true
+            LEFT JOIN LATERAL (
+              ${selectedConnectorVersionArtifactSql(tx, {
+                connectorKey: tx`t.connector_key`,
+                version: tx`t.connector_version`,
+                organizationId: tx`t.organization_id`,
+              })}
+            ) run_cv ON true
+            WHERE t.stale_status = 'pending'
+          )
+          SELECT
+            (SELECT count(*)::int FROM timed_out) AS reaped,
+            -- Claimed real syncs of a feed: charged below, and each gets at most
+            -- one retry. A dry run is neither — it records nothing on the feed,
+            -- and the retry INSERT does not carry the dry_run flag, so a retried
+            -- dry run would come back as a REAL sync that persists everything the
+            -- operator asked to only preview. It is an interactive one-shot;
+            -- reaping it as 'timeout' and letting the operator re-trigger is the
+            -- correct outcome.
+            (SELECT coalesce(
+               json_agg(json_build_object('runId', id, 'feedId', feed_id)),
+               '[]'::json
+             )
+             FROM timed_out
+             WHERE run_type = 'sync'
+               AND stale_status IN ('claimed', 'running')
+               AND feed_id IS NOT NULL
+               AND NOT dry_run
+            ) AS charged_syncs,
+            (SELECT coalesce(
+               json_agg(json_build_object(
+                 'runId', id,
+                 'runType', run_type,
+                 'connectorKey', connector_key,
+                 'connectionId', connection_id,
+                 'deviceWorkerId', device_worker_id,
+                 'platform', platform,
+                 'pendingAgeSeconds', pending_age_seconds,
+                 'lastDeviceActivityAt', last_seen_at,
+                 'requiredCapability', required_capability,
+                 'reason', reason
+               )),
+               '[]'::json
+             )
+             FROM dispatch_failures
+            ) AS dispatch_failures,
+            -- Auto operation runs carry a dispatch card in the operation ledger
+            -- (operations/operation-run-card.ts). Terminalizing the run here
+            -- without superseding that card would leave it reading "dispatched"
+            -- forever, so the ledger would disagree with the run it describes.
+            -- Approval-gated action runs are excluded from this sweep entirely
+            -- (see the stale_candidates predicate), so every action row reaped
+            -- here is an auto one.
+            (SELECT coalesce(
+               json_agg(json_build_object(
+                 'runId', id,
+                 'organizationId', organization_id,
+                 'actionKey', action_key,
+                 'staleStatus', stale_status
+               )),
+               '[]'::json
+             )
+             FROM timed_out WHERE run_type = 'action'
+            ) AS timed_out_actions
+        `) as unknown as Array<{
+          reaped: number;
+          charged_syncs: unknown;
+          dispatch_failures: unknown;
+          timed_out_actions: unknown;
+        }>;
+
+        const chargedRaw = reapedRow?.charged_syncs;
+        const chargedSyncs = (
+          Array.isArray(chargedRaw)
+            ? chargedRaw
+            : typeof chargedRaw === 'string'
+              ? JSON.parse(chargedRaw)
+              : []
+        ) as Array<{ runId: number; feedId: number }>;
+        for (const charged of chargedSyncs) {
+          const recorded = await applyFeedSyncFailure(tx, {
+            feedId: Number(charged.feedId),
+            errorMessage: heartbeatErrorMessage,
+            runId: Number(charged.runId),
+          });
+          if (recorded) recordedFailures.push(recorded);
+        }
+
+        // Runs after the charge, so a feed the charge just auto-paused is already
+        // 'paused' here and gets no retry. The NOT EXISTS dedupes against another
+        // active sync run on the feed (the predicate `idx_runs_active_sync_per_feed`
+        // backs); the reaped rows are already 'timeout' in this snapshot.
+        const retries =
+          chargedSyncs.length === 0
+            ? []
+            : await tx`
           INSERT INTO public.runs (
             organization_id, run_type, feed_id, connection_id,
             connector_key, connector_version, status, approval_status, created_at
@@ -436,139 +574,31 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           SELECT
             t.organization_id, 'sync', t.feed_id, t.connection_id,
             t.connector_key, t.connector_version, 'pending', 'auto', current_timestamp
-          FROM timed_out t
-          WHERE t.run_type = 'sync'
-            AND t.stale_status IN ('claimed', 'running')
-            AND t.feed_id IS NOT NULL
-            -- Never retry a dry run. This INSERT does not carry the dry_run
-            -- flag, so a retried dry run would come back as a REAL sync that
-            -- persists everything the operator asked to only preview. A dry
-            -- run is also an interactive one-shot — reaping it as 'timeout'
-            -- and letting the operator re-trigger is the correct outcome.
-            AND NOT t.dry_run
+          FROM public.runs t
+          JOIN public.feeds f ON f.id = t.feed_id
+          WHERE t.id = ANY(${pgBigintArray(chargedSyncs.map((charged) => Number(charged.runId)))}::bigint[])
+            AND f.status = 'active'
+            AND f.deleted_at IS NULL
             AND NOT EXISTS (
-              -- Look for an unrelated active sync run on the same feed.
-              -- Exclude timed_out.id because in PostgreSQL the sibling
-              -- CTE UPDATE is not visible here (all CTEs see the same
-              -- snapshot), so the row we just reaped still appears as
-              -- running. Without this exclusion, every reap would
-              -- dedupe against itself and no retries would ever land.
               SELECT 1 FROM public.runs r
               WHERE r.feed_id = t.feed_id
                 AND r.run_type = 'sync'
                 AND r.status IN ('pending', 'claimed', 'running')
-                AND r.id NOT IN (SELECT id FROM timed_out)
             )
-          RETURNING id, feed_id
-        ),
-        dispatch_failures AS (
-          SELECT
-            t.id,
-            t.run_type,
-            t.connector_key,
-            t.connection_id,
-            c.device_worker_id,
-            dw.platform,
-            EXTRACT(EPOCH FROM (current_timestamp - t.created_at)) AS pending_age_seconds,
-            dw.last_seen_at,
-            cd.run_required_capability AS required_capability,
-            CASE
-              WHEN c.device_worker_id IS NULL
-                THEN 'fleet_or_unpinned_no_claim'
-              WHEN dw.id IS NULL
-                THEN 'pinned_device_missing'
-              WHEN ${delegatedBrowserAffinitySql(reserved, {
-                platform: reserved`dw.platform`,
-                connectorKey: reserved`t.connector_key`,
-              })}
-                THEN 'fleet_or_browser_affinity_no_claim'
-              WHEN dw.last_seen_at < t.created_at
-                THEN 'no_device_poll_during_pending_window'
-              WHEN cd.run_required_capability IS NOT NULL
-                AND NOT COALESCE(
-                  dw.capabilities @> jsonb_build_array(cd.run_required_capability),
-                  false
-                )
-                THEN 'device_ineligible_required_capability'
-              ELSE 'device_activity_seen_but_unclaimed'
-            END AS reason
-          FROM timed_out t
-          LEFT JOIN public.connections c ON c.id = t.connection_id
-          LEFT JOIN public.device_workers dw ON dw.id = c.device_worker_id
-          LEFT JOIN LATERAL (
-            SELECT
-              definitions.required_capability AS run_required_capability
-            FROM public.connector_definitions definitions
-            WHERE definitions.key = t.connector_key
-              AND definitions.organization_id = t.organization_id
-              AND definitions.version = t.connector_version
-              AND definitions.status = 'active'
-            ORDER BY definitions.updated_at DESC, definitions.id DESC
-            LIMIT 1
-          ) cd ON true
-          LEFT JOIN LATERAL (
-            ${selectedConnectorVersionArtifactSql(reserved, {
-              connectorKey: reserved`t.connector_key`,
-              version: reserved`t.connector_version`,
-              organizationId: reserved`t.organization_id`,
-            })}
-          ) run_cv ON true
-          WHERE t.stale_status = 'pending'
-        )
-        SELECT
-          (SELECT count(*)::int FROM timed_out) AS reaped,
-          (SELECT count(*)::int FROM retries) AS retries_created,
-          (SELECT count(*)::int FROM timed_out
-            WHERE run_type = 'sync'
-              AND stale_status IN ('claimed', 'running')
-              AND feed_id IS NOT NULL
-              -- Same NOT dry_run predicate as the retries CTE. A dry run is
-              -- never eligible for retry, so counting it here would inflate
-              -- skippedRetries below and attribute the skip to "another
-              -- active sync run exists", which would be false.
-              AND NOT dry_run) AS sync_eligible,
-          (SELECT coalesce(
-             json_agg(json_build_object(
-               'runId', id,
-               'runType', run_type,
-               'connectorKey', connector_key,
-               'connectionId', connection_id,
-               'deviceWorkerId', device_worker_id,
-               'platform', platform,
-               'pendingAgeSeconds', pending_age_seconds,
-               'lastDeviceActivityAt', last_seen_at,
-               'requiredCapability', required_capability,
-               'reason', reason
-             )),
-             '[]'::json
-           )
-           FROM dispatch_failures
-          ) AS dispatch_failures,
-          -- Auto operation runs carry a dispatch card in the operation ledger
-          -- (operations/operation-run-card.ts). Terminalizing the run here
-          -- without superseding that card would leave it reading "dispatched"
-          -- forever, so the ledger would disagree with the run it describes.
-          -- Approval-gated action runs are excluded from this sweep entirely
-          -- (see the stale_candidates predicate), so every action row reaped
-          -- here is an auto one.
-          (SELECT coalesce(
-             json_agg(json_build_object(
-               'runId', id,
-               'organizationId', organization_id,
-               'actionKey', action_key,
-               'staleStatus', stale_status
-             )),
-             '[]'::json
-           )
-           FROM timed_out WHERE run_type = 'action'
-          ) AS timed_out_actions
-      `) as unknown as Array<{
-        reaped: number;
-        retries_created: number;
-        sync_eligible: number;
-        dispatch_failures: unknown;
-        timed_out_actions: unknown;
-      }>;
+          RETURNING id
+        `;
+
+        return {
+          reaped: reapedRow?.reaped ?? 0,
+          retries_created: retries.length,
+          sync_eligible: chargedSyncs.length,
+          dispatch_failures: reapedRow?.dispatch_failures,
+          timed_out_actions: reapedRow?.timed_out_actions,
+        };
+      });
+      for (const recorded of recordedFailures) {
+        await announceFeedAutoPause(recorded);
+      }
 
       // Device-placed chat turns are claimed by the device's own poller, so the
       // connector reaper above never sees them; they terminalize through the
@@ -601,14 +631,13 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         );
       }
 
-      const reapedRow = reaped[0];
       const reapedCount =
         deviceChatsReaped +
         agentTurnsReaped +
         approvalActionsReaped +
-        (reapedRow?.reaped ?? 0);
-      const retriesCreated = reapedRow?.retries_created ?? 0;
-      const syncEligible = reapedRow?.sync_eligible ?? 0;
+        reaped.reaped;
+      const retriesCreated = reaped.retries_created;
+      const syncEligible = reaped.sync_eligible;
 
       if (reapedCount === 0) {
         return { acquired: true, reaped: 0, retriesCreated: 0, dispatchFailures: [] };
@@ -620,7 +649,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       // resurrect a run that is durably terminal. `supersedeActionEvent`
       // answers undefined for a run with no card — a run created by a pod that
       // predates the dispatch card — which is not an error here.
-      const timedOutActionsRaw = reapedRow?.timed_out_actions;
+      const timedOutActionsRaw = reaped.timed_out_actions;
       const timedOutActions = Array.isArray(timedOutActionsRaw)
         ? timedOutActionsRaw
         : typeof timedOutActionsRaw === 'string'
@@ -659,7 +688,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         }
       }
 
-      const dispatchFailuresRaw = reapedRow?.dispatch_failures;
+      const dispatchFailuresRaw = reaped.dispatch_failures;
       const parsedDispatchFailures = Array.isArray(dispatchFailuresRaw)
         ? dispatchFailuresRaw
         : typeof dispatchFailuresRaw === 'string'
@@ -720,16 +749,15 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         '[reaper] Marked stale connector runs as timeout'
       );
 
-      // Surface the conflict-dedup count so operators can spot when two
-      // pods are competing for the same stale row across an advisory-
-      // lock release boundary (the only case where `ON CONFLICT DO
-      // NOTHING` should fire on the partial unique index). The delta is
-      // sync-eligible reaped rows that did not produce a retry insert.
+      // Surface the skipped-retry count: charged sync rows that did not
+      // produce a retry because their feed is paused (including one this
+      // sweep's charge just auto-paused) or deleted, or another active sync
+      // run already exists on it.
       const skippedRetries = syncEligible - retriesCreated;
       if (skippedRetries > 0) {
         logger.info(
           { count: skippedRetries },
-          '[reaper] Skipped sync retries — another active sync run exists (ON CONFLICT DO NOTHING)'
+          '[reaper] Skipped sync retries — feed inactive or another active sync run exists'
         );
       }
 
@@ -741,9 +769,18 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
       };
     } finally {
       await reserved`SELECT pg_advisory_unlock(${REAPER_ADVISORY_LOCK_KEY})`;
+      acquired = false;
     }
   } finally {
-    reserved.release();
+    // Never return a session that may still own the lock to the pool. Closing
+    // its backend is the only reliable cleanup after an unlock error.
+    if (acquired) {
+      await reserved`SELECT pg_terminate_backend(pg_backend_pid())`.catch(
+        () => undefined
+      );
+    } else {
+      reserved.release();
+    }
   }
 }
 

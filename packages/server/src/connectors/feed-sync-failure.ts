@@ -1,19 +1,22 @@
 /**
  * Charge one failed feed sync to the feed's source health.
  *
- * A sync run can reach a terminal failure from two lanes:
+ * A claimed sync run can reach a terminal failure from three lanes:
  *
  *  1. the worker reported an outcome — `completeWorkerJob`
  *     (worker-api/run-lifecycle.ts), the lane the backoff policy was written
- *     for; and
+ *     for;
  *  2. the gateway failed the run inside the poll request itself, after the
  *     claim CTE already stamped the feed `last_sync_status='pending'` —
- *     `pollWorkerJob` (worker-api/poll.ts) resolving the connector's bundle.
+ *     `failClaimedWorkerRun` (worker-api/poll.ts), e.g. when the connector's
+ *     bundle cannot be produced; and
+ *  3. the claimant stopped heartbeating and the stale-run reaper timed the run
+ *     out — `reapStaleRuns` (scheduled/check-stalled-executions.ts).
  *
  * Only (1) used to apply the policy, so a connector that could never produce a
  * bundle re-fired on its plain cadence forever: `consecutive_failures` pinned
  * at 0, `last_error` NULL, no backoff and no auto-pause — a feed that reports
- * healthy while every run fails. Both lanes charge through here.
+ * healthy while every run fails. All three lanes charge through here.
  *
  * This is the FAILURE half only. Success also resets the counter, advances the
  * checkpoint and adds `items_collected`, none of which a lane that never ran
