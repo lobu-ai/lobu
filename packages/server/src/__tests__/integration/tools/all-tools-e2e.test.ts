@@ -363,6 +363,8 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 				action: "set",
 				key: "coverage-board",
 				source_code: "export default function B() { return null; }",
+				// A Data hub tab, so the unscoped open resolves to a page.
+				attach: [{ workspace: true }],
 			},
 			TEST_ENV,
 			authCtx
