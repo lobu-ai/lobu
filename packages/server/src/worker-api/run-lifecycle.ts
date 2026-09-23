@@ -218,17 +218,15 @@ async function reactivateProfileCascade(
         AND status = 'pending_auth'
         AND deleted_at IS NULL
     `;
-		// A fresh credential is an explicit resume, so it opens a new failure
-		// episode exactly like a `manage_feeds` resume. Without the reset a
-		// failure-paused feed re-pauses on its very next failure. A feed with no
-		// cron stays manual (#2021): resuming it must not invent a run.
+		// A feed the failure policy paused stays paused (#3700): only
+		// `manage_feeds` resumes it. Resumed feeds keep their failure history.
+		// A feed with no cron stays manual (#2021): resuming it must not invent
+		// a run.
 		await tx`
       UPDATE feeds f
       SET status = 'active',
           next_run_at = CASE WHEN f.schedule IS NULL THEN f.next_run_at
                              ELSE COALESCE(f.next_run_at, NOW()) END,
-          consecutive_failures = 0,
-          first_failure_at = NULL,
           updated_at = current_timestamp
       FROM connections c
       WHERE f.connection_id = c.id

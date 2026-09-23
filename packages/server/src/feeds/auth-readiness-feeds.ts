@@ -8,10 +8,9 @@
  * edits must not undo manual or failure pauses.
  *
  * Even a real recovery never resumes a feed the failure policy paused
- * (`feedBackoff.pauseThreshold`, #3694): that pause ends through an explicit
- * `manage_feeds` resume or a fresh auth run, both of which reset the failure
- * episode. A feed with no cron stays manual (#2021): resuming it must not
- * invent a run.
+ * (`feedBackoff.pauseThreshold`, #3694, #3700): that pause ends only through
+ * an explicit `manage_feeds` resume, which resets the failure episode. A feed
+ * with no cron stays manual (#2021): resuming it must not invent a run.
  */
 
 import { feedBackoff } from '../connectors/feed-backoff';

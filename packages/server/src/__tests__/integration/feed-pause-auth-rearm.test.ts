@@ -11,9 +11,10 @@
  *     on the profile to `status='active'` and stamped `next_run_at` on feeds
  *     with no schedule. It undid failure pauses and manual pauses of sibling
  *     feeds, and gave unscheduled feeds a run after every sibling sync.
- *  2. Auth-run completion (`reactivateProfileCascade`) resumed failure-paused
- *     feeds without resetting the failure episode, so the next failure
- *     re-paused them at once with no backoff budget.
+ *  2. Auth-run completion (`reactivateProfileCascade`) resumed paused feeds
+ *     on connections that were not re-authenticated (manually paused or
+ *     deleted) and stamped a run on feeds with no cron. #3700 separately
+ *     keeps failure-paused feeds paused there.
  *  3. `manage_auth_profiles` update of a usable browser_session profile and
  *     any `manage_connections` update of its connection (even a rename)
  *     re-applied the same "set every feed active" cascade.
@@ -379,21 +380,6 @@ describe('auth-driven feed re-arm', () => {
   });
 
   describe('auth run completion', () => {
-    it('resumes a failure-paused feed with a fresh failure budget', async () => {
-      const org = await createTestOrganization();
-      const { profileId, connectionId } = await seedProfile(org.id, 'oauth_account', 'active');
-      const feedId = await seedFeed(org.id, connectionId, 'default');
-      await failUntilPaused(feedId);
-
-      await completeFreshAuthRun(org.id, profileId);
-
-      const after = await readFeed(feedId);
-      expect(after.status).toBe('active');
-      expect(after.next_run_at).not.toBeNull();
-      expect(after.consecutive_failures).toBe(0);
-      expect(after.first_failure_at).toBeNull();
-    });
-
     it('does not invent a run for a paused feed with no schedule', async () => {
       const org = await createTestOrganization();
       const { profileId, connectionId } = await seedProfile(org.id, 'oauth_account', 'active');
