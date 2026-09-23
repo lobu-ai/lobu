@@ -26,20 +26,22 @@ interface ParsedDateAlias {
 
 type CalendarOffset = { days?: number; months?: number };
 
-const NAMED_ALIASES: Record<string, CalendarOffset> = {
-  today: {},
-  yesterday: { days: 1 },
-  last_week: { days: 7 },
-  last_month: { months: 1 },
-};
+// Maps, not object literals: an object lookup would also find inherited keys
+// such as `constructor`, so invalid input would resolve instead of throwing.
+const NAMED_ALIASES = new Map<string, CalendarOffset>([
+  ['today', {}],
+  ['yesterday', { days: 1 }],
+  ['last_week', { days: 7 }],
+  ['last_month', { months: 1 }],
+]);
 
-const RELATIVE_UNITS: Record<string, (value: number) => CalendarOffset> = {
-  d: (value) => ({ days: value }),
-  w: (value) => ({ days: value * 7 }),
-  m: (value) => ({ months: value }),
-  q: (value) => ({ months: value * 3 }),
-  y: (value) => ({ months: value * 12 }),
-};
+const RELATIVE_UNITS = new Map<string, (value: number) => CalendarOffset>([
+  ['d', (value) => ({ days: value })],
+  ['w', (value) => ({ days: value * 7 })],
+  ['m', (value) => ({ months: value })],
+  ['q', (value) => ({ months: value * 3 })],
+  ['y', (value) => ({ months: value * 12 })],
+]);
 
 /**
  * Parse a date alias into a Date object
@@ -57,7 +59,7 @@ export function parseDateAlias(alias: string, referenceDate: Date = new Date()):
       : raw;
   const lowered = unquoted.toLowerCase();
 
-  const named = NAMED_ALIASES[lowered];
+  const named = NAMED_ALIASES.get(lowered);
   if (named) {
     return { date: utcDayStartBefore(referenceDate, named), originalInput: alias };
   }
@@ -83,7 +85,7 @@ export function parseDateAlias(alias: string, referenceDate: Date = new Date()):
 
 /** `<digits><unit>` such as `7d` or `3m`, as the calendar distance it names. */
 function parseRelativeAlias(value: string): CalendarOffset | null {
-  const toOffset = RELATIVE_UNITS[value.slice(-1)];
+  const toOffset = RELATIVE_UNITS.get(value.slice(-1));
   const digits = value.slice(0, -1);
   if (!toOffset || digits.length === 0) return null;
   for (const char of digits) {

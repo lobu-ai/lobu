@@ -91,7 +91,7 @@ describe.each(['UTC', 'Pacific/Kiritimati', 'America/Los_Angeles'])('in process 
       expect(() => parseDateAlias('2025-02-30', ref)).toThrow();
       expect(() => parseDateAlias('2025-02-30T12:00:00Z', ref)).toThrow();
       expect(() => parseDateAlias('2025-01-15T25:00', ref)).toThrow();
-      for (const bad of ['d', '7x', '1.5d', '-3d', ' 7 d']) {
+      for (const bad of ['d', '7x', '1.5d', '-3d', ' 7 d', 'constructor', '__proto__', 'tostring', 'hasownproperty']) {
         expect(() => parseDateAlias(bad, ref)).toThrow('Invalid date alias');
       }
     });
