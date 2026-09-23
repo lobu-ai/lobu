@@ -34,6 +34,7 @@ import {
 	type ConnectorDeriveFeedContext,
 } from "../automations/connector-derived";
 import { materializeConnectorAutomationSignal } from "../automations/connector-signal";
+import { feedBackoff } from "../connectors/feed-backoff";
 import {
 	FeedPageUnavailableError,
 	lockFeedPage,
@@ -163,7 +164,8 @@ async function runUsesBrowserConnector(
 /**
  * Reactivate the auth profile + the paused connections/feeds linked to it
  * after a successful auth run. Connections leave `pending_auth`, paused feeds
- * resume with `next_run_at` seeded. Shared by the auth completion path.
+ * below the failure-pause threshold resume with `next_run_at` seeded.
+ * Failure-paused feeds require an explicit `manage_feeds` update.
  */
 async function reactivateProfileCascade(
 	sql: DbClient,
@@ -220,6 +222,7 @@ async function reactivateProfileCascade(
       WHERE f.connection_id = c.id
         AND c.auth_profile_id = ${authProfileId}
         AND f.status = 'paused'
+        AND f.consecutive_failures < ${feedBackoff.pauseThreshold}
     `;
 	});
 }

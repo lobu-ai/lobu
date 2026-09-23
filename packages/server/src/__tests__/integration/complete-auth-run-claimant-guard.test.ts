@@ -28,11 +28,12 @@
 import { parseSecretRef } from '@lobu/core';
 import type { Context } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { feedBackoff } from '../../connectors/feed-backoff';
 import type { Env } from '../../index';
 import { resolveAuthCredentials } from '../../utils/auth-credential-secrets';
 import { completeAuthRun } from '../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestOrganization } from '../setup/test-fixtures';
+import { createTestConnection, createTestOrganization } from '../setup/test-fixtures';
 
 const CLAIMANT = 'worker-legit';
 const ATTACKER = 'worker-attacker';
@@ -156,5 +157,71 @@ describe('completeAuthRun claimant guard', () => {
       SELECT status FROM runs WHERE id = ${runId}
     `) as Array<{ status: string }>;
     expect(run[0].status).toBe('completed');
+  });
+});
+
+describe('completeAuthRun feed reactivation', () => {
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+  });
+
+  it.each([
+    { failures: 0, expectedStatus: 'active' },
+    { failures: feedBackoff.pauseThreshold - 1, expectedStatus: 'active' },
+    { failures: feedBackoff.pauseThreshold, expectedStatus: 'paused' },
+    { failures: feedBackoff.pauseThreshold + 1, expectedStatus: 'paused' },
+  ])('leaves a paused feed with $failures failures $expectedStatus after auth succeeds', async ({ failures, expectedStatus }) => {
+    const org = await createTestOrganization();
+    const profileId = await insertAuthProfile(org.id);
+    const runId = await insertRunningAuthRun(org.id, profileId);
+    const connection = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'github',
+      status: 'paused',
+      visibility: 'private',
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE connections SET auth_profile_id = ${profileId}, status = 'pending_auth'
+      WHERE id = ${connection.id}
+    `;
+    await sql`
+      UPDATE feeds
+      SET status = 'paused', schedule = '*/5 * * * *', next_run_at = NULL,
+          consecutive_failures = ${failures},
+          first_failure_at = ${failures > 0 ? new Date('2026-01-01T00:00:00Z') : null},
+          last_error = ${failures > 0 ? 'sync failed' : null}
+      WHERE connection_id = ${connection.id}
+    `;
+    const [before] = await sql`
+      SELECT status, next_run_at, consecutive_failures, first_failure_at, last_error
+      FROM feeds WHERE connection_id = ${connection.id}
+    `;
+
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId,
+      worker_id: CLAIMANT,
+      status: 'success',
+      credentials: { api_key: 'test-rotated-token' },
+    });
+    await completeAuthRun(ctx);
+    expect(result()).toEqual({ body: { success: true }, status: 200 });
+
+    const [profile] = await sql`SELECT status FROM auth_profiles WHERE id = ${profileId}`;
+    const [linkedConnection] = await sql`SELECT status FROM connections WHERE id = ${connection.id}`;
+    expect(profile.status).toBe('active');
+    expect(linkedConnection.status).toBe('active');
+
+    const [after] = await sql`
+      SELECT status, next_run_at, consecutive_failures, first_failure_at, last_error
+      FROM feeds WHERE connection_id = ${connection.id}
+    `;
+    expect(after.status).toBe(expectedStatus);
+    if (expectedStatus === 'paused') {
+      expect(after).toEqual(before);
+    } else {
+      expect(after.next_run_at).not.toBeNull();
+      expect(after).toEqual({ ...before, status: 'active', next_run_at: after.next_run_at });
+    }
   });
 });
