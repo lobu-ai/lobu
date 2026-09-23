@@ -115,6 +115,7 @@ describe('connector version change vs in-flight runs of the old version', () => 
   let orgId: string;
   let feedId: number;
   let connectionId: number;
+  let userId: string;
 
   beforeAll(async () => {
     await initWorkspaceProvider();
@@ -128,6 +129,7 @@ describe('connector version change vs in-flight runs of the old version', () => 
     });
     ctx = seeded.ctx;
     orgId = seeded.org.id;
+    userId = seeded.user.id;
 
     const installed = await manageConnections(
       { action: 'install_connector', source_code: probeSource('1.0.0') },
@@ -279,6 +281,20 @@ describe('connector version change vs in-flight runs of the old version', () => 
 
   it('leaves the run of a feed pinned to that run\'s version alone', async () => {
     await getTestDb()`UPDATE feeds SET pinned_version = '1.0.0' WHERE id = ${feedId}`;
+    const runId = await seedRun('running');
+    await bumpTo('2.0.0');
+    expect(await runStatus(runId)).toBe('running');
+    expect(await feedCheckpoint()).toEqual({ cursor: 'v1-committed' });
+  }, 120_000);
+
+  it('leaves the feed and run of a device-pinned connection alone', async () => {
+    const sql = getTestDb();
+    const [device] = await sql<{ id: string }[]>`
+      INSERT INTO device_workers (user_id, worker_id, platform, capabilities, label, organization_id, last_seen_at)
+      VALUES (${userId}, 'zz-version-fence-device', 'darwin', ${sql.json([])}, 'Version Fence Device', ${orgId}, NOW())
+      RETURNING id
+    `;
+    await sql`UPDATE connections SET device_worker_id = ${device.id} WHERE id = ${connectionId}`;
     const runId = await seedRun('running');
     await bumpTo('2.0.0');
     expect(await runStatus(runId)).toBe('running');

@@ -648,7 +648,9 @@ async function upsertConnectorDefinitionRecordsInTransaction(
  * the reset could write a stale cursor straight back; cancelled, they fail the
  * lease fence both of those take (`lockFeedPage`, `finalizeRun`). A
  * feed pinned to the run's version keeps its run and checkpoint because its
- * execution version did not change. Runs lock before feeds, the order a feed
+ * execution version did not change. A device-pinned connection runs the
+ * version its own device advertises, not the active one, so its feeds and runs
+ * are left alone too. Runs lock before feeds, the order a feed
  * page and a completion take them in. Cancelling also clears the claim-time
  * `pending` feed health state that the cancelled completion can no longer end.
  */
@@ -669,7 +671,9 @@ async function resetFeedsForVersionChange(
         completed_at = NOW(),
         error_message = ${`Superseded: connector '${params.connectorKey}' changed from version '${params.previousVersion}' to '${params.version}'`}
       FROM feeds f
+      JOIN connections c ON c.id = f.connection_id
       WHERE r.feed_id = f.id
+        AND c.device_worker_id IS NULL
         AND r.organization_id = ${params.organizationId}
         AND r.connector_key = ${params.connectorKey}
         AND r.run_type = 'sync'
@@ -701,6 +705,7 @@ async function resetFeedsForVersionChange(
       AND c.connector_key = ${params.connectorKey}
       AND f.organization_id = ${params.organizationId}
       AND f.pinned_version IS NULL
+      AND c.device_worker_id IS NULL
       AND f.deleted_at IS NULL
       AND f.checkpoint IS NOT NULL
       AND f.checkpoint <> jsonb_build_object('source_ack', f.checkpoint -> 'source_ack')
