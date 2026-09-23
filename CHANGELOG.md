@@ -1,5 +1,12 @@
 # Changelog
 
+## [20.3.1](https://github.com/lobu-ai/lobu/compare/lobu-v20.3.0...lobu-v20.3.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **connector-sdk:** classify retries by status, never retry an unsafe write on an ambiguous failure ([#3689](https://github.com/lobu-ai/lobu/issues/3689)) ([1ef4523](https://github.com/lobu-ai/lobu/commit/1ef45232177a79ab8d87f4d3c73610124d2b38f7))
+
 ## [20.3.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.2.0...lobu-v20.3.0) (2026-09-21)
 
 
