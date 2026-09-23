@@ -17,7 +17,7 @@
  * setters do.
  */
 
-import { Temporal } from 'temporal-polyfill';
+import { Temporal } from '@js-temporal/polyfill';
 
 interface ParsedDateAlias {
   date: Date;
