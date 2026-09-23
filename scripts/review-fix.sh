@@ -71,7 +71,7 @@ fi
 FIXER_CLI="$(review_select_reviewer "${REVIEWER_CLI:-auto}")"
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"
 if [ "$FIXER_CLI" = "claude" ]; then
   review_validate_claude_model "$CLAUDE_REVIEW_MODEL" || exit $?

@@ -84,8 +84,8 @@ review_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/review.sh"
 grep -Fq 'CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"' "$review_script" ||
   fail "Claude reviewer must default to the Fable model"
 
-grep -Fq 'CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-5.6-sol}"' "$review_script" ||
-  fail "Codex reviewer must default to the gpt-5.6-sol model"
+grep -Fq 'CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"' "$review_script" ||
+  fail "Codex reviewer must default to the gpt-6-astra model"
 
 grep -Fq 'CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"' "$review_script" ||
   fail "Codex reviewer must default to xhigh reasoning effort"

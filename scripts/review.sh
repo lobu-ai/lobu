@@ -81,10 +81,7 @@ else
 fi
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
-# Codex defaults assume API-key auth: the ChatGPT account backend rejects
-# gpt-5.6-sol ("not supported when using Codex with a ChatGPT account"), so
-# ChatGPT-backed operators must override CODEX_REVIEW_MODEL.
-CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
+CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"
 REVIEWER_CLI="${REVIEWER_CLI:-auto}"
 # light (default): skip the cross-harness reviewer for small safe-class diffs

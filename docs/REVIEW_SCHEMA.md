@@ -14,7 +14,7 @@ environments, including Claude Code, use Codex. Set
 `REVIEWER_CLI=codex|claude` to override automatic selection. The script
 also accepts `CLAUDE_REVIEW_MODEL` (default `fable`),
 `CLAUDE_REVIEW_EFFORT` (default `high`), and `CODEX_REVIEW_MODEL`
-(default `gpt-5.6-sol` at `model_reasoning_effort=xhigh`). Claude reviews
+(default `gpt-6-astra` at `model_reasoning_effort=xhigh`). Claude reviews
 fail closed unless
 `CLAUDE_REVIEW_MODEL` is `fable`, `opus`, or a full `claude-opus-*` model ID;
 Sonnet, Haiku, empty, and arbitrary model values are rejected before the
