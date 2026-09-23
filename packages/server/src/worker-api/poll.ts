@@ -39,7 +39,11 @@ import {
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
-import { announceFeedAutoPause, applyFeedSyncFailure } from '../connectors/feed-sync-failure';
+import {
+  announceFeedAutoPause,
+  applyFeedSyncFailure,
+  type RecordedFeedSyncFailure,
+} from '../connectors/feed-sync-failure';
 import { resolveOperationFiles } from '../operations/file-inputs';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
@@ -110,16 +114,20 @@ const DUE_FEEDS_LOCK_KEY = 71001;
 /**
  * Fail a run that this worker already claimed. Approval-gated actions also
  * have a durable card, so the run failure and failed-card supersede share one
- * short transaction. Other worker lanes have no approval card and retain the
- * existing single-row terminal transition.
+ * short transaction. When `chargeSyncFeed` is set, a sync run's feed charge
+ * also joins that transaction (feed-sync-failure.ts), so the run cannot go
+ * terminal beside the uncharged feed that its claim stamped 'pending'. Other
+ * worker lanes retain the existing single-row terminal transition.
  */
 export async function failClaimedWorkerRun(params: {
   runId: number;
   workerId: string;
   errorMessage: string;
+  chargeSyncFeed?: boolean;
 }): Promise<boolean> {
   const sql = getDb();
   let delivered = false;
+  let recordedFeedFailure: RecordedFeedSyncFailure | null = null;
   const transitioned = await sql.begin(async (tx) => {
     const nativeRun = await lockAgentTurnRun(tx, params.runId, true);
     const rows = await tx<{
@@ -127,6 +135,8 @@ export async function failClaimedWorkerRun(params: {
       run_type: string;
       approval_status: string;
       action_key: string | null;
+      feed_id: number | null;
+      dry_run: boolean;
     }>`
       UPDATE runs
       SET status = ${nativeRun?.run_metadata?.cancel_requested_at ? 'cancelled' : 'failed'},
@@ -135,7 +145,7 @@ export async function failClaimedWorkerRun(params: {
           error_message = ${params.errorMessage}
       WHERE id = ${params.runId}
         ${runLeaseFence(tx, params.workerId)}
-      RETURNING organization_id, run_type, approval_status, action_key
+      RETURNING organization_id, run_type, approval_status, action_key, feed_id, dry_run
     `;
     if (rows.length === 0) return false;
 
@@ -146,6 +156,13 @@ export async function failClaimedWorkerRun(params: {
       });
     }
     const row = rows[0];
+    if (params.chargeSyncFeed && row.run_type === 'sync' && row.feed_id && !row.dry_run) {
+      recordedFeedFailure = await applyFeedSyncFailure(tx, {
+        feedId: Number(row.feed_id),
+        errorMessage: params.errorMessage,
+        runId: params.runId,
+      });
+    }
     // Both approval-gated and auto action runs carry an operation card, so a
     // pre-dispatch failure supersedes either. Only the approval-gated lane
     // fails closed on a missing card: an auto run created before the dispatch
@@ -174,6 +191,7 @@ export async function failClaimedWorkerRun(params: {
     return true;
   });
   if (delivered) await notifyThreadResponse();
+  await announceFeedAutoPause(recordedFeedFailure);
   return transitioned;
 }
 
@@ -1937,26 +1955,19 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       });
     } catch (err) {
       const message = errorMessage(err);
-      const failed = await failClaimedWorkerRun({
-        runId: row.run_id,
-        workerId: worker_id,
-        errorMessage: message,
-      });
       // The claim CTE above already stamped this feed `last_sync_status =
       // 'pending'`. Failing only the run leaves it there forever: a connector
       // whose bundle can never be produced re-fires on its plain cadence with
       // `consecutive_failures` pinned at 0, so it never backs off, never
-      // auto-pauses, and reports healthy while every run fails. Gated on the
-      // transition so a lost lease cannot charge the feed twice.
-      if (failed && row.feed_id && !row.dry_run) {
-        await announceFeedAutoPause(
-          await applyFeedSyncFailure(getDb(), {
-            feedId: row.feed_id,
-            errorMessage: message,
-            runId: row.run_id,
-          })
-        );
-      }
+      // auto-pauses, and reports healthy while every run fails. The charge
+      // rides the run's lease-fenced transition, so a lost lease cannot charge
+      // the feed twice.
+      await failClaimedWorkerRun({
+        runId: row.run_id,
+        workerId: worker_id,
+        errorMessage: message,
+        chargeSyncFeed: true,
+      });
       logger.error(
         { run_id: row.run_id, connector_key: row.connector_key, err },
         'Failed to resolve connector code for claimed worker run'

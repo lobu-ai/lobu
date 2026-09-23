@@ -760,14 +760,20 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
   /**
    * A connector whose bundle cannot be produced fails INSIDE the poll request,
    * gateway-side, after the claim CTE has already stamped the feed
-   * `last_sync_status='pending'`. That path terminalises the run but never ran
-   * the feed bookkeeping, so a permanently-broken connector re-fired on its
-   * plain cadence forever: no backoff, no auto-pause, `consecutive_failures`
-   * pinned at 0 and `last_error` NULL, i.e. a feed that reports healthy while
-   * every run fails. Observed in prod on a connector importing an SDK export
-   * that had been removed (14 days, 0 recorded failures).
+   * `last_sync_status='pending'`. Before the feed charge was added, that path
+   * terminalised the run but never ran the feed bookkeeping, so a
+   * permanently-broken connector re-fired on its plain cadence forever: no
+   * backoff, no auto-pause, `consecutive_failures` pinned at 0 and `last_error`
+   * NULL, i.e. a feed that reports healthy while every run fails. Observed in
+   * prod on a connector importing an SDK export that had been removed (14
+   * days, 0 recorded failures).
    */
-  it('charges a gateway-side compile failure to the feed, not just the run', async () => {
+  async function pollUncompilableFeed(): Promise<{
+    runId: number;
+    feedId: number;
+    status: number;
+    polled: Record<string, unknown> | null;
+  }> {
     const org = await createTestOrganization();
     const sql = getTestDb();
     // No bundled source on disk and no stored compiled_code for this key, so
@@ -818,11 +824,18 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
       }),
       {} as never
     );
-    const polled = (await response.json()) as Record<string, unknown>;
-    expect(polled.skipped_run_id).toBe(runRow.id);
+    const polled = response.ok ? ((await response.json()) as Record<string, unknown>) : null;
+    return { runId: runRow.id, feedId: feedRow.id, status: response.status, polled };
+  }
+
+  it('charges a gateway-side compile failure to the feed, not just the run', async () => {
+    const sql = getTestDb();
+    const { runId, feedId, status, polled } = await pollUncompilableFeed();
+    expect(status).toBe(200);
+    expect(polled?.skipped_run_id).toBe(runId);
 
     const [run] = (await sql`
-      SELECT status, error_message FROM runs WHERE id = ${runRow.id}
+      SELECT status, error_message FROM runs WHERE id = ${runId}
     `) as Array<{ status: string; error_message: string | null }>;
     expect(run.status).toBe('failed');
     expect(String(run.error_message)).toContain('test.uncompilable');
@@ -830,7 +843,7 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     const [feed] = (await sql`
       SELECT status, last_sync_status, last_error, consecutive_failures,
              EXTRACT(EPOCH FROM (next_run_at - current_timestamp)) AS seconds_out
-      FROM feeds WHERE id = ${feedRow.id}
+      FROM feeds WHERE id = ${feedId}
     `) as Array<{
       status: string;
       last_sync_status: string | null;
@@ -849,6 +862,51 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     // still be due and re-fire on the next poll.
     expect(Number(feed.seconds_out)).toBeGreaterThan(0);
   });
+
+  it('never commits the run failure without the feed charge', async () => {
+    const sql = getTestDb();
+    // Make the feed charge itself fail. A run failure that committed on its
+    // own would leave the feed 'pending' with no failure counted: the exact
+    // state the charge exists to prevent.
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION test_fail_feed_charge() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.last_sync_status = 'failed' THEN
+          RAISE EXCEPTION 'feed charge failed';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER test_fail_feed_charge_trg BEFORE UPDATE ON feeds
+        FOR EACH ROW EXECUTE FUNCTION test_fail_feed_charge();
+    `);
+    try {
+      const { runId, feedId, status, polled } = await pollUncompilableFeed();
+      expect(status).toBe(500);
+      expect(polled).toBeNull();
+      const [run] = (await sql`
+        SELECT r.status, r.error_message, f.last_sync_status, f.consecutive_failures
+        FROM runs r JOIN feeds f ON f.id = r.feed_id
+        WHERE r.id = ${runId} AND f.id = ${feedId}
+      `) as Array<{
+        status: string;
+        error_message: string | null;
+        last_sync_status: string | null;
+        consecutive_failures: number;
+      }>;
+      // Both halves roll back to the committed claim: the reaper can recover
+      // the running run, and no terminal failure contradicts the pending feed.
+      expect(run.status).toBe('running');
+      expect(run.error_message).toBeNull();
+      expect(run.last_sync_status).toBe('pending');
+      expect(Number(run.consecutive_failures)).toBe(0);
+    } finally {
+      await sql.unsafe(`
+        DROP TRIGGER IF EXISTS test_fail_feed_charge_trg ON feeds;
+        DROP FUNCTION IF EXISTS test_fail_feed_charge();
+      `);
+    }
+  });
+
   /**
    * Guards the success half of the completion UPDATE, which the failure-lane
    * consolidation rewrote from a ternary-in-SQL form to plain SQL. Nothing else
