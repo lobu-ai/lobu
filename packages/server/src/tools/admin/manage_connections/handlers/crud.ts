@@ -2445,8 +2445,11 @@ export async function handleDelete(
   // by a worker. A `local_action` run keeps status='pending' after approval so
   // the worker poll can claim it; without this, a worker would still execute
   // the mutation against the deleted connection. A run a worker already
-  // claimed is left to its executor. Each card advances in the same
-  // transaction, with the same all-or-nothing rule as the approval expiry.
+  // claimed is left to its executor. A card advances in the same transaction.
+  // An approved run always has one (approval writes it), so a missing card
+  // rolls the delete back like the approval expiry; auto transport runs
+  // (device feed reads, browser dispatch) are created without a card and are
+  // simply cancelled.
   const unclaimedActionCancelReason =
     'Connection deleted before a worker claimed this action; it will not run.';
   const cancelUnclaimedActionRunsBeforeDelete = async (
@@ -2464,7 +2467,10 @@ export async function handleDelete(
       FOR UPDATE
     `;
     for (const unclaimedRun of unclaimedRuns) {
-      const cancelled = await db<{ action_key: string | null }>`
+      const cancelled = await db<{
+        action_key: string | null;
+        approval_status: string;
+      }>`
           UPDATE runs
           SET status = 'cancelled',
               error_message = ${unclaimedActionCancelReason},
@@ -2475,7 +2481,7 @@ export async function handleDelete(
             AND run_type = 'action'
             AND status = 'pending'
             AND approval_status IN ('approved', 'auto')
-          RETURNING action_key
+          RETURNING action_key, approval_status
         `;
       if (cancelled.length === 0) continue;
 
@@ -2493,7 +2499,7 @@ export async function handleDelete(
         null,
         db
       );
-      if (eventId === undefined) {
+      if (eventId === undefined && cancelled[0].approval_status === 'approved') {
         throw new Error(
           `Cannot cancel action run ${unclaimedRun.id}: its approval card is missing`
         );

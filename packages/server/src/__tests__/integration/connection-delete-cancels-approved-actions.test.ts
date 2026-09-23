@@ -166,6 +166,37 @@ describe("connection delete cancels approved-but-unclaimed action runs", () => {
 		expect(row).toMatchObject({ status: "pending", claimed_by: null });
 	});
 
+	it("cancels a cardless auto transport run without blocking the delete", async () => {
+		// Device feed reads and browser dispatch insert pending auto action runs
+		// with no operation card; the delete must still succeed and cancel them.
+		const sql = getTestDb();
+		const conn = await createTestConnection({
+			organization_id: orgId,
+			connector_key: CONNECTOR,
+			created_by: ctx.userId ?? undefined,
+		});
+		const [run] = await sql`
+			INSERT INTO runs (
+				organization_id, run_type, connection_id, connector_key,
+				action_key, approval_status, status, created_at
+			) VALUES (
+				${orgId}, 'action', ${conn.id}, ${CONNECTOR},
+				'needs_approval', 'auto', 'pending', NOW()
+			)
+			RETURNING id
+		`;
+
+		const deleted = (await manageConnections(
+			{ action: "delete", connection_id: conn.id },
+			{} as Env,
+			ctx,
+		)) as { deleted?: boolean; error?: string };
+		expect(deleted.error).toBeUndefined();
+		expect(deleted.deleted).toBe(true);
+		const [row] = await sql`SELECT status FROM runs WHERE id = ${run.id}`;
+		expect(row.status).toBe("cancelled");
+	});
+
 	it("leaves an approved run on another connection claimable", async () => {
 		const sql = getTestDb();
 		const deletedConn = await createTestConnection({
