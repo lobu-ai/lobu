@@ -25,7 +25,10 @@ import { notifyActionApprovalNeeded } from "../../../../notifications/triggers";
 import { resolveApprovalChatOrigin } from "../../approval-delivery";
 import { resolveActionMode } from "../../../../operations/action-modes";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
-import { LOST_LEASE_MESSAGE } from "../../../../runs/run-lease";
+import {
+	keepInlineRunLeaseAlive,
+	LOST_LEASE_MESSAGE,
+} from "../../../../runs/run-lease";
 import {
 	AUTO_APPROVED_CARD_STATUS,
 	autoOperationCardOriginId,
@@ -405,6 +408,39 @@ interface InlineExecutionOptions {
 }
 
 export async function executeOperationInline(
+	runId: number,
+	organizationId: string,
+	connection: ConnectionRow,
+	operation: OperationDescriptor,
+	actionInput: Record<string, unknown>,
+	requesterUserId: string | null,
+	abortSignal: AbortSignal | undefined,
+	options: InlineExecutionOptions,
+): Promise<InlineExecutionResult> {
+	// Every backend below runs under this one lease refresher, so no inline
+	// execution can be reaped as stale while it is still in flight.
+	const stopHeartbeat = keepInlineRunLeaseAlive(
+		runId,
+		organizationId,
+		options.claimedBy,
+	);
+	try {
+		return await executeOperationInlineBackend(
+			runId,
+			organizationId,
+			connection,
+			operation,
+			actionInput,
+			requesterUserId,
+			abortSignal,
+			options,
+		);
+	} finally {
+		stopHeartbeat();
+	}
+}
+
+async function executeOperationInlineBackend(
 	runId: number,
 	organizationId: string,
 	connection: ConnectionRow,

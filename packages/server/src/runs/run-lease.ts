@@ -18,7 +18,9 @@
  * forgets is exactly the one that clobbers another owner's run.
  */
 
-import type { DbClient } from "../db/client";
+import { intervals } from "../config/intervals";
+import { type DbClient, getDb } from "../db/client";
+import logger from "../utils/logger";
 
 /**
  * Reported when a fenced terminal write matches no row: the run was cancelled,
@@ -54,4 +56,67 @@ export function runOwnerFence(sql: DbClient, expectedOwner: string | null) {
 	return expectedOwner === null
 		? sql`AND claimed_by IS NULL`
 		: sql`AND claimed_by = ${expectedOwner}`;
+}
+
+/**
+ * Keep a gateway-inline run's lease alive while its execution is in flight.
+ *
+ * The inline claim stamps `last_heartbeat_at` once, and the stale-run reaper
+ * times out any heartbeating `action` run whose beat is older than
+ * `runsReaperStaleAfterSeconds`. Without a refresher, an inline call that
+ * outlived that threshold was reaped mid-flight: the external mutation then
+ * succeeded, the fenced terminal write matched no row, and the caller was told
+ * it failed. Each beat is fenced on this holder's own lease, so it can never
+ * revive a run somebody else took, and it stops at the first beat that matches
+ * no row. The timer lives in this process only: a crashed pod stops beating
+ * and the reaper still reclaims its run. The cadence is derived from the
+ * reaper threshold so the two cannot drift apart.
+ *
+ * Returns the stop function; call it as soon as execution returns.
+ */
+export function keepInlineRunLeaseAlive(
+	runId: number,
+	organizationId: string,
+	claimedBy: string,
+): () => void {
+	const periodMs = Math.max(
+		250,
+		Math.floor((intervals.runsReaperStaleAfterSeconds * 1000) / 4),
+	);
+	let stopped = false;
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	const schedule = () => {
+		if (stopped) return;
+		timer = setTimeout(beat, periodMs);
+		timer.unref?.();
+	};
+	const beat = async () => {
+		if (stopped) return;
+		try {
+			const sql = getDb();
+			const rows = await sql`
+				UPDATE runs SET last_heartbeat_at = current_timestamp
+				WHERE id = ${runId} AND organization_id = ${organizationId}
+				${runLeaseFence(sql, claimedBy)}
+				RETURNING id
+			`;
+			if (rows.length === 0) {
+				stopped = true;
+				return;
+			}
+		} catch (error) {
+			// A missed beat is survivable (the threshold spans four of them); the
+			// next tick retries. The terminal write stays lease-fenced either way.
+			logger.warn(
+				{ run_id: runId, error: String(error) },
+				"[run-lease] Inline run heartbeat failed",
+			);
+		}
+		schedule();
+	};
+	schedule();
+	return () => {
+		stopped = true;
+		if (timer) clearTimeout(timer);
+	};
 }
