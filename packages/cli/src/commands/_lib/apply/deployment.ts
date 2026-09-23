@@ -360,7 +360,8 @@ export function buildDeploymentManifest(
         ...connectors,
         // Keep the declaration shape for display/diff labels; drop the bytes.
         definitions: definitions.map(
-          ({ sourceCode: _sourceCode, ...def }) => def
+          ({ sourceCode: _sourceCode, compiledCode: _compiledCode, ...def }) =>
+            def
         ),
       },
     },

@@ -132,6 +132,30 @@ describe("project dependency policy", () => {
     );
     expect(npm.calls()).toHaveLength(0);
   });
+  test("optional dependencies may be omitted even when also declared as dependencies", async () => {
+    const root = project();
+    const npm = installer();
+    const session = new Map();
+    json(join(root, "package.json"), {
+      dependencies: { optional: "1.0.0" },
+      optionalDependencies: { optional: "1.0.0" },
+    });
+    expect(() => checkProjectDeps(root)).not.toThrow();
+    let compiled = false;
+    await frozen(root, session, async () => {
+      compiled = true;
+    });
+    await frozen(root, session);
+    expect(compiled).toBe(true);
+    expect(npm.calls()).toHaveLength(1);
+    json(join(root, "package.json"), {
+      dependencies: { optional: "1.0.0", required: "1.0.0" },
+      optionalDependencies: { optional: "1.0.0" },
+    });
+    expect(() => checkProjectDeps(root)).toThrow(
+      "Missing project dependency required"
+    );
+  });
   test("read-only config inspection preserves zero-install SDK aliases", async () => {
     const root = project();
     const npm = installer();

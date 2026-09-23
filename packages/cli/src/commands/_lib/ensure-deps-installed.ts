@@ -21,6 +21,7 @@ type Manifest = {
   workspaces?: string[] | { packages: string[] };
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
 };
 type Project = { root: string; packages: string[]; manifest: Manifest };
 /** Owned by one apply or one running local stack, never a process-global cache. */
@@ -169,6 +170,8 @@ function missingDependency(
       ...manifest.dependencies,
       ...manifest.devDependencies,
     })) {
+      // Optional declarations override required entries and may be omitted by the installer.
+      if (Object.hasOwn(manifest.optionalDependencies ?? {}, name)) continue;
       // Config loading aliases these two packages to the running CLI's SDK.
       // Preserve zero-install validation without hiding missing user libraries.
       if (readOnly && (name === "@lobu/cli" || name === "@lobu/connector-sdk"))
