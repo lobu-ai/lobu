@@ -260,6 +260,40 @@ describe('install_connector — source for a built-in key', () => {
     expect(kept.checkpoint).toEqual({ cursor: 'image-cursor' });
   });
 
+  it('in cloud, a source install over a legacy org version selects the image and resets its cursor', async () => {
+    delete process.env.LOBU_CLOUD_MODE;
+    const { org, ctx } = await seedOwnerContext({ orgName: 'Legacy Install Org', userName: 'Legacy Install User' });
+    const installed = await manageConnections(
+      { action: 'install_connector', source_code: uploadedSource() },
+      TEST_ENV,
+      ctx
+    );
+    expect('error' in installed ? installed.error : undefined).toBeUndefined();
+
+    const sql = getTestDb();
+    const connection = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'rss',
+      createDefaultFeed: false,
+    });
+    const [feed] = await sql`
+      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
+      VALUES (${org.id}, ${connection.id}, 'articles', 'active', '{"cursor":"old-cursor"}'::jsonb)
+      RETURNING id
+    `;
+    process.env.LOBU_CLOUD_MODE = '1';
+
+    const reinstalled = await manageConnections(
+      { action: 'install_connector', source_code: uploadedSource() },
+      TEST_ENV,
+      ctx
+    );
+    expect('error' in reinstalled ? reinstalled.error : undefined).toBeUndefined();
+    expect('version' in reinstalled ? reinstalled.version : undefined).toBe(imageVersion);
+    const [reset] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+    expect(reset.checkpoint).toBeNull();
+  });
+
   it('in cloud, a custom key retains the uploaded source for execution', async () => {
     process.env.LOBU_CLOUD_MODE = '1';
     const { org, ctx } = await seedOwnerContext({ orgName: 'Cloud Custom Org', userName: 'Cloud Custom User' });

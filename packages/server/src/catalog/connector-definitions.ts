@@ -184,6 +184,34 @@ function installsImageCopy(connectorKey: string): boolean {
 	return isCloudMode() && findBundledConnectorFile(connectorKey) !== null;
 }
 
+/**
+ * Install the image copy of a built-in key and reset feed state when that
+ * replaces the active version, in one transaction under the shared upsert's
+ * writer lock, like an org-copy install.
+ */
+async function installImageCopy(params: {
+	organizationId: string;
+	connectorKey: string;
+}): Promise<
+	(ConnectorInstallResult & { previousVersion: string | null }) | null
+> {
+	return getDb().begin(async (tx) => {
+		const installed = await upsertBundledConnectorForOrg({
+			...params,
+			sql: tx,
+		});
+		if (installed?.previousVersion) {
+			await invalidateFeedCheckpointsForVersionChange(tx, {
+				organizationId: params.organizationId,
+				connectorKey: params.connectorKey,
+				previousVersion: installed.previousVersion,
+				version: installed.version,
+			});
+		}
+		return installed;
+	});
+}
+
 export async function installConnectorDefinitionFromSource(params: {
 	organizationId: string;
 	sourceUrl?: string;
@@ -199,7 +227,7 @@ export async function installConnectorDefinitionFromSource(params: {
 		compiled: params.compiled,
 	});
 	if (installsImageCopy(resolved.metadata.key)) {
-		const installed = await upsertBundledConnectorForOrg({
+		const installed = await installImageCopy({
 			organizationId: params.organizationId,
 			connectorKey: resolved.metadata.key,
 		});
@@ -749,21 +777,15 @@ export async function updateInstalledConnectorSource(params: {
 	}
 
 	if (installsImageCopy(params.connectorKey)) {
-		const installed = await upsertBundledConnectorForOrg({
+		const installed = await installImageCopy({
 			organizationId: params.organizationId,
 			connectorKey: params.connectorKey,
 		});
 		if (installed) {
-			await invalidateFeedCheckpointsForVersionChange({
-				organizationId: params.organizationId,
-				connectorKey: params.connectorKey,
-				previousVersion: def.version,
-				version: installed.version,
-			});
 			return {
 				connectorKey: installed.connectorKey,
 				name: installed.name,
-				previousVersion: def.version,
+				previousVersion: installed.previousVersion ?? def.version,
 				version: installed.version,
 				codeHash: installed.codeHash,
 			};
