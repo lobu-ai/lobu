@@ -194,10 +194,10 @@ async function seedHeadlessShellRun(orgId: string, version = HEADLESS_OS_SHELL_V
   const [run] = (await sql`
     INSERT INTO runs (
       organization_id, run_type, connection_id, connector_key,
-      connector_version, action_key, action_input, approval_status, status,
+      connector_version, connector_artifact_hash, action_key, action_input, approval_status, status,
       created_at
     ) VALUES (
-      ${orgId}, 'action', ${connection.id}, 'os.shell', ${version}, 'run',
+      ${orgId}, 'action', ${connection.id}, 'os.shell', ${version}, ${deviceManifestHash(HEADLESS_OS_SHELL_MANIFEST as unknown as DeviceConnectorManifest)}, 'run',
       ${sql.json({ command: 'hostname' })}, 'auto', 'pending', NOW()
     )
     RETURNING id
@@ -308,16 +308,16 @@ async function insertPendingManifestRun(params: {
   orgId: string;
   connectionId: number;
   feedId: number;
-  version: string;
+  manifest: DeviceConnectorManifest;
 }) {
   const sql = getTestDb();
   const [run] = (await sql`
     INSERT INTO runs (
       organization_id, run_type, feed_id, connection_id, connector_key,
-      connector_version, approval_status, status, created_at
+      connector_version, connector_artifact_hash, approval_status, status, created_at
     ) VALUES (
       ${params.orgId}, 'sync', ${params.feedId}, ${params.connectionId},
-      ${CHROME_MANIFEST_KEY}, ${params.version}, 'auto', 'pending', NOW()
+      ${CHROME_MANIFEST_KEY}, ${params.manifest.version}, ${deviceManifestHash(params.manifest)}, 'auto', 'pending', NOW()
     )
     RETURNING id
   `) as unknown as Array<{ id: number }>;
@@ -828,7 +828,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: chromeManifest as DeviceConnectorManifest,
     });
 
     const response = await poll(workerId, [chromeManifest], 'chrome-extension', {
@@ -885,7 +885,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: chromeManifest as DeviceConnectorManifest,
     });
 
     const repairedPoll = await poll(workerId, [chromeManifest], 'chrome-extension', pollOptions);
@@ -1917,10 +1917,10 @@ describe('device connector manifests', () => {
     const [run] = (await sql`
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id, connector_key,
-        connector_version, approval_status, status, created_at
+        connector_version, connector_artifact_hash, approval_status, status, created_at
       ) VALUES (
         ${orgId}, 'sync', ${messagesFeed!.id}, ${connectionId}, ${CHROME_MANIFEST_KEY},
-        '2.0.0', 'auto', 'pending', NOW()
+        '2.0.0', ${deviceManifestHash(chromeManifest)}, 'auto', 'pending', NOW()
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
@@ -2021,10 +2021,10 @@ describe('device connector manifests', () => {
     const [run] = (await sql`
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id, connector_key,
-        connector_version, approval_status, status, created_at, target_device_worker_id
+        connector_version, connector_artifact_hash, approval_status, status, created_at, target_device_worker_id
       ) VALUES (
         ${orgId}, 'sync', ${messagesFeed!.id}, ${connectionId}, ${CHROME_MANIFEST_KEY},
-        '1.0.0', 'auto', 'pending', NOW(), ${v1Device.id}::uuid
+        '1.0.0', ${deviceManifestHash(v1Manifest)}, 'auto', 'pending', NOW(), ${v1Device.id}::uuid
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
@@ -2104,7 +2104,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: winningManifest as DeviceConnectorManifest,
     });
 
     const losingPoll = await poll(
@@ -2221,7 +2221,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: chromeManifest as DeviceConnectorManifest,
     });
     await sql`
       UPDATE connector_definitions SET name = 'stale metadata'

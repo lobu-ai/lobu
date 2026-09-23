@@ -63,6 +63,7 @@ import {
 	MANAGE_ENTITY_SCHEMA_ACTION_KEY,
 	type StoredManageEntitySchemaProposal,
 } from "../../manage_entity_schema";
+import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { runLeaseFence } from "../../../../runs/run-lease";
 import { executeOperationInline } from "./execute";
 import { qualifiedOperationKey } from "./shared";
@@ -1493,11 +1494,13 @@ export async function handleApprove(
 
 	const pendingRows = await sql`
     SELECT id, connection_id, action_key, action_input,
+           connector_key, connector_version, connector_artifact_hash, target_device_worker_id,
            policy_principal_kind, policy_principal_id
     FROM runs
     WHERE id = ${args.run_id}
       AND organization_id = ${ctx.organizationId}
       AND approval_status = 'pending'
+      AND status = 'pending'
       AND run_type = 'action'
     LIMIT 1
   `;
@@ -1508,6 +1511,10 @@ export async function handleApprove(
 	const pendingRun = pendingRows[0] as {
 		id: number;
 		connection_id: number;
+		connector_key: string;
+		connector_version: string | null;
+		connector_artifact_hash: string | null;
+		target_device_worker_id: string | null;
 		action_key: string;
 		action_input: Record<string, unknown> | null;
 		policy_principal_kind: string | null;
@@ -1522,6 +1529,26 @@ export async function handleApprove(
 		return {
 			error: `Operation '${pendingRun.action_key}' is no longer available for this connection.`,
 		};
+	}
+
+	// Approval must not reinterpret a pending run under a newer contract.
+	// Compare with the artifact selected alongside the operation metadata, then
+	// check the original execution pin against the run's recorded hash.
+	if (pendingRun.connector_artifact_hash != null || resolved.connection.connector_manifest_hash != null) {
+		if (
+			pendingRun.connector_artifact_hash == null ||
+			pendingRun.connector_artifact_hash !== resolved.connection.connector_manifest_hash ||
+			pendingRun.connector_key !== resolved.connection.connector_key ||
+			pendingRun.connector_version !== resolved.connection.connector_version
+		) {
+			return { error: "The connector contract changed since this run was queued. Re-run the operation before approving it." };
+		}
+		const admissionError = await deviceManifestAdmissionError(
+			sql, ctx.organizationId, pendingRun.connection_id, pendingRun.connector_key,
+			pendingRun.connector_version, pendingRun.target_device_worker_id,
+			{ manifestBacked: true, manifestHash: pendingRun.connector_artifact_hash },
+		);
+		if (admissionError) return { error: admissionError };
 	}
 
 	// (sol #5) Re-evaluate the connector-action write-gate NOW, at approve time,

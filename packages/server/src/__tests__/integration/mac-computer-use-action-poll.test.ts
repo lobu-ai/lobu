@@ -6,6 +6,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deviceManifestHash } from '@lobu/connector-sdk/device-manifest-hash';
+import type { DeviceConnectorManifest } from '@lobu/connector-sdk/device-manifest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { generateSecureToken } from '../../auth/oauth/utils';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
@@ -118,9 +120,10 @@ describe('mac computer_use action poll', () => {
     const inserted = (await sql`
       INSERT INTO runs (
         organization_id, run_type, connection_id, connector_key, connector_version,
-        action_key, action_input, approval_status, status, created_at
+        connector_artifact_hash, action_key, action_input, approval_status, status, created_at
       ) VALUES (
         ${orgId}, 'action', ${connRows[0].id}, ${CONNECTOR_KEY}, '0.1.0',
+        ${deviceManifestHash(manifest as unknown as DeviceConnectorManifest)},
         ${OPERATION_KEY}, ${sql.json({})}, 'auto', 'pending', current_timestamp
       )
       RETURNING id

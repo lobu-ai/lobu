@@ -242,7 +242,7 @@ async function softDeleteOrphanFeed(
  * own automation (sync soft-deletes the orphan feed; auth/action throw).
  */
 type ConnectorVersionResolution =
-  | { ok: true; version: string }
+  | { ok: true; version: string; manifestBacked: boolean; manifestHash: string | null }
   | { ok: false; reason: 'no-definition' }
   | { ok: false; reason: 'no-version'; version: string }
   | { ok: false; reason: 'not-runnable'; version: string };
@@ -277,12 +277,14 @@ async function resolveActiveConnectorVersion(
   // Presence of runnable code, never the bytes: an artifact bundle is
   // megabytes and nothing on this path needs its contents.
   const versionRows = await sql`
-    SELECT (compiled_code IS NOT NULL) AS has_compiled_code, source_path
-    FROM connector_versions
-    WHERE connector_key = ${params.connectorKey} AND version = ${version}
-      AND (organization_id = ${params.orgId} OR organization_id IS NULL)
-    ORDER BY organization_id NULLS LAST
-    LIMIT 1
+    SELECT (artifact_compiled_code IS NOT NULL) AS has_compiled_code,
+           artifact_source_path AS source_path, manifest_backed,
+           CASE WHEN manifest_backed THEN artifact_hash ELSE NULL END AS manifest_hash
+    FROM (${selectedConnectorVersionArtifactSql(sql, {
+      connectorKey: sql`${params.connectorKey}`,
+      version: sql`${version}`,
+      organizationId: sql`${params.orgId}`,
+    })}) artifact
   `;
   if (versionRows.length === 0) {
     // No stored artifact row at all. A runnable caller still needs one; a
@@ -290,11 +292,13 @@ async function resolveActiveConnectorVersion(
     // device-executed connectors that ship no gateway-side artifact) keeps
     // working, and there are no organization-supplied bytes to admit.
     if (params.requireRunnable) return { ok: false, reason: 'no-version', version };
-    return { ok: true, version };
+    return { ok: true, version, manifestBacked: false, manifestHash: null };
   }
   const artifact = versionRows[0] as {
     has_compiled_code: boolean;
     source_path: string | null;
+    manifest_backed: boolean;
+    manifest_hash: string | null;
   };
   // Runnable if ANY runtime code source exists: stored compiled code, a
   // source_path the runtime can compile on demand, or a bundled connector
@@ -308,15 +312,16 @@ async function resolveActiveConnectorVersion(
   ) {
     return { ok: false, reason: 'not-runnable', version };
   }
-  return { ok: true, version };
+  return { ok: true, version, manifestBacked: artifact.manifest_backed, manifestHash: artifact.manifest_hash };
 }
 
 /**
- * Reject an unavailable manifest on the exact execution pin before queuing.
- * Compiled artifacts bypass this check; native hashless artifacts retain capability claims.
+ * Reject an unavailable manifest on the exact execution pin before queuing
+ * or approving. Compiled artifacts bypass this check; native hashless
+ * artifacts retain capability claims.
  *
  * The readiness owner is the fleet whose manifests are compared, so it is the
- * DEVICE's owner, falling back to the personal org's owner when the connection
+ * pinned DEVICE's owner, falling back to the personal org's owner when the run
  * carries no pin — the same resolution `manage_feeds`, `list_available` and
  * `connector-pushdown` use. Resolving it from `connections.created_by` instead
  * looked up the creator's fleet: in a team org a connection created by a
@@ -324,43 +329,36 @@ async function resolveActiveConnectorVersion(
  * so every run on a perfectly healthy pin was refused with
  * DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE.
  */
-async function deviceManifestAdmissionError(
+export async function deviceManifestAdmissionError(
   sql: DbClient,
   organizationId: string,
   connectionId: number,
   connectorKey: string,
   connectorVersion: string,
-  deviceWorkerId: string | null
+  deviceWorkerId: string | null,
+  artifact: { manifestBacked: boolean; manifestHash: string | null }
 ): Promise<string | null> {
   const pinError = describeMissingBrowserExecutionPin(connectorKey, deviceWorkerId);
   if (pinError) return pinError;
+  if (!artifact.manifestBacked) return null;
   const [row] = await sql<{
     owner_user_id: string | null;
-    manifest_hash: string | null;
     runtime: Record<string, unknown> | null;
   }>`
     SELECT COALESCE(dw.user_id, (o.metadata::jsonb)->>'personal_org_for_user_id')
              AS owner_user_id,
-           cv.artifact_hash AS manifest_hash,
            cd.runtime
     FROM connections c
     JOIN "organization" o ON o.id = c.organization_id
-    LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
+    LEFT JOIN device_workers dw ON dw.id = ${deviceWorkerId}::uuid
     LEFT JOIN connector_definitions cd
       ON cd.organization_id = c.organization_id AND cd.key = c.connector_key
       AND cd.status = 'active'
-    JOIN LATERAL (
-      ${selectedConnectorVersionArtifactSql(sql, {
-        connectorKey: sql`${connectorKey}`,
-        version: sql`${connectorVersion}`,
-        organizationId: sql`${organizationId}`,
-      })}
-    ) cv ON cv.manifest_backed
     WHERE c.id = ${connectionId} AND c.organization_id = ${organizationId}
     LIMIT 1
   `;
-  if (!row) return null;
-  if (row.manifest_hash == null) {
+  if (!row) return DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
+  if (artifact.manifestHash == null) {
     return hashlessManifestArtifactMayBeClaimed(connectorKey, row.runtime)
       ? null : DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE;
   }
@@ -368,7 +366,7 @@ async function deviceManifestAdmissionError(
     ownerUserId: row.owner_user_id,
     connectorKey,
     connectorVersion,
-    manifestHash: row.manifest_hash,
+    manifestHash: artifact.manifestHash,
     deviceWorkerId,
   };
   const index = await loadDeviceConnectorReadiness({ sql, targets: [target] });
@@ -569,7 +567,7 @@ async function createSyncRunWithClient(
   const connectorVersion = resolved.version;
   const admissionError = await deviceManifestAdmissionError(
     sql, feed.organization_id, feed.connection_id, feed.connector_key,
-    connectorVersion, feed.device_worker_id
+    connectorVersion, feed.device_worker_id, resolved
   );
   if (admissionError) throw new ToolUserError(admissionError, 409);
 
@@ -589,11 +587,11 @@ async function createSyncRunWithClient(
     ? await sql`
     INSERT INTO runs (
       organization_id, run_type, feed_id, connection_id,
-      connector_key, connector_version, status, approval_status, created_at,
+      connector_key, connector_version, connector_artifact_hash, status, approval_status, created_at,
       dry_run, target_device_worker_id
     ) VALUES (
       ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
-      ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
+      ${feed.connector_key}, ${connectorVersion}, ${resolved.manifestHash}, 'pending', 'auto', current_timestamp,
       true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
     )
     RETURNING id
@@ -602,11 +600,11 @@ async function createSyncRunWithClient(
     WITH inserted AS (
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id,
-        connector_key, connector_version, status, approval_status, created_at,
+        connector_key, connector_version, connector_artifact_hash, status, approval_status, created_at,
         target_device_worker_id
       ) VALUES (
         ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
-        ${feed.connector_key}, ${connectorVersion}, 'pending', 'auto', current_timestamp,
+        ${feed.connector_key}, ${connectorVersion}, ${resolved.manifestHash}, 'pending', 'auto', current_timestamp,
         ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
       )
       RETURNING id, feed_id
@@ -1206,10 +1204,10 @@ export async function createAuthRun(params: {
   try {
     const inserted = await sql`
       INSERT INTO runs (
-        organization_id, run_type, connector_key, connector_version,
+        organization_id, run_type, connector_key, connector_version, connector_artifact_hash,
         auth_profile_id, created_by_user_id, approval_status, status, created_at
       ) VALUES (
-        ${params.organizationId}, 'auth', ${params.connectorKey}, ${connectorVersion},
+        ${params.organizationId}, 'auth', ${params.connectorKey}, ${connectorVersion}, ${resolved.manifestHash},
         ${params.authProfileId}, ${params.createdByUserId}, 'auto', 'pending', current_timestamp
       )
       RETURNING id
@@ -1396,7 +1394,7 @@ export async function createConnectorOperationRun(params: {
   const admissionError = params.approvalMode === 'device'
     ? await deviceManifestAdmissionError(
         sql, params.organizationId, params.connectionId, params.connectorKey,
-        connectorVersion, targetDeviceWorkerId
+        connectorVersion, targetDeviceWorkerId, resolved
       )
     : null;
 
@@ -1420,7 +1418,7 @@ export async function createConnectorOperationRun(params: {
     claimed_by: string | null;
   }>`
     INSERT INTO runs (
-      organization_id, run_type, connection_id, connector_key, connector_version,
+      organization_id, run_type, connection_id, connector_key, connector_version, connector_artifact_hash,
       action_key, action_input, approval_status, status,
       automation_id, parent_run_id,
       policy_principal_kind, policy_principal_id, created_by_user_id,
@@ -1431,7 +1429,7 @@ export async function createConnectorOperationRun(params: {
       created_at
     ) VALUES (
       ${params.organizationId}, 'action', ${params.connectionId},
-      ${params.connectorKey}, ${connectorVersion},
+      ${params.connectorKey}, ${connectorVersion}, ${resolved.manifestHash},
       ${params.operationKey}, ${sql.json(params.operationInput)},
       ${approvalStatus}, ${admissionError ? 'failed' : status},
       ${params.automationId ?? null}, ${params.parentRunId ?? null},

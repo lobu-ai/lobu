@@ -874,6 +874,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               -- Work bound to a tombstoned connection never runs, whichever
               -- deletion path left the row pending; the reaper terminalizes it.
               AND con.deleted_at IS NULL
+              -- A run admitted before the hash was recorded cannot prove which
+              -- hashed manifest it was admitted against; there is no backfill.
+              AND (
+                r.connector_artifact_hash IS NOT NULL
+                OR NOT COALESCE(run_cv.manifest_backed, false)
+                OR run_cv.artifact_hash IS NULL
+              )
               AND ${connectorClaimLaneSql(tx, connectorClaimContext, {
                 connectorKey: tx`r.connector_key`,
                 connectorVersion: tx`r.connector_version`,
@@ -884,8 +891,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                 runTargetDeviceWorkerId: tx`r.target_device_worker_id`,
                 pinPlatform: tx`pin_dw.platform`,
                 runRequiredCapability: tx`cd.run_required_capability`,
-                runManifestBacked: tx`run_cv.manifest_backed`,
-                runManifestHash: tx`run_cv.artifact_hash`,
+                runManifestBacked: tx`(r.connector_artifact_hash IS NOT NULL OR COALESCE(run_cv.manifest_backed, false))`,
+                runManifestHash: tx`r.connector_artifact_hash`,
                 runRuntime: tx`cd.run_runtime`,
               })}
             )
@@ -1112,8 +1119,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         cv.artifact_row_count,
         cv.artifact_compiled_code AS compiled_code,
         cv.artifact_compile_config_hash AS compile_config_hash,
-        cv.artifact_hash AS connector_manifest_hash,
-        COALESCE(cv.manifest_backed, false) AS connector_manifest_backed,
+        r.connector_artifact_hash AS connector_manifest_hash,
+        (r.connector_artifact_hash IS NOT NULL OR COALESCE(cv.manifest_backed, false)) AS connector_manifest_backed,
         CASE WHEN cd.version = r.connector_version THEN cd.required_capability ELSE NULL END
           AS connector_required_capability,
         ap.auth_data AS auth_profile_auth_data,
