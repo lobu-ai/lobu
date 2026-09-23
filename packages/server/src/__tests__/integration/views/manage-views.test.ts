@@ -303,8 +303,12 @@ mountView(view, V);
 		await expect(
 			setView(SIMPLE_SOURCE, { key: "Custom:Name" })
 		).rejects.toThrow(/key/i);
+		// The shell's peek pane reads peek/peek_* on every page, view paths too.
 		await expect(
-			setView(SIMPLE_SOURCE, { params: { view: { type: "string" } } })
+			setView(SIMPLE_SOURCE, { params: { peek: { type: "string" } } })
+		).rejects.toThrow(/reserved/);
+		await expect(
+			setView(SIMPLE_SOURCE, { params: { peek_entity: { type: "string" } } })
 		).rejects.toThrow(/reserved/);
 		await expect(
 			setView(SIMPLE_SOURCE, {

@@ -940,7 +940,7 @@ describe("manage_entity merge action", () => {
 		expect(run.initiator_kind).toBe("automation");
 		expect((run.initiator_ref as { automation_id: number }).automation_id).toBe(6021);
 		expect(Number(run.automation_id)).toBe(6021);
-		const expectedUrl = `https://app.lobu.test/${org.slug}/memory?agent=personal-agent&automation=6021&run_ids=${queued.approval_run_id}`;
+		const expectedUrl = `https://app.lobu.test/${org.slug}/events?agent=personal-agent&automation=6021&run_ids=${queued.approval_run_id}`;
 		expect(queued.approval_url).toBe(expectedUrl);
 
 		const replay = (await manageEntity(

@@ -25,7 +25,7 @@ import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
 import { ToolUserError } from '../../utils/errors';
 import {
-  RESERVED_VIEW_PARAMS,
+  isShellOwnedParam,
   VIEW_ACTION_NAME_RE,
   VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
@@ -115,9 +115,9 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
     }
   }
   for (const [name, decl] of Object.entries(args.params ?? {})) {
-    if (RESERVED_VIEW_PARAMS.has(name)) {
+    if (isShellOwnedParam(name)) {
       throw new ToolUserError(
-        `Param '${name}' is reserved on type/record pages and cannot be declared`,
+        `Param '${name}' is reserved: the web shell's peek pane reads peek and peek_* on every page`,
         400
       );
     }

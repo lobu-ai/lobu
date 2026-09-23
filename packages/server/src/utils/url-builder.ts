@@ -448,8 +448,8 @@ function memoryResourceQuery(resource: MemoryResource): string {
 }
 
 /**
- * Build a permalink into the memory/events log for a {@link MemoryResource}.
- * Pattern: /{ownerSlug}/memory?<resource query>
+ * Build a permalink into the events log for a {@link MemoryResource}.
+ * Pattern: /{ownerSlug}/events?<resource query>
  *
  * This is the ONE place a memory permalink is assembled. `ownerSlug` empty →
  * returns undefined (no org context, can't build a usable link).
@@ -462,7 +462,7 @@ export function buildResourcePermalink(
   if (!ownerSlug) return undefined;
   return withBaseUrl(
     normalizeBaseUrl(baseUrl),
-    `/${ownerSlug}/memory?${memoryResourceQuery(resource)}`
+    `/${ownerSlug}/events?${memoryResourceQuery(resource)}`
   );
 }
 

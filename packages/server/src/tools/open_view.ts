@@ -3,6 +3,7 @@ import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
 import type { Env } from "../index";
 import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
+import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { getView, viewResourceUri } from "../views/views";
 import { getDb } from "../db/client";
@@ -135,14 +136,17 @@ async function openViewImpl(
 		}
 		pathname = `/${orgSlug}/${scope.type}`;
 	} else {
-		pathname = `/${orgSlug}`;
+		// No scope: a workspace view, a tab on the Data hub.
+		pathname = `/${orgSlug}/data`;
 	}
 	const params = resolveViewParams(view, args.params);
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
-	const search = new URLSearchParams({ view: args.key });
+	// The view is the path; the query string is its params and nothing else.
+	const search = new URLSearchParams();
 	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
+	const query = search.toString();
 	return {
 		view: args.key,
 		scope: {
@@ -150,7 +154,7 @@ async function openViewImpl(
 			...(scope.entity !== undefined ? { entity: scope.entity } : {}),
 		},
 		params,
-		url: `${origin}${pathname}?${search.toString()}`,
+		url: `${origin}${pathname}${viewPathSuffix(args.key)}${query ? `?${query}` : ""}`,
 		resource: viewResourceUri(args.key),
 	};
 }

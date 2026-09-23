@@ -5,6 +5,7 @@ import {
   defineView,
   escapeLiteral,
   mintInteractionId,
+  queryResult,
   sql,
   tool,
 } from "../api.js";
@@ -127,5 +128,56 @@ describe("params", () => {
       limit: 50,
       open: true,
     });
+  });
+});
+
+describe("queryResult", () => {
+  test("a rejected SQL statement is an error, not an empty result", () => {
+    // query_sql answers an unknown table with a normal result: rows: [] plus
+    // `error`. Reading only `rows` rendered it as "no matching records".
+    expect(
+      queryResult("sql", {
+        structuredContent: { rows: [], error: "Unknown table 'entity_types'" },
+      })
+    ).toEqual({ data: null, error: "Unknown table 'entity_types'" });
+  });
+
+  test("rows come back when the statement ran", () => {
+    expect(
+      queryResult("sql", { structuredContent: { rows: [{ n: 1 }] } })
+    ).toEqual({ data: [{ n: 1 }], error: null });
+  });
+
+  test("a failed query script is an error", () => {
+    expect(
+      queryResult("sdk", {
+        structuredContent: {
+          success: false,
+          error: { name: "E", message: "boom" },
+        },
+      })
+    ).toEqual({ data: null, error: "boom" });
+    expect(
+      queryResult("sdk", {
+        structuredContent: { success: true, return_value: 3 },
+      })
+    ).toEqual({ data: 3, error: null });
+  });
+
+  test("a named tool's body is data, even one with an error field", () => {
+    const body = { error: "domain value", items: [] };
+    expect(queryResult("tool", { structuredContent: body })).toEqual({
+      data: body,
+      error: null,
+    });
+  });
+
+  test("a host-reported tool error wins", () => {
+    expect(
+      queryResult("sql", {
+        isError: true,
+        content: [{ type: "text", text: "denied" }],
+      })
+    ).toEqual({ data: null, error: "denied" });
   });
 });

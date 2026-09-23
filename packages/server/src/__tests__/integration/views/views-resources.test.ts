@@ -284,9 +284,11 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(result.structuredContent.resource).toBe('ui://lobu/views/board');
 		// Declared params validate; unknown names are ignored.
 		expect(result.structuredContent.params).toEqual({ by: 'stage' });
-		expect(result.structuredContent.url).toContain('?view=board');
-		expect(result.structuredContent.url).toContain('by=stage');
-		expect(result.structuredContent.url).not.toContain('extra');
+		// Unscoped means a workspace view: a Data hub tab. The view is the path
+		// and the query string is its declared params alone — no host key.
+		const url = new URL(result.structuredContent.url);
+		expect(url.pathname).toBe('/views-org/data/-/views/board');
+		expect(Object.fromEntries(url.searchParams)).toEqual({ by: 'stage' });
 		// The result binds the stable loader id, not the per-view one.
 		expect(result._meta['openai/outputTemplate']).toBe(
 			LOBU_VIEWS_RESOURCE_URI
@@ -307,13 +309,24 @@ describe('views resources + open_view + invoke_view_action', () => {
 		).rejects.toThrow(/must be a string/);
 	});
 
+	it('open_view puts a type-scoped view under the type path', async () => {
+		const result = await rpc('tools/call', {
+			name: 'open_view',
+			arguments: { key: 'board', scope: { type: 'company' } },
+		});
+		expect(new URL(result.structuredContent.url).pathname).toBe(
+			'/views-org/company/-/views/board'
+		);
+	});
+
 	it('open_view resolves entity scope through entities JOIN entity_types', async () => {
 		const result = await rpc('tools/call', {
 			name: 'open_view',
 			arguments: { key: 'board', scope: { entity: entityId } },
 		});
-		expect(result.structuredContent.url).toContain('/views-org/company/');
-		expect(result.structuredContent.url).toContain('?view=board');
+		expect(new URL(result.structuredContent.url).pathname).toMatch(
+			/^\/views-org\/company\/[^/]+\/-\/views\/board$/
+		);
 		await expect(
 			rpc('tools/call', {
 				name: 'open_view',

@@ -203,6 +203,45 @@ function parseTextJson(result: ToolResult): unknown {
   return null;
 }
 
+/**
+ * Read one `useQuery` result. A failed read is an error, never an empty
+ * result: `query_sql` answers a rejected statement (unknown table, bad column)
+ * with a normal result carrying `error` beside `rows: []`, and `query_sdk`
+ * reports a thrown script as `success: false` — both would otherwise render as
+ * "no rows".
+ */
+export function queryResult<T>(
+  kind: "sql" | "sdk" | "tool",
+  result: ToolResult
+): { data: T | null; error: string | null } {
+  const err = resultError(result);
+  if (err) return { data: null, error: err };
+  // structuredContent when the tool declares an outputSchema (query_sql,
+  // query_sdk, every read tool on MCP hosts); otherwise the text body.
+  const sc = (result.structuredContent ??
+    parseTextJson(result) ??
+    {}) as Record<string, unknown>;
+  if (kind === "sql" && typeof sc.error === "string" && sc.error)
+    return { data: null, error: sc.error };
+  if (kind === "sdk" && sc.success === false) {
+    const e = sc.error as { message?: unknown } | string | undefined;
+    const message = typeof e === "string" ? e : e?.message;
+    return {
+      data: null,
+      error:
+        typeof message === "string" && message
+          ? message
+          : "Query script failed",
+    };
+  }
+  // query_sdk → { success, return_value }, query_sql → { rows }, a named
+  // tool → its whole body.
+  const data = (
+    kind === "sdk" ? sc.return_value : kind === "tool" ? sc : sc.rows
+  ) as T;
+  return { data: data ?? null, error: null };
+}
+
 export interface QueryState<T> {
   data: T | null;
   error: string | null;
@@ -255,42 +294,11 @@ export function useQuery<T = unknown>(
     call
       .then((result) => {
         if (cancelled) return;
-        const err = resultError(result);
-        if (err) {
-          setState({ data: null, error: err, loading: false });
-          return;
-        }
-        // structuredContent when the tool declares an outputSchema (query_sql,
-        // query_sdk, every read tool on MCP hosts); otherwise the text body.
-        const sc = (result.structuredContent ??
-          parseTextJson(result) ??
-          {}) as Record<string, unknown>;
-        if (typeof q === "string" && sc.success === false) {
-          const sdkError = sc.error;
-          const message =
-            sdkError && typeof sdkError === "object"
-              ? (sdkError as Record<string, unknown>).message
-              : undefined;
-          setState({
-            data: null,
-            error:
-              typeof message === "string" && message.length > 0
-                ? message
-                : "Query script failed",
-            loading: false,
-          });
-          return;
-        }
-        // query_sdk → { success, return_value }, query_sql → { rows }, a named
-        // tool → its whole body.
-        const data = (
-          typeof q === "string"
-            ? sc.return_value
-            : q.kind === "tool"
-              ? sc
-              : sc.rows
-        ) as T;
-        setState({ data: data ?? null, error: null, loading: false });
+        const out = queryResult<T>(
+          typeof q === "string" ? "sdk" : q.kind === "tool" ? "tool" : "sql",
+          result
+        );
+        setState({ ...out, loading: false });
       })
       .catch((e: unknown) => {
         if (cancelled) return;

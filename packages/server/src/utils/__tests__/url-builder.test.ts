@@ -312,7 +312,7 @@ describe('buildResourcePermalink', () => {
   it('run kind → ?run_ids (survives the supersede chain by construction)', () => {
     expect(
       buildResourcePermalink('acme', { kind: 'run', runId: 536620 }, 'https://app.lobu.com')
-    ).toBe('https://app.lobu.com/acme/memory?run_ids=536620');
+    ).toBe('https://app.lobu.com/acme/events?run_ids=536620');
   });
 
   it('automation run kind → Automation-filtered activity scoped to the run', () => {
@@ -323,25 +323,25 @@ describe('buildResourcePermalink', () => {
         'https://app.lobu.com'
       )
     ).toBe(
-      'https://app.lobu.com/acme/memory?agent=agent%2Fone&automation=42&run_ids=536620'
+      'https://app.lobu.com/acme/events?agent=agent%2Fone&automation=42&run_ids=536620'
     );
   });
 
   it('event kind → ?content_ids (chain-resolved on read)', () => {
     expect(
       buildResourcePermalink('acme', { kind: 'event', eventId: 4309390 }, 'https://app.lobu.com')
-    ).toBe('https://app.lobu.com/acme/memory?content_ids=4309390');
+    ).toBe('https://app.lobu.com/acme/events?content_ids=4309390');
   });
 
   it('feed kind → ?feed_ids (all activity in a channel)', () => {
     expect(
       buildResourcePermalink('acme', { kind: 'feed', feedId: 42 }, 'https://app.lobu.com')
-    ).toBe('https://app.lobu.com/acme/memory?feed_ids=42');
+    ).toBe('https://app.lobu.com/acme/events?feed_ids=42');
   });
 
   it('builds a relative URL when no base is provided', () => {
     expect(buildResourcePermalink('acme', { kind: 'run', runId: 536620 })).toBe(
-      '/acme/memory?run_ids=536620'
+      '/acme/events?run_ids=536620'
     );
   });
 

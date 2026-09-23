@@ -34,8 +34,14 @@ const VIEW_RESOURCE_PREFIX = 'ui://lobu/views/';
 export const VIEW_COMPILED_MAX_BYTES = 2 * 1024 * 1024;
 /** Source cap so one save cannot feed esbuild an unbounded input. */
 export const VIEW_SOURCE_MAX_CHARS = 1_000_000;
-/** Param names the host owns on type/record pages; a view cannot declare them. */
-export const RESERVED_VIEW_PARAMS = new Set(['view', 'version']);
+/**
+ * A view owns its page's whole query string (it is selected by path, see
+ * `view-path`), except the web shell's peek pane, which reads `peek` and
+ * `peek_*` on every page. A view cannot declare those.
+ */
+export function isShellOwnedParam(name: string): boolean {
+  return name === 'peek' || name.startsWith('peek_');
+}
 
 export function isValidViewKey(key: string): boolean {
   return VIEW_KEY_RE.test(key);

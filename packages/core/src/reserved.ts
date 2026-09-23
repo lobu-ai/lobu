@@ -27,6 +27,8 @@ export const OWNER_ROUTE_SEGMENTS = [
   "activity",
   "agents",
   "connectors",
+  "data",
+  // Redirects to /events: stored notification permalinks point here.
   "memory",
   "members",
   "settings",

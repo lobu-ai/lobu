@@ -313,7 +313,7 @@ function resolveNotifHref(
 	) {
 		return `/${ownerSlug}/connectors`;
 	}
-	return `/${ownerSlug}/memory`;
+	return `/${ownerSlug}/events`;
 }
 
 export function runHref(

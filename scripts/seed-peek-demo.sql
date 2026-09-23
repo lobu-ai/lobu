@@ -198,7 +198,7 @@ WITH ev AS (
     'Approval needed: send digest to #finance',
     'Automation "Daily spend digest" wants to post a summary to the #finance channel. Review the proposed message before it sends.',
     'markdown', 'content', 'none', null,
-    jsonb_build_object('seed','peek','notification_type','action_approval_needed','resource_type','run','resource_url','/local-install/memory?view=events&run_ids=' || :approval_run_id),
+    jsonb_build_object('seed','peek','notification_type','action_approval_needed','resource_type','run','resource_url','/local-install/events?run_ids=' || :approval_run_id),
     now(), now(), :'USER'
   ) RETURNING id
 )
