@@ -32,9 +32,36 @@ import { ViewBridge, type HostContext, type ToolResult } from "./bridge.js";
 export type ParamValue = string | number | boolean;
 export type Params = Record<string, ParamValue>;
 
+/**
+ * What the view is rendering. `type` on a type page, `entity` (plus its
+ * `type`) on a record page, `event` on an event's page, nothing on the Data hub.
+ *
+ * `event` is an `events.id` and, like the event's permalink, names its whole
+ * supersede lineage. There is no event hook: read it with the same exact-id
+ * read the event page renders, and render the current version, the row that
+ * nothing superseded (the result is the lineage, oldest first):
+ *
+ * ```tsx
+ * export const view = defineView({
+ *   key: "deal-won",
+ *   attach: [{ event_kind: "deal.won", type: "deal" }],
+ * });
+ *
+ * export default function DealWon() {
+ *   const { event } = useScope();
+ *   const read = useQuery<{ content: Array<{ superseded_by?: number | null;
+ *     title: string | null; metadata: Record<string, unknown> }> }>(
+ *     event === undefined ? null : tool("read_knowledge", { content_ids: [event] })
+ *   );
+ *   const current = read.data?.content.find((row) => row.superseded_by == null);
+ *   return <h1>{current?.title}</h1>;
+ * }
+ * ```
+ */
 export interface Scope {
   type?: string;
   entity?: number | string;
+  event?: number;
 }
 
 export interface ParamDef {
@@ -42,12 +69,17 @@ export interface ParamDef {
   default?: ParamValue;
 }
 
-export interface Attachment {
-  type?: string;
-  entity?: number | string;
-  workspace?: true;
-  placement?: "tab" | "overview";
-}
+/**
+ * Where a view appears: exactly one subject per entry. `{ type }`,
+ * `{ entity }` and `{ workspace: true }` take a `placement`; an event
+ * attachment `{ event_kind, type }` matches events of that kind linked to at
+ * least one entity of `type`, renders on the event's page, and takes none.
+ */
+export type Attachment =
+  | { type: string; placement?: "tab" | "overview" }
+  | { entity: number | string; placement?: "tab" | "overview" }
+  | { workspace: true; placement?: "tab" | "overview" }
+  | { event_kind: string; type: string };
 
 export interface ViewDefinition {
   /** View key: the single namespace of keys (no `custom:` prefix). Required —
@@ -396,7 +428,7 @@ export function coerceParams(def: ViewDefinition, raw: unknown): Params {
   return out;
 }
 
-function coerceScope(raw: unknown): Scope {
+export function coerceScope(raw: unknown): Scope {
   if (!raw || typeof raw !== "object") return {};
   const scope = raw as Record<string, unknown>;
   const out: Scope = {};
@@ -404,6 +436,9 @@ function coerceScope(raw: unknown): Scope {
     out.type = scope.type;
   if (typeof scope.entity === "number" || typeof scope.entity === "string") {
     out.entity = scope.entity;
+  }
+  if (typeof scope.event === "number" && Number.isInteger(scope.event)) {
+    out.event = scope.event;
   }
   return out;
 }

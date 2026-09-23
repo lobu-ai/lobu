@@ -92,6 +92,33 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
     );
   }
   for (const entry of args.attach ?? []) {
+    // An event attachment names a subject of its own (one event) and is the
+    // only variant that carries `type` as a qualifier rather than a target.
+    if ('event_kind' in entry && entry.event_kind !== undefined) {
+      const raw = entry as Record<string, unknown>;
+      const extra = Object.keys(raw).filter(
+        (k) => k !== 'event_kind' && k !== 'type' && raw[k] !== undefined
+      );
+      if (extra.length > 0) {
+        throw new ToolUserError(
+          `An event_kind attach entry takes only event_kind and type (got ${extra.join(', ')})`,
+          400
+        );
+      }
+      if (!EMITS_NAME_RE.test(entry.event_kind)) {
+        throw new ToolUserError(
+          `attach event_kind '${entry.event_kind}' is not an event-kind name`,
+          400
+        );
+      }
+      if (typeof entry.type !== 'string' || entry.type.trim() === '') {
+        throw new ToolUserError(
+          'An event_kind attach entry needs the entity type its events link to',
+          400
+        );
+      }
+      continue;
+    }
     const keys = [
       'type' in entry && entry.type !== undefined,
       'entity' in entry && entry.entity !== undefined,
@@ -99,7 +126,7 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
     ].filter(Boolean).length;
     if (keys !== 1) {
       throw new ToolUserError(
-        'Each attach entry needs exactly one of type, entity or workspace',
+        'Each attach entry needs exactly one of type, entity, workspace or event_kind (with its type)',
         400
       );
     }

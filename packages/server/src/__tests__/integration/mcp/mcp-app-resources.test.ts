@@ -663,7 +663,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
         payload_text: null,
         attachments: [],
         source_url: null,
-        view_url: expect.stringContaining('content_ids='),
+        view_url: expect.stringMatching(/\/events\/\d+$/),
       })
     );
     expect(body.result?.content?.[0]?.text).toContain('"title": "Saved chart"');
@@ -704,7 +704,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     expect(body.result?.structuredContent).toEqual(
       expect.objectContaining({
         title: 'Large durable note',
-        view_url: expect.stringContaining('content_ids='),
+        view_url: expect.stringMatching(/\/events\/\d+$/),
         exact_read: expect.objectContaining({
           method: 'client.knowledge.read',
         }),

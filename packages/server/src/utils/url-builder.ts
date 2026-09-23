@@ -420,9 +420,10 @@ export function buildConnectionAuthUrl(
  *    automation/scheduled run). Survives the supersede chain by construction: a
  *    run's events share one run_id and run-scoped reads were never masked by
  *    `superseded_by IS NULL`.
- *  - `event` — a point in the log (a specific card). Read-side chain resolution
- *    (get_content) resolves a superseded id to its full lineage, so a frozen
- *    event permalink still lands even after it's superseded.
+ *  - `event` — a point in the log (a specific card), at the event's own page
+ *    `/{owner}/events/<id>` (where its attached views mount). Read-side chain
+ *    resolution (get_content) resolves a superseded id to its full lineage, so
+ *    a frozen event permalink still lands even after it's superseded.
  *  - `feed`  — a channel / conversational stream (all activity in #leads).
  *  - `automation_run` — one execution scoped to its Automation drill-down. Requires
  *    both route identifiers: the owning agent and the Automation.
@@ -433,23 +434,25 @@ export type MemoryResource =
   | { kind: 'event'; eventId: number }
   | { kind: 'feed'; feedId: number };
 
-/** The `?param=value` query for a {@link MemoryResource}. */
-function memoryResourceQuery(resource: MemoryResource): string {
+/** The events-log path + query for a {@link MemoryResource}. An event is a
+ *  subject with a page of its own; every other kind is a filter of the log. */
+function memoryResourcePath(resource: MemoryResource): string {
   switch (resource.kind) {
     case 'run':
-      return `run_ids=${resource.runId}`;
+      return `events?run_ids=${resource.runId}`;
     case 'automation_run':
-      return `agent=${encodeURIComponent(resource.agentId)}&automation=${resource.automationId}&run_ids=${resource.runId}`;
+      return `events?agent=${encodeURIComponent(resource.agentId)}&automation=${resource.automationId}&run_ids=${resource.runId}`;
     case 'event':
-      return `content_ids=${resource.eventId}`;
+      return `events/${resource.eventId}`;
     case 'feed':
-      return `feed_ids=${resource.feedId}`;
+      return `events?feed_ids=${resource.feedId}`;
   }
 }
 
 /**
  * Build a permalink into the events log for a {@link MemoryResource}.
- * Pattern: /{ownerSlug}/events?<resource query>
+ * Pattern: /{ownerSlug}/events/<id> for an event, else
+ * /{ownerSlug}/events?<resource query>
  *
  * This is the ONE place a memory permalink is assembled. `ownerSlug` empty →
  * returns undefined (no org context, can't build a usable link).
@@ -462,7 +465,7 @@ export function buildResourcePermalink(
   if (!ownerSlug) return undefined;
   return withBaseUrl(
     normalizeBaseUrl(baseUrl),
-    `/${ownerSlug}/events?${memoryResourceQuery(resource)}`
+    `/${ownerSlug}/${memoryResourcePath(resource)}`
   );
 }
 

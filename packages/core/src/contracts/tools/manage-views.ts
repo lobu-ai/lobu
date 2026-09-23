@@ -27,6 +27,12 @@ const ViewPlacementSchema = Type.Optional(
   })
 );
 
+// `event_kind` belongs to the event variant alone. The subject variants stay
+// open objects (the handler reports a mixed entry itself), so each one forbids
+// the key: otherwise `{ event_kind, type, placement }` would validate as a
+// type attachment and render as a type tab.
+const NoEventKind = Type.Optional(Type.Never());
+
 export const ViewAttachmentSchema = Type.Union([
   Type.Object({
     type: Type.String({
@@ -35,19 +41,43 @@ export const ViewAttachmentSchema = Type.Union([
       description: "Entity-type slug this view attaches to.",
     }),
     placement: ViewPlacementSchema,
+    event_kind: NoEventKind,
   }),
   Type.Object({
     entity: Type.Union([Type.Integer(), Type.String()], {
       description: "Entity id (number) or slug (string) this view attaches to.",
     }),
     placement: ViewPlacementSchema,
+    event_kind: NoEventKind,
   }),
   Type.Object({
     workspace: Type.Literal(true, {
       description: "A tab on the Data hub, at /data/-/views/<key>.",
     }),
     placement: ViewPlacementSchema,
+    event_kind: NoEventKind,
   }),
+  // An event subject: the view renders one event (scope.event) on the event's
+  // own page, /events/<id>/-/views/<key>. It matches an event whose kind is
+  // `event_kind` AND that links at least one entity of `type`. Closed, and no
+  // placement: the event page has one layout.
+  Type.Object(
+    {
+      event_kind: Type.String({
+        minLength: 1,
+        maxLength: 128,
+        description:
+          "Event kind (semantic_type) this view renders, e.g. 'deal.won'.",
+      }),
+      type: Type.String({
+        minLength: 1,
+        maxLength: 120,
+        description:
+          "Entity-type slug the event must link at least one entity of.",
+      }),
+    },
+    { additionalProperties: false }
+  ),
 ]);
 export type ViewAttachment = Static<typeof ViewAttachmentSchema>;
 

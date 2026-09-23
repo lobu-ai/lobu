@@ -20,6 +20,7 @@ import {
 	addUserToOrganization,
 	createTestAccessToken,
 	createTestEntity,
+	createTestEvent,
 	createTestOAuthClient,
 	createTestOrganization,
 	createTestUser,
@@ -444,6 +445,140 @@ describe('views resources + open_view + invoke_view_action', () => {
 		await expect(
 			rpc('tools/call', { name: 'open_view', arguments: { key: 'gone' } })
 		).rejects.toThrow(/Unknown view/);
+	});
+
+	describe('event subjects', () => {
+		// An event attaches by kind AND by the type of an entity it links, so
+		// each case below varies exactly one of the two.
+		const eventAttach = [{ event_kind: 'deal.won', type: 'company' }];
+		async function wonEvent(options: {
+			semantic_type?: string;
+			entity_ids?: number[];
+			organization_id?: string;
+		}) {
+			return createTestEvent({
+				content: 'Closed the Acme deal',
+				title: 'Acme won',
+				semantic_type: options.semantic_type ?? 'deal.won',
+				entity_ids: options.entity_ids ?? [entityId],
+				organization_id: options.organization_id ?? org.id,
+			});
+		}
+
+		it('stores an event attachment and lists it', async () => {
+			await setAttachedView('won', eventAttach);
+			const views = await rpc('tools/call', {
+				name: 'manage_views',
+				arguments: { action: 'list' },
+			});
+			const won = views.structuredContent.views.find(
+				(v: { key: string }) => v.key === 'won'
+			);
+			expect(won.attach).toEqual(eventAttach);
+		});
+
+		it('rejects an event attachment without a type or with a placement', async () => {
+			await expect(setAttachedView('bad-won', [{ event_kind: 'deal.won' }])).rejects.toThrow();
+			await expect(
+				setAttachedView('bad-won', [
+					{ event_kind: 'deal.won', type: 'company', placement: 'tab' },
+				])
+			).rejects.toThrow();
+			await expect(
+				setAttachedView('bad-won', [{ event_kind: 'not a kind!', type: 'company' }])
+			).rejects.toThrow(/event-kind name/);
+		});
+
+		it("open_view scope.event links to the event's view page with its params", async () => {
+			await setAttachedView('won', eventAttach);
+			const event = await wonEvent({});
+			const result = await rpc('tools/call', {
+				name: 'open_view',
+				arguments: { key: 'won', scope: { event: event.id }, params: { by: 'stage' } },
+			});
+			const url = new URL(result.structuredContent.url);
+			expect(url.pathname).toBe(`/views-org/events/${event.id}/-/views/won`);
+			expect(Object.fromEntries(url.searchParams)).toEqual({ by: 'stage' });
+			expect(result.structuredContent.scope).toEqual({ event: event.id });
+		});
+
+		it("matches the lineage's current version, reached from any of its ids", async () => {
+			await setAttachedView('won', eventAttach);
+			// The permalink was minted while the deal was still open; the row
+			// that superseded it is the won one.
+			const draft = await wonEvent({ semantic_type: 'deal.open' });
+			const current = await wonEvent({});
+			const sql = getTestDb();
+			await sql`UPDATE events SET superseded_by = ${current.id} WHERE id = ${draft.id}`;
+			await sql`UPDATE events SET supersedes_event_id = ${draft.id} WHERE id = ${current.id}`;
+			expect(await openPath({ key: 'won', scope: { event: draft.id } })).toBe(
+				`/views-org/events/${draft.id}/-/views/won`
+			);
+		});
+
+		it('refuses an event of another kind, or linking no entity of the type', async () => {
+			await setAttachedView('won', eventAttach);
+			const lost = await wonEvent({ semantic_type: 'deal.lost' });
+			await expect(openPath({ key: 'won', scope: { event: lost.id } })).rejects.toThrow(
+				/not attached to 'deal.lost' events/
+			);
+			const person = await createTestEntity({
+				name: 'Ada',
+				entity_type: 'person',
+				organization_id: org.id,
+				created_by: owner.id,
+			});
+			const onPerson = await wonEvent({ entity_ids: [person.id] });
+			await expect(openPath({ key: 'won', scope: { event: onPerson.id } })).rejects.toThrow(
+				/linked to a company; event \d+ links none/
+			);
+			const unlinked = await wonEvent({ entity_ids: [] });
+			await expect(openPath({ key: 'won', scope: { event: unlinked.id } })).rejects.toThrow(
+				/links none/
+			);
+		});
+
+		it('404s an unknown event and an event of another organization', async () => {
+			await setAttachedView('won', eventAttach);
+			await expect(openPath({ key: 'won', scope: { event: 987654321 } })).rejects.toThrow(
+				/Event 987654321 not found/
+			);
+			const other = await createTestOrganization({ name: 'Other Org', slug: 'views-other-org' });
+			const otherCompany = await createTestEntity({
+				name: 'Globex',
+				entity_type: 'company',
+				organization_id: other.id,
+				created_by: owner.id,
+			});
+			const foreign = await wonEvent({
+				entity_ids: [otherCompany.id],
+				organization_id: other.id,
+			});
+			await expect(openPath({ key: 'won', scope: { event: foreign.id } })).rejects.toThrow(
+				new RegExp(`Event ${foreign.id} not found`)
+			);
+		});
+
+		it('never opens an event attachment as a type or record page', async () => {
+			// Same `type` as the company tab `board` uses, but it qualifies the
+			// event: the type page and the record page do not mount it.
+			await setAttachedView('won', eventAttach);
+			await expect(openPath({ key: 'won', scope: { type: 'company' } })).rejects.toThrow(
+				/not a tab on type 'company'/
+			);
+			await expect(openPath({ key: 'won', scope: { entity: entityId } })).rejects.toThrow(
+				/not attached to entity/
+			);
+			await expect(openPath({ key: 'won' })).rejects.toThrow(/pass scope.event/);
+		});
+
+		it('takes scope.event alone', async () => {
+			await setAttachedView('won', eventAttach);
+			const event = await wonEvent({});
+			await expect(
+				openPath({ key: 'won', scope: { event: event.id, type: 'company' } })
+			).rejects.toThrow(/scope.event names the view's subject on its own/);
+		});
 	});
 
 	it('manage_connections reads stay structured over MCP (no text-only fallback)', async () => {

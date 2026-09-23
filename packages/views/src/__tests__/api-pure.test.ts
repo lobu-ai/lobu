@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   coerceParams,
+  coerceScope,
   defaultsFor,
   defineView,
   escapeLiteral,
@@ -179,5 +180,21 @@ describe("queryResult", () => {
         content: [{ type: "text", text: "denied" }],
       })
     ).toEqual({ data: null, error: "denied" });
+  });
+});
+
+describe("coerceScope", () => {
+  test("keeps an event subject: the host seeds scope.event on an event page", () => {
+    expect(coerceScope({ event: 4309390 })).toEqual({ event: 4309390 });
+    expect(coerceScope({ type: "deal", entity: 7 })).toEqual({
+      type: "deal",
+      entity: 7,
+    });
+  });
+
+  test("drops an event id that is not an integer", () => {
+    expect(coerceScope({ event: "4309390" })).toEqual({});
+    expect(coerceScope({ event: 1.5 })).toEqual({});
+    expect(coerceScope(null)).toEqual({});
   });
 });

@@ -924,6 +924,10 @@ export type OpenViewData = {
        * Entity id the view opens for.
        */
       entity?: number;
+      /**
+       * Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.
+       */
+      event?: number;
     };
     /**
      * Declared view params; unknown names are ignored.
@@ -968,6 +972,7 @@ export type OpenViewResponses = {
     scope: {
       type?: string;
       entity?: number;
+      event?: number;
     };
     params: {
       [key: string]: unknown | string | number | boolean;
@@ -6558,6 +6563,7 @@ export type ManageViewsData = {
                * Type-attached views render as a full tab or an Overview card.
                */
               placement?: "tab" | "overview";
+              event_kind?: unknown;
             }
           | {
               /**
@@ -6568,16 +6574,28 @@ export type ManageViewsData = {
                * Type-attached views render as a full tab or an Overview card.
                */
               placement?: "tab" | "overview";
+              event_kind?: unknown;
             }
           | {
               /**
-               * Workspace page at /pages/<slug> with a sidebar entry.
+               * A tab on the Data hub, at /data/-/views/<key>.
                */
               workspace: true;
               /**
                * Type-attached views render as a full tab or an Overview card.
                */
               placement?: "tab" | "overview";
+              event_kind?: unknown;
+            }
+          | {
+              /**
+               * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
+               */
+              event_kind: string;
+              /**
+               * Entity-type slug the event must link at least one entity of.
+               */
+              type: string;
             }
         >;
         /**
@@ -6697,6 +6715,7 @@ export type ManageViewsResponses = {
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
               }
             | {
                 /**
@@ -6707,16 +6726,28 @@ export type ManageViewsResponses = {
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
               }
             | {
                 /**
-                 * Workspace page at /pages/<slug> with a sidebar entry.
+                 * A tab on the Data hub, at /data/-/views/<key>.
                  */
                 workspace: true;
                 /**
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
+              }
+            | {
+                /**
+                 * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
+                 */
+                event_kind: string;
+                /**
+                 * Entity-type slug the event must link at least one entity of.
+                 */
+                type: string;
               }
           >;
           params: {
@@ -6780,6 +6811,7 @@ export type ManageViewsResponses = {
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
               }
             | {
                 /**
@@ -6790,16 +6822,28 @@ export type ManageViewsResponses = {
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
               }
             | {
                 /**
-                 * Workspace page at /pages/<slug> with a sidebar entry.
+                 * A tab on the Data hub, at /data/-/views/<key>.
                  */
                 workspace: true;
                 /**
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
+              }
+            | {
+                /**
+                 * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
+                 */
+                event_kind: string;
+                /**
+                 * Entity-type slug the event must link at least one entity of.
+                 */
+                type: string;
               }
           >;
           params: {
@@ -6870,6 +6914,7 @@ export type ManageViewsResponses = {
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
               }
             | {
                 /**
@@ -6880,16 +6925,28 @@ export type ManageViewsResponses = {
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
               }
             | {
                 /**
-                 * Workspace page at /pages/<slug> with a sidebar entry.
+                 * A tab on the Data hub, at /data/-/views/<key>.
                  */
                 workspace: true;
                 /**
                  * Type-attached views render as a full tab or an Overview card.
                  */
                 placement?: "tab" | "overview";
+                event_kind?: unknown;
+              }
+            | {
+                /**
+                 * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
+                 */
+                event_kind: string;
+                /**
+                 * Entity-type slug the event must link at least one entity of.
+                 */
+                type: string;
               }
           >;
           params: {

@@ -9,9 +9,10 @@ import { resolvePublicOrigin } from "../utils/public-origin";
 import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
 import { getOrganizationSlug } from "../utils/url-builder";
 import { getView, viewResourceUri } from "../views/views";
-import { getDb } from "../db/client";
+import { getDb, pgBigintArray } from "../db/client";
 import { requireWorkspaceContext } from "./access-control";
-import type { AccountToolContext } from "./registry";
+import { getContent } from "./get_content/handler";
+import type { AccountToolContext, ToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 
 const ParamValueSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean()]);
@@ -26,6 +27,12 @@ export const OpenViewSchema = Type.Object(
 				),
 				entity: Type.Optional(
 					Type.Integer({ description: "Entity id the view opens for." })
+				),
+				event: Type.Optional(
+					Type.Integer({
+						description:
+							"Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.",
+					})
 				),
 			})
 		),
@@ -43,6 +50,7 @@ export const OpenViewResultSchema = Type.Object({
 	scope: Type.Object({
 		type: Type.Optional(Type.String()),
 		entity: Type.Optional(Type.Integer()),
+		event: Type.Optional(Type.Integer()),
 	}),
 	params: Type.Record(Type.String(), ParamValueSchema),
 	url: Type.String({
@@ -97,7 +105,80 @@ function resolveViewParams(
 
 type StoredView = NonNullable<Awaited<ReturnType<typeof getView>>>;
 
-const isTab = (a: ViewAttachment) => (a.placement ?? "tab") === "tab";
+type EventAttachment = Extract<ViewAttachment, { event_kind: string }>;
+type SubjectAttachment = Exclude<ViewAttachment, EventAttachment>;
+
+/** An event attachment carries `type` as a qualifier of its event, not as a
+ *  page of its own, so every type/record/workspace lookup skips it. */
+const isEventAttachment = (a: ViewAttachment): a is EventAttachment =>
+	"event_kind" in a && typeof a.event_kind === "string";
+
+const subjectAttachments = (view: StoredView): SubjectAttachment[] =>
+	view.attach.filter((a): a is SubjectAttachment => !isEventAttachment(a));
+
+const isTab = (a: SubjectAttachment) => (a.placement ?? "tab") === "tab";
+
+/**
+ * The event page for `eventId`, when `view` attaches to it. The event is read
+ * through `read_knowledge` itself — the exact-id read the web event page
+ * renders — so the caller's workspace, connection-visibility and agent read
+ * policy decide whether it exists, and a view can never open over an event its
+ * caller cannot read. The id names a supersede lineage; the match is made on
+ * its current version (the row nothing supersedes).
+ */
+async function resolveEventViewPath(
+	view: StoredView,
+	eventId: number,
+	orgSlug: string,
+	env: Env,
+	ctx: ToolContext
+): Promise<string> {
+	const read = await getContent({ content_ids: [eventId], limit: 100 }, env, ctx);
+	const rows = read.content as Array<{
+		semantic_type: string;
+		entity_ids: number[];
+		superseded_by?: number | null;
+	}>;
+	const current = rows.find((row) => row.superseded_by == null) ?? null;
+	if (!current) {
+		throw new ToolUserError(`Event ${eventId} not found`, 404);
+	}
+	const kinds = view.attach
+		.filter(isEventAttachment)
+		.filter((a) => a.event_kind === current.semantic_type);
+	if (kinds.length === 0) {
+		throw new ToolUserError(
+			`View '${view.key}' is not attached to '${current.semantic_type}' events`,
+			400
+		);
+	}
+	const entityIds = current.entity_ids.filter((id) => Number.isInteger(id));
+	const sql = getDb();
+	const linkedTypes =
+		entityIds.length === 0
+			? []
+			: await sql<{ slug: string }>`
+          SELECT DISTINCT et.slug
+          FROM entities e
+          JOIN entity_types et ON et.id = e.entity_type_id
+          WHERE e.id = ANY(${pgBigintArray(entityIds)}::bigint[])
+            AND e.organization_id = ${ctx.organizationId}
+            AND e.deleted_at IS NULL
+            AND et.deleted_at IS NULL
+        `;
+	const types = new Set(linkedTypes.map((row) => row.slug));
+	if (!kinds.some((a) => types.has(a.type))) {
+		throw new ToolUserError(
+			`View '${view.key}' renders '${current.semantic_type}' events linked to ${kinds
+				.map((a) => `a ${a.type}`)
+				.join(" or ")}; event ${eventId} links none`,
+			400
+		);
+	}
+	// The permalink id, not the current version's: the page resolves the
+	// lineage the same way this did.
+	return `/${orgSlug}/events/${eventId}${viewPathSuffix(view.key)}`;
+}
 
 /**
  * The page that renders `view` for `scope`, chosen from the view's attachments
@@ -132,14 +213,14 @@ async function resolveViewPath(
 			throw new ToolUserError(`Entity ${scope.entity} not found`, 404);
 		}
 		// A slug pin names a top-level record: slugs are unique per parent.
-		const onRecord = (a: ViewAttachment) =>
+		const onRecord = (a: SubjectAttachment) =>
 			"entity" in a
 				? typeof a.entity === "number"
 					? a.entity === scope.entity
 					: row.parent_id === null && a.entity === row.slug
 				: "type" in a && a.type === row.entity_type;
 		const recordPath = `/${orgSlug}/${row.entity_type}/${row.slug}`;
-		const matches = view.attach.filter(onRecord);
+		const matches = subjectAttachments(view).filter(onRecord);
 		if (matches.some(isTab)) return { pathname: `${recordPath}${suffix}`, card: false };
 		// An Overview card renders on the record page itself, with its defaults.
 		if (matches.length > 0) return { pathname: recordPath, card: true };
@@ -159,7 +240,11 @@ async function resolveViewPath(
 		if (rows.length === 0) {
 			throw new ToolUserError(`Entity type '${scope.type}' not found`, 404);
 		}
-		if (view.attach.some((a) => "type" in a && a.type === scope.type && isTab(a))) {
+		if (
+			subjectAttachments(view).some(
+				(a) => "type" in a && a.type === scope.type && isTab(a)
+			)
+		) {
 			return { pathname: `/${orgSlug}/${scope.type}${suffix}`, card: false };
 		}
 		throw new ToolUserError(
@@ -167,13 +252,15 @@ async function resolveViewPath(
 			400
 		);
 	}
-	if (view.attach.some((a) => "workspace" in a)) {
+	if (subjectAttachments(view).some((a) => "workspace" in a)) {
 		return { pathname: `/${orgSlug}/data${suffix}`, card: false };
 	}
 	// No workspace attachment: the view's one type tab is its only page.
 	const typeTabs = [
 		...new Set(
-			view.attach.flatMap((a) => ("type" in a && isTab(a) ? [a.type] : []))
+			subjectAttachments(view).flatMap((a) =>
+				"type" in a && isTab(a) ? [a.type] : []
+			)
 		),
 	];
 	if (typeTabs.length === 1) {
@@ -183,14 +270,16 @@ async function resolveViewPath(
 	throw new ToolUserError(
 		typeTabs.length > 1
 			? `View '${view.key}' is a tab on several types (${typeTabs.join(", ")}); pass scope.type`
-			: `View '${view.key}' has no page of its own; pass scope.entity for a record it attaches to`,
+			: view.attach.some(isEventAttachment)
+				? `View '${view.key}' renders one event; pass scope.event`
+				: `View '${view.key}' has no page of its own; pass scope.entity for a record it attaches to`,
 		400
 	);
 }
 
 async function openViewImpl(
 	args: OpenViewArgs,
-	_env: Env,
+	env: Env,
 	ctx: AccountToolContext
 ): Promise<Static<typeof OpenViewResultSchema>> {
 	const target = requireWorkspaceContext(ctx);
@@ -201,12 +290,28 @@ async function openViewImpl(
 	const scope = args.scope ?? {};
 	const orgSlug =
 		(await getOrganizationSlug(target.organizationId)) ?? target.organizationId;
-	const { pathname, card } = await resolveViewPath(
-		view,
-		scope,
-		orgSlug,
-		target.organizationId
-	);
+	if (
+		scope.event !== undefined &&
+		(scope.type !== undefined || scope.entity !== undefined)
+	) {
+		throw new ToolUserError(
+			"scope.event names the view's subject on its own; drop scope.type and scope.entity",
+			400
+		);
+	}
+	const { pathname, card } =
+		scope.event !== undefined
+			? {
+					pathname: await resolveEventViewPath(
+						view,
+						scope.event,
+						orgSlug,
+						env,
+						target
+					),
+					card: false,
+				}
+			: await resolveViewPath(view, scope, orgSlug, target.organizationId);
 	const params = resolveViewParams(view, args.params);
 	if (card) {
 		// The record page mounts a card with its defaults and nothing else, so a
@@ -234,6 +339,7 @@ async function openViewImpl(
 		scope: {
 			...(scope.type !== undefined ? { type: scope.type } : {}),
 			...(scope.entity !== undefined ? { entity: scope.entity } : {}),
+			...(scope.event !== undefined ? { event: scope.event } : {}),
 		},
 		params,
 		url: `${origin}${pathname}${query ? `?${query}` : ""}`,

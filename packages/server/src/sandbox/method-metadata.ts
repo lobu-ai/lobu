@@ -1113,7 +1113,7 @@ export default async (_ctx, client) => {
 	},
 	"views.set": {
 		summary:
-			"Store a view: compile source_code server-side and upsert by key. Params: { key, source_code, name?, description?, attach?, params?, actions?, last_writer? }. attach says where the view appears (type/entity/workspace entries); params are declared typed URL params; actions map names to the event kind each emits. Same source is a no-op (written:false).",
+			"Store a view: compile source_code server-side and upsert by key. Params: { key, source_code, name?, description?, attach?, params?, actions?, last_writer? }. attach says where the view appears (type/entity/workspace entries, or { event_kind, type } to render one event of that kind at /events/<id>/-/views/<key>, reading it with read_knowledge({ content_ids: [scope.event] })); params are declared typed URL params; actions map names to the event kind each emits. Same source is a no-op (written:false).",
 		access: "admin",
 		signature:
 			"views.set(input: { key: string; source_code: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string>; name?: string; description?: string; attach?: object[]; params?: object; actions?: object }): Promise<unknown>",

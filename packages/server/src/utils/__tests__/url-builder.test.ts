@@ -327,10 +327,13 @@ describe('buildResourcePermalink', () => {
     );
   });
 
-  it('event kind → ?content_ids (chain-resolved on read)', () => {
+  it("event kind → the event's own page (chain-resolved on read)", () => {
     expect(
       buildResourcePermalink('acme', { kind: 'event', eventId: 4309390 }, 'https://app.lobu.com')
-    ).toBe('https://app.lobu.com/acme/events?content_ids=4309390');
+    ).toBe('https://app.lobu.com/acme/events/4309390');
+    expect(buildResourcePermalink('acme', { kind: 'event', eventId: 7 })).toBe(
+      '/acme/events/7'
+    );
   });
 
   it('feed kind → ?feed_ids (all activity in a channel)', () => {
