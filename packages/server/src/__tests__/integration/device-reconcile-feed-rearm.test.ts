@@ -19,6 +19,9 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { applyFeedSyncFailure } from '../../connectors/feed-sync-failure';
+import { feedBackoff } from '../../connectors/feed-backoff';
+import type { DbClient } from '../../db/client';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import {
   deviceManifestHash,
@@ -111,19 +114,21 @@ async function seedWorker(userId: string, orgId: string, version: string): Promi
 
 async function feedRow(orgId: string): Promise<{
   id: number;
+  status: string;
   schedule: string | null;
   next_run_at: Date | null;
+  consecutive_failures: number;
 }> {
   const [row] = (await sql`
-    SELECT f.id, f.schedule, f.next_run_at
+    SELECT f.id, f.status, f.schedule, f.next_run_at, f.consecutive_failures
     FROM feeds f
     JOIN connections c ON c.id = f.connection_id
     WHERE c.connector_key = ${CONNECTOR}
       AND c.organization_id = ${orgId}
       AND f.feed_key = ${FEED_KEY}
       AND f.deleted_at IS NULL
-  `) as unknown as Array<{ id: number; schedule: string | null; next_run_at: Date | null }>;
-  return row;
+  `) as unknown as Array<{ id: number; status: string; schedule: string | null; next_run_at: Date | null; consecutive_failures: number }>;
+  return { ...row, consecutive_failures: Number(row.consecutive_failures ?? 0) };
 }
 
 /** The state `run-lifecycle` leaves after a manual feed's run completes. */
@@ -199,6 +204,79 @@ describe('device reconcile feed re-arm', () => {
 
     const after = await feedRow(orgId);
     expect(after.schedule).toBe('*/5 * * * *');
+    expect(after.next_run_at).not.toBeNull();
+  });
+
+  it('does not resume a feed auto-paused by consecutive sync failures', async () => {
+    await reconcileDeviceCapabilities(userId);
+    const created = await feedRow(orgId);
+    // A cron'd feed, so the old self-heal would have re-armed it: NULL means
+    // "auto-paused / cleared" on that path. Prod: chrome `downloads`, 422 on
+    // every sync, re-armed by every device reconcile until the pause stuck.
+    await sql`
+      UPDATE feeds SET schedule = '*/5 * * * *', next_run_at = NOW()
+      WHERE id = ${created.id}
+    `;
+    for (let i = 0; i < feedBackoff.pauseThreshold; i++) {
+      await applyFeedSyncFailure(sql as unknown as DbClient, {
+        feedId: created.id,
+        errorMessage: 'Request failed with status 422',
+        runId: 999001 + i,
+      });
+    }
+    const paused = await feedRow(orgId);
+    expect(paused.status).toBe('paused');
+    expect(paused.next_run_at).toBeNull();
+    expect(paused.consecutive_failures).toBeGreaterThanOrEqual(feedBackoff.pauseThreshold);
+
+    // No manifest change here: the paused feed alone forces the slow wire
+    // path, which is exactly the every-poll re-arm this guards against.
+    await reconcileDeviceCapabilities(userId);
+
+    const after = await feedRow(orgId);
+    expect(after.status).toBe('paused');
+    expect(after.next_run_at).toBeNull();
+  });
+
+  it('re-activates a feed paused only because its capability went away', async () => {
+    await reconcileDeviceCapabilities(userId);
+    const created = await feedRow(orgId);
+    // What `pauseStaleDeviceFeeds` leaves behind: status='paused' with the
+    // failure counters untouched (consecutive_failures 0), e.g. the laptop
+    // was asleep or offline. The wire path must still resume it when the
+    // capability comes back.
+    await sql`
+      UPDATE feeds
+      SET schedule = '*/5 * * * *', status = 'paused', next_run_at = NULL,
+          consecutive_failures = 0, first_failure_at = NULL
+      WHERE id = ${created.id}
+    `;
+
+    // No manifest change here either: the paused feed alone forces the slow
+    // wire path, which is the capability-return re-activation.
+    await reconcileDeviceCapabilities(userId);
+
+    const after = await feedRow(orgId);
+    expect(after.status).toBe('active');
+    expect(after.next_run_at).not.toBeNull();
+  });
+
+  it('still re-arms an active cron feed that failed below the pause threshold', async () => {
+    await reconcileDeviceCapabilities(userId);
+    const created = await feedRow(orgId);
+    await sql`
+      UPDATE feeds
+      SET schedule = '*/5 * * * *', next_run_at = NULL, consecutive_failures = 3,
+          last_sync_status = 'failed'
+      WHERE id = ${created.id}
+    `;
+
+    await seedDefinition(orgId, '2.0.0');
+    await advertise(workerDbId, '2.0.0');
+    await reconcileDeviceCapabilities(userId);
+
+    const after = await feedRow(orgId);
+    expect(after.status).toBe('active');
     expect(after.next_run_at).not.toBeNull();
   });
 });

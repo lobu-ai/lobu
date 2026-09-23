@@ -33,6 +33,7 @@ import {
 import { DEVICE_WORKER_FRESH_INTERVAL } from '../utils/device-liveness';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
+import { feedBackoff } from '../connectors/feed-backoff';
 import {
   attestDeviceManifestArtifacts,
   getDeviceManifestClaimAuthorizationsForDevice,
@@ -616,6 +617,18 @@ async function ensureDeviceConnectorWired(
         `) as unknown as Array<{ id: number }>;
 
         if (existingFeed[0]?.id) {
+          // Re-activate a feed paused only because its capability went away
+          // (`pauseStaleDeviceFeeds` leaves `consecutive_failures` untouched),
+          // but never resume a feed the failure policy hard-paused
+          // (`applyFeedSyncFailure` pauses when `consecutive_failures` reaches
+          // `feedBackoff.pauseThreshold`, with `next_run_at=NULL`). That pause
+          // is deliberate: this wire path runs on every poll while the feed is
+          // paused, so re-arming retries a broken feed forever. Resume of a
+          // failure-paused feed stays an explicit `manage_feeds` update, which
+          // also resets `consecutive_failures`/`first_failure_at`. No
+          // manifest-change exception: a new extension version does not prove
+          // the failure is fixed.
+          const pauseThreshold = feedBackoff.pauseThreshold;
           await tx`
             UPDATE feeds
             SET status = 'active',
@@ -623,6 +636,8 @@ async function ensureDeviceConnectorWired(
                   canSync
                     ? // Re-arm only a feed that HAS a cron, where NULL means
                       // "auto-paused / cleared" and NOW() resumes its cadence.
+                      // A feed paused by the failure policy never reaches this
+                      // statement (see guard below).
                       // A feed with no cron is manual by #2021, and stamping
                       // NOW() here invented a trigger nobody chose: this branch
                       // runs on the slow wire path, which the `ready` fast path
@@ -637,6 +652,7 @@ async function ensureDeviceConnectorWired(
                 },
                 updated_at = current_timestamp
             WHERE id = ${existingFeed[0].id}
+              AND NOT (status = 'paused' AND consecutive_failures >= ${pauseThreshold})
           `;
         } else {
           // The manifest's per-feed `name` when it declares one, and only the
