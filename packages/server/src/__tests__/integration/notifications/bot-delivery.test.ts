@@ -203,7 +203,7 @@ describe("resolveBotDeliveryTargets", () => {
 		expect(first.notified_count).toBe(1);
 		expect(first.event_id).toBeGreaterThan(0);
 		expect(first.url).toBe(
-			`/${org.slug}/memory?content_ids=${first.event_id}`,
+			`/${org.slug}/events?content_ids=${first.event_id}`,
 		);
 
 		// A deduplicated retry still resolves to the durable notification the
