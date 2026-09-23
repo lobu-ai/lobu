@@ -14,7 +14,12 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { manageConnections } from '../../../tools/admin/manage_connections';
+import { getDb } from '../../../db/client';
 import { createSyncRun } from '../../../runs/queue-service';
+import {
+  resolveConnectorInstallSource,
+  upsertConnectorDefinitionRecords,
+} from '../../../utils/connector-definition-install';
 import { completeWorkerJob, streamContent } from '../../../worker-api';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -48,6 +53,26 @@ export default class VersionFenceProbeConnector {
   async execute() { return {}; }
 }
 `;
+}
+
+/** The probe with an identity attribution, so its upsert takes identity-scope locks. */
+function identityProbeSource(version: string): string {
+  return probeSource(version).replace(
+    `name: 'Items',`,
+    `name: 'Items',
+        eventKinds: {
+          item: {
+            attributions: [
+              {
+                role: 'about',
+                target: {
+                  identities: [{ namespace: 'zz_version_fence_item', eventPath: 'metadata.item_id' }],
+                },
+              },
+            ],
+          },
+        },`,
+  );
 }
 
 function mockWorkerCtx(body: unknown): Context<{ Bindings: Env }> {
@@ -344,7 +369,7 @@ describe('connector version change vs in-flight runs of the old version', () => 
     expect(await feedCheckpoint()).toBeNull();
   }, 120_000);
 
-  it('update_connector_source refuses a version change it computed from a stale active version', async () => {
+  it('update_connector_source resets from the version a concurrent writer activated, not a stale read', async () => {
     const { outcome, concurrentRunId } = await whileAnotherWriterActivates2(() =>
       manageConnections(
         { action: 'update_connector_source', connector_key: KEY, source_code: probeSource('1.0.0') },
@@ -352,14 +377,96 @@ describe('connector version change vs in-flight runs of the old version', () => 
         ctx,
       ),
     );
+    expect('error' in outcome ? outcome.error : undefined).toBeUndefined();
     const result = 'value' in outcome ? outcome.value : undefined;
-    const message =
-      'error' in outcome
-        ? String(outcome.error)
-        : result && typeof result === 'object' && 'error' in result
-          ? String((result as { error: unknown }).error)
-          : '';
-    expect(message).toContain('Version conflict');
-    expect(await runStatus(concurrentRunId)).toBe('running');
+    expect(result && typeof result === 'object' && 'error' in result ? result.error : undefined).toBeUndefined();
+    expect(await runStatus(concurrentRunId)).toBe('cancelled');
+    expect(await feedCheckpoint()).toBeNull();
+  }, 120_000);
+
+  it('a source update and a shared definition upsert of the same connector serialize instead of deadlocking', async () => {
+    const sql = getTestDb();
+    const holding = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const blocker = sql.begin(async (tx) => {
+      await tx`
+        SELECT id FROM connector_definitions
+        WHERE key = ${KEY} AND organization_id = ${orgId} AND status = 'active'
+        FOR UPDATE
+      `;
+      holding.resolve();
+      await release.promise;
+    });
+    await holding.promise;
+
+    const lockWaiters = async (expected: number) => {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const [row] = await sql<{ c: number }[]>`
+          SELECT count(*)::int AS c FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+        `;
+        if ((row?.c ?? 0) >= expected) return;
+        if (Date.now() > deadline) throw new Error(`never saw ${expected} lock waiters`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    const settle = <T,>(promise: Promise<T>) =>
+      promise.then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    let sourceUpdate: Promise<unknown> = Promise.resolve(null);
+    let sharedUpsert: Promise<unknown> = Promise.resolve(null);
+    try {
+      // The source update reaches the definition row first and queues behind
+      // the blocker; the shared writer (catalog/device path) queues second.
+      sourceUpdate = settle(
+        manageConnections(
+          {
+            action: 'update_connector_source',
+            connector_key: KEY,
+            source_code: identityProbeSource('2.0.0'),
+          },
+          TEST_ENV,
+          ctx,
+        ).then((result) => {
+          if ('error' in result) throw new Error(String(result.error));
+        }),
+      );
+      await lockWaiters(1);
+      const { metadata } = await resolveConnectorInstallSource({
+        sourceCode: identityProbeSource('2.0.0'),
+      });
+      sharedUpsert = settle(
+        upsertConnectorDefinitionRecords({
+          sql: getDb(),
+          organizationId: orgId,
+          metadata,
+          versionRecord: {
+            compiledCode: null,
+            compiledCodeHash: null,
+            compileConfigHash: null,
+            sourceCode: null,
+            sourcePath: null,
+          },
+          versionScope: 'organization',
+        }),
+      );
+      await lockWaiters(2);
+    } finally {
+      release.resolve();
+      await blocker;
+    }
+
+    expect(await sourceUpdate).toBeNull();
+    expect(await sharedUpsert).toBeNull();
+    // Both writers declared the identity namespace, so both took its lock.
+    const registry = await sql`
+      SELECT namespace FROM connector_identity_scope_registry
+      WHERE organization_id = ${orgId} AND connector_key = ${KEY}
+    `;
+    expect(registry.map((row) => row.namespace)).toEqual(['zz_version_fence_item']);
   }, 120_000);
 });

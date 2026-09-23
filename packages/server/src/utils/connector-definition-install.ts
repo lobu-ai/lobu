@@ -283,6 +283,8 @@ type UpsertConnectorDefinitionRecordsParams = {
 
 type UpsertConnectorDefinitionResult = {
   updated: boolean;
+  /** The active version this write replaced, read under the writer lock. */
+  previousVersion: string | null;
 };
 
 /**
@@ -322,6 +324,28 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     compiledCode: params.versionRecord.compiledCode,
     sourceCode: params.versionRecord.sourceCode,
   });
+
+  // Every writer of this connector's definition serializes here, before the
+  // identity-scope locks below, so all of them take their locks in one order.
+  // The active version is read under that lock: a caller that resets state for
+  // a version change needs the version this write actually replaces, not one
+  // read before a concurrent writer committed.
+  await sql`
+    SELECT pg_advisory_xact_lock(
+      hashtext('lobu:connector-definition'),
+      hashtext(${`${params.organizationId}:${metadata.key}`})
+    )
+  `;
+  const activeRows = (await sql`
+    SELECT version FROM connector_definitions
+    WHERE key = ${metadata.key}
+      AND organization_id = ${params.organizationId}
+      AND status = 'active'
+    ORDER BY updated_at DESC
+    LIMIT 1
+    FOR UPDATE
+  `) as unknown as Array<{ version: string }>;
+  const previousVersion = activeRows[0]?.version ?? null;
 
   await preflightConnectorRelationshipTypes({
     sql,
@@ -512,7 +536,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
             ELSE COALESCE(EXCLUDED.source_path, connector_versions.source_path)
           END
     `;
-    return { updated: wasActive };
+    return { updated: wasActive, previousVersion };
   }
 
   // Org-supplied bytes land ONLY on the caller org's own row (#2045: a shared
@@ -584,5 +608,5 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     `;
   }
 
-  return { updated: wasActive };
+  return { updated: wasActive, previousVersion };
 }

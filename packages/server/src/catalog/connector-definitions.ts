@@ -214,10 +214,6 @@ export async function installConnectorDefinitionFromSource(params: {
 	// Installing over an installed connector changes its active version in
 	// place, so it resets that version's feed state the way an update does.
 	const { updated } = await sql.begin(async (tx) => {
-		const previousVersion = await lockActiveConnectorVersion(tx, {
-			organizationId: params.organizationId,
-			connectorKey: resolved.metadata.key,
-		});
 		const result = await upsertConnectorDefinitionRecords({
 			sql: tx,
 			organizationId: params.organizationId,
@@ -231,11 +227,11 @@ export async function installConnectorDefinitionFromSource(params: {
 			},
 			versionScope: "organization",
 		});
-		if (previousVersion !== null) {
+		if (result.previousVersion !== null) {
 			await invalidateFeedCheckpointsForVersionChange(tx, {
 				organizationId: params.organizationId,
 				connectorKey: resolved.metadata.key,
-				previousVersion,
+				previousVersion: result.previousVersion,
 				version: resolved.metadata.version,
 			});
 		}
@@ -609,54 +605,6 @@ export async function validateConnectorSource(params: {
 }
 
 /**
- * Serialize an org's writers of one connector's active version and read that
- * version inside the caller's transaction. A version read before the
- * transaction can be stale by the time the upsert commits: a concurrent writer
- * may have activated another version in between, and a reset computed from the
- * stale value skips (or mis-scopes) that change. The advisory lock also covers
- * the not-yet-installed case, where there is no row to lock.
- */
-async function lockActiveConnectorVersion(
-	sql: DbClient,
-	params: { organizationId: string; connectorKey: string },
-): Promise<string | null> {
-	await sql`
-		SELECT pg_advisory_xact_lock(
-			hashtext('lobu:connector-definition-version'),
-			hashtext(${`${params.organizationId}:${params.connectorKey}`})
-		)
-	`;
-	const rows = (await sql`
-		SELECT version FROM connector_definitions
-		WHERE key = ${params.connectorKey}
-			AND organization_id = ${params.organizationId}
-			AND status = 'active'
-		ORDER BY updated_at DESC
-		LIMIT 1
-		FOR UPDATE
-	`) as unknown as Array<{ version: string }>;
-	return rows[0]?.version ?? null;
-}
-
-/**
- * Lock the active version and require it to still be the one `def` read
- * before the transaction, so the reset below is computed from the version
- * this write actually replaces.
- */
-async function lockExpectedActiveConnectorVersion(
-	sql: DbClient,
-	params: { organizationId: string; connectorKey: string; version: string },
-): Promise<void> {
-	const active = await lockActiveConnectorVersion(sql, params);
-	if (active !== params.version) {
-		throw new Error(
-			`Version conflict: expected active version '${params.version}' but '${active ?? "(none)"}' is active. ` +
-				`Re-read with get_connector_source and retry.`,
-		);
-	}
-}
-
-/**
  * Drop the unpinned per-feed cursors of an org's connector when its ACTIVE
  * version changes (a source update or a rollback).
  *
@@ -851,12 +799,7 @@ export async function updateInstalledConnectorSource(params: {
 	}
 
 	await sql.begin(async (tx) => {
-		await lockExpectedActiveConnectorVersion(tx, {
-			organizationId: params.organizationId,
-			connectorKey: params.connectorKey,
-			version: def.version,
-		});
-		await upsertConnectorDefinitionRecords({
+		const { previousVersion } = await upsertConnectorDefinitionRecords({
 			sql: tx,
 			organizationId: params.organizationId,
 			metadata: resolved.metadata,
@@ -873,7 +816,7 @@ export async function updateInstalledConnectorSource(params: {
 		await invalidateFeedCheckpointsForVersionChange(tx, {
 			organizationId: params.organizationId,
 			connectorKey: params.connectorKey,
-			previousVersion: def.version,
+			previousVersion: previousVersion ?? def.version,
 			version: resolved.metadata.version,
 		});
 	});
@@ -963,12 +906,7 @@ export async function rollbackConnectorVersion(params: {
 	// row keeps its stored code — only the definition metadata flips. (And the
 	// all-null record means no org row is created for it — see versionScope.)
 	await sql.begin(async (tx) => {
-		await lockExpectedActiveConnectorVersion(tx, {
-			organizationId: params.organizationId,
-			connectorKey: params.connectorKey,
-			version: def.version,
-		});
-		await upsertConnectorDefinitionRecords({
+		const { previousVersion } = await upsertConnectorDefinitionRecords({
 			sql: tx,
 			organizationId: params.organizationId,
 			metadata,
@@ -985,7 +923,7 @@ export async function rollbackConnectorVersion(params: {
 		await invalidateFeedCheckpointsForVersionChange(tx, {
 			organizationId: params.organizationId,
 			connectorKey: params.connectorKey,
-			previousVersion: def.version,
+			previousVersion: previousVersion ?? def.version,
 			version: params.version,
 		});
 	});
