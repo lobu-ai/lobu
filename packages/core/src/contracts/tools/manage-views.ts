@@ -40,7 +40,7 @@ export const ViewAttachmentSchema = Type.Union([
   }),
   Type.Object({
     workspace: Type.Literal(true, {
-      description: "Workspace page at /pages/<slug> with a sidebar entry.",
+      description: "A tab on the Data hub, at /data/-/views/<key>.",
     }),
     placement: ViewPlacementSchema,
   }),
