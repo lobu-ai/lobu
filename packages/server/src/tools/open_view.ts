@@ -110,7 +110,7 @@ async function resolveViewPath(
 	scope: { type?: string; entity?: number },
 	orgSlug: string,
 	organizationId: string
-): Promise<string> {
+): Promise<{ pathname: string; card: boolean }> {
 	const suffix = viewPathSuffix(view.key);
 	const sql = getDb();
 	if (scope.entity !== undefined) {
@@ -140,9 +140,9 @@ async function resolveViewPath(
 				: "type" in a && a.type === row.entity_type;
 		const recordPath = `/${orgSlug}/${row.entity_type}/${row.slug}`;
 		const matches = view.attach.filter(onRecord);
-		if (matches.some(isTab)) return `${recordPath}${suffix}`;
-		// An Overview card renders on the record page itself.
-		if (matches.length > 0) return recordPath;
+		if (matches.some(isTab)) return { pathname: `${recordPath}${suffix}`, card: false };
+		// An Overview card renders on the record page itself, with its defaults.
+		if (matches.length > 0) return { pathname: recordPath, card: true };
 		throw new ToolUserError(
 			`View '${view.key}' is not attached to entity ${scope.entity}`,
 			400
@@ -160,7 +160,7 @@ async function resolveViewPath(
 			throw new ToolUserError(`Entity type '${scope.type}' not found`, 404);
 		}
 		if (view.attach.some((a) => "type" in a && a.type === scope.type && isTab(a))) {
-			return `/${orgSlug}/${scope.type}${suffix}`;
+			return { pathname: `/${orgSlug}/${scope.type}${suffix}`, card: false };
 		}
 		throw new ToolUserError(
 			`View '${view.key}' is not a tab on type '${scope.type}'`,
@@ -168,7 +168,7 @@ async function resolveViewPath(
 		);
 	}
 	if (view.attach.some((a) => "workspace" in a)) {
-		return `/${orgSlug}/data${suffix}`;
+		return { pathname: `/${orgSlug}/data${suffix}`, card: false };
 	}
 	// No workspace attachment: the view's one type tab is its only page.
 	const typeTabs = [
@@ -176,7 +176,9 @@ async function resolveViewPath(
 			view.attach.flatMap((a) => ("type" in a && isTab(a) ? [a.type] : []))
 		),
 	];
-	if (typeTabs.length === 1) return `/${orgSlug}/${typeTabs[0]}${suffix}`;
+	if (typeTabs.length === 1) {
+		return { pathname: `/${orgSlug}/${typeTabs[0]}${suffix}`, card: false };
+	}
 	throw new ToolUserError(
 		typeTabs.length > 1
 			? `View '${view.key}' is a tab on several types (${typeTabs.join(", ")}); pass scope.type`
@@ -198,19 +200,33 @@ async function openViewImpl(
 	const scope = args.scope ?? {};
 	const orgSlug =
 		(await getOrganizationSlug(target.organizationId)) ?? target.organizationId;
-	const pathname = await resolveViewPath(
+	const { pathname, card } = await resolveViewPath(
 		view,
 		scope,
 		orgSlug,
 		target.organizationId
 	);
 	const params = resolveViewParams(view, args.params);
+	if (card) {
+		// The record page mounts a card with its defaults and nothing else, so a
+		// link carrying other values would render something different.
+		const defaults = resolveViewParams(view, undefined);
+		const overridden = Object.keys(params).filter((k) => params[k] !== defaults[k]);
+		if (overridden.length > 0) {
+			throw new ToolUserError(
+				`View '${view.key}' renders as an Overview card on that record, which takes no params (${overridden.join(", ")})`,
+				400
+			);
+		}
+	}
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
 	// The view is the path; the query string is its params and nothing else.
 	const search = new URLSearchParams();
-	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
+	if (!card) {
+		for (const [k, v] of Object.entries(params)) search.set(k, String(v));
+	}
 	const query = search.toString();
 	return {
 		view: args.key,

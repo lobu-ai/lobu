@@ -343,7 +343,13 @@ describe('views resources + open_view + invoke_view_action', () => {
 		attachedViews.push(key);
 		await executeTool(
 			'manage_views',
-			{ action: 'set', key, source_code: VIEW_SOURCE, attach },
+			{
+				action: 'set',
+				key,
+				source_code: VIEW_SOURCE,
+				attach,
+				params: { by: { type: 'string', default: 'owner' } },
+			},
 			TEST_ENV,
 			ownerCtx
 		);
@@ -390,9 +396,22 @@ describe('views resources + open_view + invoke_view_action', () => {
 
 	it('open_view opens an Overview card on the record page itself', async () => {
 		await setAttachedView('card', [{ type: 'company', placement: 'overview' }]);
-		expect(await openPath({ key: 'card', scope: { entity: entityId } })).toMatch(
-			/^\/views-org\/company\/[^/]+$/
-		);
+		// The card renders with its defaults, so the link carries no query.
+		const card = await rpc('tools/call', {
+			name: 'open_view',
+			arguments: { key: 'card', scope: { entity: entityId } },
+		});
+		const url = new URL(card.structuredContent.url);
+		expect(url.pathname).toMatch(/^\/views-org\/company\/[^/]+$/);
+		expect(url.search).toBe('');
+		expect(card.structuredContent.params).toEqual({ by: 'owner' });
+		// Passing the default is the same card; any other value is not reproducible.
+		expect(
+			await openPath({ key: 'card', scope: { entity: entityId }, params: { by: 'owner' } })
+		).toMatch(/^\/views-org\/company\/[^/]+$/);
+		await expect(
+			openPath({ key: 'card', scope: { entity: entityId }, params: { by: 'stage' } })
+		).rejects.toThrow(/Overview card on that record, which takes no params \(by\)/);
 		await expect(
 			openPath({ key: 'card', scope: { type: 'company' } })
 		).rejects.toThrow(/not a tab on type 'company'/);
