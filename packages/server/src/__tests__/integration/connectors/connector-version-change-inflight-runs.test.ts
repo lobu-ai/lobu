@@ -272,4 +272,94 @@ describe('connector version change vs in-flight runs of the old version', () => 
     expect(await feedCheckpoint()).toBeNull();
     expect(await runStatus(runId)).toBe('cancelled');
   }, 120_000);
+
+  /**
+   * A second writer activates 2.0.0 and starts a 2.0.0 run while this install
+   * is in flight. The install must compute its reset from the version it
+   * actually replaces (2.0.0), not from a read taken before that writer
+   * committed (1.0.0, which equals the incoming version and skips the reset).
+   */
+  async function whileAnotherWriterActivates2(write: () => Promise<unknown>) {
+    const sql = getTestDb();
+    const holding = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let concurrentRunId = 0;
+    const writer = sql.begin(async (tx) => {
+      await tx`
+        UPDATE connector_definitions SET version = '2.0.0', updated_at = NOW()
+        WHERE key = ${KEY} AND organization_id = ${orgId} AND status = 'active'
+      `;
+      holding.resolve();
+      await release.promise;
+      const [run] = await tx<{ id: number }[]>`
+        INSERT INTO runs
+          (organization_id, run_type, feed_id, connection_id, connector_key,
+           connector_version, status, claimed_by, claimed_at, created_at)
+        VALUES (${orgId}, 'sync', ${feedId}, ${connectionId}, ${KEY}, '2.0.0',
+                'running', ${WORKER_ID}, NOW(), NOW())
+        RETURNING id
+      `;
+      concurrentRunId = Number(run.id);
+      await tx`UPDATE feeds SET checkpoint = ${tx.json({ cursor: 'v2-cursor' })} WHERE id = ${feedId}`;
+      const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      return pid;
+    });
+    await holding.promise;
+    const [{ pid: writerPid }] = await sql<{ pid: number }[]>`
+      SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND query ILIKE '%UPDATE connector_definitions SET version = ''2.0.0''%'
+    `;
+    const pending = write().then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    try {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const [row] = await sql<{ c: number }[]>`
+          SELECT count(*)::int AS c FROM pg_stat_activity
+          WHERE ${writerPid}::int = ANY(pg_blocking_pids(pid))
+        `;
+        if ((row?.c ?? 0) > 0) break;
+        if (Date.now() > deadline) throw new Error('second writer never blocked the install');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      release.resolve();
+      await writer;
+    }
+    return { outcome: await pending, concurrentRunId };
+  }
+
+  it('install_connector resets from the version a concurrent writer activated, not a stale read', async () => {
+    const { outcome, concurrentRunId } = await whileAnotherWriterActivates2(() =>
+      manageConnections(
+        { action: 'install_connector', source_code: probeSource('1.0.0') },
+        TEST_ENV,
+        ctx,
+      ),
+    );
+    expect('error' in outcome ? outcome.error : undefined).toBeUndefined();
+    expect(await runStatus(concurrentRunId)).toBe('cancelled');
+    expect(await feedCheckpoint()).toBeNull();
+  }, 120_000);
+
+  it('update_connector_source refuses a version change it computed from a stale active version', async () => {
+    const { outcome, concurrentRunId } = await whileAnotherWriterActivates2(() =>
+      manageConnections(
+        { action: 'update_connector_source', connector_key: KEY, source_code: probeSource('1.0.0') },
+        TEST_ENV,
+        ctx,
+      ),
+    );
+    const result = 'value' in outcome ? outcome.value : undefined;
+    const message =
+      'error' in outcome
+        ? String(outcome.error)
+        : result && typeof result === 'object' && 'error' in result
+          ? String((result as { error: unknown }).error)
+          : '';
+    expect(message).toContain('Version conflict');
+    expect(await runStatus(concurrentRunId)).toBe('running');
+  }, 120_000);
 });
