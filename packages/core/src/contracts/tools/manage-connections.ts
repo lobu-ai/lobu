@@ -5,7 +5,10 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
 import { paginationFields } from "./pagination";
-import { SourceDependenciesSchema, SourceFilesSchema } from "./source-files";
+import {
+  SourceDependenciesSchema,
+  SourceFilesSchema,
+} from "./source-files-schema";
 
 const ConnectionFacetsSchema = Type.Object({
   data: Type.Boolean(),

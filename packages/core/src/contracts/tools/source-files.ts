@@ -1,31 +1,13 @@
-import { type Static, Type } from "@sinclair/typebox";
+import type { Static } from "@sinclair/typebox";
+import type {
+  SourceDependenciesSchema,
+  SourceFilesSchema,
+} from "./source-files-schema";
 
 export const SOURCE_MAX_BYTES = 1_000_000;
-const MAX_FILES = 128;
+export const SOURCE_MAX_FILES = 128;
 
-/** Paths are relative to the author's project, never a build machine. */
-export const SourceFilesSchema = Type.Object(
-  {
-    entrypoint: Type.String({ minLength: 1, maxLength: 240 }),
-    files: Type.Record(Type.String(), Type.String(), {
-      maxProperties: MAX_FILES,
-    }),
-  },
-  {
-    description:
-      "Author files consumed by the build, keyed by portable project-relative paths. entrypoint identifies the file matching source_code. Never include secrets, machine paths, node_modules, or resolved credentials.",
-  }
-);
 export type SourceFiles = Static<typeof SourceFilesSchema>;
-export const SourceDependenciesSchema = Type.Record(
-  Type.String(),
-  Type.String(),
-  {
-    maxProperties: MAX_FILES,
-    description:
-      "Direct npm dependencies and their exact installed versions, captured with source_files. This is not a lockfile.",
-  }
-);
 export type SourceDependencies = Static<typeof SourceDependenciesSchema>;
 
 export interface RetainedSource {
@@ -64,8 +46,10 @@ export function validateRetainedSource(
 ): void {
   assertSourcePath(sourceFiles.entrypoint);
   const files = Object.entries(sourceFiles.files);
-  if (files.length === 0 || files.length > MAX_FILES) {
-    throw new Error(`Source must contain between 1 and ${MAX_FILES} files`);
+  if (files.length === 0 || files.length > SOURCE_MAX_FILES) {
+    throw new Error(
+      `Source must contain between 1 and ${SOURCE_MAX_FILES} files`
+    );
   }
   for (const [path, contents] of files) {
     assertSourcePath(path);
@@ -79,7 +63,7 @@ export function validateRetainedSource(
     throw new Error("Source entrypoint must match source_code exactly");
   }
   const packages = Object.entries(dependencies);
-  if (packages.length > MAX_FILES)
+  if (packages.length > SOURCE_MAX_FILES)
     throw new Error("Too many source dependencies");
   for (const [name, version] of packages) {
     if (

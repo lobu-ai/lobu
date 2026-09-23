@@ -2732,6 +2732,22 @@ export type ManageConnectionsData = {
          * For action=install_connector. Mutually exclusive with connector_id/source_url/source_uri/mcp_url — provide exactly one. Inline TypeScript or pre-compiled JavaScript source code.
          */
         source_code?: string;
+        compiled_code?: string;
+        /**
+         * Author files consumed by the build, keyed by portable project-relative paths. entrypoint identifies the file matching source_code. Never include secrets, machine paths, node_modules, or resolved credentials.
+         */
+        source_files?: {
+          entrypoint: string;
+          files: {
+            [key: string]: unknown | string;
+          };
+        };
+        /**
+         * Direct npm dependencies and their exact installed versions, captured with source_files. This is not a lockfile.
+         */
+        dependencies?: {
+          [key: string]: unknown | string;
+        };
         /**
          * Set to true if source_code is already compiled JavaScript (skip compilation)
          */
@@ -2780,6 +2796,22 @@ export type ManageConnectionsData = {
          * TypeScript or pre-compiled JavaScript connector source to validate.
          */
         source_code: string;
+        compiled_code?: string;
+        /**
+         * Author files consumed by the build, keyed by portable project-relative paths. entrypoint identifies the file matching source_code. Never include secrets, machine paths, node_modules, or resolved credentials.
+         */
+        source_files?: {
+          entrypoint: string;
+          files: {
+            [key: string]: unknown | string;
+          };
+        };
+        /**
+         * Direct npm dependencies and their exact installed versions, captured with source_files. This is not a lockfile.
+         */
+        dependencies?: {
+          [key: string]: unknown | string;
+        };
         /**
          * Set to true if source_code is already compiled JavaScript (skip compilation)
          */
@@ -2798,6 +2830,22 @@ export type ManageConnectionsData = {
          * New TypeScript or pre-compiled JavaScript connector source.
          */
         source_code: string;
+        compiled_code?: string;
+        /**
+         * Author files consumed by the build, keyed by portable project-relative paths. entrypoint identifies the file matching source_code. Never include secrets, machine paths, node_modules, or resolved credentials.
+         */
+        source_files?: {
+          entrypoint: string;
+          files: {
+            [key: string]: unknown | string;
+          };
+        };
+        /**
+         * Direct npm dependencies and their exact installed versions, captured with source_files. This is not a lockfile.
+         */
+        dependencies?: {
+          [key: string]: unknown | string;
+        };
         /**
          * Set to true if source_code is already compiled JavaScript (skip compilation)
          */
@@ -3258,6 +3306,16 @@ export type ManageConnectionsResponses = {
         active_version: string;
         version: string;
         source_code: string | null;
+        source_files: {
+          entrypoint: string;
+          files: {
+            [key: string]: unknown | string;
+          };
+        } | null;
+        dependencies: {
+          [key: string]: unknown | string;
+        } | null;
+        source_complete: boolean;
         source_path: string | null;
         code_hash: string | null;
         versions: Array<{
@@ -6459,6 +6517,21 @@ export type ManageViewsData = {
          */
         compiled_code?: string;
         /**
+         * Author files consumed by the build, keyed by portable project-relative paths. entrypoint identifies the file matching source_code. Never include secrets, machine paths, node_modules, or resolved credentials.
+         */
+        source_files?: {
+          entrypoint: string;
+          files: {
+            [key: string]: unknown | string;
+          };
+        };
+        /**
+         * Direct npm dependencies and their exact installed versions, captured with source_files. This is not a lockfile.
+         */
+        dependencies?: {
+          [key: string]: unknown | string;
+        };
+        /**
          * [set] Where the view appears; extracted from the module by the caller.
          */
         attach?: Array<
@@ -6597,7 +6670,7 @@ export type ManageViewsResponses = {
           name: string;
           description: string;
           /**
-           * First 16 hex of sha256(source_code). Same source, same hash.
+           * First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.
            */
           content_hash: string;
           attach: Array<
@@ -6666,7 +6739,7 @@ export type ManageViewsResponses = {
           source_bytes: number;
         };
         /**
-         * False when the same source was already stored (no write).
+         * False when the same source, retained files, dependencies, metadata and executable artifact were already stored (no write).
          */
         written: boolean;
       }
@@ -6680,7 +6753,7 @@ export type ManageViewsResponses = {
           name: string;
           description: string;
           /**
-           * First 16 hex of sha256(source_code). Same source, same hash.
+           * First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.
            */
           content_hash: string;
           attach: Array<
@@ -6749,6 +6822,16 @@ export type ManageViewsResponses = {
           source_bytes: number;
         };
         source_code: string;
+        source_files: {
+          entrypoint: string;
+          files: {
+            [key: string]: unknown | string;
+          };
+        } | null;
+        dependencies: {
+          [key: string]: unknown | string;
+        } | null;
+        source_complete: boolean;
       }
     | {
         action: "list";
@@ -6760,7 +6843,7 @@ export type ManageViewsResponses = {
           name: string;
           description: string;
           /**
-           * First 16 hex of sha256(source_code). Same source, same hash.
+           * First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.
            */
           content_hash: string;
           attach: Array<

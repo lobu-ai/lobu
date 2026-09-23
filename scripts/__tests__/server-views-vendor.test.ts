@@ -108,10 +108,12 @@ describe("composed server runtime vendors @lobu/views", () => {
               }) => { path: string; external: true } | null
             ) => void;
           }) {
-            build.onResolve({ filter: /^(@lobu\/|esbuild$)/ }, (args) => ({
-              path: args.path,
-              external: true,
-            }));
+            // Core/views are vendored; worker compile helpers are bundled
+            // into the server, not installed as a runtime package.
+            build.onResolve(
+              { filter: /^(@lobu\/(core|views)(\/|$)|esbuild$)/ },
+              (args) => ({ path: args.path, external: true })
+            );
           },
         },
       ],
@@ -124,7 +126,7 @@ describe("composed server runtime vendors @lobu/views", () => {
       cwd: scratch,
       encoding: "utf8",
     });
-    expect(run.status).toBe(0);
+    expect(run.status, run.stderr).toBe(0);
     const result = JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}");
     expect(result).toMatchObject({ ok: true, marker: true });
     expect(result.bytes).toBeGreaterThan(100000);
