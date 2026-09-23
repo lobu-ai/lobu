@@ -46,6 +46,10 @@
 
 import type { ReservedSql } from 'postgres';
 import { intervals } from '../config/intervals';
+import {
+  announceFeedAutoPause,
+  feedSyncFailureAssignments,
+} from '../connectors/feed-sync-failure';
 import { type DbClient, getDb } from '../db/client';
 import { incrementCounter } from '../gateway/metrics/prometheus';
 import type { Env } from '../index';
@@ -379,16 +383,20 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         }
       }
 
-      // Reap + recover in a single statement using CTEs. Claimed/running sync
-      // rows get one fresh retry. Never-claimed rows are audit-only dispatch
+      // Reap + recover in a single statement using CTEs. A claimed/running
+      // sync crossed the worker-claim boundary, so its stale claim is charged
+      // to the feed like a worker-reported failure (feed-sync-failure.ts). It
+      // gets one fresh retry only when the feed was active and healthy before
+      // it — a crash or deploy recovers at once, while a sync that keeps dying
+      // backs off and eventually auto-pauses instead of re-queueing itself
+      // every interval. Never-claimed rows are audit-only dispatch
       // failures: connector code never ran, so they must not mutate source
       // health, consume its failure budget, or auto-pause its feed. Doing the
-      // timeout + claimed-run retry in one statement makes
-      // the timeout + retry atomic — if the process crashes after the
-      // statement returns, both writes are durable; if it crashes
-      // before, neither is. The previous shape (bulk UPDATE RETURNING +
-      // per-row INSERT loop) could leave a row in `timeout` with no
-      // retry queued when a crash landed between the two writes (lobu#862).
+      // timeout + charge + retry in one statement makes them atomic — if the
+      // process crashes after the statement returns, all writes are durable;
+      // if it crashes before, none is. The previous shape (bulk UPDATE
+      // RETURNING + per-row INSERT loop) could leave a row in `timeout` with
+      // no retry queued when a crash landed between the two writes (lobu#862).
       //
       // The retry INSERT uses `WHERE NOT EXISTS (SELECT 1 FROM runs ...)`
       // to dedupe against any currently-active sync run on the same
@@ -428,6 +436,28 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
                     r.connector_version, r.organization_id, r.dry_run, r.created_at,
                     r.action_key, c.stale_status
         ),
+        lost_syncs AS (
+          SELECT feed_id, id AS run_id
+          FROM timed_out
+          WHERE run_type = 'sync'
+            AND stale_status IN ('claimed', 'running')
+            AND feed_id IS NOT NULL
+            -- A dry run is a preview, not the feed's sync.
+            AND NOT dry_run
+        ),
+        charged_feeds AS (
+          UPDATE public.feeds
+          SET ${feedSyncFailureAssignments(reserved, {
+            errorMessage: heartbeatErrorMessage,
+            // Retain a notification wake hint; enqueue already advanced the
+            // ordinary scheduled-feed slot.
+            nextRun: reserved`next_run_at`,
+          })}
+          FROM lost_syncs
+          WHERE feeds.id = lost_syncs.feed_id
+          RETURNING feeds.id AS feed_id, lost_syncs.run_id,
+                    feeds.consecutive_failures, feeds.status, feeds.deleted_at
+        ),
         retries AS (
           INSERT INTO public.runs (
             organization_id, run_type, feed_id, connection_id,
@@ -437,15 +467,15 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             t.organization_id, 'sync', t.feed_id, t.connection_id,
             t.connector_key, t.connector_version, 'pending', 'auto', current_timestamp
           FROM timed_out t
-          WHERE t.run_type = 'sync'
-            AND t.stale_status IN ('claimed', 'running')
-            AND t.feed_id IS NOT NULL
-            -- Never retry a dry run. This INSERT does not carry the dry_run
-            -- flag, so a retried dry run would come back as a REAL sync that
-            -- persists everything the operator asked to only preview. A dry
-            -- run is also an interactive one-shot — reaping it as 'timeout'
-            -- and letting the operator re-trigger is the correct outcome.
-            AND NOT t.dry_run
+          JOIN charged_feeds f ON f.run_id = t.id
+          -- The charged row is the synchronization point for retry eligibility:
+          -- consecutive_failures = 1 means the feed was healthy before this
+          -- timeout, while its returned status/deletion state incorporates a
+          -- concurrent pause or deletion. Never retry a dry run: lost_syncs,
+          -- which feeds charged_feeds, excludes them before this join.
+          WHERE f.consecutive_failures = 1
+            AND f.status = 'active'
+            AND f.deleted_at IS NULL
             AND NOT EXISTS (
               -- Look for an unrelated active sync run on the same feed.
               -- Exclude timed_out.id because in PostgreSQL the sibling
@@ -518,15 +548,20 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         SELECT
           (SELECT count(*)::int FROM timed_out) AS reaped,
           (SELECT count(*)::int FROM retries) AS retries_created,
-          (SELECT count(*)::int FROM timed_out
-            WHERE run_type = 'sync'
-              AND stale_status IN ('claimed', 'running')
-              AND feed_id IS NOT NULL
-              -- Same NOT dry_run predicate as the retries CTE. A dry run is
-              -- never eligible for retry, so counting it here would inflate
-              -- skippedRetries below and attribute the skip to "another
-              -- active sync run exists", which would be false.
-              AND NOT dry_run) AS sync_eligible,
+          (SELECT count(*)::int FROM charged_feeds
+            WHERE consecutive_failures = 1
+              AND status = 'active'
+              AND deleted_at IS NULL) AS sync_eligible,
+          (SELECT coalesce(
+             json_agg(json_build_object(
+               'feedId', feed_id,
+               'runId', run_id,
+               'consecutiveFailures', consecutive_failures
+             )),
+             '[]'::json
+           )
+           FROM charged_feeds
+          ) AS charged_feeds,
           (SELECT coalesce(
              json_agg(json_build_object(
                'runId', id,
@@ -566,6 +601,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         reaped: number;
         retries_created: number;
         sync_eligible: number;
+        charged_feeds: unknown;
         dispatch_failures: unknown;
         timed_out_actions: unknown;
       }>;
@@ -659,6 +695,26 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         }
       }
 
+      // After the reap committed, like every other lane: the feed is already
+      // paused, and a lost announcement must never undo that.
+      const chargedFeedsRaw = reapedRow?.charged_feeds;
+      const chargedFeeds = Array.isArray(chargedFeedsRaw)
+        ? chargedFeedsRaw
+        : typeof chargedFeedsRaw === 'string'
+          ? JSON.parse(chargedFeedsRaw)
+          : [];
+      for (const charged of chargedFeeds as Array<{
+        feedId: number;
+        runId: number;
+        consecutiveFailures: number;
+      }>) {
+        await announceFeedAutoPause({
+          feedId: Number(charged.feedId),
+          runId: Number(charged.runId),
+          consecutiveFailures: Number(charged.consecutiveFailures),
+        });
+      }
+
       const dispatchFailuresRaw = reapedRow?.dispatch_failures;
       const parsedDispatchFailures = Array.isArray(dispatchFailuresRaw)
         ? dispatchFailuresRaw
@@ -720,16 +776,13 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         '[reaper] Marked stale connector runs as timeout'
       );
 
-      // Surface the conflict-dedup count so operators can spot when two
-      // pods are competing for the same stale row across an advisory-
-      // lock release boundary (the only case where `ON CONFLICT DO
-      // NOTHING` should fire on the partial unique index). The delta is
-      // sync-eligible reaped rows that did not produce a retry insert.
+      // The delta is eligible charged feeds that did not produce a retry
+      // because the NOT EXISTS guard observed another active sync.
       const skippedRetries = syncEligible - retriesCreated;
       if (skippedRetries > 0) {
         logger.info(
           { count: skippedRetries },
-          '[reaper] Skipped sync retries — another active sync run exists (ON CONFLICT DO NOTHING)'
+          '[reaper] Skipped sync retries — another active sync run exists'
         );
       }
 

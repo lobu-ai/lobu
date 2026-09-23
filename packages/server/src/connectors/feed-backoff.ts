@@ -7,8 +7,9 @@
  * minutes, forever — hammering the connector and its upstream API rate limit.
  *
  * The policy lives here so sync failure charging (feed-sync-failure.ts, for
- * both the worker-reported outcome and the gateway failing a claimed run whose
- * connector bundle cannot be produced), source wake scheduling
+ * the worker-reported outcome, the gateway failing a claimed run whose
+ * connector bundle cannot be produced, and the reaper timing out a sync after
+ * it crossed the worker-claim boundary), source wake scheduling
  * (runs/feed-notifications.ts), and the `feed.auto_paused` signal
  * (automations/platform-events.ts) read the same numbers. It applies ONLY to a
  * run that was claimed for the feed. A never-claimed run is a dispatch failure

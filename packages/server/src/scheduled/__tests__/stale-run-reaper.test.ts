@@ -32,10 +32,16 @@ DROP FUNCTION IF EXISTS test_fail_stale_approval_event();
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
 	process.env.RUNS_REAPER_STALE_AFTER_SECONDS = String(STALE_THRESHOLD_SECONDS);
+	process.env.FEED_BACKOFF_BASE_MS = "60000";
+	process.env.FEED_BACKOFF_MAX_MS = "60000";
+	process.env.FEED_PAUSE_AFTER_CONSECUTIVE_FAILURES = "20";
 });
 
 afterAll(() => {
 	delete process.env.RUNS_REAPER_STALE_AFTER_SECONDS;
+	delete process.env.FEED_BACKOFF_BASE_MS;
+	delete process.env.FEED_BACKOFF_MAX_MS;
+	delete process.env.FEED_PAUSE_AFTER_CONSECUTIVE_FAILURES;
 });
 
 beforeEach(async () => {
@@ -1062,6 +1068,165 @@ describe("reapStaleRuns — atomic timeout + retry (lobu#862)", () => {
 	});
 });
 
+async function feedHealth(feedId: number) {
+	const [row] = (await getDb()`
+    SELECT last_sync_status, last_error, consecutive_failures, status,
+           next_run_at > current_timestamp + INTERVAL '50 seconds' AS backed_off,
+           next_run_at IS NULL AS unscheduled
+    FROM feeds WHERE id = ${feedId}
+  `) as unknown as Array<{
+		last_sync_status: string | null;
+		last_error: string | null;
+		consecutive_failures: number;
+		status: string;
+		backed_off: boolean | null;
+		unscheduled: boolean;
+	}>;
+	return row;
+}
+
+/**
+ * A sync that crossed the worker-claim boundary is charged to the feed's
+ * failure budget. The one immediate retry is for an active feed that was
+ * healthy — a worker crash or deploy — so a sync that keeps dying backs off
+ * and eventually pauses instead of re-queueing itself every reaper interval.
+ */
+describe("reapStaleRuns — a lost claimed sync is charged to its feed", () => {
+	async function seedScheduledFeed(feedId: number, consecutiveFailures: number) {
+		await seedFeed(feedId);
+		await getDb()`
+      UPDATE feeds
+      SET schedule = '*/5 * * * *',
+          consecutive_failures = ${consecutiveFailures},
+          next_run_at = current_timestamp + INTERVAL '10 seconds'
+      WHERE id = ${feedId}
+    `;
+	}
+
+	async function seedLostSync(
+		feedId: number,
+		status: "claimed" | "running" = "running",
+	): Promise<number> {
+		return seedRun({
+			status,
+			lastHeartbeatAgoSeconds: STALE_THRESHOLD_SECONDS * 3,
+			claimedAtAgoSeconds: STALE_THRESHOLD_SECONDS * 3,
+			runType: "sync",
+			feedId,
+		});
+	}
+
+	test("a stale claim with no heartbeat is charged", async () => {
+		const feedId = 8180;
+		await seedScheduledFeed(feedId, 0);
+		await seedLostSync(feedId, "claimed");
+
+		const result = await reapStaleRuns();
+
+		expect(result.retriesCreated).toBe(1);
+		expect(await feedHealth(feedId)).toMatchObject({
+			last_error: "worker_heartbeat_lost",
+			consecutive_failures: 1,
+		});
+	});
+
+	test("a healthy feed is charged once and still gets its immediate retry", async () => {
+		const feedId = 8181;
+		await seedScheduledFeed(feedId, 0);
+		await seedLostSync(feedId);
+
+		const result = await reapStaleRuns();
+
+		expect(result.retriesCreated).toBe(1);
+		expect(await feedHealth(feedId)).toMatchObject({
+			last_sync_status: "failed",
+			last_error: "worker_heartbeat_lost",
+			consecutive_failures: 1,
+			status: "active",
+			backed_off: true,
+		});
+	});
+
+	test("a feed that was already failing backs off instead of retrying immediately", async () => {
+		const feedId = 8282;
+		await seedScheduledFeed(feedId, 2);
+		await seedLostSync(feedId);
+
+		const result = await reapStaleRuns();
+
+		expect(result.retriesCreated).toBe(0);
+		expect(await feedHealth(feedId)).toMatchObject({
+			consecutive_failures: 3,
+			status: "active",
+			backed_off: true,
+		});
+		const pending = (await getDb()`
+      SELECT id FROM runs
+      WHERE feed_id = ${feedId} AND run_type = 'sync' AND status = 'pending'
+    `) as unknown as Array<{ id: number }>;
+		expect(pending).toHaveLength(0);
+	});
+
+	test("a paused feed is charged without being resurrected", async () => {
+		const feedId = 8333;
+		await seedScheduledFeed(feedId, 0);
+		await seedLostSync(feedId);
+		await getDb()`
+      UPDATE feeds
+      SET status = 'paused', next_run_at = NULL
+      WHERE id = ${feedId}
+    `;
+
+		const result = await reapStaleRuns();
+
+		expect(result.retriesCreated).toBe(0);
+		expect(await feedHealth(feedId)).toMatchObject({
+			consecutive_failures: 1,
+			status: "paused",
+			unscheduled: true,
+		});
+		const pending = (await getDb()`
+      SELECT id FROM runs
+      WHERE feed_id = ${feedId} AND run_type = 'sync' AND status = 'pending'
+    `) as unknown as Array<{ id: number }>;
+		expect(pending).toHaveLength(0);
+	});
+
+	test("the failure that crosses the threshold pauses the feed", async () => {
+		process.env.FEED_PAUSE_AFTER_CONSECUTIVE_FAILURES = "3";
+		try {
+			const feedId = 8383;
+			await seedScheduledFeed(feedId, 2);
+			await seedLostSync(feedId);
+
+			const result = await reapStaleRuns();
+
+			expect(result.retriesCreated).toBe(0);
+			expect(await feedHealth(feedId)).toMatchObject({
+				consecutive_failures: 3,
+				status: "paused",
+				unscheduled: true,
+			});
+		} finally {
+			process.env.FEED_PAUSE_AFTER_CONSECUTIVE_FAILURES = "20";
+		}
+	});
+
+	test("a manual feed stays unscheduled", async () => {
+		const feedId = 8484;
+		await seedFeed(feedId);
+		await seedLostSync(feedId);
+
+		await reapStaleRuns();
+
+		expect(await feedHealth(feedId)).toMatchObject({
+			consecutive_failures: 1,
+			last_sync_status: "failed",
+			unscheduled: true,
+		});
+	});
+});
+
 /**
  * A dry run (`runs.dry_run`) executes the connector for real but the server
  * persists nothing. The reaper is the one path that can undo that AFTER the
@@ -1107,6 +1272,11 @@ describe("reapStaleRuns — dry runs are reaped but never resurrected", () => {
       WHERE feed_id = ${feedId} AND run_type = 'sync' AND status = 'pending'
     `) as unknown as Array<{ id: number | string; dry_run: boolean }>;
 		expect(requeued).toHaveLength(0);
+		// A preview is not the feed's sync: it never touches the failure budget.
+		expect(await feedHealth(feedId)).toMatchObject({
+			consecutive_failures: 0,
+			last_sync_status: null,
+		});
 	});
 
 	test("a stale never-claimed dry sync stamps no feed failure state", async () => {
