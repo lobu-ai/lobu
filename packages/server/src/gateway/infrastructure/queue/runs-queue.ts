@@ -198,6 +198,10 @@ export class RunsQueue implements IMessageQueue {
               false
             )
           )
+          -- RunsQueue work uses the 'auto' default. Human-approved rows have
+          -- a separate inline lease and reconciliation path that must retain
+          -- their running state across a gateway restart.
+          AND COALESCE(approval_status, 'auto') = 'auto'
           AND (claimed_at IS NULL
                OR claimed_at < now() - (${recoveryWindowMs}::int * interval '1 millisecond'))
         RETURNING id
