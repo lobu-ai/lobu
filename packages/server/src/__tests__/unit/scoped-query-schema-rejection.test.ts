@@ -167,6 +167,10 @@ describe('validateAndScopeQuery — parser-bypass regressions', () => {
     ["SELECT pg_sleep(10)"],
     ["SELECT pg_notify('c', 'x')"],
     ["SELECT pg_terminate_backend(1)"],
+    ["SELECT * FROM pg_stat_get_activity(NULL)"],
+    ["SELECT pg_log_backend_memory_contexts(1)"],
+    ["SELECT PG_CATALOG.PG_STAT_GET_ACTIVITY(NULL)"],
+    ["SELECT current_setting('server_version')"],
   ])('rejects %s', (sql) => {
     expect(() => scopeAsMember(sql)).toThrow(/not allowed/i);
   });

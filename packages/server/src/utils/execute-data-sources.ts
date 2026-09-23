@@ -86,32 +86,21 @@ const FORBIDDEN_QUERY_FUNCTIONS = new Set([
   'crosstab3',
   'crosstab4',
   'connectby',
-  // Session state: a custom GUC or an advisory lock outlives the request on a
-  // pooled connection.
+  // Session state: a custom GUC outlives the request on a pooled connection,
+  // and reading one exposes server configuration.
   'set_config',
-  // Server side effects.
-  'pg_notify',
-  'pg_logical_emit_message',
-  'pg_cancel_backend',
-  'pg_terminate_backend',
-  'pg_reload_conf',
-  'pg_rotate_logfile',
-  'pg_switch_wal',
-  'pg_create_restore_point',
-  'pg_stat_file',
+  'current_setting',
+  // Large objects.
   'loread',
   'lowrite',
 ]);
-/** Families matched by prefix, so a sibling (`pg_read_binary_file`, `dblink_exec`) cannot slip by. */
-const FORBIDDEN_QUERY_FUNCTION_PREFIXES = [
-  'dblink',
-  'pg_read_',
-  'pg_ls_',
-  'lo_',
-  'pg_advisory',
-  'pg_try_advisory',
-  'pg_sleep',
-];
+/**
+ * Families matched by prefix, so a sibling cannot slip by. `pg_` is the whole
+ * server namespace: other sessions' activity and query text
+ * (`pg_stat_get_activity`), files (`pg_read_file`), locks (`pg_advisory_lock`),
+ * backend control, logging and sleeps. Caller SQL has no use for any of it.
+ */
+const FORBIDDEN_QUERY_FUNCTION_PREFIXES = ['pg_', 'dblink', 'lo_'];
 /** `query_to_xml`, `table_to_xml`, `schema_to_xml`, `database_to_xml`, `cursor_to_xml` and their `xmlschema` variants. */
 const FORBIDDEN_QUERY_FUNCTION_INFIX = '_to_xml';
 
