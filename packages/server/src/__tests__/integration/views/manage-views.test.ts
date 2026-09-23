@@ -22,6 +22,7 @@ import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
+	createTestEntity,
 	createTestOrganization,
 	createTestUser,
 } from "../../setup/test-fixtures";
@@ -366,6 +367,13 @@ mountView(view, V);
 		};
 		const set = await setView(SIMPLE_SOURCE, { params });
 		expect(set.written).toBe(true);
+		// open_view links the view's `deal` tab, so the type has to exist.
+		await createTestEntity({
+			name: "Acme renewal",
+			entity_type: "deal",
+			organization_id: orgId,
+			created_by: ownerId,
+		});
 		const opened = (await executeTool(
 			"open_view",
 			{ key: "pipeline" },
