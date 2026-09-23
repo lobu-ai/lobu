@@ -1669,9 +1669,13 @@ export async function handleApprove(
 		// The lease is taken in the same statement that flips the run to
 		// `running`: an approved, running, unowned row is exactly the window the
 		// stale-run reaper and a second approve would both grab.
+		// A worker-claimed run becomes claimable only now, so its claim clock
+		// (`run_at`, which the stale-run reaper reads for approved rows) starts
+		// here rather than at queue time; a slow review must not time it out
+		// before any worker can poll it.
 		const runningSet = setRunning
 			? tx`, status = 'running', claimed_by = ${inlineOwner}, claimed_at = current_timestamp, last_heartbeat_at = current_timestamp`
-			: tx``;
+			: tx`, run_at = current_timestamp`;
 		const rows = await tx`
 			UPDATE runs
 			SET approval_status = 'approved'
