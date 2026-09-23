@@ -9,7 +9,6 @@ import chalk from "chalk";
 import ora from "ora";
 import type { ConnectorRef } from "../config/index.js";
 import { resolveApiClient } from "../internal/api-client.js";
-import { agentApiBase } from "../internal/gateway-url.js";
 import {
   addContext,
   getCurrentContextName,
@@ -19,11 +18,13 @@ import {
   setCurrentContext,
 } from "../internal/context.js";
 import { type Credentials, saveCredentials } from "../internal/credentials.js";
+import { agentApiBase } from "../internal/gateway-url.js";
 import { parseEnvContent } from "../internal/index.js";
-import { prepareRuntime } from "../internal/runtime-components.js";
 import { checkNodeSupport } from "../internal/node-version.js";
 import { loadProjectLink } from "../internal/project-link.js";
+import { prepareRuntime } from "../internal/runtime-components.js";
 import { loadProjectConfig } from "./_lib/apply/desired-state.js";
+import type { DependencySession } from "./_lib/ensure-deps-installed.js";
 
 interface DevOptions {
   port?: string;
@@ -448,14 +449,26 @@ export async function devCommand(
           hasLobuConfig,
         })
       ) {
-        await autoApplyLocalProject(cwd, gatewayUrl, localOrgSlug);
+        const dependencySession: DependencySession = new Map();
+        await autoApplyLocalProject(
+          cwd,
+          gatewayUrl,
+          localOrgSlug,
+          undefined,
+          dependencySession
+        );
         // Watch the project's listed view files + their import graph (and the
         // config itself) and re-apply on change, so an edited view shows up
         // locally within ~2 s of saving. Best-effort like the apply above: a
         // project with no views, or a watch setup failure, only logs.
         // Lazy-imported so the reapply graph (esbuild, jiti) stays out of
         // `lobu run`'s module-load path — same rule as the auto-apply above.
-        void startViewReapplyLoop(cwd, gatewayUrl, localOrgSlug).catch(() => {
+        void startViewReapplyLoop(
+          cwd,
+          gatewayUrl,
+          localOrgSlug,
+          dependencySession
+        ).catch(() => {
           // startViewReapplyLoop logs its own diagnostics; never crash `run`.
         });
       }
@@ -507,7 +520,8 @@ export async function devCommand(
 export async function startViewReapplyLoop(
   cwd: string,
   gatewayUrl: string,
-  localOrgSlug?: string
+  localOrgSlug?: string,
+  dependencySession: DependencySession = new Map()
 ): Promise<{ close: () => void }> {
   const noop = { close: () => undefined };
   try {
@@ -528,7 +542,13 @@ export async function startViewReapplyLoop(
     const current = startViewReapply(set, { onLog, onChange });
     async function onChange(): Promise<void> {
       console.log(chalk.dim("\n  views changed — re-applying…"));
-      await autoApplyLocalProject(cwd, gatewayUrl, localOrgSlug);
+      await autoApplyLocalProject(
+        cwd,
+        gatewayUrl,
+        localOrgSlug,
+        undefined,
+        dependencySession
+      );
       try {
         set = await collectViewReapplySet(cwd);
       } catch {
@@ -581,7 +601,8 @@ export async function autoApplyLocalProject(
     yes: boolean;
     url: string;
     org?: string;
-  }) => Promise<unknown>
+  }) => Promise<unknown>,
+  dependencySession?: DependencySession
 ): Promise<void> {
   try {
     const applyCommand =
@@ -594,6 +615,7 @@ export async function autoApplyLocalProject(
     // cloud org can't redirect this local apply to a slug that doesn't exist
     // here — that previously 404'd and silently applied nothing.
     await applyCommand({
+      ...(dependencySession ? { dependencySession } : {}),
       cwd,
       yes: true,
       url: gatewayUrl,

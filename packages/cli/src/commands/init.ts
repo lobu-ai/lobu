@@ -401,7 +401,10 @@ export async function initCommand(
           "\nInstalling project dependencies (this may take a few minutes)..."
         )
       );
-      const depsWarning = installScaffoldedProjectDeps(projectDir, "inherit");
+      const depsWarning = await installScaffoldedProjectDeps(
+        projectDir,
+        "inherit"
+      );
       if (depsWarning) console.log(chalk.yellow(`\n⚠ ${depsWarning}`));
       else console.log(chalk.green("✓ Project dependencies installed"));
     }
@@ -808,7 +811,7 @@ export async function initCommand(
           "\nInstalling project dependencies (this may take a few minutes)..."
         )
       );
-      depsWarning = installScaffoldedProjectDeps(projectDir, "inherit");
+      depsWarning = await installScaffoldedProjectDeps(projectDir, "inherit");
     }
 
     if (depsWarning) {
@@ -1043,12 +1046,12 @@ async function generateLobuConfig(
  * Warn-don't-fail: a broken/missing installer must not abort the scaffold, so
  * the failure is returned as a warning string for the caller to print.
  */
-export function installScaffoldedProjectDeps(
+export async function installScaffoldedProjectDeps(
   projectDir: string,
   stdio: "inherit" | "pipe" = "pipe"
-): string | null {
+): Promise<string | null> {
   try {
-    installProjectDeps(projectDir, { stdio });
+    await installProjectDeps(projectDir, { stdio });
     return null;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -1,156 +1,320 @@
-/**
- * Ensure a connector project's npm dependencies are installed before the CLI
- * compiles its connectors. esbuild bundles a connector's imports relative to
- * the connector file's directory, so the project's own `node_modules` (next to
- * `package.json`) must exist. We install when stale, preferring `bun` (faster,
- * if the user has it) and falling back to `npm` (always present with Node) so
- * the lobu CLI never forces a bun install on the user's machine.
- * `--ignore-scripts` keeps install-time supply-chain surface off the user's
- * machine — packages that need build scripts (native bindings) belong in
- * `runtime.nix.packages`, not bundled npm.
- */
+/** Project dependencies are created by init, and frozen before apply compiles. */
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
+import lockfile from "proper-lockfile";
+import { globSync } from "tinyglobby";
 
-import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+const exec = promisify(execFile);
+const LOCKS = [
+  "bun.lock",
+  "bun.lockb",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+];
+type Manifest = {
+  packageManager?: string;
+  workspaces?: string[] | { packages: string[] };
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+};
+type Project = { root: string; packages: string[]; manifest: Manifest };
+/** Owned by one apply or one running local stack, never a process-global cache. */
+export type DependencySession = Map<string, string>;
 
-// Per-process memo so `lobu apply` installs each project root at most once.
-const ensuredRoots = new Set<string>();
+type Mode = "create" | "frozen" | "read";
 
-/**
- * Find the connector's project root — the nearest ancestor with
- * `lobu.config.ts`. Anchoring on `lobu.config.ts` (not any ancestor
- * `package.json`) is what stops a connector inside a monorepo from resolving to
- * the monorepo's root package.json and triggering a wrong-directory install.
- */
-function findProjectRoot(fromFile: string): string | null {
-  let dir = dirname(fromFile);
-  for (let i = 0; i < 40; i++) {
-    if (existsSync(join(dir, "lobu.config.ts"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+function manifestAt(root: string): Manifest {
+  return JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 }
 
-/**
- * The project is "stale" if `node_modules` is missing or its mtime is older
- * than whichever lockfile the project uses (`bun.lock` for a bun-based project,
- * `package-lock.json` for an npm-based one). Honouring both means switching
- * installers between runs doesn't trigger spurious reinstalls.
- */
-function installIsStale(root: string): boolean {
-  const nodeModules = join(root, "node_modules");
-  if (!existsSync(nodeModules)) return true;
-  for (const lockName of ["bun.lock", "package-lock.json"]) {
-    const lock = join(root, lockName);
-    if (!existsSync(lock)) continue;
-    try {
-      if (statSync(lock).mtimeMs > statSync(nodeModules).mtimeMs) return true;
-    } catch {
-      // unreadable lockfile — treat as fresh rather than reinstall on every run
+function workspacePackages(root: string, manifest: Manifest): string[] {
+  const patterns = Array.isArray(manifest.workspaces)
+    ? manifest.workspaces
+    : manifest.workspaces?.packages;
+  if (!patterns) return [];
+  if (
+    !Array.isArray(patterns) ||
+    patterns.some(
+      (p) =>
+        typeof p !== "string" ||
+        p.startsWith("/") ||
+        p.split("/").includes("..")
+    )
+  ) {
+    throw new Error(
+      `Invalid workspace paths in ${join(root, "package.json")}. Keep workspace packages under their root.`
+    );
+  }
+  return globSync(
+    patterns.map((p) => `${p.replace(/\/$/, "")}/package.json`),
+    {
+      cwd: root,
+      absolute: true,
+      ignore: ["**/node_modules/**", "**/.git/**"],
+      followSymbolicLinks: false,
     }
-  }
-  return false;
+  )
+    .map((p) => dirname(p))
+    .sort();
 }
 
-function hasOnPath(bin: string): boolean {
-  const cmd = commandOnPath(bin);
-  if (!cmd) return false;
-  try {
-    // `env: process.env` is node's default; passed explicitly because bun
-    // otherwise resolves the binary against the STARTUP environment's PATH,
-    // ignoring runtime changes (which the tests rely on to stage fakes).
-    execFileSync(cmd, ["--version"], { stdio: "ignore", env: process.env });
-    return true;
-  } catch {
-    return false;
+function findProject(cwd: string): Project | null {
+  // A directory without lobu.config.ts is not a Lobu project: never install into it.
+  if (!existsSync(join(cwd, "lobu.config.ts"))) return null;
+  const projectDir = realpathSync(cwd);
+  if (!existsSync(join(projectDir, "package.json"))) return null;
+  let root = projectDir;
+  // Only a declared workspace member inherits an ancestor's lockfile.
+  for (let dir = dirname(projectDir); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, "package.json"))) {
+      // An unrelated ancestor is not part of this project's dependency inputs.
+      // Validate the selected root below; malformed unrelated manifests cannot own it.
+      try {
+        if (workspacePackages(dir, manifestAt(dir)).includes(root)) root = dir;
+      } catch {
+        // No valid workspace declaration establishes ownership at this ancestor.
+      }
+    }
+    if (dirname(dir) === dir) break;
   }
+  const manifest = manifestAt(root);
+  return {
+    root,
+    manifest,
+    packages: [root, ...workspacePackages(root, manifest)],
+  };
 }
 
 function commandOnPath(bin: string): string | null {
-  const path = process.env.PATH;
-  if (!path) return null;
-  for (const dir of path.split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, bin);
-    if (existsSync(candidate)) return candidate;
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (dir && existsSync(join(dir, bin))) return resolve(dir, bin);
   }
   return null;
 }
 
-const bunInstaller = { cmd: "bun", args: ["install", "--ignore-scripts"] };
-const npmInstaller = {
-  cmd: "npm",
-  args: ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
-};
-
-/**
- * Pick an installer for the user's project. Honour an existing lockfile so we
- * don't mix `bun.lock` and `package-lock.json` for the same project, then fall
- * back to whatever's available — bun is faster when present, npm is always
- * available because Node ships it. The lobu CLI never requires bun on the
- * user's machine.
- */
-function pickInstaller(root: string): { cmd: string; args: string[] } {
-  const hasNpmLock = existsSync(join(root, "package-lock.json"));
-  if (hasNpmLock) return npmInstaller;
-  const hasBunLock = existsSync(join(root, "bun.lock"));
-  const bunAvailable = hasOnPath("bun");
-  if (hasBunLock && bunAvailable) return bunInstaller;
-  if (bunAvailable) return bunInstaller;
-  return npmInstaller;
+function policy(project: Project, mode: Mode) {
+  const { root, manifest } = project;
+  const locks = LOCKS.filter((name) => existsSync(join(root, name)));
+  if (locks.length > 1)
+    throw new Error(
+      `Conflicting lockfiles in ${root}: ${locks.join(", ")}. Keep the lockfile for your declared package manager.`
+    );
+  const lock = locks[0];
+  if (lock === "pnpm-lock.yaml" || lock === "yarn.lock")
+    throw new Error(
+      `Lobu project installation supports Bun and npm; ${lock} requires a different package manager.`
+    );
+  const declaration = manifest.packageManager;
+  const parsed = declaration?.match(
+    /^(bun|npm)@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+sha(?:224|256|384|512)\.[a-fA-F0-9]+)?$/
+  );
+  if (declaration && !parsed)
+    throw new Error(
+      `Unsupported packageManager ${JSON.stringify(declaration)}. Declare an exact bun@version or npm@version.`
+    );
+  const lockedManager = lock
+    ? lock.startsWith("bun.")
+      ? "bun"
+      : "npm"
+    : undefined;
+  const manager =
+    parsed?.[1] ?? lockedManager ?? (commandOnPath("bun") ? "bun" : "npm");
+  if (lockedManager && lockedManager !== manager)
+    throw new Error(
+      `packageManager ${declaration} conflicts with ${lock}. Use one package manager and its lockfile.`
+    );
+  for (const member of project.packages.slice(1)) {
+    const nested = manifestAt(member).packageManager;
+    if (nested && nested !== declaration)
+      throw new Error(
+        `Workspace package ${member} declares a different packageManager. Declare the manager at ${root}.`
+      );
+    if (LOCKS.some((name) => existsSync(join(member, name))))
+      throw new Error(
+        `Workspace package ${member} has its own lockfile. Use the workspace lockfile in ${root}.`
+      );
+  }
+  if (!lock && mode === "frozen")
+    throw new Error(
+      `Missing lockfile in ${root}. Run '${manager} install --ignore-scripts' there and commit the lockfile before applying.`
+    );
+  return { manager, lock, version: parsed?.[2] };
 }
 
-/**
- * Run the project's dependency install in `root` with the picked installer
- * (bun if available, else npm; `--ignore-scripts` always). Throws when the
- * install fails or the installer binary is missing — callers decide whether
- * that's fatal (`lobu apply` compile path) or a warning (`lobu init`).
- */
-export function installProjectDeps(
-  root: string,
-  opts: {
-    /** "inherit" streams installer output to the terminal; "pipe" keeps it quiet. */
+function fingerprint(project: Project): string {
+  const hash = createHash("sha256");
+  for (const dir of project.packages) {
+    for (const name of ["package.json", ".npmrc", "bunfig.toml", ...LOCKS]) {
+      const file = join(dir, name);
+      hash.update(relative(project.root, file));
+      hash.update(existsSync(file) ? readFileSync(file) : "<missing>");
+      hash.update("\0");
+    }
+  }
+  return hash.digest("hex");
+}
+
+function missingDependency(
+  project: Project,
+  readOnly = false
+): string | undefined {
+  for (const dir of project.packages) {
+    const manifest = manifestAt(dir);
+    for (const name of Object.keys({
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+    })) {
+      // Config loading aliases these two packages to the running CLI's SDK.
+      // Preserve zero-install validation without hiding missing user libraries.
+      if (readOnly && (name === "@lobu/cli" || name === "@lobu/connector-sdk"))
+        continue;
+      let at = dir;
+      while (!existsSync(join(at, "node_modules", name, "package.json"))) {
+        if (at === project.root)
+          return `${name} (declared in ${relative(project.root, dir) || "."})`;
+        at = dirname(at);
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Read-only consumers must never install through desired-state loading. */
+export function checkProjectDeps(cwd: string): void {
+  const project = findProject(cwd);
+  if (!project) return;
+  const selected = policy(project, "read");
+  const missing = missingDependency(project, true);
+  if (missing)
+    throw new Error(
+      `Missing project dependency ${missing}. Run '${selected.manager} ${!selected.lock ? "install" : selected.manager === "bun" ? "install --frozen-lockfile" : "ci"} --ignore-scripts' in ${project.root}, then retry.`
+    );
+}
+
+/** Hold the project lock through compilation so another Lobu install cannot race it. */
+export async function withProjectDependencies<T>(
+  cwd: string,
+  options: {
+    mode?: Mode;
+    session?: DependencySession;
+    log?: (message: string) => void;
     stdio?: "inherit" | "pipe";
-  } = {}
-): { installer: string } {
-  const installer = pickInstaller(root);
-  const cmd = commandOnPath(installer.cmd);
-  if (!cmd) {
-    throw new Error(`Installer not found on PATH: ${installer.cmd}`);
+  },
+  use: () => Promise<T>
+): Promise<T> {
+  const mode = options.mode ?? "frozen";
+  if (mode === "read") {
+    checkProjectDeps(cwd);
+    return use();
   }
-  // `env: process.env` — see hasOnPath for why it's passed explicitly.
-  execFileSync(cmd, installer.args, {
-    cwd: root,
-    stdio: opts.stdio ?? "inherit",
-    env: process.env,
+  const initial = findProject(cwd);
+  if (!initial) return use();
+  const release = await lockfile.lock(join(initial.root, "package.json"), {
+    stale: 300_000,
+    update: 10_000,
+    retries: { retries: 300, minTimeout: 200, maxTimeout: 200 },
   });
-  return { installer: installer.cmd };
+  try {
+    const project = findProject(cwd);
+    if (!project || project.root !== initial.root)
+      throw new Error(
+        "Workspace ownership changed during installation. Retry the command."
+      );
+    const selected = policy(project, mode);
+    const cmd = commandOnPath(selected.manager);
+    if (!cmd)
+      throw new Error(
+        `Install ${selected.manager}${selected.version ? `@${selected.version}` : ""} and put it on PATH. Lobu will not switch package managers for this project.`
+      );
+    const { stdout } = await exec(cmd, ["--version"], { env: process.env });
+    const version = stdout.trim();
+    if (
+      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) ||
+      (selected.version && selected.version !== version)
+    ) {
+      throw new Error(
+        `Project requires ${selected.manager}@${selected.version ?? "a valid version"}; found ${version}. Install the declared version before applying.`
+      );
+    }
+    const before = fingerprint(project);
+    const key = `${cmd}\0${version}\0${before}`;
+    if (
+      mode === "create" ||
+      options.session?.get(project.root) !== key ||
+      missingDependency(project)
+    ) {
+      options.session?.delete(project.root);
+      options.log?.(
+        `Installing project dependencies with ${selected.manager} in ${project.root}...`
+      );
+      const args =
+        selected.manager === "bun"
+          ? [
+              "install",
+              ...(mode === "create" ? [] : ["--frozen-lockfile"]),
+              "--ignore-scripts",
+            ]
+          : [
+              mode === "create" ? "install" : "ci",
+              "--ignore-scripts",
+              "--no-audit",
+              "--no-fund",
+              "--include=dev",
+            ];
+      try {
+        const child = execFile(cmd, args, {
+          cwd: project.root,
+          env: { ...process.env, NODE_ENV: "development" },
+          maxBuffer: 8 * 1024 * 1024,
+        });
+        if (options.stdio !== "pipe") {
+          child.stdout?.pipe(process.stdout);
+          child.stderr?.pipe(process.stderr);
+        }
+        await new Promise<void>((accept, reject) => {
+          child.once("error", reject);
+          child.once("exit", (code, signal) =>
+            code === 0 ? accept() : reject(new Error(`exit ${code ?? signal}`))
+          );
+        });
+      } catch (error) {
+        throw new Error(
+          `${selected.manager} ${args.join(" ")} failed in ${project.root}. Fix the project manifest/lockfile with '${selected.manager} install --ignore-scripts', then retry. ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      if (mode !== "create") {
+        const after = findProject(cwd);
+        if (!after || before !== fingerprint(after))
+          throw new Error(
+            "Dependency inputs changed during installation. Retry with a consistent manifest and lockfile."
+          );
+        const missing = missingDependency(project);
+        if (missing)
+          throw new Error(
+            `Installation did not provide project dependency ${missing}. Check the package manager configuration in ${project.root}.`
+          );
+        options.session?.set(project.root, key);
+      }
+    }
+    return await use();
+  } finally {
+    await release();
+  }
 }
 
-/**
- * Install the connector project's deps if missing/stale. No-op when the
- * connector has no `package.json` (no declared npm deps to bundle).
- */
-export function ensureProjectDepsInstalled(
-  connectorFilePath: string,
-  log: (message: string) => void
-): void {
-  const root = findProjectRoot(connectorFilePath);
-  if (!root || ensuredRoots.has(root)) return;
-  // No package.json at the project root → the connector declares no npm deps
-  // (the SDK is runtime-provided/externalized), so there's nothing to install.
-  if (!existsSync(join(root, "package.json"))) {
-    ensuredRoots.add(root);
-    return;
-  }
-  if (!installIsStale(root)) {
-    ensuredRoots.add(root);
-    return;
-  }
-  log(`Installing connector dependencies in ${root}...`);
-  installProjectDeps(root, { stdio: "inherit" });
-  ensuredRoots.add(root);
+/** Init alone may create/update the project's lockfile. */
+export async function installProjectDeps(
+  root: string,
+  opts: { stdio?: "inherit" | "pipe" } = {}
+): Promise<void> {
+  await withProjectDependencies(
+    root,
+    { ...opts, mode: "create" },
+    async () => undefined
+  );
 }

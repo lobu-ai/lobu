@@ -7,6 +7,10 @@ import { printError, printText } from "../../../internal/output.js";
 import { loadProjectLink } from "../../../internal/project-link.js";
 import { ApiError, ValidationError } from "../../memory/_lib/errors.js";
 import {
+  type DependencySession,
+  withProjectDependencies,
+} from "../ensure-deps-installed.js";
+import {
   type ApplyClient,
   type RemoteAgent,
   type RemoteConnectorDefinition,
@@ -26,9 +30,9 @@ import {
   toBaseline,
 } from "./deployment.js";
 import {
+  type DesiredAutomation,
   type DesiredConnectorDefinition,
   type DesiredState,
-  type DesiredAutomation,
   loadDesiredStateFromConfig,
   normalizeConnectionConfigScope,
   resolveConnectorSchemas,
@@ -44,15 +48,15 @@ import {
   UPDATE_FIELD_TABLES,
 } from "./diff.js";
 import {
-  confirmCustomConnectors,
-  confirmDeletions,
-  confirmPlan,
-} from "./prompt.js";
-import {
   hydrateManagedConnectorCatalog,
   isManagedCloudTarget,
   loadManagedCloudConnectorCatalog,
 } from "./managed-connector-catalog.js";
+import {
+  confirmCustomConnectors,
+  confirmDeletions,
+  confirmPlan,
+} from "./prompt.js";
 import {
   renderBlockedReport,
   renderMissingSecrets,
@@ -67,6 +71,7 @@ import {
 } from "./shared.js";
 
 interface ApplyOptions {
+  dependencySession?: DependencySession;
   cwd?: string;
   dryRun?: boolean;
   yes?: boolean;
@@ -480,28 +485,11 @@ async function installConnectorDefinitions(
     if (!def) continue;
     let result: Awaited<ReturnType<typeof client.installConnector>>;
     if (def.sourcePath) {
-      // Local `*.connector.ts`: compile on the CLI, where the project's
-      // node_modules is available, so esbuild can bundle the connector's
-      // declared npm deps (the server only receives the artifact). Native deps
-      // ride `runtime.nix.packages` and are provisioned at run time. Compile
-      // `sourcePath` (the actual `.ts`), not `sourceFile` (an error-message
-      // label that may point at a `type: connector` YAML doc).
-      //
-      // Lazy-imported (cached by the loader) so the heavy connector-compile
-      // graph (esbuild + connector-worker + SDK) stays out of apply-cmd's
-      // module-load path — see the dynamic-import allow-list in AGENTS.md.
-      const { ensureProjectDepsInstalled } = await import(
-        "../ensure-deps-installed.js"
-      );
-      const { compileConnectorForIsolateFromFile } = await import(
-        "../connector-loader.js"
-      );
-      ensureProjectDepsInstalled(def.sourcePath, printText);
-      const compiledCode = await compileConnectorForIsolateFromFile(
-        def.sourcePath
-      );
+      if (def.compiledCode === undefined) {
+        throw new Error(`Local connector was not prepared: ${def.sourcePath}`);
+      }
       result = await client.installConnector({
-        sourceCode: compiledCode,
+        sourceCode: def.compiledCode,
         compiled: true,
       });
     } else if (def.sourceCode !== undefined) {
@@ -1390,21 +1378,48 @@ async function postDeploymentSummarySafe(
 
 export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
-  const fetchImpl = opts.fetchImpl ?? fetch;
-
-  // Auto-load `.env` from the project dir so secret()/$VAR refs in
-  // lobu.config.ts resolve without the user having to `set -a; source .env`.
-  // Mirrors `lobu dev`. Existing process.env values win (don't clobber shell).
+  // Auto-load `.env` so secret()/$VAR refs in lobu.config.ts resolve without
+  // `set -a; source .env`. Mirrors `lobu dev`; existing process.env values win.
   await loadProjectEnvFile(cwd);
-
-  // Load desired state from the TypeScript entrypoint (lobu.config.ts).
-  const loadArgs = {
+  const prepared = await withProjectDependencies(
     cwd,
-    ...(opts.only ? { only: opts.only } : {}),
-    onLog: (message: string) => printText(chalk.dim(message)),
-  };
-  const { state, configPath, warnings } =
-    await loadDesiredStateFromConfig(loadArgs);
+    {
+      mode: opts.dryRun ? "read" : "frozen",
+      session: opts.dependencySession ?? new Map(),
+      log: printText,
+    },
+    async () => {
+      const prepared = await loadDesiredStateFromConfig({
+        cwd,
+        ...(opts.only ? { only: opts.only } : {}),
+      });
+      if (!opts.dryRun) {
+        for (const def of prepared.state.connectors.definitions) {
+          if (!def.sourcePath) continue;
+          // Preserve the existing lazy compiler load: its heavy esbuild/worker
+          // graph is needed only for local connectors. Compile under the
+          // dependency lock; release before prompts or remote apply requests.
+          const { compileConnectorForIsolateFromFile } = await import(
+            "../connector-loader.js"
+          );
+          def.compiledCode = await compileConnectorForIsolateFromFile(
+            def.sourcePath
+          );
+        }
+      }
+      return prepared;
+    }
+  );
+  await applyProject(opts, prepared);
+}
+
+async function applyProject(
+  opts: ApplyOptions,
+  prepared: Awaited<ReturnType<typeof loadDesiredStateFromConfig>>
+): Promise<void> {
+  const cwd = opts.cwd ?? process.cwd();
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const { state, configPath, warnings } = prepared;
 
   printText(chalk.dim(`Config: ${configPath}`));
   for (const warning of warnings) {

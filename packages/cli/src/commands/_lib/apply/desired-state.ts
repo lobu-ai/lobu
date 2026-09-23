@@ -25,6 +25,7 @@ import type {
   ViewSource,
 } from "../../../config/index.js";
 import { ValidationError } from "../../memory/_lib/errors.js";
+import { checkProjectDeps } from "../ensure-deps-installed.js";
 import {
   type AgentMarkdown,
   mapProjectToDesiredState,
@@ -246,11 +247,12 @@ export interface DesiredConnectorDefinition {
   /** Remote URL — mutually exclusive with `sourcePath`. */
   sourceUrl?: string;
   /**
-   * Raw TypeScript source read from `sourcePath`, pushed verbatim to the
-   * server (which compiles, extracts metadata, and returns the real `key`).
-   * Absent when `sourceUrl` is used.
+   * Raw TypeScript source used for static inspection. Local sources are
+   * compiled before upload; remote sources are compiled by the server.
    */
   sourceCode?: string;
+  /** Local artifact prepared while the project's dependencies are locked. */
+  compiledCode?: string;
   /** For error messages — the `.connector.ts` file or `type: connector` doc. */
   sourceFile: string;
 }
@@ -878,11 +880,6 @@ interface LoadDesiredStateOptions {
    * expansion), so `--only agents` doesn't require connector secrets.
    */
   only?: "agents" | "memory";
-  /**
-   * Operator-visible log line (install notices while resolving views).
-   * Defaults to silent; `lobu apply` passes its printer.
-   */
-  onLog?: (message: string) => void;
 }
 
 /**
@@ -1008,15 +1005,11 @@ const VIEW_SOURCE_MAX_BYTES = 1_000_000;
  */
 async function resolveViewSources(
   sources: ViewSource[],
-  cwd: string,
-  log: (message: string) => void
+  cwd: string
 ): Promise<DesiredView[]> {
   const baseDir = resolve(cwd);
   const views: DesiredView[] = [];
   const seen = new Set<string>();
-  const { ensureProjectDepsInstalled } = await import(
-    "../ensure-deps-installed.js"
-  );
   const { bundleViewFromFile } = await import("../view-bundler.js");
   const { contentHash } = await import(
     "@lobu/core/contracts/tools/view-content-hash"
@@ -1062,7 +1055,6 @@ async function resolveViewSources(
         `viewFromFile(${JSON.stringify(rel)}) is over the ${VIEW_SOURCE_MAX_BYTES} byte source cap`
       );
     }
-    ensureProjectDepsInstalled(abs, log);
     const bundled = await bundleViewFromFile(abs);
     const key = bundled.metadata.key;
     if (seen.has(key)) {
@@ -1255,12 +1247,8 @@ export async function loadProjectConfig(
     throw new ValidationError(`No lobu.config.ts found in ${cwd}`);
   }
   const { createJiti } = await import("jiti");
-  // Resolve the SDK imports the config will reference (`@lobu/cli/config`,
-  // `@lobu/connector-sdk`) against the running CLI's own copies — not the
-  // project's `node_modules`. This lets a freshly-scaffolded project
-  // `validate`/`run` with zero install: the user has the CLI, that's enough.
-  // Falls through silently if a symbol can't be resolved from here (the
-  // catch-all error below still surfaces real problems).
+  // SDK config imports use the running CLI's copies. Ordinary project
+  // dependencies are checked before desired-state loading.
   const alias: Record<string, string> = {};
   for (const spec of ["@lobu/cli/config", "@lobu/connector-sdk"]) {
     try {
@@ -1271,7 +1259,8 @@ export async function loadProjectConfig(
   }
   const jiti = createJiti(
     pathToFileURL(configPath).href,
-    Object.keys(alias).length > 0 ? { alias } : undefined
+    // Validation must not populate node_modules/.cache/jiti.
+    { alias, fsCache: false }
   );
   let project: unknown;
   try {
@@ -1301,6 +1290,7 @@ export async function loadProjectConfig(
 export async function loadDesiredStateFromConfig(
   opts: LoadDesiredStateOptions
 ): Promise<{ state: DesiredState; configPath: string; warnings: string[] }> {
+  checkProjectDeps(opts.cwd);
   const env = opts.env ?? process.env;
   const { project: typedProject, configPath } = await loadProjectConfig(
     opts.cwd
@@ -1445,11 +1435,7 @@ export async function loadDesiredStateFromConfig(
     // Views are neither agents nor memory: a targeted apply skips them too.
     // Bundled here so the diff key is the server's hash (same function, same
     // inputs); executePlan ships these artifacts verbatim.
-    state.views = await resolveViewSources(
-      typedProject.views ?? [],
-      opts.cwd,
-      opts.onLog ?? (() => undefined)
-    );
+    state.views = await resolveViewSources(typedProject.views ?? [], opts.cwd);
   }
   // Surface load-time warnings to `lobu apply` (which prints them). #1010's
   // "ignored connectors because [memory] is disabled" case is obsolete here —
