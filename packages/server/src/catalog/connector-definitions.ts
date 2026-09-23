@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { getErrorMessage } from "@lobu/core";
 import { getLoginProviderScopes } from "../auth/config";
-import { getDb } from "../db/client";
+import { type DbClient, getDb } from "../db/client";
 import { getLocalActionKind } from "../operations/connector-operations";
 import {
 	getMcpOAuthRequestedScopes,
@@ -31,6 +31,7 @@ import {
 	upsertBundledConnectorForOrg,
 } from "../utils/ensure-connector-installed";
 import logger from "../utils/logger";
+import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "../utils/run-statuses";
 import { listCatalogEntries } from "./load";
 import {
 	ATLASSIAN_MCP_FEEDS,
@@ -210,18 +211,35 @@ export async function installConnectorDefinitionFromSource(params: {
 			return installed;
 		}
 	}
-	const { updated } = await upsertConnectorDefinitionRecords({
-		sql,
+	// Installing over an installed connector changes its active version in
+	// place, so it resets that version's feed state the way an update does.
+	const previous = await getScopedConnectorDefinition({
 		organizationId: params.organizationId,
-		metadata: resolved.metadata,
-		versionRecord: {
-			compiledCode: resolved.compiledCode,
-			compiledCodeHash: resolved.compiledCodeHash,
-			compileConfigHash: resolved.compileConfigHash,
-			sourceCode: resolved.sourceCode,
-			sourcePath: resolved.sourcePath,
-		},
-		versionScope: "organization",
+		connectorKey: resolved.metadata.key,
+	});
+	const { updated } = await sql.begin(async (tx) => {
+		const result = await upsertConnectorDefinitionRecords({
+			sql: tx,
+			organizationId: params.organizationId,
+			metadata: resolved.metadata,
+			versionRecord: {
+				compiledCode: resolved.compiledCode,
+				compiledCodeHash: resolved.compiledCodeHash,
+				compileConfigHash: resolved.compileConfigHash,
+				sourceCode: resolved.sourceCode,
+				sourcePath: resolved.sourcePath,
+			},
+			versionScope: "organization",
+		});
+		if (previous) {
+			await invalidateFeedCheckpointsForVersionChange(tx, {
+				organizationId: params.organizationId,
+				connectorKey: resolved.metadata.key,
+				previousVersion: previous.version,
+				version: resolved.metadata.version,
+			});
+		}
+		return result;
 	});
 
 	logger.info(
@@ -591,8 +609,8 @@ export async function validateConnectorSource(params: {
 }
 
 /**
- * Drop the per-feed cursors of an org's connector when its ACTIVE version
- * changes (a source update or a rollback).
+ * Drop the unpinned per-feed cursors of an org's connector when its ACTIVE
+ * version changes (a source update or a rollback).
  *
  * A version change means the connector's emission contract may have changed —
  * fixed validation, new eventKinds, a different cursor format. A cursor written
@@ -609,15 +627,52 @@ export async function validateConnectorSource(params: {
  * across every mid-run checkpoint write and only a successful completion may
  * advance it. Feeds holding nothing but a `source_ack` have no cursor to
  * invalidate, so they are left alone.
+ *
+ * Sync runs still queued or executing under another or unknown version are
+ * cancelled in the same transaction. A page or completion they commit after
+ * the reset could write a stale cursor straight back; cancelled, they fail the
+ * lease fence both of those take (`lockFeedPage`, `finalizeRun`). A
+ * feed pinned to the run's version keeps its run and checkpoint because its
+ * execution version did not change. Runs lock before feeds, the order a feed
+ * page and a completion take them in. Cancelling also clears the claim-time
+ * `pending` feed health state that the cancelled completion can no longer end.
  */
-async function invalidateFeedCheckpointsForVersionChange(params: {
-	organizationId: string;
-	connectorKey: string;
-	previousVersion: string;
-	version: string;
-}): Promise<void> {
+async function invalidateFeedCheckpointsForVersionChange(
+	sql: DbClient,
+	params: {
+		organizationId: string;
+		connectorKey: string;
+		previousVersion: string;
+		version: string;
+	},
+): Promise<void> {
 	if (params.version === params.previousVersion) return;
-	const sql = getDb();
+	const superseded = await sql`
+		WITH superseded AS (
+			UPDATE runs r
+			SET status = 'cancelled',
+				completed_at = NOW(),
+				error_message = ${`Superseded: connector '${params.connectorKey}' changed from version '${params.previousVersion}' to '${params.version}'`}
+			FROM feeds f
+			WHERE r.feed_id = f.id
+				AND r.organization_id = ${params.organizationId}
+				AND r.connector_key = ${params.connectorKey}
+				AND r.run_type = 'sync'
+				AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+				AND r.connector_version IS DISTINCT FROM COALESCE(f.pinned_version, ${params.version})
+			RETURNING r.id, r.feed_id
+		), released_feeds AS (
+			UPDATE feeds f
+			SET last_sync_status = NULL,
+				updated_at = NOW()
+			FROM superseded s
+			WHERE f.id = s.feed_id
+				AND f.last_sync_status = 'pending'
+			RETURNING f.id
+		)
+		SELECT s.id FROM superseded s
+		LEFT JOIN released_feeds f ON f.id = s.feed_id
+	`;
 	const cleared = await sql`
 		UPDATE feeds f
 		SET checkpoint = CASE
@@ -630,18 +685,20 @@ async function invalidateFeedCheckpointsForVersionChange(params: {
 		WHERE f.connection_id = c.id
 			AND c.connector_key = ${params.connectorKey}
 			AND f.organization_id = ${params.organizationId}
+			AND f.pinned_version IS NULL
 			AND f.deleted_at IS NULL
 			AND f.checkpoint IS NOT NULL
 			AND f.checkpoint <> jsonb_build_object('source_ack', f.checkpoint -> 'source_ack')
 		RETURNING f.id
 	`;
-	if (cleared.length > 0) {
+	if (cleared.length > 0 || superseded.length > 0) {
 		logger.info(
 			{
 				connector_key: params.connectorKey,
 				previous_version: params.previousVersion,
 				version: params.version,
 				feeds_reset: cleared.length,
+				runs_superseded: superseded.length,
 			},
 			"Connector version change invalidated per-feed checkpoints",
 		);
@@ -745,25 +802,27 @@ export async function updateInstalledConnectorSource(params: {
 		);
 	}
 
-	await upsertConnectorDefinitionRecords({
-		sql,
-		organizationId: params.organizationId,
-		metadata: resolved.metadata,
-		versionRecord: {
-			compiledCode: resolved.compiledCode,
-			compiledCodeHash: resolved.compiledCodeHash,
-			compileConfigHash: resolved.compileConfigHash,
-			sourceCode: resolved.sourceCode,
-			sourcePath: resolved.sourcePath,
-		},
-		versionScope: "organization",
-	});
+	await sql.begin(async (tx) => {
+		await upsertConnectorDefinitionRecords({
+			sql: tx,
+			organizationId: params.organizationId,
+			metadata: resolved.metadata,
+			versionRecord: {
+				compiledCode: resolved.compiledCode,
+				compiledCodeHash: resolved.compiledCodeHash,
+				compileConfigHash: resolved.compileConfigHash,
+				sourceCode: resolved.sourceCode,
+				sourcePath: resolved.sourcePath,
+			},
+			versionScope: "organization",
+		});
 
-	await invalidateFeedCheckpointsForVersionChange({
-		organizationId: params.organizationId,
-		connectorKey: params.connectorKey,
-		previousVersion: def.version,
-		version: resolved.metadata.version,
+		await invalidateFeedCheckpointsForVersionChange(tx, {
+			organizationId: params.organizationId,
+			connectorKey: params.connectorKey,
+			previousVersion: def.version,
+			version: resolved.metadata.version,
+		});
 	});
 
 	logger.info(
@@ -850,25 +909,27 @@ export async function rollbackConnectorVersion(params: {
 	// All-null versionRecord: the ON CONFLICT upsert COALESCEs, so the retained
 	// row keeps its stored code — only the definition metadata flips. (And the
 	// all-null record means no org row is created for it — see versionScope.)
-	await upsertConnectorDefinitionRecords({
-		sql,
-		organizationId: params.organizationId,
-		metadata,
-		versionRecord: {
-			compiledCode: null,
-			compiledCodeHash: null,
-			compileConfigHash: null,
-			sourceCode: null,
-			sourcePath: null,
-		},
-		versionScope: "organization",
-	});
+	await sql.begin(async (tx) => {
+		await upsertConnectorDefinitionRecords({
+			sql: tx,
+			organizationId: params.organizationId,
+			metadata,
+			versionRecord: {
+				compiledCode: null,
+				compiledCodeHash: null,
+				compileConfigHash: null,
+				sourceCode: null,
+				sourcePath: null,
+			},
+			versionScope: "organization",
+		});
 
-	await invalidateFeedCheckpointsForVersionChange({
-		organizationId: params.organizationId,
-		connectorKey: params.connectorKey,
-		previousVersion: def.version,
-		version: params.version,
+		await invalidateFeedCheckpointsForVersionChange(tx, {
+			organizationId: params.organizationId,
+			connectorKey: params.connectorKey,
+			previousVersion: def.version,
+			version: params.version,
+		});
 	});
 
 	logger.info(

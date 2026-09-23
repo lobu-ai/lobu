@@ -476,6 +476,10 @@ async function createSyncRunWithClient(
                connector_definitions.updated_at DESC,
                connector_definitions.id DESC
       LIMIT 1
+      -- Hold the definition selected for both capability and version resolution
+      -- through run insertion. A version change updates this row before sweeping
+      -- old runs, so neither transaction can commit a stale-version run afterward.
+      FOR SHARE
     ) cd ON TRUE
     WHERE f.id = ${feedId}
   `;
@@ -640,7 +644,10 @@ export async function createSyncRun(
   const dryRun = opts?.dryRun === true;
 
   try {
-    if (db) {
+    // materializeDueFeeds may pass a plain pool as `db`. Only a transaction
+    // client exposes savepoint; otherwise wrap the definition lock + insert so
+    // the lock cannot disappear between those statements.
+    if (db && typeof db.savepoint === 'function') {
       return await createSyncRunWithClient(sql, feedId, dryRun);
     }
 
