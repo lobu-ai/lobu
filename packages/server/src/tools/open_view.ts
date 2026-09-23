@@ -177,7 +177,8 @@ async function resolveViewPath(
 		),
 	];
 	if (typeTabs.length === 1) {
-		return { pathname: `/${orgSlug}/${typeTabs[0]}${suffix}`, card: false };
+		// Resolved as an explicit scope.type, so a deleted type is refused.
+		return resolveViewPath(view, { type: typeTabs[0] }, orgSlug, organizationId);
 	}
 	throw new ToolUserError(
 		typeTabs.length > 1

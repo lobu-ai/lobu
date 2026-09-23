@@ -394,6 +394,29 @@ describe('views resources + open_view + invoke_view_action', () => {
 		);
 	});
 
+	it('open_view refuses an unscoped link to a type that no longer exists', async () => {
+		// Unscoped, the view's one type tab is its page, so that type gets the
+		// same live check an explicit scope.type does.
+		await setAttachedView('gone', [{ type: 'deal', placement: 'tab' }]);
+		await expect(openPath({ key: 'gone' })).rejects.toThrow(/Entity type 'deal' not found/);
+		await createTestEntity({
+			name: 'Old Plan',
+			entity_type: 'retired',
+			organization_id: org.id,
+			created_by: owner.id,
+		});
+		await setAttachedView('retired-tab', [{ type: 'retired', placement: 'tab' }]);
+		expect(await openPath({ key: 'retired-tab' })).toBe('/views-org/retired/-/views/retired-tab');
+		const sql = getTestDb();
+		await sql`
+      UPDATE entity_types SET deleted_at = NOW()
+      WHERE slug = 'retired' AND organization_id = ${org.id}
+    `;
+		await expect(openPath({ key: 'retired-tab' })).rejects.toThrow(
+			/Entity type 'retired' not found/
+		);
+	});
+
 	it('open_view opens an Overview card on the record page itself', async () => {
 		await setAttachedView('card', [{ type: 'company', placement: 'overview' }]);
 		// The card renders with its defaults, so the link carries no query.
