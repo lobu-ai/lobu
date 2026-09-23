@@ -10,7 +10,7 @@
  */
 
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
-import { type DbClient, getDb } from '../db/client';
+import { getDb } from '../db/client';
 import {
   bundledConnectorSourcePath,
   compileConnectorForIsolateFromFile,
@@ -264,9 +264,7 @@ async function recompileStoredConnectorVersion(
 export async function upsertBundledConnectorForOrg(params: {
   organizationId: string;
   connectorKey: string;
-  /** A caller transaction to write in; defaults to its own. */
-  sql?: DbClient;
-}): Promise<(ConnectorInstallResult & { previousVersion: string | null }) | null> {
+}): Promise<ConnectorInstallResult | null> {
   const filePath = findBundledConnectorFile(params.connectorKey);
   if (!filePath) return null;
 
@@ -276,8 +274,8 @@ export async function upsertBundledConnectorForOrg(params: {
   validateConnectorMetadata(metadata);
 
   const sourcePath = bundledConnectorSourcePath(filePath);
-  const { updated, previousVersion } = await upsertConnectorDefinitionRecords({
-    sql: params.sql ?? getDb(),
+  const { updated } = await upsertConnectorDefinitionRecords({
+    sql: getDb(),
     organizationId: params.organizationId,
     metadata,
     versionRecord: {
@@ -300,7 +298,6 @@ export async function upsertBundledConnectorForOrg(params: {
     authSchema: metadata.authSchema ?? null,
     mcpConfig: metadata.mcpConfig ?? null,
     openapiConfig: metadata.openapiConfig ?? null,
-    previousVersion,
   };
 }
 

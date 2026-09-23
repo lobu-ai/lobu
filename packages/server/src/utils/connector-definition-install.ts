@@ -18,6 +18,8 @@ import type { McpOAuthMetadata } from '../mcp-proxy/types';
 import { assertChromeNamespaceInstallIsDeviceManifest } from './connector-execution-placement';
 import { preflightConnectorRelationshipTypes } from './connector-relationship-declarations';
 import { reconcileConnectorIdentityScopeRegistry } from './connector-identity-scopes';
+import logger from './logger';
+import { ACTIVE_RUN_STATUSES, runStatusLiteral } from './run-statuses';
 
 type SqlClient = ReturnType<typeof getDb>;
 
@@ -283,8 +285,6 @@ type UpsertConnectorDefinitionRecordsParams = {
 
 type UpsertConnectorDefinitionResult = {
   updated: boolean;
-  /** The active version this write replaced, read under the writer lock. */
-  previousVersion: string | null;
 };
 
 /**
@@ -294,8 +294,21 @@ type UpsertConnectorDefinitionResult = {
 export async function upsertConnectorDefinitionRecords(
   params: UpsertConnectorDefinitionRecordsParams
 ): Promise<UpsertConnectorDefinitionResult> {
-  const run = (sql: SqlClient) =>
-    upsertConnectorDefinitionRecordsInTransaction({ ...params, sql });
+  const run = async (sql: SqlClient): Promise<UpsertConnectorDefinitionResult> => {
+    const { updated, previousVersion } = await upsertConnectorDefinitionRecordsInTransaction({
+      ...params,
+      sql,
+    });
+    if (previousVersion !== null) {
+      await resetFeedsForVersionChange(sql, {
+        organizationId: params.organizationId,
+        connectorKey: params.metadata.key,
+        previousVersion,
+        version: params.metadata.version,
+      });
+    }
+    return { updated };
+  };
   const callerOwnsTransaction = typeof params.sql.savepoint === 'function';
   const result = callerOwnsTransaction
     ? await params.sql.savepoint(run)
@@ -305,7 +318,7 @@ export async function upsertConnectorDefinitionRecords(
 
 async function upsertConnectorDefinitionRecordsInTransaction(
   params: UpsertConnectorDefinitionRecordsParams
-): Promise<UpsertConnectorDefinitionResult> {
+): Promise<{ updated: boolean; previousVersion: string | null }> {
   const { sql } = params;
   const { metadata } = params;
 
@@ -327,9 +340,8 @@ async function upsertConnectorDefinitionRecordsInTransaction(
 
   // Every writer of this connector's definition serializes here, before the
   // identity-scope locks below, so all of them take their locks in one order.
-  // The active version is read under that lock: a caller that resets state for
-  // a version change needs the version this write actually replaces, not one
-  // read before a concurrent writer committed.
+  // The active version is read under that lock, so the feed reset keys on the
+  // version this write actually replaces, not one a concurrent writer replaced.
   await sql`
     SELECT pg_advisory_xact_lock(
       hashtext('lobu:connector-definition'),
@@ -609,4 +621,101 @@ async function upsertConnectorDefinitionRecordsInTransaction(
   }
 
   return { updated: wasActive, previousVersion };
+}
+
+/**
+ * Drop the unpinned per-feed cursors of an org's connector when its ACTIVE
+ * version changes (a source update or a rollback).
+ *
+ * A version change means the connector's emission contract may have changed —
+ * fixed validation, new eventKinds, a different cursor format. A cursor written
+ * by the other version must not gate what the now-active code collects: a
+ * cursor committed over rejected or malformed items otherwise makes that page
+ * unreachable forever. Clearing it makes the next sync re-collect under the
+ * active code, and insert-time (connection_id, origin_id) dedup makes the
+ * re-offer idempotent — identical content lands as `unchanged`. A same-version
+ * source refresh is not a contract change and keeps its checkpoints.
+ *
+ * `source_ack` survives. It is the record of what this feed already
+ * acknowledged back to its source, not connector cursor state, and losing it
+ * re-acknowledges delivered items — which is why `streamContent` carries it
+ * across every mid-run checkpoint write and only a successful completion may
+ * advance it. Feeds holding nothing but a `source_ack` have no cursor to
+ * invalidate, so they are left alone.
+ *
+ * Sync runs still queued or executing under another or unknown version are
+ * cancelled in the same transaction. A page or completion they commit after
+ * the reset could write a stale cursor straight back; cancelled, they fail the
+ * lease fence both of those take (`lockFeedPage`, `finalizeRun`). A
+ * feed pinned to the run's version keeps its run and checkpoint because its
+ * execution version did not change. Runs lock before feeds, the order a feed
+ * page and a completion take them in. Cancelling also clears the claim-time
+ * `pending` feed health state that the cancelled completion can no longer end.
+ */
+async function resetFeedsForVersionChange(
+  sql: SqlClient,
+  params: {
+    organizationId: string;
+    connectorKey: string;
+    previousVersion: string;
+    version: string;
+  }
+): Promise<void> {
+  if (params.version === params.previousVersion) return;
+  const superseded = await sql`
+    WITH superseded AS (
+      UPDATE runs r
+      SET status = 'cancelled',
+        completed_at = NOW(),
+        error_message = ${`Superseded: connector '${params.connectorKey}' changed from version '${params.previousVersion}' to '${params.version}'`}
+      FROM feeds f
+      WHERE r.feed_id = f.id
+        AND r.organization_id = ${params.organizationId}
+        AND r.connector_key = ${params.connectorKey}
+        AND r.run_type = 'sync'
+        AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+        AND r.connector_version IS DISTINCT FROM COALESCE(f.pinned_version, ${params.version})
+      RETURNING r.id, r.feed_id
+    ), released_feeds AS (
+      UPDATE feeds f
+      SET last_sync_status = NULL,
+        updated_at = NOW()
+      FROM superseded s
+      WHERE f.id = s.feed_id
+        AND f.last_sync_status = 'pending'
+      RETURNING f.id
+    )
+    SELECT s.id FROM superseded s
+    LEFT JOIN released_feeds f ON f.id = s.feed_id
+  `;
+  const cleared = await sql`
+    UPDATE feeds f
+    SET checkpoint = CASE
+        WHEN f.checkpoint ? 'source_ack'
+          THEN jsonb_build_object('source_ack', f.checkpoint -> 'source_ack')
+        ELSE NULL
+      END,
+      updated_at = current_timestamp
+    FROM connections c
+    WHERE f.connection_id = c.id
+      AND c.connector_key = ${params.connectorKey}
+      AND f.organization_id = ${params.organizationId}
+      AND f.pinned_version IS NULL
+      AND f.deleted_at IS NULL
+      AND f.checkpoint IS NOT NULL
+      AND f.checkpoint <> jsonb_build_object('source_ack', f.checkpoint -> 'source_ack')
+    RETURNING f.id
+  `;
+  if (cleared.length > 0 || superseded.length > 0) {
+    logger.info(
+      {
+        connector_key: params.connectorKey,
+        previous_version: params.previousVersion,
+        version: params.version,
+        feeds_reset: cleared.length,
+        runs_superseded: superseded.length,
+      },
+      'Connector version change invalidated per-feed checkpoints'
+    );
+  }
 }
