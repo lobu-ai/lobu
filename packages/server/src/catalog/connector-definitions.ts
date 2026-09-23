@@ -10,8 +10,10 @@ import {
 	selectMcpOAuthClientAuthMethod,
 } from "../mcp-proxy/client";
 import { computeCodeHash } from "../utils/compiler-core";
+import { isCloudMode } from "../utils/cloud-mode";
 import {
 	connectorSourcePathToUri,
+	findBundledConnectorFile,
 	getCatalogConnectorInstallability,
 	resolveFileSourcePath,
 } from "../utils/connector-catalog";
@@ -170,6 +172,17 @@ export async function getScopedConnectorDefinition(params: {
 	return (rows[0] as ScopedConnectorDefinitionRow | undefined) ?? null;
 }
 
+/**
+ * Cloud always executes a built-in key from the image's own file
+ * (`resolveConnectorCode`), so org-supplied source for that key would be stored
+ * and never run, and would pin the org to whatever version it carried. Source
+ * installs of a built-in key install the image copy through the one bundled
+ * writer instead. Self-hosted keeps the org copy: there it is a real override.
+ */
+function installsImageCopy(connectorKey: string): boolean {
+	return isCloudMode() && findBundledConnectorFile(connectorKey) !== null;
+}
+
 export async function installConnectorDefinitionFromSource(params: {
 	organizationId: string;
 	sourceUrl?: string;
@@ -184,6 +197,19 @@ export async function installConnectorDefinitionFromSource(params: {
 		sourceCode: params.sourceCode,
 		compiled: params.compiled,
 	});
+	if (installsImageCopy(resolved.metadata.key)) {
+		const installed = await upsertBundledConnectorForOrg({
+			organizationId: params.organizationId,
+			connectorKey: resolved.metadata.key,
+		});
+		if (installed) {
+			logger.info(
+				{ connector_key: installed.connectorKey, version: installed.version },
+				"Built-in connector source install resolved to the image copy",
+			);
+			return installed;
+		}
+	}
 	const { updated } = await upsertConnectorDefinitionRecords({
 		sql,
 		organizationId: params.organizationId,
@@ -631,12 +657,14 @@ export type ConnectorVersionChange = {
 };
 
 /**
- * Replace an installed connector's source (org-local), reusing the install
- * persist path. Guards that make it safe where `install_connector` is not:
- * the connector must already be installed, the source's key must match, an
- * optional `expectedVersion` gives optimistic concurrency, and overwriting ANY
- * retained version's row with different code is rejected (a changed source must
- * bump `definition.version` so the prior code stays retained for rollback).
+ * Replace an installed connector's source, reusing the install persist path.
+ * In cloud a built-in key selects the image copy (`installsImageCopy`); other
+ * keys keep org-local source. Guards that make it safe where `install_connector`
+ * is not: the connector must already be installed, the source's key must match,
+ * an optional `expectedVersion` gives optimistic concurrency, and for org-local
+ * source, overwriting ANY retained version's row with different code is
+ * rejected (a changed source must bump `definition.version` so the prior code
+ * stays retained for rollback).
  */
 export async function updateInstalledConnectorSource(params: {
 	organizationId: string;
@@ -665,6 +693,28 @@ export async function updateInstalledConnectorSource(params: {
 			`source_code defines connector '${resolved.metadata.key}', not '${params.connectorKey}'. ` +
 				`Refusing to update (use install_connector to install a new connector).`,
 		);
+	}
+
+	if (installsImageCopy(params.connectorKey)) {
+		const installed = await upsertBundledConnectorForOrg({
+			organizationId: params.organizationId,
+			connectorKey: params.connectorKey,
+		});
+		if (installed) {
+			await invalidateFeedCheckpointsForVersionChange({
+				organizationId: params.organizationId,
+				connectorKey: params.connectorKey,
+				previousVersion: def.version,
+				version: installed.version,
+			});
+			return {
+				connectorKey: installed.connectorKey,
+				name: installed.name,
+				previousVersion: def.version,
+				version: installed.version,
+				codeHash: installed.codeHash,
+			};
+		}
 	}
 
 	// A retained version's stored code is immutable: overwriting ANY existing
