@@ -21,7 +21,7 @@
  * seed.
  */
 
-import { getDb } from '../db/client';
+import { type DbClient, getDb } from '../db/client';
 import logger from './logger';
 
 // Fields the lookup populates. Lined up with the apple.photos event schema.
@@ -68,16 +68,25 @@ export interface GeoEnrichment {
 // process lifetime; restart the server to re-probe after seeding.
 let enrichmentAvailable: boolean | undefined;
 
-async function probeAvailability(sql: ReturnType<typeof getDb>): Promise<boolean> {
+/** Keep a fail-open query from aborting a caller-owned transaction. */
+function runIsolatedQuery<T>(sql: DbClient, query: (db: DbClient) => Promise<T>): Promise<T> {
+  return typeof sql.savepoint === 'function' ? sql.savepoint(query) : query(sql);
+}
+
+async function probeAvailability(sql: DbClient): Promise<boolean> {
   try {
-    const probe = (await sql`
-      SELECT EXISTS (
-        SELECT 1 FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE p.proname = 'geo_lookup' AND n.nspname = 'public'
-      ) AS has_fn,
-      (SELECT COUNT(*) > 0 FROM geo_places LIMIT 1) AS has_data
-    `) as Array<{ has_fn: boolean; has_data: boolean }>;
+    const probe = await runIsolatedQuery(
+      sql,
+      async (db) =>
+        (await db`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'geo_lookup' AND n.nspname = 'public'
+          ) AS has_fn,
+          (SELECT COUNT(*) > 0 FROM geo_places LIMIT 1) AS has_data
+        `) as Array<{ has_fn: boolean; has_data: boolean }>
+    );
     const [row] = probe;
     return !!row && row.has_fn && row.has_data;
   } catch {
@@ -152,11 +161,15 @@ export async function lookupGeoEnrichment(
   if (!enrichmentAvailable) return null;
 
   try {
-    const rows = (await sql`
-      SELECT place_name, place_id, country_code, country_name,
-             admin1_code, admin1_name, timezone, population, distance_km
-      FROM geo_lookup(${coords.lat}, ${coords.lng})
-    `) as GeoLookupRow[];
+    const rows = await runIsolatedQuery(
+      sql,
+      async (db) =>
+        (await db`
+          SELECT place_name, place_id, country_code, country_name,
+                 admin1_code, admin1_name, timezone, population, distance_km
+          FROM geo_lookup(${coords.lat}, ${coords.lng})
+        `) as GeoLookupRow[]
+    );
     const [row] = rows;
     if (!row || !row.place_name || !row.country_code || !row.country_name) {
       return null;

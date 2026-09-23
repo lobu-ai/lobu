@@ -184,6 +184,23 @@ describe('lookupGeoEnrichment', () => {
     );
     expect(result).toBeNull();
   });
+
+  it('isolates a failed probe in a caller-owned transaction savepoint', async () => {
+    const query = vi.fn(() => Promise.reject(new Error('geo schema unavailable')));
+    const sql = query as unknown as Sql & {
+      savepoint: (fn: (tx: Sql) => Promise<unknown>) => Promise<unknown>;
+    };
+    sql.savepoint = vi.fn((fn) => fn(sql));
+
+    const result = await lookupGeoEnrichment(
+      { latitude: 41.89, longitude: 12.49 },
+      { sql }
+    );
+
+    expect(result).toBeNull();
+    expect(sql.savepoint).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledOnce();
+  });
 });
 
 describe('mergeEnrichedMetadata', () => {

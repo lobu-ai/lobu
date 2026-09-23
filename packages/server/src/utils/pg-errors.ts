@@ -23,3 +23,13 @@ export function isQueryCanceled(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   return (error as { code?: string }).code === '57014';
 }
+
+/**
+ * Check whether a caught error is a PG deadlock (40P01). Postgres aborts one
+ * transaction of the cycle; the victim's work rolled back in full and is safe
+ * to run again.
+ */
+export function isDeadlockDetected(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  return (error as { code?: string }).code === '40P01';
+}

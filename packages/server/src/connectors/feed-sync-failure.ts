@@ -26,27 +26,41 @@
  */
 
 import { maybeEmitFeedAutoPausedAfterFailure } from '../automations/platform-events';
-import { getDb } from '../db/client';
+import type { DbClient } from '../db/client';
 import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import { feedBackoff } from './feed-backoff';
 
+/** What a recorded failure left behind, for {@link announceFeedAutoPause}. */
+export interface RecordedFeedSyncFailure {
+  feedId: number;
+  runId: number;
+  consecutiveFailures: number;
+}
+
 /**
  * Stamp the failed outcome, increment `consecutive_failures`, open the failure
  * episode, back `next_run_at` off beyond the plain cadence, and hard-pause
- * (plus emit `feed.auto_paused`) once the threshold is crossed.
+ * once the threshold is crossed.
+ *
+ * Runs on the caller's handle. A completion caller passes the transaction that
+ * owns the run's terminal transition, so a crash cannot leave only one half of
+ * that state committed. Announce the pause with {@link announceFeedAutoPause}
+ * after the caller's transaction commits.
  */
-export async function applyFeedSyncFailure(params: {
-  feedId: number;
-  errorMessage: string | null;
-  runId: number;
-}): Promise<void> {
-  const sql = getDb();
+export async function applyFeedSyncFailure(
+  sql: DbClient,
+  params: {
+    feedId: number;
+    errorMessage: string | null;
+    runId: number;
+  }
+): Promise<RecordedFeedSyncFailure | null> {
   const feedRows = (await sql`
     SELECT schedule, timezone FROM feeds WHERE id = ${params.feedId}
   `) as unknown as Array<{ schedule: string | null; timezone: string | null }>;
-  if (feedRows.length === 0) return;
+  if (feedRows.length === 0) return null;
 
   // Manual feeds (no schedule) stay unscheduled after failure.
   const schedule = feedRows[0]?.schedule ?? null;
@@ -87,23 +101,38 @@ export async function applyFeedSyncFailure(params: {
     RETURNING consecutive_failures
   `) as unknown as Array<{ consecutive_failures: number }>;
 
-  const consecutiveFailures = Number(updated[0]?.consecutive_failures ?? 0);
+  return {
+    feedId: params.feedId,
+    runId: params.runId,
+    consecutiveFailures: Number(updated[0]?.consecutive_failures ?? 0),
+  };
+}
+
+/**
+ * Emit `feed.auto_paused` when a recorded failure crossed the pause threshold.
+ * Best-effort, after the failure committed: the feed is already paused, and a
+ * lost announcement must never undo that.
+ */
+export async function announceFeedAutoPause(
+  recorded: RecordedFeedSyncFailure | null
+): Promise<void> {
+  if (!recorded) return;
   // delivery_id is stable per failure episode (first_failure_at), so retries
   // after a failed activation are idempotent and do not double-queue
   // Automations.
   try {
     await maybeEmitFeedAutoPausedAfterFailure({
-      feedId: params.feedId,
-      consecutiveFailures,
-      pauseThreshold,
-      runId: params.runId,
+      feedId: recorded.feedId,
+      consecutiveFailures: recorded.consecutiveFailures,
+      pauseThreshold: feedBackoff.pauseThreshold,
+      runId: recorded.runId,
     });
   } catch (err) {
     // The feed is already paused; log hard so we notice a lost activation, but
     // never fail the caller — its run is already terminal.
     logger.error(
-      { feed_id: params.feedId, error: errorMessage(err) },
-      '[applyFeedSyncFailure] maybeEmitFeedAutoPausedAfterFailure threw'
+      { feed_id: recorded.feedId, error: errorMessage(err) },
+      '[announceFeedAutoPause] maybeEmitFeedAutoPausedAfterFailure threw'
     );
   }
 }

@@ -247,6 +247,50 @@ describe('completeWorkerJob status guard (late-completion-after-timeout)', () =>
     expect(after[0].last_sync_at).not.toBeNull();
   });
 
+  it('rolls the run transition back when feed bookkeeping fails', async () => {
+    const org = await createTestOrganization();
+    const connId = await insertConnection(org.id);
+    const feedId = await insertFeed(org.id, connId);
+    const sql = getTestDb();
+    await sql`
+      UPDATE feeds
+      SET consecutive_failures = 2147483647
+      WHERE id = ${feedId}
+    `;
+    const [run] = await sql<{ id: number }[]>`
+      INSERT INTO runs
+        (organization_id, run_type, feed_id, connection_id, connector_key,
+         connector_version, status, claimed_by, claimed_at, created_at)
+      VALUES
+        (${org.id}, 'sync', ${feedId}, ${connId}, 'chrome', '0.2.0',
+         'running', ${WORKER_ID}, NOW(), NOW())
+      RETURNING id
+    `;
+    const { ctx, result } = mockWorkerCtx({
+      run_id: run.id,
+      worker_id: WORKER_ID,
+      status: 'failed',
+      error_message: 'expected failure',
+    });
+
+    await completeWorkerJob(ctx);
+
+    expect(result().status).toBe(500);
+    const [after] = await sql<{
+      status: string;
+      completed_at: Date | null;
+      error_message: string | null;
+    }[]>`
+      SELECT status, completed_at, error_message
+      FROM runs WHERE id = ${run.id}
+    `;
+    expect(after).toEqual({
+      status: 'running',
+      completed_at: null,
+      error_message: null,
+    });
+  });
+
   it('does not commit a new checkpoint when a running stream later fails', async () => {
     const org = await createTestOrganization();
     const connId = await insertConnection(org.id);

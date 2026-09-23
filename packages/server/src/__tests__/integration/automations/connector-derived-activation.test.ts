@@ -393,7 +393,13 @@ describe("platform-derived connector activation", () => {
 				],
 			},
 		});
-		expect(res.status).toBe(200);
+		// The page is refused whole: a deleted feed accepts no events, so there
+		// is nothing an Automation could be activated by.
+		expect(res.status).toBe(409);
+		const events = await db`
+			SELECT id FROM events WHERE connection_id = ${connection.id}
+		`;
+		expect(events).toHaveLength(0);
 
 		const runs = await db`
 			SELECT id FROM runs WHERE automation_id = ${automationId}

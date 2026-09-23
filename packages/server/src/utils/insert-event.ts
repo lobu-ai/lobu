@@ -87,6 +87,25 @@ export async function lockEventDedupIdentity(
   `;
 }
 
+/**
+ * Take every identity lock one transaction will need, up front and in lock-key
+ * order. Two transactions that each write several identities and lock them as
+ * they go deadlock when they meet the same pair in opposite order; a single
+ * global order cannot form that cycle. `lockEventDedupIdentity` on one of these
+ * identities later in the same transaction is then a no-op re-acquire.
+ */
+export async function lockEventDedupIdentities(
+  sql: DbClient,
+  connectionId: number,
+  originIds: readonly string[]
+): Promise<void> {
+  const keys = [...new Set(originIds.map((originId) => eventDedupLockKey(connectionId, originId)))];
+  keys.sort((a, b) => a - b);
+  for (const key of keys) {
+    await sql`SELECT pg_advisory_xact_lock(${EVENT_DEDUP_LOCK_NAMESPACE}, ${key})`;
+  }
+}
+
 // ============================================
 // Types
 // ============================================
@@ -1009,24 +1028,29 @@ export async function insertEvent(
   // or both target the same row to supersede (→ duplicate-key error on
   // idx_events_superseded_by, which fails the whole stream batch). Hold a
   // transaction-scoped advisory lock keyed on (connection_id, origin_id) so
-  // these serialize. Only engage when we own the connection (no caller-supplied
-  // tx, which already runs in its own atomic scope) and have both keys.
+  // these serialize — inside the caller's transaction when it passes one, since
+  // READ COMMITTED hides a concurrent writer's uncommitted row there just the
+  // same, or in a short transaction of our own otherwise.
+  const inCallerTransaction = typeof sql.savepoint === 'function';
   const dedupConnectionId = params.connectionId;
-  if (options?.onConflictUpdate && !options.sql && dedupConnectionId && params.originId) {
-    return sql.begin(async (tx) => {
+  if (options?.onConflictUpdate && dedupConnectionId && params.originId) {
+    const lockThenInsert = async (tx: DbClient) => {
       await lockEventDedupIdentity(tx, dedupConnectionId, params.originId);
       return runInsert(tx);
-    }) as Promise<InsertedEvent>;
+    };
+    return (
+      inCallerTransaction ? lockThenInsert(sql) : sql.begin(lockThenInsert)
+    ) as Promise<InsertedEvent>;
   }
 
-  // An explicit supersede without a caller-supplied tx must still commit the
+  // An explicit supersede outside a transaction must still commit the
   // superseding INSERT and the superseded_by stamp atomically: as two
   // autocommit statements, a crash between them would leave the superseded
   // row's denormalized edge permanently NULL — which, after the Stage-2 view
   // flip to `WHERE superseded_by IS NULL`, would resurrect it as a live row.
   // (The dedup path can only derive a supersede when connectionId+originId are
   // both present, and that case is already inside the advisory-lock tx above.)
-  if (params.supersedesEventId != null && !options?.sql) {
+  if (params.supersedesEventId != null && !inCallerTransaction) {
     return sql.begin(async (tx) =>
       runInsert(tx)
     ) as Promise<InsertedEvent>;

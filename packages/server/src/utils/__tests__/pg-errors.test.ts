@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isQueryCanceled, isUniqueViolation } from '../pg-errors';
+import { isDeadlockDetected, isQueryCanceled, isUniqueViolation } from '../pg-errors';
 
 describe('pg-errors', () => {
   describe('isQueryCanceled', () => {
@@ -27,6 +27,15 @@ describe('pg-errors', () => {
       expect(isUniqueViolation({ code: '23505', constraint: 'idx_bar' }, 'idx_foo')).toBe(false);
       expect(isUniqueViolation({ code: '23503', constraint: 'idx_foo' }, 'idx_foo')).toBe(false);
       expect(isUniqueViolation(null, 'idx_foo')).toBe(false);
+    });
+  });
+
+  describe('isDeadlockDetected', () => {
+    it('matches only SQLSTATE 40P01', () => {
+      expect(isDeadlockDetected({ code: '40P01' })).toBe(true);
+      expect(isDeadlockDetected({ code: '40001' })).toBe(false);
+      expect(isDeadlockDetected(new Error('deadlock detected'))).toBe(false);
+      expect(isDeadlockDetected(null)).toBe(false);
     });
   });
 });

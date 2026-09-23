@@ -39,7 +39,7 @@ import {
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
-import { applyFeedSyncFailure } from '../connectors/feed-sync-failure';
+import { announceFeedAutoPause, applyFeedSyncFailure } from '../connectors/feed-sync-failure';
 import { resolveOperationFiles } from '../operations/file-inputs';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
@@ -1949,11 +1949,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       // auto-pauses, and reports healthy while every run fails. Gated on the
       // transition so a lost lease cannot charge the feed twice.
       if (failed && row.feed_id && !row.dry_run) {
-        await applyFeedSyncFailure({
-          feedId: row.feed_id,
-          errorMessage: message,
-          runId: row.run_id,
-        });
+        await announceFeedAutoPause(
+          await applyFeedSyncFailure(getDb(), {
+            feedId: row.feed_id,
+            errorMessage: message,
+            runId: row.run_id,
+          })
+        );
       }
       logger.error(
         { run_id: row.run_id, connector_key: row.connector_key, err },

@@ -34,7 +34,16 @@ import {
 	type ConnectorDeriveFeedContext,
 } from "../automations/connector-derived";
 import { materializeConnectorAutomationSignal } from "../automations/connector-signal";
-import { applyFeedSyncFailure } from "../connectors/feed-sync-failure";
+import {
+	FeedPageUnavailableError,
+	lockFeedPage,
+	withFeedPageTransaction,
+} from "../connectors/feed-page-commit";
+import {
+	announceFeedAutoPause,
+	applyFeedSyncFailure,
+	type RecordedFeedSyncFailure,
+} from "../connectors/feed-sync-failure";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { getDb, parsePgNumberArray } from "../db/client";
 import { eventArtifactBinding } from "../gateway/files/artifact-store";
@@ -516,74 +525,132 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		const isDry = run.dry_run === true;
 		const dryPreview: Array<Record<string, unknown>> = [];
 
-		// The whole batch, parameterised on a DB handle. The real path passes the
-		// singleton: event inserts below remain statement-per-autocommit, while
-		// applyEventAttributions opens one bounded transaction for this batch's
-		// entity attribution writes. The dry path passes a tx that is rolled back.
-		const ingestBatch = async (db: DbClient) => {
-			// Audio attachments are queued only after their event insert commits.
-			let pendingTranscriptions: Parameters<
-				typeof triggerAudioTranscriptions
-			>[1] = [];
-			let totalItems = 0;
-			const rejectedItems: Array<{
-				id: string;
-				semantic_type?: string;
-				errors: string[];
-			}> = [];
-			const acceptedItems: typeof batch.items = [];
-
-			// Validate the connector-authored payload before attribution adds any
-			// server-owned identity projection keys. Besides making strict
-			// additionalProperties:false schemas compatible with tenant scope, this
-			// keeps a rejected event from creating or accreting an entity that will
-			// never have a corresponding durable event.
-			for (const item of batch.items) {
-				const itemOriginType = item.origin_type ?? null;
-				const itemSemanticType =
-					item.semantic_type ?? itemOriginType ?? "content";
-				const validationType = itemOriginType ?? itemSemanticType;
-				if (validationType && run.feed_key) {
-					const kindResult = await validateConnectorEventSemanticType(
-						validationType,
-						item.metadata as Record<string, unknown> | undefined,
-						run.connector_key,
-						run.feed_key,
-						run.organization_id
-					);
-					if (!kindResult.valid) {
-						logger.warn(
-							{
-								run_id: batch.run_id,
-								item_id: browserRun ? "[browser-item]" : item.id,
-								semantic_type: validationType,
-								errors: kindResult.errors,
-							},
-							"Connector event semantic type validation failed — rejecting event"
-						);
-						rejectedItems.push({
-							id: item.id,
+		// Validate the connector-authored payload before attribution adds any
+		// server-owned identity projection keys. Besides making strict
+		// additionalProperties:false schemas compatible with tenant scope, this
+		// keeps a rejected event from creating or accreting an entity that will
+		// never have a corresponding durable event.
+		const rejectedItems: Array<{
+			id: string;
+			semantic_type?: string;
+			errors: string[];
+		}> = [];
+		for (const item of batch.items) {
+			const itemOriginType = item.origin_type ?? null;
+			const itemSemanticType = item.semantic_type ?? itemOriginType ?? "content";
+			const validationType = itemOriginType ?? itemSemanticType;
+			if (validationType && run.feed_key) {
+				const kindResult = await validateConnectorEventSemanticType(
+					validationType,
+					item.metadata as Record<string, unknown> | undefined,
+					run.connector_key,
+					run.feed_key,
+					run.organization_id
+				);
+				if (!kindResult.valid) {
+					logger.warn(
+						{
+							run_id: batch.run_id,
+							item_id: browserRun ? "[browser-item]" : item.id,
 							semantic_type: validationType,
 							errors: kindResult.errors,
-						});
-						continue;
-					}
+						},
+						"Connector event semantic type validation failed — rejecting event"
+					);
+					rejectedItems.push({
+						id: item.id,
+						semantic_type: validationType,
+						errors: kindResult.errors,
+					});
 				}
-				acceptedItems.push(item);
 			}
+		}
 
-			// Any rejection fails the WHOLE batch before a single write or
-			// checkpoint advance. Splitting the batch (ingest the valid items,
-			// report the rejected ones) looks friendlier but is the silent
-			// data-loss path: the cursor the worker commits next describes the
-			// page as consumed, so the rejected items are never offered again
-			// even after the connector is fixed. A failed batch advances nothing;
-			// the run fails loudly with rejected_items on the response, the
-			// author fixes their eventKinds, and the next sync re-collects the
-			// page in full.
-			if (rejectedItems.length > 0) {
-				return { totalItems: 0, rejectedItems };
+		// Any rejection fails the WHOLE batch before a single write or
+		// checkpoint advance. Splitting the batch (ingest the valid items,
+		// report the rejected ones) looks friendlier but is the silent
+		// data-loss path: the cursor the worker commits next describes the
+		// page as consumed, so the rejected items are never offered again
+		// even after the connector is fixed. A failed batch advances nothing;
+		// the run fails loudly with rejected_items on the response, the
+		// author fixes their eventKinds, and the next sync re-collects the
+		// page in full.
+		if (rejectedItems.length > 0) {
+			// Non-2xx: the worker must fail the run, not report the offered item
+			// count as collected. Nothing was written and no checkpoint moved, so
+			// a corrected connector re-collects this page on its next sync.
+			return c.json(
+				{
+					error: "batch_rejected",
+					error_description:
+						"One or more offered items failed validation; the whole batch was rejected, nothing was ingested and no checkpoint was advanced. Fix the connector's declared eventKinds and re-sync.",
+					rejected_items: rejectedItems,
+				},
+				422
+			);
+		}
+
+		// ESCAPES THE TX: inline attachments are published to the artifact store
+		// before the page transaction opens, because nothing that leaves Postgres
+		// may run inside it (see connectors/feed-page-commit.ts). Each item keeps
+		// the ids it published so the ones no stored row references are reclaimed
+		// below — all of them if the page does not commit.
+		const stagedItems: Array<{
+			item: (typeof batch.items)[number];
+			sourceOriginId: string | undefined;
+			pendingTranscriptions: Awaited<
+				ReturnType<typeof materializeInlineAttachments>
+			>["pendingTranscriptions"];
+			publishedArtifactIds: string[];
+		}> = [];
+		try {
+			for (const acceptedItem of batch.items) {
+				const sourceOriginId = browserSourceOriginIds.get(acceptedItem);
+				if (isDry) {
+					stagedItems.push({
+						item: acceptedItem,
+						sourceOriginId,
+						pendingTranscriptions: [],
+						publishedArtifactIds: [],
+					});
+					continue;
+				}
+				const materialized = await materializeInlineAttachments(
+					[acceptedItem],
+					() =>
+						eventArtifactBinding({
+							organizationId: run.organization_id,
+							connectionId: run.connection_id,
+							feedId: run.feed_id,
+							originId: acceptedItem.id,
+						})
+				);
+				stagedItems.push({
+					item: materialized.items[0] as typeof acceptedItem,
+					sourceOriginId,
+					pendingTranscriptions: materialized.pendingTranscriptions,
+					publishedArtifactIds: materialized.publishedArtifactIds,
+				});
 			}
+		} catch (err) {
+			await deleteMaterializedArtifacts(
+				stagedItems.flatMap((staged) => staged.publishedArtifactIds)
+			);
+			throw err;
+		}
+
+		// The page: every event, its attribution and Automation activation rows,
+		// and the checkpoint, written in the one transaction that also holds the
+		// run's lease (feed-page-commit.ts). State is local to one call because a
+		// deadlock victim runs it again from the start.
+		const writePage = async (db: DbClient) => {
+			let totalItems = 0;
+			const activations: AutomationActivationResult[] = [];
+			const pendingTranscriptions: Parameters<
+				typeof triggerAudioTranscriptions
+			>[1] = [];
+			const autoLinks: Array<Parameters<typeof autoLinkEvent>[0]> = [];
+			const referencedArtifactIds = new Set<string>();
 
 			// Resolve or create entities declared via eventKinds[kind].attributions
 			// before inserting events. One query per (entityType, matchField) per
@@ -598,7 +665,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 					connectionId: run.connection_id,
 					feedKey: run.feed_key,
 					orgId: run.organization_id,
-					items: acceptedItems,
+					items: stagedItems.map((staged) => staged.item),
 				},
 				db
 			);
@@ -612,8 +679,8 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			if (
 				run.feed_id != null &&
 				run.feed_key &&
-				acceptedItems.some(
-					(item) => (item.automation_signals?.length ?? 0) === 0
+				stagedItems.some(
+					(staged) => (staged.item.automation_signals?.length ?? 0) === 0
 				)
 			) {
 				deriveContext = await loadConnectorDeriveFeedContext(
@@ -627,52 +694,17 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				);
 			}
 
-			for (const [itemIndex, batchItem] of acceptedItems.entries()) {
-				let item = batchItem;
-				const sourceOriginId = browserSourceOriginIds.get(item);
-				let publishedArtifactIds: string[] = [];
-				let artifactCommitted = false;
+			for (const [itemIndex, staged] of stagedItems.entries()) {
+				const { item, sourceOriginId } = staged;
 				try {
 					const itemOriginType = item.origin_type ?? null;
 					const itemSemanticType =
 						item.semantic_type ?? itemOriginType ?? "content";
 
-					// Skip events with no content — connectors must provide text
-					if (!item.payload_text && !item.title) {
-						logger.warn(
-							{
-								run_id: batch.run_id,
-								item_id: browserRun ? "[browser-item]" : item.id,
-								connector: run.connector_key,
-							},
-							"[stream] Skipping event with empty payload_text and title"
-						);
-						continue;
-					}
-
-					let itemPendingTranscriptions: Awaited<
-						ReturnType<typeof materializeInlineAttachments>
-					>["pendingTranscriptions"] = [];
-					if (!isDry) {
-						// ESCAPES THE TX: publish only after validation, immediately before
-						// the event insert. The finally block deletes this item's artifacts
-						// unless insertEvent wrote a row that references them.
-						const materialized = await materializeInlineAttachments(
-							[item],
-							() =>
-								eventArtifactBinding({
-									organizationId: run.organization_id,
-									connectionId: run.connection_id,
-									feedId: run.feed_id,
-									originId: item.id,
-								})
-						);
-						item = materialized.items[0] as typeof item;
-						itemPendingTranscriptions = materialized.pendingTranscriptions;
-						publishedArtifactIds = materialized.publishedArtifactIds;
-					}
-
-					const activations: AutomationActivationResult[] = [];
+					// An item with neither text nor a title is still a source record —
+					// its content can live wholly in payload_data. It is stored like
+					// any other: skipping it while the page's checkpoint advanced past
+					// it lost it for good.
 					const inserted = await insertEvent(
 						{
 							entityIds: entityIds,
@@ -706,15 +738,11 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 							// these reserved fields from identities in the transaction above.
 							trustedIdentityScopeProjections: true,
 							sourceOriginId,
-							// Dry path only: the tx that gets rolled back — the INSERT
-							// genuinely executes, so every constraint, trigger and NOT NULL
-							// is exercised for real. The real path must NOT pass `db` even
-							// though it equals the singleton: a caller-supplied `sql` makes
-							// insertEvent skip its advisory-lock dedup transaction (the
-							// caller's tx is assumed to be the atomic scope), and that lock
-							// is what serializes concurrent ingests of the same
-							// (connection_id, origin_id) across replicas.
-							sql: isDry ? db : undefined,
+							// The page transaction. insertEvent takes the item's dedup lock
+							// inside it (already held — lockFeedPage took every identity
+							// in key order), so concurrent ingests of the same
+							// (connection_id, origin_id) still serialize across replicas.
+							sql: db,
 							afterPersist: async (persisted, tx) => {
 								// Keyed by `origin_type`, like attribution rules. A declaration
 								// naming an endpoint the item never mentioned is omitted below,
@@ -832,19 +860,21 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 					);
 					// `unchanged` reuses the pre-existing row, which still points at the
 					// artifacts published by an earlier sync — the ones we just published
-					// were never referenced by any row, so the finally block reclaims them.
-					// `state_updated` reconciles counters on the existing row and leaves
-					// `attachments` untouched, so it reuses the earlier sync's artifacts
-					// exactly as `unchanged` does — the ones just published are unreferenced.
+					// were never referenced by any row, so they are reclaimed after
+					// commit. `state_updated` reconciles counters on the existing row and
+					// leaves `attachments` untouched, so it reuses the earlier sync's
+					// artifacts exactly as `unchanged` does.
 					if (
 						inserted.change !== "unchanged" &&
 						inserted.change !== "state_updated"
 					) {
-						artifactCommitted = true;
+						for (const id of staged.publishedArtifactIds) {
+							referencedArtifactIds.add(id);
+						}
 						const transcriptionConnectionId = run.connection_id;
 						if (transcriptionConnectionId != null) {
 							pendingTranscriptions.push(
-								...itemPendingTranscriptions.map((job) => ({
+								...staged.pendingTranscriptions.map((job) => ({
 									...job,
 									originId: inserted.origin_id,
 									baseEventId: inserted.id,
@@ -852,56 +882,43 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 									title: inserted.title,
 								}))
 							);
-						} else if (itemPendingTranscriptions.length > 0) {
+						} else if (staged.pendingTranscriptions.length > 0) {
 							logger.warn(
 								{ run_id: batch.run_id },
 								"[stream] Audio transcription skipped — source connection missing"
 							);
 						}
 					}
-					// ESCAPES THE TX: this dispatches real Automation runs to the worker
-					// fleet. The activation ROWS roll back with the tx, but a dispatched
-					// agent run has already left the database — it would run against, and
-					// react to, an event that is about to cease to exist.
-					if (!isDry) {
-						await dispatchAutomationRunsBestEffort(activations);
+					totalItems++;
+					if (entityIds.length > 0) {
+						autoLinks.push({
+							eventId: Number(inserted.id),
+							entityIds,
+							content: item.payload_text,
+							title: item.title,
+							organizationId: run.organization_id,
+						});
 					}
-					if (inserted) {
-						totalItems++;
-						// ESCAPES THE TX: detached (`.catch(() => {})`) and writes through
-						// the getDb() singleton, not `db`, so its writes would commit
-						// independently of the rollback — and race it, since nothing awaits
-						// them.
-						if (entityIds.length > 0 && !isDry) {
-							autoLinkEvent({
-								eventId: Number(inserted.id),
-								entityIds,
-								content: item.payload_text,
-								title: item.title,
-								organizationId: run.organization_id,
-							}).catch(() => {});
-						}
-						// Captured after a successful insert, so the preview describes rows
-						// that really did land (and would land again on a real sync) rather
-						// than rows we merely hoped would.
-						if (isDry && dryPreview.length < DRY_RUN_PREVIEW_LIMIT) {
-							dryPreview.push({
-								origin_id: item.id,
-								title: item.title,
-								semantic_type: itemSemanticType,
-								payload_type: item.payload_type,
-								occurred_at: item.occurred_at,
-								author_name: item.author_name,
-								source_url: item.source_url,
-								// Bounded: a preview is for eyeballing shape, and some
-								// connectors emit very large bodies.
-								content_preview:
-									typeof item.payload_text === "string"
-										? item.payload_text.slice(0, DRY_RUN_CONTENT_CHARS)
-										: null,
-								attachment_count: item.attachments?.length ?? 0,
-							});
-						}
+					// Captured after a successful insert, so the preview describes rows
+					// that really did land (and would land again on a real sync) rather
+					// than rows we merely hoped would.
+					if (isDry && dryPreview.length < DRY_RUN_PREVIEW_LIMIT) {
+						dryPreview.push({
+							origin_id: item.id,
+							title: item.title,
+							semantic_type: itemSemanticType,
+							payload_type: item.payload_type,
+							occurred_at: item.occurred_at,
+							author_name: item.author_name,
+							source_url: item.source_url,
+							// Bounded: a preview is for eyeballing shape, and some
+							// connectors emit very large bodies.
+							content_preview:
+								typeof item.payload_text === "string"
+									? item.payload_text.slice(0, DRY_RUN_CONTENT_CHARS)
+									: null,
+							attachment_count: item.attachments?.length ?? 0,
+						});
 					}
 				} catch (err) {
 					if (browserRun) {
@@ -913,20 +930,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 						console.error("[stream] Insert failed for item", item.id, ":", err);
 					}
 					throw err;
-				} finally {
-					if (!artifactCommitted) {
-						await deleteMaterializedArtifacts(publishedArtifactIds);
-					}
 				}
-			}
-
-			// ESCAPES THE TX: transcription is an external, paid API call, and it
-			// is fired detached so nothing awaits it. `pendingTranscriptions` is
-			// already empty on a dry run (nothing was materialized), but the
-			// guard stays so this cannot start costing money if materialization
-			// ever grows a dry path.
-			if (!isDry) {
-				triggerAudioTranscriptions(run.organization_id, pendingTranscriptions);
 			}
 
 			// Source acknowledgments advance only on successful completion; streaming
@@ -954,32 +958,59 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
     `;
 			}
 
-			return { totalItems, rejectedItems };
+			return {
+				totalItems,
+				activations,
+				pendingTranscriptions,
+				autoLinks,
+				referencedArtifactIds,
+			};
 		};
 
-		// The real path: singleton handle, autocommit per statement, byte-for-byte
-		// the semantics that shipped before dry runs existed.
-		//
-		// The dry path: the same closure against a transaction, then an unconditional
-		// rollback. postgres.js rolls back when the `begin` callback throws, so the
-		// throw IS the mechanism — a sentinel, not an error condition. Catching only
-		// that exact object means a genuine failure inside the batch still propagates
-		// to the 500 handler below instead of being swallowed as "rolled back fine".
+		const page = {
+			runId: batch.run_id,
+			workerId: batch.worker_id || null,
+			organizationId: run.organization_id,
+			connectionId: run.connection_id,
+			feedId: run.feed_id,
+			originIds: stagedItems.map((staged) => staged.item.id),
+		};
+
+		// The real path commits the page. The dry path runs the same closure
+		// under the same locks and then rolls back unconditionally. postgres.js
+		// rolls back when the `begin` callback throws, so the throw IS the
+		// mechanism — a sentinel, not an error condition. Catching only that exact
+		// object means a genuine failure inside the batch still propagates to the
+		// 500 handler below instead of being swallowed as "rolled back fine".
 		const DRY_RUN_ROLLBACK = Symbol("dry-run-rollback");
-		let outcome: Awaited<ReturnType<typeof ingestBatch>> | null = null;
-		if (isDry) {
-			try {
-				await sql.begin(async (tx) => {
-					outcome = await ingestBatch(tx);
-					throw DRY_RUN_ROLLBACK;
-				});
-			} catch (err) {
-				if (err !== DRY_RUN_ROLLBACK) throw err;
+		let outcome: Awaited<ReturnType<typeof writePage>> | null = null;
+		try {
+			if (isDry) {
+				try {
+					await sql.begin(async (tx) => {
+						await lockFeedPage(tx, page);
+						outcome = await writePage(tx);
+						throw DRY_RUN_ROLLBACK;
+					});
+				} catch (err) {
+					if (err !== DRY_RUN_ROLLBACK) throw err;
+				}
+			} else {
+				outcome = await withFeedPageTransaction(sql, page, writePage);
 			}
-		} else {
-			outcome = await ingestBatch(sql);
+		} catch (err) {
+			await deleteMaterializedArtifacts(
+				stagedItems.flatMap((staged) => staged.publishedArtifactIds)
+			);
+			if (err instanceof FeedPageUnavailableError) {
+				// Reaped, cancelled or re-claimed after this request was authorized.
+				// A deleted feed/connection reaches the same fence. Nothing was written.
+				// Same answer the authorization gate gives a run it already lost.
+				return c.json({ error: "Run is not in progress" }, 409);
+			}
+			throw err;
 		}
-		// Unreachable: ingestBatch either assigns `outcome` or throws (and a throw
+		// Unreachable: the page either assigns `outcome` or throws (and a throw
 		// that is not the rollback sentinel is rethrown above). Asserted rather
 		// than defaulted to {totalItems: 0} — TypeScript cannot see the assignment
 		// through the transaction closure, and a silent zero here would report
@@ -987,9 +1018,30 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		if (outcome === null) {
 			throw new Error("[stream] batch completed without an outcome");
 		}
-		const { totalItems, rejectedItems } = outcome as Awaited<
-			ReturnType<typeof ingestBatch>
-		>;
+		const committed = outcome as Awaited<ReturnType<typeof writePage>>;
+		const { totalItems } = committed;
+
+		if (!isDry) {
+			// ESCAPES-THE-TX effects run only after the page is durable, never on a
+			// transaction retry.
+			await deleteMaterializedArtifacts(
+				stagedItems
+					.flatMap((staged) => staged.publishedArtifactIds)
+					.filter((id) => !committed.referencedArtifactIds.has(id))
+			);
+			// Dispatches real Automation runs to the worker fleet; their activation
+			// rows committed with the page.
+			await dispatchAutomationRunsBestEffort(committed.activations);
+			// Detached (`.catch(() => {})`), writing through the getDb() singleton.
+			for (const link of committed.autoLinks) {
+				autoLinkEvent(link).catch(() => {});
+			}
+			// Transcription is an external, paid API call, fired detached.
+			triggerAudioTranscriptions(
+				run.organization_id,
+				committed.pendingTranscriptions
+			);
+		}
 
 		if (isDry) {
 			// Written AFTER the rollback, on the singleton — this is the one thing a
@@ -1024,21 +1076,6 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
           )
       WHERE id = ${batch.run_id}
     `;
-		}
-
-		if (rejectedItems.length > 0) {
-			// Non-2xx: the worker must fail the run, not report the offered item
-			// count as collected. Nothing was written and no checkpoint moved, so
-			// a corrected connector re-collects this page on its next sync.
-			return c.json(
-				{
-					error: "batch_rejected",
-					error_description:
-						"One or more offered items failed validation; the whole batch was rejected, nothing was ingested and no checkpoint was advanced. Fix the connector's declared eventKinds and re-sync.",
-					rejected_items: rejectedItems,
-				},
-				422
-			);
 		}
 
 		return c.json({
@@ -1146,37 +1183,129 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 		// double-applies (consecutive_failures, items_collected, next_run_at,
 		// auth_data). The failed path also stamps exit diagnostics.
 		//
-		// The checkpoint write is CASE-guarded on `dry_run` and failure in SQL
-		// (rather than read-then-branch in JS) so the guard rides the same atomic
-		// UPDATE as the terminal transition: a dry run or failed stream never
-		// records a new connector checkpoint.
-		const dryGuardedCheckpoint = sql`
-          checkpoint = CASE WHEN dry_run OR ${req.status === "failed"} THEN checkpoint
-                       ELSE COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint) END`;
-		const updatedRuns = (await finalizeRun(sql, {
-			runId: req.run_id,
-			workerId: req.worker_id,
-			status: req.status === "failed" ? "failed" : "completed",
-			extraSet:
-				req.status === "failed"
-					? sql`,
-          items_collected = ${req.items_collected ?? 0},
-          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint},
-          output_tail = ${req.output_tail ?? null},
-          exit_code = ${req.exit_code ?? null},
-          exit_signal = ${req.exit_signal ?? null},
-          exit_reason = ${req.exit_reason ?? null}`
-					: sql`,
-          items_collected = ${req.items_collected ?? 0},
-          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-			returning: sql`feed_id, connection_id, dry_run`,
-		})) as unknown as Array<{
-			feed_id: number | null;
-			connection_id: number | null;
-			dry_run: boolean;
-		}>;
+		// The terminal transition and the feed's sync bookkeeping (outcome,
+		// failure budget, FINAL checkpoint, next_run_at) commit together: apart,
+		// a crash between them left a completed run whose feed never advanced or
+		// reset, or a failed run that never counted against its feed. The run row
+		// locks before the feed row — the order a feed page takes them in
+		// (connectors/feed-page-commit.ts).
+		const finalized = await sql.begin(async (tx) => {
+			let recordedFailure: RecordedFeedSyncFailure | null = null;
+			// The checkpoint write is CASE-guarded on `dry_run` and failure in SQL
+			// (rather than read-then-branch in JS) so the guard rides the same atomic
+			// UPDATE as the terminal transition: a dry run or failed stream never
+			// records a new connector checkpoint.
+			const dryGuardedCheckpoint = tx`
+	          checkpoint = CASE WHEN dry_run OR ${req.status === "failed"} THEN checkpoint
+	                       ELSE COALESCE(${req.checkpoint ? tx.json(req.checkpoint) : null}, checkpoint) END`;
 
-		if (updatedRuns.length === 0) {
+			const updatedRuns = (await finalizeRun(tx, {
+				runId: req.run_id,
+				workerId: req.worker_id,
+				status: req.status === "failed" ? "failed" : "completed",
+				extraSet:
+					req.status === "failed"
+						? tx`,
+	          items_collected = ${req.items_collected ?? 0},
+	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint},
+	          output_tail = ${req.output_tail ?? null},
+	          exit_code = ${req.exit_code ?? null},
+	          exit_signal = ${req.exit_signal ?? null},
+	          exit_reason = ${req.exit_reason ?? null}`
+						: tx`,
+	          items_collected = ${req.items_collected ?? 0},
+	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
+				returning: tx`feed_id, connection_id, dry_run`,
+			})) as unknown as Array<{
+				feed_id: number | null;
+				connection_id: number | null;
+				dry_run: boolean;
+			}>;
+
+			if (updatedRuns.length === 0) return null;
+
+			// Update the feed's sync state
+			const runRows = updatedRuns;
+			const feedId = runRows[0]?.feed_id;
+			const isDry = runRows[0]?.dry_run === true;
+
+			// Never for a dry run: this block stamps last_sync_at/status, resets or
+			// increments consecutive_failures, adds items_collected, ADVANCES THE FEED
+			// CHECKPOINT, and moves next_run_at (with backoff/auto-pause on failure).
+			// Every one of those durably changes what the next REAL sync does or how
+			// the feed reports its last real outcome — exactly the state a dry run
+			// exists to leave untouched.
+			//
+			// Why this stays an explicit guard while streamContent uses a rolled-back
+			// transaction instead. Two reasons, and they are the reasons — not an
+			// oversight to be tidied up later:
+			//
+			//  1. This function's write set is closed and cannot grow the way an
+			//     item-ingest loop grows: it finalizes one run row and stamps one feed
+			//     row. One guard covers one block; there is no open set to lose track of.
+			//  2. The keep/discard sets are INTERLEAVED. A dry run must still finalize
+			//     its own run row — that is real working state, and finalizeRun's whole
+			//     purpose is that the terminal transition is atomic. Rolling back here
+			//     would mean lifting the run update out of the transaction and giving up
+			//     that guarantee to buy uniformity. Not a trade worth making.
+			if (feedId && !isDry) {
+				const feedRows = (await tx`
+	      SELECT schedule, timezone FROM feeds WHERE id = ${feedId}
+	    `) as unknown as Array<{
+					schedule: string | null;
+					timezone: string | null;
+				}>;
+
+				// Manual feeds (no schedule) stay unscheduled after completion.
+				const schedule = feedRows[0]?.schedule ?? null;
+				const nextRun = schedule
+					? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
+					: null;
+
+				// A connector that could not reach a required execution dependency never
+				// reached the source. Preserve the last real source-health result, do not
+				// consume the hard-pause budget, and keep the ordinary schedule armed.
+				if (dependencyUnavailable) {
+					await tx`
+	          UPDATE feeds
+	          SET last_error = ${req.error_message ?? null},
+	              next_run_at = ${nextRun},
+	              updated_at = current_timestamp
+	          WHERE id = ${feedId}
+	        `;
+				} else if (req.status === "failed") {
+					// Backoff + hard auto-pause (item 5, #2033) live in the shared helper
+					// so the gateway-side poll failure lane applies the same policy.
+					recordedFailure = await applyFeedSyncFailure(tx, {
+						feedId,
+						errorMessage: req.error_message ?? null,
+						runId: req.run_id,
+					});
+				} else {
+					// Success: reset consecutive_failures to 0 and use the plain cron
+					// next_run_at so a recovered feed immediately resumes normal cadence.
+					await tx`
+	        UPDATE feeds
+	        SET last_sync_at = current_timestamp,
+	            last_sync_status = 'success',
+	            last_error = NULL,
+	            consecutive_failures = 0,
+	            first_failure_at = NULL,
+	            items_collected = items_collected + ${req.items_collected ?? 0},
+	            checkpoint = COALESCE(${req.checkpoint ? tx.json(req.checkpoint) : null}, checkpoint),
+	            -- Enqueue consumes the previous due time. A newly-due value belongs
+	            -- to a notification received during this run; preserve it under the
+	            -- same row lock as completion/checkpoint commit.
+	            next_run_at = CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END,
+	            updated_at = current_timestamp
+	        WHERE id = ${feedId}
+	      `;
+				}
+			}
+			return { runRows, recordedFailure };
+		});
+
+		if (finalized === null) {
 			// The run was already finalized (timeout race) or this worker isn't the
 			// claimant. Skip all feed/auth bookkeeping and return an idempotent
 			// already-finalized response.
@@ -1190,85 +1319,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			);
 			return c.json({ success: false, reason: "already_finalized" });
 		}
-
-		// Update the feed's sync state
-		const runRows = updatedRuns;
-		const feedId = runRows[0]?.feed_id;
-		const isDry = runRows[0]?.dry_run === true;
-
-		// Never for a dry run: this block stamps last_sync_at/status, resets or
-		// increments consecutive_failures, adds items_collected, ADVANCES THE FEED
-		// CHECKPOINT, and moves next_run_at (with backoff/auto-pause on failure).
-		// Every one of those durably changes what the next REAL sync does or how
-		// the feed reports its last real outcome — exactly the state a dry run
-		// exists to leave untouched.
-		//
-		// Why this stays an explicit guard while streamContent uses a rolled-back
-		// transaction instead. Two reasons, and they are the reasons — not an
-		// oversight to be tidied up later:
-		//
-		//  1. This function's write set is closed and cannot grow the way an
-		//     item-ingest loop grows: it finalizes one run row and stamps one feed
-		//     row. One guard covers one block; there is no open set to lose track of.
-		//  2. The keep/discard sets are INTERLEAVED. A dry run must still finalize
-		//     its own run row — that is real working state, and finalizeRun's whole
-		//     purpose is that the terminal transition is atomic. Rolling back here
-		//     would mean lifting the run update out of the transaction and giving up
-		//     that guarantee to buy uniformity. Not a trade worth making.
-		if (feedId && !isDry) {
-			const feedRows = (await sql`
-      SELECT schedule, timezone FROM feeds WHERE id = ${feedId}
-    `) as unknown as Array<{
-				schedule: string | null;
-				timezone: string | null;
-			}>;
-
-			// Manual feeds (no schedule) stay unscheduled after completion.
-			const schedule = feedRows[0]?.schedule ?? null;
-			const nextRun = schedule
-				? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
-				: null;
-
-			// A connector that could not reach a required execution dependency never
-			// reached the source. Preserve the last real source-health result, do not
-			// consume the hard-pause budget, and keep the ordinary schedule armed.
-			if (dependencyUnavailable) {
-				await sql`
-          UPDATE feeds
-          SET last_error = ${req.error_message ?? null},
-              next_run_at = ${nextRun},
-              updated_at = current_timestamp
-          WHERE id = ${feedId}
-        `;
-			} else if (req.status === "failed") {
-				// Backoff + hard auto-pause (item 5, #2033) live in the shared helper
-				// so the gateway-side poll failure lane applies the same policy.
-				await applyFeedSyncFailure({
-					feedId,
-					errorMessage: req.error_message ?? null,
-					runId: req.run_id,
-				});
-			} else {
-				// Success: reset consecutive_failures to 0 and use the plain cron
-				// next_run_at so a recovered feed immediately resumes normal cadence.
-				await sql`
-        UPDATE feeds
-        SET last_sync_at = current_timestamp,
-            last_sync_status = 'success',
-            last_error = NULL,
-            consecutive_failures = 0,
-            first_failure_at = NULL,
-            items_collected = items_collected + ${req.items_collected ?? 0},
-            checkpoint = COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint),
-            -- Enqueue consumes the previous due time. A newly-due value belongs
-            -- to a notification received during this run; preserve it under the
-            -- same row lock as completion/checkpoint commit.
-            next_run_at = CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END,
-            updated_at = current_timestamp
-        WHERE id = ${feedId}
-      `;
-			}
-		}
+		const { runRows } = finalized;
+		await announceFeedAutoPause(finalized.recordedFailure);
 
 		// Persist refreshed browser auth data on the auth profile.
 		//

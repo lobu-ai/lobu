@@ -148,7 +148,11 @@ timeout, and one failure does not discard successful results from the others.
   it only when source identity genuinely changes.
 - **Checkpointing.** Return `checkpoint` (timestamp- or id-based) for incremental
   sync; use `ctx.emitEvents` / `ctx.updateCheckpoint` mid-sync for long runs so a
-  crash resumes from the last saved point. The checkpoint is stored on the
+  crash resumes from the last saved point. Each page the platform receives
+  commits as one unit: its events and the checkpoint sent with it become
+  durable together or not at all, and only while the run still holds its lease,
+  so a saved checkpoint never covers events that were not stored. An event with
+  no text and no title is stored like any other. The checkpoint is stored on the
   configured feed and is **not** invalidated by bumping the connector's
   `version` — updating connector source leaves feed state, checkpoints, and
   collected data untouched. If you change the event or checkpoint shape, handle
