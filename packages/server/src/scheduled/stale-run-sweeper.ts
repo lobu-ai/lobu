@@ -51,14 +51,17 @@ interface StaleRunSweepSpec {
 	 *  `COALESCE(claimed_at, created_at)` is older than this are reaped. */
 	coarseStaleInterval: string;
 	/**
-	 * Include never-claimed pending rows, judged solely on created_at.
+	 * Include never-claimed pending rows. Auto-approved rows are judged on
+	 * `created_at`; human-approved rows are judged on the `run_at` stamped when
+	 * approval made them claimable.
 	 *
 	 * Only rows a worker is actually allowed to claim are reaped: a run with
 	 * `approval_status = 'pending'` is parked waiting for a HUMAN to approve it —
 	 * no worker will ever claim it, so the claim-timeout must NOT apply, or a
 	 * queued-approval run is force-timed-out before anyone can approve it (#2044).
-	 * Approval flips it to `approval_status = 'approved', status = 'running'`,
-	 * after which the normal in-progress heartbeat/coarse predicate governs it.
+	 * Approval flips inline work to `status = 'running'`, after which the normal
+	 * in-progress heartbeat/coarse predicate governs it. Worker-executed actions
+	 * remain pending and start their claim clock at approval.
 	 */
 	includePending?: boolean;
 }
@@ -145,8 +148,12 @@ export function buildStaleRunWhereSql(spec: StaleRunSweepSpec): string {
            -- explicit expiry. Once activated, its activation timestamp starts
            -- the ordinary worker-claim clock; the potentially old created_at
            -- must not make it time out immediately.
+           -- An approved row became claimable at approval, which stamps
+           -- run_at; judging it on queue-time created_at would time out any
+           -- run whose review outlasted the interval before a worker polled.
            (activation_kind IS NULL
-            AND created_at < current_timestamp - ${intervalSql(spec.coarseStaleInterval)})
+            AND CASE WHEN approval_status = 'approved' THEN run_at ELSE created_at END
+                < current_timestamp - ${intervalSql(spec.coarseStaleInterval)})
            OR (activation_kind = 'page_visit'
                AND activated_at IS NOT NULL
                AND activated_at < current_timestamp - ${intervalSql(spec.coarseStaleInterval)})

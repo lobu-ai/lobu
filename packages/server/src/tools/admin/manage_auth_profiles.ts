@@ -51,6 +51,10 @@ import { getScopedConnectorDefinition } from "../../catalog/connector-definition
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import { callerIsAdmin } from './helpers/db-helpers';
 import {
+  pauseFeedsForInactiveConnections,
+  resumeFeedsForRecoveredConnections,
+} from '../../feeds/auth-readiness-feeds';
+import {
   getEnvKeyMethods,
   getOAuthCredentialKeys,
   getOAuthMethods,
@@ -279,34 +283,43 @@ async function syncConnectionsForOAuthAppProfile(
   `;
 }
 
+/**
+ * Mirror browser-session readiness onto dependent connections and feeds. On
+ * recovery, only connections still marked pending_auth move; routine refreshes
+ * leave active and manually paused connections alone.
+ */
 async function syncConnectionsForBrowserAuthProfile(
   organizationId: string,
   authProfileId: number,
   active: boolean
 ): Promise<void> {
   const sql = getDb();
-  const nextConnectionStatus = active ? 'active' : 'pending_auth';
-  const nextFeedStatus = active ? 'active' : 'paused';
-  const nextRunAtValue = active ? sql`NOW()` : sql`NULL`;
+  await sql.begin(async (tx) => {
+    if (active) {
+      const recovered = (await tx`
+        UPDATE connections
+        SET status = 'active', updated_at = NOW()
+        WHERE organization_id = ${organizationId}
+          AND auth_profile_id = ${authProfileId}
+          AND status = 'pending_auth'
+          AND deleted_at IS NULL
+        RETURNING id
+      `) as Array<{ id: number }>;
+      for (const connection of recovered) {
+        await resumeFeedsForRecoveredConnections(tx, { connectionId: connection.id });
+      }
+      return;
+    }
 
-  await sql`
-    UPDATE connections
-    SET status = ${nextConnectionStatus},
-        updated_at = NOW()
-    WHERE organization_id = ${organizationId}
-      AND auth_profile_id = ${authProfileId}
-  `;
-
-  await sql`
-    UPDATE feeds f
-    SET status = ${nextFeedStatus},
-        next_run_at = ${nextRunAtValue},
-        updated_at = NOW()
-    FROM connections c
-    WHERE f.connection_id = c.id
-      AND c.organization_id = ${organizationId}
-      AND c.auth_profile_id = ${authProfileId}
-  `;
+    await tx`
+      UPDATE connections
+      SET status = 'pending_auth', updated_at = NOW()
+      WHERE organization_id = ${organizationId}
+        AND auth_profile_id = ${authProfileId}
+        AND deleted_at IS NULL
+    `;
+    await pauseFeedsForInactiveConnections(tx, { authProfileId });
+  });
 }
 
 async function handleCreateAuthProfile(
