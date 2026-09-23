@@ -415,7 +415,9 @@ export default class ActionProbeConnector {
     }
   }, 120_000);
 
-  it('drops per-feed connector cursors on every active-version change, keeping source acknowledgments', async () => {
+  it('leaves feed checkpoints untouched when the active version changes', async () => {
+    // The connector owns its checkpoint shape (docs/connector-authoring.md):
+    // a version change runs different code, it does not reset feed state.
     const sql = getTestDb();
     const KEY2 = 'zz.checkpointprobe';
     const src = (version: string, marker: string) =>
@@ -428,115 +430,27 @@ export default class ActionProbeConnector {
     );
     expect('error' in installed ? installed.error : undefined).toBeUndefined();
 
-    // A connection + feed of this connector carrying a committed checkpoint.
     const [conn] = await sql`
       INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
       VALUES (${orgId}, ${KEY2}, 'Checkpoint Probe Conn', 'zz-checkpoint-probe-conn', 'active')
       RETURNING id
     `;
+    const checkpoint = { cursor: 'old-cursor', source_ack: { records: [{ id: 'delivered-1' }] } };
     const [feed] = await sql`
       INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${conn.id}, 'items', 'active', ${sql.json({ cursor: 'old-cursor' })})
+      VALUES (${orgId}, ${conn.id}, 'items', 'active', ${sql.json(checkpoint)})
       RETURNING id
     `;
 
-    // Same-version refresh with identical code: checkpoint must survive.
-    const refresh = await manageConnections(
-      { action: 'update_connector_source', connector_key: KEY2, source_code: src('1.0.0', 'C1') },
-      TEST_ENV,
-      ctx,
-    );
-    expect('error' in refresh ? refresh.error : undefined).toBeUndefined();
-    const [kept] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(kept.checkpoint).toEqual({ cursor: 'old-cursor' });
-
-    // Negative controls. Clearing too widely is worse than the bug it fixes:
-    // a reset cursor re-collects a feed from the beginning, so the UPDATE must
-    // reach ONLY feeds joined through a connection of THIS connector in THIS
-    // org. Two neighbours that must survive the bump untouched:
-    //   (a) another connector's feed in the SAME org
-    //   (b) the SAME connector's feed in a DIFFERENT org
-    const [otherConnectorConn] = await sql`
-      INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
-      VALUES (${orgId}, ${KEY}, 'Other Connector Conn', 'zz-other-connector-conn', 'active')
-      RETURNING id
-    `;
-    const [otherConnectorFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${otherConnectorConn.id}, 'items', 'active', ${sql.json({ cursor: 'other-connector' })})
-      RETURNING id
-    `;
-
-    const otherOrg = await seedOwnerContext({
-      orgName: 'Checkpoint Scope Neighbour Org',
-      userName: 'Checkpoint Scope Neighbour User',
-    });
-    const [otherOrgConn] = await sql`
-      INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
-      VALUES (${otherOrg.org.id}, ${KEY2}, 'Neighbour Org Conn', 'zz-neighbour-org-conn', 'active')
-      RETURNING id
-    `;
-    const [otherOrgFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${otherOrg.org.id}, ${otherOrgConn.id}, 'items', 'active', ${sql.json({ cursor: 'other-org' })})
-      RETURNING id
-    `;
-
-    // A feed of THIS connector whose checkpoint also carries the server-owned
-    // `source_ack`. The cursor is connector state and must go; the ack records
-    // what this feed already acknowledged back to the source, so dropping it
-    // would re-acknowledge delivered items — every other checkpoint write
-    // preserves it, and so must this one.
-    const SOURCE_ACK = {
-      binding_id: 'binding-1',
-      epoch: 'epoch-1',
-      records: [{ id: 'delivered-1', revision: 3 }],
-    };
-    const [ackFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${conn.id}, 'acked', 'active',
-        ${sql.json({ cursor: 'old-cursor', source_ack: SOURCE_ACK })})
-      RETURNING id
-    `;
-    // A feed holding ONLY an ack has no cursor to invalidate: it must come
-    // through byte-identical rather than being rewritten to the same value.
-    const [ackOnlyFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${conn.id}, 'ack-only', 'active', ${sql.json({ source_ack: SOURCE_ACK })})
-      RETURNING id
-    `;
-    const [{ updated_at: ackOnlyUpdatedAt }] =
-      await sql`SELECT updated_at FROM feeds WHERE id = ${ackOnlyFeed.id}`;
-
-    // Version bump: the old cursor must not gate what the new code collects.
     const bumped = await manageConnections(
       { action: 'update_connector_source', connector_key: KEY2, source_code: src('1.0.1', 'C2') },
       TEST_ENV,
       ctx,
     );
     expect('error' in bumped ? bumped.error : undefined).toBeUndefined();
-    const [cleared] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(cleared.checkpoint).toBeNull();
+    const [afterBump] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+    expect(afterBump.checkpoint).toEqual(checkpoint);
 
-    const [untouchedConnector] = await sql`SELECT checkpoint FROM feeds WHERE id = ${otherConnectorFeed.id}`;
-    expect(untouchedConnector.checkpoint).toEqual({ cursor: 'other-connector' });
-    const [untouchedOrg] = await sql`SELECT checkpoint FROM feeds WHERE id = ${otherOrgFeed.id}`;
-    expect(untouchedOrg.checkpoint).toEqual({ cursor: 'other-org' });
-
-    const [ackKept] = await sql`SELECT checkpoint FROM feeds WHERE id = ${ackFeed.id}`;
-    expect(ackKept.checkpoint).toEqual({ source_ack: SOURCE_ACK });
-    const [ackOnly] = await sql`
-      SELECT checkpoint, updated_at FROM feeds WHERE id = ${ackOnlyFeed.id}
-    `;
-    expect(ackOnly.checkpoint).toEqual({ source_ack: SOURCE_ACK });
-    expect(ackOnly.updated_at).toEqual(ackOnlyUpdatedAt);
-
-    // A rollback is an active-version change too: the cursor 1.0.1 wrote is
-    // just as foreign to 1.0.0 as the reverse, so it goes the same way.
-    await sql`
-      UPDATE feeds SET checkpoint = ${sql.json({ cursor: 'written-by-1.0.1' })}
-      WHERE id = ${feed.id}
-    `;
     const rolledBack = await manageConnections(
       { action: 'rollback_connector_version', connector_key: KEY2, version: '1.0.0' },
       TEST_ENV,
@@ -544,9 +458,7 @@ export default class ActionProbeConnector {
     );
     expect('error' in rolledBack ? rolledBack.error : undefined).toBeUndefined();
     const [afterRollback] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(afterRollback.checkpoint).toBeNull();
-    const [ackAfterRollback] = await sql`SELECT checkpoint FROM feeds WHERE id = ${ackFeed.id}`;
-    expect(ackAfterRollback.checkpoint).toEqual({ source_ack: SOURCE_ACK });
+    expect(afterRollback.checkpoint).toEqual(checkpoint);
   }, 120_000);
 
   it('refuses to update a connector that is not installed', async () => {

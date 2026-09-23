@@ -590,64 +590,6 @@ export async function validateConnectorSource(params: {
 	};
 }
 
-/**
- * Drop the per-feed cursors of an org's connector when its ACTIVE version
- * changes (a source update or a rollback).
- *
- * A version change means the connector's emission contract may have changed —
- * fixed validation, new eventKinds, a different cursor format. A cursor written
- * by the other version must not gate what the now-active code collects: a
- * cursor committed over rejected or malformed items otherwise makes that page
- * unreachable forever. Clearing it makes the next sync re-collect under the
- * active code, and insert-time (connection_id, origin_id) dedup makes the
- * re-offer idempotent — identical content lands as `unchanged`. A same-version
- * source refresh is not a contract change and keeps its checkpoints.
- *
- * `source_ack` survives. It is the record of what this feed already
- * acknowledged back to its source, not connector cursor state, and losing it
- * re-acknowledges delivered items — which is why `streamContent` carries it
- * across every mid-run checkpoint write and only a successful completion may
- * advance it. Feeds holding nothing but a `source_ack` have no cursor to
- * invalidate, so they are left alone.
- */
-async function invalidateFeedCheckpointsForVersionChange(params: {
-	organizationId: string;
-	connectorKey: string;
-	previousVersion: string;
-	version: string;
-}): Promise<void> {
-	if (params.version === params.previousVersion) return;
-	const sql = getDb();
-	const cleared = await sql`
-		UPDATE feeds f
-		SET checkpoint = CASE
-				WHEN f.checkpoint ? 'source_ack'
-					THEN jsonb_build_object('source_ack', f.checkpoint -> 'source_ack')
-				ELSE NULL
-			END,
-			updated_at = current_timestamp
-		FROM connections c
-		WHERE f.connection_id = c.id
-			AND c.connector_key = ${params.connectorKey}
-			AND f.organization_id = ${params.organizationId}
-			AND f.deleted_at IS NULL
-			AND f.checkpoint IS NOT NULL
-			AND f.checkpoint <> jsonb_build_object('source_ack', f.checkpoint -> 'source_ack')
-		RETURNING f.id
-	`;
-	if (cleared.length > 0) {
-		logger.info(
-			{
-				connector_key: params.connectorKey,
-				previous_version: params.previousVersion,
-				version: params.version,
-				feeds_reset: cleared.length,
-			},
-			"Connector version change invalidated per-feed checkpoints",
-		);
-	}
-}
-
 export type ConnectorVersionChange = {
 	connectorKey: string;
 	name: string;
@@ -701,12 +643,6 @@ export async function updateInstalledConnectorSource(params: {
 			connectorKey: params.connectorKey,
 		});
 		if (installed) {
-			await invalidateFeedCheckpointsForVersionChange({
-				organizationId: params.organizationId,
-				connectorKey: params.connectorKey,
-				previousVersion: def.version,
-				version: installed.version,
-			});
 			return {
 				connectorKey: installed.connectorKey,
 				name: installed.name,
@@ -759,12 +695,6 @@ export async function updateInstalledConnectorSource(params: {
 		versionScope: "organization",
 	});
 
-	await invalidateFeedCheckpointsForVersionChange({
-		organizationId: params.organizationId,
-		connectorKey: params.connectorKey,
-		previousVersion: def.version,
-		version: resolved.metadata.version,
-	});
 
 	logger.info(
 		{
@@ -864,12 +794,6 @@ export async function rollbackConnectorVersion(params: {
 		versionScope: "organization",
 	});
 
-	await invalidateFeedCheckpointsForVersionChange({
-		organizationId: params.organizationId,
-		connectorKey: params.connectorKey,
-		previousVersion: def.version,
-		version: params.version,
-	});
 
 	logger.info(
 		{
