@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -64,23 +65,23 @@ describe('MicrosoftOutlookConnector runtime', () => {
     const connector = new MicrosoftOutlookConnector();
 
     await expect(
-      connector.sync({ feedKey: 'messages', config: {}, credentials: null, checkpoint: {} })
+      runSync(connector, { feedKey: 'messages', config: {}, credentials: null, checkpoint: {} })
     ).rejects.toThrow('Microsoft Outlook requires OAuth authentication');
   });
 
-  test('encodes an opaque mail-folder id and follows Graph next links up to max_results', async () => {
+  test('encodes an opaque mail-folder id and stores whole pages until max_results', async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = typeof input === 'string' ? input : input.toString();
       urls.push(url);
       const page = urls.length === 1
-        ? { value: [graphMessage('one')], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/next-page' }
-        : { value: [graphMessage('two'), graphMessage('three')] };
+        ? { value: [graphMessage('one')], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/page-2' }
+        : { value: [graphMessage('two'), graphMessage('three')], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/page-3' };
       return Response.json(page);
     }) as typeof fetch;
 
     const connector = new MicrosoftOutlookConnector();
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'messages',
       config: { folder: FOLDER_ID, max_results: 2, lookback_days: 30 },
       credentials: { accessToken: 'token' },
@@ -90,23 +91,75 @@ describe('MicrosoftOutlookConnector runtime', () => {
     expect(new URL(urls[0]).pathname).toContain(
       '/mailFolders/AQMkAGI2%2FLy8%2BZm9sZGVy%3D/messages'
     );
-    expect(urls[1]).toBe('https://graph.microsoft.com/v1.0/next-page');
+    expect(urls[1]).toBe('https://graph.microsoft.com/v1.0/page-2');
+    // The cap is checked between pages: page 2 is stored whole, not cut at two.
     expect(result.events.map((event: { origin_id: string }) => event.origin_id)).toEqual([
       'outlook_msg_one',
       'outlook_msg_two',
+      'outlook_msg_three',
     ]);
     expect(result.events[0]).toMatchObject({
       origin_type: 'email',
       author_name: 'Sender',
       metadata: { from: 'sender@example.com', to: 'Recipient', is_read: true },
     });
+    // Each page commits with the link to the first page it did not read.
+    expect(result.commits.map((c) => (c.checkpoint as { pending?: { next_link: string } }).pending?.next_link)).toEqual([
+      'https://graph.microsoft.com/v1.0/page-2',
+      'https://graph.microsoft.com/v1.0/page-3',
+    ]);
+    expect(result.status).toBe('more');
+  });
+
+  test('resumes a capped traversal from its saved link and closes the window at its end', async () => {
+    const window = { start: '2026-09-01T00:00:00.000Z', end: '2026-09-02T00:00:00.000Z' };
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      urls.push(typeof input === 'string' ? input : input.toString());
+      return Response.json({ value: [graphMessage('four')] });
+    }) as typeof fetch;
+
+    const result = await runSync(new MicrosoftOutlookConnector(), {
+      feedKey: 'messages',
+      config: { max_results: 50 },
+      credentials: { accessToken: 'token' },
+      checkpoint: { pending: { window, next_link: 'https://graph.microsoft.com/v1.0/page-3' } },
+    });
+
+    expect(urls).toEqual(['https://graph.microsoft.com/v1.0/page-3']);
+    expect(result.events.map((e: { origin_id: string }) => e.origin_id)).toEqual(['outlook_msg_four']);
+    expect(result.checkpoint).toEqual({ last_sync_at: window.end });
+    expect(result.status).toBe('complete');
+  });
+
+  test('restarts the saved window from its first page when Graph retires the link', async () => {
+    const window = { start: '2026-09-01T00:00:00.000Z', end: '2026-09-02T00:00:00.000Z' };
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      urls.push(url);
+      if (urls.length === 1) return new Response('expired', { status: 410 });
+      return Response.json({ value: [graphMessage('again')] });
+    }) as typeof fetch;
+
+    const result = await runSync(new MicrosoftOutlookConnector(), {
+      feedKey: 'messages',
+      config: { max_results: 50 },
+      credentials: { accessToken: 'token' },
+      checkpoint: { pending: { window, next_link: 'https://graph.microsoft.com/v1.0/stale' } },
+    });
+
+    expect(urls[0]).toBe('https://graph.microsoft.com/v1.0/stale');
+    const restarted = decodeURIComponent(urls[1]);
+    expect(restarted).toContain(`receivedDateTime ge ${window.start} and receivedDateTime lt ${window.end}`);
+    expect(result.checkpoint).toEqual({ last_sync_at: window.end });
   });
 
   test('emits an origin_type the feed declares as an event kind', async () => {
     globalThis.fetch = (async () => Response.json({ value: [graphEvent('meeting')] })) as typeof fetch;
 
     const connector = new MicrosoftOutlookConnector();
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'calendar',
       config: { max_results: 10, lookback_days: 7, lookahead_days: 30 },
       credentials: { accessToken: 'token' },

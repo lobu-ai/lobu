@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
 
@@ -36,7 +37,7 @@ describe("IOSAppStoreConnector.sync", () => {
     connector.http = { raw: async () => feedResponse([], 503) };
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "reviews",
         config: { app_id: "123", country: "US" },
         checkpoint: {},
@@ -56,7 +57,7 @@ describe("IOSAppStoreConnector.sync", () => {
       },
     };
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: "reviews",
       config: { app_id: "123", country: "US" },
       checkpoint: {},

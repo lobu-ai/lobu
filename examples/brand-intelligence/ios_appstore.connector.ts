@@ -70,7 +70,7 @@ export default class IOSAppStoreConnector extends ConnectorRuntime {
     key: "ios_appstore",
     name: "iOS App Store",
     description: "Fetches app reviews from the Apple App Store via RSS feeds.",
-    version: "1.0.0",
+    version: "1.1.0",
     faviconDomain: "apple.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -239,9 +239,9 @@ export default class IOSAppStoreConnector extends ConnectorRuntime {
         ? { last_timestamp: events[0].occurred_at.toISOString() }
         : { last_timestamp: checkpoint.last_timestamp };
 
+    await ctx.commit(events, newCheckpoint as Record<string, unknown>);
     return {
-      events,
-      checkpoint: newCheckpoint as Record<string, unknown>,
+      status: "complete",
       metadata: {
         items_found: allReviews.length,
       },

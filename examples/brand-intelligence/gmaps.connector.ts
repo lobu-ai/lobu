@@ -57,7 +57,7 @@ export default class GoogleMapsConnector extends ConnectorRuntime {
     key: "gmaps",
     name: "Google Maps",
     description: "Fetches business reviews using Google Places API.",
-    version: "1.0.0",
+    version: "1.1.0",
     faviconDomain: "maps.google.com",
     authSchema: {
       methods: [
@@ -174,9 +174,9 @@ export default class GoogleMapsConnector extends ConnectorRuntime {
     const { events: emitted, checkpoint: newCheckpoint } =
       finalizeTimestampSync(events, ctx.checkpoint);
 
+    await ctx.commit(emitted, newCheckpoint);
     return {
-      events: emitted,
-      checkpoint: newCheckpoint,
+      status: "complete",
       metadata: {
         items_found: reviews.length,
       },

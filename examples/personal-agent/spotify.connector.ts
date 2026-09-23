@@ -196,7 +196,7 @@ export default class SpotifyConnector extends ConnectorRuntime {
     name: "Spotify",
     description:
       "Syncs saved tracks, playlists, recently played, and top tracks from Spotify.",
-    version: "1.0.0",
+    version: "1.1.0",
     faviconDomain: "spotify.com",
     authSchema: {
       methods: [
@@ -438,15 +438,13 @@ export default class SpotifyConnector extends ConnectorRuntime {
         });
       }
 
-      if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
+      await ctx.commit(events.splice(0), null);
     }
 
-    return {
-      events,
-      checkpoint: {
-        last_sync_at: new Date().toISOString(),
-      } satisfies SpotifyCheckpoint as Record<string, unknown>,
-    };
+    await ctx.commit(events, {
+      last_sync_at: new Date().toISOString(),
+    } satisfies SpotifyCheckpoint as Record<string, unknown>);
+    return { status: "complete" };
   }
 
   // -------------------------------------------------------------------------
@@ -564,16 +562,14 @@ export default class SpotifyConnector extends ConnectorRuntime {
       });
       events.push(...trackEvents);
 
-      if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
+      await ctx.commit(events.splice(0), null);
     }
 
-    return {
-      events,
-      checkpoint: {
-        last_sync_at: new Date().toISOString(),
-        playlist_snapshots: snapshots,
-      } satisfies SpotifyCheckpoint as Record<string, unknown>,
-    };
+    await ctx.commit(events, {
+      last_sync_at: new Date().toISOString(),
+      playlist_snapshots: snapshots,
+    } satisfies SpotifyCheckpoint as Record<string, unknown>);
+    return { status: "complete" };
   }
 
   // -------------------------------------------------------------------------
@@ -632,16 +628,14 @@ export default class SpotifyConnector extends ConnectorRuntime {
         });
       }
 
-      if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
+      await ctx.commit(events.splice(0), null);
     }
 
-    return {
-      events,
-      checkpoint: {
-        last_sync_at: new Date().toISOString(),
-        ...(newCursor && { cursor: newCursor }),
-      } satisfies SpotifyCheckpoint as Record<string, unknown>,
-    };
+    await ctx.commit(events, {
+      last_sync_at: new Date().toISOString(),
+      ...(newCursor && { cursor: newCursor }),
+    } satisfies SpotifyCheckpoint as Record<string, unknown>);
+    return { status: "complete" };
   }
 
   // -------------------------------------------------------------------------
@@ -718,23 +712,17 @@ export default class SpotifyConnector extends ConnectorRuntime {
       events.map((e, index) => `${index}:${e.origin_id}`)
     );
     if (previous.top_tracks_digest === digest) {
-      return {
-        events: [],
-        checkpoint: {
-          last_sync_at: new Date().toISOString(),
-          top_tracks_digest: digest,
-        } satisfies SpotifyCheckpoint as Record<string, unknown>,
-      };
-    }
-
-    if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
-
-    return {
-      events,
-      checkpoint: {
+      await ctx.commit([], {
         last_sync_at: new Date().toISOString(),
         top_tracks_digest: digest,
-      } satisfies SpotifyCheckpoint as Record<string, unknown>,
-    };
+      } satisfies SpotifyCheckpoint as Record<string, unknown>);
+      return { status: "complete" };
+    }
+
+    await ctx.commit(events, {
+      last_sync_at: new Date().toISOString(),
+      top_tracks_digest: digest,
+    } satisfies SpotifyCheckpoint as Record<string, unknown>);
+    return { status: "complete" };
   }
 }

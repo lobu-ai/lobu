@@ -58,15 +58,13 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
   /**
    * Sync data from the connected service.
    *
-   * Called by the worker when a sync run is executed.
-   * Should return events to ingest and an updated checkpoint.
-   * Long-running connectors may optionally use `ctx.emitEvents()` and
-   * `ctx.updateCheckpoint()` to stream progress before returning.
+   * Called by the worker when a sync run is executed. Commit each page of
+   * events with its checkpoint through `ctx.commit` as it is fetched, then
+   * return how the pass ended.
    *
    * @param ctx - Sync context with feed config, checkpoint, and credentials
-   * @returns Events and updated checkpoint
    */
-  async sync(ctx: SyncContext<C, F>): Promise<SyncResult<C>> {
+  async sync(ctx: SyncContext<C, F>): Promise<SyncResult> {
     const handler = this.definition.feeds?.[ctx.feedKey]?.sync;
     if (!handler) {
       throw new Error(

@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { runSync } from './sync-harness';
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -951,7 +952,7 @@ describe("XConnector browser-first routing", () => {
 
 		try {
 			const connector = new XConnector();
-			const result = await connector.sync({
+			const result = await runSync(connector, {
 				feedKey: "liked_tweets",
 				config: {},
 				checkpoint: {},
@@ -1006,7 +1007,7 @@ describe("XConnector browser-first routing", () => {
 
 		try {
 			const connector = new XConnector();
-			const result = await connector.sync({
+			const result = await runSync(connector, {
 				feedKey: "liked_tweets",
 				config: {},
 				checkpoint: {
@@ -1043,7 +1044,7 @@ describe("XConnector browser-first routing", () => {
 		};
 
 		await expect(
-			connector.sync({
+			runSync(connector, {
 				feedKey: "liked_tweets",
 				config: {
 					account_handle: "testuser",
@@ -1088,7 +1089,7 @@ describe("XConnector browser-first routing", () => {
 
 		let message = "";
 		try {
-			await connector.sync({
+			await runSync(connector, {
 				feedKey: "liked_tweets",
 				config: {
 					account_handle: "testuser",
@@ -1153,7 +1154,7 @@ describe("XConnector browser-first routing", () => {
 			}),
 		};
 		const connector = new XConnector();
-		const result = await connector.sync({
+		const result = await runSync(connector, {
 			feedKey: "liked_tweets",
 			config: {
 				account_handle: "testuser",
@@ -1201,7 +1202,7 @@ describe("XConnector browser-first routing", () => {
 			}),
 		};
 
-		const result = await new XConnector().sync({
+		const result = await runSync(new XConnector(), {
 			feedKey: "liked_tweets",
 			config: {
 				account_handle: "testuser",
@@ -1244,7 +1245,7 @@ describe("XConnector browser-first routing", () => {
 			},
 		};
 
-		const result = await new XConnector().sync({
+		const result = await runSync(new XConnector(), {
 			feedKey: "liked_tweets",
 			config: {
 				account_handle: "testuser",
@@ -1324,7 +1325,7 @@ describe("XConnector browser-first routing", () => {
 			},
 		};
 		const connector = new XConnector();
-		const result = await connector.sync({
+		const result = await runSync(connector, {
 			feedKey: "liked_tweets",
 			config: {
 				account_handle: "testuser",
@@ -1524,7 +1525,7 @@ describe("XConnector browser-first routing", () => {
 				},
 			};
 
-			const result = await new XConnector().sync({
+			const result = await runSync(new XConnector(), {
 				feedKey: "liked_tweets",
 				config: {
 					account_handle: "testuser",
@@ -1578,7 +1579,7 @@ describe("XConnector browser-first routing", () => {
 		};
 
 		const connector = new XConnector();
-		const res = await connector.sync({
+		const res = await runSync(connector, {
 			feedKey: "bookmarks",
 			config: {},
 			checkpoint: {},
@@ -1606,7 +1607,7 @@ describe("XConnector browser-first routing", () => {
 		};
 
 		const connector = new XConnector();
-		await connector.sync({
+		await runSync(connector, {
 			feedKey: "my_tweets",
 			config: { use_extension: "true", account_handle: "testuser" },
 			checkpoint: {},
@@ -1633,7 +1634,7 @@ describe("XConnector browser-first routing", () => {
 		};
 
 		const connector = new XConnector();
-		await connector.sync({
+		await runSync(connector, {
 			feedKey: "direct_messages",
 			config: {},
 			checkpoint: {},
@@ -1727,7 +1728,7 @@ describe("XConnector home_feed", () => {
 			checkpoint: {},
 			sessionState: { chrome_dispatcher: dispatcher },
 		};
-		const res = await connector.sync(ctx);
+		const res = await runSync(connector, ctx);
 
 		expect(calls).toHaveLength(1);
 		expect(calls[0].action).toBe("navigate");
@@ -1756,7 +1757,7 @@ describe("XConnector home_feed", () => {
 			checkpoint: {},
 			sessionState: { chrome_dispatcher: dispatcher },
 		};
-		await expect(connector.sync(ctx)).rejects.toThrow(/Not logged into X/);
+		await expect(runSync(connector, ctx)).rejects.toThrow(/Not logged into X/);
 	});
 
 	test("home_feed configSchema accepts min_scrolls + max_scrolls", () => {
@@ -1796,7 +1797,7 @@ describe("XConnector home_feed", () => {
 		};
 
 		const connector = new XConnector();
-		const res = await connector.sync({
+		const res = await runSync(connector, {
 			feedKey: "home_feed",
 			config: { max_scrolls: 4, use_existing_tab: true },
 			checkpoint: {},
@@ -1833,7 +1834,7 @@ describe("XConnector home_feed", () => {
 		};
 
 		const connector = new XConnector();
-		const res = await connector.sync({
+		const res = await runSync(connector, {
 			feedKey: "home_feed",
 			config: { max_scrolls: 4 },
 			checkpoint: {},
@@ -1864,7 +1865,7 @@ describe("XConnector home_feed", () => {
 		// Force mid-range pick: min + floor(0.5 * (max-min+1)) = 8 + floor(2.5) = 10
 		Math.random = () => 0.5;
 		try {
-			await connector.sync({
+			await runSync(connector, {
 				feedKey: "home_feed",
 				config: { min_scrolls: 8, max_scrolls: 12 },
 				checkpoint: {},
@@ -1891,7 +1892,7 @@ describe("XConnector home_feed", () => {
 			},
 		};
 		const connector = new XConnector();
-		await connector.sync({
+		await runSync(connector, {
 			feedKey: "home_feed",
 			config: { max_scrolls: 7 },
 			checkpoint: {},

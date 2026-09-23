@@ -152,7 +152,7 @@ export default class CapterraConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: "capterra",
     name: "Capterra",
-    version: "2.0.0",
+    version: "2.1.0",
     faviconDomain: "capterra.com",
     description:
       "Reads software reviews from Capterra through the paired Chrome extension.",
@@ -255,9 +255,9 @@ export default class CapterraConnector extends ConnectorRuntime {
       };
     });
 
+    await ctx.commit(events, ctx.checkpoint);
     return {
-      events,
-      checkpoint: ctx.checkpoint,
+      status: "complete",
       metadata: {
         items_found: events.length,
         items_skipped: rows.length - reviews.length,

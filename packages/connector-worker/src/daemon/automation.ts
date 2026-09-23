@@ -72,7 +72,7 @@ import {
  *
  * Declared narrowly so a caller that only executes automations — the one-shot
  * `executeClaimedAutomationRun` entry point — does not have to fabricate
- * connector-sync fields (`batchSize`, `generateEmbeddings`)
+ * connector-sync fields (`generateEmbeddings`)
  * that this arm never touches. The daemon's full `ExecutorConfig` is
  * structurally assignable to it.
  */

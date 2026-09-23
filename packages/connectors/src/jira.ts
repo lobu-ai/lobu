@@ -12,7 +12,7 @@ import {
   type EventEnvelope,
   type FeedReadContext,
   type FeedReadResult,
-  paginateByCursor,
+  HttpStatusError,
   requireBearerClient,
   type RuntimeConnectorDefinition,
   type SyncContext,
@@ -64,7 +64,15 @@ interface JiraConfig {
 }
 
 interface JiraCheckpoint {
+  /** When the last complete traversal began; the next one fetches issues updated since. */
   last_sync_at?: string;
+  /**
+   * A traversal that stopped at the per-run page cap: the fixed `updated`
+   * window it walks and the `nextPageToken` of the first page not yet stored,
+   * so the next run continues instead of re-reading the newest issues and
+   * never reaching the rest.
+   */
+  pending?: { window: { start: string; end: string }; page_token: string };
 }
 
 interface JiraUser {
@@ -519,52 +527,79 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
   // Sync into local memory.
   // -------------------------------------------------------------------------
 
-  private async syncFeed(ctx: SyncContext<JiraCheckpoint, JiraConfig>): Promise<SyncResult<JiraCheckpoint>> {
+  private async syncFeed(ctx: SyncContext<JiraCheckpoint, JiraConfig>): Promise<SyncResult> {
     const base = await this.restBase(ctx.config, ctx.sessionState, ctx.credentials);
     const http = this.client(ctx.credentials);
+    const checkpoint = ctx.checkpoint ?? {};
     const lookbackDays = ctx.config.lookback_days ?? 365;
+    // Fixed per traversal: issues updated since the last complete traversal
+    // began, up to when this one began. An issue edited while the walk runs
+    // falls in the next window, and `origin_id` makes a re-report a supersede.
+    const window = checkpoint.pending?.window ?? {
+      start: checkpoint.last_sync_at ?? new Date(0).toISOString(),
+      end: new Date().toISOString(),
+    };
     const jql = buildJiraJql({
       baseQuery: asString(ctx.config.query) ?? asString(ctx.config.jql) ?? '',
       defaultWhenEmpty: `updated >= -${lookbackDays}d`,
+      window,
     });
-
-    const events: EventEnvelope[] = [];
 
     // `/rest/api/3/search` was removed by Atlassian (CHANGE-2046); the
     // replacement `/search/jql` paginates with an opaque nextPageToken and
     // returns no total — iterate until the token is absent.
-    const pages = paginateByCursor<JiraIssue, string>(
-      async (nextPageToken) => {
-        const params = new URLSearchParams({
-          jql,
-          maxResults: String(this.PAGE_SIZE),
-          fields: ISSUE_FIELDS,
-        });
-        if (nextPageToken) params.set('nextPageToken', nextPageToken);
-        const data = await http.json<JiraSearchResponse>(
+    let pageToken = checkpoint.pending?.page_token;
+    // A stored token may be retired between runs. The first request of the run
+    // — the only one using a token from a previous run — may restart the same
+    // window from its first page instead of wedging the feed.
+    let staleCursorRecoverable = pageToken !== undefined;
+    let found = 0;
+    for (let page = 0; page < this.MAX_PAGES; page++) {
+      const params = new URLSearchParams({
+        jql,
+        maxResults: String(this.PAGE_SIZE),
+        fields: ISSUE_FIELDS,
+      });
+      if (pageToken) params.set('nextPageToken', pageToken);
+      let data: JiraSearchResponse;
+      try {
+        data = await http.json<JiraSearchResponse>(
           `${base}/search/jql?${params.toString()}`,
           { method: 'GET', headers: { Accept: 'application/json' } },
         );
-        return { items: data.issues ?? [], nextCursor: data.nextPageToken };
-      },
-      { maxPages: this.MAX_PAGES },
-    );
+      } catch (error) {
+        if (staleCursorRecoverable && error instanceof HttpStatusError && error.status === 400) {
+          staleCursorRecoverable = false;
+          pageToken = undefined;
+          page--;
+          continue;
+        }
+        throw error;
+      }
+      staleCursorRecoverable = false;
 
-    for await (const issues of pages) {
+      const issues = data.issues ?? [];
+      const events: EventEnvelope[] = [];
       for (const issue of issues) {
         const event = this.issueEvent(issue, ctx.config);
         if (event) events.push(event);
       }
-      // Preserve the original early-exit on an empty page even when a token is
-      // returned — guards against a degenerate self-referential cursor.
-      if (issues.length === 0) break;
-    }
+      found += events.length;
 
-    return {
-      events,
-      checkpoint: { last_sync_at: new Date().toISOString() },
-      metadata: { items_found: events.length },
-    };
+      // An empty page ends the walk even when a token is returned — guards
+      // against a degenerate self-referential cursor.
+      if (!data.nextPageToken || issues.length === 0) {
+        await ctx.commit(events, { last_sync_at: window.end });
+        return { status: 'complete', metadata: { items_found: found } };
+      }
+      pageToken = data.nextPageToken;
+      await ctx.commit(events, {
+        ...(checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
+        pending: { window, page_token: pageToken },
+      });
+    }
+    // The page cap stopped the walk; its committed token resumes it next run.
+    return { status: 'more', metadata: { items_found: found } };
   }
 
   // -------------------------------------------------------------------------

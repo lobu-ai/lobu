@@ -182,7 +182,7 @@ export default class G2Connector extends ConnectorRuntime {
     name: "G2",
     description:
       "Reads B2B software reviews from G2.com through the paired Chrome extension.",
-    version: "2.0.0",
+    version: "2.1.0",
     faviconDomain: "g2.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -231,8 +231,7 @@ export default class G2Connector extends ConnectorRuntime {
       !productUrl?.match(/^https:\/\/www\.g2\.com\/products\/[^/]+\/reviews/)
     ) {
       return {
-        events: [],
-        checkpoint: ctx.checkpoint,
+        status: "complete",
         metadata: { items_found: 0, error: "Invalid product_url" },
       };
     }
@@ -296,10 +295,10 @@ export default class G2Connector extends ConnectorRuntime {
       if (pageNum < maxPages) await sleep(6000);
     }
 
-    return {
-      events: allEvents,
-      checkpoint: { ...(ctx.checkpoint ?? {}), pages_crawled: pagesCrawled },
-      metadata: { items_found: allEvents.length },
-    };
+    await ctx.commit(allEvents, {
+      ...(ctx.checkpoint ?? {}),
+      pages_crawled: pagesCrawled,
+    });
+    return { status: "complete", metadata: { items_found: allEvents.length } };
   }
 }

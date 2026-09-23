@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 /**
  * Midas connector — extension dispatcher wiring + dashboard DOM text parsing.
  *
@@ -55,7 +56,7 @@ function dispatcherFor(bodyText: string) {
 }
 
 function syncWith(bodyText: string, checkpoint: MidasCheckpoint | null = {}) {
-  return new MidasConnector().sync({
+  return runSync(new MidasConnector(), {
     feedKey: "assets",
     config: {},
     checkpoint,
@@ -427,7 +428,7 @@ describe("MidasConnector.sync", () => {
     };
 
     const connector = new MidasConnector();
-    const res = await connector.sync({
+    const res = await runSync(connector, {
       feedKey: "assets",
       config: {},
       checkpoint: {},
@@ -556,7 +557,7 @@ describe("MidasConnector.sync", () => {
   test("throws a clear error when chrome_dispatcher is missing", async () => {
     const connector = new MidasConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "assets",
         config: {},
         checkpoint: {},
@@ -581,7 +582,7 @@ describe("MidasConnector.sync", () => {
     };
     const connector = new MidasConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "assets",
         config: {},
         checkpoint: {},
@@ -595,7 +596,7 @@ describe("MidasConnector.sync", () => {
     const dispatcher = { dispatch: async () => ({}) };
     const connector = new MidasConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "nope",
         config: {},
         checkpoint: {},
@@ -615,7 +616,7 @@ describe("MidasConnector.sync", () => {
     };
     const connector = new MidasConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "assets",
         config: {},
         checkpoint: {},

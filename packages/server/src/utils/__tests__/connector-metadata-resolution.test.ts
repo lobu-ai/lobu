@@ -41,9 +41,10 @@ export default class MetaResolutionProbeConnector extends ConnectorRuntime {
       invoices: {
         key: 'invoices',
         name: 'Invoices',
-        sync: async () => ({
-          events: [], checkpoint: null, metadata: { items_found: 0, items_skipped: 0 },
-        }),
+        sync: async (ctx) => {
+          await ctx.commit([], null);
+          return { status: 'complete', metadata: { items_found: 0, items_skipped: 0 } };
+        },
         eventKinds: {
           invoice: {
             attributions: [

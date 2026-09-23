@@ -937,7 +937,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
 
   private async syncMessages(
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>
-  ): Promise<SyncResult<BrowserCheckpoint>> {
+  ): Promise<SyncResult> {
     const dispatcher = requireExtensionDispatcher(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     return await this.collectMessages(ctx, dispatcher, tabId);
@@ -954,7 +954,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>,
     dispatcher: ChromeActionDispatcher,
     tabId: number
-  ): Promise<SyncResult<BrowserCheckpoint>> {
+  ): Promise<SyncResult> {
     try {
       return await this.collectMessagesInner(ctx, dispatcher, tabId);
     } catch (error) {
@@ -968,7 +968,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>,
     dispatcher: ChromeActionDispatcher,
     tabId: number
-  ): Promise<SyncResult<BrowserCheckpoint>> {
+  ): Promise<SyncResult> {
     const { checkpoint, request } = buildCollectionPlan({
       checkpoint: ctx.checkpoint as Record<string, unknown> | null,
       config: ctx.config as Record<string, unknown>,
@@ -1144,7 +1144,8 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     nextCheckpoint.diagnostics =
       Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
 
-    return { events, checkpoint: nextCheckpoint };
+    await ctx.commit(events, nextCheckpoint as unknown as BrowserCheckpoint);
+    return { status: "complete" };
   }
 
   async execute(ctx: ActionContext): Promise<ActionResult> {

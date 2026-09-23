@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -70,7 +71,7 @@ describe('RedditConnector runtime', () => {
     }) as typeof fetch;
 
     const connector = new RedditConnector();
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'posts',
       config: { subreddit: 'lobu', search_terms: 'agent memory', lookback_days: 730 },
       credentials: { accessToken: 'token' },
@@ -93,7 +94,7 @@ describe('RedditConnector runtime', () => {
     }) as typeof fetch;
 
     const connector = new RedditConnector();
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'posts',
       config: { subreddit: 'programming/new?limit=1' },
       credentials: { accessToken: 'token' },
@@ -111,7 +112,7 @@ describe('RedditConnector runtime', () => {
       ])) as typeof fetch;
 
     const connector = new RedditConnector();
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'comments',
       config: { subreddit: 'lobu' },
       credentials: { accessToken: 'token' },
@@ -149,7 +150,7 @@ describe('RedditConnector runtime', () => {
     }) as typeof fetch;
 
     const connector = new RedditConnector();
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'posts',
       config: { subreddit: 'lobu', lookback_days: 30 },
       credentials: { accessToken: 'token' },
@@ -172,7 +173,7 @@ describe('RedditConnector runtime', () => {
     }) as typeof fetch;
 
     const connector = new RedditConnector();
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'posts',
       config: { subreddit: 'lobu' },
       credentials: { accessToken: 'token' },
@@ -190,7 +191,7 @@ describe('RedditConnector runtime', () => {
 
     const connector = new RedditConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'posts',
         config: { subreddit: 'missing' },
         credentials: { accessToken: 'token' },

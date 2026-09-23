@@ -38,7 +38,7 @@ export default class LifecycleProbeConnector {
     description: '${marker}',
     version: '${version}',
   };
-  async sync() { return { events: [], checkpoint: null }; }
+  async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
   async execute() { return { marker: '${marker}' }; }
 }
 `;
@@ -113,7 +113,7 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
         action: 'validate_connector_source',
         source_code: `export default class NoKey {
   definition = { name: 'No Key' };
-  async sync() { return { events: [], checkpoint: null }; }
+  async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
   async execute() { return {}; }
 }`,
       },
@@ -169,7 +169,7 @@ export default class ActionProbeConnector {
       articles: {
         key: 'articles',
         name: 'Articles',
-        sync: async () => ({ events: [], checkpoint: null }),
+        sync: async (ctx) => { await ctx.commit([], null); return { status: 'complete' }; },
       },
     },
     actions: {
@@ -178,7 +178,7 @@ export default class ActionProbeConnector {
       write_thing: { key: 'write_thing', name: 'Write thing', requiresApproval: true, requiredScopes: ['probe.write'] },
     },
   };
-  async sync() { return { events: [], checkpoint: null }; }
+  async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
   async execute() { return {}; }
 }
 `,

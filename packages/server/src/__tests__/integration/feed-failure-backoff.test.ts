@@ -179,6 +179,38 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     expect(feed.due).toBe(true);
   });
 
+  describe('a pass that reports more work', () => {
+    async function complete(body: Record<string, unknown>) {
+      const org = await createTestOrganization();
+      const connId = await insertConnection(org.id);
+      const feedId = await insertFeed(org.id, connId, 0);
+      const runId = await insertRunningRun(org.id, connId, feedId);
+      const { ctx, result } = mockWorkerCtx({
+        worker_id: WORKER_ID, run_id: runId, status: 'success', items_collected: 0, ...body,
+      });
+      await completeWorkerJob(ctx);
+      expect(result().status).toBe(200);
+      const [feed] = await getTestDb()`
+        SELECT next_run_at <= current_timestamp AS due, checkpoint FROM feeds WHERE id = ${feedId}
+      `;
+      return feed as { due: boolean; checkpoint: unknown };
+    }
+
+    it('runs again now when it committed a checkpoint', async () => {
+      const feed = await complete({ more: true, checkpoint: { cursor: 'page-2' } });
+      expect(feed.due).toBe(true);
+      expect(feed.checkpoint).toEqual({ cursor: 'page-2' });
+    });
+
+    it('keeps its schedule when it committed no checkpoint, so it cannot loop', async () => {
+      expect((await complete({ more: true })).due).toBe(false);
+    });
+
+    it('keeps its schedule when the pass did not ask for more', async () => {
+      expect((await complete({ checkpoint: { cursor: 'page-2' } })).due).toBe(false);
+    });
+  });
+
   it('does not charge a temporarily unavailable browser dependency to source-health failures', async () => {
     const org = await createTestOrganization();
     const connId = await insertConnection(org.id);

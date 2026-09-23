@@ -529,7 +529,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
     name: "Midas",
     description:
       "Syncs Midas portfolio holdings via the Owletto Chrome extension.",
-    version: "1.0.5",
+    version: "1.1.0",
     faviconDomain: "atlas.getmidas.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -578,7 +578,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
 
   private async syncFeed(
     ctx: SyncContext<MidasCheckpoint>
-  ): Promise<SyncResult<MidasCheckpoint>> {
+  ): Promise<SyncResult> {
     if (ctx.feedKey !== "assets") {
       throw new Error(`Unknown feed: ${ctx.feedKey}`);
     }
@@ -682,9 +682,9 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
       active_holdings: [...activeHoldings, ...preservedHoldings],
     };
 
+    await ctx.commit(events, checkpoint);
     return {
-      events,
-      checkpoint,
+      status: "complete",
       metadata: {
         items_found: events.length,
         holdings: snapshot.holdings.length,

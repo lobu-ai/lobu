@@ -6,6 +6,7 @@
  */
 
 import type { Env, EventEnvelope } from '@lobu/connector-sdk';
+import { stableStringify } from '@lobu/core/contracts/tools/view-content-hash';
 import type { AgentKind } from '@lobu/core/contracts/worker/device-automation';
 import { executeAutomationRun } from './automation.js';
 import {
@@ -126,7 +127,6 @@ async function resolveJobExecution(
 }
 
 export interface ExecutorConfig {
-  batchSize: number;
   heartbeatIntervalMs: number;
   /** Test-only override; production deliberately uses the 15-second default. */
   terminalHeartbeatGraceMs?: number;
@@ -153,7 +153,6 @@ export interface ExecutorConfig {
  * copy of these numbers that is free to drift away from them.
  */
 export const DEFAULT_CONFIG: ExecutorConfig = {
-  batchSize: 10,
   heartbeatIntervalMs: 30000,
   generateEmbeddings: true,
   timeoutMs: 600000,
@@ -199,6 +198,23 @@ export function resolveEffectiveEnv(env: Env, job: PollResponse): Env {
     LOBU_DB_EGRESS_ALLOW_HOSTS: job.db_egress_allow_hosts ?? '',
   };
   return effective === 'block-private' && job.compiled_code ? withoutDeploymentProviderKeys(merged) : merged;
+}
+
+/**
+ * Whether a sync pass moved the feed's cursor. `more` asks for an immediate
+ * rerun, which is progress only when this pass committed a checkpoint other
+ * than the one it started from; a pass that re-committed its starting cursor
+ * would otherwise rerun forever. `source_ack` is the platform's record, not the
+ * connector's cursor, so it does not count.
+ */
+function cursorAdvanced(started: unknown, committed: Record<string, unknown> | null): boolean {
+  if (committed === null) return false;
+  const cursor = (value: unknown) => {
+    if (!value || typeof value !== 'object') return stableStringify(value);
+    const { source_ack: _ack, ...rest } = value as Record<string, unknown>;
+    return stableStringify(rest);
+  };
+  return cursor(committed) !== cursor(started);
 }
 
 /**
@@ -353,34 +369,10 @@ async function executeSyncRun(
   startHeartbeat();
 
   try {
-    let batch: ContentItem[] = [];
-    let lastCheckpoint = checkpoint as unknown as Record<string, unknown> | null;
-
-    const flushBatch = async () => {
-      if (batch.length === 0) return;
-
-      try {
-        await client.stream({
-          type: 'batch',
-          run_id,
-          worker_id: client.id,
-          items: batch,
-          checkpoint: lastCheckpoint ?? undefined,
-        });
-      } catch (streamErr) {
-        const batchIds = batch.map((b) => b.id);
-        log.debug(
-          `[executor] Stream batch failed for run ${run_id} (${batchIds.length} items lost: ${batchIds.join(', ')}):`,
-          streamErr
-        );
-        const msg = streamErr instanceof Error ? streamErr.message : String(streamErr);
-        throw new Error(
-          `Stream batch failed: ${msg} (lost ${batchIds.length} items: ${batchIds.join(', ')})`
-        );
-      }
-
-      batch = [];
-    };
+    // The last checkpoint a commit made durable. Completion re-sends it so the
+    // feed's `source_ack`, which only a successful completion may advance,
+    // moves with it.
+    let committedCheckpoint: Record<string, unknown> | null = null;
 
     const result = await executeCompiledConnector({
       compiledCode: compiled_code,
@@ -397,31 +389,22 @@ async function executeSyncRun(
         entityIds: job.entity_ids ?? [],
       },
       hooks: {
-        onCheckpointUpdate: async (nextCheckpoint) => {
-          lastCheckpoint = nextCheckpoint;
-          if (!lastCheckpoint) return;
-          try {
-            await client.stream({
-              type: 'batch',
-              run_id,
-              worker_id: client.id,
-              items: [],
-              checkpoint: lastCheckpoint,
-            });
-          } catch (err) {
-            log.debug('[executor] Checkpoint flush failed:', err);
-          }
-        },
-        onEventChunk: async (events) => {
-          const contentItems = await processEventChunk(events, cfg.generateEmbeddings);
-          for (const contentItem of contentItems) {
-            batch.push(contentItem);
-            itemsCollectedSoFar++;
-
-            if (batch.length >= cfg.batchSize) {
-              await flushBatch();
-            }
-          }
+        // One chunk of a `ctx.commit`, sent as one page: the gateway stores its
+        // events and checkpoint in one transaction or not at all. Any failure
+        // propagates and ends the run; the next run resumes from the last
+        // checkpoint that did land.
+        onCommit: async (events, nextCheckpoint) => {
+          const items = await processEventChunk(events, cfg.generateEmbeddings);
+          if (items.length === 0 && !nextCheckpoint) return;
+          await client.stream({
+            type: 'batch',
+            run_id,
+            worker_id: client.id,
+            items,
+            ...(nextCheckpoint ? { checkpoint: nextCheckpoint } : {}),
+          });
+          itemsCollectedSoFar += items.length;
+          if (nextCheckpoint) committedCheckpoint = nextCheckpoint;
         },
         onChromeDispatch: async (actionKey, actionInput) => {
           // Forward to the gateway's dispatch endpoint. The endpoint
@@ -442,9 +425,6 @@ async function executeSyncRun(
     if (result.mode !== 'sync') {
       throw new Error(`Expected sync result, got mode=${result.mode}`);
     }
-    lastCheckpoint = result.checkpoint;
-
-    await flushBatch();
 
     stopHeartbeat();
 
@@ -453,7 +433,8 @@ async function executeSyncRun(
       worker_id: client.id,
       status: 'success',
       items_collected: itemsCollectedSoFar,
-      checkpoint: lastCheckpoint ?? undefined,
+      checkpoint: committedCheckpoint ?? undefined,
+      ...(result.status === 'more' && cursorAdvanced(checkpoint, committedCheckpoint) ? { more: true } : {}),
       auth_update: result.auth_update ?? undefined,
       error_message: partialFetchFailureMessage(result.metadata),
     });

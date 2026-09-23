@@ -29,6 +29,7 @@ import {
   toEventEnvelope,
   type BrowserCheckpoint,
 } from "../whatsapp-web-helpers.js";
+import { runSync } from './sync-harness';
 
 /** The extension suite's fixture, unchanged. */
 function message(
@@ -492,7 +493,7 @@ describe("sync over the generic chrome bridge", () => {
         },
       },
     });
-    const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
     const nav = calls.find((call) => call.action === "navigate");
     expect(nav?.input).toMatchObject({
       url: "https://web.whatsapp.com/",
@@ -521,7 +522,7 @@ describe("sync over the generic chrome bridge", () => {
       { adapterInstalled: false }
     );
     uninstallAdapter();
-    const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
     expect(injections).toHaveLength(1);
     // The injected expression really is the serialised adapter program, not a
     // stub: it carries the adapter's own global key and its op table.
@@ -554,7 +555,7 @@ describe("sync over the generic chrome bridge", () => {
     let ticks = 0;
     Date.now = () => realNow() + ticks++ * 40_000;
     try {
-      const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+      const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
       expect(result.events.map((event) => event.origin_id)).toEqual([
         "reconnected",
       ]);
@@ -581,7 +582,7 @@ describe("sync over the generic chrome bridge", () => {
     Date.now = () => realNow() + ticks++ * 40_000;
     try {
       await expect(
-        messagesFeed().sync(syncCtx(null, dispatcher)),
+        runSync(messagesFeed(), syncCtx(null, dispatcher)),
       ).rejects.toThrow("stream_disconnected");
       expect(
         calls.filter((call) =>
@@ -623,7 +624,7 @@ describe("sync over the generic chrome bridge", () => {
     Date.now = () => realNow() + ticks++ * 40_000;
     try {
       await expect(
-        messagesFeed().sync(syncCtx(null, dispatcher)),
+        runSync(messagesFeed(), syncCtx(null, dispatcher)),
       ).rejects.toThrow("stream_disconnected");
     } finally {
       Date.now = realNow;
@@ -648,7 +649,7 @@ describe("sync over the generic chrome bridge", () => {
     });
     try {
       await expect(
-        messagesFeed().sync(syncCtx(null, dispatcher))
+        runSync(messagesFeed(), syncCtx(null, dispatcher))
       ).rejects.toThrow(
         /^\[lobu:dependency_unavailable:browser_source_hydrating\] WhatsApp Web hydrating: stores_settling/
       );
@@ -698,7 +699,7 @@ describe("sync over the generic chrome bridge", () => {
     });
     const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
     await expect(
-      messagesFeed().sync(syncCtx(null, dispatcher))
+      runSync(messagesFeed(), syncCtx(null, dispatcher))
     ).rejects.toThrow(/^evaluation timed out$/);
     expect(probed).toBe(true);
   });
@@ -728,7 +729,7 @@ describe("sync over the generic chrome bridge", () => {
     const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
     try {
       await expect(
-        messagesFeed().sync(syncCtx(null, dispatcher))
+        runSync(messagesFeed(), syncCtx(null, dispatcher))
       ).rejects.toThrow(
         /^\[lobu:dependency_unavailable:browser_source_hydrating\]/
       );
@@ -762,7 +763,7 @@ describe("sync over the generic chrome bridge", () => {
     });
     try {
       await expect(
-        messagesFeed().sync(syncCtx(null, dispatcher))
+        runSync(messagesFeed(), syncCtx(null, dispatcher))
       ).rejects.toThrow(
         /^\[lobu:dependency_unavailable:browser_source_hydrating\]/
       );
@@ -787,7 +788,7 @@ describe("sync over the generic chrome bridge", () => {
       }),
     });
     await expect(
-      messagesFeed().sync(syncCtx(null, dispatcher))
+      runSync(messagesFeed(), syncCtx(null, dispatcher))
     ).rejects.toThrow(
       /^\[lobu:dependency_unavailable:browser_source_hydrating\] WhatsApp Web hydrating: stores_settling/
     );
@@ -805,12 +806,12 @@ describe("sync over the generic chrome bridge", () => {
       },
     });
     await expect(
-      messagesFeed().sync(syncCtx(null, dispatcher))
+      runSync(messagesFeed(), syncCtx(null, dispatcher))
     ).rejects.toThrow(/not signed in.*web\.whatsapp\.com.*Linked Devices/is);
   });
 
   it("refuses to run without a paired extension", async () => {
-    await expect(messagesFeed().sync(syncCtx(null, undefined))).rejects.toThrow(
+    await expect(runSync(messagesFeed(), syncCtx(null, undefined))).rejects.toThrow(
       /paired Owletto Chrome extension/i
     );
   });
@@ -853,7 +854,7 @@ describe("media", () => {
       collect: collectResponse(imageMessages(13)),
       download_media: { ok: true, status: "unavailable" },
     });
-    const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
     expect(mediaCalls()).toHaveLength(12);
     expect(
       result.events.filter(
@@ -878,7 +879,7 @@ describe("media", () => {
         },
       },
     });
-    const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
     expect(result.events.filter((event) => event.attachments)).toHaveLength(2);
     expect(
       result.events.filter(
@@ -957,7 +958,7 @@ describe("media", () => {
         }),
     });
 
-    const pending = messagesFeed().sync(syncCtx(null, dispatcher));
+    const pending = runSync(messagesFeed(), syncCtx(null, dispatcher));
     // Let the run reach the media phase and block there.
     for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
     expect(mediaCalls()).toHaveLength(1);
@@ -993,7 +994,7 @@ describe("media", () => {
       },
     });
     try {
-      const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+      const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
       expect(mediaCalls().length).toBeLessThan(3);
       // The skipped items stay retryable rather than being reported as gone.
       expect(
@@ -1016,7 +1017,7 @@ describe("media", () => {
       collect: collectResponse(images),
       download_media: { ok: true, status: "unavailable" },
     });
-    const firstRun = await messagesFeed().sync(syncCtx(null, first.dispatcher));
+    const firstRun = await runSync(messagesFeed(), syncCtx(null, first.dispatcher));
     expect(first.mediaCalls()).toHaveLength(1);
 
     const second = makeDispatcher({
@@ -1024,7 +1025,8 @@ describe("media", () => {
       collect: collectResponse(images),
       download_media: { ok: true, status: "unavailable" },
     });
-    await messagesFeed().sync(
+    await runSync(
+      messagesFeed(),
       syncCtx(firstRun.checkpoint as BrowserCheckpoint, second.dispatcher)
     );
     expect(second.mediaCalls()).toHaveLength(0);
@@ -1049,7 +1051,7 @@ describe("media", () => {
       collect: collectResponse([overlap]),
       download_media: { ok: true, status: "downloaded" },
     });
-    const result = await messagesFeed().sync(syncCtx(migrated, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(migrated, dispatcher));
     expect(mediaCalls()).toHaveLength(0);
     expect(result.events).toHaveLength(0);
   });
@@ -1080,7 +1082,7 @@ describe("checkpoint fields clear when their cause is gone", () => {
         dirty_reconciled: [{ key: priorDirty.key, message_id: "3EB0" }],
       },
     });
-    const result = await messagesFeed().sync(syncCtx(prior, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(prior, dispatcher));
     const next = result.checkpoint as BrowserCheckpoint;
     expect(next.dirty ?? []).toEqual([]);
     expect(next.backfill.complete).toBe(true);
@@ -1105,7 +1107,7 @@ describe("checkpoint fields clear when their cause is gone", () => {
       // A plain text message: nothing media-eligible, so no retry row survives.
       collect: collectResponse([message("plain-text")]),
     });
-    const result = await messagesFeed().sync(syncCtx(prior, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(prior, dispatcher));
     expect((result.checkpoint as BrowserCheckpoint).media ?? {}).toEqual({});
   });
 });
@@ -1294,7 +1296,8 @@ describe("quarantined messages", () => {
         backfill: { complete: true },
       },
     });
-    const { checkpoint } = await messagesFeed().sync(
+    const { checkpoint } = await runSync(
+      messagesFeed(),
       syncCtx(initializeBrowserCheckpoint({}), dispatcher.dispatcher)
     );
 
@@ -1315,7 +1318,8 @@ describe("quarantined messages", () => {
       },
     ];
     const run = (checkpoint: BrowserCheckpoint) =>
-      messagesFeed().sync(
+      runSync(
+        messagesFeed(),
         syncCtx(
           checkpoint,
           makeDispatcher({
@@ -1345,7 +1349,7 @@ describe("buffered source records use normal feed ingestion", () => {
     const missing = makeDispatcher({ probe: READY, feed_listen: () => {
       throw new Error("Owletto for Chrome: unknown dispatch (connector='chrome', action_key='feed_listen').");
     } });
-    await expect(messagesFeed().sync(syncCtx(null, missing.dispatcher))).rejects.toThrow(
+    await expect(runSync(messagesFeed(), syncCtx(null, missing.dispatcher))).rejects.toThrow(
       /^\[lobu:dependency_unavailable:browser_extension_update_required\]/
     );
     const broken = makeDispatcher({
@@ -1355,7 +1359,7 @@ describe("buffered source records use normal feed ingestion", () => {
       },
     });
     await expect(
-      messagesFeed().sync(syncCtx(null, broken.dispatcher))
+      runSync(messagesFeed(), syncCtx(null, broken.dispatcher))
     ).rejects.toThrow("Feed listener could not bind its page document");
   });
 
@@ -1366,7 +1370,7 @@ describe("buffered source records use normal feed ingestion", () => {
       feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
       collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
     });
-    const result = await messagesFeed().sync(syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
+    const result = await runSync(messagesFeed(), syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
     expect(result.events.map((event) => event.origin_id)).toEqual(["live-a"]);
     const next = result.checkpoint as BrowserCheckpoint;
     expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
@@ -1380,7 +1384,7 @@ describe("buffered source records use normal feed ingestion", () => {
       feed_listen: observation([{ revision: 7, payload: message("same", { body: "old" }) }], { listening: false }),
       collect: collectResponse([message("same", { body: "edited" })]),
     });
-    const result = await messagesFeed().sync(syncCtx(null, dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
     expect(result.events).toHaveLength(1);
     expect(result.events[0].payload_text).toBe("edited");
     expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([{ id: "same", revision: 7 }]);
@@ -1400,7 +1404,7 @@ describe("buffered source records use normal feed ingestion", () => {
       feed_listen: observation([sourceError], { listening: false }),
       collect: collectResponse([]),
     });
-    await expect(messagesFeed().sync(syncCtx(null, preview.dispatcher))).rejects.toThrow(
+    await expect(runSync(messagesFeed(), syncCtx(null, preview.dispatcher))).rejects.toThrow(
       "WhatsApp source observation failed; recovery is required"
     );
 
@@ -1409,7 +1413,7 @@ describe("buffered source records use normal feed ingestion", () => {
       feed_listen: observation([sourceError]),
       collect: collectResponse([]),
     });
-    const result = await messagesFeed().sync(syncCtx(null, recovered.dispatcher));
+    const result = await runSync(messagesFeed(), syncCtx(null, recovered.dispatcher));
     expect(result.events).toEqual([]);
     expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([
       { id: "whatsapp-web:source-observation-error", revision: 9 },

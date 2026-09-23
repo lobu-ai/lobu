@@ -2,7 +2,7 @@
  * Fixture connector for `isolate-executor.test.ts`.
  *
  * Each `scenario` config value exercises one boundary of the connector isolate
- * lane: chunked emit and checkpoint hooks, host-mediated fetch with streamed
+ * lane: chunked commits, host-mediated fetch with streamed
  * bodies, timers, console redaction, runaway CPU and heap, thrown errors, a
  * throwing timer callback, an oversized bridge message, auth artifacts, chrome
  * dispatch, and the credential placeholder the guest is handed in place of its
@@ -91,9 +91,9 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				const count = Number(ctx.config.count ?? 250);
 				const events: EventEnvelope[] = [];
 				for (let i = 0; i < count; i += 1) events.push(event(i));
-				await ctx.emitEvents?.(events);
-				await ctx.updateCheckpoint?.({ cursor: count });
-				return { events: [event(count)], checkpoint: { cursor: count + 1 }, metadata: { items_found: count + 1 } };
+				await ctx.commit(events, { cursor: count });
+				await ctx.commit([event(count)], { cursor: count + 1 });
+				return { status: "complete", metadata: { items_found: count + 1 } };
 			}
 			case "fetch": {
 				const init: RequestInit = { headers: { "x-fixture": "yes" } };
@@ -105,9 +105,7 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				const res = await fetch(String(ctx.config.url), init);
 				const hasBody = res.body !== null;
 				const text = await res.text();
-				return {
-					events: [],
-					checkpoint: {
+				await ctx.commit([], {
 						status: res.status,
 						ok: res.ok,
 						url: res.url,
@@ -116,8 +114,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 						hasBody,
 						bytes: text.length,
 						text: text.slice(0, 512),
-					},
-				};
+					});
+				return { status: "complete" };
 			}
 			case "stream": {
 				// Reads the body as it arrives and acknowledges every chunk to the
@@ -137,10 +135,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 					await fetch(String(ctx.config.ackUrl), { method: "POST", body: String(chunks.length) });
 				}
 				const tail = decoder.decode();
-				return {
-					events: [],
-					checkpoint: { chunks, tail, text: chunks.join("") + tail, usedBeforeRead, usedAfterRead: res.bodyUsed },
-				};
+				await ctx.commit([], { chunks, tail, text: chunks.join("") + tail, usedBeforeRead, usedAfterRead: res.bodyUsed });
+				return { status: "complete" };
 			}
 			case "stream_abort": {
 				// Abort after the first chunk: the next read rejects with the
@@ -158,7 +154,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 					rejection = String((error as Error).name);
 				}
 				const after = await (await fetch(String(ctx.config.afterUrl))).text();
-				return { events: [], checkpoint: { first, rejection, after } };
+				await ctx.commit([], { first, rejection, after });
+				return { status: "complete" };
 			}
 			case "stream_cancel": {
 				const res = await fetch(String(ctx.config.url));
@@ -167,7 +164,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				const first = new TextDecoder().decode((await reader.read()).value);
 				await reader.cancel();
 				const after = await (await fetch(String(ctx.config.afterUrl))).text();
-				return { events: [], checkpoint: { first, after, bodyUsed: res.bodyUsed } };
+				await ctx.commit([], { first, after, bodyUsed: res.bodyUsed });
+				return { status: "complete" };
 			}
 			case "raw_fetch": {
 				// Bypasses the guest fetch validator on purpose: the host must judge
@@ -176,10 +174,12 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 					.__lobuHost;
 				try {
 					await host.async("fetchOpen", { id: 4242, url: String(ctx.config.url), method: "GET", headers: [], redirect: "follow" });
-					return { events: [], checkpoint: { outcome: "resolved" } };
+					await ctx.commit([], { outcome: "resolved" });
+					return { status: "complete" };
 				} catch (error) {
 					const e = error as { name?: string; message?: string };
-					return { events: [], checkpoint: { outcome: "rejected", name: String(e.name), message: String(e.message) } };
+					await ctx.commit([], { outcome: "rejected", name: String(e.name), message: String(e.message) });
+					return { status: "complete" };
 				}
 			}
 			case "loop": {
@@ -210,27 +210,25 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 					}, 1);
 					setTimeout(resolve, 20_000);
 				});
-				return { events: [], checkpoint: null };
+				return { status: "complete" };
 			}
 			case "big_message": {
-				await ctx.updateCheckpoint?.({ blob: "x".repeat(Number(ctx.config.count ?? 65_536)) });
-				return { events: [], checkpoint: null };
+				await ctx.commit([], { blob: "x".repeat(Number(ctx.config.count ?? 65_536)) });
+				return { status: "complete" };
 			}
 			case "console": {
 				console.log(`Authorization: Bearer ${String(ctx.config.secret)}`);
 				console.warn("plain warning");
 				console.error("cookie: Cookie: session=" + String(ctx.config.secret));
 				console.info("info line");
-				return { events: [], checkpoint: null };
+				return { status: "complete" };
 			}
 			case "env": {
-				return {
-					events: [],
-					checkpoint: {
+				await ctx.commit([], {
 						fixture_env: process.env.FIXTURE_ENV ?? null,
 						config_fixture_env: (ctx.config as Record<string, unknown>).FIXTURE_ENV ?? null,
-					},
-				};
+					});
+				return { status: "complete" };
 			}
 			case "timers": {
 				const order: string[] = [];
@@ -251,13 +249,15 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 					order.push("sync");
 					setTimeout(resolve, 60);
 				});
-				return { events: [], checkpoint: { order } };
+				await ctx.commit([], { order });
+				return { status: "complete" };
 			}
 			case "dispatch": {
 				const dispatcher = (ctx.sessionState as { chrome_dispatcher?: Dispatcher } | null)?.chrome_dispatcher;
 				if (!dispatcher) throw new Error("no chrome_dispatcher on sessionState");
 				const observation = await dispatcher.dispatch("tabs.list", { from: "sync" });
-				return { events: [], checkpoint: { observation } };
+				await ctx.commit([], { observation });
+				return { status: "complete" };
 			}
 			case "prelude": {
 				const url = new URL("https://Example.COM:443/a/./b/../c d?x=1&y=a b#frag ment");
@@ -277,9 +277,7 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				} catch (error) {
 					throwIfAbortedName = (error as Error).name;
 				}
-				return {
-					events: [],
-					checkpoint: {
+				await ctx.commit([], {
 						href: url.href,
 						origin: url.origin,
 						host: url.host,
@@ -298,8 +296,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 						abortReason: (controller.signal.reason as Error).name,
 						throwIfAbortedName,
 						timeoutReason: (timeoutSignal.reason as Error).name,
-					},
-				};
+					});
+				return { status: "complete" };
 			}
 			case "credential": {
 				// Spends the token the way every bundled connector does (a bearer
@@ -312,9 +310,7 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				});
 				const echoed = (await res.json()) as { headers: Record<string, string | undefined> };
 				const globals = globalThis as unknown as Record<string, unknown>;
-				return {
-					events: [],
-					checkpoint: {
+				await ctx.commit([], {
 						guestToken: token,
 						credentialKeys: Object.keys(ctx.credentials ?? {}).sort(),
 						upstreamAuthorization: echoed.headers.authorization ?? null,
@@ -326,8 +322,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 							String(globals.__job_json ?? ""),
 							String(globals.__config_json ?? ""),
 						].join("\n"),
-					},
-				};
+					});
+				return { status: "complete" };
 			}
 			case "credential_in_url": {
 				// A token in the query string is refused before the request leaves.
@@ -338,7 +334,8 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				} catch (error) {
 					refused = { name: (error as Error).name, message: (error as Error).message };
 				}
-				return { events: [], checkpoint: { refused } };
+				await ctx.commit([], { refused });
+				return { status: "complete" };
 			}
 			default:
 				throw new Error(`unknown scenario ${scenario}`);

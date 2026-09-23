@@ -344,6 +344,9 @@ function toDate(v: unknown): Date | null {
   return null;
 }
 
+/** Rows per `ctx.commit` during a sync. */
+const COMMIT_ROWS = 500;
+
 export default class PostgresConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: 'postgres',
@@ -466,21 +469,26 @@ export default class PostgresConnector extends ConnectorRuntime {
       // to feedKey only for direct/programmatic sync calls (no feedId).
       const originPrefix = ctx.feedId != null ? String(ctx.feedId) : ctx.feedKey;
 
-      // Map rows → events, advancing the compound checkpoint to the last row.
-      const events: EventEnvelope[] = [];
-      let newCheckpoint: PgCheckpoint = checkpoint;
-      for (const row of rows) {
-        events.push(this.rowToEvent(originPrefix, row, config, cursorCol, pkCol));
-        newCheckpoint = {
-          last_cursor: toCheckpointValue(row[cursorCol]),
-          last_pk: toCheckpointValue(row[pkCol]),
+      // Map rows → events and commit them in slices, each with the keyset
+      // checkpoint of its last row: that checkpoint resumes exactly after it,
+      // so a run cut short keeps every slice it committed.
+      for (let start = 0; start < rows.length; start += COMMIT_ROWS) {
+        const slice = rows.slice(start, start + COMMIT_ROWS);
+        const last = slice[slice.length - 1];
+        const sliceCheckpoint: PgCheckpoint = {
+          last_cursor: toCheckpointValue(last[cursorCol]),
+          last_pk: toCheckpointValue(last[pkCol]),
         };
+        await ctx.commit(
+          slice.map((row) => this.rowToEvent(originPrefix, row, config, cursorCol, pkCol)),
+          sliceCheckpoint as unknown as Record<string, unknown>
+        );
       }
 
       return {
-        events,
-        checkpoint: newCheckpoint as unknown as Record<string, unknown>,
-        metadata: { items_found: events.length },
+        // A full page means rows remain past the cursor: run again now.
+        status: rows.length >= limit ? 'more' : 'complete',
+        metadata: { items_found: rows.length },
       };
     } finally {
       await sql.end({ timeout: 5 });

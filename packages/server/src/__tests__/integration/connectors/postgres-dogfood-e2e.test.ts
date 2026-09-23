@@ -15,6 +15,7 @@
  * scheduled CheckDueFeeds→poll path (covered by postgres-sync-cloud-gate.test.ts);
  * and real prod creds / the least-privilege read-only role.
  */
+import type { EventEnvelope } from '@lobu/connector-sdk';
 import PostgresConnector from '@lobu/connectors/postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { querySql } from '../../../tools/admin/query_sql';
@@ -44,6 +45,22 @@ const FUNNEL_SQL = `SELECT o.slug AS org,
   JOIN dog_member m ON m."userId" = u.id
   JOIN dog_org o ON o.id = m."organizationId"
   GROUP BY o.slug`;
+
+const syncPostgres = async (
+  conn: PostgresConnector,
+  input: Omit<Parameters<PostgresConnector['sync']>[0], 'commit'>
+) => {
+  const events: EventEnvelope[] = [];
+  let checkpoint: Record<string, unknown> | null = null;
+  const result = await conn.sync({
+    ...input,
+    commit: async (page, next) => {
+      events.push(...page);
+      if (next !== null) checkpoint = next;
+    },
+  });
+  return { ...result, events, checkpoint };
+};
 
 describe('postgres dogfood E2E (memory feed + connection-backed derived entity)', () => {
   let ctx: ToolContext;
@@ -103,7 +120,7 @@ describe('postgres dogfood E2E (memory feed + connection-backed derived entity)'
 
   it('memory feed: sync() maps the signup JOIN to events with a keyset checkpoint', async () => {
     const conn = new PostgresConnector();
-    const r = await conn.sync({
+    const r = await syncPostgres(conn, {
       feedKey: 'query',
       config: {
         DATABASE_URL: process.env.DATABASE_URL,
@@ -135,14 +152,14 @@ describe('postgres dogfood E2E (memory feed + connection-backed derived entity)'
       primary_key: 'id',
       cursor_column: 'created_at',
     };
-    const r1 = await conn.sync({
+    const r1 = await syncPostgres(conn, {
       feedKey: 'query',
       config: base as never,
       checkpoint: null as never,
       credentials: null,
       entityIds: [],
     });
-    const r2 = await conn.sync({
+    const r2 = await syncPostgres(conn, {
       feedKey: 'query',
       config: base as never,
       checkpoint: r1.checkpoint as never,
@@ -155,7 +172,7 @@ describe('postgres dogfood E2E (memory feed + connection-backed derived entity)'
   it('memory feed ingestion: connector envelopes land in events via the worker stream, deduped by origin_id', async () => {
     const db = getTestDb();
     const conn = new PostgresConnector();
-    const r = await conn.sync({
+    const r = await syncPostgres(conn, {
       feedKey: 'query',
       config: {
         DATABASE_URL: process.env.DATABASE_URL,

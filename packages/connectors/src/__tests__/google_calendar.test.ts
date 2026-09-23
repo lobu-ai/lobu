@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, mock, test } from 'bun:test';
 // mock provides a faithful real generator (not a throwing stub), so this
 // exercises the genuine paging semantics while keeping the browser stack out.
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -108,7 +109,7 @@ describe('GoogleCalendarConnector full sync', () => {
     ]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
@@ -118,6 +119,10 @@ describe('GoogleCalendarConnector full sync', () => {
     expect(result.events).toHaveLength(2);
     expect(result.checkpoint.sync_token).toBe('SYNC_TOKEN');
     expect(calls).toEqual([null, 'p2']);
+    // Page 1 is committed parked on its continuation before page 2 is read.
+    expect(result.commits.map((c) => c.events.length)).toEqual([1, 1]);
+    expect(result.commits[0].checkpoint?.pending).toMatchObject({ page_token: 'p2' });
+    expect(result.status).toBe('complete');
   });
 
   test.each(['events', 'changes'])(
@@ -145,17 +150,19 @@ describe('GoogleCalendarConnector full sync', () => {
 
       // The cap stops the run after page 1, but page 1 is stored whole and its
       // continuation is parked rather than discarded.
-      const first = await connector.sync({ ...ctx, checkpoint: {} });
+      const first = await runSync(connector, { ...ctx, checkpoint: {} });
       expect(first.events.map(originId).sort()).toEqual(['a1', 'a2']);
       expect(calls).toEqual([null]);
       expect(first.checkpoint.sync_token).toBeUndefined();
       expect(first.checkpoint.last_sync_at).toBeUndefined();
       expect(first.checkpoint.pending.page_token).toBe('p2');
+      expect(first.status).toBe('more');
 
-      const second = await connector.sync({ ...ctx, checkpoint: first.checkpoint });
+      const second = await runSync(connector, { ...ctx, checkpoint: first.checkpoint });
       expect(second.events.map(originId)).toEqual(['b']);
       expect(second.checkpoint.sync_token).toBe('SYNC2');
       expect(second.checkpoint.pending).toBeUndefined();
+      expect(second.status).toBe('complete');
       expect(calls).toEqual([null, 'p2']);
       // The resumed page must be requested against the window that minted it.
       expect(new URL(urls[0]).searchParams.get('timeMin')).toBe(
@@ -171,7 +178,7 @@ describe('GoogleCalendarConnector full sync', () => {
     ]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'changes',
       config: {},
       credentials: { accessToken: 'tok' },
@@ -189,7 +196,7 @@ describe('GoogleCalendarConnector full sync', () => {
     const { client } = fakeHttp([{ items: [], nextPageToken: 'p2' }]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'changes',
       config: {},
       credentials: { accessToken: 'tok' },
@@ -206,7 +213,7 @@ describe('GoogleCalendarConnector full sync', () => {
     connector.client = () => client;
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'changes',
         config: {},
         credentials: { accessToken: 'tok' },
@@ -228,7 +235,7 @@ describe('GoogleCalendarConnector full sync', () => {
     ]);
     connector.client = () => client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'changes',
       config: { calendar_id: 'secondary' },
       credentials: { accessToken: 'tok' },
@@ -257,7 +264,7 @@ describe('GoogleCalendarConnector full sync', () => {
     // Throwing leaves the stored checkpoint untouched, so `p2` is retried whole
     // rather than being recorded as reached.
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'changes',
         config: {},
         credentials: { accessToken: 'tok' },
@@ -279,7 +286,7 @@ describe('GoogleCalendarConnector full sync', () => {
     // An incremental cursor only advances on the last page, so running out of
     // pages has to fail rather than persist a partial batch.
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'events',
         config: { max_results: 2 },
         credentials: { accessToken: 'tok' },
@@ -358,7 +365,7 @@ describe('GoogleCalendarConnector event kind', () => {
     ]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
@@ -378,7 +385,7 @@ describe('GoogleCalendarConnector event kind', () => {
     ]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
@@ -403,7 +410,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
     const { client, calls } = rejectingTokenHttp(403, SCOPE_REJECTION_BODY);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
@@ -438,7 +445,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
     });
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'events',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },
@@ -456,7 +463,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
     connector.client = () => client;
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'events',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },
@@ -500,7 +507,7 @@ describe('GoogleCalendarConnector incremental sync', () => {
       },
     });
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'events',
       config: { calendar_id: 'primary', max_results: 100 },
       credentials: { accessToken: 'tok' },
@@ -614,7 +621,7 @@ describe('GoogleCalendarConnector durable changes feed', () => {
     const { client, urls } = fakeHttp([{ items: [cancelled], nextSyncToken: 'NEXT' }]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'changes',
       config: { calendar_id: 'primary', max_results: 100, lookback_days: 30 },
       credentials: { accessToken: 'tok' },
@@ -651,7 +658,7 @@ describe('GoogleCalendarConnector durable changes feed', () => {
     ]);
     connector.client = () => client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'changes',
       config: { calendar_id: 'primary', max_results: 1 },
       credentials: { accessToken: 'tok' },
@@ -686,7 +693,7 @@ describe('GoogleCalendarConnector durable changes feed', () => {
     connector.client = () => client;
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'changes',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },
@@ -701,7 +708,7 @@ describe('GoogleCalendarConnector durable changes feed', () => {
     connector.client = () => client;
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'changes',
         config: { calendar_id: 'primary', max_results: 100 },
         credentials: { accessToken: 'tok' },

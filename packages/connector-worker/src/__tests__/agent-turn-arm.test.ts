@@ -137,7 +137,6 @@ function turnJob(overrides: Record<string, unknown> = {}): PollResponse {
 
 function cfgWith(executor: SyncExecutor | undefined): ExecutorConfig {
   return {
-    batchSize: 10,
     // Long enough that no heartbeat fires inside a test.
     heartbeatIntervalMs: 60_000,
     generateEmbeddings: false,

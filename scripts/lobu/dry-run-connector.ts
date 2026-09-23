@@ -70,15 +70,24 @@ async function main() {
 
     console.log(`\nRunning sync with config: ${JSON.stringify(config)}...\n`);
 
-    const result = await instance.sync({
+    // Nothing is stored: each commit is collected so the run's events and last
+    // checkpoint can be printed and validated below.
+    const committed: { events: any[]; checkpoint: unknown } = { events: [], checkpoint: null };
+    const outcome = await instance.sync({
       feedKey,
       config,
       checkpoint: null,
       credentials: null,
       entityIds: [],
       sessionState: config._sessionState ?? null,
+      commit: async (events: any[], checkpoint: unknown) => {
+        committed.events.push(...events);
+        if (checkpoint !== null) committed.checkpoint = checkpoint;
+      },
     });
+    const result = { ...outcome, ...committed };
 
+    console.log(`Status: ${result.status}`);
     console.log(`Events: ${result.events.length}`);
     console.log(`Checkpoint: ${JSON.stringify(result.checkpoint)}`);
     if (result.metadata) console.log(`Metadata: ${JSON.stringify(result.metadata)}`);

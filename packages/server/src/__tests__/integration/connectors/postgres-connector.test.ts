@@ -9,6 +9,7 @@
  * case below), the only place the connector executes in production.
  */
 
+import type { EventEnvelope } from '@lobu/connector-sdk';
 import PostgresConnector from '@lobu/connectors/postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getTestDb } from '../../setup/test-db';
@@ -19,14 +20,24 @@ const cfg = {
   primary_key: 'id',
   cursor_column: 'created_at',
 };
-const run = (over: Record<string, unknown>, checkpoint: unknown) =>
-  conn.sync({
+/** One sync pass, with everything it committed collected in commit order. */
+const run = async (over: Record<string, unknown>, checkpoint: unknown, feedId?: number) => {
+  const events: EventEnvelope[] = [];
+  let committed: unknown = null;
+  const result = await conn.sync({
     feedKey: 'query',
+    feedId,
     config: { DATABASE_URL: process.env.DATABASE_URL, ...cfg, ...over } as never,
     checkpoint: checkpoint as never,
     credentials: null,
     entityIds: [],
+    commit: async (page, next) => {
+      events.push(...page);
+      if (next !== null) committed = next;
+    },
   });
+  return { ...result, events, checkpoint: committed as Record<string, unknown> | null };
+};
 
 describe('PostgresConnector.sync (keyset incremental, real DB)', () => {
   beforeAll(async () => {
@@ -51,6 +62,15 @@ describe('PostgresConnector.sync (keyset incremental, real DB)', () => {
       last_cursor: expect.any(String),
       last_pk: expect.any(String),
     });
+  });
+
+  it('a pass capped by max_rows_per_sync commits its rows, asks for more, and the next pass resumes', async () => {
+    const r1 = await run({ max_rows_per_sync: 2 }, null);
+    expect(r1.status).toBe('more');
+    expect(r1.events.map((e) => e.origin_id)).toEqual(['query:1', 'query:2']);
+    const r2 = await run({ max_rows_per_sync: 2 }, r1.checkpoint);
+    expect(r2.status).toBe('complete');
+    expect(r2.events.map((e) => e.origin_id)).toEqual(['query:3']);
   });
 
   it('is incremental: a re-sync from the checkpoint yields no rows', async () => {
@@ -86,29 +106,8 @@ describe('PostgresConnector.sync (keyset incremental, real DB)', () => {
   it('namespaces origin_id by feed instance so two feeds on one connection do not collide', async () => {
     // Both feeds share feedKey 'query' and the same primary keys; distinct feedId
     // must keep their origin_ids apart (else one supersedes the other's events).
-    const conn = new PostgresConnector();
-    const base = {
-      DATABASE_URL: process.env.DATABASE_URL,
-      query: 'SELECT id, email, created_at FROM pgc_it',
-      primary_key: 'id',
-      cursor_column: 'created_at',
-    };
-    const feedA = await conn.sync({
-      feedKey: 'query',
-      feedId: 101,
-      config: base as never,
-      checkpoint: null as never,
-      credentials: null,
-      entityIds: [],
-    });
-    const feedB = await conn.sync({
-      feedKey: 'query',
-      feedId: 202,
-      config: base as never,
-      checkpoint: null as never,
-      credentials: null,
-      entityIds: [],
-    });
+    const feedA = await run({}, null, 101);
+    const feedB = await run({}, null, 202);
     expect(feedA.events[0].origin_id).toBe('101:1');
     expect(feedB.events[0].origin_id).toBe('202:1');
     // Same pk, different feed → no collision.
@@ -247,7 +246,7 @@ describe('PostgresConnector.sync (keyset incremental, real DB)', () => {
         env: { LOBU_DB_EGRESS_POLICY: 'allow-private' },
       },
       {
-        onEventChunk: (events) => {
+        onCommit: async (events) => {
           emittedEvents.push(...events);
         },
       }

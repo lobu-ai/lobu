@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1782,7 +1783,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const res = await (async () => {
       try {
-        return await connector.sync(ctx);
+        return await runSync(connector, ctx);
       } finally {
         dom.window.close();
         for (const [name, descriptor] of savedGlobals) {
@@ -1999,7 +2000,7 @@ describe("LinkedInConnector home_feed", () => {
     });
     setup?.(dom);
     try {
-      return await new LinkedInConnector().sync({
+      return await runSync(new LinkedInConnector(), {
         feedKey: "home_feed",
         config: { max_scrolls: 1 },
         checkpoint: {},
@@ -2451,7 +2452,7 @@ describe("LinkedInConnector home_feed", () => {
     // Force mid-range pick: min + floor(0.5 * (max-min+1)) = 6 + floor(2.5) = 8
     Math.random = () => 0.5;
     try {
-      const res = await connector.sync({
+      const res = await runSync(connector, {
         feedKey: "home_feed",
         config: { min_scrolls: 6, max_scrolls: 10 },
         checkpoint: {},
@@ -2470,7 +2471,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const connector = new LinkedInConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
@@ -2496,7 +2497,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const connector = new LinkedInConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
@@ -2537,7 +2538,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const connector = new LinkedInConnector();
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: "home_feed",
       config: {},
       checkpoint: {},
@@ -2575,7 +2576,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const connector = new LinkedInConnector(fetchImpl);
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: "home_feed",
       config: {},
       checkpoint: {},
@@ -2611,7 +2612,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const connector = new LinkedInConnector(failedFetch);
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
@@ -2637,7 +2638,7 @@ describe("LinkedInConnector home_feed", () => {
     };
     const connector = new LinkedInConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
@@ -2657,7 +2658,7 @@ describe("LinkedInConnector home_feed", () => {
       checkpoint: {},
       sessionState: { chrome_dispatcher: dispatcher },
     };
-    await expect(connector.sync(ctx)).rejects.toThrow(
+    await expect(runSync(connector, ctx)).rejects.toThrow(
       /Not logged into LinkedIn/
     );
   });
@@ -3234,7 +3235,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.11.11");
+    expect(c.definition.version).toBe("3.12.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

@@ -457,7 +457,6 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     const lookbackDays = (ctx.config.lookback_days as number) ?? 30;
 
     const checkpoint = (ctx.checkpoint ?? {}) as CalendarCheckpoint;
-    const events: EventEnvelope[] = [];
     const durableChanges = ctx.feedKey === 'changes';
 
     // A checkpoint minted under a different scope (or by an older version that
@@ -467,10 +466,13 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     const scope = JSON.stringify([CHECKPOINT_SCOPE_VERSION, calendarId, lookbackDays]);
     const resumable = checkpoint.scope === scope;
 
-    /** Traversal reached the last page: store its cursor and stamp the run. */
-    const finish = (items: EventEnvelope[], syncToken?: string): SyncResult => {
-      const result = this.buildResult(items, syncToken);
-      return { ...result, checkpoint: { ...result.checkpoint, scope } };
+    /** Traversal reached the last page: commit it with its cursor and stamp the run. */
+    const finish = async (items: EventEnvelope[], syncToken?: string): Promise<SyncResult> => {
+      await ctx.commit(items, {
+        ...this.completedCheckpoint(syncToken),
+        scope,
+      } as Record<string, unknown>);
+      return { status: 'complete' };
     };
 
     if (resumable && checkpoint.sync_token) {
@@ -517,15 +519,14 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     const baseParams = params.toString();
 
     /**
-     * Ran out of budget mid-traversal: park the next page token and return no
-     * sync token and no `last_sync_at`, so nothing downstream can read this run
-     * as a completed window. The next scheduled run resumes from `token`.
+     * Mid-traversal: the next page token, with no sync token and no
+     * `last_sync_at`, so nothing downstream can read it as a completed window.
+     * A run that stops here resumes from `token`.
      */
-    const park = (token: string): SyncResult => ({
-      ...this.buildResult(events, undefined),
-      checkpoint: { scope, pending: { params: baseParams, page_token: token } },
-    });
+    const parked = (token: string) =>
+      ({ scope, pending: { params: baseParams, page_token: token } }) as Record<string, unknown>;
 
+    let collected = 0;
     let pageToken = pending?.page_token;
     const seenTokens = new Set<string>();
     for (let page = 0; ; page++) {
@@ -549,6 +550,7 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
       // A provider page is atomic: `max_results` caps how much a run starts,
       // never how much of a fetched page is stored. Dropping a page's tail
       // would lose those events for good once the cursor moved past them.
+      const events: EventEnvelope[] = [];
       for (const calEvent of items) {
         const envelope = durableChanges
           ? this.calendarEventToChangeEnvelope(calEvent)
@@ -570,17 +572,19 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
         throw new Error('Google Calendar returned a repeated page token.');
       }
       pageToken = data.nextPageToken;
+      await ctx.commit(events, parked(pageToken));
+      collected += events.length;
 
       // Stop once this run has collected its share, once the provider returns
       // an empty page, or at the hard ceiling — the last of which is the only
       // bound on a window of nothing but filtered-out items, where
-      // `events.length` never reaches the cap.
+      // `collected` never reaches the cap. The traversal continues next run.
       if (
-        events.length >= maxResults ||
+        collected >= maxResults ||
         items.length === 0 ||
         page + 1 >= MAX_SYNC_PAGES
       ) {
-        return park(pageToken);
+        return { status: 'more' };
       }
     }
   }
@@ -985,28 +989,14 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
     };
   }
 
-  private buildResult(
-    events: EventEnvelope[],
-    syncToken: string | undefined
-  ): SyncResult {
-    // Sort events by occurred_at descending
-    events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
-
+  private completedCheckpoint(syncToken: string | undefined): CalendarCheckpoint {
     // Built fresh rather than spread over the previous checkpoint: the whole
     // object replaces the stored one, so a run that recovered from a rejected
     // token cannot leave that token behind. When the sync produced no new token
     // the key is absent, and the next run correctly starts from a full sync.
-    const newCheckpoint: CalendarCheckpoint = {
+    return {
       ...(syncToken ? { sync_token: syncToken } : {}),
       last_sync_at: new Date().toISOString(),
-    };
-
-    return {
-      events,
-      checkpoint: newCheckpoint as Record<string, unknown>,
-      metadata: {
-        items_found: events.length,
-      },
     };
   }
 

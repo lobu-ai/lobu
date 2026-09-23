@@ -72,10 +72,10 @@ export default defineConnector({
         additionalProperties: false,
       },
       eventKinds: { item: { description: "An item from the service" } },
-      sync: async () => ({
-        events: [],
-        checkpoint: { last_sync_at: new Date().toISOString() },
-      }),
+      sync: async (ctx) => {
+        await ctx.commit([], { last_sync_at: new Date().toISOString() });
+        return { status: "complete" };
+      },
       read: async () => ({
         rows: [],
         hasMore: false,
@@ -113,8 +113,9 @@ publishes `['sync', 'read']`. Connector authors do not declare a separate feed
 mode. Only metadata-only device or MCP definitions declare `operations`
 directly because their executable handlers live elsewhere.
 
-- **`sync`** returns event envelopes and a checkpoint. The platform may persist
-  those events for local search, entities, relationships, and Automations.
+- **`sync`** commits event envelopes and checkpoints through `ctx.commit`, then
+  returns whether the source is caught up or has more work. The platform may
+  persist those events for local search, entities, relationships, and Automations.
 - **`read`** pushes filtering and pagination to the source and returns rows to
   the caller without persisting them.
 - **Both** lets a connector maintain a small, searchable index while retaining
@@ -146,12 +147,21 @@ timeout, and one failure does not discard successful results from the others.
   across syncs. Ingestion may supersede the prior row and allocate a new
   `events.id`; cross-sync dedupe relies on `origin_id`, never the row id. Change
   it only when source identity genuinely changes.
-- **Checkpointing.** Return `checkpoint` (timestamp- or id-based) for incremental
-  sync; use `ctx.emitEvents` / `ctx.updateCheckpoint` mid-sync for long runs so a
-  crash resumes from the last saved point. Each page the platform receives
-  commits as one unit: its events and the checkpoint sent with it become
-  durable together or not at all, and only while the run still holds its lease,
-  so a saved checkpoint never covers events that were not stored. An event with
+- **Checkpointing.** Store events with `await ctx.commit(events, checkpoint)`,
+  once per source page, with the checkpoint (timestamp-, id- or cursor-based)
+  that resumes after that page. A large commit may travel in chunks, but its
+  checkpoint moves only with the final chunk and only while the run still
+  holds its lease. A failed commit can therefore leave replayable events
+  behind, but a saved checkpoint never covers events that were not stored.
+  The promise resolves only once every chunk and the checkpoint are stored and
+  rejects (failing the run) otherwise, so await each call before fetching the
+  next page; a run that stops anywhere resumes from the last checkpoint that
+  resolved.
+  Pass `null` to store events without moving the checkpoint. `sync` then
+  returns `{ status: "complete" }` when the source is caught up, or
+  `{ status: "more" }` when it stopped early at a committed boundary (a page or
+  time budget) with work left, which starts the next run right away instead
+  of waiting for the schedule. An event with
   no text and no title is stored like any other. The checkpoint is stored on the
   configured feed and is **not** invalidated by bumping the connector's
   `version` — updating connector source leaves feed state, checkpoints, and

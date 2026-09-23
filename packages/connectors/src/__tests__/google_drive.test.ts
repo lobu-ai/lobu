@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, mock, test } from 'bun:test';
 // faithful generator rather than a throwing stub, so these tests exercise the
 // real paging semantics.
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -174,7 +175,7 @@ describe('GoogleDriveConnector full sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       credentials: { accessToken: 'tok' },
@@ -198,7 +199,7 @@ describe('GoogleDriveConnector full sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       credentials: { accessToken: 'tok' },
@@ -207,6 +208,10 @@ describe('GoogleDriveConnector full sync', () => {
 
     expect(result.events).toHaveLength(2);
     expect(drive.trace.filter((t) => t === 'files.list')).toHaveLength(2);
+    // Each page is committed with the cursor that resumes after it.
+    expect(result.commits.map((c) => c.events.length)).toEqual([1, 1]);
+    expect(result.commits[0].checkpoint?.list_page_token).toBe('p2');
+    expect(result.status).toBe('complete');
   });
 
   test('stops at the first page boundary at or past max_results', async () => {
@@ -223,7 +228,7 @@ describe('GoogleDriveConnector full sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false, max_results: 2 },
       credentials: { accessToken: 'tok' },
@@ -233,6 +238,7 @@ describe('GoogleDriveConnector full sync', () => {
     expect(result.events).toHaveLength(3);
     expect(result.checkpoint.list_page_token).toBe('P2');
     expect(result.checkpoint.page_token).toBeUndefined();
+    expect(result.status).toBe('more');
   });
 });
 
@@ -247,7 +253,7 @@ describe('GoogleDriveConnector incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       credentials: { accessToken: 'tok' },
@@ -256,6 +262,9 @@ describe('GoogleDriveConnector incremental sync', () => {
 
     expect(result.events).toHaveLength(2);
     expect(result.checkpoint.page_token).toBe('TOKEN_2');
+    // The first page is committed with the change cursor that follows it.
+    expect(result.commits.map((c) => c.events.length)).toEqual([1, 1]);
+    expect(JSON.stringify(result.commits[0].checkpoint)).toContain('c2');
     // Never re-listed: the incremental path succeeded.
     expect(drive.trace).not.toContain('files.list');
   });
@@ -272,7 +281,7 @@ describe('GoogleDriveConnector incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: {},
       credentials: { accessToken: 'tok' },
@@ -298,7 +307,7 @@ describe('GoogleDriveConnector incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       credentials: { accessToken: 'tok' },
@@ -319,7 +328,7 @@ describe('GoogleDriveConnector page-token recovery', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       credentials: { accessToken: 'tok' },
@@ -341,7 +350,7 @@ describe('GoogleDriveConnector page-token recovery', () => {
     connector.client = () => drive.client;
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'files',
         config: {},
         credentials: { accessToken: 'tok' },
@@ -358,7 +367,7 @@ describe('GoogleDriveConnector page-token recovery', () => {
     connector.client = () => drive.client;
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'files',
         config: {},
         credentials: { accessToken: 'tok' },
@@ -666,7 +675,7 @@ describe('GoogleDriveConnector sync content inlining', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -699,7 +708,7 @@ describe('GoogleDriveConnector sync content inlining', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -721,7 +730,7 @@ describe('GoogleDriveConnector sync content inlining', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -740,7 +749,7 @@ describe('GoogleDriveConnector sync content inlining', () => {
     ]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       credentials: { accessToken: 'tok' },
@@ -759,7 +768,7 @@ describe('GoogleDriveConnector sync content inlining', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -777,7 +786,7 @@ describe('GoogleDriveConnector query construction', () => {
     const drive = fakeDrive([startToken('T'), filesList([{ files: [] }])]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { query: "mimeType = 'application/pdf'", include_content: false },
       credentials: { accessToken: 'tok' },
@@ -794,7 +803,7 @@ describe('GoogleDriveConnector query construction', () => {
     const drive = fakeDrive([startToken('T'), filesList([{ files: [] }])]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { include_trashed: true, include_content: false },
       credentials: { accessToken: 'tok' },
@@ -813,7 +822,7 @@ describe('GoogleDriveConnector query construction', () => {
     const drive = fakeDrive([startToken('T'), filesList([{ files: [] }])]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { folder_id: 'FOLDER1', include_content: false },
       credentials: { accessToken: 'tok' },
@@ -878,7 +887,7 @@ describe('GoogleDriveConnector view-churn guard', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -907,7 +916,7 @@ describe('GoogleDriveConnector view-churn guard', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -936,7 +945,7 @@ describe('GoogleDriveConnector view-churn guard', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -955,7 +964,7 @@ describe('GoogleDriveConnector view-churn guard', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: true },
       credentials: { accessToken: 'tok' },
@@ -1135,7 +1144,7 @@ describe('GoogleDriveConnector time budget', () => {
     connector.client = () => drive.client;
 
     // The cap is far away: only the clock can stop this run.
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 2000, include_content: false },
       checkpoint: {},
@@ -1161,7 +1170,7 @@ describe('GoogleDriveConnector time budget', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 2000, include_content: false },
       checkpoint: { page_token: 'C1', last_sync_at: '2026-01-01T00:00:00.000Z' },
@@ -1183,7 +1192,7 @@ describe('GoogleDriveConnector query escaping', () => {
     const drive = fakeDrive([startToken('T'), filesList([{ files: [] }])]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { folder_id: "EVIL\\", include_content: false },
       credentials: { accessToken: 'tok' },
@@ -1202,7 +1211,7 @@ describe('GoogleDriveConnector query escaping', () => {
     const drive = fakeDrive([startToken('T'), filesList([{ files: [] }])]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { folder_id: "a' or '1'='1", include_content: false },
       credentials: { accessToken: 'tok' },
@@ -1245,7 +1254,7 @@ describe('GoogleDriveConnector folder exclusion', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       checkpoint: { page_token: 'TOK-1' },
@@ -1282,7 +1291,7 @@ describe('GoogleDriveConnector bootstrap page-boundary', () => {
       ]);
       connector.client = () => drive.client;
 
-      const result = await connector.sync({
+      const result = await runSync(connector, {
         feedKey: 'files',
         config: { max_results: 3, include_content: false },
         checkpoint,
@@ -1309,7 +1318,7 @@ describe('GoogleDriveConnector resumable bootstrap', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 3, include_content: false },
       checkpoint: {},
@@ -1339,7 +1348,7 @@ describe('GoogleDriveConnector resumable bootstrap', () => {
     const drive = fakeDrive([startToken('TOK-1'), endlessFiles]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 2000, include_content: false },
       checkpoint: {},
@@ -1361,7 +1370,7 @@ describe('GoogleDriveConnector resumable bootstrap', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 10, include_content: false },
       checkpoint: { pending_page_token: 'TOK-1', list_page_token: 'PAGE-2' },
@@ -1386,7 +1395,7 @@ describe('GoogleDriveConnector resumable bootstrap', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 3, include_content: false },
       checkpoint: {},
@@ -1407,7 +1416,7 @@ describe('GoogleDriveConnector resumable bootstrap', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 10, include_content: false },
       checkpoint: {
@@ -1446,7 +1455,7 @@ describe('GoogleDriveConnector feed scope on the incremental axis', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { folder_id: 'FOLDER1', include_content: false },
       checkpoint: { page_token: 'T1', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1474,7 +1483,7 @@ describe('GoogleDriveConnector feed scope on the incremental axis', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { folder_id: 'FOLDER1', include_content: false },
       checkpoint: { page_token: 'T1', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1503,7 +1512,7 @@ describe('GoogleDriveConnector feed scope on the incremental axis', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { folder_id: 'FOLDER1', include_content: false },
       checkpoint: { page_token: 'T1', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1525,7 +1534,7 @@ describe('GoogleDriveConnector feed scope on the incremental axis', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { query: "mimeType = 'application/pdf'", include_content: false },
       checkpoint: {},
@@ -1558,7 +1567,7 @@ describe('GoogleDriveConnector bounded incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 3, include_content: false },
       checkpoint: { page_token: 'START', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1579,7 +1588,7 @@ describe('GoogleDriveConnector bounded incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 3, include_content: false },
       checkpoint: { page_token: 'START', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1599,7 +1608,7 @@ describe('GoogleDriveConnector bounded incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 100, include_content: false },
       checkpoint: { page_token: 'START', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1619,7 +1628,7 @@ describe('GoogleDriveConnector bounded incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 100, include_content: false },
       checkpoint: {},
@@ -1642,7 +1651,7 @@ describe('GoogleDriveConnector bounded incremental sync', () => {
     ]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 100, include_content: false },
       checkpoint: { page_token: 'CHANGES-P2', last_sync_at: '2026-01-01T00:00:00Z' },
@@ -1663,7 +1672,7 @@ describe('GoogleDriveConnector content failure visibility', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: {},
       checkpoint: {},
@@ -1685,7 +1694,7 @@ describe('GoogleDriveConnector content failure visibility', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: {},
       checkpoint: {},
@@ -1711,7 +1720,7 @@ describe('GoogleDriveConnector bootstrap window', () => {
     connector.client = () => drive.client;
 
     const pinned = '2026-01-01T00:00:00.000Z';
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 3, include_content: false },
       checkpoint: {
@@ -1733,7 +1742,7 @@ describe('GoogleDriveConnector bootstrap window', () => {
     connector.client = () => drive.client;
 
     const pinned = '2026-01-01T00:00:00.000Z';
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { max_results: 10, include_content: false },
       checkpoint: {
@@ -1760,7 +1769,7 @@ describe('GoogleDriveConnector incomplete search', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       checkpoint: {},
@@ -1780,7 +1789,7 @@ describe('GoogleDriveConnector incomplete search', () => {
     ]);
     connector.client = () => drive.client;
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       checkpoint: {},
@@ -1796,7 +1805,7 @@ describe('GoogleDriveConnector incomplete search', () => {
     const drive = fakeDrive([startToken('TOK'), filesList([{ files: [] }])]);
     connector.client = () => drive.client;
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'files',
       config: { include_content: false },
       checkpoint: {},

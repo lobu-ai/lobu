@@ -38,7 +38,7 @@ const STORED_SOURCE = `
 export default class StaleProbeConnector {
   definition = { key: 'zz.staleprobe', name: 'Stale Probe', version: '1.0.0' };
   marker(): string { return 'RECOMPILED_FROM_SOURCE_MARKER'; }
-  async sync() { return { events: [], checkpoint: null }; }
+  async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
   async execute() { return {}; }
 }
 `;
@@ -201,7 +201,7 @@ describe('install-time compile-config provenance', () => {
   const TS_SOURCE = `
 export default class FreshInstallConnector {
   definition = { key: 'zz.freshinstall', name: 'Fresh Install Probe', version: '1.0.0' };
-  async sync() { return { events: [], checkpoint: null }; }
+  async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
   async execute() { return {}; }
 }
 `;

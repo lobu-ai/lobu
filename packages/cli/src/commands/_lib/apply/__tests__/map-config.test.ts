@@ -880,7 +880,10 @@ describe("mapProjectToDesiredState", () => {
       feeds: {
         stars: {
           name: "Stars",
-          sync: async () => ({ events: [], checkpoint: null }),
+          sync: async (ctx) => {
+            await ctx.commit([], null);
+            return { status: "complete" };
+          },
         },
       },
     });

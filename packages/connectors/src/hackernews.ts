@@ -376,11 +376,8 @@ export default class HackerNewsConnector extends ConnectorRuntime {
       await this.enrichStoriesWithExternalContent(events, deadline);
     }
 
-    return {
-      events,
-      checkpoint: { last_sync_at: new Date().toISOString() },
-      metadata: { items_found: events.length },
-    };
+    await ctx.commit(events, { last_sync_at: new Date().toISOString() });
+    return { status: 'complete', metadata: { items_found: events.length } };
   }
 
   // -------------------------------------------------------------------------

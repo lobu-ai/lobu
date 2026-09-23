@@ -14,6 +14,7 @@
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { runSync } from './sync-harness';
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
@@ -63,7 +64,7 @@ describe("GitHub commits feed", () => {
 	test("maps each commit to a per-sha event attributed to the linked author", async () => {
 		const { connector, calls } = buildConnector(COMMITS);
 
-		const result = await connector.sync({
+		const result = await runSync(connector, {
 			config: { repo_owner: "lobu-ai", repo_name: "lobu" },
 			feedKey: "commits",
 			checkpoint: null,
@@ -91,7 +92,7 @@ describe("GitHub commits feed", () => {
 	test("unlinked-email commit falls back to git author name, no false person link", async () => {
 		const { connector } = buildConnector(COMMITS);
 
-		const result = await connector.sync({
+		const result = await runSync(connector, {
 			config: { repo_owner: "lobu-ai", repo_name: "lobu" },
 			feedKey: "commits",
 			checkpoint: null,
@@ -111,7 +112,7 @@ describe("GitHub commits feed", () => {
 	test("every event is stamped with github_repo_full_name for repo-ACL attribution", async () => {
 		const { connector } = buildConnector(COMMITS);
 
-		const result = await connector.sync({
+		const result = await runSync(connector, {
 			config: { repo_owner: "Lobu-AI", repo_name: "Lobu" },
 			feedKey: "commits",
 			checkpoint: null,

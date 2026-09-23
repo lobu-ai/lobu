@@ -215,7 +215,7 @@ export default class TwitterTakeoutConnector extends ConnectorRuntime<
   > = {
     key: "twitter.takeout",
     name: "X/Twitter Takeout",
-    version: "1.0.0",
+    version: "1.1.0",
     description: "Ingests local X/Twitter archive exports.",
     authSchema: { methods: [{ type: "none" }] },
     // Feed sync reads an absolute path on the user's own machine. Per the SDK
@@ -302,7 +302,7 @@ export default class TwitterTakeoutConnector extends ConnectorRuntime<
 
   private async syncFeed(
     ctx: SyncContext<TwitterTakeoutCheckpoint, LocalTakeoutConfig>
-  ): Promise<SyncResult<TwitterTakeoutCheckpoint>> {
+  ): Promise<SyncResult> {
     const takeoutDir = assertDirectory(ctx.config, "X/Twitter");
     const dataDir = path.join(takeoutDir, "data");
     const max = batchSize(ctx.config);
@@ -351,20 +351,18 @@ export default class TwitterTakeoutConnector extends ConnectorRuntime<
     throw new Error(`Unknown X/Twitter Takeout feed: ${ctx.feedKey}`);
   }
 
-  private result(
+  private async result(
     ctx: SyncContext<TwitterTakeoutCheckpoint, LocalTakeoutConfig>,
     key: keyof TwitterTakeoutCheckpoint,
     allEvents: EventEnvelope[],
     max: number
-  ): SyncResult<TwitterTakeoutCheckpoint> {
+  ): Promise<SyncResult> {
     const events = takeBatch(allEvents, ctx.checkpoint?.[key], max);
-    return {
-      events,
-      checkpoint: {
-        ...ctx.checkpoint,
-        [key]: maxEventCursor(events, ctx.checkpoint?.[key]),
-      },
-    };
+    await ctx.commit(events, {
+      ...ctx.checkpoint,
+      [key]: maxEventCursor(events, ctx.checkpoint?.[key]),
+    });
+    return { status: "complete" };
   }
 
   private readTweetEvents(dataDir: string): EventEnvelope[] {

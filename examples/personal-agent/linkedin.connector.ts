@@ -2963,6 +2963,13 @@ function assertTakeoutDir(config: LinkedInConfig): string {
   return dir;
 }
 
+/** One sync pass's output; `syncFeed` commits it as a single page. */
+interface LinkedInSyncPage {
+  events: EventEnvelope[];
+  checkpoint: LinkedInCheckpoint;
+  metadata?: Record<string, unknown>;
+}
+
 export default class LinkedInConnector extends ConnectorRuntime<
   LinkedInCheckpoint,
   LinkedInConfig
@@ -2994,7 +3001,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.11.11",
+    version: "3.12.0",
     faviconDomain: "linkedin.com",
     // Auth is `none`: every live feed authenticates implicitly through the
     // paired Owletto Chrome extension (the user's own signed-in linkedin.com
@@ -3459,7 +3466,15 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
   private async syncFeed(
     ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>
-  ): Promise<SyncResult<LinkedInCheckpoint>> {
+  ): Promise<SyncResult> {
+    const page = await this.collectFeed(ctx);
+    await ctx.commit(page.events, page.checkpoint);
+    return { status: "complete", metadata: page.metadata };
+  }
+
+  private async collectFeed(
+    ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>
+  ): Promise<LinkedInSyncPage> {
     const feedKey = ctx.feedKey;
 
     // ── Live (Chrome-extension) feeds ────────────────────────────
@@ -3506,7 +3521,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
   private async syncLive(
     ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>
-  ): Promise<SyncResult<LinkedInCheckpoint>> {
+  ): Promise<LinkedInSyncPage> {
     const config = ctx.config;
     const checkpoint = (ctx.checkpoint ?? {}) as LinkedInCheckpoint;
     const feedKey = ctx.feedKey;
@@ -3551,7 +3566,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     maxScrolls: number,
     checkpoint: LinkedInCheckpoint,
     dispatcher: ChromeActionDispatcher
-  ): Promise<SyncResult<LinkedInCheckpoint>> {
+  ): Promise<LinkedInSyncPage> {
     const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
       dispatcher,
       url: "https://www.linkedin.com/feed/",
@@ -3637,7 +3652,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     maxScrolls: number,
     checkpoint: LinkedInCheckpoint,
     dispatcher: ChromeActionDispatcher
-  ): Promise<SyncResult<LinkedInCheckpoint>> {
+  ): Promise<LinkedInSyncPage> {
     const postsUrl = `${baseUrl}/posts/`;
     const result = await extensionNetworkSync<LinkedInPost>({
       dispatcher,
@@ -3711,7 +3726,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     maxScrolls: number,
     checkpoint: LinkedInCheckpoint,
     dispatcher: ChromeActionDispatcher
-  ): Promise<SyncResult<LinkedInCheckpoint>> {
+  ): Promise<LinkedInSyncPage> {
     const jobsUrl = `${baseUrl}/jobs/`;
     const result = await extensionNetworkSync<LinkedInJob>({
       dispatcher,
@@ -3773,7 +3788,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: keyof LinkedInCheckpoint,
     allEvents: EventEnvelope[],
     max: number
-  ): SyncResult<LinkedInCheckpoint> {
+  ): LinkedInSyncPage {
     const events = takeBatch(allEvents, ctx.checkpoint?.[key], max);
     return {
       events,

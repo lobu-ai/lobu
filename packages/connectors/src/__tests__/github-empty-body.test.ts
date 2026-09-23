@@ -17,6 +17,7 @@
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { runSync } from './sync-harness';
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
@@ -52,7 +53,7 @@ describe("GitHub empty-body guard (#2033)", () => {
 	] as const) {
 		test(`${label}: null body returns [] instead of throwing`, async () => {
 			const connector = buildConnector(null);
-			const result = await connector.sync({
+			const result = await runSync(connector, {
 				config: CONFIG,
 				feedKey,
 				checkpoint: null,
@@ -64,7 +65,7 @@ describe("GitHub empty-body guard (#2033)", () => {
 
 		test(`${label}: undefined body returns [] instead of throwing`, async () => {
 			const connector = buildConnector(undefined);
-			const result = await connector.sync({
+			const result = await runSync(connector, {
 				config: CONFIG,
 				feedKey,
 				checkpoint: null,

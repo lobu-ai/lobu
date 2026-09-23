@@ -542,9 +542,9 @@ export function defineConnection(config: Omit<Connection, "kind">): Connection {
  * {…}`). Used to type-check the `<Connector>` generic on
  * {@link connectorFromFile} against the referenced module.
  */
-// The connector's checkpoint/config type params appear in both variance
-// positions (the contravariant `sync(ctx: SyncContext<C, F>)` and the covariant
-// `SyncResult<C>`), so `any` is the only instantiation that accepts every
+// The connector's checkpoint type param appears in both variance positions
+// (`sync(ctx: SyncContext<C, F>)` reads `ctx.checkpoint: C` and hands `C` to
+// `ctx.commit`), so `any` is the only instantiation that accepts every
 // concrete subclass; `unknown`/`never` reject real connectors typed
 // `ConnectorRuntime<MyCheckpoint, MyConfig>`. Only the constructor shape is
 // load-bearing here, never the type params.

@@ -158,7 +158,7 @@ export async function runFeed(feed: FeedRecord): Promise<{ itemCount: number }> 
       entityIds: feed.entity_ids,
     },
     hooks: {
-      onEventChunk: async (events) => {
+      onCommit: async (events) => {
         itemCount += events.length;
       },
     },

@@ -3,6 +3,7 @@ import {
 	connectorSdkMock,
 	HttpStatusError,
 } from "./connector-sdk.mock";
+import { runSync } from './sync-harness';
 
 mock.module("@lobu/connector-sdk", () => ({
 	...connectorSdkMock(),
@@ -34,7 +35,7 @@ describe("XConnector forced OAuth", () => {
 
 		const connector = new XConnector();
 		await expect(
-			connector.sync({
+			runSync(connector, {
 				feedKey: "my_tweets",
 				config: { use_oauth: true },
 				checkpoint: {},

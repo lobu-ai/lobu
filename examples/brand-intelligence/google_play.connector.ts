@@ -191,7 +191,7 @@ export default class GooglePlayConnector extends ConnectorRuntime {
     key: "google_play",
     name: "Google Play Store",
     description: "Fetches app reviews from the Google Play Store.",
-    version: "1.0.0",
+    version: "1.1.0",
     faviconDomain: "play.google.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -353,9 +353,9 @@ export default class GooglePlayConnector extends ConnectorRuntime {
             pagination_token: checkpoint.pagination_token,
           };
 
+    await ctx.commit(events, newCheckpoint as Record<string, unknown>);
     return {
-      events,
-      checkpoint: newCheckpoint as Record<string, unknown>,
+      status: "complete",
       metadata: {
         items_found: allReviews.length,
         items_skipped: 0,

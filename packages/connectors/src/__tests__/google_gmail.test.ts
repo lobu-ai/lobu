@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -106,7 +107,7 @@ function toThreadResponse(thread: FakeThread | undefined) {
 async function syncThreads(threads: FakeThread[], config: Record<string, unknown> = {}) {
   const connector = new GmailConnector();
   connector.createClient = () => fakeHttp(threads);
-  const result = await connector.sync({
+  const result = await runSync(connector, {
     feedKey: 'threads',
     config,
     credentials: { accessToken: 'tok' },
@@ -123,7 +124,7 @@ test('the checkpoint precedes sync requests so messages arriving during sync rem
       firstRequestAt = Math.min(firstRequestAt, Date.now());
     });
 
-  const result = await connector.sync({
+  const result = await runSync(connector, {
     feedKey: 'threads',
     config: {},
     credentials: { accessToken: 'tok' },
@@ -150,7 +151,7 @@ test('person-building sync requests its label union and attribution headers', as
       (url) => urls.push(url)
     );
 
-  await connector.sync({
+  await runSync(connector, {
     feedKey: 'threads',
     config: { labels: [' INBOX ', 'SENT'], human_senders_only: true },
     credentials: { accessToken: 'tok' },
@@ -614,7 +615,7 @@ describe('Gmail human_senders_only sync mode', () => {
         new Set(['t-missing'])
       );
 
-    await connector.sync({
+    await runSync(connector, {
       feedKey: 'threads',
       config: { max_results: 1, human_senders_only: true },
       credentials: { accessToken: 'tok' },
@@ -661,7 +662,7 @@ describe('complete Gmail sync input', () => {
       { id: 'first', date: '2026-07-01T10:00:00Z', body: 'Original request with details past the snippet.' },
       { id: 'reply', date: '2026-07-02T11:00:00Z', body: 'The work is complete. Teşekkürler.' },
     ] }], (url) => urls.push(url));
-    const result = await connector.sync(context());
+    const result = await runSync(connector, context());
     expect(result.events[0].payload_text).toContain('Original request with details past the snippet.');
     expect(result.events[0].payload_text).toContain('The work is complete. Teşekkürler.');
     expect(result.events[0].occurred_at.toISOString()).toBe('2026-07-02T11:00:00.000Z');
@@ -673,7 +674,7 @@ describe('complete Gmail sync input', () => {
     const connector = new GmailConnector();
     const urls: string[] = [];
     connector.createClient = () => fakeHttp([], (url) => urls.push(url));
-    await connector.sync(context({}, { query: '-in:spam -in:trash', labels: ['INBOX', 'SENT'] }));
+    await runSync(connector, context({}, { query: '-in:spam -in:trash', labels: ['INBOX', 'SENT'] }));
     const query = new URL(urls[0]).searchParams.get('q');
     expect(query).toContain('-in:spam -in:trash');
     expect(query).not.toContain('label:INBOX');
@@ -694,18 +695,20 @@ describe('complete Gmail sync input', () => {
       };
     } });
     const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
-    const first = await connector.sync(context(prior, { max_results: 1 }));
+    const first = await runSync(connector, context(prior, { max_results: 1 }));
     expect(first.checkpoint.last_sync_at).toBeUndefined();
     expect(first.checkpoint.pending.page_token).toBe('page-two');
+    expect(first.status).toBe('more');
     // A different lookback must not re-cut a window that is mid-walk: the stored
     // page token only means anything against the query it was issued for.
-    const second = await connector.sync(context(first.checkpoint, { max_results: 1, lookback_days: 1 }));
+    const second = await runSync(connector, context(first.checkpoint, { max_results: 1, lookback_days: 1 }));
     expect(first.events.map((event) => event.origin_id)).toEqual(['newer']);
     expect(second.events.map((event) => event.origin_id)).toEqual(['older']);
     const lists = urls.filter((url) => !new URL(url).pathname.match(/\/threads\//)).map((url) => new URL(url));
     expect(lists[1].searchParams.get('pageToken')).toBe('page-two');
     expect(lists[1].searchParams.get('q')).toBe(lists[0].searchParams.get('q'));
     expect(new Date(second.checkpoint.last_sync_at).getTime()).toBeGreaterThan(Date.parse(prior.last_sync_at));
+    expect(second.status).toBe('complete');
   });
 
   test('keeps an empty page with a continuation token pending', async () => {
@@ -714,10 +717,11 @@ describe('complete Gmail sync input', () => {
       ok: true, json: async () => ({ threads: [], nextPageToken: 'continue-empty' }),
     }) });
     const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
-    const result = await connector.sync(context(prior));
+    const result = await runSync(connector, context(prior));
     expect(result.events).toEqual([]);
     expect(result.checkpoint.last_sync_at).toBeUndefined();
     expect(result.checkpoint.pending.page_token).toBe('continue-empty');
+    expect(result.status).toBe('more');
   });
 
   test('rejects a repeated token instead of recording a completed window', async () => {
@@ -725,7 +729,7 @@ describe('complete Gmail sync input', () => {
     connector.createClient = () => ({ raw: async () => ({
       ok: true, json: async () => ({ threads: [], nextPageToken: 'same' }),
     }) });
-    await expect(connector.sync(context({ schema_version: 3, scope: JSON.stringify(['label:INBOX', false]), pending: {
+    await expect(runSync(connector, context({ schema_version: 3, scope: JSON.stringify(['label:INBOX', false]), pending: {
       query: 'after:1 before:2 (label:INBOX)',
       started_at: '2026-07-02T00:00:00Z', page_token: 'same',
     } }))).rejects.toThrow('repeated page token');
@@ -736,11 +740,11 @@ describe('complete Gmail sync input', () => {
     const urls: string[] = [];
     connector.createClient = () => fakeHttp([], (url) => urls.push(url));
     const old = { last_sync_at: new Date(Date.now() - 60_000).toISOString() };
-    const first = await connector.sync(context(old, { lookback_days: 30 }));
+    const first = await runSync(connector, context(old, { lookback_days: 30 }));
     const after = Number(new URL(urls[0]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
     expect(after).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
     expect(first.checkpoint.schema_version).toBe(3);
-    await connector.sync(context(first.checkpoint, { query: '-in:spam -in:trash', lookback_days: 30 }));
+    await runSync(connector, context(first.checkpoint, { query: '-in:spam -in:trash', lookback_days: 30 }));
     const widenedAfter = Number(new URL(urls[1]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
     expect(widenedAfter).toBeLessThan(Date.parse(old.last_sync_at) / 1000 - 29 * 86400);
   });
@@ -749,7 +753,7 @@ describe('complete Gmail sync input', () => {
     const connector = new GmailConnector();
     const body = 'x'.repeat(200_000) + ' Please submit the signed agreement.';
     connector.createClient = () => fakeHttp([{ id: 'thread-long', messages: [{ id: 'long', body }] }]);
-    const result = await connector.sync(context());
+    const result = await runSync(connector, context());
     expect(result.events[0].payload_text).toContain(body);
   });
 
@@ -761,7 +765,7 @@ describe('complete Gmail sync input', () => {
           : toThreadResponse({ id: kind, messages: [{ id: 'm', date: 'invalid-date' }] })
         : { threads: [{ id: kind }] },
     }) });
-    await expect(connector.sync(context())).rejects.toThrow(/Gmail returned/);
+    await expect(runSync(connector, context())).rejects.toThrow(/Gmail returned/);
   });
 
   test('restarts the window when Gmail retires the stored page token', async () => {
@@ -779,7 +783,8 @@ describe('complete Gmail sync input', () => {
         return { ok: true, status: 200, json: async () => ({ threads: [{ id: 'first-page' }] }) };
       },
     });
-    const result = await connector.sync(
+    const result = await runSync(
+      connector,
       context({
         schema_version: 3,
         scope: JSON.stringify(['label:INBOX', false]),
@@ -802,7 +807,8 @@ describe('complete Gmail sync input', () => {
       raw: async () => ({ ok: false, status: 429, text: async () => 'rate limited' }),
     });
     await expect(
-      connector.sync(
+      runSync(
+        connector,
         context({
           schema_version: 3,
           scope: JSON.stringify(['label:INBOX', false]),
@@ -819,7 +825,7 @@ describe('complete Gmail sync input', () => {
         ? { ok: false, status: 503, text: async () => 'provider unavailable' }
         : { ok: true, json: async () => ({ threads: [{ id: 'retry-me' }] }) },
     });
-    await expect(connector.sync(context())).rejects.toThrow(/503/);
+    await expect(runSync(connector, context())).rejects.toThrow(/503/);
   });
 });
 
@@ -882,7 +888,7 @@ describe('Gmail externally stored message bodies', () => {
       const { connector, urls } = setup();
       const body =
         mode === 'sync'
-          ? (await connector.sync(syncContext)).events[0].payload_text
+          ? (await runSync(connector, syncContext)).events[0].payload_text
           : (
               await connector.execute({
                 actionKey: 'get_thread',
@@ -899,7 +905,7 @@ describe('Gmail externally stored message bodies', () => {
 
   test('a failed external body fetch cannot advance the sync checkpoint', async () => {
     const { connector } = setup(503);
-    await expect(connector.sync(syncContext)).rejects.toThrow(/503/);
+    await expect(runSync(connector, syncContext)).rejects.toThrow(/503/);
   });
 });
 
@@ -938,7 +944,7 @@ describe('Gmail empty MIME alternatives', () => {
     ] as const)(`${mode} falls back to HTML for %s plain text`, async (_name, body) => {
       const connector = setup(body);
       const text = mode === 'sync'
-        ? (await connector.sync(context)).events[0].payload_text
+        ? (await runSync(connector, context)).events[0].payload_text
         : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'alternatives' }, credentials: context.credentials })).output.messages[0].body;
       expect(text).toContain(mode === 'sync' ? 'Please confirm the delivery date.' : html);
     });
@@ -949,7 +955,7 @@ describe('Gmail empty MIME alternatives', () => {
     ['unavailable external body', { attachmentId: 'unavailable', size: 12 }, 503],
     ['empty external response for nonempty body', { attachmentId: 'nonempty', size: 12 }, 200],
   ] as const)('does not checkpoint past a %s despite a readable HTML alternative', async (_name, body, status) => {
-    await expect(setup(body, status).sync(context)).rejects.toThrow(/body/);
+    await expect(runSync(setup(body, status), context)).rejects.toThrow(/body/);
   });
 });
 
@@ -996,7 +1002,7 @@ describe('Gmail multipart body sections', () => {
   test.each(['sync', 'get_thread'])('%s retains every inline section without duplicating alternatives', async (mode) => {
     const { connector, urls } = setup();
     const body = mode === 'sync'
-      ? (await connector.sync(context)).events[0].payload_text
+      ? (await runSync(connector, context)).events[0].payload_text
       : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'mixed-body' }, credentials: context.credentials })).output.messages[0].body;
     expect(body).toContain(mode === 'sync'
       ? 'Opening section.\n\nHTML-only middle section.\n\nPlease sign the final section.'
@@ -1008,7 +1014,7 @@ describe('Gmail multipart body sections', () => {
   });
 
   test('does not checkpoint past a failed later inline section', async () => {
-    await expect(setup(503).connector.sync(context)).rejects.toThrow(/503/);
+    await expect(runSync(setup(503).connector, context)).rejects.toThrow(/503/);
   });
 });
 
@@ -1060,7 +1066,7 @@ describe('Gmail MIME syntax', () => {
           : { threads: [{ id: thread.id }] },
       }) });
       const body = mode === 'sync'
-        ? (await connector.sync(context)).events[0].payload_text
+        ? (await runSync(connector, context)).events[0].payload_text
         : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: thread.id }, credentials: context.credentials })).output.messages[0].body;
       expect(body).toContain('Complete body.');
       expect(body).not.toContain('Unwanted');
@@ -1099,7 +1105,7 @@ describe('Gmail poison-thread quarantine', () => {
       scope: JSON.stringify(['label:INBOX', false]),
       last_sync_at: '2026-07-01T00:00:00Z',
     };
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'threads', config: {}, checkpoint,
       credentials: { accessToken: 'synthetic-token' },
     });
@@ -1117,7 +1123,7 @@ describe('Gmail poison-thread quarantine', () => {
 
     // Rewalking the boundary deduplicates diagnostics without mutating state.
     const context = { feedKey: 'threads', config: {}, credentials: { accessToken: 'synthetic-token' } };
-    const replay = await connector.sync({ ...context, checkpoint: result.checkpoint });
+    const replay = await runSync(connector, { ...context, checkpoint: result.checkpoint });
     expect(replay.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
 
     // A capped window records the poison but cannot advance past unread pages.
@@ -1129,22 +1135,22 @@ describe('Gmail poison-thread quarantine', () => {
     connector.createClient = () => ({ raw: (url: string) => new URL(url).pathname.endsWith('/threads')
       ? capped.raw(url) : original.raw(url),
     });
-    const first = await connector.sync({ ...context, config: { max_results: 1 }, checkpoint });
+    const first = await runSync(connector, { ...context, config: { max_results: 1 }, checkpoint });
     expect(first.events).toEqual([]);
     expect(first.checkpoint.last_sync_at).toBe(checkpoint.last_sync_at);
     expect(first.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
     expect(first.checkpoint.pending.page_token).toBe('1');
-    const second = await connector.sync({ ...context, config: { max_results: 1 }, checkpoint: first.checkpoint });
+    const second = await runSync(connector, { ...context, config: { max_results: 1 }, checkpoint: first.checkpoint });
     expect(second.events.map((event: { origin_id: string }) => event.origin_id)).toEqual(['good-thread']);
     expect(second.checkpoint.last_sync_at).toBe(first.checkpoint.pending.started_at);
     expect(second.checkpoint.pending).toBeUndefined();
     expect(second.checkpoint.skipped_threads).toEqual(first.checkpoint.skipped_threads);
 
     connector.createClient = () => fakeHttp([]);
-    const empty = await connector.sync({ ...context, checkpoint: second.checkpoint });
+    const empty = await runSync(connector, { ...context, checkpoint: second.checkpoint });
     expect(empty.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
     connector.createClient = () => fakeHttp([{ id: 'poison-thread', messages: [{ id: 'poison-message', body: 'Repaired body.' }] }]);
-    const repaired = await connector.sync({ ...context, checkpoint: empty.checkpoint });
+    const repaired = await runSync(connector, { ...context, checkpoint: empty.checkpoint });
     expect(repaired.events[0].origin_id).toBe('poison-thread');
     expect(repaired.checkpoint.skipped_threads).toBeUndefined();
     expect(empty.checkpoint.skipped_threads).toEqual(result.checkpoint.skipped_threads);
@@ -1180,7 +1186,7 @@ describe('Gmail MIME body charset', () => {
       ] as const)(`${mode} decodes %s ${external ? 'external' : 'inline'} bytes`, async (_name, bytes, contentType, expected) => {
         const connector = setup(bytes, contentType, external);
         const body = mode === 'sync'
-          ? (await connector.sync(context)).events[0].payload_text
+          ? (await runSync(connector, context)).events[0].payload_text
           : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'encoded-thread' }, credentials: context.credentials })).output.messages[0].body;
         expect(body).toContain(expected);
         expect(body).not.toContain('\uFFFD');
@@ -1191,7 +1197,7 @@ describe('Gmail MIME body charset', () => {
       ['unsupported charset', Buffer.from('body'), 'text/plain; charset=unknown-charset'],
     ] as const)(`quarantines %s ${external ? 'external' : 'inline'} bytes without persisting corrupt content`, async (_name, bytes, contentType) => {
       const connector = setup(bytes, contentType, external);
-      const result = await connector.sync(context);
+      const result = await runSync(connector, context);
       expect(result.events).toEqual([]);
       expect(result.checkpoint.skipped_threads).toEqual({
         'encoded-thread': { message_id: 'encoded-message', error: expect.stringContaining('Gmail body decode') },
@@ -1239,7 +1245,7 @@ describe('Gmail readable HTML sync bodies', () => {
 
   test.each([false, true])('stores readable complete HTML content (external body: %s)', async (external) => {
     const { connector } = setup(external);
-    const result = await connector.sync(context);
+    const result = await runSync(connector, context);
     const text = result.events[0].payload_text;
     expect(text).not.toMatch(/<style>|\.layout|trackingCode|templateOnly|Layout title|tracking\.example|data:image/);
     expect(text).toContain('Delivery & payment');
@@ -1267,13 +1273,13 @@ describe('Gmail readable HTML sync bodies', () => {
   test('does not checkpoint past a body conversion failure', async () => {
     const { connector } = setup();
     connector.emailBodyConverter.turndown = () => { throw new Error('synthetic conversion failure'); };
-    await expect(connector.sync(context)).rejects.toThrow('synthetic conversion failure');
+    await expect(runSync(connector, context)).rejects.toThrow('synthetic conversion failure');
   });
 
   test('revisits stored HTML on upgrade without changing thread identity', async () => {
     const { connector, urls } = setup();
     const previous = { schema_version: 2, scope: JSON.stringify(['label:INBOX', false]), last_sync_at: new Date(Date.now() - 60_000).toISOString() };
-    const result = await connector.sync({ ...context, config: { lookback_days: 30 }, checkpoint: previous });
+    const result = await runSync(connector, { ...context, config: { lookback_days: 30 }, checkpoint: previous });
     const after = Number(new URL(urls[0]).searchParams.get('q')?.match(/after:(\d+)/)?.[1]);
     expect(after).toBeLessThan(Date.parse(previous.last_sync_at) / 1000 - 29 * 86400);
     expect(result.checkpoint.schema_version).toBe(3);

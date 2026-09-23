@@ -113,14 +113,14 @@ export type ExecutorJob =
 /**
  * Result shape returned by the executor. One discriminated union per mode
  * mirrors the SDK's `ActionResult` / `AuthResult` directly. Sync is
- * streaming-only: events leave via `hooks.onEventChunk`, never collected
- * onto the result — callers that need a list build it themselves in the
- * hook (see e.g. `packages/cli/src/commands/_lib/connector-run-cmd.ts`).
+ * commit-only: events and checkpoints leave through `hooks.onCommit` as the
+ * connector commits them, never collected onto the result.
  */
 export type ExecutorResult =
   | {
       mode: 'sync';
-      checkpoint: Record<string, unknown> | null;
+      /** How the pass ended; see the SDK's `SyncResult.status`. */
+      status: 'complete' | 'more';
       auth_update?: Record<string, unknown> | null;
       metadata?: Record<string, unknown>;
     }
@@ -191,10 +191,14 @@ export interface ExecutionHooks {
    * turn's own token — so the guest never holds a credential or an egress.
    */
   onRuntimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>;
-  /** Sync runs: connector streamed a chunk of events (and we should persist them). */
-  onEventChunk?: (events: EventEnvelope[]) => Promise<void> | void;
-  /** Sync runs: connector pushed an incremental checkpoint update. */
-  onCheckpointUpdate?: (checkpoint: Record<string, unknown> | null) => Promise<void> | void;
+  /**
+   * Sync runs: persist one chunk of a `ctx.commit` — its events and, on the
+   * chunk that completes the commit, the checkpoint (`null` otherwise, and
+   * when the connector left the checkpoint unchanged). Resolve only once both
+   * are durable; a rejection terminates the run, so the connector never
+   * proceeds past a commit that did not land.
+   */
+  onCommit?: (events: EventEnvelope[], checkpoint: Record<string, unknown> | null) => Promise<void> | void;
   /** Auth runs: connector emitted an artifact (QR/redirect/prompt/status). */
   onAuthArtifact?: (artifact: Record<string, unknown>) => Promise<void> | void;
   /** Auth runs: connector paused until a named signal arrives. */

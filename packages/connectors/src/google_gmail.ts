@@ -457,7 +457,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   // sync
   // -------------------------------------------------------------------------
 
-  private async syncFeed(ctx: SyncContext<GmailCheckpoint, GmailConfig>): Promise<SyncResult<GmailCheckpoint>> {
+  private async syncFeed(ctx: SyncContext<GmailCheckpoint, GmailConfig>): Promise<SyncResult> {
     const syncStartedAt = new Date();
     const token = ctx.credentials?.accessToken;
     if (!token) {
@@ -493,9 +493,23 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     // first page. `origin_id` makes that replay a supersede, not a duplicate.
     let staleCursorRecoverable = pageToken !== undefined;
     const http = this.createClient(token);
-    const events: EventEnvelope[] = [];
     const skippedThreads = { ...checkpoint.skipped_threads };
+    let itemsFound = 0;
     let itemsSkipped = 0;
+    // A part-walked window keeps the previous `last_sync_at`: it may not advance
+    // until the whole window has been walked, or the unread tail is skipped.
+    const checkpointAt = (cursor: string | undefined): GmailCheckpoint => {
+      const next: GmailCheckpoint = cursor
+        ? {
+            schema_version: 3,
+            scope: scopeKey,
+            ...(resumable && checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
+            pending: { query, started_at: windowStart, page_token: cursor },
+          }
+        : { schema_version: 3, scope: scopeKey, last_sync_at: windowStart };
+      if (Object.keys(skippedThreads).length) next.skipped_threads = { ...skippedThreads };
+      return next;
+    };
     // Bounds the threads FETCHED per run (each costs at least one API call),
     // independent of how many survive the person filter — a narrow feed must not
     // scan the whole window just because most threads are rejected. It also sizes
@@ -523,6 +537,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       staleCursorRecoverable = false;
       const listData = (await listResponse.json()) as GmailThreadListResponse;
       const threads = listData.threads ?? [];
+      const events: EventEnvelope[] = [];
       for (const threadStub of threads) {
         inspected++;
         try {
@@ -587,33 +602,18 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         throw new Error('Gmail returned a repeated page token');
       }
       pageToken = listData.nextPageToken;
-      // An empty page with a cursor is still incomplete. Persist its cursor
-      // rather than advance the window or spin on empty provider responses.
-      if (threads.length === 0) break;
-      if (!pageToken || inspected >= maxResults) break;
+      // The page commits with the cursor of the next one, so a run cut short
+      // resumes where it stopped; the last page commits the finished window.
+      await ctx.commit(events, checkpointAt(pageToken));
+      itemsFound += events.length;
+      const metadata = { items_found: itemsFound, items_skipped: itemsSkipped };
+      if (!pageToken) return { status: 'complete', metadata };
+      // An empty page with a cursor is still incomplete. Its cursor is saved
+      // and the next run continues immediately rather than reporting the
+      // fixed window as caught up.
+      if (threads.length === 0) return { status: 'more', metadata };
+      if (inspected >= maxResults) return { status: 'more', metadata };
     }
-
-    events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
-    // A part-walked window keeps the previous `last_sync_at`: it may not advance
-    // until the whole window has been walked, or the unread tail is skipped.
-    const newCheckpoint: GmailCheckpoint = pageToken
-      ? {
-          schema_version: 3,
-          scope: scopeKey,
-          ...(resumable && checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
-          pending: { query, started_at: windowStart, page_token: pageToken },
-        }
-      : { schema_version: 3, scope: scopeKey, last_sync_at: windowStart };
-    if (Object.keys(skippedThreads).length) newCheckpoint.skipped_threads = skippedThreads;
-
-    return {
-      events,
-      checkpoint: newCheckpoint,
-      metadata: {
-        items_found: events.length,
-        items_skipped: itemsSkipped,
-      },
-    };
   }
 
   // -------------------------------------------------------------------------

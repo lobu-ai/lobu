@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
 
@@ -194,7 +195,7 @@ describe("playlists snapshot gate", () => {
     });
     const connector = new SpotifyConnector();
 
-    const first = await connector.sync(syncCtx("playlists", http));
+    const first = await runSync(connector, syncCtx("playlists", http));
     expect(first.events.length).toBeGreaterThan(0);
     // The stored key is a composite (snapshot_id + the fields snapshot_id does
     // not version), so assert it round-trips rather than pinning its value.
@@ -202,7 +203,8 @@ describe("playlists snapshot gate", () => {
     expect(http.calls.some((u: string) => u.includes("/tracks"))).toBe(true);
 
     http.calls.length = 0;
-    const second = await connector.sync(
+    const second = await runSync(
+      connector,
       syncCtx("playlists", http, { checkpoint: first.checkpoint })
     );
 
@@ -222,7 +224,8 @@ describe("playlists snapshot gate", () => {
     });
     const connector = new SpotifyConnector();
 
-    const result = await connector.sync(
+    const result = await runSync(
+      connector,
       syncCtx("playlists", http, {
         checkpoint: { playlist_snapshots: { PL1: "snap-1" } },
       })
@@ -243,7 +246,7 @@ describe("playlists snapshot gate", () => {
     });
     const connector = new SpotifyConnector();
 
-    const result = await connector.sync(syncCtx("playlists", http));
+    const result = await runSync(connector, syncCtx("playlists", http));
     const trackIds = result.events
       .filter((e: any) => e.origin_type === "playlist_track")
       .map((e: any) => e.origin_id);
@@ -271,11 +274,12 @@ describe("top_tracks", () => {
     });
     const connector = new SpotifyConnector();
 
-    const first = await connector.sync(syncCtx("top_tracks", http));
+    const first = await runSync(connector, syncCtx("top_tracks", http));
     expect(first.events).toHaveLength(3);
     expect(first.checkpoint.top_tracks_digest).toBeTruthy();
 
-    const second = await connector.sync(
+    const second = await runSync(
+      connector,
       syncCtx("top_tracks", http, { checkpoint: first.checkpoint })
     );
     expect(second.events).toEqual([]);
@@ -286,13 +290,15 @@ describe("top_tracks", () => {
 
   test("a reshuffled ranking does emit", async () => {
     const connector = new SpotifyConnector();
-    const before = await connector.sync(
+    const before = await runSync(
+      connector,
       syncCtx(
         "top_tracks",
         fakeSpotifyApi({ "/me/top/tracks": topPage(["t1", "t2"]) })
       )
     );
-    const after = await connector.sync(
+    const after = await runSync(
+      connector,
       syncCtx(
         "top_tracks",
         fakeSpotifyApi({ "/me/top/tracks": topPage(["t2", "t1"]) }),
@@ -310,7 +316,8 @@ describe("top_tracks", () => {
     });
     const connector = new SpotifyConnector();
 
-    const result = await connector.sync(
+    const result = await runSync(
+      connector,
       syncCtx("top_tracks", http, { config: { limit: 2 } })
     );
 
@@ -325,7 +332,7 @@ describe("top_tracks", () => {
   test("the title is the track name, not the ranking", async () => {
     const http = fakeSpotifyApi({ "/me/top/tracks": topPage(["t1"]) });
     const connector = new SpotifyConnector();
-    const result = await connector.sync(syncCtx("top_tracks", http));
+    const result = await runSync(connector, syncCtx("top_tracks", http));
 
     expect(result.events[0].title).toBe("track t1");
     expect(result.events[0].metadata.rank).toBe(1);
@@ -366,7 +373,8 @@ describe("no snapshot feed emits a volatile provider counter", () => {
     ],
   ])("%s", async (feedKey, routes) => {
     const connector = new SpotifyConnector();
-    const result = await connector.sync(
+    const result = await runSync(
+      connector,
       syncCtx(
         feedKey as string,
         fakeSpotifyApi(routes as Record<string, unknown>)
@@ -425,7 +433,7 @@ describe("playlists gate covers edits snapshot_id does not version", () => {
       "/playlists/PL1/tracks": tracksPage,
     });
     const connector = new SpotifyConnector();
-    return connector.sync(syncCtx("playlists", http, { checkpoint }));
+    return runSync(connector, syncCtx("playlists", http, { checkpoint }));
   }
 
   test("a rename re-emits even though snapshot_id is unchanged", async () => {

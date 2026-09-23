@@ -16,6 +16,7 @@
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { runSync } from './sync-harness';
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
@@ -83,7 +84,7 @@ describe("GitHub REST path encoding", () => {
 
 		for (const [feedKey, suffix] of feedCases) {
 			const { connector, jsonCalls } = buildConnector();
-			await connector.sync({
+			await runSync(connector, {
 				config: { repo_owner: OWNER, repo_name: REPO },
 				feedKey,
 				checkpoint: null,
@@ -98,7 +99,7 @@ describe("GitHub REST path encoding", () => {
 	test("encodes repository path segments for repository and stargazer reads", async () => {
 		const { connector, jsonCalls } = buildConnector();
 
-		await connector.sync({
+		await runSync(connector, {
 			config: { repo_owner: OWNER, repo_name: REPO },
 			feedKey: "stargazers",
 			checkpoint: null,

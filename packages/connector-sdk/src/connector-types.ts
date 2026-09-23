@@ -895,10 +895,22 @@ export interface SyncContext<C = Record<string, unknown>, F = Record<string, unk
   sessionState?: Record<string, unknown> | null;
   /** App-installation context when this connection is backed by an App install. */
   installation?: ConnectorInstallationContext;
-  /** Optional hook for streaming event chunks while sync is in progress */
-  emitEvents?: (events: EventEnvelope[]) => Promise<void>;
-  /** Optional hook for persisting progress checkpoints during long syncs */
-  updateCheckpoint?: (checkpoint: C | null) => Promise<void>;
+  /**
+   * Durably store `events`, then move the feed's checkpoint to `checkpoint`.
+   * The returned promise resolves only after both have committed and rejects
+   * (failing the run) on either failure. A large page may be stored in chunks,
+   * but its checkpoint moves only with the final chunk, so a failed commit may
+   * leave deduplicable events behind but never skips an unstored event. Commit
+   * as you go, once per source page, awaiting each call before the next: a run
+   * that stops resumes from the last checkpoint that resolved.
+   *
+   * Pass `null` to store events without moving the checkpoint, and an empty
+   * `events` array to record progress over a page that yielded nothing (a
+   * continuation token past filtered-out items). The checkpoint is opaque to
+   * the platform; the next run receives the last committed one as
+   * `ctx.checkpoint`.
+   */
+  commit: (events: EventEnvelope[], checkpoint: C | null) => Promise<void>;
 }
 
 /**
@@ -918,15 +930,18 @@ export interface SyncCredentials {
 }
 
 /**
- * Result from ConnectorRuntime.sync().
- *
- * Generic parameter `C` matches the connector's checkpoint shape.
+ * How a sync pass ended. Its events and checkpoints were already committed
+ * through `ctx.commit`; the result only says what should happen next.
  */
-export interface SyncResult<C = Record<string, unknown>> {
-  /** Events to write to the events table */
-  events: EventEnvelope[];
-  /** Updated checkpoint to persist */
-  checkpoint: C | null;
+export interface SyncResult {
+  /**
+   * `complete` — the source is caught up; the next run follows the feed's
+   * schedule. `more` — the pass stopped early at a committed boundary (a time
+   * or size budget) with work remaining, so the platform starts the next run
+   * right away instead of waiting for the schedule. `more` is honored only
+   * when the run committed a checkpoint.
+   */
+  status: 'complete' | 'more';
   /** Updated auth state to persist on the linked auth profile (browser cookies, etc.) */
   auth_update?: Record<string, unknown> | null;
   /** Optional metadata about the sync */
@@ -1031,7 +1046,7 @@ export interface FeedReadResult {
 
 export type FeedSyncHandler<C = Record<string, unknown>, F = Record<string, unknown>> = (
   ctx: SyncContext<C, F>
-) => Promise<SyncResult<C>>;
+) => Promise<SyncResult>;
 
 export type FeedReadHandler<F = Record<string, unknown>> = (
   ctx: FeedReadContext<F>

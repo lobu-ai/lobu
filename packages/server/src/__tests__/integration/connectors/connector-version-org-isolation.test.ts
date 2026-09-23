@@ -39,7 +39,7 @@ export default class IsolationProbeConnector {
     description: '${marker}',
     version: '${version}',
   };
-  async sync() { return { events: [], checkpoint: null }; }
+  async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
   async execute() { return { marker: '${marker}' }; }
 }
 `;

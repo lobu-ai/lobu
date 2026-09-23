@@ -94,7 +94,6 @@ let firstCompletionResponseDelayMs = 0;
 
 function cfg(): ExecutorConfig {
   return {
-    batchSize: 10,
     heartbeatIntervalMs: 60_000,
     generateEmbeddings: true,
     timeoutMs: 30_000,

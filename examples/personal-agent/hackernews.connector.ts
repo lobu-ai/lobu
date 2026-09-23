@@ -244,7 +244,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     name: "Hacker News",
     description:
       "Searches Hacker News stories and comments via Algolia API; prepare_comment stages a reply draft in the reply form for the human to submit.",
-    version: "1.0.1",
+    version: "1.1.0",
     faviconDomain: "news.ycombinator.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -607,11 +607,8 @@ export default class HackerNewsConnector extends ConnectorRuntime {
       await this.enrichStoriesWithExternalContent(events, deadline);
     }
 
-    return {
-      events,
-      checkpoint: { last_sync_at: new Date().toISOString() },
-      metadata: { items_found: events.length },
-    };
+    await ctx.commit(events, { last_sync_at: new Date().toISOString() });
+    return { status: "complete", metadata: { items_found: events.length } };
   }
 
   // -------------------------------------------------------------------------

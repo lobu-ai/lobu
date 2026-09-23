@@ -211,7 +211,6 @@ describe("device automation resume — live server round-trip", () => {
 			automationJob(runId, workspace.org.id),
 			{} as never,
 			{
-				batchSize: 1,
 				heartbeatIntervalMs: 60_000,
 				generateEmbeddings: false,
 				timeoutMs: 30_000,

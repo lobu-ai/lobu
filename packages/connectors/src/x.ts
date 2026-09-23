@@ -47,6 +47,13 @@ import {
 	type SyncContext,
 	type SyncResult,
 } from "@lobu/connector-sdk";
+
+/** What one X sync gathers before it is committed. */
+type XSyncPage = {
+	events: EventEnvelope[];
+	checkpoint: Record<string, unknown>;
+	metadata?: SyncResult["metadata"];
+};
 import { X_IDENTITY, normalizeXHandle } from "./x-identity.js";
 
 /** OAuth scopes needed per feed for the API path (not used to pause browser-capable feeds). */
@@ -1061,7 +1068,7 @@ export function finalizeDmSyncResult(
 	messages: XDmMessage[],
 	checkpoint: XCheckpoint,
 	metadata: Record<string, unknown>,
-): SyncResult {
+): XSyncPage {
 	const seenIds = new Set<string>();
 	const deduped = messages.filter((message) => {
 		if (!message.id || !message.text || seenIds.has(message.id)) return false;
@@ -1104,7 +1111,7 @@ export function finalizeSyncResult(
 	checkpoint: XCheckpoint,
 	metadata: Record<string, unknown>,
 	options?: { originType?: string },
-): SyncResult {
+): XSyncPage {
 	const seenIds = new Set<string>();
 	const deduped = tweets.filter((tweet) => {
 		if (!tweet.id || !tweet.text || seenIds.has(tweet.id)) return false;
@@ -1151,7 +1158,7 @@ export function finalizeLikedTweetsResult(
 		pagesRead: number;
 		historicalItemsRead: number;
 	},
-): SyncResult {
+): XSyncPage {
 	// A browser backfill intentionally re-observes the newest page on every run.
 	// Do not drop the old boundary: deterministic origin ids let ingestion update
 	// metrics/media without creating a second canonical event.
@@ -1498,7 +1505,7 @@ function shouldFallbackToExtension(error: unknown): boolean {
 	return isOAuthScopeOrAuthError(error) || isOAuthLookupFallbackError(error);
 }
 
-async function syncWithOAuthFallback<T extends SyncResult>(
+async function syncWithOAuthFallback<T extends XSyncPage>(
 	oauthFn: () => Promise<T>,
 	extensionFn: () => Promise<T>,
 ): Promise<T> {
@@ -1511,7 +1518,7 @@ async function syncWithOAuthFallback<T extends SyncResult>(
 }
 
 /** Browser-first feeds fall back to the extension unless `use_oauth` is set. */
-async function syncOAuthWithOptionalFallback<T extends SyncResult>(
+async function syncOAuthWithOptionalFallback<T extends XSyncPage>(
 	config: Record<string, unknown>,
 	oauthFn: () => Promise<T>,
 	extensionFn: () => Promise<T>,
@@ -1774,7 +1781,7 @@ async function syncViaOAuthApi(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accessToken = ctx.credentials?.accessToken;
 	if (!accessToken) {
 		throw new Error("OAuth access token missing for X connector");
@@ -1876,7 +1883,7 @@ async function syncViaExtension(args: {
 	/** Extra metadata to fold into the result (e.g. which timeline tab). */
 	metadata?: Record<string, unknown>;
 	originType?: string;
-}): Promise<SyncResult> {
+}): Promise<XSyncPage> {
 	const { ctx, url, interceptPatterns, parseResponse, maxScrolls, checkpoint } =
 		args;
 	const result = await extensionNetworkSync<XTweet>({
@@ -1909,7 +1916,7 @@ async function syncSearchViaExtension(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const searchQuery = buildSearchQuery(config);
 	const maxScrolls = readMaxPages(config);
 	const searchFilter = (config.search_filter as string) ?? "live";
@@ -1930,7 +1937,7 @@ async function syncMyTweetsViaOAuthApi(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accessToken = ctx.credentials?.accessToken;
 	if (!accessToken) {
 		throw new Error("OAuth access token missing for my_tweets feed");
@@ -1977,7 +1984,7 @@ async function syncMyTweetsViaExtension(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accountHandle = await resolveAccountHandle(config);
 	const maxScrolls = readMaxPages(config);
 	const profileUrl = `https://x.com/${encodeURIComponent(accountHandle)}`;
@@ -1997,7 +2004,7 @@ async function syncLikedTweetsViaExtension(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accountHandle = await resolveAccountHandle(config);
 	const likesUrl = `https://x.com/${encodeURIComponent(accountHandle)}/likes`;
 	const dispatcher = requireExtensionDispatcher(ctx);
@@ -2130,7 +2137,7 @@ async function syncLikedTweetsViaOAuthApi(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accessToken = ctx.credentials?.accessToken;
 	if (!accessToken) {
 		throw new Error("OAuth access token missing for liked_tweets feed");
@@ -2201,7 +2208,7 @@ async function syncBookmarksViaOAuthApi(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accessToken = ctx.credentials?.accessToken;
 	if (!accessToken) {
 		throw new Error("OAuth access token missing for bookmarks feed");
@@ -2240,7 +2247,7 @@ async function syncBookmarksViaExtension(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const maxScrolls = readMaxPages(config);
 
 	return syncViaExtension({
@@ -2278,7 +2285,7 @@ async function syncDirectMessagesViaOAuthApi(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const accessToken = ctx.credentials?.accessToken;
 	if (!accessToken) {
 		throw new Error(
@@ -2332,7 +2339,7 @@ async function syncDirectMessagesViaExtension(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const maxScrolls = readMaxPages(config);
 	let authUserId =
 		typeof config.account_user_id === "string"
@@ -2378,7 +2385,7 @@ async function syncHomeFeedViaDomScrape(
 	ctx: SyncContext,
 	config: Record<string, unknown>,
 	checkpoint: XCheckpoint,
-): Promise<SyncResult> {
+): Promise<XSyncPage> {
 	const maxScrolls = readScrollBudget(config, { defaultMax: 10, cap: 30 });
 	const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
 		dispatcher: requireExtensionDispatcher(ctx),
@@ -3343,6 +3350,14 @@ export default class XConnector extends ConnectorRuntime {
 	}
 
 	private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
+		// Collected whole, then committed once: an OAuth attempt that fails part
+		// way falls back to the extension, and nothing it gathered may land first.
+		const page = await this.collectFeed(ctx);
+		await ctx.commit(page.events, page.checkpoint);
+		return { status: "complete", ...(page.metadata ? { metadata: page.metadata } : {}) };
+	}
+
+	private async collectFeed(ctx: SyncContext): Promise<XSyncPage> {
 		const config = ctx.config as Record<string, unknown>;
 		const checkpoint = (ctx.checkpoint ?? {}) as XCheckpoint;
 		const feedKey = ctx.feedKey ?? "tweets";

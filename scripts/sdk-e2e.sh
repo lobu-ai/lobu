@@ -220,10 +220,10 @@ export default class PulseConnector extends ConnectorRuntime<Checkpoint> {
 
   private async syncPulse(
     ctx: SyncContext<Checkpoint>,
-  ): Promise<SyncResult<Checkpoint>> {
+  ): Promise<SyncResult> {
     const seq = (ctx.checkpoint?.seq ?? 0) + 1;
-    return {
-      events: [
+    await ctx.commit(
+      [
         {
           origin_id: `sdke2e-pulse-${seq}`,
           origin_type: "pulse",
@@ -233,8 +233,9 @@ export default class PulseConnector extends ConnectorRuntime<Checkpoint> {
           metadata: { seq },
         },
       ],
-      checkpoint: { seq },
-    };
+      { seq },
+    );
+    return { status: "complete" };
   }
 
   async execute() {

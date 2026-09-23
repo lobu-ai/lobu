@@ -3,8 +3,8 @@
  * chunk into ONE embedding call (one HTTP round-trip / vectorized pass), not
  * one call per event, while still mapping each vector back to its source event.
  *
- * Strategy: mock `executeCompiledConnector` to invoke `onEventChunk` with a
- * 3-event chunk, mock `batchGenerateEmbeddings` to return distinguishable
+ * Strategy: mock `executeCompiledConnector` to invoke `onCommit` with a
+ * 3-event page, mock `batchGenerateEmbeddings` to return distinguishable
  * vectors, and assert:
  *   - batchGenerateEmbeddings was called exactly ONCE (not 3x),
  *   - it received all 3 chunk texts in one call,
@@ -24,11 +24,13 @@ const batchGenerateEmbeddingsMock = mock<AnyFn>(async (texts: string[]) => ({
   model: 'stub-model-v1',
 }));
 
-let capturedHooks: { onEventChunk: (events: unknown[]) => Promise<void> } | undefined;
+let capturedHooks:
+  | { onCommit: (events: unknown[], checkpoint: unknown) => Promise<void> }
+  | undefined;
 
 const executeCompiledConnectorMock = mock<AnyFn>(async (args: { hooks: typeof capturedHooks }) => {
   capturedHooks = args.hooks;
-  return { mode: 'sync', checkpoint: null };
+  return { mode: 'sync', status: 'complete' };
 });
 
 mock.module('../executor/runtime.js', () => ({
@@ -96,7 +98,7 @@ describe('sync embedding path batches per chunk (Finding #12)', () => {
       capturedHooks = args.hooks;
       // One chunk, three events. The third has empty text (no embeddable
       // content) — it must still stream through, just without a vector.
-      await capturedHooks!.onEventChunk([
+      await capturedHooks!.onCommit([
         {
           origin_id: 'a',
           payload_type: 'media',
@@ -109,8 +111,8 @@ describe('sync embedding path batches per chunk (Finding #12)', () => {
         },
         { origin_id: 'b', payload_text: 'bbbb', occurred_at: new Date(), origin_type: 'post' },
         { origin_id: 'c', payload_text: '', title: '', occurred_at: new Date(), origin_type: 'post' },
-      ]);
-      return { mode: 'sync', checkpoint: null };
+      ], null);
+      return { mode: 'sync', status: 'complete' };
     });
 
     const job = {
@@ -122,10 +124,9 @@ describe('sync embedding path batches per chunk (Finding #12)', () => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal job shape
     } as any;
 
-    // batchSize=10 so the chunk does not flush mid-loop; default generateEmbeddings=true.
+    // default generateEmbeddings=true.
     // biome-ignore lint/suspicious/noExplicitAny: minimal env
     const result = await executeRun(client as any, job, {} as any, {
-      batchSize: 10,
       executor: { execute: executeCompiledConnectorMock },
     });
     expect(result.error).toBeUndefined();

@@ -22,16 +22,16 @@ const Github = defineConnector({
 		stars: {
 			name: "Stars",
 			read: async (ctx) => ({ rows: [{ query: ctx.query ?? null }] }),
-			sync: async (ctx) => ({
-				events: [
+			sync: async (ctx) => {
+				await ctx.commit([
 					{
 						origin_id: ctx.feedKey,
 						payload_text: "star",
 						occurred_at: new Date(),
 					},
-				],
-				checkpoint: { seen: 1 },
-			}),
+				], { seen: 1 });
+				return { status: "complete" };
+			},
 		},
 	},
 	actions: {
@@ -78,15 +78,21 @@ describe("defineConnector", () => {
 	});
 
 	test("sync dispatches to the matching feed handler", async () => {
+		const commits: Array<{ events: unknown[]; checkpoint: unknown }> = [];
 		const res = await new Github().sync({
 			feedKey: "stars",
 			config: {},
 			checkpoint: null,
 			credentials: null,
 			entityIds: [],
+			commit: async (events, checkpoint) => {
+				commits.push({ events, checkpoint });
+			},
 		});
-		expect(res.events).toHaveLength(1);
-		expect(res.checkpoint).toEqual({ seen: 1 });
+		expect(res.status).toBe("complete");
+		expect(commits).toHaveLength(1);
+		expect(commits[0]?.events).toHaveLength(1);
+		expect(commits[0]?.checkpoint).toEqual({ seen: 1 });
 	});
 
 	test("sync throws for an unknown feed", async () => {
@@ -97,6 +103,7 @@ describe("defineConnector", () => {
 				checkpoint: null,
 				credentials: null,
 				entityIds: [],
+				commit: async () => {},
 			}),
 		).rejects.toThrow(/feed 'nope' does not support sync/);
 	});
@@ -140,7 +147,10 @@ describe("defineConnector", () => {
 			feeds: {
 				items: {
 					name: "Items",
-					sync: async () => ({ events: [], checkpoint: null }),
+					sync: async (ctx) => {
+						await ctx.commit([], null);
+						return { status: "complete" };
+					},
 				},
 			},
 		});
@@ -162,7 +172,13 @@ describe("defineConnector", () => {
 			name: "WithAuth",
 			version: "0.0.1",
 			feeds: {
-				f: { name: "F", sync: async () => ({ events: [], checkpoint: null }) },
+				f: {
+					name: "F",
+					sync: async (ctx) => {
+						await ctx.commit([], null);
+						return { status: "complete" };
+					},
+				},
 			},
 			authenticate: async () => ({ credentials: { token: "t" } }),
 		});

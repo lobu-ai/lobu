@@ -6,6 +6,7 @@
 // through every story at ~5s each.
 
 import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { runSync } from './sync-harness';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -58,7 +59,7 @@ test('stories enrichment short-circuits after consecutive egress failures', asyn
     config: { search_query: 'AI agents' },
   };
   // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
-  const result = await connector.sync(ctx as any);
+  const result = await runSync(connector, ctx as any);
 
   // All 20 stories are still returned — enrichment is best-effort.
   expect(result.events.length).toBe(20);
@@ -98,7 +99,7 @@ test('non-HTML/non-OK results do NOT trip the egress short-circuit', async () =>
   const { default: HackerNewsConnector } = await import('../hackernews');
   const connector = new HackerNewsConnector();
   // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
-  const result = await connector.sync({ feedKey: 'stories', config: { search_query: 'x' } } as any);
+  const result = await runSync(connector, { feedKey: 'stories', config: { search_query: 'x' } } as any);
 
   // Reached the 4th fetch (would be <=3 if non-HTML wrongly tripped the guard).
   expect(contentFetches).toBeGreaterThanOrEqual(4);

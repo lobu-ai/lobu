@@ -8,7 +8,7 @@ export default class SalesforcePipelineConnector extends ConnectorRuntime<Checkp
   readonly definition = {
     key: "salesforce-pipeline",
     name: "Salesforce pipeline",
-    version: "1.0.0",
+    version: "1.1.0",
     authSchema: { methods: [{ type: "oauth" as const, provider: "salesforce", requiredScopes: ["api", "refresh_token"] }] },
     feeds: { opportunities: { key: "opportunities", name: "Opportunities", sync: (ctx: SyncContext<Checkpoint>) => this.syncFeed(ctx) } },
   };
@@ -18,16 +18,14 @@ export default class SalesforcePipelineConnector extends ConnectorRuntime<Checkp
     const q = `SELECT Id,Name,StageName,LastModifiedDate FROM Opportunity WHERE LastModifiedDate > ${since} LIMIT 200`;
     const r = await fetch(`${ctx.config.instance_url}/services/data/v60.0/query?q=${encodeURIComponent(q)}`);
     const records = ((await r.json()) as { records?: Opportunity[] }).records ?? [];
-    return {
-      events: records.map((o) => ({
+    await ctx.commit(records.map((o) => ({
         origin_id: o.Id,
         origin_type: "opportunity_updated",
         title: `${o.Name} → ${o.StageName}`,
         payload_text: `${o.Name} moved to ${o.StageName}`,
         occurred_at: new Date(o.LastModifiedDate),
-      })),
-      checkpoint: { last_modified: records.at(-1)?.LastModifiedDate ?? since },
-    };
+      })), { last_modified: records.at(-1)?.LastModifiedDate ?? since });
+    return { status: 'complete' as const };
   }
 
   async execute() {

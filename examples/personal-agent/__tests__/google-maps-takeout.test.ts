@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 import {
   mkdirSync,
   mkdtempSync,
@@ -115,18 +116,18 @@ describe("Maps feed is declared and routed", () => {
     const connector = new GoogleTakeoutConnector();
     const config = { takeout_dir: writeMapsFixture(), batch_size: 2 };
 
-    const first = await connector.sync({ feedKey: "maps", config });
+    const first = await runSync(connector, { feedKey: "maps", config });
     expect(first.events).toHaveLength(2);
     expect(typeof first.checkpoint.last_maps_timestamp).toBe("string");
 
-    const second = await connector.sync({
+    const second = await runSync(connector, {
       feedKey: "maps",
       config,
       checkpoint: first.checkpoint,
     });
     expect(second.events).toHaveLength(1);
 
-    const exhausted = await connector.sync({
+    const exhausted = await runSync(connector, {
       feedKey: "maps",
       config,
       checkpoint: second.checkpoint,

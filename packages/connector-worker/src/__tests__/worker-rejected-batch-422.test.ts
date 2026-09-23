@@ -102,17 +102,20 @@ test('a 422 on stream fails the sync run loudly, with no checkpoint committed', 
     // biome-ignore lint/suspicious/noExplicitAny: stubbed runtime args
     async ({ hooks }: any) => {
       // The connector collected a page and offered a fresh cursor alongside it.
-      await hooks.onEventChunk([
-        {
-          origin_id: 'invalid-kind-item',
-          origin_type: 'hn_story',
-          title: 'Undeclared kind',
-          payload_text: 'body',
-          payload_type: 'text',
-          occurred_at: new Date().toISOString(),
-        },
-      ]);
-      return { mode: 'sync', checkpoint: { cursor: 'after-rejected-page' } };
+      await hooks.onCommit(
+        [
+          {
+            origin_id: 'invalid-kind-item',
+            origin_type: 'hn_story',
+            title: 'Undeclared kind',
+            payload_text: 'body',
+            payload_type: 'text',
+            occurred_at: new Date().toISOString(),
+          },
+        ],
+        { cursor: 'after-rejected-page' }
+      );
+      return { mode: 'sync', status: 'complete' };
     }
   );
 

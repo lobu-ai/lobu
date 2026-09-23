@@ -362,9 +362,9 @@ export default class RedditConnector extends ConnectorRuntime {
       pagination_token: after ?? undefined,
     };
 
+    await ctx.commit(events, checkpoint as Record<string, unknown>);
     return {
-      events,
-      checkpoint: checkpoint as Record<string, unknown>,
+      status: 'complete',
       metadata: {
         items_found: events.length,
       },

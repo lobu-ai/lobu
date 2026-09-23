@@ -115,7 +115,7 @@ export default class TrustpilotConnector extends ConnectorRuntime {
     name: "Trustpilot",
     description:
       "Reads business reviews from Trustpilot through the paired Chrome extension.",
-    version: "2.0.0",
+    version: "2.1.0",
     faviconDomain: "trustpilot.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -210,10 +210,7 @@ export default class TrustpilotConnector extends ConnectorRuntime {
       ];
     });
 
-    return {
-      events,
-      checkpoint: { ...(ctx.checkpoint ?? {}), last_page: 1 },
-      metadata: { items_found: reviews.length },
-    };
+    await ctx.commit(events, { ...(ctx.checkpoint ?? {}), last_page: 1 });
+    return { status: "complete", metadata: { items_found: reviews.length } };
   }
 }

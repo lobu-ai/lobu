@@ -181,9 +181,9 @@ export default class RSSConnector extends ConnectorRuntime {
       last_published_at: latestPublishedAt,
     };
 
+    await ctx.commit(events, newCheckpoint as unknown as Record<string, unknown>);
     return {
-      events,
-      checkpoint: newCheckpoint as unknown as Record<string, unknown>,
+      status: 'complete',
       metadata: {
         items_found: events.length,
         feeds_fetched: feedUrls.length - fetchErrors.length,

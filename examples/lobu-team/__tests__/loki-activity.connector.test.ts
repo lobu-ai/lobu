@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 import { describe, expect, it, spyOn } from "bun:test";
 import LokiActivityConnector, {
   queryLokiActivity,
@@ -13,7 +14,7 @@ describe("Lobu Team Loki activity connector", () => {
       })
     );
     try {
-      const result = await new LokiActivityConnector().sync({
+      const result = await runSync(new LokiActivityConnector(), {
         feedKey: "activity",
         checkpoint: null,
         config: {

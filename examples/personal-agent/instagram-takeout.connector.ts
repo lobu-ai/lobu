@@ -87,7 +87,7 @@ export default class InstagramTakeoutConnector extends ConnectorRuntime<
   > = {
     key: "instagram.takeout",
     name: "Instagram Takeout",
-    version: "1.0.0",
+    version: "1.1.0",
     description:
       "Ingests local Instagram export HTML for messages and activity.",
     authSchema: { methods: [{ type: "none" }] },
@@ -200,7 +200,7 @@ export default class InstagramTakeoutConnector extends ConnectorRuntime<
 
   private async syncFeed(
     ctx: SyncContext<InstagramTakeoutCheckpoint, LocalTakeoutConfig>
-  ): Promise<SyncResult<InstagramTakeoutCheckpoint>> {
+  ): Promise<SyncResult> {
     const takeoutDir = assertDirectory(ctx.config, "Instagram");
     const max = batchSize(ctx.config);
 
@@ -316,20 +316,18 @@ export default class InstagramTakeoutConnector extends ConnectorRuntime<
     throw new Error(`Unknown Instagram Takeout feed: ${ctx.feedKey}`);
   }
 
-  private result(
+  private async result(
     ctx: SyncContext<InstagramTakeoutCheckpoint, LocalTakeoutConfig>,
     key: keyof InstagramTakeoutCheckpoint,
     allEvents: EventEnvelope[],
     max: number
-  ): SyncResult<InstagramTakeoutCheckpoint> {
+  ): Promise<SyncResult> {
     const events = takeBatch(allEvents, ctx.checkpoint?.[key], max);
-    return {
-      events,
-      checkpoint: {
-        ...ctx.checkpoint,
-        [key]: maxEventCursor(events, ctx.checkpoint?.[key]),
-      },
-    };
+    await ctx.commit(events, {
+      ...ctx.checkpoint,
+      [key]: maxEventCursor(events, ctx.checkpoint?.[key]),
+    });
+    return { status: "complete" };
   }
 
   private readMessageEvents(takeoutDir: string): EventEnvelope[] {

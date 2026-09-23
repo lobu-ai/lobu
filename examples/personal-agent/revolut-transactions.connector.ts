@@ -1198,7 +1198,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     name: "Revolut",
     description:
       "Syncs exact Revolut transactions and current Invest balances through your paired Owletto Chrome session, with no separate connector login.",
-    version: "4.7.0",
+    version: "4.8.0",
     faviconDomain: "app.revolut.com",
     authSchema: {
       // Auth is implicit via the paired Owletto extension's signed-in Chrome —
@@ -1412,11 +1412,14 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     // its last known value standing as current forever.
     const previousRefs =
       ((ctx.checkpoint ?? {}) as RevolutCheckpoint).investment_refs ?? [];
-    return {
-      events: investmentSnapshotsToEvents(snapshots, new Date(), previousRefs),
-      checkpoint: {
+    await ctx.commit(
+      investmentSnapshotsToEvents(snapshots, new Date(), previousRefs),
+      {
         investment_refs: investmentRefsFromSnapshots(snapshots),
-      } satisfies RevolutCheckpoint,
+      } satisfies RevolutCheckpoint
+    );
+    return {
+      status: "complete",
       metadata: {
         backend: "extension-structured-dom",
         portfolio_count: snapshots.length,
@@ -1540,9 +1543,12 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
           }
         : checkpoint;
 
-    return {
+    await ctx.commit(
       events,
-      checkpoint: newCheckpoint as unknown as Record<string, unknown>,
+      newCheckpoint as unknown as Record<string, unknown>
+    );
+    return {
+      status: "complete",
       metadata: {
         items_found: events.length,
         items_scraped: all.length,

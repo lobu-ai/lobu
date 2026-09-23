@@ -108,7 +108,15 @@ describe('defineDeviceConnector', () => {
       key: 'ordinary',
       version: '1.0.0',
       name: 'Ordinary',
-      feeds: { items: { name: 'Items', sync: async () => ({ events: [], checkpoint: null }) } },
+      feeds: {
+        items: {
+          name: 'Items',
+          sync: async (ctx) => {
+            await ctx.commit([], null);
+            return { status: 'complete' };
+          },
+        },
+      },
     });
     expect(new ordinary().definition.runtime).toBeUndefined();
   });

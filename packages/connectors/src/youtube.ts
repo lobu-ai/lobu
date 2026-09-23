@@ -31,6 +31,13 @@ import {
   type SyncResult,
 } from '@lobu/connector-sdk';
 
+/** What one YouTube sync gathers before it is committed. */
+type YouTubeSyncPage = {
+  events: EventEnvelope[];
+  checkpoint: Record<string, unknown>;
+  metadata?: SyncResult['metadata'];
+};
+
 // ---------------------------------------------------------------------------
 // YouTube API types
 // ---------------------------------------------------------------------------
@@ -613,6 +620,12 @@ export default class YouTubeConnector extends ConnectorRuntime {
   // -------------------------------------------------------------------------
 
   private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
+    const page = await this.collectFeed(ctx);
+    await ctx.commit(page.events, page.checkpoint);
+    return { status: 'complete', ...(page.metadata ? { metadata: page.metadata } : {}) };
+  }
+
+  private async collectFeed(ctx: SyncContext): Promise<YouTubeSyncPage> {
     const auth = this.resolveAuth(ctx);
 
     switch (ctx.feedKey) {
@@ -800,7 +813,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
   // Feed: liked_videos
   // -------------------------------------------------------------------------
 
-  private async syncLikedVideos(ctx: SyncContext, auth: YouTubeAuth): Promise<SyncResult> {
+  private async syncLikedVideos(ctx: SyncContext, auth: YouTubeAuth): Promise<YouTubeSyncPage> {
     this.requireOAuth(auth, 'liked_videos');
     const maxResults = Math.min(Math.max((ctx.config.max_results as number) ?? 500, 1), 5000);
     const likesPlaylistId = await this.fetchLikesPlaylistId(auth);
@@ -820,7 +833,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
   // Feed: playlists
   // -------------------------------------------------------------------------
 
-  private async syncPlaylists(ctx: SyncContext, auth: YouTubeAuth): Promise<SyncResult> {
+  private async syncPlaylists(ctx: SyncContext, auth: YouTubeAuth): Promise<YouTubeSyncPage> {
     this.requireOAuth(auth, 'playlists');
     const maxPlaylists = Math.min(Math.max((ctx.config.max_playlists as number) ?? 100, 1), 500);
     const includeItems = (ctx.config.include_items as boolean) ?? true;
@@ -894,7 +907,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
   // Feed: subscriptions
   // -------------------------------------------------------------------------
 
-  private async syncSubscriptions(ctx: SyncContext, auth: YouTubeAuth): Promise<SyncResult> {
+  private async syncSubscriptions(ctx: SyncContext, auth: YouTubeAuth): Promise<YouTubeSyncPage> {
     this.requireOAuth(auth, 'subscriptions');
     const maxResults = Math.min(Math.max((ctx.config.max_results as number) ?? 1000, 1), 5000);
     const events: EventEnvelope[] = [];
@@ -964,7 +977,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
   // Feed: videos (keyword search)
   // -------------------------------------------------------------------------
 
-  private async syncSearchVideos(ctx: SyncContext, auth: YouTubeAuth): Promise<SyncResult> {
+  private async syncSearchVideos(ctx: SyncContext, auth: YouTubeAuth): Promise<YouTubeSyncPage> {
     const searchQuery = ctx.config.search_query as string;
     if (!searchQuery) {
       throw new Error('search_query is required.');
@@ -1250,7 +1263,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
     return events;
   }
 
-  private buildListCheckpointResult(events: EventEnvelope[]): SyncResult {
+  private buildListCheckpointResult(events: EventEnvelope[]): YouTubeSyncPage {
     events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
     const latest = events.length > 0 ? events[0].occurred_at.toISOString() : undefined;
     return {

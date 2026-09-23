@@ -252,7 +252,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     name: "Kubernetes logs",
     description:
       "Collect error and warning counts plus recent samples from Lobu production Loki in aligned 20-minute windows.",
-    version: "1.0.1",
+    version: "1.1.0",
     authSchema: {
       methods: [
         {
@@ -301,7 +301,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
 
   private async syncFeed(
     ctx: SyncContext<LokiActivityCheckpoint, LokiActivityConfig>
-  ): Promise<SyncResult<LokiActivityCheckpoint>> {
+  ): Promise<SyncResult> {
     if (!ctx.config.LOKI_URL?.trim()) throw new Error("LOKI_URL is required");
     if (!ctx.config.namespace?.trim()) throw new Error("namespace is required");
 
@@ -331,9 +331,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
 
     const windowEnd =
       windows.at(-1)?.end.toISOString() ?? ctx.checkpoint?.window_end;
-    return {
-      events,
-      checkpoint: windowEnd ? { window_end: windowEnd } : {},
-    };
+    await ctx.commit(events, windowEnd ? { window_end: windowEnd } : {});
+    return { status: "complete" };
   }
 }

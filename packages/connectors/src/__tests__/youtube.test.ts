@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', connectorSdkMock);
 
@@ -58,7 +59,7 @@ describe('YouTubeConnector personal feeds', () => {
       }),
     });
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'liked_videos',
       credentials: { accessToken: 'token' },
       config: { max_results: 10 },
@@ -110,7 +111,7 @@ describe('YouTubeConnector personal feeds', () => {
       },
     });
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'playlists',
       credentials: { accessToken: 'token' },
       config: { max_playlists: 5, include_items: true, max_items_per_playlist: 10 },
@@ -149,7 +150,7 @@ describe('YouTubeConnector personal feeds', () => {
       }),
     });
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'subscriptions',
       credentials: { accessToken: 'token' },
       config: { max_results: 10 },
@@ -167,7 +168,7 @@ describe('YouTubeConnector personal feeds', () => {
   test('liked_videos requires OAuth', async () => {
     const connector = new YouTubeConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'liked_videos',
         credentials: {},
         config: { YOUTUBE_API_KEY: 'key-only' },
@@ -179,7 +180,7 @@ describe('YouTubeConnector personal feeds', () => {
   test('subscriptions requires OAuth', async () => {
     const connector = new YouTubeConnector();
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: 'subscriptions',
         credentials: {},
         config: { YOUTUBE_API_KEY: 'key-only' },
@@ -616,7 +617,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
       },
     };
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: 'subscriptions',
       credentials: { accessToken: 'tok' },
       config: { max_results: 5000 },

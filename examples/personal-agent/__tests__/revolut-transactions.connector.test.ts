@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 /**
  * Revolut connector — transaction replay and structured Invest snapshots.
  *
@@ -562,7 +563,7 @@ describe("Revolut Finance snapshots", () => {
     };
     const connector = new RevolutTransactionsConnector();
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: "balances",
       sessionState: { chrome_dispatcher: dispatcher },
       checkpoint: {
@@ -696,7 +697,7 @@ describe("Revolut Finance snapshots", () => {
     const connector = new RevolutTransactionsConnector();
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "balances",
         sessionState: { chrome_dispatcher: dispatcher },
       } as never)
@@ -733,7 +734,7 @@ describe("Revolut Finance snapshots", () => {
     // A throw inside `finally` replaces the in-flight exception. The drain
     // failure is the actionable one; the cleanup failure must not mask it.
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "balances",
         sessionState: { chrome_dispatcher: dispatcher },
       } as never)
@@ -772,7 +773,7 @@ describe("Revolut Finance snapshots", () => {
     const connector = new RevolutTransactionsConnector();
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "balances",
         sessionState: { chrome_dispatcher: dispatcher },
       } as never)
@@ -822,7 +823,7 @@ describe("Revolut Finance snapshots", () => {
     const connector = new RevolutTransactionsConnector();
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "balances",
         sessionState: { chrome_dispatcher: dispatcher },
       } as never)
@@ -863,7 +864,7 @@ describe("Revolut Finance snapshots", () => {
     const connector = new RevolutTransactionsConnector();
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "balances",
         sessionState: { chrome_dispatcher: dispatcher },
       } as never)
@@ -893,7 +894,7 @@ describe("Revolut Finance snapshots", () => {
     const connector = new RevolutTransactionsConnector();
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "balances",
         sessionState: { chrome_dispatcher: dispatcher },
       } as never)

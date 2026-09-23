@@ -905,12 +905,13 @@ export default class GitHubConnector extends ConnectorRuntime {
     if (contentType === 'stargazers') {
       const result = await this.syncStargazers(repo, ctx.checkpoint, token);
       this.stampRepoAttribution(result.events, repo, { attachAutomationSignals });
+      // One commit: removed stargazers are only known against the full snapshot.
+      await ctx.commit(result.events, {
+        last_sync_at: new Date().toISOString(),
+        stargazers: result.currentStargazers,
+      } as Record<string, unknown>);
       return {
-        events: result.events,
-        checkpoint: {
-          last_sync_at: new Date().toISOString(),
-          stargazers: result.currentStargazers,
-        } as Record<string, unknown>,
+        status: 'complete',
         metadata: {
           items_found: result.events.length,
           current_stargazers: result.currentStargazers.length,
@@ -927,11 +928,11 @@ export default class GitHubConnector extends ConnectorRuntime {
     });
     this.stampRepoAttribution(events, repo, { attachAutomationSignals });
 
+    await ctx.commit(events, {
+      last_sync_at: new Date().toISOString(),
+    } as Record<string, unknown>);
     return {
-      events,
-      checkpoint: {
-        last_sync_at: new Date().toISOString(),
-      } as Record<string, unknown>,
+      status: 'complete',
       metadata: {
         items_found: events.length,
       },

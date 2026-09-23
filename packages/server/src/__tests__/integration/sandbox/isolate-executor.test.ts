@@ -98,12 +98,10 @@ function syncJob(config: Record<string, unknown>, env: Record<string, string> = 
 
 function captureHooks(captured: Omit<Captured, "result">): ExecutionHooks {
 	return {
-		onEventChunk: async (chunk) => {
+		onCommit: async (chunk, checkpoint) => {
 			captured.chunks.push(chunk.length);
 			captured.events.push(...(chunk as unknown as Record<string, unknown>[]));
-		},
-		onCheckpointUpdate: async (checkpoint) => {
-			captured.checkpoints.push(checkpoint);
+			if (checkpoint !== null) captured.checkpoints.push(checkpoint);
 		},
 		onAuthArtifact: async (artifact) => {
 			captured.artifacts.push(artifact);
@@ -202,9 +200,10 @@ async function failViaRuntime(code: string, job: ExecutorJob): Promise<LaneError
 	return failure;
 }
 
-function checkpointOf(result: ExecutorResult): Record<string, unknown> {
-	if (result.mode !== "sync") throw new Error(`expected a sync result, got ${result.mode}`);
-	return (result.checkpoint ?? {}) as Record<string, unknown>;
+/** The last checkpoint the run committed — where the next run would resume. */
+function checkpointOf(run: Captured): Record<string, unknown> {
+	if (run.result.mode !== "sync") throw new Error(`expected a sync result, got ${run.result.mode}`);
+	return (run.checkpoints.at(-1) ?? {}) as Record<string, unknown>;
 }
 
 beforeAll(async () => {
@@ -408,7 +407,7 @@ describe("isolate lane: hackernews against the live API", () => {
 			expect(typeof event.title).toBe("string");
 			expect(typeof event.occurred_at).toBe("string");
 		}
-		const checkpoint = checkpointOf(isolate.result);
+		const checkpoint = checkpointOf(isolate);
 		expect(typeof checkpoint.last_sync_at).toBe("string");
 		expect(Number.isNaN(Date.parse(String(checkpoint.last_sync_at)))).toBe(false);
 		if (isolate.result.mode === "sync") {
@@ -492,14 +491,14 @@ describe("isolate lane: fixture connector", () => {
 		expect(captured.logs.some((entry) => entry.line.includes("GUEST_RAN"))).toBe(false);
 	}, 120_000);
 
-	it("streams events in chunks of 100 and forwards checkpoint updates", async () => {
+	it("streams each commit in chunks of 100 with its checkpoint on the last chunk", async () => {
 		const run = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "emit", count: 250 }));
 		expect(run.chunks).toEqual([100, 100, 50, 1]);
 		expect(run.events.length).toBe(251);
 		expect(run.events[0]?.origin_id).toBe("fixture_0");
 		expect(run.events[250]?.origin_id).toBe("fixture_250");
-		expect(run.checkpoints).toEqual([{ cursor: 250 }]);
-		expect(checkpointOf(run.result)).toEqual({ cursor: 251 });
+		expect(run.checkpoints).toEqual([{ cursor: 250 }, { cursor: 251 }]);
+		expect(checkpointOf(run)).toEqual({ cursor: 251 });
 		if (run.result.mode === "sync") expect(run.result.metadata?.items_found).toBe(251);
 	});
 
@@ -521,7 +520,7 @@ describe("isolate lane: fixture connector", () => {
 
 		const sync = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "dispatch" }));
 		expect(sync.dispatches).toEqual([{ actionKey: "tabs.list", input: { from: "sync" } }]);
-		expect(checkpointOf(sync.result)).toEqual({
+		expect(checkpointOf(sync)).toEqual({
 			observation: { actionKey: "tabs.list", echoed: { from: "sync" }, tabs: [{ id: 1 }, { id: 2 }] },
 		});
 	});
@@ -575,7 +574,7 @@ describe("isolate lane: fixture connector", () => {
 			credentials: { provider: "fixture", accessToken: realToken, expiresAt: "2030-01-01T00:00:00.000Z", scope: "read" },
 		};
 		const run = await runIsolate(fixtureIsolateCode, job, { allowedDomains: ["127.0.0.1"] });
-		const cp = checkpointOf(run.result);
+		const cp = checkpointOf(run);
 		// The guest holds a placeholder in the secret proxy's grammar and the
 		// other bookkeeping fields; nothing else from the credential object.
 		expect(cp.guestToken).toMatch(/^lobu_secret_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
@@ -602,7 +601,7 @@ describe("isolate lane: fixture connector", () => {
 		};
 		const run = await runIsolate(fixtureIsolateCode, job, { allowedDomains: ["127.0.0.1"] });
 		// The lane's egress refusal: named for the guest, logged once host-side.
-		expect(checkpointOf(run.result).refused).toEqual({
+		expect(checkpointOf(run).refused).toEqual({
 			name: "EgressDenied",
 			message: "EgressDenied: fetch to 127.0.0.1: a credential placeholder may only be sent in a request header, not in the URL",
 		});
@@ -635,7 +634,7 @@ describe("isolate lane: fixture connector", () => {
 		const ok = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }), {
 			allowedDomains: ["127.0.0.1"],
 		});
-		expect(checkpointOf(ok.result)).toMatchObject({
+		expect(checkpointOf(ok)).toMatchObject({
 			status: 200,
 			ok: true,
 			url: `${baseUrl}/ok`,
@@ -649,14 +648,14 @@ describe("isolate lane: fixture connector", () => {
 			syncJob({ scenario: "fetch", url: `${baseUrl}/redirect` }),
 			{ allowedDomains: ["127.0.0.1"] },
 		);
-		expect(checkpointOf(redirected.result)).toMatchObject({ status: 200, url: `${baseUrl}/ok`, redirected: true });
+		expect(checkpointOf(redirected)).toMatchObject({ status: 200, url: `${baseUrl}/ok`, redirected: true });
 
 		const posted = await runIsolate(
 			fixtureIsolateCode,
 			syncJob({ scenario: "fetch", url: `${baseUrl}/echo`, method: "POST", body: JSON.stringify({ hello: 1 }) }),
 			{ allowedDomains: ["127.0.0.1"] },
 		);
-		const echo = JSON.parse(String(checkpointOf(posted.result).text)) as {
+		const echo = JSON.parse(String(checkpointOf(posted).text)) as {
 			method: string;
 			headers: Record<string, string>;
 			body: string;
@@ -679,7 +678,7 @@ describe("isolate lane: fixture connector", () => {
 			syncJob({ scenario: "fetch", url: `http://localhost:${port}/ok` }),
 			{ allowedDomains: ["localhost"] },
 		);
-		expect(checkpointOf(named.result)).toMatchObject({ status: 200, text: "hello from the fixture server" });
+		expect(checkpointOf(named)).toMatchObject({ status: 200, text: "hello from the fixture server" });
 	});
 
 	it("denies a fetch to an undeclared domain, on the first request and on a redirect hop", async () => {
@@ -749,14 +748,14 @@ describe("isolate lane: fixture connector", () => {
 		const ftp = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "raw_fetch", url: `ftp://127.0.0.1:${port}/ok` }), {
 			allowedDomains: ["127.0.0.1"],
 		});
-		expect(checkpointOf(ftp.result)).toMatchObject({ outcome: "rejected", message: expect.stringContaining(message) });
+		expect(checkpointOf(ftp)).toMatchObject({ outcome: "rejected", message: expect.stringContaining(message) });
 
 		// A data: URL has no host for the allowlist to judge; without the scheme
 		// check Node's fetch would resolve it locally.
 		const data = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "raw_fetch", url: "data:text/plain,hello" }), {
 			allowedDomains: ["127.0.0.1"],
 		});
-		expect(checkpointOf(data.result)).toMatchObject({ outcome: "rejected", message: expect.stringContaining(message) });
+		expect(checkpointOf(data)).toMatchObject({ outcome: "rejected", message: expect.stringContaining(message) });
 		expect(hits).toBe(before);
 	});
 
@@ -771,7 +770,7 @@ describe("isolate lane: fixture connector", () => {
 		// guest saw the first while the body was still open. The split `é`
 		// (0xC3 in chunk one, 0xA9 in chunk two) comes out whole because the
 		// guest's TextDecoder kept the partial sequence across the two decodes.
-		expect(checkpointOf(streamed.result)).toEqual({
+		expect(checkpointOf(streamed)).toEqual({
 			chunks: ["data: caf", "é\n\ndata: second\n\n"],
 			tail: "",
 			text: SSE_TEXT,
@@ -788,7 +787,7 @@ describe("isolate lane: fixture connector", () => {
 			syncJob({ scenario: "stream_abort", url: `${baseUrl}/drip`, afterUrl: `${baseUrl}/ok` }),
 			{ allowedDomains: ["127.0.0.1"], timeoutMs: 15_000 },
 		);
-		expect(checkpointOf(aborted.result)).toEqual({
+		expect(checkpointOf(aborted)).toEqual({
 			first: "data: first\n\n",
 			rejection: "AbortError",
 			after: "hello from the fixture server",
@@ -803,7 +802,7 @@ describe("isolate lane: fixture connector", () => {
 			syncJob({ scenario: "stream_cancel", url: `${baseUrl}/drip`, afterUrl: `${baseUrl}/ok` }),
 			{ allowedDomains: ["127.0.0.1"], timeoutMs: 15_000 },
 		);
-		expect(checkpointOf(cancelled.result)).toEqual({
+		expect(checkpointOf(cancelled)).toEqual({
 			first: "data: first\n\n",
 			after: "hello from the fixture server",
 			bodyUsed: true,
@@ -815,12 +814,12 @@ describe("isolate lane: fixture connector", () => {
 		const empty = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "fetch", url: `${baseUrl}/empty` }), {
 			allowedDomains: ["127.0.0.1"],
 		});
-		expect(checkpointOf(empty.result)).toMatchObject({ status: 204, hasBody: false, bytes: 0, text: "" });
+		expect(checkpointOf(empty)).toMatchObject({ status: 204, hasBody: false, bytes: 0, text: "" });
 
 		const full = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "fetch", url: `${baseUrl}/ok` }), {
 			allowedDomains: ["127.0.0.1"],
 		});
-		expect(checkpointOf(full.result)).toMatchObject({ status: 200, hasBody: true });
+		expect(checkpointOf(full)).toMatchObject({ status: 200, hasBody: true });
 	});
 
 	it("caps the response body", async () => {
@@ -836,7 +835,7 @@ describe("isolate lane: fixture connector", () => {
 			allowedDomains: ["127.0.0.1"],
 			fetchBodyBytes: 8192,
 		});
-		expect(checkpointOf(fits.result).bytes).toBe(4096);
+		expect(checkpointOf(fits).bytes).toBe(4096);
 
 		// The cap is charged as the guest pulls, never for what it did not take:
 		// `/drip` is unbounded, which no buffering lane could ever fit under a
@@ -847,7 +846,7 @@ describe("isolate lane: fixture connector", () => {
 			syncJob({ scenario: "stream_cancel", url: `${baseUrl}/drip`, afterUrl: `${baseUrl}/ok` }),
 			{ allowedDomains: ["127.0.0.1"], fetchBodyBytes: 1024 },
 		);
-		expect(checkpointOf(partial.result)).toMatchObject({ first: "data: first\n\n" });
+		expect(checkpointOf(partial)).toMatchObject({ first: "data: first\n\n" });
 		await until(() => dripClosed === before + 1);
 	});
 
@@ -891,7 +890,7 @@ describe("isolate lane: fixture connector", () => {
 	it("ends the run when an event hook rejects and surfaces the hook's own error", async () => {
 		const executor = new IsolateExecutor({ timeoutMs: 30_000, logSink: () => undefined });
 		const hooks: ExecutionHooks = {
-			onEventChunk: async () => {
+			onCommit: async () => {
 				throw new Error("event sink is down");
 			},
 		};
@@ -950,13 +949,13 @@ describe("isolate lane: fixture connector", () => {
 	it("exposes only the job env to the guest and merges it into config, through either entry point", async () => {
 		const job = syncJob({ scenario: "env" }, { FIXTURE_ENV: "from-job" });
 		const [isolate, proc] = await Promise.all([runIsolate(fixtureIsolateCode, job), runViaRuntime(fixtureIsolateCode, job)]);
-		expect(checkpointOf(isolate.result)).toEqual({ fixture_env: "from-job", config_fixture_env: "from-job" });
-		expect(checkpointOf(isolate.result).config_fixture_env).toEqual(checkpointOf(proc.result).config_fixture_env);
+		expect(checkpointOf(isolate)).toEqual({ fixture_env: "from-job", config_fixture_env: "from-job" });
+		expect(checkpointOf(isolate).config_fixture_env).toEqual(checkpointOf(proc).config_fixture_env);
 	});
 
 	it("orders timers, immediates and microtasks like Node", async () => {
 		const run = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "timers" }));
-		const order = checkpointOf(run.result).order as string[];
+		const order = checkpointOf(run).order as string[];
 		expect(order.slice(0, 3)).toEqual(["sync", "micro", "promise"]);
 		expect(order).not.toContain("cancelled");
 		expect(order.indexOf("t0")).toBeLessThan(order.indexOf("t10"));
@@ -969,8 +968,8 @@ describe("isolate lane: fixture connector", () => {
 	it("prelude globals behave like Node's for the fixture's mixed probe", async () => {
 		const job = syncJob({ scenario: "prelude" });
 		const [isolate, proc] = await Promise.all([runIsolate(fixtureIsolateCode, job), runViaRuntime(fixtureIsolateCode, job)]);
-		expect(checkpointOf(isolate.result)).toEqual(checkpointOf(proc.result));
-		expect(checkpointOf(isolate.result)).toMatchObject({
+		expect(checkpointOf(isolate)).toEqual(checkpointOf(proc));
+		expect(checkpointOf(isolate)).toMatchObject({
 			href: "https://example.com/a/c%20d?x=1&y=a%20b#frag%20ment",
 			origin: "https://example.com",
 			b64: "aGVsbG8sIGlzb2xhdGU=",

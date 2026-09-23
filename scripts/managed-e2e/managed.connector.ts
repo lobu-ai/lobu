@@ -26,7 +26,7 @@ export default class ManagedConnector extends ConnectorRuntime<Checkpoint> {
   readonly definition = {
     key: "managede2e-pulse",
     name: "Managed e2e pulse",
-    version: "1.0.0",
+    version: "1.1.0",
     authSchema: {
       methods: [
         {
@@ -45,9 +45,7 @@ export default class ManagedConnector extends ConnectorRuntime<Checkpoint> {
     },
   };
 
-  private async syncPulse(
-    ctx: SyncContext<Checkpoint>
-  ): Promise<SyncResult<Checkpoint>> {
+  private async syncPulse(ctx: SyncContext<Checkpoint>): Promise<SyncResult> {
     const seq = (ctx.checkpoint?.seq ?? 0) + 1;
 
     // The managed access token the LOCAL resolver fetched from the cloud.
@@ -78,8 +76,8 @@ export default class ManagedConnector extends ConnectorRuntime<Checkpoint> {
     };
     const items = body.items ?? [];
 
-    return {
-      events: items.map((item) => ({
+    await ctx.commit(
+      items.map((item) => ({
         origin_id: `${item.id}-${seq}`,
         origin_type: "pulse",
         title: "Managed e2e pulse",
@@ -87,8 +85,9 @@ export default class ManagedConnector extends ConnectorRuntime<Checkpoint> {
         occurred_at: new Date(),
         metadata: { seq, token_prefix: accessToken.slice(0, 8) },
       })),
-      checkpoint: { seq },
-    };
+      { seq }
+    );
+    return { status: "complete" };
   }
 
   async execute() {

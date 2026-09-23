@@ -32,7 +32,7 @@ export default class NpmDownloadsConnector extends ConnectorRuntime<
   readonly definition = {
     key: "npm-downloads",
     name: "npm downloads",
-    version: "1.0.0",
+    version: "1.1.0",
     authSchema: { methods: [{ type: "none" as const }] },
     feeds: {
       weekly: {
@@ -46,7 +46,7 @@ export default class NpmDownloadsConnector extends ConnectorRuntime<
 
   private async syncFeed(
     ctx: SyncContext<NpmDownloadsCheckpoint, NpmDownloadsConfig>
-  ): Promise<SyncResult<NpmDownloadsCheckpoint>> {
+  ): Promise<SyncResult> {
     const seen = new Set<string>(ctx.checkpoint?.seen_periods ?? []);
     const pkg = ctx.config.package;
     const res = await fetch(
@@ -59,10 +59,11 @@ export default class NpmDownloadsConnector extends ConnectorRuntime<
     };
     // One event per never-seen weekly period, keyed by the period end date.
     if (!point.end || seen.has(point.end)) {
-      return { events: [], checkpoint: { seen_periods: [...seen] } };
+      await ctx.commit([], { seen_periods: [...seen] });
+      return { status: "complete" };
     }
-    return {
-      events: [
+    await ctx.commit(
+      [
         {
           origin_id: `${pkg}@${point.end}`,
           origin_type: "npm_downloads_week",
@@ -77,8 +78,9 @@ export default class NpmDownloadsConnector extends ConnectorRuntime<
           },
         },
       ],
-      checkpoint: { seen_periods: [...seen, point.end].slice(-52) },
-    };
+      { seen_periods: [...seen, point.end].slice(-52) }
+    );
+    return { status: "complete" };
   }
 
   async execute() {

@@ -121,7 +121,7 @@ export default class GlassdoorConnector extends ConnectorRuntime {
     name: "Glassdoor",
     description:
       "Reads employee reviews from Glassdoor through the paired Chrome extension.",
-    version: "2.0.0",
+    version: "2.1.0",
     faviconDomain: "glassdoor.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -179,8 +179,7 @@ export default class GlassdoorConnector extends ConnectorRuntime {
 
     if (!company_name) {
       return {
-        events: [],
-        checkpoint: ctx.checkpoint,
+        status: "complete",
         metadata: { items_found: 0, error: "company_name is required" },
       };
     }
@@ -232,9 +231,9 @@ export default class GlassdoorConnector extends ConnectorRuntime {
       };
     });
 
+    await ctx.commit(events, ctx.checkpoint);
     return {
-      events,
-      checkpoint: ctx.checkpoint,
+      status: "complete",
       metadata: { items_found: events.length, items_skipped: itemsSkipped },
     };
   }

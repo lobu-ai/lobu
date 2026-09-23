@@ -40,7 +40,10 @@ describe("app_installation auth method", () => {
 			feeds: {
 				items: {
 					name: "Items",
-					sync: async () => ({ events: [], checkpoint: null }),
+					sync: async (ctx) => {
+						await ctx.commit([], null);
+						return { status: "complete" };
+					},
 				},
 			},
 		});
@@ -139,6 +142,7 @@ describe("installation context", () => {
 			credentials: null,
 			entityIds: [],
 			installation,
+			commit: async () => {},
 		};
 
 		expect(ctx.installation?.id).toBe("42");
@@ -153,6 +157,7 @@ describe("installation context", () => {
 			checkpoint: null,
 			credentials: null,
 			entityIds: [],
+			commit: async () => {},
 		};
 		expect(ctx.installation).toBeUndefined();
 	});

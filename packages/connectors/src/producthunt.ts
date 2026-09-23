@@ -354,9 +354,9 @@ export default class ProductHuntConnector extends ConnectorRuntime {
       last_sync_at: new Date().toISOString(),
     };
 
+    await ctx.commit(events, checkpoint as Record<string, unknown>);
     return {
-      events,
-      checkpoint: checkpoint as Record<string, unknown>,
+      status: 'complete',
       metadata: {
         items_found: events.length,
       },

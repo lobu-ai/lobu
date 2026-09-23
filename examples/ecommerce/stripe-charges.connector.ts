@@ -8,7 +8,7 @@ export default class StripeChargesConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: "stripe-charges",
     name: "Stripe charges",
-    version: "1.0.0",
+    version: "1.1.0",
     // Stripe secret key collected per connection; exposed to sync() as ctx.config.secret_key.
     authSchema: { methods: [{ type: "env_keys", fields: [{ key: "secret_key", label: "Stripe secret key", secret: true, required: true }] }] },
     feeds: { charges: { key: "charges", name: "Charges", sync: (ctx) => this.syncFeed(ctx) } },
@@ -30,7 +30,8 @@ export default class StripeChargesConnector extends ConnectorRuntime {
       source_url: `https://dashboard.stripe.com/payments/${c.id}`,
       occurred_at: new Date(c.created * 1000),
     }));
-    return { events, checkpoint: { last_created: data.at(-1)?.created ?? cursor } satisfies Checkpoint };
+    await ctx.commit(events, { last_created: data.at(-1)?.created ?? cursor } satisfies Checkpoint);
+    return { status: 'complete' };
   }
 
   async execute() {

@@ -63,7 +63,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
     name: "Website",
     description:
       "Fetches web pages over HTTP. Supports sitemap.xml for auto-discovery. Converts to markdown sections and tracks changes.",
-    version: "2.0.0",
+    version: "2.1.0",
     faviconDomain: "google.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -167,8 +167,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
       urls = explicitUrls;
     } else {
       return {
-        events: [],
-        checkpoint: ctx.checkpoint,
+        status: "complete",
         metadata: { error: "No sitemap_url or urls configured" },
       };
     }
@@ -275,9 +274,12 @@ export default class WebsiteConnector extends ConnectorRuntime {
       }
     }
 
+    await ctx.commit(events, {
+      hashes: newHashes,
+      last_sync_at: new Date().toISOString(),
+    });
     return {
-      events,
-      checkpoint: { hashes: newHashes, last_sync_at: new Date().toISOString() },
+      status: "complete",
       metadata: { pages_scraped: urls.length, events_created: events.length },
     };
   }

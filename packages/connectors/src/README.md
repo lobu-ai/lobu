@@ -44,11 +44,8 @@ export default defineConnector({
         // Fetch data, transform to events...
         const events: EventEnvelope[] = [];
 
-        return {
-          events,
-          checkpoint: { last_sync_at: new Date().toISOString() },
-          metadata: { query, items_found: events.length },
-        };
+        await ctx.commit(events, { last_sync_at: new Date().toISOString() });
+        return { status: 'complete', metadata: { query, items_found: events.length } };
       },
     },
   },
@@ -234,10 +231,11 @@ feeds: {
       issue: { description: 'An issue changed' },
     },
     // Incremental materialization for local search and Automations.
-    sync: async (ctx) => ({
-      events: await fetchChangedIssues(ctx.config.project, ctx.checkpoint),
-      checkpoint: { synced_at: new Date().toISOString() },
-    }),
+    sync: async (ctx) => {
+      const events = await fetchChangedIssues(ctx.config.project, ctx.checkpoint);
+      await ctx.commit(events, { synced_at: new Date().toISOString() });
+      return { status: 'complete' };
+    },
     // Direct source read with native filtering and pagination.
     read: async (ctx) => {
       const page = await queryIssues({
@@ -258,7 +256,8 @@ A feed's `eventKinds` are also the **default Automation trigger catalog**. The f
 
 The worker calls the selected feed's `sync` handler for scheduled,
 webhook-triggered, and manually triggered sync runs. It receives a `SyncContext`
-and returns a `SyncResult`.
+stores events through `ctx.commit`, and returns a `SyncResult` saying whether
+the source is caught up.
 
 ### SyncContext
 
@@ -271,8 +270,9 @@ interface SyncContext {
   credentials: SyncCredentials | null;      // OAuth/session credentials; env_keys are in config
   entityIds: number[];                      // Linked entity IDs
   sessionState?: Record<string, unknown>;   // Browser session state (cookies, tokens)
-  emitEvents?: (events: EventEnvelope[]) => Promise<void>;      // Stream events mid-sync
-  updateCheckpoint?: (cp: Record<string, unknown>) => Promise<void>; // Save progress mid-sync
+  // Store a page, then move its checkpoint; resolves once both are durable.
+  // `null` stores the events and leaves the checkpoint where it is.
+  commit: (events: EventEnvelope[], checkpoint: Record<string, unknown> | null) => Promise<void>;
 }
 ```
 
@@ -280,8 +280,7 @@ interface SyncContext {
 
 ```typescript
 interface SyncResult {
-  events: EventEnvelope[];                  // Events to ingest
-  checkpoint: Record<string, unknown> | null; // Updated checkpoint to persist
+  status: 'complete' | 'more';              // Caught up, or stopped early with work left (reruns now)
   auth_update?: Record<string, unknown>;    // Updated session state (browser cookies, etc.)
   metadata?: {
     items_found?: number;
@@ -320,7 +319,7 @@ Use checkpoints to implement incremental sync. Common patterns:
 - **Timestamp-based**: Store `last_sync_at` and use it as a `since` filter on the next sync (see `github.ts`)
 - **ID-based**: Store a list of seen IDs for deduplication, trimmed to a max size to prevent unbounded growth (see `rss.ts`)
 
-For long-running syncs, use `ctx.emitEvents()` to stream event batches to the platform as they're collected, and `ctx.updateCheckpoint()` to persist progress. If the sync crashes mid-way, the next run resumes from the last saved checkpoint.
+Commit as you go: call `await ctx.commit(events, checkpoint)` once per source page, with the checkpoint that resumes after that page, and await it before fetching the next. A large commit may be transported in chunks, but its checkpoint moves only with the final chunk; if the run is killed or crashes mid-way, replay may supersede already-stored events, and no checkpoint ever covers events that were not stored. A pass that stops early at a budget (pages, rows, time) returns `{ status: 'more' }` so the next run starts immediately; `more` is only honored when the pass moved the checkpoint, so a pass that makes no progress falls back to the schedule instead of looping.
 
 ## Reading from the Source
 
@@ -527,7 +526,7 @@ Connectors can also be installed manually via `client.connections.installConnect
 
 1. For fleet workers and embedded-mode hosts (worker + gateway share a host), the gateway sends only `connector_key` in the worker-poll response — both runtimes have the `.ts` source on disk, and the worker compiles locally via the shared pipeline at `@lobu/connector-worker/compile`. For DB-only / device workers without source on disk, the gateway sends `compiled_code` inline.
 2. The bundle is self-contained — the SDK and every pure-JS dependency are inlined — and is evaluated inside a V8 isolate in the worker process. The isolate has no module loader, so a bundle that still `require()`s a Node builtin is rejected before it runs.
-3. Host and guest speak the SDK shapes (`SyncContext` / `ActionContext` / `AuthContext` in, `SyncResult` / `ActionResult` / `AuthResult` out, no envelope) across named host capabilities. Sync events stream up as the connector emits them.
+3. Host and guest speak the SDK shapes (`SyncContext` / `ActionContext` / `AuthContext` in, `SyncResult` / `ActionResult` / `AuthResult` out, no envelope) across named host capabilities. Sync pages and their checkpoints cross the `ctx.commit` capability together.
 4. `IsolateExecutor` defaults to a 10-minute wall clock and a 512 MB heap for every run; interactive auth runs disable the fixed timeout while waiting for the user.
 5. The guest has no filesystem, no ambient environment, and no socket of its own: everything it can reach is a named capability the host granted — `fetch` and, for the DB connectors, a host-dialled TCP socket — plus the explicit values supplied in `job.env`.
 6. Connection credentials and config flow through the typed job context (`ctx.credentials`, `ctx.config`, or auth's `previousCredentials`). The worker API token is never forwarded to connector code. `ctx.credentials.accessToken` is a per-run placeholder the host resolves at the wire (see "`oauth` - OAuth providers" above); `ctx.config` and `previousCredentials` still carry real values.

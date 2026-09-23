@@ -40,7 +40,15 @@ interface LinearConfig {
 }
 
 interface LinearCheckpoint {
+  /** When the last complete traversal began; the next one fetches issues updated since. */
   last_sync_at?: string;
+  /**
+   * A traversal that stopped at the per-run page cap. `since`/`started_at`
+   * are the fixed bounds it walks and `cursor` the `endCursor` of the last page
+   * stored, so the next run continues past it instead of re-reading the newest
+   * issues and never reaching the rest.
+   */
+  pending?: { since?: string; started_at: string; cursor: string };
 }
 
 interface LinearUser {
@@ -323,16 +331,24 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
   // Sync into local memory.
   // -------------------------------------------------------------------------
 
-  private async syncFeed(ctx: SyncContext<LinearCheckpoint, LinearConfig>): Promise<SyncResult<LinearCheckpoint>> {
-    const events: EventEnvelope[] = [];
-    let cursor: string | null = null;
-    let pages = 0;
+  private async syncFeed(ctx: SyncContext<LinearCheckpoint, LinearConfig>): Promise<SyncResult> {
+    const checkpoint = ctx.checkpoint ?? {};
+    // Fixed per traversal: issues updated after the last complete traversal
+    // began (none on the first), walked until the listing ends. An issue edited
+    // while the walk runs is re-reported by the next traversal, and `origin_id`
+    // makes that a supersede, not a duplicate.
+    const since = checkpoint.pending ? checkpoint.pending.since : checkpoint.last_sync_at;
+    const startedAt = checkpoint.pending?.started_at ?? new Date().toISOString();
+    let cursor: string | null = checkpoint.pending?.cursor ?? null;
 
-    const filter = ctx.config.team_key
-      ? `, filter: { team: { key: { eq: ${JSON.stringify(ctx.config.team_key)} } } }`
-      : '';
+    const filter = buildLinearIssueFilter({
+      teamKey: asString(ctx.config.team_key),
+      updatedAfterIso: since,
+      updatedBeforeIso: startedAt,
+    });
 
-    while (pages < this.MAX_PAGES) {
+    let found = 0;
+    for (let pages = 0; pages < this.MAX_PAGES; pages++) {
       const after: string = cursor ? `, after: ${JSON.stringify(cursor)}` : '';
       const query: string = `
         query {
@@ -350,23 +366,34 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
         };
       }>(ctx.credentials, query, undefined, { idempotent: true });
 
-      const nodes = response.issues?.nodes ?? [];
+      const nodes = response.issues?.nodes;
+      const pageInfo = response.issues?.pageInfo;
+      if (
+        !Array.isArray(nodes) ||
+        typeof pageInfo?.hasNextPage !== 'boolean' ||
+        (pageInfo.hasNextPage && !pageInfo.endCursor)
+      ) {
+        throw new Error('Linear did not return a valid page cursor/exhaustion state.');
+      }
+      const events: EventEnvelope[] = [];
       for (const node of nodes) {
         const event = this.issueEvent(node);
         if (event) events.push(event);
       }
+      found += events.length;
 
-      pages += 1;
-      const pageInfo = response.issues?.pageInfo;
-      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) break;
+      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) {
+        await ctx.commit(events, { last_sync_at: startedAt });
+        return { status: 'complete', metadata: { items_found: found } };
+      }
       cursor = pageInfo.endCursor;
+      await ctx.commit(events, {
+        ...(checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
+        pending: { ...(since ? { since } : {}), started_at: startedAt, cursor },
+      });
     }
-
-    return {
-      events,
-      checkpoint: { last_sync_at: new Date().toISOString() },
-      metadata: { items_found: events.length },
-    };
+    // The page cap stopped the walk; its committed cursor resumes it next run.
+    return { status: 'more', metadata: { items_found: found } };
   }
 
   // -------------------------------------------------------------------------

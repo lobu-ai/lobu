@@ -67,18 +67,20 @@ export default class SelfCheckNoopConnector extends ConnectorRuntime {
         description: 'Emits one synthetic event.',
         configSchema: { type: 'object', properties: {} },
         eventKinds: {},
-        sync: async () => ({
-          events: [
-            {
-              origin_id: 'self-check-noop-1',
-              semantic_type: 'observation',
-              occurred_at: new Date(0),
-              payload_text: 'self-check noop event',
-            },
-          ],
-          checkpoint: { ran: true },
-          metadata: { items_found: 1, items_skipped: 0 },
-        }),
+        sync: async (ctx) => {
+          await ctx.commit(
+            [
+              {
+                origin_id: 'self-check-noop-1',
+                semantic_type: 'observation',
+                occurred_at: new Date(0),
+                payload_text: 'self-check noop event',
+              },
+            ],
+            { ran: true }
+          );
+          return { status: 'complete' };
+        },
       },
     },
   };
@@ -312,7 +314,7 @@ async function runSyntheticConnector(
 		compiledCode: compiled,
 		job,
 		hooks: {
-			onEventChunk: (events) => {
+			onCommit: (events) => {
 				eventCount += events.length;
 			},
 		},

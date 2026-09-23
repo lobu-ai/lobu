@@ -68,7 +68,7 @@ export default class GoogleTakeoutConnector extends ConnectorRuntime<
     // version, so shipping new semantics under 1.0.0 would overwrite the
     // existing artifact and leave version-pinned runs and rollback pointing at
     // code that no longer matches.
-    version: "1.1.0",
+    version: "1.2.0",
     description:
       "Ingests local Google Takeout exports for YouTube history, Keep notes, " +
       "and Maps saved places, lists, and reviews.",
@@ -102,7 +102,7 @@ export default class GoogleTakeoutConnector extends ConnectorRuntime<
 
   private async syncFeed(
     ctx: SyncContext<GoogleTakeoutCheckpoint, LocalTakeoutConfig>
-  ): Promise<SyncResult<GoogleTakeoutCheckpoint>> {
+  ): Promise<SyncResult> {
     const takeoutDir = assertDirectory(ctx.config, "Google");
     if (ctx.feedKey === "youtube") {
       const events = takeBatch(
@@ -110,16 +110,14 @@ export default class GoogleTakeoutConnector extends ConnectorRuntime<
         ctx.checkpoint?.last_youtube_timestamp,
         batchSize(ctx.config)
       );
-      return {
-        events,
-        checkpoint: {
-          ...ctx.checkpoint,
-          last_youtube_timestamp: maxEventCursor(
-            events,
-            ctx.checkpoint?.last_youtube_timestamp
-          ),
-        },
-      };
+      await ctx.commit(events, {
+        ...ctx.checkpoint,
+        last_youtube_timestamp: maxEventCursor(
+          events,
+          ctx.checkpoint?.last_youtube_timestamp
+        ),
+      });
+      return { status: "complete" };
     }
 
     if (ctx.feedKey === "keep") {
@@ -128,16 +126,14 @@ export default class GoogleTakeoutConnector extends ConnectorRuntime<
         ctx.checkpoint?.last_keep_timestamp,
         batchSize(ctx.config)
       );
-      return {
-        events,
-        checkpoint: {
-          ...ctx.checkpoint,
-          last_keep_timestamp: maxEventCursor(
-            events,
-            ctx.checkpoint?.last_keep_timestamp
-          ),
-        },
-      };
+      await ctx.commit(events, {
+        ...ctx.checkpoint,
+        last_keep_timestamp: maxEventCursor(
+          events,
+          ctx.checkpoint?.last_keep_timestamp
+        ),
+      });
+      return { status: "complete" };
     }
 
     if (ctx.feedKey === "maps") {
@@ -146,16 +142,14 @@ export default class GoogleTakeoutConnector extends ConnectorRuntime<
         ctx.checkpoint?.last_maps_timestamp,
         batchSize(ctx.config)
       );
-      return {
-        events,
-        checkpoint: {
-          ...ctx.checkpoint,
-          last_maps_timestamp: maxEventCursor(
-            events,
-            ctx.checkpoint?.last_maps_timestamp
-          ),
-        },
-      };
+      await ctx.commit(events, {
+        ...ctx.checkpoint,
+        last_maps_timestamp: maxEventCursor(
+          events,
+          ctx.checkpoint?.last_maps_timestamp
+        ),
+      });
+      return { status: "complete" };
     }
 
     throw new Error(`Unknown Google Takeout feed: ${ctx.feedKey}`);

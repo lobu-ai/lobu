@@ -227,14 +227,30 @@ const GUEST_RUNNER = String.raw`
     return out;
   }
 
-  async function emitEvents(events) {
-    for (var index = 0; index < events.length; index += EVENT_CHUNK_SIZE) {
-      await H.async('emitEvents', JSON.stringify(events.slice(index, index + EVENT_CHUNK_SIZE)));
+  // One commit may carry more events than one bridge message should. Every
+  // chunk but the last travels without a checkpoint, so the cursor moves only
+  // with the chunk that completes the page: an earlier chunk that lands alone
+  // is re-sent by the next run and superseded by origin_id.
+  // Serialized: a commit waits for the one before it, so checkpoints land in
+  // call order even when a connector does not await.
+  var commitTail = Promise.resolve();
+  function commit(events, checkpoint) {
+    if (!Array.isArray(events)) {
+      return Promise.reject(new TypeError('ctx.commit(events, checkpoint): events must be an array'));
     }
-  }
-
-  async function updateCheckpoint(checkpoint) {
-    await H.async('updateCheckpoint', JSON.stringify(checkpoint === undefined ? null : checkpoint));
+    var checkpointJson = JSON.stringify(checkpoint === undefined ? null : checkpoint);
+    var run = commitTail.then(async function () {
+      if (events.length === 0) {
+        await H.async('commitPage', '[]', checkpointJson);
+        return;
+      }
+      for (var index = 0; index < events.length; index += EVENT_CHUNK_SIZE) {
+        var last = index + EVENT_CHUNK_SIZE >= events.length;
+        await H.async('commitPage', JSON.stringify(events.slice(index, index + EVENT_CHUNK_SIZE)), last ? checkpointJson : 'null');
+      }
+    });
+    commitTail = run.catch(function () {});
+    return run;
   }
 
   async function executeConnectorRuntime(instance) {
@@ -316,20 +332,25 @@ const GUEST_RUNNER = String.raw`
       credentials: job.credentials,
       entityIds: job.entityIds,
       sessionState: withDispatcher(job.sessionState),
-      emitEvents: emitEvents,
-      updateCheckpoint: updateCheckpoint
+      commit: commit
     });
-    var trailingEvents = syncResult && Array.isArray(syncResult.events) ? syncResult.events : [];
-    await emitEvents(trailingEvents);
+    // A commit the connector fired without awaiting still belongs to this pass.
+    await commitTail;
+    if (syncResult && ('events' in syncResult || 'checkpoint' in syncResult)) {
+      // Returned events were never committed; reporting success would store
+      // nothing while the run looked healthy.
+      throw new Error('sync() returned events/checkpoint: commit each page with ctx.commit(events, checkpoint) and return { status }');
+    }
+    var status = syncResult && syncResult.status;
+    if (status !== 'complete' && status !== 'more') {
+      throw new Error("sync() must return { status: 'complete' | 'more' }, got " + JSON.stringify(status));
+    }
     var meta = (syncResult && syncResult.metadata) || {};
     return {
       mode: 'sync',
-      checkpoint: syncResult && syncResult.checkpoint !== undefined ? syncResult.checkpoint : null,
-      auth_update: syncResult && syncResult.auth_update !== undefined ? syncResult.auth_update : null,
-      metadata: Object.assign({
-        items_found: typeof meta.items_found === 'number' ? meta.items_found : trailingEvents.length,
-        items_skipped: typeof meta.items_skipped === 'number' ? meta.items_skipped : 0
-      }, meta)
+      status: status,
+      auth_update: syncResult.auth_update !== undefined ? syncResult.auth_update : null,
+      metadata: meta
     };
   }
 
@@ -813,11 +834,14 @@ export class IsolateExecutor implements SyncExecutor {
             pendingSleeps.add(timer);
           });
         },
-        emitEvents: async (json: unknown) => {
-          const parsed = parseGuestJson(json, 'emitEvents');
+        commitPage: async (eventsJson: unknown, checkpointJson: unknown) => {
+          if (!hooks?.onCommit) throw new Error('ctx.commit is not available in this execution context');
+          const parsed = parseGuestJson(eventsJson, 'commitPage');
           const events: EventEnvelope[] = Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
+          const next = parseGuestJson(checkpointJson, 'commitPage');
+          const checkpoint = next && typeof next === 'object' ? (next as Record<string, unknown>) : null;
           await queueHook(async () => {
-            await hooks?.onEventChunk?.(events);
+            await hooks.onCommit?.(events, checkpoint);
           });
           return undefined;
         },
@@ -836,14 +860,6 @@ export class IsolateExecutor implements SyncExecutor {
           const event = parseGuestJson(json, 'emitTurnEvent') as AgentTurnEvent;
           await queueHook(async () => {
             await hooks?.onTurnEvent?.(event);
-          });
-          return undefined;
-        },
-        updateCheckpoint: async (json: unknown) => {
-          const parsed = parseGuestJson(json, 'updateCheckpoint');
-          const checkpoint = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
-          await queueHook(async () => {
-            await hooks?.onCheckpointUpdate?.(checkpoint);
           });
           return undefined;
         },

@@ -21,7 +21,10 @@
  * ```ts
  * export default defineConnector({
  *   key: 'github', name: 'GitHub', version: '1.0.0',
- *   feeds: { stars: { name: 'Stars', sync: async (ctx) => ({ events, checkpoint }) } },
+ *   feeds: { stars: { name: 'Stars', sync: async (ctx) => {
+ *     await ctx.commit(events, checkpoint);
+ *     return { status: 'complete' };
+ *   } } },
  *   actions: { star_repo: { name: 'Star', execute: async (ctx) => ({ success: true }) } },
  * });
  * ```

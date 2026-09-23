@@ -14,9 +14,9 @@ import {
   type EventEnvelope,
   fileDownloadOutput,
   type HttpClient,
+  HttpStatusError,
   inlineContentBudget,
   inlineMaxBytesSchema,
-  paginateByCursor,
   requireBearerClient,
   type SyncContext,
   type SyncResult,
@@ -89,7 +89,24 @@ interface GraphPagedResponse<T> {
 // ---------------------------------------------------------------------------
 
 interface OutlookCheckpoint {
+  /** When the last complete traversal began; the next window starts here. */
   last_sync_at?: string;
+  /**
+   * A traversal that stopped at the per-run cap with pages left. `window`
+   * is the fixed range it walks and `next_link` Graph's cursor for the first
+   * page not yet stored, so the next run continues exactly where this one
+   * stopped instead of re-reading the newest page and never reaching the rest.
+   */
+  pending?: { window: { start: string; end: string }; next_link: string };
+}
+
+const WINDOW_OVERLAP_MS = 5 * 60_000;
+
+/** ISO timestamp `days` from now (negative for the past). */
+function daysFromNow(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString();
 }
 
 // ---------------------------------------------------------------------------
@@ -448,67 +465,53 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
   private async syncMessages(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const config = ctx.config as Record<string, unknown>;
     const folder = (config.folder as string) ?? 'inbox';
-    const maxResults = (config.max_results as number) ?? 50;
     const lookbackDays = (config.lookback_days as number) ?? 30;
-    const encodedFolder = encodeURIComponent(folder);
+    const checkpoint = (ctx.checkpoint ?? {}) as OutlookCheckpoint;
 
-    const since = new Date();
-    since.setDate(since.getDate() - lookbackDays);
-    const sinceFilter = since.toISOString();
-
-    const events: EventEnvelope[] = [];
+    // A fixed window per traversal: from where the last complete one began
+    // (or the lookback) up to when this one began. Mail arriving meanwhile
+    // belongs to the next window, so a capped walk can never be pushed past
+    // messages it has not reached by newer arrivals landing at the front.
+    // The start overlaps the previous window by a few minutes: Graph can
+    // surface a message after its receivedDateTime, and `origin_id` makes the
+    // replayed boundary a supersede, not a duplicate.
+    const window = checkpoint.pending?.window ?? {
+      start: checkpoint.last_sync_at
+        ? new Date(Date.parse(checkpoint.last_sync_at) - WINDOW_OVERLAP_MS).toISOString()
+        : daysFromNow(-lookbackDays),
+      end: new Date().toISOString(),
+    };
     const firstUrl =
-      `${this.API_BASE}/me/mailFolders/${encodedFolder}/messages` +
-      `?$top=${Math.min(maxResults, this.PAGE_SIZE)}` +
+      `${this.API_BASE}/me/mailFolders/${encodeURIComponent(folder)}/messages` +
+      `?$top=${this.PAGE_SIZE}` +
       '&$orderby=receivedDateTime desc' +
-      `&$filter=receivedDateTime ge ${sinceFilter}` +
+      `&$filter=receivedDateTime ge ${window.start} and receivedDateTime lt ${window.end}` +
       '&$select=id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,importance,isRead,webLink';
 
-    let fetched = 0;
-
-    // Graph paginates via full `@odata.nextLink` URLs, so the cursor is the page URL.
-    const pages = paginateByCursor<GraphMessage, string>(
-      async (url) => {
-        const data = await http.get<GraphPagedResponse<GraphMessage>>(url ?? firstUrl);
-        return { items: data.value, nextCursor: data['@odata.nextLink'] };
-      },
-      { maxPages: this.MAX_PAGES, initialCursor: firstUrl }
-    );
-
-    for await (const value of pages) {
-      for (const msg of value) {
-        if (fetched >= maxResults) break;
-        events.push({
-          origin_id: `outlook_msg_${msg.id}`,
-          title: msg.subject,
-          payload_text: msg.bodyPreview || msg.subject,
-          author_name: msg.from?.emailAddress?.name || msg.from?.emailAddress?.address,
-          source_url: msg.webLink,
-          occurred_at: new Date(msg.receivedDateTime),
-          origin_type: 'email',
-          metadata: {
-            from: msg.from?.emailAddress?.address,
-            to: formatRecipients(msg.toRecipients ?? []),
-            cc: formatRecipients(msg.ccRecipients ?? []),
-            importance: msg.importance,
-            has_attachments: msg.hasAttachments,
-            is_read: msg.isRead,
-          },
-        });
-        fetched++;
-      }
-
-      if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
-
-      if (fetched >= maxResults) break;
-    }
-
-    return {
-      events,
-      checkpoint: {
-        last_sync_at: new Date().toISOString(),
-      } satisfies OutlookCheckpoint as Record<string, unknown>,
-    };
+    return this.walkPages<GraphMessage>(ctx, http, {
+      window,
+      firstUrl,
+      maxResults: (config.max_results as number) ?? 50,
+      toEvent: (msg) => ({
+        origin_id: `outlook_msg_${msg.id}`,
+        title: msg.subject,
+        payload_text: msg.bodyPreview || msg.subject,
+        author_name: msg.from?.emailAddress?.name || msg.from?.emailAddress?.address,
+        source_url: msg.webLink,
+        occurred_at: new Date(msg.receivedDateTime),
+        origin_type: 'email',
+        metadata: {
+          from: msg.from?.emailAddress?.address,
+          to: formatRecipients(msg.toRecipients ?? []),
+          cc: formatRecipients(msg.ccRecipients ?? []),
+          importance: msg.importance,
+          has_attachments: msg.hasAttachments,
+          is_read: msg.isRead,
+        },
+      }),
+      // The next window starts where this one ended.
+      completed: { last_sync_at: window.end },
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -517,68 +520,106 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
 
   private async syncCalendar(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const config = ctx.config as Record<string, unknown>;
-    const lookbackDays = (config.lookback_days as number) ?? 7;
-    const lookaheadDays = (config.lookahead_days as number) ?? 30;
-    const maxResults = (config.max_results as number) ?? 100;
+    const checkpoint = (ctx.checkpoint ?? {}) as OutlookCheckpoint;
 
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - lookbackDays);
-    const endDate = new Date();
-    endDate.setDate(endDate.getDate() + lookaheadDays);
-
-    const events: EventEnvelope[] = [];
+    // A calendar view is a snapshot of a moving range, re-walked in full on
+    // every traversal; a capped walk resumes the same range next run.
+    const window = checkpoint.pending?.window ?? {
+      start: daysFromNow(-((config.lookback_days as number) ?? 7)),
+      end: daysFromNow((config.lookahead_days as number) ?? 30),
+    };
     const firstUrl =
       `${this.API_BASE}/me/calendarView` +
-      `?startDateTime=${startDate.toISOString()}` +
-      `&endDateTime=${endDate.toISOString()}` +
-      `&$top=${Math.min(maxResults, this.PAGE_SIZE)}` +
+      `?startDateTime=${window.start}` +
+      `&endDateTime=${window.end}` +
+      `&$top=${this.PAGE_SIZE}` +
       '&$orderby=start/dateTime' +
       '&$select=id,subject,bodyPreview,organizer,attendees,start,end,location,isAllDay,isCancelled,webLink,createdDateTime';
 
+    return this.walkPages<GraphEvent>(ctx, http, {
+      window,
+      firstUrl,
+      maxResults: (config.max_results as number) ?? 100,
+      toEvent: (evt) => ({
+        origin_id: `outlook_evt_${evt.id}`,
+        title: evt.subject,
+        payload_text: evt.bodyPreview || evt.subject,
+        author_name: evt.organizer?.emailAddress?.name || evt.organizer?.emailAddress?.address,
+        source_url: evt.webLink,
+        occurred_at: new Date(evt.start.dateTime),
+        origin_type: 'calendar_event',
+        metadata: {
+          organizer: evt.organizer?.emailAddress?.address,
+          location: evt.location?.displayName,
+          attendee_count: evt.attendees?.length ?? 0,
+          is_all_day: evt.isAllDay,
+          is_cancelled: evt.isCancelled,
+          start_time: evt.start.dateTime,
+          end_time: evt.end.dateTime,
+        },
+      }),
+      completed: { last_sync_at: new Date().toISOString() },
+    });
+  }
+
+  /**
+   * Walk a Graph collection page by page, committing each page with the
+   * cursor of the next. `max_results` caps how much a run starts, never how
+   * much of a fetched page is stored: a page is committed whole, and the run
+   * stops between pages once the cap is reached, handing back `more`.
+   */
+  private async walkPages<T>(
+    ctx: SyncContext,
+    http: HttpClient,
+    walk: {
+      window: { start: string; end: string };
+      firstUrl: string;
+      maxResults: number;
+      toEvent: (item: T) => EventEnvelope;
+      completed: OutlookCheckpoint;
+    }
+  ): Promise<SyncResult> {
+    const checkpoint = (ctx.checkpoint ?? {}) as OutlookCheckpoint;
+    let url = checkpoint.pending?.next_link ?? walk.firstUrl;
+    // A saved link outlives the run that issued it and Graph may retire it.
+    // The first request of the run — the only one using a stored cursor — may
+    // restart the window from its first page instead of wedging the feed;
+    // `origin_id` makes that replay a supersede, not a duplicate.
+    let staleCursorRecoverable = checkpoint.pending !== undefined;
     let fetched = 0;
 
-    const pages = paginateByCursor<GraphEvent, string>(
-      async (url) => {
-        const data = await http.get<GraphPagedResponse<GraphEvent>>(url ?? firstUrl);
-        return { items: data.value, nextCursor: data['@odata.nextLink'] };
-      },
-      { maxPages: this.MAX_PAGES, initialCursor: firstUrl }
-    );
-
-    for await (const value of pages) {
-      for (const evt of value) {
-        if (fetched >= maxResults) break;
-        events.push({
-          origin_id: `outlook_evt_${evt.id}`,
-          title: evt.subject,
-          payload_text: evt.bodyPreview || evt.subject,
-          author_name: evt.organizer?.emailAddress?.name || evt.organizer?.emailAddress?.address,
-          source_url: evt.webLink,
-          occurred_at: new Date(evt.start.dateTime),
-          origin_type: 'calendar_event',
-          metadata: {
-            organizer: evt.organizer?.emailAddress?.address,
-            location: evt.location?.displayName,
-            attendee_count: evt.attendees?.length ?? 0,
-            is_all_day: evt.isAllDay,
-            is_cancelled: evt.isCancelled,
-            start_time: evt.start.dateTime,
-            end_time: evt.end.dateTime,
-          },
-        });
-        fetched++;
+    for (let page = 0; page < this.MAX_PAGES; page++) {
+      let data: GraphPagedResponse<T>;
+      try {
+        data = await http.get<GraphPagedResponse<T>>(url);
+      } catch (error) {
+        if (staleCursorRecoverable && error instanceof HttpStatusError && [400, 404, 410].includes(error.status)) {
+          staleCursorRecoverable = false;
+          url = walk.firstUrl;
+          page--;
+          continue;
+        }
+        throw error;
       }
+      staleCursorRecoverable = false;
 
-      if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
-
-      if (fetched >= maxResults) break;
+      const events = data.value.map(walk.toEvent);
+      fetched += events.length;
+      const nextLink = data['@odata.nextLink'];
+      if (!nextLink) {
+        await ctx.commit(events, walk.completed as Record<string, unknown>);
+        return { status: 'complete', metadata: { items_found: fetched } };
+      }
+      const pending: OutlookCheckpoint = {
+        ...(checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
+        pending: { window: walk.window, next_link: nextLink },
+      };
+      await ctx.commit(events, pending as Record<string, unknown>);
+      url = nextLink;
+      if (fetched >= walk.maxResults) break;
     }
-
-    return {
-      events,
-      checkpoint: {
-        last_sync_at: new Date().toISOString(),
-      } satisfies OutlookCheckpoint as Record<string, unknown>,
-    };
+    // Pages remain: the committed cursor resumes this window next run.
+    return { status: 'more', metadata: { items_found: fetched } };
   }
+
 }

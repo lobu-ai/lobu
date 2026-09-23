@@ -1215,11 +1215,12 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						: tx`,
 	          items_collected = ${req.items_collected ?? 0},
 	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-				returning: tx`feed_id, connection_id, dry_run`,
+				returning: tx`feed_id, connection_id, dry_run, checkpoint IS NOT NULL AS committed_checkpoint`,
 			})) as unknown as Array<{
 				feed_id: number | null;
 				connection_id: number | null;
 				dry_run: boolean;
+				committed_checkpoint: boolean;
 			}>;
 
 			if (updatedRuns.length === 0) return null;
@@ -1228,6 +1229,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			const runRows = updatedRuns;
 			const feedId = runRows[0]?.feed_id;
 			const isDry = runRows[0]?.dry_run === true;
+			const committedCheckpoint = runRows[0]?.committed_checkpoint === true;
 
 			// Never for a dry run: this block stamps last_sync_at/status, resets or
 			// increments consecutive_failures, adds items_collected, ADVANCES THE FEED
@@ -1295,8 +1297,14 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 	            checkpoint = COALESCE(${req.checkpoint ? tx.json(req.checkpoint) : null}, checkpoint),
 	            -- Enqueue consumes the previous due time. A newly-due value belongs
 	            -- to a notification received during this run; preserve it under the
-	            -- same row lock as completion/checkpoint commit.
-	            next_run_at = CASE WHEN next_run_at <= current_timestamp THEN next_run_at ELSE ${nextRun}::timestamptz END,
+	            -- same row lock as completion/checkpoint commit. A pass that stopped
+	            -- early with work remaining runs again now, but only if it committed
+	            -- a checkpoint: one that moved nothing would otherwise loop.
+	            next_run_at = CASE
+	              WHEN ${req.more === true} AND ${committedCheckpoint} THEN current_timestamp
+	              WHEN next_run_at <= current_timestamp THEN next_run_at
+	              ELSE ${nextRun}::timestamptz
+	            END,
 	            updated_at = current_timestamp
 	        WHERE id = ${feedId}
 	      `;

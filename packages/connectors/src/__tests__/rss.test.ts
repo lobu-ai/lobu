@@ -8,6 +8,7 @@
 
 import { afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -38,7 +39,8 @@ test('all feed URLs failing → sync throws with per-URL errors, not a clean emp
   }) as typeof fetch;
 
   const connector = new RSSConnector();
-  const promise = connector.sync(
+  const promise = runSync(
+    connector,
     ctxFor(['https://down-a.example.com/feed.xml', 'https://down-b.example.com/feed.xml'])
   );
 
@@ -57,7 +59,8 @@ test('partial failure → good feed items returned, failures surfaced in metadat
   }) as typeof fetch;
 
   const connector = new RSSConnector();
-  const result = await connector.sync(
+  const result = await runSync(
+    connector,
     ctxFor(['https://ok.example.com/feed.xml', 'https://down.example.com/feed.xml'])
   );
 
@@ -78,7 +81,7 @@ test('all feeds healthy → no failure keys in metadata', async () => {
   globalThis.fetch = (async () => new Response(FEED_XML, { status: 200 })) as typeof fetch;
 
   const connector = new RSSConnector();
-  const result = await connector.sync(ctxFor(['https://ok.example.com/feed.xml']));
+  const result = await runSync(connector, ctxFor(['https://ok.example.com/feed.xml']));
 
   expect(result.events).toHaveLength(1);
   expect(result.metadata?.feeds_fetched).toBe(1);

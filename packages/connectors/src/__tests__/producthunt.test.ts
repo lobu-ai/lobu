@@ -5,6 +5,7 @@
 
 import { afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { connectorSdkMock } from './connector-sdk.mock';
+import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 
@@ -27,5 +28,5 @@ test('missing token + API 401 → sync throws instead of a clean empty run', asy
   // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
   const ctx = { feedKey: 'posts', config: { search_query: 'ai agents' }, checkpoint: null } as any;
 
-  await expect(connector.sync(ctx)).rejects.toThrow(/Developer Token/);
+  await expect(runSync(connector, ctx)).rejects.toThrow(/Developer Token/);
 });

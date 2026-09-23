@@ -5,7 +5,7 @@ export default class ShopifyOrdersConnector extends ConnectorRuntime {
   readonly definition = {
     key: "shopify-orders",
     name: "Shopify orders",
-    version: "1.0.0",
+    version: "1.1.0",
     authSchema: { methods: [{ type: "env_keys" as const, fields: [{ key: "access_token", secret: true }] }] },
     feeds: { orders: { key: "orders", name: "Order updates", sync: (ctx: SyncContext) => this.syncFeed(ctx) } },
   };
@@ -14,17 +14,15 @@ export default class ShopifyOrdersConnector extends ConnectorRuntime {
     const since = (ctx.checkpoint as any)?.updated_at_min ?? "2000-01-01T00:00:00Z";
     const r = await fetch(`https://${ctx.config.shop}/admin/api/2024-10/orders.json?status=any&updated_at_min=${encodeURIComponent(since)}&limit=100`);
     const orders: any[] = ((await r.json() as any).orders ?? []).sort((a: any, b: any) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime());
-    return {
-      events: orders.map((o) => ({
+    await ctx.commit(orders.map((o) => ({
         origin_id: `${o.id}:${o.updated_at}`,
         origin_type: "order_updated",
         title: `Order ${o.name} — ${o.fulfillment_status ?? "unfulfilled"}`,
         payload_text: `Order ${o.name} is ${o.fulfillment_status ?? "unfulfilled"}`,
         source_url: `https://${ctx.config.shop}/admin/orders/${o.id}`,
         occurred_at: new Date(o.updated_at),
-      })),
-      checkpoint: { updated_at_min: orders.at(-1)?.updated_at ?? since },
-    };
+      })), { updated_at_min: orders.at(-1)?.updated_at ?? since });
+    return { status: 'complete' as const };
   }
 
   async execute() {

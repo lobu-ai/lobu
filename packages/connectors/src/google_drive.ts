@@ -286,6 +286,27 @@ function buildListQuery(config: DriveConfig): string {
 // Connector
 // ---------------------------------------------------------------------------
 
+type DriveCommit = (events: EventEnvelope[], checkpoint: DriveCheckpoint) => Promise<void>;
+
+/**
+ * Checkpoint for a bootstrap with list pages still unread.
+ *
+ * `page_token` is deliberately absent: while it is missing the feed cannot go
+ * incremental, which is exactly the property that keeps the unread files
+ * reachable.
+ */
+function bootstrapCheckpoint(
+  pendingPageToken: string,
+  listPageToken: string,
+  startedAt: string
+): DriveCheckpoint {
+  return {
+    pending_page_token: pendingPageToken,
+    list_page_token: listPageToken,
+    last_sync_at: startedAt,
+  };
+}
+
 export default class GoogleDriveConnector extends ConnectorRuntime<
   Record<string, unknown>,
   DriveConfig
@@ -493,8 +514,11 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
 
     // An unfinished bootstrap outranks everything: going incremental with pages
     // still unread would strand every file the traversal never reached.
+    const commit = (events: EventEnvelope[], next: DriveCheckpoint) =>
+      ctx.commit(events, next as Record<string, unknown>);
+
     if (checkpoint.list_page_token && checkpoint.pending_page_token) {
-      return this.fullSync(http, config, {
+      return this.fullSync(http, config, commit, {
         startToken: checkpoint.pending_page_token,
         listPageToken: checkpoint.list_page_token,
         startedAt: checkpoint.last_sync_at,
@@ -506,25 +530,15 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         http,
         checkpoint.page_token,
         config,
+        commit,
         checkpoint.last_sync_at
       );
-      if (result) {
-        // A partial run must NOT advance `last_sync_at`. The view-churn guard
-        // skips content for files modified before that stamp, so stamping now
-        // would make the next run treat the unread backlog as already-stored
-        // and drop its content on the floor.
-        return this.buildResult(
-          result.events,
-          result.nextPageToken,
-          result.partial ? checkpoint.last_sync_at : undefined,
-          { changesPending: result.partial }
-        );
-      }
+      if (result) return result;
       // Token rejected (see isPageTokenRejection). Fall through to ONE full
       // re-list, exactly as the Calendar connector does — never a retry loop.
     }
 
-    return this.fullSync(http, config);
+    return this.fullSync(http, config, commit);
   }
 
   /**
@@ -539,6 +553,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
   private async fullSync(
     http: HttpClient,
     config: DriveConfig,
+    commit: DriveCommit,
     resume?: { startToken: string; listPageToken: string; startedAt?: string }
   ): Promise<SyncResult> {
     // A resumed bootstrap keeps the token minted when the traversal STARTED —
@@ -555,7 +570,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     const maxResults = Math.min(config.max_results ?? 500, 2000);
     const includeContent = config.include_content !== false;
     const q = buildListQuery(config);
-    const events: EventEnvelope[] = [];
+    let collected = 0;
 
     // 1000 is Drive's max pageSize, so 200 pages is 200k files — far past any
     // configurable max_results. Defensive bound against a self-referential
@@ -605,43 +620,53 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       { maxPages: MAX_PAGES, initialCursor: resume?.listPageToken ?? null }
     );
 
-    const deadline = this.now() + SYNC_TIME_BUDGET_MS;
-    for await (const items of pages) {
-      for (const file of items) {
-        events.push(await this.driveFileToEnvelope(http, file, includeContent, 'upserted'));
-      }
-      // Tested only BETWEEN pages: a page is consumed whole or not at all, so
-      // `nextListPageToken` always addresses the first file we have not read.
-      // Stopping on the clock parks a checkpoint; being killed on it does not.
-      if (events.length >= maxResults || this.now() >= deadline) break;
-    }
-
-    // Unread pages mean the bootstrap is unfinished, and WHY it stopped is
-    // irrelevant: the item cap, the clock, and the paginator's own MAX_PAGES
-    // ceiling all leave files the change feed will never replay. Only Drive
-    // withholding a nextPageToken proves the traversal exhausted, so that —
-    // not the reason for stopping — is what may promote the change token.
-    if (nextListPageToken) {
-      return this.buildBootstrapResult(
-        events,
-        startToken,
-        nextListPageToken,
-        bootstrapStartedAt,
-        searchIncomplete
-      );
-    }
-
     // A Drive `q` has no equivalent on `changes.list` and cannot be re-evaluated
     // client-side against a change record, so the only way to keep honouring it
     // is to keep listing. Withholding the token re-lists next run; promoting it
     // would silently widen the feed to every changed file in the Drive.
     const hasCustomQuery = typeof config.query === 'string' && config.query.trim() !== '';
-    return this.buildResult(
-      events,
-      hasCustomQuery ? undefined : startToken,
-      bootstrapStartedAt,
-      { searchIncomplete }
-    );
+
+    const deadline = this.now() + SYNC_TIME_BUDGET_MS;
+    for await (const items of pages) {
+      const events: EventEnvelope[] = [];
+      for (const file of items) {
+        events.push(await this.driveFileToEnvelope(http, file, includeContent, 'upserted'));
+      }
+      collected += events.length;
+      // Only Drive withholding a nextPageToken proves the traversal exhausted,
+      // so that — not the reason a run stops — is what may promote the change
+      // token. Until then each page commits with the bootstrap parked on the
+      // next unread page: a page is consumed whole or not at all, so the list
+      // token always addresses the first file not yet stored.
+      if (!nextListPageToken) {
+        await commit(events, {
+          ...(hasCustomQuery ? {} : { page_token: startToken }),
+          last_sync_at: bootstrapStartedAt,
+        });
+        return {
+          status: 'complete',
+          metadata: {
+            items_found: collected,
+            bootstrap_complete: true,
+            ...(searchIncomplete ? { search_incomplete: true } : {}),
+          },
+        };
+      }
+      await commit(events, bootstrapCheckpoint(startToken, nextListPageToken, bootstrapStartedAt));
+      if (collected >= maxResults || this.now() >= deadline) break;
+    }
+
+    // Unread pages remain, and WHY this run stopped is irrelevant: the item
+    // cap, the clock, and the paginator's own MAX_PAGES ceiling all leave files
+    // the change feed will never replay. The bootstrap resumes next run.
+    return {
+      status: 'more',
+      metadata: {
+        items_found: collected,
+        bootstrap_complete: false,
+        ...(searchIncomplete ? { search_incomplete: true } : {}),
+      },
+    };
   }
 
   /**
@@ -654,12 +679,9 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     http: HttpClient,
     pageToken: string,
     config: DriveConfig,
+    commit: DriveCommit,
     lastSyncAt?: string
-  ): Promise<{
-    events: EventEnvelope[];
-    nextPageToken?: string;
-    partial: boolean;
-  } | null> {
+  ): Promise<SyncResult | null> {
     const includeContent = config.include_content !== false;
     const includeTrashed = Boolean(config.include_trashed);
     const folderId =
@@ -667,7 +689,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         ? config.folder_id.trim()
         : undefined;
     const maxResults = Math.min(config.max_results ?? 500, 2000);
-    const events: EventEnvelope[] = [];
+    let collected = 0;
     let nextPageToken: string | undefined;
     // The cursor for the page AFTER the one just consumed. A run that stops
     // early persists this instead of dropping back to a full re-list — a
@@ -718,8 +740,9 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     // start of the next page, so stopping part-way through one would skip the
     // changes still in it.
     const deadline = this.now() + SYNC_TIME_BUDGET_MS;
-    let stoppedEarly = false;
     for await (const items of pages) {
+      if (rejected) return null;
+      const events: EventEnvelope[] = [];
       for (const change of items) {
         const envelope = await this.changeToEnvelope(
           http,
@@ -731,25 +754,41 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         );
         if (envelope) events.push(envelope);
       }
-      if (rejected) break;
-      if ((events.length >= maxResults || this.now() >= deadline) && resumeCursor) {
-        stoppedEarly = true;
-        break;
+      collected += events.length;
+      if (!resumeCursor) {
+        // The stream is caught up: the page that carried `newStartPageToken`
+        // commits it and stamps the run. Rebuilt rather than spread over the
+        // previous checkpoint so a run that recovered from a rejected token
+        // cannot leave that token behind; without a new token the key is
+        // absent and the next run correctly re-lists.
+        await commit(events, {
+          ...(nextPageToken ? { page_token: nextPageToken } : {}),
+          last_sync_at: new Date().toISOString(),
+        });
+        return {
+          status: 'complete',
+          metadata: { items_found: collected, bootstrap_complete: true },
+        };
       }
+      // Mid-stream: commit with the cursor of the next page, a resumable
+      // position in the change stream. `last_sync_at` does NOT advance — the
+      // view-churn guard skips content for files modified before that stamp,
+      // so stamping now would make the next run treat the unread backlog as
+      // already stored and drop its content on the floor.
+      await commit(events, {
+        page_token: resumeCursor,
+        ...(lastSyncAt ? { last_sync_at: lastSyncAt } : {}),
+      });
+      if (collected >= maxResults || this.now() >= deadline) break;
     }
-
     if (rejected) return null;
 
-    // Either we stopped on the cap, or the paginator ran out of pages with the
-    // stream still open (MAX_PAGES). Both leave changes unread, and both must
-    // hand back the cursor: discarding it would silently demote the next run to
-    // a full re-list and restart the whole bootstrap.
-    const unread = stoppedEarly || (!nextPageToken && Boolean(resumeCursor));
-    if (unread && resumeCursor) {
-      return { events, nextPageToken: resumeCursor, partial: true };
-    }
-
-    return { events, nextPageToken, partial: false };
+    // Stopped on the cap or the clock, or the paginator ran out of pages
+    // (MAX_PAGES) with the stream still open. The committed cursor resumes it.
+    return {
+      status: 'more',
+      metadata: { items_found: collected, bootstrap_complete: true, changes_pending: true },
+    };
   }
 
   private async fetchStartPageToken(http: HttpClient): Promise<string> {
@@ -1216,70 +1255,6 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       modified_at: file.modifiedTime ?? '',
       trashed: Boolean(file.trashed),
       url: file.webViewLink ?? '',
-    };
-  }
-
-  /**
-   * Checkpoint for a bootstrap that stopped on `max_results` with pages left.
-   *
-   * `page_token` is deliberately absent: while it is missing the feed cannot go
-   * incremental, which is exactly the property that keeps the unread files
-   * reachable. `bootstrap_complete: false` is surfaced in metadata so an
-   * operator can see the traversal is still catching up rather than guessing
-   * from a suspiciously round item count.
-   */
-  private buildBootstrapResult(
-    events: EventEnvelope[],
-    pendingPageToken: string,
-    listPageToken: string,
-    startedAt: string,
-    searchIncomplete = false
-  ): SyncResult {
-    events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
-
-    const checkpoint: DriveCheckpoint = {
-      pending_page_token: pendingPageToken,
-      list_page_token: listPageToken,
-      last_sync_at: startedAt,
-    };
-
-    return {
-      events,
-      checkpoint: checkpoint as Record<string, unknown>,
-      metadata: {
-        items_found: events.length,
-        bootstrap_complete: false,
-        ...(searchIncomplete ? { search_incomplete: true } : {}),
-      },
-    };
-  }
-
-  private buildResult(
-    events: EventEnvelope[],
-    pageToken: string | undefined,
-    /** Stamp to persist as-is; omit to advance `last_sync_at` to now. */
-    keepLastSyncAt: string | undefined,
-    flags: { changesPending?: boolean; searchIncomplete?: boolean } = {}
-  ): SyncResult {
-    events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
-
-    // Rebuilt rather than spread over the previous checkpoint so a run that
-    // recovered from a rejected token cannot leave that token behind. Without a
-    // new token the key is absent and the next run correctly re-lists.
-    const newCheckpoint: DriveCheckpoint = {
-      ...(pageToken ? { page_token: pageToken } : {}),
-      last_sync_at: keepLastSyncAt ?? new Date().toISOString(),
-    };
-
-    return {
-      events,
-      checkpoint: newCheckpoint as Record<string, unknown>,
-      metadata: {
-        items_found: events.length,
-        bootstrap_complete: true,
-        ...(flags.changesPending ? { changes_pending: true } : {}),
-        ...(flags.searchIncomplete ? { search_incomplete: true } : {}),
-      },
     };
   }
 

@@ -1,3 +1,4 @@
+import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
 
@@ -49,7 +50,7 @@ describe("GoogleMapsConnector.sync", () => {
       },
     };
 
-    const result = await connector.sync({
+    const result = await runSync(connector, {
       feedKey: "reviews",
       config: { GOOGLE_MAPS_API_KEY: "key", business_name: "Acme" },
       checkpoint: null,
@@ -68,7 +69,7 @@ describe("GoogleMapsConnector.sync", () => {
     };
 
     await expect(
-      connector.sync({
+      runSync(connector, {
         feedKey: "reviews",
         config: { GOOGLE_MAPS_API_KEY: "key", place_id: "PID" },
         checkpoint: null,

@@ -15,7 +15,7 @@ type AnyFn = (...args: any[]) => any;
 
 const executeCompiledConnectorMock = mock<AnyFn>(async () => ({
   mode: 'sync',
-  checkpoint: null,
+  status: 'complete',
 }));
 
 mock.module('../executor/runtime.js', () => ({
@@ -65,7 +65,7 @@ const baseJob = {
 test('sync metadata.fetch_errors → forwarded as error_message on the successful completion', async () => {
   executeCompiledConnectorMock.mockImplementation(async () => ({
     mode: 'sync',
-    checkpoint: null,
+    status: 'complete',
     metadata: {
       items_found: 3,
       feeds_failed: 1,
@@ -89,7 +89,7 @@ test('sync metadata.fetch_errors → forwarded as error_message on the successfu
 test('clean sync → no error_message on the completion', async () => {
   executeCompiledConnectorMock.mockImplementation(async () => ({
     mode: 'sync',
-    checkpoint: null,
+    status: 'complete',
     metadata: { items_found: 3 },
   }));
 
