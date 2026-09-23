@@ -152,6 +152,10 @@ import {
 import { createConnectionSetupBundle } from "../../helpers/interactive-connection-setup";
 import { supersedeActionEvent } from "../../approval-events";
 import {
+	pauseFeedsForInactiveConnections,
+	resumeFeedsForRecoveredConnections,
+} from "../../../../feeds/auth-readiness-feeds";
+import {
 	lockOrganizationForRelationshipClaims,
 	retractConnectionRelationshipClaims,
 } from "../../../../utils/relationship-claims";
@@ -1848,6 +1852,8 @@ export async function handleUpdate(
   const effectiveSelectedAuthProfile = hasAuthProfileArg
     ? authSelection.authProfile
     : currentAuthProfile;
+  const browserAuthBindingChanged =
+    hasAuthProfileArg && nextAuthProfileId !== existing.auth_profile_id;
 
   // Device-bound browser profile auto-pins the connection's device.
 	const updateProfileDeviceWorkerId =
@@ -1867,21 +1873,25 @@ export async function handleUpdate(
       nextDeviceWorkerId = updateProfileDeviceWorkerId;
     }
   }
-  const browserProfileUsable =
-		effectiveSelectedAuthProfile?.profile_kind === "browser_session"
-      ? (
-          await getBrowserSessionReadiness(
-            effectiveSelectedAuthProfile.auth_data,
-						existing.connector_key,
-          )
-        ).usable
-      : false;
+  const newlyBoundBrowserProfile =
+    browserAuthBindingChanged &&
+    effectiveSelectedAuthProfile?.profile_kind === "browser_session"
+      ? effectiveSelectedAuthProfile
+      : null;
+  const browserProfileUsable = newlyBoundBrowserProfile
+    ? (
+        await getBrowserSessionReadiness(
+          newlyBoundBrowserProfile.auth_data,
+          existing.connector_key,
+        )
+      ).usable
+    : false;
   const effectiveStatus =
     args.status ??
-		(effectiveSelectedAuthProfile?.profile_kind === "browser_session"
+    (newlyBoundBrowserProfile
       ? browserProfileUsable
-					? "active"
-					: "pending_auth"
+        ? "active"
+        : "pending_auth"
       : null);
   // Un-redact BEFORE anything reads the incoming config. Clients round-trip
   // what the (now redacted) read path gave them — the Owletto action-modes
@@ -2033,6 +2043,7 @@ export async function handleUpdate(
 
   // biome-ignore lint/suspicious/noExplicitAny: postgres.js row shape
   let updated: any[];
+  let previousConnectionStatus: string;
   try {
     // Row-locked restore→write. The `existing` snapshot at the top of this
     // handler is read WITHOUT a lock, and many awaits (auth-profile lookups,
@@ -2048,14 +2059,14 @@ export async function handleUpdate(
     // Mirrors the shape manage_feeds already uses for handleUpdateFeed.
     const updateOutcome = await sql.begin(async (tx) => {
       const lockedRows = await tx`
-        SELECT config, app_auth_profile_id
+        SELECT config, app_auth_profile_id, status
         FROM connections
         WHERE id = ${args.connection_id}
           AND organization_id = ${organizationId}
           AND deleted_at IS NULL
         FOR UPDATE
       `;
-      if (lockedRows.length === 0) return { rows: [] };
+      if (lockedRows.length === 0) return { rows: [], previousStatus: null };
       if (hasAppAuthProfileArg && !callerIsAdmin && args.app_auth_profile_slug === null && lockedRows[0].app_auth_profile_id !== null) {
         return { denial: { error: 'Only admins can clear the OAuth app profile.' } };
       }
@@ -2164,13 +2175,16 @@ export async function handleUpdate(
             AND deleted_at IS NULL
         `;
       }
-      return { rows };
+      return { rows, previousStatus: String(lockedRows[0].status) };
     });
     if ("denial" in updateOutcome && updateOutcome.denial) {
       return updateOutcome.denial;
     }
     updated = updateOutcome.rows;
-    if (updated.length === 0) return { error: "Connection not found" };
+    if (updated.length === 0 || updateOutcome.previousStatus === null) {
+      return { error: "Connection not found" };
+    }
+    previousConnectionStatus = updateOutcome.previousStatus;
   } catch (err) {
     if (isConnectionSlugUniqueViolation(err) && updateExplicitSlug) {
 			return {
@@ -2230,18 +2244,21 @@ export async function handleUpdate(
   };
 
   // Metadata edits and credential detachment must preserve operator-paused feeds.
-  if (args.status !== undefined || (!explicitlyNoAuth && effectiveStatus !== null)) {
-    await sql`
-    UPDATE feeds
-    SET status = ${mapConnectionStatusToFeedStatus(updatedConnection.status)},
-        next_run_at = CASE
-          WHEN ${mapConnectionStatusToFeedStatus(updatedConnection.status)} = 'active'
-            THEN COALESCE(next_run_at, NOW())
-          ELSE next_run_at
-        END,
-        updated_at = NOW()
-    WHERE connection_id = ${updatedConnection.id}
-  `;
+  // An explicit status cascades to feeds, but activation still preserves a
+  // failure-policy pause. A status derived from a newly bound auth profile
+  // moves feeds only when the connection actually changed readiness. A feed
+  // with no cron stays manual (#2021).
+  const shouldCascadeStatus =
+    args.status !== undefined ||
+    (!explicitlyNoAuth &&
+      effectiveStatus !== null &&
+      updatedConnection.status !== previousConnectionStatus);
+  if (shouldCascadeStatus) {
+    if (mapConnectionStatusToFeedStatus(updatedConnection.status) === "active") {
+      await resumeFeedsForRecoveredConnections(sql, { connectionId: updatedConnection.id });
+    } else {
+      await pauseFeedsForInactiveConnections(sql, { connectionId: updatedConnection.id });
+    }
   }
 
 	const effectiveAuth = hasAuthProfileArg

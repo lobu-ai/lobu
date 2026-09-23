@@ -28,10 +28,14 @@
  * convention as config/intervals.ts).
  */
 
-/** Positive number from env (rounded to int); falls back when unset/invalid. */
+/**
+ * Positive integer from env (rounded); falls back when unset/invalid. A value
+ * that rounds to 0 is invalid too because zero either disables the delay or
+ * hard-pauses every healthy feed.
+ */
 function parseEnvInt(name: string, fallback: number): number {
-  const raw = Number(process.env[name]);
-  return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : fallback;
+  const raw = Math.round(Number(process.env[name]));
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
 export const feedBackoff = {

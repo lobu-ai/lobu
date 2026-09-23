@@ -46,6 +46,10 @@ import {
 } from "../connectors/feed-sync-failure";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { getDb, parsePgNumberArray } from "../db/client";
+import {
+	pauseFeedsForInactiveConnections,
+	resumeFeedsForRecoveredConnections,
+} from "../feeds/auth-readiness-feeds";
 import { eventArtifactBinding } from "../gateway/files/artifact-store";
 import { emit } from "../events/emitter";
 import { parseJsonBody } from "../gateway/routes/shared/helpers";
@@ -210,15 +214,26 @@ async function reactivateProfileCascade(
       SET status = 'active', updated_at = current_timestamp
       WHERE auth_profile_id = ${authProfileId}
         AND status = 'pending_auth'
+        AND deleted_at IS NULL
     `;
+		// A fresh credential is an explicit resume, so it opens a new failure
+		// episode exactly like a `manage_feeds` resume. Without the reset a
+		// failure-paused feed re-pauses on its very next failure. A feed with no
+		// cron stays manual (#2021): resuming it must not invent a run.
 		await tx`
       UPDATE feeds f
       SET status = 'active',
-          next_run_at = COALESCE(f.next_run_at, NOW()),
+          next_run_at = CASE WHEN f.schedule IS NULL THEN f.next_run_at
+                             ELSE COALESCE(f.next_run_at, NOW()) END,
+          consecutive_failures = 0,
+          first_failure_at = NULL,
           updated_at = current_timestamp
       FROM connections c
       WHERE f.connection_id = c.id
         AND c.auth_profile_id = ${authProfileId}
+        AND c.status = 'active'
+        AND c.deleted_at IS NULL
+        AND f.deleted_at IS NULL
         AND f.status = 'paused'
     `;
 	});
@@ -1404,34 +1419,43 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 					? "active"
 					: "pending_auth";
 
-				await sql`
-          UPDATE auth_profiles
-          SET auth_data = ${sql.json(nextAuthData)},
-              status = ${nextStatus},
-              updated_at = current_timestamp
-          WHERE id = ${authProfile.id}
-        `;
+				await sql.begin(async (tx) => {
+					await tx`
+            UPDATE auth_profiles
+            SET auth_data = ${tx.json(nextAuthData)},
+                status = ${nextStatus},
+                updated_at = current_timestamp
+            WHERE id = ${authProfile.id}
+          `;
 
-				await sql`
-          UPDATE connections
-          SET status = ${nextStatus === "active" ? "active" : "pending_auth"},
-              updated_at = current_timestamp
-          WHERE auth_profile_id = ${authProfile.id}
-        `;
+					// Routine cookie rotations leave active connections alone. Recovery
+					// claims only pending_auth rows, so concurrent completions cannot
+					// overwrite an operator pause after the first recovery commits.
+					if (nextStatus === "active") {
+						const recovered = (await tx`
+              UPDATE connections
+              SET status = 'active', updated_at = current_timestamp
+              WHERE auth_profile_id = ${authProfile.id}
+                AND status = 'pending_auth'
+                AND deleted_at IS NULL
+              RETURNING id
+            `) as Array<{ id: number }>;
+						for (const recoveredConnection of recovered) {
+							await resumeFeedsForRecoveredConnections(tx, {
+								connectionId: recoveredConnection.id,
+							});
+						}
+						return;
+					}
 
-				await sql`
-          UPDATE feeds f
-          SET status = ${nextStatus === "active" ? "active" : "paused"},
-              next_run_at = ${
-								nextStatus === "active"
-									? sql`COALESCE(f.next_run_at, NOW())`
-									: sql`NULL`
-							},
-              updated_at = current_timestamp
-          FROM connections c
-          WHERE f.connection_id = c.id
-            AND c.auth_profile_id = ${authProfile.id}
-        `;
+					await tx`
+            UPDATE connections
+            SET status = 'pending_auth', updated_at = current_timestamp
+            WHERE auth_profile_id = ${authProfile.id}
+              AND deleted_at IS NULL
+          `;
+					await pauseFeedsForInactiveConnections(tx, { authProfileId: authProfile.id });
+				});
 
 				if (nextStatus === "pending_auth") {
 					notifyBrowserAuthExpired({
@@ -1466,13 +1490,9 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
             SET status = 'pending_auth',
                 updated_at = current_timestamp
             WHERE auth_profile_id = ${authProfile.id}
+              AND deleted_at IS NULL
           `;
-					await sql`
-            UPDATE feeds f
-            SET status = 'paused', next_run_at = NULL, updated_at = current_timestamp
-            FROM connections c
-            WHERE f.connection_id = c.id AND c.auth_profile_id = ${authProfile.id}
-          `;
+					await pauseFeedsForInactiveConnections(sql, { authProfileId: authProfile.id });
 				}
 			}
 		}
