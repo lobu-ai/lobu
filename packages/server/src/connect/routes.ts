@@ -14,6 +14,7 @@
  */
 
 import { type Context, Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import {
   generateCodeChallenge as buildPkceChallenge,
   generateCodeVerifier as buildPkceVerifier,
@@ -21,6 +22,8 @@ import {
 import { createMiddleware } from 'hono/factory';
 import { createAuth } from '../auth';
 import { getDb } from '../db/client';
+import { feedBackoff, shouldHardPauseFeed } from '../connectors/feed-backoff';
+import { resumeFeedsForRecoveredConnections } from '../feeds/auth-readiness-feeds';
 import type { Env } from '../index';
 import {
   ensureUniqueAuthProfileSlug,
@@ -237,7 +240,7 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
 
   const sql = getDb();
 
-  // Find the first feed for this connection and ensure it has the schema-required config
+  // Prefer a feed that validation may resume; failure pauses need manage_feeds.
   const feedRows = await sql`
     SELECT
       f.id,
@@ -245,7 +248,8 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
       f.config
     FROM feeds f
     WHERE connection_id = ${connectionId} AND f.deleted_at IS NULL
-    ORDER BY id ASC
+    ORDER BY (f.status = 'paused' AND f.consecutive_failures >= ${feedBackoff.pauseThreshold}) ASC,
+             f.id ASC
     LIMIT 1
   `;
 
@@ -306,7 +310,8 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
   // only `secret://` refs land in `auth_data`. Secret write + profile/connection
   // updates share one transaction so a partial failure cannot leave a
   // decryptable secret without the matching auth_data ref.
-  await sql.begin(async (tx) => {
+  const feedId = Number(feed.id);
+  const created = await sql.begin(async (tx) => {
     const credentialRefs = await toSecretRefAuthData({
       organizationId: tokenRow.organization_id,
       authProfileId,
@@ -330,18 +335,21 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
         AND organization_id = ${tokenRow.organization_id}
     `;
 
-    // Activate feeds so the worker can pick them up for validation
-    await tx`
-      UPDATE feeds
-      SET status = 'active',
-          next_run_at = NOW(),
-          updated_at = NOW()
-      WHERE connection_id = ${connectionId}
+    // Match auth recovery's lock order (profile, connection, feed), and keep
+    // admission and enqueue together. Rejecting rolls credential writes back.
+    const [current] = await tx`
+      SELECT status, consecutive_failures FROM feeds
+      WHERE id = ${feedId} AND deleted_at IS NULL FOR UPDATE
     `;
+    if (!current || (current.status === 'paused' && shouldHardPauseFeed(Number(current.consecutive_failures)))) {
+      throw new HTTPException(409, { res: c.json({
+        error: 'Resume a feed paused after repeated failures before validating this connection.',
+      }, 409) });
+    }
+    await resumeFeedsForRecoveredConnections(tx, { connectionId });
+    return createSyncRun(feedId, c.env as unknown as Env, tx);
   });
 
-  const feedId = Number(feed.id);
-  const created = await createSyncRun(feedId, c.env as unknown as Env);
   if (!created.ok) {
     return c.json(
       { error: describeSyncRunSkip(created.reason) },
@@ -479,13 +487,7 @@ connectRoutes.post('/:token/complete', requireConnectToken, async (c) => {
         AND organization_id = ${tokenRow.organization_id}
     `;
 
-    // Ensure feeds are active
-    await tx`
-      UPDATE feeds
-      SET status = 'active',
-          updated_at = NOW()
-      WHERE connection_id = ${tokenRow.connection_id}
-    `;
+    await resumeFeedsForRecoveredConnections(tx, { connectionId: Number(tokenRow.connection_id) });
 
     // Mark token as completed
     await tx`
@@ -1060,11 +1062,7 @@ async function handleOAuthCallback(
       }
 
       if (!tokenRow.auth_profile_id) {
-        await tx`
-          UPDATE feeds
-          SET status = 'active', next_run_at = NOW(), updated_at = NOW()
-          WHERE connection_id = ${tokenRow.connection_id}
-        `;
+        await resumeFeedsForRecoveredConnections(tx, { connectionId: Number(tokenRow.connection_id) });
       }
     }
 
