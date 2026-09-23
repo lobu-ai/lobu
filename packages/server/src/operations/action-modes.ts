@@ -24,10 +24,13 @@ function isActionMode(value: unknown): value is ActionMode {
 export function getActionModes(
   config: Record<string, unknown> | null | undefined
 ): Record<string, ActionMode> {
-  if (!config || typeof config !== 'object') return {};
+  // Null prototype: operation keys are connector-chosen strings, and a key
+  // like `toString` or `__proto__` must be an ordinary own entry, never an
+  // inherited member that readers mistake for a configured mode.
+  const out: Record<string, ActionMode> = Object.create(null);
+  if (!config || typeof config !== 'object') return out;
   const raw = (config as Record<string, unknown>).action_modes;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const out: Record<string, ActionMode> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (isActionMode(value)) out[key] = value;
   }
