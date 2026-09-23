@@ -335,11 +335,23 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
         AND organization_id = ${tokenRow.organization_id}
     `;
 
-    // Match auth recovery's lock order (profile, connection, feed), and keep
-    // admission and enqueue together. Rejecting rolls credential writes back.
+    // Enqueue takes the active-run slot before locking the feed for its schedule
+    // update. Keep that order: locking feeds first deadlocks concurrent triggers.
+    const queued = await createSyncRun(feedId, c.env as unknown as Env, tx);
+    if (!queued.ok) {
+      // Orphan retirement rolls back too, so do not claim it persisted.
+      const error = queued.reason === 'connector_uninstalled'
+        ? 'The connector is no longer installed in this workspace.'
+        : queued.reason === 'connector_version_unrunnable'
+          ? 'The connector version has no runnable code.'
+          : describeSyncRunSkip(queued.reason);
+      throw new HTTPException(409, { res: c.json({ error }, 409) });
+    }
+    // Enqueue holds the feed lock until commit. A failure pause observed here
+    // rolls back the run and credentials before either becomes visible.
     const [current] = await tx`
       SELECT status, consecutive_failures FROM feeds
-      WHERE id = ${feedId} AND deleted_at IS NULL FOR UPDATE
+      WHERE id = ${feedId} AND deleted_at IS NULL
     `;
     if (!current || (current.status === 'paused' && shouldHardPauseFeed(Number(current.consecutive_failures)))) {
       throw new HTTPException(409, { res: c.json({
@@ -347,15 +359,9 @@ connectRoutes.post('/:token/validate', requireConnectToken, async (c) => {
       }, 409) });
     }
     await resumeFeedsForRecoveredConnections(tx, { connectionId });
-    return createSyncRun(feedId, c.env as unknown as Env, tx);
+    return queued;
   });
 
-  if (!created.ok) {
-    return c.json(
-      { error: describeSyncRunSkip(created.reason) },
-      409
-    );
-  }
   const runId = created.runId;
 
   logger.info(
