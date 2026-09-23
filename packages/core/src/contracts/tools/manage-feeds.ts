@@ -198,6 +198,14 @@ export const TriggerFeedAction = Type.Object({
   ),
 });
 
+export const RecollectFeedAction = Type.Object({
+  action: Type.Literal("recollect_feed", {
+    description:
+      "Clear a feed's sync cursor so its next sync re-collects from scratch. Already-collected events are kept and re-collected items dedupe on origin_id; the feed's status, schedule and failure state are unchanged, and what was already acknowledged back to the source (source_ack) is preserved. Refused while the feed has an active sync run. Does not start a sync — call trigger_feed or wait for the schedule.",
+  }),
+  feed_id: Type.Number({ description: "Feed ID to re-collect" }),
+});
+
 // ============================================
 // Result Types
 // ============================================
@@ -276,6 +284,10 @@ export const ManageFeedsResultSchema = Type.Union([
     // the flag and persisting anyway is the one failure mode that matters here.
     dry_run: Type.Optional(Type.Boolean()),
   }),
+  Type.Object({
+    action: Type.Literal("recollect_feed"),
+    feed_id: Type.Integer(),
+  }),
   // Nothing was queued. `triggered` discriminates this from the success
   // variant above: the skip used to carry only `message`, so a caller that
   // queued no run was shape-indistinguishable from one that did, and no run
@@ -298,6 +310,7 @@ export const ManageFeedsSchema = Type.Union([
   UpdateFeedAction,
   DeleteFeedAction,
   TriggerFeedAction,
+  RecollectFeedAction,
 ]);
 
 export type ManageFeedsArgs = Static<typeof ManageFeedsSchema>;
@@ -309,3 +322,4 @@ export type FeedCreateInput = ActionInput<ManageFeedsArgs, "create_feed">;
 export type FeedUpdateInput = ActionInput<ManageFeedsArgs, "update_feed">;
 export type FeedDeleteInput = ActionInput<ManageFeedsArgs, "delete_feed">;
 export type FeedTriggerInput = ActionInput<ManageFeedsArgs, "trigger_feed">;
+export type FeedRecollectInput = ActionInput<ManageFeedsArgs, "recollect_feed">;

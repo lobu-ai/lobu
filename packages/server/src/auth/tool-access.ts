@@ -132,6 +132,7 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 		"update_feed",
 		"delete_feed",
 		"trigger_feed",
+		"recollect_feed",
 	]),
 	manage_auth_profiles: new Set([
 		// `create_auth_profile` and `update_auth_profile` are in

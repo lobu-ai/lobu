@@ -986,6 +986,14 @@ export default async (_ctx, client) => {
 		example:
 			"await client.feeds.trigger({ feed_id: 42 });\n// Validate without writing anything; read the preview via feeds.get once the run completes:\nawait client.feeds.trigger({ feed_id: 42, dry_run: true });",
 	},
+	"feeds.recollect": {
+		summary:
+			"Re-collect a feed from scratch: clear its sync cursor so the next sync starts over. Collected events are kept (re-collected items dedupe on origin_id); status, schedule and failure state are unchanged, and the source acknowledgment (source_ack) is preserved. Refused while the feed has an active sync run. Does not start a sync; call feeds.trigger afterwards or wait for the schedule.",
+		access: "admin",
+		signature: "feeds.recollect(input: { feed_id: number }): Promise<unknown>",
+		example:
+			"await client.feeds.recollect({ feed_id: 42 });\nawait client.feeds.trigger({ feed_id: 42 });",
+	},
 
 	// authProfiles
 	"authProfiles.manage": {

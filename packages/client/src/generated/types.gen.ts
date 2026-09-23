@@ -3906,6 +3906,16 @@ export type ManageFeedsData = {
          * Execute the connector for real but persist nothing in Lobu — no events, no entities, no attachments, and the feed's checkpoint and sync state do not move. The run executes asynchronously; once it completes, a capped preview of what would have been ingested is on the run's dry_run_preview, visible via read_feed's recent_runs. Use this to test a connector whose credentials are OAuth or API-key based; those never leave the gateway, so the sync can only run server-side. Two limits worth knowing: it does not undo side effects the connector causes UPSTREAM (marking a message read, etc.), and it occupies the feed's single active-sync slot while it runs, so a scheduled sync landing mid-run is skipped until the next tick.
          */
         dry_run?: boolean;
+      }
+    | {
+        /**
+         * Clear a feed's sync cursor so its next sync re-collects from scratch. Already-collected events are kept and re-collected items dedupe on origin_id; the feed's status, schedule and failure state are unchanged, and what was already acknowledged back to the source (source_ack) is preserved. Refused while the feed has an active sync run. Does not start a sync — call trigger_feed or wait for the schedule.
+         */
+        action: "recollect_feed";
+        /**
+         * Feed ID to re-collect
+         */
+        feed_id: number;
       };
   path: {
     /**
@@ -4005,6 +4015,10 @@ export type ManageFeedsResponses = {
         run_id: number;
         feed_id: number;
         dry_run?: boolean;
+      }
+    | {
+        action: "recollect_feed";
+        feed_id: number;
       }
     | {
         action: "trigger_feed";
