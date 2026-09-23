@@ -441,7 +441,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		// Look up run details for event columns
 		const runRows = (await sql`
     SELECT r.feed_id, r.connection_id, r.connector_key, r.organization_id,
-           r.dry_run,
+           r.dry_run, r.claimed_by,
            f.feed_key, f.entity_ids
     FROM runs r
     LEFT JOIN feeds f ON f.id = r.feed_id
@@ -452,6 +452,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			connector_key: string;
 			organization_id: string;
 			dry_run: boolean;
+			claimed_by: string | null;
 			feed_key: string | null;
 			entity_ids: number[] | null;
 		}>;
@@ -566,7 +567,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			}
 		}
 
-		// Any rejection fails the WHOLE batch before a single write or
+		// Any rejection fails the WHOLE batch before a single event write or
 		// checkpoint advance. Splitting the batch (ingest the valid items,
 		// report the rejected ones) looks friendlier but is the silent
 		// data-loss path: the cursor the worker commits next describes the
@@ -576,8 +577,34 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		// author fixes their eventKinds, and the next sync re-collects the
 		// page in full.
 		if (rejectedItems.length > 0) {
+			// Workers truncate HTTP bodies (Chrome at 200 characters), before the
+			// rejected_items details. Keep the diagnosis where it is still complete;
+			// failed completion carries this same error into the feed's last_error.
+			const compact = (value: string, limit: number) =>
+				stripNul(browserRun ? sanitizeBrowserText(value) ?? "" : value)
+					.replace(/\s+/g, " ")
+					.trim().slice(0, limit);
+			const details = rejectedItems.slice(0, 5).map(({ id, errors }) =>
+				// Metadata errors start with a heading, then the first AJV reason.
+				// The full Expected schema comes last and is deliberately omitted.
+				`${compact(id, 80)}: ${compact(errors.slice(0, 2).join(" "), 240)}`
+			);
+			const message = `422 batch_rejected: ${details.join("; ")}${
+				rejectedItems.length > 5 ? `; +${rejectedItems.length - 5} more rejected items` : ""
+			}`;
+			const recorded = await sql`
+      UPDATE runs SET error_message = ${message}
+      WHERE id = ${batch.run_id}
+        ${batch.worker_id
+					? runLeaseFence(sql, batch.worker_id)
+					: sql`AND status = 'running' ${runOwnerFence(sql, run.claimed_by)}`}
+      RETURNING id
+    `;
+			if (recorded.length === 0) {
+				return c.json({ error: "Run is not in progress" }, 409);
+			}
 			// Non-2xx: the worker must fail the run, not report the offered item
-			// count as collected. Nothing was written and no checkpoint moved, so
+			// count as collected. No event was written and no checkpoint moved, so
 			// a corrected connector re-collects this page on its next sync.
 			return c.json(
 				{
@@ -1207,7 +1234,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 					req.status === "failed"
 						? tx`,
 	          items_collected = ${req.items_collected ?? 0},
-	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint},
+	          -- A batch rejection recorded by /stream outranks the worker's truncated relay of it.
+	          error_message = COALESCE(error_message, ${req.error_message ?? null}),${dryGuardedCheckpoint},
 	          output_tail = ${req.output_tail ?? null},
 	          exit_code = ${req.exit_code ?? null},
 	          exit_signal = ${req.exit_signal ?? null},
@@ -1215,15 +1243,17 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						: tx`,
 	          items_collected = ${req.items_collected ?? 0},
 	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-				returning: tx`feed_id, connection_id, dry_run, checkpoint IS NOT NULL AS committed_checkpoint`,
+				returning: tx`feed_id, connection_id, dry_run, error_message, checkpoint IS NOT NULL AS committed_checkpoint`,
 			})) as unknown as Array<{
 				feed_id: number | null;
 				connection_id: number | null;
 				dry_run: boolean;
+				error_message: string | null;
 				committed_checkpoint: boolean;
 			}>;
 
 			if (updatedRuns.length === 0) return null;
+			const recordedError = updatedRuns[0].error_message;
 
 			// Update the feed's sync state
 			const runRows = updatedRuns;
@@ -1270,7 +1300,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 				if (dependencyUnavailable) {
 					await tx`
 	          UPDATE feeds
-	          SET last_error = ${req.error_message ?? null},
+	          SET last_error = ${recordedError},
 	              next_run_at = ${nextRun},
 	              updated_at = current_timestamp
 	          WHERE id = ${feedId}
@@ -1280,7 +1310,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 					// so the gateway-side poll failure lane applies the same policy.
 					recordedFailure = await applyFeedSyncFailure(tx, {
 						feedId,
-						errorMessage: req.error_message ?? null,
+						errorMessage: recordedError,
 						runId: req.run_id,
 					});
 				} else {

@@ -63,7 +63,7 @@ function mockWorkerCtx(body: unknown): {
   return { ctx, result: () => captured };
 }
 
-async function seed(dryRun: boolean): Promise<{
+async function seed(dryRun: boolean, connectorKey = 'rss'): Promise<{
   orgId: string;
   feedId: number;
   runId: number;
@@ -75,7 +75,7 @@ async function seed(dryRun: boolean): Promise<{
     INSERT INTO connections
       (organization_id, connector_key, status, visibility, slug, created_at, updated_at)
     VALUES
-      (${org.id}, 'rss', 'active', 'org', ${`rss-dry-${dryRun}`}, NOW(), NOW())
+      (${org.id}, ${connectorKey}, 'active', 'org', ${`rss-dry-${dryRun}`}, NOW(), NOW())
     RETURNING id
   `) as Array<{ id: number }>;
 
@@ -94,7 +94,7 @@ async function seed(dryRun: boolean): Promise<{
       (organization_id, run_type, feed_id, connection_id, connector_key,
        connector_version, status, claimed_by, dry_run, created_at)
     VALUES
-      (${org.id}, 'sync', ${feed[0].id}, ${conn[0].id}, 'rss', '1.0.0',
+      (${org.id}, 'sync', ${feed[0].id}, ${conn[0].id}, ${connectorKey}, '1.0.0',
        'running', ${WORKER_ID}, ${dryRun}, NOW())
     RETURNING id
   `) as Array<{ id: number }>;
@@ -410,6 +410,94 @@ describe('feed dry run persists nothing', () => {
     expect(finalRun.error_message).toContain('422');
     expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toEqual(FEED_CHECKPOINT);
     expect((await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId}`)[0].count).toBe(0);
+  });
+
+  it.each([
+    { connectorKey: 'rss', workerId: WORKER_ID },
+    { connectorKey: 'chrome.history', workerId: WORKER_ID },
+    { connectorKey: 'rss', workerId: undefined },
+  ])('retains bounded rejected item reasons after a truncated $connectorKey failure (worker $workerId)', async ({ connectorKey, workerId }) => {
+    const sql = getTestDb();
+    const { orgId, feedId, runId } = await seed(false, connectorKey);
+    await createTestConnectorDefinition({
+      key: connectorKey,
+      name: 'Validated feed',
+      organization_id: orgId,
+      feeds_schema: {
+        items: {
+          eventKinds: {
+            story: {
+              metadataSchema: {
+                type: 'object',
+                properties: { source_url: { type: 'string', format: 'uri' } },
+              },
+            },
+          },
+        },
+      },
+    });
+    const streamed = mockWorkerCtx({
+      ...batchFor(runId),
+      worker_id: workerId,
+      items: Array.from({ length: 7 }, (_, i) => ({
+        ...batchFor(runId).items[0],
+        id: `dry-item-${i + 1}\0 https://example.test/?token=synthetic-secret&padding=${'x'.repeat(200)}`,
+        semantic_type: 'story',
+        metadata: { source_url: 'not a uri' },
+      })),
+    });
+    await streamContent(streamed.ctx);
+    expect(streamed.result().status).toBe(422);
+
+    // Chrome's postJson keeps only the first 200 response characters, before
+    // rejected_items. Exercise both real handlers and inspect durable rows.
+    const workerError = `https://example.test/api/workers/stream → 422 ${JSON.stringify(streamed.result().body).slice(0, 200)}`;
+    expect(workerError).not.toContain('source_url');
+    const completed = mockWorkerCtx({
+      run_id: runId,
+      worker_id: WORKER_ID,
+      status: 'failed',
+      error_message: workerError,
+    });
+    await completeWorkerJob(completed.ctx);
+    expect(completed.result().status).toBe(200);
+    const [run] = await sql`SELECT status, error_message FROM runs WHERE id = ${runId}`;
+    const [feed] = await sql`SELECT last_error, checkpoint FROM feeds WHERE id = ${feedId}`;
+    expect(run.status).toBe('failed');
+    expect(run.error_message).toContain('source_url: must be a valid uri');
+    expect(run.error_message).toContain('dry-item-1');
+    expect(run.error_message).toContain('dry-item-2');
+    expect(run.error_message).toContain('dry-item-5');
+    expect(run.error_message).not.toContain('dry-item-6');
+    expect(run.error_message).toContain('+2 more rejected items');
+    expect(run.error_message.length).toBeLessThanOrEqual(1800);
+    expect(run.error_message).not.toContain('\0');
+    expect(run.error_message).not.toContain('Expected:');
+    if (connectorKey === 'chrome.history') {
+      expect(run.error_message).not.toContain('synthetic-secret');
+    }
+    expect(feed.last_error).toBe(run.error_message);
+    expect(feed.checkpoint).toEqual(FEED_CHECKPOINT);
+  });
+
+  it.each(['wrong-worker', 'terminal'])('does not overwrite a %s run with a rejection diagnostic', async (lostLease) => {
+    const sql = getTestDb();
+    const { orgId, runId } = await seed(false);
+    await createTestConnectorDefinition({
+      key: 'rss', name: 'Restricted feed', organization_id: orgId,
+      feeds_schema: { items: { eventKinds: { story: {} } } },
+    });
+    await sql`UPDATE runs SET error_message = 'durable error',
+      status = ${lostLease === 'terminal' ? 'failed' : 'running'} WHERE id = ${runId}`;
+    const streamed = mockWorkerCtx({
+      ...batchFor(runId),
+      worker_id: lostLease === 'wrong-worker' ? 'other-worker' : WORKER_ID,
+      items: [{ ...batchFor(runId).items[0], semantic_type: 'undeclared-kind' }],
+    });
+    await streamContent(streamed.ctx);
+    expect(streamed.result().status).toBe(409);
+    const [run] = await sql`SELECT error_message FROM runs WHERE id = ${runId}`;
+    expect(run.error_message).toBe('durable error');
   });
 
   // The whole-batch rule is the part of this fix with the widest blast radius:
