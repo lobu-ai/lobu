@@ -12,6 +12,7 @@
  * and no write. The server never executes view code.
  */
 
+import { validateRetainedSource } from '@lobu/core/contracts/tools/source-files';
 import {
   GetViewAction,
   ListViewsAction,
@@ -30,6 +31,7 @@ import {
   VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
+  viewSourceDependencies,
   contentHash,
   getView,
   isValidViewKey,
@@ -175,6 +177,19 @@ async function handleSet(
   // so the no-op comparison below sees the same bytes `setView` would store.
   // Comparing a source/metadata-only hash first would discard bundle-only
   // fixes before they reach the compiled-bytes comparison.
+  if ((args.source_files === undefined) !== (args.dependencies === undefined)) {
+    throw new ToolUserError('source_files and dependencies must be supplied together', 400);
+  }
+  const retained = args.source_files
+    ? { sourceFiles: args.source_files, dependencies: args.dependencies! }
+    : args.compiled_code ? undefined : {
+      sourceFiles: { entrypoint: 'index.tsx', files: { 'index.tsx': args.source_code } },
+      dependencies: viewSourceDependencies(),
+    };
+  if (retained) {
+    try { validateRetainedSource(args.source_code, retained.sourceFiles, retained.dependencies); }
+    catch (error) { throw new ToolUserError((error as Error).message, 400); }
+  }
   const compiled = args.compiled_code
     ? checkCompiledCode(args.compiled_code)
     : await compileView(args.source_code);
@@ -187,7 +202,8 @@ async function handleSet(
       params,
       actions,
     },
-    compiled
+    compiled,
+    retained
   );
   // Same source AND same metadata AND same executable bundle: no write.
   // A legacy row (source/metadata-only hash) never matches, so it refreshes
@@ -203,6 +219,9 @@ async function handleSet(
     description,
     source_code: args.source_code,
     compiled_code: compiled,
+    source_files: retained?.sourceFiles ?? null,
+    dependencies: retained?.dependencies ?? null,
+    source_complete: retained !== undefined,
     content_hash: hash,
     attach,
     params,
@@ -246,7 +265,11 @@ async function handleGet(
 ): Promise<ManageViewsResult> {
   const view = await getView(ctx.organizationId, args.key);
   if (!view) throw new ToolUserError(`Unknown view: ${args.key}`, 404);
-  return { action: 'get', view: projectView(view), source_code: view.source_code };
+  return {
+    action: 'get', view: projectView(view), source_code: view.source_code,
+    source_files: view.source_files, dependencies: view.dependencies,
+    source_complete: view.source_complete,
+  };
 }
 
 async function handleList(

@@ -2,6 +2,10 @@ import type { EntityMetrics } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
 import type { InstallConnectorInput } from "@lobu/core/contracts/tools/manage-connections";
 import type {
+  SourceDependencies,
+  SourceFiles,
+} from "@lobu/core/contracts/tools/source-files";
+import type {
   InferenceCapabilityBlock,
   InferenceModality,
 } from "../../../config/define.js";
@@ -153,6 +157,8 @@ export interface SetViewPayload {
   description?: string;
   source_code: string;
   compiled_code?: string;
+  source_files?: SourceFiles;
+  dependencies?: SourceDependencies;
   attach: Array<Record<string, unknown>>;
   params: Record<string, unknown>;
   actions: Record<string, { emits: string }>;
@@ -283,6 +289,9 @@ type CliInstallConnectorPayload = {
   sourceUrl?: InstallConnectorInput["source_url"];
   sourceUri?: InstallConnectorInput["source_uri"];
   compiled?: InstallConnectorInput["compiled"];
+  compiledCode?: InstallConnectorInput["compiled_code"];
+  sourceFiles?: InstallConnectorInput["source_files"];
+  dependencies?: InstallConnectorInput["dependencies"];
 };
 
 /**
@@ -1378,6 +1387,9 @@ export class ApplyClient {
         ? {
             source_code: payload.sourceCode,
             compiled: payload.compiled ?? false,
+            compiled_code: payload.compiledCode,
+            source_files: payload.sourceFiles,
+            dependencies: payload.dependencies,
           }
         : {}),
       ...(payload.sourceUrl ? { source_url: payload.sourceUrl } : {}),

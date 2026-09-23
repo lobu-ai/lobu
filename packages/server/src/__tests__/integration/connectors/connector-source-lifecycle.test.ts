@@ -15,6 +15,13 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
+import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
+import { resolveConnectorCode, type StoredConnectorVersion } from '../../../utils/ensure-connector-installed';
+import { extractConnectorMetadata } from '../../../utils/connector-compiler';
 import type { Env } from '../../../index';
 import { initWorkspaceProvider } from '../../../workspace';
 import { manageConnections } from '../../../tools/admin/manage_connections';
@@ -59,6 +66,46 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
     orgId = seeded.org.id;
   });
 
+  it('retains a CLI multi-file artifact through normalization, MCP read-back and version guards', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lobu-retained-source-'));
+    const key = 'zz.retainedfiles';
+    const source = `import { marker } from './value'; ${probeSource('1.0.0', 'CLI').replaceAll(KEY, key).replace("return { marker: 'CLI' }", "return { success: true, output: { marker } }")}`;
+    try {
+      await mkdir(join(root, 'connectors'));
+      await writeFile(join(root, 'connectors/index.ts'), source);
+      await writeFile(join(root, 'connectors/value.ts'), 'export const marker = "from imported file";');
+      const artifact = await createIsolateConnectorCompiler().compileConnectorArtifactFromFile(join(root, 'connectors/index.ts'), root);
+      const payload = { source_code: source, compiled_code: artifact.compiledCode, source_files: artifact.sourceFiles, dependencies: artifact.dependencies };
+      const installed = await manageConnections({ action: 'install_connector', ...payload }, TEST_ENV, ctx);
+      expect(installed).toMatchObject({ connector_key: key });
+      const get = () => manageConnections({ action: 'get_connector_source', connector_key: key }, TEST_ENV, ctx);
+      expect(await get()).toMatchObject({ source_complete: true, source_code: source, source_files: artifact.sourceFiles, dependencies: {} });
+      // Remove the author's filesystem before the runtime normalizes a CLI upload.
+      await rm(root, { recursive: true, force: true });
+      const sql = getTestDb();
+      const rows = await sql`SELECT id, organization_id, version, compiled_code, compile_config_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+      const code = await resolveConnectorCode(key, rows[0] as unknown as StoredConnectorVersion);
+      expect((await extractConnectorMetadata(code)).key).toBe(key);
+      expect(code).toContain('from imported file');
+      const executed = await new IsolateExecutor({ timeoutMs: 10_000 }).execute(code, {
+        mode: 'action', actionKey: 'probe', actionInput: {}, config: {}, credentials: null, sessionState: null, env: {},
+      });
+      expect(executed).toEqual({ mode: 'action', output: { marker: 'from imported file' } });
+      expect(await get()).toMatchObject({ source_complete: true, source_files: artifact.sourceFiles });
+      const edited = { ...artifact.sourceFiles, files: { ...artifact.sourceFiles.files, 'connectors/value.ts': '// changed comment\nexport const marker = "from imported file";' } };
+      const rejected = await manageConnections({ action: 'update_connector_source', connector_key: key, ...payload, source_files: edited }, TEST_ENV, ctx);
+      expect(rejected).toMatchObject({ error: expect.stringContaining('Bump the version') });
+      const invalid = await manageConnections({ action: 'install_connector', ...payload, source_files: { ...edited, entrypoint: '../escape.ts' } }, TEST_ENV, ctx);
+      expect(invalid).toMatchObject({ error: expect.stringContaining('portable project file') });
+      expect(await get()).toMatchObject({ source_files: artifact.sourceFiles });
+      // Replacing with an explicitly compiled legacy upload clears provenance.
+      await manageConnections({ action: 'install_connector', source_code: artifact.compiledCode, compiled: true }, TEST_ENV, ctx);
+      expect(await get()).toMatchObject({ source_complete: false, source_files: null, dependencies: null });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('runs the full round trip: install → get → validate → update → guards → rollback', async () => {
     const sql = getTestDb();
 
@@ -84,6 +131,9 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
     expect(got.active_version).toBe('1.0.0');
     expect(got.version).toBe('1.0.0');
     expect(got.source_code).toContain("marker: 'V1'");
+    expect(got.source_complete).toBe(true);
+    expect(got.source_files).toEqual({ entrypoint: "source.ts", files: { "source.ts": probeSource("1.0.0", "V1") } });
+    expect(got.dependencies).toEqual({});
     expect(got.versions).toEqual([
       expect.objectContaining({
         version: '1.0.0',
@@ -348,6 +398,8 @@ export default class ActionProbeConnector {
     );
     if (!('active_version' in finalGet))
       throw new Error('unexpected result shape');
+    expect(finalGet.source_files).toEqual(got.source_files);
+    expect(finalGet.source_complete).toBe(true);
     expect(finalGet.active_version).toBe('1.0.0');
     expect(finalGet.source_code).toContain("marker: 'V1'");
     expect(finalGet.versions.map((v) => v.version).sort()).toEqual([

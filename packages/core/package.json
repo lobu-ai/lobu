@@ -242,6 +242,12 @@
       "bun": "./src/agent-tooling.ts",
       "import": "./dist/agent-tooling.js",
       "require": "./dist/agent-tooling.js"
+    },
+    "./contracts/tools/source-files": {
+      "types": "./dist/contracts/tools/source-files.d.ts",
+      "bun": "./src/contracts/tools/source-files.ts",
+      "import": "./dist/contracts/tools/source-files.js",
+      "require": "./dist/contracts/tools/source-files.js"
     }
   },
   "scripts": {

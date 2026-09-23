@@ -15,6 +15,8 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
+import type { SourceFiles, SourceDependencies } from '@lobu/core/contracts/tools/source-files';
+import { sourceDependencies } from '@lobu/connector-worker/compile';
 import { build, type Plugin } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
@@ -72,6 +74,9 @@ export interface StoredView {
   source_code: string;
   compiled_code: string;
   content_hash: string;
+  source_files: SourceFiles | null;
+  dependencies: SourceDependencies | null;
+  source_complete: boolean;
   attach: ViewAttachment[];
   params: Record<string, ViewParamDecl>;
   actions: Record<string, ViewActionDecl>;
@@ -86,6 +91,9 @@ export interface SetViewInput {
   source_code: string;
   compiled_code: string;
   content_hash: string;
+  source_files?: SourceFiles | null;
+  dependencies?: SourceDependencies | null;
+  source_complete?: boolean;
   attach: ViewAttachment[];
   params: StoredView['params'];
   actions: StoredView['actions'];
@@ -99,6 +107,9 @@ interface ViewRow {
   source_code: string;
   compiled_code: string;
   content_hash: string;
+  source_files: SourceFiles | null;
+  dependencies: SourceDependencies | null;
+  source_complete: boolean | null;
   attach: unknown;
   params: unknown;
   actions: unknown;
@@ -114,6 +125,9 @@ function mapViewRow(row: ViewRow): StoredView {
     source_code: String(row.source_code),
     compiled_code: String(row.compiled_code ?? ''),
     content_hash: String(row.content_hash),
+    source_files: row.source_files ?? null,
+    dependencies: row.dependencies ?? null,
+    source_complete: row.source_complete === true,
     attach: (row.attach ?? []) as ViewAttachment[],
     params: (row.params ?? {}) as StoredView['params'],
     actions: (row.actions ?? {}) as StoredView['actions'],
@@ -132,6 +146,7 @@ export async function getView(
   const sql = getDb();
   const rows = await sql<ViewRow>`
     SELECT key, name, description, source_code, compiled_code, content_hash,
+      source_files, dependencies, source_complete,
       attach, params, actions, last_writer, updated_at
     FROM views
     WHERE organization_id = ${organizationId} AND key = ${key}
@@ -144,6 +159,7 @@ export async function listViews(organizationId: string): Promise<StoredView[]> {
   const sql = getDb();
   const rows = await sql<ViewRow>`
     SELECT key, name, description, source_code, compiled_code, content_hash,
+      source_files, dependencies, source_complete,
       attach, params, actions, last_writer, updated_at
     FROM views
     WHERE organization_id = ${organizationId}
@@ -173,10 +189,12 @@ export async function setView(
   const rows = await sql<ViewRow>`
     INSERT INTO views (
       organization_id, key, name, description, source_code, compiled_code,
-      content_hash, attach, params, actions, last_writer, updated_at
+      content_hash, source_files, dependencies, source_complete, attach, params, actions, last_writer, updated_at
     ) VALUES (
       ${organizationId}, ${input.key}, ${input.name}, ${input.description},
       ${input.source_code}, ${input.compiled_code}, ${input.content_hash},
+      ${input.source_files ? sql.json(input.source_files) : null},
+      ${input.dependencies ? sql.json(input.dependencies) : null}, ${input.source_complete ?? false},
       ${sql.json(input.attach)}, ${sql.json(input.params)},
       ${sql.json(input.actions)}, ${input.last_writer}, NOW()
     )
@@ -186,12 +204,16 @@ export async function setView(
       source_code = EXCLUDED.source_code,
       compiled_code = EXCLUDED.compiled_code,
       content_hash = EXCLUDED.content_hash,
+      source_files = EXCLUDED.source_files,
+      dependencies = EXCLUDED.dependencies,
+      source_complete = EXCLUDED.source_complete,
       attach = EXCLUDED.attach,
       params = EXCLUDED.params,
       actions = EXCLUDED.actions,
       last_writer = EXCLUDED.last_writer,
       updated_at = NOW()
     RETURNING key, name, description, source_code, compiled_code, content_hash,
+      source_files, dependencies, source_complete,
       attach, params, actions, last_writer, updated_at
   `;
   return { view: mapViewRow(rows[0]), written: true };
@@ -213,9 +235,9 @@ export async function removeView(
 /** Public projection: metadata only, never source or bundle. */
 export function projectView(view: StoredView): Omit<
   StoredView,
-  'compiled_code' | 'source_code'
+  'compiled_code' | 'source_code' | 'source_files' | 'dependencies' | 'source_complete'
 > & { compiled_bytes: number; source_bytes: number } {
-  const { compiled_code, source_code, ...rest } = view;
+  const { compiled_code, source_code, source_files: _files, dependencies: _deps, source_complete: _complete, ...rest } = view;
   return {
     ...rest,
     compiled_bytes: Buffer.byteLength(compiled_code, 'utf8'),
@@ -240,6 +262,11 @@ const VIEW_ALLOWED_BARE_SPECIFIERS = new Set([
   'react/jsx-runtime',
   '@lobu/views',
 ]);
+/** The server compiler always mounts through these installed runtime packages. */
+export function viewSourceDependencies(): SourceDependencies {
+  return sourceDependencies(['react', 'react-dom/client', '@lobu/views'].map((name) => require.resolve(name)));
+}
+
 /** Virtual specifier carrying the authored source into the bundle. */
 const VIEW_SOURCE_SPECIFIER = 'lobu-view-source';
 

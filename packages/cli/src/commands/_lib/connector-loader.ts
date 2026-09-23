@@ -46,3 +46,6 @@ const compiler = createIsolateConnectorCompiler();
 
 export const compileConnectorForIsolateFromFile =
   compiler.compileConnectorForIsolateFromFile;
+
+export const compileConnectorArtifactFromFile =
+  compiler.compileConnectorArtifactFromFile;

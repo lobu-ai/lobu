@@ -25,6 +25,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import type { RetainedSource } from '@lobu/core/contracts/tools/source-files';
 import { build, type BuildOptions, type Metafile, type Plugin } from 'esbuild';
 import {
   IsolateLaneIneligibleError,
@@ -32,6 +33,9 @@ import {
   isNodeBuiltinSpecifier,
 } from '../isolate/eligibility.js';
 import { EXTERNAL_RUNTIME_DEPS } from '../runtime-deps.js';
+import { createSourceCapture } from './source-capture.js';
+
+export { createSourceCapture, sourceDependencies } from './source-capture.js';
 
 export {
   assertExternalDepsResolvable,
@@ -117,6 +121,16 @@ export const ISOLATE_LANE_BUILD_OPTIONS = {
   conditions: ['workerd'],
   supported: { 'dynamic-import': false },
   external: [],
+} as const satisfies Partial<BuildOptions>;
+
+/**
+ * Retained artifacts travel with their source, so they must be portable:
+ * esbuild otherwise embeds build paths in module comments, CommonJS wrapper
+ * keys, and generated identifiers. Whitespace minification alone keeps them.
+ */
+const RETAINED_SOURCE_BUILD_OPTIONS = {
+  minify: true,
+  legalComments: 'none',
 } as const satisfies Partial<BuildOptions>;
 
 export interface NpmSpecifierPluginOptions {
@@ -387,12 +401,12 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
     }
   }
 
-  async function bundleConnectorForIsolate(filePath: string): Promise<IsolateBundle> {
+  async function bundleConnectorForIsolate(filePath: string, capture?: ReturnType<typeof createSourceCapture>): Promise<IsolateBundle> {
     let mtimeMs: number | null = null;
     try {
       mtimeMs = (await stat(filePath)).mtimeMs;
       const cached = cache.get(filePath);
-      if (cached && cached.mtimeMs === mtimeMs) {
+      if (!capture && cached && cached.mtimeMs === mtimeMs) {
         touch(filePath, cached);
         return cached.bundle;
       }
@@ -406,16 +420,17 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
       write: false,
       metafile: true,
       minify: false,
+      ...(capture && RETAINED_SOURCE_BUILD_OPTIONS),
       sourcemap: false,
       logLevel: 'silent',
-      plugins,
+      plugins: capture ? [capture.plugin, ...plugins] : plugins,
     });
     const code = result.outputFiles[0]?.text ?? '';
     const bundle: IsolateBundle = {
       code,
       builtins: builtinsFromMetafile(result.metafile),
     };
-    if (mtimeMs !== null) touch(filePath, { mtimeMs, bundle });
+    if (!capture && mtimeMs !== null) touch(filePath, { mtimeMs, bundle });
     return bundle;
   }
 
@@ -426,11 +441,19 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
     return bundle.code;
   }
 
-  async function bundleConnectorForIsolateFromSource(sourceCode: string): Promise<IsolateBundle> {
+  async function compileConnectorArtifactFromFile(filePath: string, projectRoot: string) {
+    const capture = createSourceCapture(filePath, projectRoot);
+    const bundle = await bundleConnectorForIsolate(filePath, capture);
+    if (bundle.builtins.length > 0) throw new IsolateLaneIneligibleError(bundle.builtins, filePath);
+    return { compiledCode: bundle.code, ...capture.source() };
+  }
+
+  async function bundleConnectorForIsolateFromSource(sourceCode: string, retainSource = false): Promise<IsolateBundle & Partial<RetainedSource>> {
     const tmpDir = await mkdtemp(join(tmpdir(), 'lobu-connector-isolate-'));
     const sourcePath = join(tmpDir, 'source.ts');
     try {
       await writeFile(sourcePath, sourceCode, 'utf-8');
+      const capture = retainSource ? createSourceCapture(sourcePath, tmpDir) : undefined;
       const result = await build({
         ...ISOLATE_LANE_BUILD_OPTIONS,
         entryPoints: [sourcePath],
@@ -438,19 +461,27 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
         write: false,
         metafile: true,
         minify: false,
+        ...(capture && RETAINED_SOURCE_BUILD_OPTIONS),
         sourcemap: false,
         logLevel: 'silent',
         nodePaths: [resolve(process.cwd(), 'node_modules')],
-        plugins,
+        plugins: [...(capture ? [capture.plugin] : []), ...plugins],
       });
       const code = result.outputFiles[0]?.text ?? '';
       return {
         code,
+        ...(capture?.source() ?? {}),
         builtins: builtinsFromMetafile(result.metafile),
       };
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
+  }
+
+  async function compileConnectorArtifactFromSource(sourceCode: string) {
+    const bundle = await bundleConnectorForIsolateFromSource(sourceCode, true);
+    if (bundle.builtins.length > 0) throw new IsolateLaneIneligibleError(bundle.builtins, '<source>');
+    return { compiledCode: bundle.code, sourceFiles: bundle.sourceFiles!, dependencies: bundle.dependencies! };
   }
 
   async function compileConnectorForIsolateFromSource(sourceCode: string): Promise<string> {
@@ -461,6 +492,8 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
 
   return {
     bundleConnectorForIsolate,
+    compileConnectorArtifactFromFile,
+    compileConnectorArtifactFromSource,
     compileConnectorForIsolateFromFile,
     compileConnectorForIsolateFromSource,
   };

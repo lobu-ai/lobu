@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { RetainedSource } from "./source-files";
 
 /**
  * Content identity for Lobu views, shared by the server (compile-at-save)
@@ -49,17 +50,18 @@ export interface ViewContentMetadata {
 export function contentHash(
   source: string,
   metadata: ViewContentMetadata,
-  compiledCode: string
+  compiledCode: string,
+  retainedSource?: RetainedSource
 ): string {
   const artifactDigest = createHash("sha256")
     .update(compiledCode, "utf8")
     .digest("hex");
-  return createHash("sha256")
+  const hash = createHash("sha256")
     .update(source)
     .update("\n")
     .update(stableStringify(metadata ?? null))
     .update("\n")
-    .update(artifactDigest)
-    .digest("hex")
-    .slice(0, 16);
+    .update(artifactDigest);
+  if (retainedSource) hash.update("\n").update(stableStringify(retainedSource));
+  return hash.digest("hex").slice(0, 16);
 }

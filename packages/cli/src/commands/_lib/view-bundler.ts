@@ -23,7 +23,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
 import { build, type Metafile, type Plugin } from "esbuild";
+import { createSourceCapture } from "../../internal/connector-compiler.js";
 
 export interface ViewMetadata {
   key: string;
@@ -32,7 +34,7 @@ export interface ViewMetadata {
   actions: Record<string, { emits: string }>;
 }
 
-export interface BundledView {
+export interface BundledView extends RetainedSource {
   compiledCode: string;
   metadata: ViewMetadata;
 }
@@ -106,10 +108,15 @@ function readViewExport(
  * module has no `view` export, no default-export component, or an invalid
  * key — all fail loud at apply time, never as a blank frame.
  */
-export async function bundleViewFromFile(entry: string): Promise<BundledView> {
+export async function bundleViewFromFile(
+  entry: string,
+  projectRoot: string
+): Promise<BundledView> {
   const dir = dirname(resolve(entry));
   const rel = `./${basename(entry)}`;
+  const capture = createSourceCapture(entry, projectRoot);
   const browser = await build({
+    plugins: [capture.plugin],
     stdin: {
       contents: `import { mountView } from "@lobu/views";\nimport * as mod from ${JSON.stringify(rel)};\nmountView(mod.view, mod.default);\n`,
       loader: "tsx",
@@ -141,7 +148,7 @@ export async function bundleViewFromFile(entry: string): Promise<BundledView> {
     platform: "node",
     target: ["node22"],
     jsx: "automatic",
-    plugins: [metadataStub],
+    plugins: [capture.plugin, metadataStub],
     define: { "process.env.NODE_ENV": '"production"' },
     logLevel: "silent",
   });
@@ -164,6 +171,7 @@ export async function bundleViewFromFile(entry: string): Promise<BundledView> {
     }
     return {
       compiledCode,
+      ...capture.source(),
       metadata: {
         key: def.key,
         attach: Array.isArray(def.attach) ? def.attach : [],

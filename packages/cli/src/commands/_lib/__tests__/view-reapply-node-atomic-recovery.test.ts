@@ -44,7 +44,7 @@ describe("view reapply Node atomic-save recovery (F11)", () => {
           `const sleep = (ms) => new Promise((r) => setTimeout(r, ms));`,
           `const attempts = [];`,
           `const applied = [];`,
-          `globalThis.__f11apply = async (opts) => { if (opts.url !== "http://127.0.0.1:1" || opts.cwd !== project) throw new Error("unexpected target"); const text = readFileSync(entry, "utf8"); attempts.push(text); const artifact = await bundleViewFromFile(entry); applied.push({ text, bytes: artifact.compiledCode.length }); };`,
+          `globalThis.__f11apply = async (opts) => { if (opts.url !== "http://127.0.0.1:1" || opts.cwd !== project) throw new Error("unexpected target"); const text = readFileSync(entry, "utf8"); attempts.push(text); const artifact = await bundleViewFromFile(entry, project); applied.push({ text, bytes: artifact.compiledCode.length }); };`,
           `const loop = await startViewReapplyLoop(project, "http://127.0.0.1:1", "f11-fixture");`,
           `const atomic = (text) => { writeFileSync(entry + ".tmp", text); renameSync(entry + ".tmp", entry); };`,
           `const fail = (msg, extra) => { console.error("F11-FAIL: " + msg + (extra ? " " + JSON.stringify(extra) : "")); process.exit(1); };`,

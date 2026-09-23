@@ -80,6 +80,9 @@ export async function handleInstallConnector(
 						sourceUri,
 						sourceCode,
 						compiled: args.compiled,
+						compiledCode: args.compiled_code,
+						sourceFiles: args.source_files,
+						dependencies: args.dependencies,
 					});
 
 		await maybeUpsertAuthAfterInstall(installed, args.auth_values, ctx);
@@ -175,6 +178,9 @@ export async function handleGetConnectorSource(
 			active_version: source.activeVersion,
 			version: source.version,
 			source_code: source.sourceCode,
+			source_files: source.sourceFiles,
+			dependencies: source.dependencies,
+			source_complete: source.sourceComplete,
 			source_path: source.sourcePath,
 			code_hash: source.codeHash,
 			versions: source.versions,
@@ -192,6 +198,9 @@ export async function handleValidateConnectorSource(
 		organizationId: ctx.organizationId,
 		sourceCode: args.source_code,
 		compiled: args.compiled,
+		compiledCode: args.compiled_code,
+		sourceFiles: args.source_files,
+		dependencies: args.dependencies,
 	});
 	if (!result.valid) {
 		// A failed compile is the preflight WORKING, not a tool error — return it
@@ -229,6 +238,9 @@ export async function handleUpdateConnectorSource(
 			connectorKey: args.connector_key,
 			sourceCode: args.source_code,
 			compiled: args.compiled,
+			compiledCode: args.compiled_code,
+			sourceFiles: args.source_files,
+			dependencies: args.dependencies,
 			expectedVersion: args.expected_version,
 		});
 

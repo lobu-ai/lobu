@@ -1,3 +1,5 @@
+import type { SourceFiles, SourceDependencies } from "@lobu/core/contracts/tools/source-files";
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { getErrorMessage } from "@lobu/core";
@@ -189,6 +191,9 @@ export async function installConnectorDefinitionFromSource(params: {
 	sourceUri?: string;
 	sourceCode?: string;
 	compiled?: boolean;
+	compiledCode?: string;
+	sourceFiles?: SourceFiles;
+	dependencies?: SourceDependencies;
 }): Promise<ConnectorInstallResult> {
 	const sql = getDb();
 	const resolved = await resolveConnectorInstallSource({
@@ -196,6 +201,9 @@ export async function installConnectorDefinitionFromSource(params: {
 		sourceUri: params.sourceUri,
 		sourceCode: params.sourceCode,
 		compiled: params.compiled,
+		compiledCode: params.compiledCode,
+		sourceFiles: params.sourceFiles,
+		dependencies: params.dependencies,
 	});
 	if (installsImageCopy(resolved.metadata.key)) {
 		const installed = await upsertBundledConnectorForOrg({
@@ -220,6 +228,9 @@ export async function installConnectorDefinitionFromSource(params: {
 			compileConfigHash: resolved.compileConfigHash,
 			sourceCode: resolved.sourceCode,
 			sourcePath: resolved.sourcePath,
+			sourceFiles: resolved.sourceFiles,
+			dependencies: resolved.dependencies,
+			sourceComplete: resolved.sourceComplete,
 		},
 		versionScope: "organization",
 	});
@@ -394,6 +405,9 @@ export type InstalledConnectorSource = {
 	activeVersion: string;
 	version: string;
 	sourceCode: string | null;
+	sourceFiles: SourceFiles | null;
+	dependencies: SourceDependencies | null;
+	sourceComplete: boolean;
 	sourcePath: string | null;
 	codeHash: string | null;
 	versions: ConnectorVersionSummary[];
@@ -428,10 +442,10 @@ export async function getInstalledConnectorSource(params: {
 	// visible — never another org's private artifact. When a version exists as
 	// both (post-dual-write), the org's own row wins.
 	const rows = (await sql`
-    SELECT version, created_at, source_code, source_path, compiled_code_hash, has_compiled
+    SELECT version, created_at, source_code, source_path, source_files, dependencies, source_complete, compiled_code_hash, has_compiled
     FROM (
       SELECT DISTINCT ON (version)
-             version, created_at, id, source_code, source_path, compiled_code_hash,
+             version, created_at, id, source_code, source_path, source_files, dependencies, source_complete, compiled_code_hash,
              (compiled_code IS NOT NULL) AS has_compiled
       FROM connector_versions
       WHERE connector_key = ${params.connectorKey}
@@ -444,6 +458,9 @@ export async function getInstalledConnectorSource(params: {
 		created_at: string;
 		source_code: string | null;
 		source_path: string | null;
+		source_files: SourceFiles | null;
+		dependencies: SourceDependencies | null;
+		source_complete: boolean | null;
 		compiled_code_hash: string | null;
 		has_compiled: boolean;
 	}>;
@@ -473,6 +490,9 @@ export async function getInstalledConnectorSource(params: {
 		activeVersion: def.version,
 		version: target.version,
 		sourceCode,
+		sourceFiles: target.source_files ?? null,
+		dependencies: target.dependencies ?? null,
+		sourceComplete: target.source_complete === true,
 		sourcePath: target.source_path,
 		codeHash: target.compiled_code_hash,
 		versions: rows.map((row) => ({
@@ -552,12 +572,18 @@ export async function validateConnectorSource(params: {
 	organizationId: string;
 	sourceCode: string;
 	compiled?: boolean;
+	compiledCode?: string;
+	sourceFiles?: SourceFiles;
+	dependencies?: SourceDependencies;
 }): Promise<ConnectorSourceValidation> {
 	let resolved: Awaited<ReturnType<typeof resolveConnectorInstallSource>>;
 	try {
 		resolved = await resolveConnectorInstallSource({
 			sourceCode: params.sourceCode,
 			compiled: params.compiled,
+			compiledCode: params.compiledCode,
+			sourceFiles: params.sourceFiles,
+			dependencies: params.dependencies,
 		});
 	} catch (error) {
 		return { valid: false, diagnostics: getErrorMessage(error) };
@@ -613,6 +639,9 @@ export async function updateInstalledConnectorSource(params: {
 	connectorKey: string;
 	sourceCode: string;
 	compiled?: boolean;
+	compiledCode?: string;
+	sourceFiles?: SourceFiles;
+	dependencies?: SourceDependencies;
 	expectedVersion?: string;
 }): Promise<ConnectorVersionChange> {
 	const sql = getDb();
@@ -629,6 +658,9 @@ export async function updateInstalledConnectorSource(params: {
 	const resolved = await resolveConnectorInstallSource({
 		sourceCode: params.sourceCode,
 		compiled: params.compiled,
+		compiledCode: params.compiledCode,
+		sourceFiles: params.sourceFiles,
+		dependencies: params.dependencies,
 	});
 	if (resolved.metadata.key !== params.connectorKey) {
 		throw new Error(
@@ -660,7 +692,7 @@ export async function updateInstalledConnectorSource(params: {
 	// version silently clobbered its code otherwise (#2045 review finding).
 	const targetVersion = resolved.metadata.version;
 	const existing = (await sql`
-      SELECT compiled_code_hash, source_code FROM connector_versions
+      SELECT compiled_code_hash, source_code, source_files, dependencies, source_complete FROM connector_versions
       WHERE connector_key = ${params.connectorKey} AND version = ${targetVersion}
         AND (organization_id = ${params.organizationId} OR organization_id IS NULL)
       ORDER BY organization_id NULLS LAST
@@ -668,13 +700,20 @@ export async function updateInstalledConnectorSource(params: {
     `) as unknown as Array<{
 		compiled_code_hash: string | null;
 		source_code: string | null;
+		source_files: SourceFiles | null;
+		dependencies: SourceDependencies | null;
+		source_complete: boolean | null;
 	}>;
 	const row = existing[0];
 	const sameCode =
 		!row ||
 		row.source_code === resolved.sourceCode ||
 		row.compiled_code_hash === resolved.compiledCodeHash;
-	if (!sameCode) {
+	const sameSource = !row?.source_complete || (
+		isDeepStrictEqual(row.source_files, resolved.sourceFiles) &&
+		isDeepStrictEqual(row.dependencies, resolved.dependencies)
+	);
+	if (!sameCode || !sameSource) {
 		throw new Error(
 			`Version '${targetVersion}' of '${params.connectorKey}' is already retained with different code. ` +
 				`Bump the version in the connector definition so the existing code stays retained for rollback_connector_version.`,
@@ -691,6 +730,9 @@ export async function updateInstalledConnectorSource(params: {
 			compileConfigHash: resolved.compileConfigHash,
 			sourceCode: resolved.sourceCode,
 			sourcePath: resolved.sourcePath,
+			sourceFiles: resolved.sourceFiles,
+			dependencies: resolved.dependencies,
+			sourceComplete: resolved.sourceComplete,
 		},
 		versionScope: "organization",
 	});

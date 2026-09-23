@@ -100,7 +100,15 @@ describe("deployment baseline encoding", () => {
       key,
       sourceFile: `${key}.connector.ts`,
       sourceCode: "export default class Fixture {}",
-      compiledCode: "x".repeat(600_000),
+      sourceRoot: "/project",
+      compiledArtifact: {
+        compiledCode: "x".repeat(600_000),
+        sourceFiles: {
+          entrypoint: "source.ts",
+          files: { "source.ts": "export default class Fixture {}" },
+        },
+        dependencies: {},
+      },
     }));
     const pins = { "fixture-one": "1.0.0", "fixture-two": "2.0.0" };
     const manifest = buildDeploymentManifest(
@@ -116,7 +124,7 @@ describe("deployment baseline encoding", () => {
       definitions.map(({ key, sourceFile }) => ({ key, sourceFile }))
     );
     expect(manifest.connector_versions).toEqual(pins);
-    expect(definitions[0]?.compiledCode.length).toBe(600_000);
+    expect(definitions[0]?.compiledArtifact.compiledCode.length).toBe(600_000);
   });
 
   test("distinguishes absent attribution from a recorded empty baseline", () => {

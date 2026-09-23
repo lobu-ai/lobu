@@ -485,12 +485,15 @@ async function installConnectorDefinitions(
     if (!def) continue;
     let result: Awaited<ReturnType<typeof client.installConnector>>;
     if (def.sourcePath) {
-      if (def.compiledCode === undefined) {
+      const artifact = def.compiledArtifact;
+      if (!artifact) {
         throw new Error(`Local connector was not prepared: ${def.sourcePath}`);
       }
       result = await client.installConnector({
-        sourceCode: def.compiledCode,
-        compiled: true,
+        sourceCode: artifact.sourceFiles.files[artifact.sourceFiles.entrypoint],
+        compiledCode: artifact.compiledCode,
+        sourceFiles: artifact.sourceFiles,
+        dependencies: artifact.dependencies,
       });
     } else if (def.sourceCode !== undefined) {
       // `source_url` connector: source was fetched into `sourceCode` and has no
@@ -844,6 +847,8 @@ export async function executePlan(
       name: row.desired.key,
       source_code: row.desired.sourceCode,
       compiled_code: row.desired.compiledCode,
+      source_files: row.desired.sourceFiles,
+      dependencies: row.desired.dependencies,
       attach: row.desired.attach,
       params: row.desired.params,
       actions: row.desired.actions,
@@ -1399,11 +1404,14 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
           // Preserve the existing lazy compiler load: its heavy esbuild/worker
           // graph is needed only for local connectors. Compile under the
           // dependency lock; release before prompts or remote apply requests.
-          const { compileConnectorForIsolateFromFile } = await import(
+          const { compileConnectorArtifactFromFile } = await import(
             "../connector-loader.js"
           );
-          def.compiledCode = await compileConnectorForIsolateFromFile(
-            def.sourcePath
+          if (!def.sourceRoot)
+            throw new Error("Local connector is missing its project root");
+          def.compiledArtifact = await compileConnectorArtifactFromFile(
+            def.sourcePath,
+            def.sourceRoot
           );
         }
       }

@@ -15,6 +15,7 @@ import type {
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
+import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
 import type Ajv from "ajv";
 import type {
   ConnectorSource,
@@ -244,6 +245,8 @@ export interface DesiredConnectorDefinition {
   declaredKeyHint?: string;
   /** Local `.ts` path (absolute) — mutually exclusive with `sourceUrl`. */
   sourcePath?: string;
+  /** Project boundary for collecting local source; never sent to the server. */
+  sourceRoot?: string;
   /** Remote URL — mutually exclusive with `sourcePath`. */
   sourceUrl?: string;
   /**
@@ -251,14 +254,14 @@ export interface DesiredConnectorDefinition {
    * compiled before upload; remote sources are compiled by the server.
    */
   sourceCode?: string;
-  /** Local artifact prepared while the project's dependencies are locked. */
-  compiledCode?: string;
+  /** Artifact and author files prepared while project dependencies are locked. */
+  compiledArtifact?: RetainedSource & { compiledCode: string };
   /** For error messages — the `.connector.ts` file or `type: connector` doc. */
   sourceFile: string;
 }
 
 /** One `viewFromFile` entry, bundled at load (apply reuses the artifacts). */
-export interface DesiredView {
+export interface DesiredView extends RetainedSource {
   /**
    * View key, re-derived from the module's own `defineView({ key })` at bundle
    * time. The bundle pass refuses a mismatch with nothing to fall back to: a
@@ -978,6 +981,7 @@ function resolveConnectorSources(
       key: null,
       declaredKeyHint: extractDeclaredConnectorKey(sourceCode) ?? undefined,
       sourcePath: abs,
+      sourceRoot: baseDir,
       sourceCode,
       sourceFile: rel.replace(/^\.\//, ""),
     });
@@ -1055,7 +1059,8 @@ async function resolveViewSources(
         `viewFromFile(${JSON.stringify(rel)}) is over the ${VIEW_SOURCE_MAX_BYTES} byte source cap`
       );
     }
-    const bundled = await bundleViewFromFile(abs);
+    const bundled = await bundleViewFromFile(abs, baseDir);
+    sourceCode = bundled.sourceFiles.files[bundled.sourceFiles.entrypoint]!;
     const key = bundled.metadata.key;
     if (seen.has(key)) {
       throw new ValidationError(
@@ -1093,10 +1098,16 @@ async function resolveViewSources(
           params,
           actions,
         },
-        bundled.compiledCode
+        bundled.compiledCode,
+        {
+          sourceFiles: bundled.sourceFiles,
+          dependencies: bundled.dependencies,
+        }
       ),
       sourceFile: rel.replace(/^\.\//, ""),
       compiledCode: bundled.compiledCode,
+      sourceFiles: bundled.sourceFiles,
+      dependencies: bundled.dependencies,
       attach,
       params,
       actions,
