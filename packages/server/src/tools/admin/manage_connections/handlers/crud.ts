@@ -2441,6 +2441,66 @@ export async function handleDelete(
 		return expiredRunIds;
   };
 
+  // Cancel action runs that are decided (approved or auto) but not yet claimed
+  // by a worker. A `local_action` run keeps status='pending' after approval so
+  // the worker poll can claim it; without this, a worker would still execute
+  // the mutation against the deleted connection. A run a worker already
+  // claimed is left to its executor. Each card advances in the same
+  // transaction, with the same all-or-nothing rule as the approval expiry.
+  const unclaimedActionCancelReason =
+    'Connection deleted before a worker claimed this action; it will not run.';
+  const cancelUnclaimedActionRunsBeforeDelete = async (
+    db: DbClient
+  ): Promise<void> => {
+    const unclaimedRuns = await db<{ id: number }>`
+      SELECT id
+      FROM runs
+      WHERE organization_id = ${organizationId}
+        AND connection_id = ${args.connection_id}
+        AND run_type = 'action'
+        AND status = 'pending'
+        AND approval_status IN ('approved', 'auto')
+      ORDER BY id
+      FOR UPDATE
+    `;
+    for (const unclaimedRun of unclaimedRuns) {
+      const cancelled = await db<{ action_key: string | null }>`
+          UPDATE runs
+          SET status = 'cancelled',
+              error_message = ${unclaimedActionCancelReason},
+              completed_at = NOW()
+          WHERE id = ${unclaimedRun.id}
+            AND organization_id = ${organizationId}
+            AND connection_id = ${args.connection_id}
+            AND run_type = 'action'
+            AND status = 'pending'
+            AND approval_status IN ('approved', 'auto')
+          RETURNING action_key
+        `;
+      if (cancelled.length === 0) continue;
+
+      const actionKey = cancelled[0].action_key ?? 'Action';
+      const eventId = await supersedeActionEvent(
+        unclaimedRun.id,
+        organizationId,
+        'failed',
+        `${actionKey} — cancelled`,
+        unclaimedActionCancelReason,
+        {
+          error_message: unclaimedActionCancelReason,
+          run_status: 'cancelled',
+        },
+        null,
+        db
+      );
+      if (eventId === undefined) {
+        throw new Error(
+          `Cannot cancel action run ${unclaimedRun.id}: its approval card is missing`
+        );
+      }
+    }
+  };
+
   const performDelete = async (): Promise<ManageConnectionsResult> => {
   // Phase 1: fallible EXTERNAL teardown runs FIRST, while the connection is
   // still visible with its approvals pending. A teardown failure (e.g. the chat
@@ -2507,6 +2567,7 @@ export async function handleDelete(
 		});
 
 		const expiredApprovalRunIds = await expirePendingApprovalsBeforeDelete(tx);
+		await cancelUnclaimedActionRunsBeforeDelete(tx);
 
     // Pause the connection's existing feeds in the same atomic lifecycle
     // transition. Keep each schedule as historical configuration, but clear its

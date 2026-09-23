@@ -871,6 +871,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             -- (1) Connector-worker lanes: sync / action / auth.
             (
               r.run_type IN ('sync', 'action', 'auth')
+              -- Work bound to a tombstoned connection never runs, whichever
+              -- deletion path left the row pending; the reaper terminalizes it.
+              AND con.deleted_at IS NULL
               AND ${connectorClaimLaneSql(tx, connectorClaimContext, {
                 connectorKey: tx`r.connector_key`,
                 connectorVersion: tx`r.connector_version`,
