@@ -42,6 +42,18 @@ describe("isReservedEntityTypeSlug", () => {
     expect(isReservedEntityTypeSlug("environments")).toBe(true);
     expect(isReservedEntityTypeSlug("infrastructure")).toBe(true);
   });
+
+  it("blocks the view path marker, which would turn a type's list page into a view path", () => {
+    expect(isReservedEntityTypeSlug("-")).toBe(true);
+  });
+
+  it("checks the slug create would STORE, so a spelling that normalizes onto a reserved name is blocked", () => {
+    // Create rewrites every character outside [a-z0-9-] to `-`.
+    expect(isReservedEntityTypeSlug("!")).toBe(true);
+    expect(isReservedEntityTypeSlug("entity_types")).toBe(true);
+    expect(isReservedEntityTypeSlug("Data")).toBe(true);
+    expect(isReservedEntityTypeSlug("my_type")).toBe(false);
+  });
 });
 
 describe("normalizeEntityTypeSlug", () => {

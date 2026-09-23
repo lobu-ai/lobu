@@ -8,6 +8,7 @@
 
 import { deriveToolActorSource } from './apply-context';
 import { slugify } from "@lobu/core";
+import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import type {
 	ValidatedEntityRowInsert,
@@ -915,6 +916,17 @@ async function loadEntityTreeIds(sql: DbClient, entityId: number): Promise<numbe
  * Create new entity
  * Entity is created in the user's organization
  */
+/** `-` marks where a host path ends and a view begins (`/<type>/<slug>/-/views/<key>`),
+ *  so a record stored under it would have an unreachable page. */
+function assertSlugIsNotViewMarker(slug: string | null | undefined): void {
+	if (slug === VIEW_PATH_MARKER) {
+		throw new ToolUserError(
+			`Slug '${VIEW_PATH_MARKER}' is reserved: it marks a view in page URLs`,
+			400,
+		);
+	}
+}
+
 export async function createEntity(
 	data: EntityData,
 	opts?: EntityCreateOptions,
@@ -943,6 +955,8 @@ export async function createEntity(
 	if (!data.organization_id) {
 		throw new Error("Organization ID is required");
 	}
+
+	assertSlugIsNotViewMarker(data.slug);
 	const sql = opts?.sql ?? getDb();
 
 	try {
@@ -1078,6 +1092,8 @@ export async function updateEntity(
 	if (data.parent_id !== undefined && data.parent_id !== null) {
 		await preventEntityCycles(entityId, data.parent_id, sql);
 	}
+
+	assertSlugIsNotViewMarker(data.slug);
 
 	// Generate new slug if provided or name is being updated
 	const newSlug = data.slug ?? (data.name ? slugify(data.name) : null);

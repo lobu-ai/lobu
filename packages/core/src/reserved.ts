@@ -7,6 +7,8 @@
  * Users cannot create `$…` types. Hide + prune use the `$` prefix only.
  */
 
+import { VIEW_PATH_MARKER } from "./contracts/tools/view-path";
+
 // ── Entity type classification ──────────────────────────────────────────────
 
 /**
@@ -123,6 +125,9 @@ export const RESERVED_ENTITY_TYPE_SLUGS = [
   "entity-types",
   "recent",
   "chat",
+  // The web host's view marker (`/<type>/-/views/<key>`): a type stored as `-`
+  // would make its own list page parse as a view path.
+  VIEW_PATH_MARKER,
   // Product words that are not knowledge types.
   "organization",
   "user",
@@ -137,7 +142,9 @@ export const RESERVED_ENTITY_TYPE_SLUGS = [
  * `$…` is reserved for platform-named types ($member, $resource).
  */
 export function isReservedEntityTypeSlug(slug: string): boolean {
-  const s = slug.toLowerCase();
+  // Checked in its STORED form: create rewrites `!` to `-` and `entity_types`
+  // to `entity-types`, so checking the raw input let those through.
+  const s = normalizeEntityTypeSlug(slug);
   if (s.startsWith("$")) return true;
   return (RESERVED_ENTITY_TYPE_SLUGS as readonly string[]).includes(s);
 }

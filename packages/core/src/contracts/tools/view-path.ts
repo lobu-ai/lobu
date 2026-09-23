@@ -7,8 +7,9 @@
  *   /<org>/<type>/-/views/<key>              view attached to a type
  *   /<org>/<type>/<slug>/-/views/<key>       view attached to a record
  *
- * `-` is never a slug (slugify trims dashes), so it marks where the host's
- * path ends. The server's `open_view` links and the web host's tabs both build
+ * `-` marks where the host's path ends. It is reserved as a slug: entity-type
+ * create rejects it (RESERVED_ENTITY_TYPE_SLUGS) and so does a record's
+ * explicit slug, and a derived record slug never is one (slugify trims dashes). The server's `open_view` links and the web host's tabs both build
  * the suffix here, so the two cannot drift apart.
  */
 export const VIEW_PATH_MARKER = "-";
