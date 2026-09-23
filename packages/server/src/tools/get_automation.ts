@@ -28,7 +28,7 @@ import {
   STANDARD_IDENTITY_NAMESPACES,
   type EntityIdentityScope,
 } from '../utils/content-search';
-import { formatDateISO, parseDateAlias } from '../utils/date-aliases';
+import { toEndOfDay } from '../utils/date-aliases';
 import { parseJsonObject } from '@lobu/core';
 import logger from '../utils/logger';
 import { parsePositiveIntegerId, ToolUserError } from '../utils/errors';
@@ -48,6 +48,7 @@ import {
   ensureIsoString,
   ensureNumber,
   foldUnprocessedRanges,
+  parseAutomationWindowDate,
   parseBigintArray,
   readPendingWindow,
 } from '../utils/window-utils';
@@ -342,13 +343,11 @@ async function getAutomationImpl(
   let parsedUntil: string | undefined;
 
   if (args.content_since) {
-    parsedSince = formatDateISO(parseDateAlias(args.content_since).date);
+    parsedSince = parseAutomationWindowDate(args.content_since).toISOString();
   }
 
   if (args.content_until) {
-    const endOfDay = new Date(parseDateAlias(args.content_until).date);
-    endOfDay.setHours(23, 59, 59, 999);
-    parsedUntil = endOfDay.toISOString();
+    parsedUntil = toEndOfDay(parseAutomationWindowDate(args.content_until)).toISOString();
   }
 
   const whereClauses: string[] = [

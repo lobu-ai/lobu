@@ -1,134 +1,133 @@
 /**
  * Date Alias Parsing Tests
+ *
+ * A day is a UTC calendar day, whatever the server process's local timezone.
+ * Cases run in UTC and on both sides of it; the non-UTC references sit near
+ * midnight UTC where their local and UTC calendar dates differ.
  */
 
-import { describe, expect, it } from 'vitest';
-import { formatDateISO, parseDateAlias, toEndOfDay } from '../date-aliases';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { foldUnprocessedRanges, parseAutomationWindowDate } from '../window-utils';
+import { parseDateAlias, toEndOfDay } from '../date-aliases';
 
-describe('parseDateAlias', () => {
-  const ref = new Date('2025-06-15T12:00:00Z');
+const iso = (d: Date) => d.toISOString();
 
-  describe('named aliases', () => {
-    it('should parse "today"', () => {
-      const result = parseDateAlias('today', ref);
-      expect(result.date.getHours()).toBe(0);
-      expect(result.date.getMinutes()).toBe(0);
-      expect(result.date.getDate()).toBe(ref.getDate());
-    });
-
-    it('should parse "yesterday"', () => {
-      const result = parseDateAlias('yesterday', ref);
-      expect(result.date.getDate()).toBe(ref.getDate() - 1);
-    });
-
-    it('should parse "last_week"', () => {
-      const result = parseDateAlias('last_week', ref);
-      const expected = new Date(ref);
-      expected.setDate(expected.getDate() - 7);
-      expect(result.date.getDate()).toBe(expected.getDate());
-    });
-
-    it('should parse "last_month"', () => {
-      const result = parseDateAlias('last_month', ref);
-      const expected = new Date(ref);
-      expected.setMonth(expected.getMonth() - 1);
-      expect(result.date.getMonth()).toBe(expected.getMonth());
-    });
+describe.each(['UTC', 'Pacific/Kiritimati', 'America/Los_Angeles'])('in process TZ %s', (tz) => {
+  let savedTz: string | undefined;
+  beforeAll(() => {
+    savedTz = process.env.TZ;
+    process.env.TZ = tz;
+  });
+  afterAll(() => {
+    if (savedTz === undefined) delete process.env.TZ;
+    else process.env.TZ = savedTz;
   });
 
-  describe('relative aliases', () => {
-    it('should parse "7d"', () => {
-      const result = parseDateAlias('7d', ref);
-      const expected = new Date(ref);
-      expected.setDate(expected.getDate() - 7);
-      expect(result.date.getDate()).toBe(expected.getDate());
+  // Cross a local calendar boundary in both directions while keeping the same
+  // UTC day: late UTC in Kiritimati, early UTC in Los Angeles.
+  const ref = new Date(
+    tz === 'America/Los_Angeles' ? '2025-06-15T00:30:00Z' : '2025-06-15T23:30:00Z'
+  );
+
+  describe('parseDateAlias', () => {
+    it('named aliases start the UTC day', () => {
+      expect(iso(parseDateAlias('today', ref).date)).toBe('2025-06-15T00:00:00.000Z');
+      expect(iso(parseDateAlias('yesterday', ref).date)).toBe('2025-06-14T00:00:00.000Z');
+      expect(iso(parseDateAlias('last_week', ref).date)).toBe('2025-06-08T00:00:00.000Z');
+      expect(iso(parseDateAlias('last_month', ref).date)).toBe('2025-05-15T00:00:00.000Z');
     });
 
-    it('should parse "30d"', () => {
-      const result = parseDateAlias('30d', ref);
-      const diff = Math.abs(ref.getTime() - result.date.getTime());
-      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-      expect(days).toBe(30);
+    it('relative aliases count back whole UTC days', () => {
+      expect(iso(parseDateAlias('7d', ref).date)).toBe('2025-06-08T00:00:00.000Z');
+      expect(iso(parseDateAlias('30d', ref).date)).toBe('2025-05-16T00:00:00.000Z');
+      expect(iso(parseDateAlias('2w', ref).date)).toBe('2025-06-01T00:00:00.000Z');
+      expect(iso(parseDateAlias('1m', ref).date)).toBe('2025-05-15T00:00:00.000Z');
+      expect(iso(parseDateAlias('1q', ref).date)).toBe('2025-03-15T00:00:00.000Z');
+      expect(iso(parseDateAlias('1y', ref).date)).toBe('2024-06-15T00:00:00.000Z');
     });
 
-    it('should parse "1m"', () => {
-      const result = parseDateAlias('1m', ref);
-      const expected = new Date(ref);
-      expected.setMonth(expected.getMonth() - 1);
-      expect(result.date.getMonth()).toBe(expected.getMonth());
+    it('an ISO date is that UTC day', () => {
+      expect(iso(parseDateAlias('2025-01-15', ref).date)).toBe('2025-01-15T00:00:00.000Z');
+      expect(iso(parseDateAlias('0099-01-15', ref).date)).toBe('0099-01-15T00:00:00.000Z');
     });
 
-    it('should parse "1q"', () => {
-      const result = parseDateAlias('1q', ref);
-      const expected = new Date(ref);
-      expected.setMonth(expected.getMonth() - 3);
-      expect(result.date.getMonth()).toBe(expected.getMonth());
+    it('an ISO datetime is UTC unless it carries an explicit offset', () => {
+      expect(iso(parseDateAlias('2025-01-15T12:30:00Z', ref).date)).toBe(
+        '2025-01-15T12:30:00.000Z'
+      );
+      expect(iso(parseDateAlias('2025-01-15T23:30:00', ref).date)).toBe(
+        '2025-01-15T23:30:00.000Z'
+      );
+      expect(iso(parseDateAlias('2025-01-15T23:30:00-08:00', ref).date)).toBe(
+        '2025-01-16T07:30:00.000Z'
+      );
+      expect(iso(parseDateAlias('"2025-01-15T12:30:00Z"', ref).date)).toBe(
+        '2025-01-15T12:30:00.000Z'
+      );
     });
 
-    it('should parse "1y"', () => {
-      const result = parseDateAlias('1y', ref);
-      expect(result.date.getFullYear()).toBe(ref.getFullYear() - 1);
+    it('reads basic, extended, and hour-only ISO 8601 offsets', () => {
+      expect(iso(parseDateAlias('2025-01-15T10:00:00+03', ref).date)).toBe('2025-01-15T07:00:00.000Z');
+      expect(iso(parseDateAlias('2025-01-15T10:00:00+0300', ref).date)).toBe('2025-01-15T07:00:00.000Z');
+      expect(iso(parseDateAlias('2025-01-15T10:00:00+03:00', ref).date)).toBe('2025-01-15T07:00:00.000Z');
+      expect(iso(parseDateAlias('2025-01-15t10:00:00z', ref).date)).toBe('2025-01-15T10:00:00.000Z');
     });
 
-    it('should parse "2w" (weeks)', () => {
-      const result = parseDateAlias('2w', ref);
-      const diff = Math.abs(ref.getTime() - result.date.getTime());
-      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-      expect(days).toBe(14);
-    });
-  });
-
-  describe('ISO dates', () => {
-    it('should parse ISO date string', () => {
-      const result = parseDateAlias('2025-01-15', ref);
-      expect(result.date.getFullYear()).toBe(2025);
-      expect(result.date.getMonth()).toBe(0);
-      expect(result.date.getDate()).toBe(15);
+    it('month and year arithmetic clamp to the end of a shorter month', () => {
+      const endOfMarch = new Date('2025-03-31T12:00:00Z');
+      expect(iso(parseDateAlias('last_month', endOfMarch).date)).toBe('2025-02-28T00:00:00.000Z');
+      expect(iso(parseDateAlias('1m', endOfMarch).date)).toBe('2025-02-28T00:00:00.000Z');
+      expect(iso(parseDateAlias('1q', new Date('2025-05-31T12:00:00Z')).date)).toBe(
+        '2025-02-28T00:00:00.000Z'
+      );
+      expect(iso(parseDateAlias('1y', new Date('2024-02-29T12:00:00Z')).date)).toBe(
+        '2023-02-28T00:00:00.000Z'
+      );
     });
 
-    it('should parse ISO datetime string', () => {
-      const result = parseDateAlias('2025-01-15T12:30:00Z', ref);
-      expect(result.date.toISOString()).toBe('2025-01-15T12:30:00.000Z');
-    });
-
-    it('should parse quoted ISO datetime string', () => {
-      const result = parseDateAlias('"2025-01-15T12:30:00Z"', ref);
-      expect(result.date.toISOString()).toBe('2025-01-15T12:30:00.000Z');
-    });
-  });
-
-  describe('invalid inputs', () => {
-    it('should throw for invalid alias', () => {
+    it('rejects invalid input', () => {
       expect(() => parseDateAlias('foobar', ref)).toThrow('Invalid date alias');
-    });
-
-    it('should throw for invalid ISO date', () => {
       expect(() => parseDateAlias('2025-99-99', ref)).toThrow();
+      expect(() => parseDateAlias('2025-02-30', ref)).toThrow();
+      expect(() => parseDateAlias('2025-02-30T12:00:00Z', ref)).toThrow();
+      expect(() => parseDateAlias('2025-01-15T25:00', ref)).toThrow();
+      for (const bad of ['d', '7x', '1.5d', '-3d', ' 7 d']) {
+        expect(() => parseDateAlias(bad, ref)).toThrow('Invalid date alias');
+      }
     });
   });
-});
 
-describe('formatDateISO', () => {
-  it('should format date as YYYY-MM-DD', () => {
-    const d = new Date('2025-06-15T12:30:00Z');
-    expect(formatDateISO(d)).toBe('2025-06-15');
-  });
-});
-
-describe('toEndOfDay', () => {
-  it('should set time to 23:59:59.999', () => {
+  it('toEndOfDay closes the UTC day', () => {
     const d = new Date('2025-06-15T08:00:00Z');
-    const eod = toEndOfDay(d);
-    expect(eod.getHours()).toBe(23);
-    expect(eod.getMinutes()).toBe(59);
-    expect(eod.getSeconds()).toBe(59);
-    expect(eod.getMilliseconds()).toBe(999);
+    expect(iso(toEndOfDay(d))).toBe('2025-06-15T23:59:59.999Z');
+    expect(iso(d)).toBe('2025-06-15T08:00:00.000Z');
   });
 
-  it('should not modify the original date', () => {
-    const d = new Date('2025-06-15T08:00:00Z');
-    const origTime = d.getTime();
-    toEndOfDay(d);
-    expect(d.getTime()).toBe(origTime);
+  it('an Automation window boundary uses the parsed UTC day', () => {
+    expect(iso(parseAutomationWindowDate('2025-06-15'))).toBe('2025-06-15T00:00:00.000Z');
+    expect(iso(parseAutomationWindowDate('0099-01-15'))).toBe('0099-01-15T00:00:00.000Z');
+    expect(iso(parseAutomationWindowDate('2025-06-15T23:30:00-08:00'))).toBe(
+      '2025-06-16T00:00:00.000Z'
+    );
+  });
+
+  it('month ranges close on the last millisecond of the UTC month', () => {
+    expect(
+      foldUnprocessedRanges(
+        [{ month: '2025-06-01T00:00:00.000Z', total: 3 }],
+        [{ month: '2025-06-01T00:00:00.000Z', linked: 1 }],
+        false
+      )
+    ).toEqual([
+      {
+        month: '2025-06',
+        window_start: '2025-06-01T00:00:00.000Z',
+        window_end: '2025-06-30T23:59:59.999Z',
+        total_content: 3,
+        processed_content: 1,
+        unprocessed_content: 2,
+        status: 'partial',
+      },
+    ]);
   });
 });

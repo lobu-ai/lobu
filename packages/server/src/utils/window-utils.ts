@@ -307,8 +307,8 @@ export function foldUnprocessedRanges(
 
     const rangeStart = new Date(monthDate);
     const rangeEnd = new Date(monthDate);
-    rangeEnd.setMonth(rangeEnd.getMonth() + 1);
-    rangeEnd.setMilliseconds(-1);
+    rangeEnd.setUTCMonth(rangeEnd.getUTCMonth() + 1);
+    rangeEnd.setUTCMilliseconds(-1);
 
     let status: UnprocessedRange['status'];
     if (linked === 0) {
@@ -336,36 +336,17 @@ export function foldUnprocessedRanges(
  * Resolve an agent-supplied `since`/`until` to a UTC instant.
  *
  * Window boundaries are UTC everywhere in this file (`requestedArrivalWindow`
- * builds its day edge with `Date.UTC`), but `parseDateAlias` normalizes every
- * result to midnight in the SERVER's LOCAL zone — and the two disagree by a
- * full day in BOTH directions:
- *
- *   UTC-5  `new Date('2026-08-06')` is UTC midnight = local Aug 5 19:00, so
- *          `.setHours(0,0,0,0)` lands on Aug 5. The agent asked for the 6th and
- *          would have written the 5th.
- *   UTC+3  the same call lands on local Aug 6 = `2026-08-05T21:00Z`, which a
- *          UTC day boundary then reads as Aug 5. Same wrong day, reached by a
- *          different route.
- *
- * `get_automation.next_action` hands MCP clients exactly such a `YYYY-MM-DD` string,
- * so the server's own suggested call did not round-trip on any non-UTC
- * deployment. A calendar date is a UTC day here, so parse it as one directly and
- * never let the local zone touch it.
- *
- * Aliases (`today`, `7d`, `last_week`) are relative to the server's clock by
- * definition, so those still go through `parseDateAlias`; only their resulting
- * calendar day is reinterpreted as UTC.
- *
- * Caught by the e2e on a west-of-UTC machine (it asked for 2026-08-06 and got the
- * 2026-08-05 window). Invisible to every unit test, which all pass in UTC.
+ * builds its day edge with `Date.UTC`), and so is `parseDateAlias`: a calendar
+ * date or alias names a UTC day on every deployment. The shared parser used to
+ * resolve in the SERVER's LOCAL zone, so content filters could read an explicit
+ * `2026-08-06` as the 5th west of UTC, while this function could resolve
+ * `today` to a window starting tomorrow east of UTC. A datetime is truncated to
+ * its UTC day.
  */
 export function parseAutomationWindowDate(value: string): Date {
-  const trimmed = value.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    return new Date(`${trimmed}T00:00:00.000Z`);
-  }
-  const local = parseDateAlias(trimmed).date;
-  return new Date(Date.UTC(local.getFullYear(), local.getMonth(), local.getDate()));
+  const date = new Date(parseDateAlias(value).date);
+  date.setUTCHours(0, 0, 0, 0);
+  return date;
 }
 
 /**
