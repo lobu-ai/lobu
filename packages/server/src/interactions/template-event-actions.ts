@@ -119,9 +119,9 @@ async function acceptedAction(params: ActionParams): Promise<InvokedTemplateEven
 		interaction.interaction_id !== params.interactionId || !isDeepStrictEqual(interaction.value, value) ||
 		actor.platform !== params.actor.platform || actor.id !== params.actor.platformUserId ||
 		(row.created_by ?? null) !== (params.actor.userId ?? null) ||
-		(interaction.connection_id ?? null) !== (source?.connectionId ?? null) ||
-		(interaction.message_id ?? null) !== (source?.messageId ?? null) ||
-		(!messagePinsDelivery && (interaction.thread_id ?? null) !== (source?.threadId ?? null))) {
+		(interaction.connection_id ?? null) !== (source?.connectionId || null) ||
+		(interaction.message_id ?? null) !== (source?.messageId || null) ||
+		(!messagePinsDelivery && (interaction.thread_id ?? null) !== (source?.threadId || null))) {
 		throw new ToolUserError("This interaction id was already used for a different action, actor, value, or delivery.", 409);
 	}
 	return { created: false, eventId: Number(row.id), eventType: row.semantic_type };

@@ -11,7 +11,7 @@ describe("accepted event action retries", () => {
 	beforeAll(async () => { await initWorkspaceProvider(); });
 	beforeEach(async () => { await cleanupTestDatabase(); });
 
-	async function fixture() {
+	async function fixture(metadata: Record<string, unknown> = {}) {
 		const workspace = await TestWorkspace.create({ name: "Action Replay Test" });
 		const api = await TestApiClient.for({ organizationId: workspace.org.id, userId: workspace.users.owner.id, memberRole: "owner" });
 		await api.entity_schema.createType({
@@ -30,7 +30,7 @@ describe("accepted event action retries", () => {
 			},
 		});
 		const entity = await createTestEntity({ name: "Replay item", entity_type: "replay-item", organization_id: workspace.org.id, created_by: workspace.users.owner.id });
-		const source = await api.knowledge.save({ entity_ids: [entity.id], semantic_type: "replay.opened", content: "Choose", payload_type: "empty" });
+		const source = await api.knowledge.save({ entity_ids: [entity.id], semantic_type: "replay.opened", content: "Choose", payload_type: "empty", metadata });
 		const params: InvokeTemplateEventActionParams = {
 			organizationId: workspace.org.id, sourceEventId: source.id, action: "choose", value: "A", interactionId: "accepted-click", surface: "web",
 			actor: { platform: "lobu", platformUserId: workspace.users.owner.id, userId: workspace.users.owner.id },
@@ -52,15 +52,34 @@ describe("accepted event action retries", () => {
 		expect(rows).toHaveLength(1);
 	});
 
+	it.each(["threadId", "connectionId", "messageId"])("replays an exact retry with an empty-string %s", async (field) => {
+		const source = field === "threadId"
+			? { connectionId: "synthetic-connection", messageId: "synthetic-message", threadId: "" }
+			: { [field]: "" };
+		const f = await fixture(field === "threadId" ? { delivery: [source] } : {});
+		const invocation = {
+			source, surface: field === "threadId" ? "slack" : "web",
+			actor: field === "threadId" ? { platform: "slack", platformUserId: "synthetic-chat-actor" } : f.params.actor,
+		};
+		const accepted = await f.invoke(invocation);
+		expect(accepted.created).toBe(true);
+		await expect(f.invoke(invocation)).resolves.toEqual({ ...accepted, created: false });
+		await f.close();
+		await expect(f.invoke(invocation)).resolves.toEqual({ ...accepted, created: false });
+		const rows = await getTestDb()`SELECT id FROM events WHERE organization_id = ${f.params.organizationId} AND semantic_type = 'replay.chosen'`;
+		expect(rows).toHaveLength(1);
+		expect(Number(rows[0].id)).toBe(accepted.eventId);
+	});
+
 	it.each(["value", "actor", "delivery"])("rejects reuse of an accepted id with a different %s", async (field) => {
 		const f = await fixture();
 		await f.invoke();
 		const changed: Partial<InvokeTemplateEventActionParams> = field === "value" ? { value: "B" }
 			: field === "actor" ? { actor: { platform: "lobu", platformUserId: "synthetic-other-actor" } }
 			: { source: { connectionId: "synthetic-connection", messageId: "synthetic-message" } };
-		await expect(f.invoke(changed)).rejects.toMatchObject({ httpStatus: expect.any(Number) });
+		await expect(f.invoke(changed)).rejects.toMatchObject({ httpStatus: 409 });
 		await f.close();
-		await expect(f.invoke(changed)).rejects.toMatchObject({ httpStatus: expect.any(Number) });
+		await expect(f.invoke(changed)).rejects.toMatchObject({ httpStatus: 409 });
 	});
 
 	it("converges concurrent exact retries to one durable event", async () => {
