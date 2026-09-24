@@ -186,18 +186,6 @@ describe('device-pinned artifact selection', () => {
     expect(run.approval_status).toBe('pending');
   });
 
-  it('rejects changes to an admitted run identity in the database', async () => {
-    const sql = getTestDb();
-    const { orgId, workerId } = await seedOwnerWithDevice('macos');
-    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
-    const connection = await shellConnection(orgId);
-    const queued = await queueShellRun(orgId, Number(connection.id));
-    await expect(sql`UPDATE runs SET connector_artifact_hash = NULL WHERE id = ${queued.runId}`).rejects.toThrow('immutable');
-    await expect(sql`UPDATE runs SET connector_version = '9.9.9' WHERE id = ${queued.runId}`).rejects.toThrow('immutable');
-    await sql`UPDATE runs SET status = 'cancelled' WHERE id = ${queued.runId}`;
-    expect((await runRow(queued.runId)).status).toBe('cancelled');
-  });
-
   it('approves and claims a queued run when the original device still advertises its contract', async () => {
     const { userId, orgId, workerId } = await seedOwnerWithDevice('macos');
     expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
@@ -262,8 +250,6 @@ describe('device-pinned artifact selection', () => {
     // disposable embedded database; the transaction restores it on failure.
     const migration = readFileSync(new URL('../../../../../db/migrations/20260923230000_runs_connector_artifact_hash.sql', import.meta.url), 'utf8').split('-- migrate:down')[0];
     await sql.begin(async (tx) => {
-      await tx`DROP TRIGGER runs_preserve_connector_artifact ON runs`;
-      await tx`DROP FUNCTION preserve_run_connector_artifact()`;
       await tx`ALTER TABLE runs DROP COLUMN connector_artifact_hash`;
       await tx.unsafe(migration);
       await tx.unsafe(migration);

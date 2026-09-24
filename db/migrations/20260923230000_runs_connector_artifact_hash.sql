@@ -28,27 +28,5 @@ WHERE r.status = 'pending'
     LIMIT 1
   );
 
-CREATE OR REPLACE FUNCTION preserve_run_connector_artifact() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.connector_artifact_hash IS DISTINCT FROM OLD.connector_artifact_hash
-    OR (OLD.connector_artifact_hash IS NOT NULL AND (
-      NEW.connector_key IS DISTINCT FROM OLD.connector_key
-      OR NEW.connector_version IS DISTINCT FROM OLD.connector_version
-      OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
-    )) THEN
-    RAISE EXCEPTION 'A run''s admitted connector artifact is immutable';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS runs_preserve_connector_artifact ON runs;
-CREATE TRIGGER runs_preserve_connector_artifact
-BEFORE UPDATE OF connector_artifact_hash, connector_key, connector_version, organization_id ON runs
-FOR EACH ROW EXECUTE FUNCTION preserve_run_connector_artifact();
-
 -- migrate:down
-DROP TRIGGER IF EXISTS runs_preserve_connector_artifact ON runs;
-DROP FUNCTION IF EXISTS preserve_run_connector_artifact();
 ALTER TABLE runs DROP COLUMN IF EXISTS connector_artifact_hash;
