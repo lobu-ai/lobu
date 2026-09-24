@@ -1,10 +1,7 @@
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
-
-export const input = {
-  type: "object",
-  properties: { summary: { type: "string" } },
-  required: ["summary"],
-} as const;
+import type {
+  AutomationScriptContext,
+  ReactionClient,
+} from "@lobu/connector-sdk";
 
 interface PollResult {
   option: string;
@@ -125,21 +122,36 @@ function pollState(value: unknown): PollState | null {
 }
 
 async function readTrigger(
-  ctx: ReactionContext,
+  ctx: AutomationScriptContext,
   client: ReactionClient
 ): Promise<TriggerEvent | null> {
+  // This is an event handler: read the exact durable activation, not a time
+  // window that may contain neighboring votes or exclude a delayed event.
+  const signals = ctx.trigger_signals
+    .map(objectValue)
+    .filter(
+      (signal) =>
+        signal.kind === "event" &&
+        signal.source === "workspace" &&
+        signal.event_type === "poll_vote_cast"
+    );
+  if (signals.length !== 1) throw new Error("Expected one queued poll vote");
+  const triggerId = positiveInteger(signals[0].event_id);
+  if (triggerId == null) throw new Error("Invalid queued poll vote id");
   const page = objectValue(
     await client.knowledge.read({
-      automation_id: ctx.window.automation_id,
-      run_id: ctx.window.run_id,
-      limit: 10,
+      content_ids: [triggerId],
+      limit: 1,
     })
   );
   const content = Array.isArray(page.content) ? page.content : [];
   const matches = content.filter(
-    (item) => objectValue(item).semantic_type === "poll_vote_cast"
+    (item) =>
+      objectValue(item).semantic_type === "poll_vote_cast" &&
+      positiveInteger(objectValue(item).id) === triggerId
   );
-  if (matches.length !== 1) return null;
+  if (matches.length !== 1)
+    throw new Error("Queued poll vote was not readable");
   const row = objectValue(matches[0]);
   const id = positiveInteger(row.id);
   if (id == null) return null;
@@ -201,7 +213,7 @@ async function currentHead(
 }
 
 async function saveSuccessor(params: {
-  ctx: ReactionContext;
+  ctx: AutomationScriptContext;
   client: ReactionClient;
   entityId: number;
   headId: number;
@@ -274,7 +286,7 @@ async function currentResponseEvent(
 }
 
 async function upsertResponseEvent(params: {
-  ctx: ReactionContext;
+  ctx: AutomationScriptContext;
   pollEntityId: number;
   platform: string;
   actorId: string;
@@ -359,7 +371,7 @@ async function resultsForPoll(
 }
 
 export default async function reducePollVote(
-  ctx: ReactionContext,
+  ctx: AutomationScriptContext,
   client: ReactionClient
 ): Promise<void> {
   const trigger = await readTrigger(ctx, client);
