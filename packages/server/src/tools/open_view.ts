@@ -133,13 +133,13 @@ async function resolveEventViewPath(
 	env: Env,
 	ctx: ToolContext
 ): Promise<string> {
-	const read = await getContent({ content_ids: [eventId], limit: 100 }, env, ctx);
-	const rows = read.content as Array<{
-		semantic_type: string;
-		entity_ids: number[];
-		superseded_by?: number | null;
-	}>;
-	const current = rows.find((row) => row.superseded_by == null) ?? null;
+	type Row = { semantic_type: string; entity_ids: number[]; superseded_by?: number | null };
+	let current: Row | null = null;
+	for (let offset = 0; !current; offset += 100) {
+		const read = await getContent({ content_ids: [eventId], limit: 100, offset }, env, ctx);
+		current = (read.content as Row[]).find((row) => row.superseded_by == null) ?? null;
+		if (!read.page?.has_more) break;
+	}
 	if (!current) {
 		throw new ToolUserError(`Event ${eventId} not found`, 404);
 	}

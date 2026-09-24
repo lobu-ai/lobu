@@ -516,6 +516,23 @@ describe('views resources + open_view + invoke_view_action', () => {
 			);
 		});
 
+		it('finds the current version past the first page of a long lineage', async () => {
+			await setAttachedView('won', eventAttach);
+			const sql = getTestDb();
+			const versions = [];
+			for (let i = 0; i < 100; i++) versions.push(await wonEvent({ semantic_type: 'deal.open' }));
+			versions.push(await wonEvent({}));
+			for (let i = 1; i < versions.length; i++) {
+				await sql`UPDATE events SET superseded_by = ${versions[i].id} WHERE id = ${versions[i - 1].id}`;
+				await sql`UPDATE events SET supersedes_event_id = ${versions[i - 1].id} WHERE id = ${versions[i].id}`;
+			}
+			for (const entry of [versions[0], versions[100]]) {
+				expect(await openPath({ key: 'won', scope: { event: entry.id } })).toBe(
+					`/views-org/events/${entry.id}/-/views/won`
+				);
+			}
+		});
+
 		it('refuses an event of another kind, or linking no entity of the type', async () => {
 			await setAttachedView('won', eventAttach);
 			const lost = await wonEvent({ semantic_type: 'deal.lost' });
