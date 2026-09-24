@@ -823,7 +823,7 @@ export default async (_ctx, client) => {
 			"Enable a reviewed catalog connector with connector_id, or install a connector definition from exactly one explicit source (source_url | source_uri | source_code | mcp_url). Organization-local: if the key is already installed for this org the active definition is updated in place (prior versions stay retained for rollbackConnectorVersion); the global catalog is never modified. To change an existing connector's source, prefer validateConnectorSource then updateConnectorSource.",
 		access: "admin",
 		signature:
-			"connections.installConnector(input: { connector_id?: string; source_url?: string; source_uri?: string; source_code?: string; compiled?: boolean; mcp_url?: string; auth_values?: Record<string, string> }): Promise<unknown>",
+			"connections.installConnector(input: { connector_id?: string; source_url?: string; source_uri?: string; source_code?: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string>; compiled?: boolean; mcp_url?: string; auth_values?: Record<string, string> }): Promise<unknown>",
 		example:
 			"await client.connections.installConnector({ connector_id: 'google.gmail' });",
 	},
@@ -836,7 +836,7 @@ export default async (_ctx, client) => {
 	},
 	"connections.getConnectorSource": {
 		summary:
-			"Read the installed source for a connector in this organization (organization-local): the active (or a specific retained) version's source_code/source_path, its code hash, and the retained version history usable with rollbackConnectorVersion.",
+			"Read the installed source for a connector in this organization (organization-local): the active (or a specific retained) version's source_code/source_path, source_files and exact dependencies (source_complete indicates retained author files), its code hash, and the retained version history usable with rollbackConnectorVersion.",
 		access: "admin",
 		signature:
 			"connections.getConnectorSource(input: { connector_key: string; version?: string }): Promise<unknown>",
@@ -848,7 +848,7 @@ export default async (_ctx, client) => {
 			"Compile connector source and return extracted metadata or compiler diagnostics WITHOUT persisting anything — the safe preflight before updateConnectorSource. Returns { valid: false, diagnostics } on compile/metadata failure; on success reports the extracted key/name/version, whether that key is installed in this org, and whether the version collides with a retained version.",
 		access: "admin",
 		signature:
-			"connections.validateConnectorSource(input: { source_code: string; compiled?: boolean }): Promise<unknown>",
+			"connections.validateConnectorSource(input: { source_code: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string>; compiled?: boolean }): Promise<unknown>",
 		example:
 			"const check = await client.connections.validateConnectorSource({ source_code });",
 	},
@@ -857,7 +857,7 @@ export default async (_ctx, client) => {
 			"Replace an installed connector's source (organization-local; never the global catalog). The source's definition.key must equal connector_key and definition.version must be bumped when the code changes — the prior version stays retained for rollbackConnectorVersion. Existing connections, feeds, and credentials stay attached. Pass expected_version for an optimistic concurrency check.",
 		access: "admin",
 		signature:
-			"connections.updateConnectorSource(input: { connector_key: string; source_code: string; compiled?: boolean; expected_version?: string }): Promise<unknown>",
+			"connections.updateConnectorSource(input: { connector_key: string; source_code: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string>; compiled?: boolean; expected_version?: string }): Promise<unknown>",
 		example:
 			"await client.connections.updateConnectorSource({ connector_key: 'google.gmail', source_code, expected_version: '1.4.2' });",
 	},
@@ -986,6 +986,14 @@ export default async (_ctx, client) => {
 		example:
 			"await client.feeds.trigger({ feed_id: 42 });\n// Validate without writing anything; read the preview via feeds.get once the run completes:\nawait client.feeds.trigger({ feed_id: 42, dry_run: true });",
 	},
+	"feeds.recollect": {
+		summary:
+			"Re-collect a feed from scratch: clear its sync cursor so the next sync starts over. Collected events are kept (re-collected items dedupe on origin_id); status, schedule and failure state are unchanged, and the source acknowledgment (source_ack) is preserved. Refused while the feed has an active sync run. Does not start a sync; call feeds.trigger afterwards or wait for the schedule.",
+		access: "admin",
+		signature: "feeds.recollect(input: { feed_id: number }): Promise<unknown>",
+		example:
+			"await client.feeds.recollect({ feed_id: 42 });\nawait client.feeds.trigger({ feed_id: 42 });",
+	},
 
 	// authProfiles
 	"authProfiles.manage": {
@@ -1108,7 +1116,7 @@ export default async (_ctx, client) => {
 			"Store a view: compile source_code server-side and upsert by key. Params: { key, source_code, name?, description?, attach?, params?, actions?, last_writer? }. attach says where the view appears (type/entity/workspace entries); params are declared typed URL params; actions map names to the event kind each emits. Same source is a no-op (written:false).",
 		access: "admin",
 		signature:
-			"views.set(input: { key: string; source_code: string; name?: string; description?: string; attach?: object[]; params?: object; actions?: object }): Promise<unknown>",
+			"views.set(input: { key: string; source_code: string; compiled_code?: string; source_files?: { entrypoint: string; files: Record<string, string> }; dependencies?: Record<string, string>; name?: string; description?: string; attach?: object[]; params?: object; actions?: object }): Promise<unknown>",
 		example:
 			"await client.views.set({ key: 'pipeline', source_code: 'export default function Pipeline() { return null; }', attach: [{ type: 'deal', placement: 'tab' }] });",
 	},

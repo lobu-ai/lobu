@@ -10,8 +10,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
-  mkdtempSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -49,6 +49,12 @@ function mkView(
   return join(dir, entry);
 }
 
+function bundleFixture(entry: string) {
+  const root = tempDirs.find((dir) => entry.startsWith(`${dir}/`));
+  if (!root) throw new Error("Unknown fixture root");
+  return bundleViewFromFile(entry, root);
+}
+
 const PIPELINE_SOURCE = `import { defineView, sql, useAction, useParams, useQuery } from "@lobu/views";
 
 export const view = defineView({
@@ -74,7 +80,7 @@ export default function Pipeline() {
 describe("bundleViewFromFile", () => {
   test("extracts metadata and bundles react + bridge with no SDK chain", async () => {
     const entry = mkView({ "views/deal/pipeline.tsx": PIPELINE_SOURCE });
-    const bundled = await bundleViewFromFile(entry);
+    const bundled = await bundleFixture(entry);
     expect(bundled.metadata.key).toBe("pipeline");
     expect(bundled.metadata.attach).toEqual([{ type: "deal" }]);
     expect(bundled.metadata.params).toEqual({
@@ -103,13 +109,20 @@ import { Board } from "../_lib/board";
 export const view = defineView({ key: "board", attach: [{ type: "deal" }] });
 export default function BoardView() { return Board({}); }
 `,
-        "views/_lib/board.tsx": `export function Board(_props: unknown) { return null; }
+        "views/_lib/board.tsx": `export function Board(_props: unknown) { return <div>Board</div>; }
 `,
       },
       "views/deal/board.tsx"
     );
-    const bundled = await bundleViewFromFile(entry);
+    const bundled = await bundleFixture(entry);
     expect(bundled.metadata.key).toBe("board");
+    expect(bundled.sourceFiles.entrypoint).toBe("views/deal/board.tsx");
+    expect(Object.keys(bundled.sourceFiles.files).sort()).toEqual([
+      "views/_lib/board.tsx",
+      "views/deal/board.tsx",
+    ]);
+    expect(bundled.dependencies["@lobu/views"]).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(bundled.dependencies.react).toMatch(/^\d+\.\d+\.\d+$/);
     expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
   });
 
@@ -121,7 +134,7 @@ export default function BoardView() { return Board({}); }
       },
       "views/deal/nope.tsx"
     );
-    await expect(bundleViewFromFile(entry)).rejects.toThrow(
+    await expect(bundleFixture(entry)).rejects.toThrow(
       "must export const view"
     );
   });
@@ -135,7 +148,7 @@ export const view = defineView({ key: "nodefault", attach: [] });
       },
       "views/deal/nodefault.tsx"
     );
-    await expect(bundleViewFromFile(entry)).rejects.toThrow(
+    await expect(bundleFixture(entry)).rejects.toThrow(
       "default-export component"
     );
   });
@@ -150,7 +163,7 @@ export default function Bad() { return null; }
       },
       "views/deal/bad.tsx"
     );
-    await expect(bundleViewFromFile(entry)).rejects.toThrow("must match");
+    await expect(bundleFixture(entry)).rejects.toThrow("must match");
   });
 });
 

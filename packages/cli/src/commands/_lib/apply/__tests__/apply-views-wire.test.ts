@@ -17,6 +17,10 @@ import {
 } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type {
+  SourceFiles,
+  SourceDependencies,
+} from "@lobu/core/contracts/tools/source-files";
 import * as context from "../../../../internal/context.js";
 import * as credentials from "../../../../internal/credentials.js";
 import { applyCommand } from "../apply-cmd.js";
@@ -223,7 +227,11 @@ describe("apply views over the wire", () => {
         params: { by: { type: "string", default: "owner" } },
         actions: { markWon: { emits: "deal.won" } },
       },
-      firstSets[0]?.body.compiled_code as string
+      firstSets[0]?.body.compiled_code as string,
+      {
+        sourceFiles: firstSets[0]?.body.source_files as SourceFiles,
+        dependencies: firstSets[0]?.body.dependencies as SourceDependencies,
+      }
     );
     store.views[0] = {
       ...(store.views[0] as Record<string, unknown>),

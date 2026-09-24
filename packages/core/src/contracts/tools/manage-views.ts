@@ -1,5 +1,9 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
+import {
+  SourceDependenciesSchema,
+  SourceFilesSchema,
+} from "./source-files-schema";
 
 // ============================================
 // Lobu views: React modules rendered in the sandboxed frame.
@@ -81,7 +85,7 @@ export const ViewRowSchema = Type.Object({
   description: Type.String(),
   content_hash: Type.String({
     description:
-      "First 16 hex of sha256(source, declared metadata, compiled artifact digest). Same executable artifact and same metadata means no write.",
+      "First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.",
   }),
   attach: Type.Array(ViewAttachmentSchema),
   params: Type.Record(Type.String(), ViewParamDeclSchema),
@@ -129,6 +133,8 @@ export const SetViewAction = Type.Object({
         "[set] CLI-bundled browser bundle for the source (relative files and npm deps resolved where node_modules exists). When present the server stores it after the size check instead of compiling; when absent the server compiles source_code itself (the chat-agent path).",
     })
   ),
+  source_files: Type.Optional(SourceFilesSchema),
+  dependencies: Type.Optional(SourceDependenciesSchema),
   attach: Type.Optional(
     Type.Array(ViewAttachmentSchema, {
       description:
@@ -202,13 +208,16 @@ export const ManageViewsResultSchema = Type.Union([
     view: ViewRowSchema,
     written: Type.Boolean({
       description:
-        "False when the same executable artifact was already stored (no write).",
+        "False when the same source, retained files, dependencies, metadata and executable artifact were already stored (no write).",
     }),
   }),
   Type.Object({
     action: Type.Literal("get"),
     view: ViewRowSchema,
     source_code: Type.String(),
+    source_files: Type.Union([SourceFilesSchema, Type.Null()]),
+    dependencies: Type.Union([SourceDependenciesSchema, Type.Null()]),
+    source_complete: Type.Boolean(),
   }),
   Type.Object({
     action: Type.Literal("list"),

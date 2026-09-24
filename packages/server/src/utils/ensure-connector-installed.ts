@@ -218,27 +218,35 @@ async function recompileStoredConnectorVersion(
 ): Promise<string | null> {
   const sql = getDb();
   const rows = await sql`
-    SELECT source_code, version FROM connector_versions
+    SELECT source_code, compiled_code, source_complete, version FROM connector_versions
     WHERE id = ${rowId}
     LIMIT 1
   `;
-  const row = rows[0] as { source_code: string | null; version: string } | undefined;
-  const sourceCode = row?.source_code ?? null;
+  const row = rows[0] as { source_code: string | null; compiled_code: string | null; source_complete: boolean | null; version: string } | undefined;
+  // Retained editable sources can import project files/npm packages unavailable
+  // here. Normalize their self-contained artifact, as precompiled CLI uploads
+  // did before source and artifact were separated; keep author bytes untouched.
+  const sourceCode = row?.source_complete && row.compiled_code
+    ? row.compiled_code : row?.source_code ?? null;
   if (!row || !sourceCode) return null;
 
-  const { compiledCode, compiledCodeHash } = await compileConnectorSource(sourceCode);
+  const { compiledCode, compiledCodeHash } = await compileConnectorSource(sourceCode, !!row.source_complete);
   // By primary key, never (connector_key, version): that pair no longer
   // identifies one row — an org-scoped copy may share it with the shared row,
   // and the fresh artifact belongs only to the row whose source produced it.
   // Each row converges independently across replicas (Postgres-mediated),
   // exactly as the single shared row did before org scoping.
-  await sql`
+  const updated = await sql`
     UPDATE connector_versions
     SET compiled_code = ${compiledCode},
         compiled_code_hash = ${compiledCodeHash},
         compile_config_hash = ${COMPILE_CONFIG_HASH}
     WHERE id = ${rowId}
+      AND compiled_code IS NOT DISTINCT FROM ${row.compiled_code}
+      AND source_code IS NOT DISTINCT FROM ${row.source_code}
+    RETURNING id
   `;
+  if (updated.length === 0) throw new Error('Connector changed during compilation; retry the operation');
   logger.info(
     { connector_key: connectorKey, version: row.version, row_id: rowId },
     'Recompiled stale connector artifact (compile configuration changed)'

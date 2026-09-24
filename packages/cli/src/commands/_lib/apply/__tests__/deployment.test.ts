@@ -95,6 +95,38 @@ describe("computeManifestHash", () => {
 });
 
 describe("deployment baseline encoding", () => {
+  test("large compiled connectors are stored as version pins, without bundle bytes", () => {
+    const definitions = ["fixture-one", "fixture-two"].map((key) => ({
+      key,
+      sourceFile: `${key}.connector.ts`,
+      sourceCode: "export default class Fixture {}",
+      sourceRoot: "/project",
+      compiledArtifact: {
+        compiledCode: "x".repeat(600_000),
+        sourceFiles: {
+          entrypoint: "source.ts",
+          files: { "source.ts": "export default class Fixture {}" },
+        },
+        dependencies: {},
+      },
+    }));
+    const pins = { "fixture-one": "1.0.0", "fixture-two": "2.0.0" };
+    const manifest = buildDeploymentManifest(
+      baseState({
+        connectors: { definitions, authProfiles: [], connections: [] },
+      }),
+      pins
+    );
+    const encoded = JSON.stringify(manifest);
+    // The server's deployment route rejects snapshots above 1 MB.
+    expect(Buffer.byteLength(encoded)).toBeLessThan(1_000_000);
+    expect(JSON.parse(encoded).state.connectors.definitions).toEqual(
+      definitions.map(({ key, sourceFile }) => ({ key, sourceFile }))
+    );
+    expect(manifest.connector_versions).toEqual(pins);
+    expect(definitions[0]?.compiledArtifact.compiledCode.length).toBe(600_000);
+  });
+
   test("distinguishes absent attribution from a recorded empty baseline", () => {
     const absent = buildDeploymentManifest(baseState(), {});
     expect(toBaseline(loadBaselineFromManifest(absent)).recorded).toBe(false);

@@ -122,7 +122,11 @@ describe("view desired state", () => {
           params: { by: { type: "string", default: "owner" } },
           actions: { markWon: { emits: "deal.won" } },
         },
-        view?.compiledCode ?? ""
+        view?.compiledCode ?? "",
+        view && {
+          sourceFiles: view.sourceFiles,
+          dependencies: view.dependencies,
+        }
       )
     );
   });
@@ -202,7 +206,11 @@ export default function Board() { return LABEL; }
           params: {},
           actions: {},
         },
-        firstView?.compiledCode ?? ""
+        firstView?.compiledCode ?? "",
+        firstView && {
+          sourceFiles: firstView.sourceFiles,
+          dependencies: firstView.dependencies,
+        }
       )
     );
     // Seed the remote row from the first load (as the server stored it).

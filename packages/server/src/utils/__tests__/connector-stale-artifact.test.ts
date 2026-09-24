@@ -55,9 +55,10 @@ function fakeSql(strings: TemplateStringsArray, ...params: unknown[]): Promise<u
     return Promise.resolve(
       storedSourceCode === null
         ? []
-        : [{ id: 1, source_code: storedSourceCode, version: '1.0.0' }]
+        : [{ id: 1, source_code: storedSourceCode, compiled_code: STALE_BUNDLE, source_complete: null, version: '1.0.0' }]
     );
   }
+  if (text.startsWith("UPDATE connector_versions")) return Promise.resolve([{ id: 1 }]);
   return Promise.resolve([]);
 }
 

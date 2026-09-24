@@ -15,6 +15,13 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
+import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
+import { resolveConnectorCode, type StoredConnectorVersion } from '../../../utils/ensure-connector-installed';
+import { extractConnectorMetadata } from '../../../utils/connector-compiler';
 import type { Env } from '../../../index';
 import { initWorkspaceProvider } from '../../../workspace';
 import { manageConnections } from '../../../tools/admin/manage_connections';
@@ -59,6 +66,58 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
     orgId = seeded.org.id;
   });
 
+  it('retains a CLI multi-file artifact through normalization, MCP read-back and version guards', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lobu-retained-source-'));
+    const key = 'zz.retainedfiles';
+    const source = `import { marker } from './value'; ${probeSource('1.0.0', 'CLI').replaceAll(KEY, key).replace("return { marker: 'CLI' }", "return { success: true, output: { marker } }")}`;
+    try {
+      await mkdir(join(root, 'connectors'));
+      await writeFile(join(root, 'connectors/index.ts'), source);
+      await writeFile(join(root, 'connectors/value.ts'), 'export const marker = "from imported file";');
+      const artifact = await createIsolateConnectorCompiler().compileConnectorArtifactFromFile(join(root, 'connectors/index.ts'), root);
+      const payload = { source_code: source, compiled_code: artifact.compiledCode, source_files: artifact.sourceFiles, dependencies: artifact.dependencies };
+      const installed = await manageConnections({ action: 'install_connector', ...payload }, TEST_ENV, ctx);
+      expect(installed).toMatchObject({ connector_key: key });
+      const get = () => manageConnections({ action: 'get_connector_source', connector_key: key }, TEST_ENV, ctx);
+      expect(await get()).toMatchObject({ source_complete: true, source_code: source, source_files: artifact.sourceFiles, dependencies: {} });
+      const sql = getTestDb();
+      const assertImmutableArtifact = async () => {
+        const before = await sql`SELECT compiled_code, compiled_code_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+        const rejected = await manageConnections({ action: 'update_connector_source', connector_key: key, ...payload, compiled_code: artifact.compiledCode.replace('from imported file', 'changed output') }, TEST_ENV, ctx);
+        expect(rejected).toMatchObject({ error: expect.stringContaining('Bump the version') });
+        const after = await sql`SELECT compiled_code, compiled_code_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+        expect(after).toEqual(before);
+        const identical = await manageConnections({ action: 'update_connector_source', connector_key: key, ...payload }, TEST_ENV, ctx);
+        expect(identical).toMatchObject({ connector_key: key, version: '1.0.0' });
+      };
+      await assertImmutableArtifact();
+      // Remove the author's filesystem before the runtime normalizes a CLI upload.
+      await rm(root, { recursive: true, force: true });
+      await sql`UPDATE connector_versions SET compile_config_hash = NULL WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+      const rows = await sql`SELECT id, organization_id, version, compiled_code, compile_config_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+      const code = await resolveConnectorCode(key, rows[0] as unknown as StoredConnectorVersion);
+      await assertImmutableArtifact();
+      expect((await extractConnectorMetadata(code)).key).toBe(key);
+      expect(code).toContain('from imported file');
+      const executed = await new IsolateExecutor({ timeoutMs: 10_000 }).execute(code, {
+        mode: 'action', actionKey: 'probe', actionInput: {}, config: {}, credentials: null, sessionState: null, env: {},
+      });
+      expect(executed).toEqual({ mode: 'action', output: { marker: 'from imported file' } });
+      expect(await get()).toMatchObject({ source_complete: true, source_files: artifact.sourceFiles });
+      const edited = { ...artifact.sourceFiles, files: { ...artifact.sourceFiles.files, 'connectors/value.ts': '// changed comment\nexport const marker = "from imported file";' } };
+      const rejected = await manageConnections({ action: 'update_connector_source', connector_key: key, ...payload, source_files: edited }, TEST_ENV, ctx);
+      expect(rejected).toMatchObject({ error: expect.stringContaining('Bump the version') });
+      const invalid = await manageConnections({ action: 'install_connector', ...payload, source_files: { ...edited, entrypoint: '../escape.ts' } }, TEST_ENV, ctx);
+      expect(invalid).toMatchObject({ error: expect.stringContaining('portable project file') });
+      expect(await get()).toMatchObject({ source_files: artifact.sourceFiles });
+      // Replacing with an explicitly compiled legacy upload clears provenance.
+      await manageConnections({ action: 'install_connector', source_code: artifact.compiledCode, compiled: true }, TEST_ENV, ctx);
+      expect(await get()).toMatchObject({ source_complete: false, source_files: null, dependencies: null });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('runs the full round trip: install → get → validate → update → guards → rollback', async () => {
     const sql = getTestDb();
 
@@ -84,6 +143,9 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
     expect(got.active_version).toBe('1.0.0');
     expect(got.version).toBe('1.0.0');
     expect(got.source_code).toContain("marker: 'V1'");
+    expect(got.source_complete).toBe(true);
+    expect(got.source_files).toEqual({ entrypoint: "source.ts", files: { "source.ts": probeSource("1.0.0", "V1") } });
+    expect(got.dependencies).toEqual({});
     expect(got.versions).toEqual([
       expect.objectContaining({
         version: '1.0.0',
@@ -348,6 +410,8 @@ export default class ActionProbeConnector {
     );
     if (!('active_version' in finalGet))
       throw new Error('unexpected result shape');
+    expect(finalGet.source_files).toEqual(got.source_files);
+    expect(finalGet.source_complete).toBe(true);
     expect(finalGet.active_version).toBe('1.0.0');
     expect(finalGet.source_code).toContain("marker: 'V1'");
     expect(finalGet.versions.map((v) => v.version).sort()).toEqual([
@@ -415,7 +479,9 @@ export default class ActionProbeConnector {
     }
   }, 120_000);
 
-  it('drops per-feed connector cursors on every active-version change, keeping source acknowledgments', async () => {
+  it('leaves feed checkpoints untouched when the active version changes', async () => {
+    // The connector owns its checkpoint shape (docs/connector-authoring.md):
+    // a version change runs different code, it does not reset feed state.
     const sql = getTestDb();
     const KEY2 = 'zz.checkpointprobe';
     const src = (version: string, marker: string) =>
@@ -428,115 +494,27 @@ export default class ActionProbeConnector {
     );
     expect('error' in installed ? installed.error : undefined).toBeUndefined();
 
-    // A connection + feed of this connector carrying a committed checkpoint.
     const [conn] = await sql`
       INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
       VALUES (${orgId}, ${KEY2}, 'Checkpoint Probe Conn', 'zz-checkpoint-probe-conn', 'active')
       RETURNING id
     `;
+    const checkpoint = { cursor: 'old-cursor', source_ack: { records: [{ id: 'delivered-1' }] } };
     const [feed] = await sql`
       INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${conn.id}, 'items', 'active', ${sql.json({ cursor: 'old-cursor' })})
+      VALUES (${orgId}, ${conn.id}, 'items', 'active', ${sql.json(checkpoint)})
       RETURNING id
     `;
 
-    // Same-version refresh with identical code: checkpoint must survive.
-    const refresh = await manageConnections(
-      { action: 'update_connector_source', connector_key: KEY2, source_code: src('1.0.0', 'C1') },
-      TEST_ENV,
-      ctx,
-    );
-    expect('error' in refresh ? refresh.error : undefined).toBeUndefined();
-    const [kept] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(kept.checkpoint).toEqual({ cursor: 'old-cursor' });
-
-    // Negative controls. Clearing too widely is worse than the bug it fixes:
-    // a reset cursor re-collects a feed from the beginning, so the UPDATE must
-    // reach ONLY feeds joined through a connection of THIS connector in THIS
-    // org. Two neighbours that must survive the bump untouched:
-    //   (a) another connector's feed in the SAME org
-    //   (b) the SAME connector's feed in a DIFFERENT org
-    const [otherConnectorConn] = await sql`
-      INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
-      VALUES (${orgId}, ${KEY}, 'Other Connector Conn', 'zz-other-connector-conn', 'active')
-      RETURNING id
-    `;
-    const [otherConnectorFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${otherConnectorConn.id}, 'items', 'active', ${sql.json({ cursor: 'other-connector' })})
-      RETURNING id
-    `;
-
-    const otherOrg = await seedOwnerContext({
-      orgName: 'Checkpoint Scope Neighbour Org',
-      userName: 'Checkpoint Scope Neighbour User',
-    });
-    const [otherOrgConn] = await sql`
-      INSERT INTO connections (organization_id, connector_key, display_name, slug, status)
-      VALUES (${otherOrg.org.id}, ${KEY2}, 'Neighbour Org Conn', 'zz-neighbour-org-conn', 'active')
-      RETURNING id
-    `;
-    const [otherOrgFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${otherOrg.org.id}, ${otherOrgConn.id}, 'items', 'active', ${sql.json({ cursor: 'other-org' })})
-      RETURNING id
-    `;
-
-    // A feed of THIS connector whose checkpoint also carries the server-owned
-    // `source_ack`. The cursor is connector state and must go; the ack records
-    // what this feed already acknowledged back to the source, so dropping it
-    // would re-acknowledge delivered items — every other checkpoint write
-    // preserves it, and so must this one.
-    const SOURCE_ACK = {
-      binding_id: 'binding-1',
-      epoch: 'epoch-1',
-      records: [{ id: 'delivered-1', revision: 3 }],
-    };
-    const [ackFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${conn.id}, 'acked', 'active',
-        ${sql.json({ cursor: 'old-cursor', source_ack: SOURCE_ACK })})
-      RETURNING id
-    `;
-    // A feed holding ONLY an ack has no cursor to invalidate: it must come
-    // through byte-identical rather than being rewritten to the same value.
-    const [ackOnlyFeed] = await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, checkpoint)
-      VALUES (${orgId}, ${conn.id}, 'ack-only', 'active', ${sql.json({ source_ack: SOURCE_ACK })})
-      RETURNING id
-    `;
-    const [{ updated_at: ackOnlyUpdatedAt }] =
-      await sql`SELECT updated_at FROM feeds WHERE id = ${ackOnlyFeed.id}`;
-
-    // Version bump: the old cursor must not gate what the new code collects.
     const bumped = await manageConnections(
       { action: 'update_connector_source', connector_key: KEY2, source_code: src('1.0.1', 'C2') },
       TEST_ENV,
       ctx,
     );
     expect('error' in bumped ? bumped.error : undefined).toBeUndefined();
-    const [cleared] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(cleared.checkpoint).toBeNull();
+    const [afterBump] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
+    expect(afterBump.checkpoint).toEqual(checkpoint);
 
-    const [untouchedConnector] = await sql`SELECT checkpoint FROM feeds WHERE id = ${otherConnectorFeed.id}`;
-    expect(untouchedConnector.checkpoint).toEqual({ cursor: 'other-connector' });
-    const [untouchedOrg] = await sql`SELECT checkpoint FROM feeds WHERE id = ${otherOrgFeed.id}`;
-    expect(untouchedOrg.checkpoint).toEqual({ cursor: 'other-org' });
-
-    const [ackKept] = await sql`SELECT checkpoint FROM feeds WHERE id = ${ackFeed.id}`;
-    expect(ackKept.checkpoint).toEqual({ source_ack: SOURCE_ACK });
-    const [ackOnly] = await sql`
-      SELECT checkpoint, updated_at FROM feeds WHERE id = ${ackOnlyFeed.id}
-    `;
-    expect(ackOnly.checkpoint).toEqual({ source_ack: SOURCE_ACK });
-    expect(ackOnly.updated_at).toEqual(ackOnlyUpdatedAt);
-
-    // A rollback is an active-version change too: the cursor 1.0.1 wrote is
-    // just as foreign to 1.0.0 as the reverse, so it goes the same way.
-    await sql`
-      UPDATE feeds SET checkpoint = ${sql.json({ cursor: 'written-by-1.0.1' })}
-      WHERE id = ${feed.id}
-    `;
     const rolledBack = await manageConnections(
       { action: 'rollback_connector_version', connector_key: KEY2, version: '1.0.0' },
       TEST_ENV,
@@ -544,9 +522,7 @@ export default class ActionProbeConnector {
     );
     expect('error' in rolledBack ? rolledBack.error : undefined).toBeUndefined();
     const [afterRollback] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(afterRollback.checkpoint).toBeNull();
-    const [ackAfterRollback] = await sql`SELECT checkpoint FROM feeds WHERE id = ${ackFeed.id}`;
-    expect(ackAfterRollback.checkpoint).toEqual({ source_ack: SOURCE_ACK });
+    expect(afterRollback.checkpoint).toEqual(checkpoint);
   }, 120_000);
 
   it('refuses to update a connector that is not installed', async () => {

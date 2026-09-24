@@ -201,7 +201,7 @@ describe('install_connector — source for a built-in key', () => {
     expect(await resolveConnectorCodeForKey('rss', org.id)).toContain('UPLOADED-SOURCE');
   });
 
-  it('in cloud, updating a legacy org version selects the image and resets its cursor once', async () => {
+  it('in cloud, updating a legacy org version selects the image and keeps its cursor', async () => {
     delete process.env.LOBU_CLOUD_MODE;
     const { org, ctx } = await seedOwnerContext({ orgName: 'Legacy Source Org', userName: 'Legacy Source User' });
     const installed = await manageConnections(
@@ -241,23 +241,8 @@ describe('install_connector — source for a built-in key', () => {
       { version: imageVersion, name: imageName, org_scoped: false, has_code: false },
     ]);
     expect(await orgScopedRowCount(org.id)).toBe(1);
-    const [reset] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(reset.checkpoint).toBeNull();
-
-    await sql`UPDATE feeds SET checkpoint = '{"cursor":"image-cursor"}'::jsonb WHERE id = ${feed.id}`;
-    const refreshed = await manageConnections(
-      {
-        action: 'update_connector_source',
-        connector_key: 'rss',
-        source_code: uploadedSource(),
-        expected_version: imageVersion,
-      },
-      TEST_ENV,
-      ctx
-    );
-    expect('error' in refreshed ? refreshed.error : undefined).toBeUndefined();
     const [kept] = await sql`SELECT checkpoint FROM feeds WHERE id = ${feed.id}`;
-    expect(kept.checkpoint).toEqual({ cursor: 'image-cursor' });
+    expect(kept.checkpoint).toEqual({ cursor: 'old-cursor' });
   });
 
   it('in cloud, a custom key retains the uploaded source for execution', async () => {

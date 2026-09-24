@@ -11,6 +11,7 @@
  * - update_feed: Update feed settings
  * - delete_feed: Delete a feed
  * - trigger_feed: Trigger an immediate sync for a feed
+ * - recollect_feed: Clear a feed's sync cursor so the next sync starts over
  */
 
 import {
@@ -28,6 +29,7 @@ import {
   ManageFeedsSchema,
   ReadFeedAction,
   ReadFeedsAction,
+  RecollectFeedAction,
   TriggerFeedAction,
   UpdateFeedAction,
 } from '@lobu/core/contracts/tools/manage-feeds';
@@ -190,6 +192,7 @@ const manageFeedsTool = defineActionTool('manage_feeds', {
   update_feed: action(UpdateFeedAction, handleUpdateFeed),
   delete_feed: action(DeleteFeedAction, handleDeleteFeed),
   trigger_feed: action(TriggerFeedAction, handleTriggerFeed),
+  recollect_feed: action(RecollectFeedAction, handleRecollectFeed),
 });
 
 export { ManageFeedsResultSchema, ManageFeedsSchema };
@@ -1202,4 +1205,76 @@ async function handleTriggerFeed(
     feed_id: args.feed_id,
     ...(dryRun ? { dry_run: true } : {}),
   };
+}
+
+/**
+ * Clear a feed's connector cursor so its next sync re-collects from scratch.
+ * Re-collected items dedupe on origin_id, so collected events stay and nothing
+ * else about the feed moves. `source_ack` survives: it records what was already
+ * acknowledged back to the source, and dropping it would re-acknowledge
+ * delivered items.
+ *
+ * Refused while the feed has an active sync run. A claimed run already holds
+ * the old cursor and would write its successor back over the reset. The feed
+ * row is locked first so the run check sees every run committed before the
+ * write; a run enqueued after the lock is released reads the cleared cursor at
+ * claim time.
+ */
+async function handleRecollectFeed(
+  args: Static<typeof RecollectFeedAction>,
+  ctx: ToolContext,
+): Promise<ManageFeedsResult> {
+  const sql = getDb();
+  const { organizationId } = ctx;
+
+  const result = await sql.begin(async (tx): Promise<{ error: string } | { feed: Record<string, unknown> }> => {
+    const locked = await tx`
+      SELECT f.id
+      FROM feeds f
+      JOIN connections c ON c.id = f.connection_id
+      WHERE f.id = ${args.feed_id} AND f.organization_id = ${organizationId} AND c.deleted_at IS NULL AND f.deleted_at IS NULL
+      FOR UPDATE OF f
+    `;
+    if (locked.length === 0) {
+      return { error: 'Feed not found' };
+    }
+
+    const active = await tx`
+      SELECT 1 FROM runs
+      WHERE feed_id = ${args.feed_id} AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+      LIMIT 1
+    `;
+    if (active.length > 0) {
+      return {
+        error: 'Feed has an active sync run; wait for it to finish before re-collecting',
+      };
+    }
+
+    const updated = await tx`
+      UPDATE feeds
+      SET checkpoint = CASE
+            WHEN checkpoint ? 'source_ack' THEN jsonb_build_object('source_ack', checkpoint->'source_ack')
+            ELSE NULL
+          END,
+          updated_at = NOW()
+      WHERE id = ${args.feed_id}
+      RETURNING ${tx.unsafe(publicFeedColumnList())}
+    `;
+    return { feed: updated[0] as Record<string, unknown> };
+  });
+  if ('error' in result) {
+    return { error: result.error };
+  }
+
+  recordToolConfigChange(ctx, {
+    resourceKind: 'feed',
+    resourceId: args.feed_id,
+    op: 'updated',
+    action: 'recollect_feed',
+    summary: `Feed '${result.feed.display_name ?? result.feed.feed_key ?? args.feed_id}' cursor cleared for re-collection`,
+    state: result.feed,
+    changedFields: ['checkpoint'],
+  });
+
+  return { action: 'recollect_feed', feed_id: args.feed_id };
 }

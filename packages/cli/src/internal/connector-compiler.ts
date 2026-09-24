@@ -2,5 +2,6 @@
 // It requires esbuild and the SDK, never a worker process or native executor.
 export {
   createIsolateConnectorCompiler,
+  createSourceCapture,
   findBundledConnectorFile,
 } from "@lobu/connector-worker/compile";

@@ -248,6 +248,12 @@
       "bun": "./src/contracts/tools/view-path.ts",
       "import": "./dist/contracts/tools/view-path.js",
       "require": "./dist/contracts/tools/view-path.js"
+    },
+    "./contracts/tools/source-files": {
+      "types": "./dist/contracts/tools/source-files.d.ts",
+      "bun": "./src/contracts/tools/source-files.ts",
+      "import": "./dist/contracts/tools/source-files.js",
+      "require": "./dist/contracts/tools/source-files.js"
     }
   },
   "scripts": {

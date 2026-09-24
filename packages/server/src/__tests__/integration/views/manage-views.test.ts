@@ -10,6 +10,8 @@
  */
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { loadMigrationUpSection, loadMigrationDownSection } from "../../../db/migration-loader";
 import {
   contentHash,
   stableStringify,
@@ -17,7 +19,7 @@ import {
 import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import { ToolUserError } from "../../../utils/errors";
-import { compileView, setView as storeView } from "../../../views/views";
+import { compileView, viewSourceDependencies, setView as storeView } from "../../../views/views";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -127,6 +129,28 @@ describe("manage_views", () => {
 		};
 	}
 
+	it("replays the source migration in either direction without inventing legacy provenance", async () => {
+		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
+		const file = "20260924000000_resource_source_files.sql";
+		const up = loadMigrationUpSection(dir, file);
+		const down = loadMigrationDownSection(dir, file);
+		await getTestDb().begin(async (sql) => {
+			await sql`CREATE TEMP TABLE views (id integer) ON COMMIT DROP`;
+			await sql`CREATE TEMP TABLE connector_versions (id integer) ON COMMIT DROP`;
+			await sql`INSERT INTO views VALUES (1)`;
+			await sql`INSERT INTO connector_versions VALUES (1)`;
+			await sql.unsafe(up);
+			await sql.unsafe(up);
+			for (const table of ["views", "connector_versions"]) {
+				const rows = await sql`SELECT source_files, dependencies, source_complete FROM ${sql(table)}`;
+				expect(rows).toMatchObject([{ source_files: null, dependencies: null, source_complete: null }]);
+			}
+			await sql.unsafe(down);
+			await sql.unsafe(down);
+			await sql.unsafe(up);
+		});
+	});
+
 	it("set compiles and stores; get returns source; list returns metadata only", async () => {
 		const set = await setView(SIMPLE_SOURCE);
 		expect(set.action).toBe("set");
@@ -150,6 +174,13 @@ describe("manage_views", () => {
 		)) as { action: string; view: Record<string, unknown>; source_code: string };
 		expect(get.view.key).toBe("pipeline");
 		expect(get.source_code).toBe(SIMPLE_SOURCE);
+		expect(get).toMatchObject({
+			source_complete: true,
+			source_files: {
+				entrypoint: "index.tsx",
+				files: { "index.tsx": SIMPLE_SOURCE },
+			},
+		});
 
 		const list = (await executeTool(
 			"manage_views",
@@ -161,6 +192,31 @@ describe("manage_views", () => {
 		expect(list.views[0].key).toBe("pipeline");
 		expect(list.views[0]).not.toHaveProperty("source_code");
 		expect(list.views[0]).not.toHaveProperty("compiled_code");
+		expect(list.views[0]).not.toHaveProperty("source_files");
+	});
+
+	it("retains imported source changes even when the compiled artifact is unchanged; rejects invalid source atomically", async () => {
+		const files = { entrypoint: "views/index.tsx", files: { "views/index.tsx": SIMPLE_SOURCE, "lib/value.ts": "// first\nexport const value = 1;" } };
+		const payload = { compiled_code: "globalThis.sourceProbe = 1;", source_files: files, dependencies: {} };
+		const first = await setView(SIMPLE_SOURCE, payload);
+		files.files["lib/value.ts"] = "// second\nexport const value = 1;";
+		const second = await setView(SIMPLE_SOURCE, payload);
+		expect(second.written).toBe(true);
+		expect(second.view.content_hash).not.toBe(first.view.content_hash);
+		expect((await setView(SIMPLE_SOURCE, payload)).written).toBe(false);
+		const get = () => executeTool("manage_views", { action: "get", key: "pipeline" }, TEST_ENV, ownerCtx);
+		expect(await get()).toMatchObject({ source_complete: true, source_files: files, dependencies: {} });
+		await expect(setView(SIMPLE_SOURCE, { ...payload, source_files: { ...files, files: { ...files.files, "../escape.ts": "secret" } } })).rejects.toThrow("portable project file");
+		expect(await get()).toMatchObject({ source_complete: true, source_files: files });
+		// An MCP edit replaces the retained set rather than leaving stale CLI imports.
+		await setView(SIMPLE_SOURCE + "\n// edited through MCP");
+		expect(await get()).toMatchObject({ source_complete: true, source_files: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_SOURCE + "\n// edited through MCP" } } });
+	});
+
+	it("does not invent original files for a legacy compiled upload", async () => {
+		await setView(SIMPLE_SOURCE, { compiled_code: "globalThis.sourceProbe = 1;" });
+		const get = await executeTool("manage_views", { action: "get", key: "pipeline" }, TEST_ENV, ownerCtx);
+		expect(get).toMatchObject({ source_complete: false, source_files: null, dependencies: null });
 	});
 
 	it("bundles react for modules that import it", async () => {
@@ -535,7 +591,7 @@ mountView(view, V);
 		const refresh = await setView(SIMPLE_SOURCE);
 		expect(refresh.written).toBe(true);
 		expect(refresh.view.content_hash).toBe(
-			contentHash(SIMPLE_SOURCE, legacyMeta, compiled)
+			contentHash(SIMPLE_SOURCE, legacyMeta, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_SOURCE } }, dependencies: viewSourceDependencies() })
 		);
 		const again = await setView(SIMPLE_SOURCE);
 		expect(again.written).toBe(false);

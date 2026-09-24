@@ -44,5 +44,5 @@ export function findBundledConnectorFile(key: string): string | null {
 // and a bundle shaped for it cannot load in an isolate at all.
 const compiler = createIsolateConnectorCompiler();
 
-export const compileConnectorForIsolateFromFile =
-  compiler.compileConnectorForIsolateFromFile;
+export const compileConnectorArtifactFromFile =
+  compiler.compileConnectorArtifactFromFile;

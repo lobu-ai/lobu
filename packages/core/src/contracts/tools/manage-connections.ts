@@ -5,6 +5,10 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
 import { paginationFields } from "./pagination";
+import {
+  SourceDependenciesSchema,
+  SourceFilesSchema,
+} from "./source-files-schema";
 
 const ConnectionFacetsSchema = Type.Object({
   data: Type.Boolean(),
@@ -343,6 +347,9 @@ export const InstallConnectorAction = Type.Object({
         "For action=install_connector. Mutually exclusive with connector_id/source_url/source_uri/mcp_url — provide exactly one. Inline TypeScript or pre-compiled JavaScript source code.",
     })
   ),
+  compiled_code: Type.Optional(Type.String({ minLength: 1 })),
+  source_files: Type.Optional(SourceFilesSchema),
+  dependencies: Type.Optional(SourceDependenciesSchema),
   compiled: Type.Optional(
     Type.Boolean({
       description:
@@ -407,6 +414,9 @@ export const ValidateConnectorSourceAction = Type.Object({
     description:
       "TypeScript or pre-compiled JavaScript connector source to validate.",
   }),
+  compiled_code: Type.Optional(Type.String({ minLength: 1 })),
+  source_files: Type.Optional(SourceFilesSchema),
+  dependencies: Type.Optional(SourceDependenciesSchema),
   compiled: Type.Optional(
     Type.Boolean({
       description:
@@ -427,6 +437,9 @@ export const UpdateConnectorSourceAction = Type.Object({
   source_code: Type.String({
     description: "New TypeScript or pre-compiled JavaScript connector source.",
   }),
+  compiled_code: Type.Optional(Type.String({ minLength: 1 })),
+  source_files: Type.Optional(SourceFilesSchema),
+  dependencies: Type.Optional(SourceDependenciesSchema),
   compiled: Type.Optional(
     Type.Boolean({
       description:
@@ -923,6 +936,9 @@ export const ManageConnectionsResultSchema = Type.Union([
     active_version: Type.String(),
     version: Type.String(),
     source_code: Type.Union([Type.String(), Type.Null()]),
+    source_files: Type.Union([SourceFilesSchema, Type.Null()]),
+    dependencies: Type.Union([SourceDependenciesSchema, Type.Null()]),
+    source_complete: Type.Boolean(),
     source_path: Type.Union([Type.String(), Type.Null()]),
     code_hash: Type.Union([Type.String(), Type.Null()]),
     versions: Type.Array(

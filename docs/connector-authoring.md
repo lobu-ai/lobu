@@ -165,7 +165,10 @@ timeout, and one failure does not discard successful results from the others.
   no text and no title is stored like any other. The checkpoint is stored on the
   configured feed and is **not** invalidated by bumping the connector's
   `version` — updating connector source leaves feed state, checkpoints, and
-  collected data untouched. If you change the event or checkpoint shape, handle
+  collected data untouched. To re-collect one feed from scratch, clear its
+  cursor explicitly with `client.feeds.recollect({ feed_id })` (`manage_feeds`
+  action `recollect_feed`); `source_ack` is kept and re-collected events dedupe
+  on `origin_id`. If you change the event or checkpoint shape, handle
   old checkpoints in the connector itself: carry a schema/scope version inside
   the checkpoint and reset when it mismatches, the way the shipped Google
   connectors do (`google_calendar.ts`, `google_gmail.ts`).

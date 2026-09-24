@@ -11,6 +11,7 @@ import type {
 	FeedListInput,
 	FeedReadInput,
 	FeedReadManyInput,
+	FeedRecollectInput,
 	FeedTriggerInput,
 	FeedUpdateInput,
 } from "@lobu/core/contracts/tools/manage-feeds";
@@ -28,6 +29,7 @@ export interface FeedsNamespace {
 	update(input: FeedUpdateInput): Promise<unknown>;
 	delete(input: FeedDeleteInput): Promise<unknown>;
 	trigger(input: FeedTriggerInput): Promise<unknown>;
+	recollect(input: FeedRecollectInput): Promise<unknown>;
 }
 
 export function buildFeedsNamespace(
@@ -45,5 +47,6 @@ export function buildFeedsNamespace(
 		update: method("update_feed", { publicMethod: "update" }),
 		delete: method("delete_feed", { publicMethod: "delete" }),
 		trigger: method("trigger_feed", { publicMethod: "trigger" }),
+		recollect: method("recollect_feed", { publicMethod: "recollect" }),
 	};
 }

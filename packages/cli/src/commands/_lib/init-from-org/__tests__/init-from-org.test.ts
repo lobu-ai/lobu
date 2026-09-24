@@ -58,14 +58,14 @@ const ORIG_ENV: Record<string, string | undefined> = {};
 beforeEach(() => {
   for (const key of [
     "LOBU_API_URL",
-    "LOBU_TOKEN",
+    "LOBU_API_TOKEN",
     "LOBU_ORG",
     "LOBU_CONTEXT_DIR",
   ]) {
     ORIG_ENV[key] = process.env[key];
   }
   process.env.LOBU_API_URL = "https://example.test";
-  process.env.LOBU_TOKEN = "test-token";
+  process.env.LOBU_API_TOKEN = "test-token";
   process.env.LOBU_ORG = "acme";
 });
 

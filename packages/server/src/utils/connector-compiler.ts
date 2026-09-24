@@ -5,6 +5,7 @@
  * and metadata extraction (finds ConnectorRuntime subclass with sync()+execute()).
  */
 
+import type { RetainedSource } from '@lobu/core/contracts/tools/source-files';
 import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
 import type { ConnectorAgentTooling } from '@lobu/connector-sdk';
 import { type CompileResult, computeCodeHash, extractMetadata } from './compiler-core';
@@ -176,10 +177,14 @@ main();
 
 const isolateCompiler = createIsolateConnectorCompiler();
 
-export async function compileConnectorSource(sourceCode: string): Promise<CompileResult> {
-  const compiledCode = await isolateCompiler.compileConnectorForIsolateFromSource(sourceCode);
-  const compiledCodeHash = computeCodeHash(compiledCode);
-  return { compiledCode, compiledCodeHash };
+export async function compileConnectorSource(sourceCode: string, portableOutput = false): Promise<CompileResult> {
+  const compiledCode = await isolateCompiler.compileConnectorForIsolateFromSource(sourceCode, portableOutput);
+  return { compiledCode, compiledCodeHash: computeCodeHash(compiledCode) };
+}
+
+export async function compileConnectorSourceArtifact(sourceCode: string): Promise<CompileResult & RetainedSource> {
+  const artifact = await isolateCompiler.compileConnectorArtifactFromSource(sourceCode);
+  return { ...artifact, compiledCodeHash: computeCodeHash(artifact.compiledCode) };
 }
 
 export async function extractConnectorMetadata(compiledCode: string): Promise<ConnectorMetadata> {

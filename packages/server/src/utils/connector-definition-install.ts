@@ -1,3 +1,4 @@
+import { validateRetainedSource, type RetainedSource, type SourceFiles, type SourceDependencies } from '@lobu/core/contracts/tools/source-files';
 import { readFile } from 'node:fs/promises';
 import { COMPILE_CONFIG_HASH, flattenConnectorSourceFromFile } from '@lobu/connector-worker/compile';
 import type { getDb } from '../db/client';
@@ -10,6 +11,7 @@ import {
 import {
   type ConnectorMetadata,
   compileConnectorSource,
+  compileConnectorSourceArtifact,
   extractConnectorMetadata,
   validateConnectorMetadata,
 } from './connector-compiler';
@@ -47,6 +49,9 @@ type ConnectorVersionPersistence = {
   compileConfigHash: string | null;
   sourceCode: string | null;
   sourcePath: string | null;
+  sourceFiles?: SourceFiles | null;
+  dependencies?: SourceDependencies | null;
+  sourceComplete?: boolean;
 };
 
 type ResolvedConnectorInstallSource = Omit<
@@ -190,7 +195,24 @@ export async function resolveConnectorInstallSource(params: {
   sourceUri?: string;
   sourceCode?: string;
   compiled?: boolean;
+  compiledCode?: string;
+  sourceFiles?: SourceFiles;
+  dependencies?: SourceDependencies;
 }): Promise<ResolvedConnectorInstallSource> {
+  if ((params.sourceFiles === undefined) !== (params.dependencies === undefined)) {
+    throw new Error('source_files and dependencies must be supplied together');
+  }
+  if (params.compiledCode && (params.compiled || !params.sourceCode || !params.sourceFiles || params.sourceUri || params.sourceUrl)) {
+    throw new Error('compiled_code requires source_code, source_files and dependencies and cannot be combined with compiled, source_uri or source_url');
+  }
+  let retained: RetainedSource | undefined;
+  if (params.sourceFiles) {
+    if (!params.sourceCode || params.compiled || !params.compiledCode) {
+      throw new Error('Connector source_files requires source_code and compiled_code');
+    }
+    validateRetainedSource(params.sourceCode, params.sourceFiles, params.dependencies!);
+    retained = { sourceFiles: params.sourceFiles, dependencies: params.dependencies! };
+  }
   let sourceCode: string;
   let sourcePath: string | null = null;
 
@@ -224,21 +246,29 @@ export async function resolveConnectorInstallSource(params: {
   // The pre-compiled sniff only applies to text uploads: a file-backed install
   // stores a flattened source snapshot whose esbuild output shape would
   // false-positive the sniff, and its compile path is explicit anyway.
-  const alreadyCompiled = params.compiled || (!params.sourceUri && isPreCompiledJs(sourceCode));
+  const alreadyCompiled = !!params.compiledCode || params.compiled || (!params.sourceUri && isPreCompiledJs(sourceCode));
 
   let compiledCode: string;
   let compiledCodeHash: string;
 
-  if (alreadyCompiled) {
+  if (params.compiledCode) {
+    // Normalize source-aware uploads at save time. Their retained version must
+    // compare artifact identity, including after runtime normalization, without
+    // temporary build paths changing that identity on each compilation.
+    const compiled = await compileConnectorSource(params.compiledCode, true);
+    compiledCode = compiled.compiledCode;
+    compiledCodeHash = compiled.compiledCodeHash;
+  } else if (alreadyCompiled) {
     compiledCode = sourceCode;
-    compiledCodeHash = computeCodeHash(sourceCode);
+    compiledCodeHash = computeCodeHash(compiledCode);
   } else if (params.sourceUri && sourcePath) {
     compiledCode = await compileConnectorForIsolateFromFile(sourcePath);
     compiledCodeHash = computeCodeHash(compiledCode);
   } else {
-    const compiled = await compileConnectorSource(sourceCode);
+    const compiled = await compileConnectorSourceArtifact(sourceCode);
     compiledCode = compiled.compiledCode;
     compiledCodeHash = compiled.compiledCodeHash;
+    retained = { sourceFiles: compiled.sourceFiles, dependencies: compiled.dependencies };
   }
 
   const metadata = await extractConnectorMetadata(compiledCode);
@@ -246,14 +276,16 @@ export async function resolveConnectorInstallSource(params: {
 
   return {
     metadata,
+    sourceFiles: retained?.sourceFiles ?? null,
+    dependencies: retained?.dependencies ?? null,
+    sourceComplete: retained !== undefined,
     sourceCode,
     sourcePath,
     compiledCode,
     compiledCodeHash,
-    // Pre-compiled uploads were NOT produced by this server's pipeline — an
-    // older client may have compiled under a different externals list — so
-    // they carry no fingerprint and get normalized on first resolution.
-    compileConfigHash: alreadyCompiled ? null : COMPILE_CONFIG_HASH,
+    // Legacy precompiled uploads retain unknown provenance until first use;
+    // source-aware uploads were normalized by this server above.
+    compileConfigHash: alreadyCompiled && !params.compiledCode ? null : COMPILE_CONFIG_HASH,
   };
 }
 
@@ -469,11 +501,13 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     await sql`
       INSERT INTO connector_versions (
         connector_key, version, organization_id, compiled_code, compiled_code_hash,
-        compile_config_hash, source_code, source_path
+        compile_config_hash, source_code, source_path, source_files, dependencies, source_complete
       ) VALUES (
         ${metadata.key}, ${metadata.version}, NULL, ${record.compiledCode},
         ${record.compiledCodeHash}, ${record.compileConfigHash},
-        ${record.sourceCode}, ${record.sourcePath}
+        ${record.sourceCode}, ${record.sourcePath},
+        ${record.sourceFiles ? sql.json(record.sourceFiles) : null},
+        ${record.dependencies ? sql.json(record.dependencies) : null}, ${record.sourceComplete ?? false}
       )
       ON CONFLICT (connector_key, version) WHERE organization_id IS NULL DO UPDATE
       SET compiled_code = CASE
@@ -498,6 +532,27 @@ async function upsertConnectorDefinitionRecordsInTransaction(
               THEN EXCLUDED.compile_config_hash
             WHEN EXCLUDED.compiled_code IS NOT NULL THEN EXCLUDED.compile_config_hash
             ELSE connector_versions.compile_config_hash
+          END,
+          source_files = CASE
+            WHEN ${replaceVersionArtifact}
+              OR connector_versions.source_path LIKE 'device-manifest://%'
+              OR EXCLUDED.compiled_code IS NOT NULL OR EXCLUDED.source_code IS NOT NULL
+              THEN EXCLUDED.source_files
+            ELSE connector_versions.source_files
+          END,
+          dependencies = CASE
+            WHEN ${replaceVersionArtifact}
+              OR connector_versions.source_path LIKE 'device-manifest://%'
+              OR EXCLUDED.compiled_code IS NOT NULL OR EXCLUDED.source_code IS NOT NULL
+              THEN EXCLUDED.dependencies
+            ELSE connector_versions.dependencies
+          END,
+          source_complete = CASE
+            WHEN ${replaceVersionArtifact}
+              OR connector_versions.source_path LIKE 'device-manifest://%'
+              OR EXCLUDED.compiled_code IS NOT NULL OR EXCLUDED.source_code IS NOT NULL
+              THEN EXCLUDED.source_complete
+            ELSE connector_versions.source_complete
           END,
           source_code = CASE
             WHEN ${replaceVersionArtifact} THEN EXCLUDED.source_code
@@ -526,11 +581,13 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     await sql`
       INSERT INTO connector_versions (
         connector_key, version, organization_id, compiled_code, compiled_code_hash,
-        compile_config_hash, source_code, source_path
+        compile_config_hash, source_code, source_path, source_files, dependencies, source_complete
       ) VALUES (
         ${metadata.key}, ${metadata.version}, ${params.organizationId}, ${record.compiledCode},
         ${record.compiledCodeHash}, ${record.compileConfigHash},
-        ${record.sourceCode}, ${record.sourcePath}
+        ${record.sourceCode}, ${record.sourcePath},
+        ${record.sourceFiles ? sql.json(record.sourceFiles) : null},
+        ${record.dependencies ? sql.json(record.dependencies) : null}, ${record.sourceComplete ?? false}
       )
       ON CONFLICT (organization_id, connector_key, version) WHERE organization_id IS NOT NULL
       DO UPDATE
@@ -552,6 +609,27 @@ async function upsertConnectorDefinitionRecordsInTransaction(
               THEN EXCLUDED.compile_config_hash
             WHEN EXCLUDED.compiled_code IS NOT NULL THEN EXCLUDED.compile_config_hash
             ELSE connector_versions.compile_config_hash
+          END,
+          source_files = CASE
+            WHEN ${replaceVersionArtifact}
+              OR connector_versions.source_path LIKE 'device-manifest://%'
+              OR EXCLUDED.compiled_code IS NOT NULL OR EXCLUDED.source_code IS NOT NULL
+              THEN EXCLUDED.source_files
+            ELSE connector_versions.source_files
+          END,
+          dependencies = CASE
+            WHEN ${replaceVersionArtifact}
+              OR connector_versions.source_path LIKE 'device-manifest://%'
+              OR EXCLUDED.compiled_code IS NOT NULL OR EXCLUDED.source_code IS NOT NULL
+              THEN EXCLUDED.dependencies
+            ELSE connector_versions.dependencies
+          END,
+          source_complete = CASE
+            WHEN ${replaceVersionArtifact}
+              OR connector_versions.source_path LIKE 'device-manifest://%'
+              OR EXCLUDED.compiled_code IS NOT NULL OR EXCLUDED.source_code IS NOT NULL
+              THEN EXCLUDED.source_complete
+            ELSE connector_versions.source_complete
           END,
           source_code = CASE
             WHEN ${replaceVersionArtifact} THEN EXCLUDED.source_code
