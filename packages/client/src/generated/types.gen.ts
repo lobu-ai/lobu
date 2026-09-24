@@ -915,6 +915,9 @@ export type OpenViewData = {
      * View key, e.g. 'pipeline'.
      */
     key: string;
+    /**
+     * Required unless the view is attached to the workspace. Pass scope.type, scope.entity, or scope.event to select its subject.
+     */
     scope?: {
       /**
        * Entity-type slug the view opens for.
