@@ -1,8 +1,12 @@
 import { type Static, Type } from "@sinclair/typebox";
+import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
 import {
-	type ViewAttachment,
-	ViewKeySchema,
-} from "@lobu/core/contracts/tools/manage-views";
+	eventAttachmentsFor,
+	hasWorkspaceAttachment,
+	isEventAttachment,
+	matchesRecord,
+	matchesType,
+} from "@lobu/core/contracts/tools/view-attach";
 import type { Env } from "../index";
 import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
@@ -34,6 +38,8 @@ export const OpenViewSchema = Type.Object(
 							"Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.",
 					})
 				),
+			}, {
+				description: "Required unless the view is attached to the workspace. Pass scope.type, scope.entity, or scope.event to select its subject.",
 			})
 		),
 		params: Type.Optional(
@@ -105,19 +111,6 @@ function resolveViewParams(
 
 type StoredView = NonNullable<Awaited<ReturnType<typeof getView>>>;
 
-type EventAttachment = Extract<ViewAttachment, { event_kind: string }>;
-type SubjectAttachment = Exclude<ViewAttachment, EventAttachment>;
-
-/** An event attachment carries `type` as a qualifier of its event, not as a
- *  page of its own, so every type/record/workspace lookup skips it. */
-const isEventAttachment = (a: ViewAttachment): a is EventAttachment =>
-	"event_kind" in a && typeof a.event_kind === "string";
-
-const subjectAttachments = (view: StoredView): SubjectAttachment[] =>
-	view.attach.filter((a): a is SubjectAttachment => !isEventAttachment(a));
-
-const isTab = (a: SubjectAttachment) => (a.placement ?? "tab") === "tab";
-
 /**
  * The event page for `eventId`, when `view` attaches to it. The event is read
  * through `read_knowledge` itself — the exact-id read the web event page
@@ -143,9 +136,7 @@ async function resolveEventViewPath(
 	if (!current) {
 		throw new ToolUserError(`Event ${eventId} not found`, 404);
 	}
-	const kinds = view.attach
-		.filter(isEventAttachment)
-		.filter((a) => a.event_kind === current.semantic_type);
+	const kinds = eventAttachmentsFor(view.attach, current.semantic_type);
 	if (kinds.length === 0) {
 		throw new ToolUserError(
 			`View '${view.key}' is not attached to '${current.semantic_type}' events`,
@@ -212,18 +203,20 @@ async function resolveViewPath(
 		if (!row) {
 			throw new ToolUserError(`Entity ${scope.entity} not found`, 404);
 		}
-		// A slug pin names a top-level record: slugs are unique per parent.
-		const onRecord = (a: SubjectAttachment) =>
-			"entity" in a
-				? typeof a.entity === "number"
-					? a.entity === scope.entity
-					: row.parent_id === null && a.entity === row.slug
-				: "type" in a && a.type === row.entity_type;
+		const record = {
+			type: row.entity_type,
+			id: scope.entity,
+			slug: row.slug,
+			parentId: row.parent_id,
+		};
 		const recordPath = `/${orgSlug}/${row.entity_type}/${row.slug}`;
-		const matches = subjectAttachments(view).filter(onRecord);
-		if (matches.some(isTab)) return { pathname: `${recordPath}${suffix}`, card: false };
+		if (view.attach.some((a) => matchesRecord(a, record, "tab"))) {
+			return { pathname: `${recordPath}${suffix}`, card: false };
+		}
 		// An Overview card renders on the record page itself, with its defaults.
-		if (matches.length > 0) return { pathname: recordPath, card: true };
+		if (view.attach.some((a) => matchesRecord(a, record, "overview"))) {
+			return { pathname: recordPath, card: true };
+		}
 		throw new ToolUserError(
 			`View '${view.key}' is not attached to entity ${scope.entity}`,
 			400
@@ -240,11 +233,8 @@ async function resolveViewPath(
 		if (rows.length === 0) {
 			throw new ToolUserError(`Entity type '${scope.type}' not found`, 404);
 		}
-		if (
-			subjectAttachments(view).some(
-				(a) => "type" in a && a.type === scope.type && isTab(a)
-			)
-		) {
+		const type = scope.type;
+		if (view.attach.some((a) => matchesType(a, type, "tab"))) {
 			return { pathname: `/${orgSlug}/${scope.type}${suffix}`, card: false };
 		}
 		throw new ToolUserError(
@@ -252,27 +242,24 @@ async function resolveViewPath(
 			400
 		);
 	}
-	if (subjectAttachments(view).some((a) => "workspace" in a)) {
+	if (hasWorkspaceAttachment(view.attach)) {
 		return { pathname: `/${orgSlug}/data${suffix}`, card: false };
 	}
-	// No workspace attachment: the view's one type tab is its only page.
+	// A type tab is a useful error hint, never an inferred frame scope.
 	const typeTabs = [
 		...new Set(
-			subjectAttachments(view).flatMap((a) =>
-				"type" in a && isTab(a) ? [a.type] : []
-			)
+			view.attach.flatMap((a) => {
+				const type = (a as { type?: string }).type;
+				return type !== undefined && matchesType(a, type, "tab") ? [type] : [];
+			})
 		),
 	];
-	if (typeTabs.length === 1) {
-		// Resolved as an explicit scope.type, so a deleted type is refused.
-		return resolveViewPath(view, { type: typeTabs[0] }, orgSlug, organizationId);
-	}
 	throw new ToolUserError(
-		typeTabs.length > 1
-			? `View '${view.key}' is a tab on several types (${typeTabs.join(", ")}); pass scope.type`
-			: view.attach.some(isEventAttachment)
-				? `View '${view.key}' renders one event; pass scope.event`
-				: `View '${view.key}' has no page of its own; pass scope.entity for a record it attaches to`,
+		view.attach.every(isEventAttachment) && view.attach.length > 0
+			? `View '${view.key}' renders one event; pass scope.event`
+			: `View '${view.key}' has no page without a scope; pass scope.type or scope.entity${
+					typeTabs.length === 1 ? ` (it is a tab on '${typeTabs[0]}')` : ""
+				}`,
 		400
 	);
 }

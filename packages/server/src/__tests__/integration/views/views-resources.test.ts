@@ -279,15 +279,15 @@ describe('views resources + open_view + invoke_view_action', () => {
 	it('open_view returns the frame shape: per-view resource + canonical params', async () => {
 		const result = await rpc('tools/call', {
 			name: 'open_view',
-			arguments: { key: 'board', params: { by: 'stage', extra: 'ignored' } },
+			arguments: { key: 'board', scope: { type: 'company' }, params: { by: 'stage', extra: 'ignored' } },
 		});
 		expect(result.structuredContent.view).toBe('board');
 		expect(result.structuredContent.resource).toBe('ui://lobu/views/board');
 		// Declared params validate; unknown names are ignored.
 		expect(result.structuredContent.params).toEqual({ by: 'stage' });
-		// Unscoped, a view without a workspace attachment opens on its one type
-		// tab. The view is the path and the query string is its declared params
-		// alone — no host key.
+		// The frame scope and the page named by the URL must agree. The query
+		// string carries only the view's declared params, with no host key.
+		expect(result.structuredContent.scope).toEqual({ type: 'company' });
 		const url = new URL(result.structuredContent.url);
 		expect(url.pathname).toBe('/views-org/company/-/views/board');
 		expect(Object.fromEntries(url.searchParams)).toEqual({ by: 'stage' });
@@ -300,15 +300,24 @@ describe('views resources + open_view + invoke_view_action', () => {
 	it('open_view fills param defaults and rejects mistyped params', async () => {
 		const result = await rpc('tools/call', {
 			name: 'open_view',
-			arguments: { key: 'board' },
+			arguments: { key: 'board', scope: { type: 'company' } },
 		});
 		expect(result.structuredContent.params).toEqual({ by: 'owner' });
 		await expect(
 			rpc('tools/call', {
 				name: 'open_view',
-				arguments: { key: 'board', params: { by: 42 } },
+				arguments: { key: 'board', scope: { type: 'company' }, params: { by: 42 } },
 			})
 		).rejects.toThrow(/must be a string/);
+	});
+
+	it('open_view refuses an unscoped non-workspace view instead of inferring its type', async () => {
+		for (const args of [{ key: 'board' }, { key: 'board', scope: {} }]) {
+			await expect(executeTool('open_view', args, TEST_ENV, ownerCtx)).rejects.toMatchObject({
+				httpStatus: 400,
+				message: "View 'board' has no page without a scope; pass scope.type or scope.entity (it is a tab on 'company')",
+			});
+		}
 	});
 
 	it('open_view puts a type-scoped view under the type path', async () => {
@@ -370,6 +379,8 @@ describe('views resources + open_view + invoke_view_action', () => {
 	it('open_view sends an unscoped workspace view to its Data hub tab', async () => {
 		await setAttachedView('hub', [{ workspace: true }, { type: 'company', placement: 'tab' }]);
 		expect(await openPath({ key: 'hub' })).toBe('/views-org/data/-/views/hub');
+		const opened = await rpc('tools/call', { name: 'open_view', arguments: { key: 'hub', scope: {} } });
+		expect(opened.structuredContent.scope).toEqual({});
 	});
 
 	it('open_view refuses a link the host would render as a missing view', async () => {
@@ -389,17 +400,16 @@ describe('views resources + open_view + invoke_view_action', () => {
 		await expect(openPath({ key: 'both' })).rejects.toThrow(/pass scope.type/);
 		// A record pin has no page of its own without the record.
 		await setAttachedView('pinned', [{ entity: entityId, placement: 'tab' }]);
-		await expect(openPath({ key: 'pinned' })).rejects.toThrow(/pass scope.entity/);
+		await expect(openPath({ key: 'pinned' })).rejects.toThrow('pass scope.type or scope.entity');
 		expect(await openPath({ key: 'pinned', scope: { entity: entityId } })).toMatch(
 			/^\/views-org\/company\/[^/]+\/-\/views\/pinned$/
 		);
 	});
 
-	it('open_view refuses an unscoped link to a type that no longer exists', async () => {
-		// Unscoped, the view's one type tab is its page, so that type gets the
-		// same live check an explicit scope.type does.
+	it('open_view requires scope even for missing types and validates explicit types', async () => {
 		await setAttachedView('gone', [{ type: 'deal', placement: 'tab' }]);
-		await expect(openPath({ key: 'gone' })).rejects.toThrow(/Entity type 'deal' not found/);
+		await expect(executeTool('open_view', { key: 'gone' }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+		await expect(openPath({ key: 'gone', scope: { type: 'deal' } })).rejects.toThrow(/Entity type 'deal' not found/);
 		await createTestEntity({
 			name: 'Old Plan',
 			entity_type: 'retired',
@@ -407,13 +417,14 @@ describe('views resources + open_view + invoke_view_action', () => {
 			created_by: owner.id,
 		});
 		await setAttachedView('retired-tab', [{ type: 'retired', placement: 'tab' }]);
-		expect(await openPath({ key: 'retired-tab' })).toBe('/views-org/retired/-/views/retired-tab');
+		expect(await openPath({ key: 'retired-tab', scope: { type: 'retired' } })).toBe('/views-org/retired/-/views/retired-tab');
 		const sql = getTestDb();
 		await sql`
       UPDATE entity_types SET deleted_at = NOW()
       WHERE slug = 'retired' AND organization_id = ${org.id}
     `;
-		await expect(openPath({ key: 'retired-tab' })).rejects.toThrow(
+		await expect(executeTool('open_view', { key: 'retired-tab' }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+		await expect(openPath({ key: 'retired-tab', scope: { type: 'retired' } })).rejects.toThrow(
 			/Entity type 'retired' not found/
 		);
 	});

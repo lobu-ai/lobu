@@ -243,6 +243,12 @@
       "import": "./dist/agent-tooling.js",
       "require": "./dist/agent-tooling.js"
     },
+    "./contracts/tools/view-attach": {
+      "types": "./dist/contracts/tools/view-attach.d.ts",
+      "bun": "./src/contracts/tools/view-attach.ts",
+      "import": "./dist/contracts/tools/view-attach.js",
+      "require": "./dist/contracts/tools/view-attach.js"
+    },
     "./contracts/tools/view-path": {
       "types": "./dist/contracts/tools/view-path.d.ts",
       "bun": "./src/contracts/tools/view-path.ts",
