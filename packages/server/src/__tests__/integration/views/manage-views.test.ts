@@ -432,7 +432,7 @@ mountView(view, V);
 		});
 		const opened = (await executeTool(
 			"open_view",
-			{ key: "pipeline" },
+			{ key: "pipeline", scope: { type: "deal" } },
 			TEST_ENV,
 			ownerCtx
 		)) as { params: Record<string, unknown> };
