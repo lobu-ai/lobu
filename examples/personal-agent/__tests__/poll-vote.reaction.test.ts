@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import type {
+  AutomationScriptContext,
+  ReactionClient,
+} from "@lobu/connector-sdk";
 import { validateAndScopeQuery } from "../../../packages/server/src/utils/execute-data-sources";
 import reducePollVote from "../poll-vote.reaction";
 
@@ -65,7 +68,7 @@ function harness(closesAt = "2026-08-28T15:00:00.000Z", quorum = 2) {
   const client = {
     knowledge: {
       read: async (input: Record<string, unknown>) => {
-        expect(input).toEqual({ automation_id: 9, run_id: runId, limit: 10 });
+        expect(input).toEqual({ content_ids: [trigger.id], limit: 1 });
         return { content: [trigger] };
       },
       save: async (input: Record<string, unknown>) => {
@@ -193,15 +196,20 @@ function harness(closesAt = "2026-08-28T15:00:00.000Z", quorum = 2) {
     runId += 1;
     await reducePollVote(
       {
-        extracted_data: { summary: "Process the trusted poll interaction." },
+        trigger_signals: [
+          {
+            kind: "event",
+            source: "workspace",
+            event_type: "poll_vote_cast",
+            event_id: trigger.id,
+          },
+        ],
         entities: [],
         window: {
           run_id: runId,
           automation_id: 9,
           window_start: "2026-08-28T14:00:00.000Z",
           window_end: "2026-08-28T15:00:00.000Z",
-          granularity: "event",
-          content_analyzed: 1,
         },
         automation: {
           id: 9,
@@ -211,7 +219,7 @@ function harness(closesAt = "2026-08-28T15:00:00.000Z", quorum = 2) {
         },
         organization_id: "org-test",
         organization_slug: "test",
-      } satisfies ReactionContext,
+      } satisfies AutomationScriptContext,
       client
     );
   };
