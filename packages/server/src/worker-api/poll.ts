@@ -1382,11 +1382,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // legacy hashless arm in connectorClaimLaneSql.
   //
   // Not client debt, and quiet is not a deletion gate: the arm's predicate is
-  // `run_cv.artifact_hash IS NULL`, so its population is artifact rows, not
-  // old clients. `attestDeviceManifestArtifacts` drains a row once a device
-  // advertises a matching manifest, but the match is key + version exact, so
-  // rows strand when every device has moved to a newer version. Those strays
-  // are what still reaches here, and they carry live traffic.
+  // `r.connector_artifact_hash IS NULL`, so its population is runs admitted
+  // against hashless artifact rows, not old clients. `attestDeviceManifestArtifacts`
+  // drains a row once a device advertises a matching manifest, but the match is
+  // key + version exact, so rows strand when every device has moved to a newer
+  // version. Those strays are what still reaches here, and they carry live traffic.
   if (
     row.connector_manifest_backed &&
     connectorClaimContext.allowLegacyManifestCapabilityClaims &&
