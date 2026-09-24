@@ -1,5 +1,12 @@
 # Changelog
 
+## [21.0.1](https://github.com/lobu-ai/lobu/compare/lobu-v21.0.0...lobu-v21.0.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **interactions:** reconcile accepted action retries from durable receipts ([#3725](https://github.com/lobu-ai/lobu/issues/3725)) ([271db39](https://github.com/lobu-ai/lobu/commit/271db39b193a6e0cdea6fcefb286882352c92db5))
+
 ## [21.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.3.1...lobu-v21.0.0) (2026-09-24)
 
 
