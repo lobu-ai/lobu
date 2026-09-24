@@ -16,6 +16,13 @@ import { createConnectorOperationRun } from '../../runs/queue-service';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { post } from '../setup/test-helpers';
 import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/device-manifests';
+import { deviceManifestHash } from '@lobu/connector-sdk/device-manifest-hash';
+import type { DeviceConnectorManifest } from '@lobu/connector-sdk/device-manifest';
+import { handleApprove } from '../../tools/admin/manage_operations/handlers/approvals';
+import { ownerToolContext } from '../setup/test-fixtures';
+import type { Env } from '../../index';
+import { insertEvent } from '../../utils/insert-event';
+import { readFileSync } from 'node:fs';
 
 // The contract the shipped daemon actually advertises, read from its generated
 // artifact: the point is that the SHIPPED manifest stays runnable on a pin.
@@ -61,7 +68,7 @@ async function addDevice(userId: string, orgId: string, platform: string) {
   return workerId;
 }
 
-async function poll(workerId: string, manifests: unknown[], platform: string) {
+async function poll(workerId: string, manifests: unknown[] | undefined, platform: string) {
   return post('/api/workers/poll', {
     body: {
       worker_id: workerId,
@@ -104,10 +111,11 @@ function queueShellRun(orgId: string, connectionId: number) {
 
 async function runRow(runId: number) {
   const rows = (await getTestDb()`
-    SELECT connector_version, target_device_worker_id, error_message, status
+    SELECT connector_version, connector_artifact_hash, target_device_worker_id, error_message, status
     FROM runs WHERE id = ${runId}
   `) as unknown as Array<{
     connector_version: string;
+    connector_artifact_hash: string | null;
     target_device_worker_id: string | null;
     error_message: string | null;
     status: string;
@@ -119,6 +127,138 @@ describe('device-pinned artifact selection', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
     delete process.env.LOBU_CLOUD_MODE;
+  });
+
+  it('does not claim an admitted run after the same device changes its manifest without a version bump', async () => {
+    const { orgId, workerId } = await seedOwnerWithDevice('macos');
+    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await queueShellRun(orgId, Number(connection.id));
+    expect((await runRow(queued.runId)).status).toBe('pending');
+    expect((await runRow(queued.runId)).connector_artifact_hash).toBe(
+      deviceManifestHash(OS_SHELL_MANIFEST as unknown as DeviceConnectorManifest),
+    );
+
+    const changed = { ...OS_SHELL_MANIFEST, description: 'A different contract under the same version' };
+    const response = await poll(workerId, [changed], 'macos');
+    expect(response.status).toBe(200);
+    const job = await response.json() as { run_id?: number };
+    expect(job.run_id).toBeUndefined();
+    expect((await runRow(queued.runId)).status).toBe('pending');
+  });
+
+  it.each(['missing', 'different-family'] as const)('keeps the admitted hash authoritative when the catalog artifact is %s', async (change) => {
+    const sql = getTestDb();
+    const { orgId, workerId } = await seedOwnerWithDevice('macos');
+    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await queueShellRun(orgId, Number(connection.id));
+    if (change === 'missing') {
+      await sql`DELETE FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = 'os.shell'`;
+    } else {
+      await sql`UPDATE connector_versions SET source_path = 'https://connector.example.test/mcp', compiled_code_hash = NULL
+        WHERE organization_id = ${orgId} AND connector_key = 'os.shell'`;
+    }
+    // A capability-only poll cannot claim a run admitted against an exact hash,
+    // even when the current artifact no longer looks manifest-backed.
+    const response = await poll(workerId, [], 'macos');
+    expect(response.status).toBe(200);
+    expect((await response.json() as { run_id?: number }).run_id).toBeUndefined();
+    expect((await runRow(queued.runId)).status).toBe('pending');
+  });
+
+  it('records queued approvals and refuses approval after the device contract changes', async () => {
+    const { userId, orgId, workerId } = await seedOwnerWithDevice('macos');
+    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await createConnectorOperationRun({
+      organizationId: orgId, connectionId: Number(connection.id),
+      connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
+      approvalMode: 'queued', createdByUserId: userId,
+    });
+    expect((await runRow(queued.runId)).connector_artifact_hash).toBe(
+      deviceManifestHash(OS_SHELL_MANIFEST as unknown as DeviceConnectorManifest),
+    );
+    expect((await poll(workerId, [{ ...OS_SHELL_MANIFEST, description: 'Changed before approval' }], 'macos')).status).toBe(200);
+    const result = await handleApprove({ action: 'approve', run_id: queued.runId }, ownerToolContext(orgId, userId), {} as Env);
+    expect(result).toEqual({ error: expect.stringContaining('contract changed') });
+    const [run] = await getTestDb()`SELECT approval_status FROM runs WHERE id = ${queued.runId}`;
+    expect(run.approval_status).toBe('pending');
+  });
+
+  it('approves and claims a queued run when the original device still advertises its contract', async () => {
+    const { userId, orgId, workerId } = await seedOwnerWithDevice('macos');
+    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await createConnectorOperationRun({
+      organizationId: orgId, connectionId: Number(connection.id),
+      connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
+      approvalMode: 'queued', createdByUserId: userId,
+    });
+    await insertEvent({
+      entityIds: [], organizationId: orgId, originId: `run_${queued.runId}_pending`,
+      title: 'Shell operation awaiting approval', content: null, semanticType: 'operation',
+      runId: queued.runId, interactionType: 'approval', interactionStatus: 'pending',
+      metadata: { action_key: 'run', run_id: queued.runId }, authorName: 'Test requester',
+    });
+    const result = await handleApprove({ action: 'approve', run_id: queued.runId }, ownerToolContext(orgId, userId), {} as Env);
+    expect(result).not.toHaveProperty('error');
+    const [approved] = await getTestDb()`SELECT approval_status FROM runs WHERE id = ${queued.runId}`;
+    expect(approved.approval_status).toBe('approved');
+    const response = await poll(workerId, [OS_SHELL_MANIFEST], 'macos');
+    expect(response.status).toBe(200);
+    expect((await response.json() as { run_id?: number }).run_id).toBe(queued.runId);
+  });
+
+  it('never guesses the hash for a run inserted without its admitted manifest', async () => {
+    const sql = getTestDb();
+    const { orgId, workerId } = await seedOwnerWithDevice('macos');
+    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const [run] = await sql`
+      INSERT INTO runs (organization_id, run_type, connection_id, connector_key, connector_version,
+        action_key, action_input, status, approval_status, target_device_worker_id)
+      VALUES (${orgId}, 'action', ${connection.id}, 'os.shell', ${OS_SHELL_MANIFEST.version as string},
+        'run', ${sql.json({ command: 'hostname' })}, 'pending', 'auto', ${connection.device_worker_id}::uuid)
+      RETURNING id
+    `;
+    const response = await poll(workerId, [OS_SHELL_MANIFEST], 'macos');
+    expect(response.status).toBe(200);
+    expect((await response.json() as { run_id?: number }).run_id).toBeUndefined();
+    expect(await runRow(Number(run.id))).toMatchObject({ status: 'pending', connector_artifact_hash: null });
+  });
+
+  it('cuts over pending runs without guessing their hashes and preserves compiled work', async () => {
+    const sql = getTestDb();
+    const { orgId, workerId } = await seedOwnerWithDevice('macos');
+    expect((await poll(workerId, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await queueShellRun(orgId, Number(connection.id));
+    const [compiled] = await sql`
+      INSERT INTO runs (organization_id, run_type, connector_key, connector_version, status, approval_status)
+      VALUES (${orgId}, 'action', 'test.compiled', '1.0.0', 'pending', 'pending') RETURNING id
+    `;
+    await sql`
+      INSERT INTO connector_versions (organization_id, connector_key, version, compiled_code, compiled_code_hash)
+      VALUES (${orgId}, 'test.compiled', '1.0.0', 'export default {}', 'compiled-fixture-hash')
+    `;
+    const [missing] = await sql`
+      INSERT INTO runs (organization_id, run_type, connector_key, connector_version, status, approval_status)
+      VALUES (${orgId}, 'action', 'test.missing', '1.0.0', 'pending', 'pending') RETURNING id
+    `;
+    // Exercise the actual migration against the pre-column schema. This is a
+    // disposable embedded database; the transaction restores it on failure.
+    const migration = readFileSync(new URL('../../../../../db/migrations/20260923230000_runs_connector_artifact_hash.sql', import.meta.url), 'utf8').split('-- migrate:down')[0];
+    await sql.begin(async (tx) => {
+      await tx`ALTER TABLE runs DROP COLUMN connector_artifact_hash`;
+      await tx.unsafe(migration);
+      await tx.unsafe(migration);
+    });
+    expect(await runRow(queued.runId)).toMatchObject({ status: 'failed', connector_artifact_hash: null, error_message: expect.stringContaining('Re-run') });
+    // Cloud connectors can resolve code from the image without a version row.
+    expect(await runRow(Number(missing.id))).toMatchObject({ status: 'pending', connector_artifact_hash: null });
+    const [preserved] = await sql`SELECT status, approval_status FROM runs WHERE id = ${compiled.id}`;
+    expect(preserved).toMatchObject({ status: 'pending', approval_status: 'pending' });
   });
 
   it('keeps a pinned endpoint runnable when a sibling endpoint advertises a newer version', async () => {
@@ -155,6 +295,29 @@ describe('device-pinned artifact selection', () => {
     };
     expect(claimed.run_id).toBe(queued.runId);
     expect(claimed.connector_version).toBe(shippedVersion);
+  });
+
+  it('approves a queued run on a pinned endpoint after a sibling endpoint advertises a newer version', async () => {
+    const { userId, orgId, workerId: macWorker } = await seedOwnerWithDevice('macos');
+    expect((await poll(macWorker, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await createConnectorOperationRun({
+      organizationId: orgId, connectionId: Number(connection.id),
+      connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
+      approvalMode: 'queued', createdByUserId: userId,
+    });
+    await insertEvent({
+      entityIds: [], organizationId: orgId, originId: `run_${queued.runId}_pending`,
+      title: 'Shell operation awaiting approval', content: null, semanticType: 'operation',
+      runId: queued.runId, interactionType: 'approval', interactionStatus: 'pending',
+      metadata: { action_key: 'run', run_id: queued.runId }, authorName: 'Test requester',
+    });
+    const headlessWorker = await addDevice(userId, orgId, 'headless');
+    expect((await poll(headlessWorker, [{ ...OS_SHELL_MANIFEST, version: '9.9.9' }], 'headless')).status).toBe(200);
+    const result = await handleApprove({ action: 'approve', run_id: queued.runId }, ownerToolContext(orgId, userId), {} as Env);
+    expect(result).not.toHaveProperty('error');
+    const response = await poll(macWorker, [OS_SHELL_MANIFEST], 'macos');
+    expect((await response.json() as { run_id?: number }).run_id).toBe(queued.runId);
   });
 
   it('routes each endpoint its own run and never the other endpoint\'s', async () => {

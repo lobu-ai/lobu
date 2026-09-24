@@ -720,6 +720,7 @@ export async function getOperationForConnection(
 		device_platform: string | null;
 		connector_runtime: Record<string, unknown> | null;
 		connector_manifest_backed: boolean;
+		connector_manifest_hash: string | null;
 		connector_artifact_source_path: string | null;
 		name: string;
 	};
@@ -744,6 +745,7 @@ export async function getOperationForConnection(
       cd.openapi_config,
       cd.runtime AS connector_runtime,
       COALESCE(cv.manifest_backed, false) AS connector_manifest_backed,
+      CASE WHEN cv.manifest_backed THEN cv.artifact_hash ELSE NULL END AS connector_manifest_hash,
       cv.artifact_source_path AS connector_artifact_source_path
     FROM connections c
     JOIN connector_definitions cd
@@ -779,6 +781,7 @@ export async function getOperationForConnection(
 		device_platform: string | null;
 		connector_runtime: Record<string, unknown> | null;
 		connector_manifest_backed: boolean;
+		connector_manifest_hash: string | null;
 		connector_artifact_source_path: string | null;
 	};
 	const operations = await buildConnectorOperations(
@@ -810,6 +813,7 @@ export async function getOperationForConnection(
 			device_platform: row.device_platform,
 			connector_runtime: row.connector_runtime,
 			connector_manifest_backed: row.connector_manifest_backed,
+			connector_manifest_hash: row.connector_manifest_hash,
 			connector_artifact_source_path: row.connector_artifact_source_path,
 			name: row.name,
 		},

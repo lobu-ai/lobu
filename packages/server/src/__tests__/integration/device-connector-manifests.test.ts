@@ -20,6 +20,7 @@ import {
 import { post } from '../setup/test-helpers';
 import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/device-manifests';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
+import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 
 // The exact contract the headless daemon advertises, read from the daemon's own
 // generated artifact rather than restated here: the point of these tests is
@@ -194,10 +195,10 @@ async function seedHeadlessShellRun(orgId: string, version = HEADLESS_OS_SHELL_V
   const [run] = (await sql`
     INSERT INTO runs (
       organization_id, run_type, connection_id, connector_key,
-      connector_version, action_key, action_input, approval_status, status,
+      connector_version, connector_artifact_hash, action_key, action_input, approval_status, status,
       created_at
     ) VALUES (
-      ${orgId}, 'action', ${connection.id}, 'os.shell', ${version}, 'run',
+      ${orgId}, 'action', ${connection.id}, 'os.shell', ${version}, ${deviceManifestHash(HEADLESS_OS_SHELL_MANIFEST as unknown as DeviceConnectorManifest)}, 'run',
       ${sql.json({ command: 'hostname' })}, 'auto', 'pending', NOW()
     )
     RETURNING id
@@ -308,16 +309,16 @@ async function insertPendingManifestRun(params: {
   orgId: string;
   connectionId: number;
   feedId: number;
-  version: string;
+  manifest: DeviceConnectorManifest;
 }) {
   const sql = getTestDb();
   const [run] = (await sql`
     INSERT INTO runs (
       organization_id, run_type, feed_id, connection_id, connector_key,
-      connector_version, approval_status, status, created_at
+      connector_version, connector_artifact_hash, approval_status, status, created_at
     ) VALUES (
       ${params.orgId}, 'sync', ${params.feedId}, ${params.connectionId},
-      ${CHROME_MANIFEST_KEY}, ${params.version}, 'auto', 'pending', NOW()
+      ${CHROME_MANIFEST_KEY}, ${params.manifest.version}, ${deviceManifestHash(params.manifest)}, 'auto', 'pending', NOW()
     )
     RETURNING id
   `) as unknown as Array<{ id: number }>;
@@ -636,6 +637,42 @@ describe('device connector manifests', () => {
     expect(versionRows[0]?.source_path).toBe(`device-manifest://macos/${CONNECTOR_KEY}@0.1.0`);
   });
 
+  it.each([false, true])('retains a stalled sync retry contract when the device manifest changed: %s', async (changed) => {
+    const sql = getTestDb();
+    const { orgId, workerId } = await seedDeviceOwner();
+    const originalManifest = manifest();
+    const original = await pollClaimingDueFeed(workerId, [originalManifest], { capacityAvailable: 1 });
+    expect(original.run_id).toBeDefined();
+    const deviceId = await deviceIdFor(workerId);
+    const originalHash = deviceManifestHash(originalManifest as DeviceConnectorManifest);
+    await sql`
+      UPDATE runs SET last_heartbeat_at = NOW() - INTERVAL '1 day',
+        claimed_at = NOW() - INTERVAL '1 day', status = 'running'
+      WHERE id = ${original.run_id}
+    `;
+    await sql`UPDATE feeds SET next_run_at = '2099-01-01T00:00:00Z' WHERE organization_id = ${orgId}`;
+    const currentManifest = changed ? manifest({ description: 'Changed after the original claim' }) : originalManifest;
+    if (changed) {
+      expect((await poll(workerId, [currentManifest], 'macos', { screentime: true }, { capacityAvailable: 0 })).status).toBe(200);
+    }
+
+    const reaped = await reapStaleRuns();
+    expect(reaped.retriesCreated).toBe(1);
+    const [retry] = await sql`
+      SELECT id, connector_artifact_hash, target_device_worker_id FROM runs
+      WHERE organization_id = ${orgId} AND status = 'pending' AND run_type = 'sync'
+    `;
+    expect(retry).toMatchObject({ connector_artifact_hash: originalHash, target_device_worker_id: deviceId });
+    const response = await poll(workerId, [currentManifest]);
+    expect(response.status).toBe(200);
+    const job = await response.json() as { run_id?: number };
+    if (changed) {
+      expect(job.run_id).toBeUndefined();
+    } else {
+      expect(job.run_id).toBe(Number(retry.id));
+    }
+  });
+
   it('marks only the exact authorized device artifact in the poll response', async () => {
     const { orgId, workerId } = await seedDeviceOwner();
     const bridgeManifest = manifest({ runtime: { platforms: ['macos'] } });
@@ -828,7 +865,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: chromeManifest as DeviceConnectorManifest,
     });
 
     const response = await poll(workerId, [chromeManifest], 'chrome-extension', {
@@ -885,7 +922,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: chromeManifest as DeviceConnectorManifest,
     });
 
     const repairedPoll = await poll(workerId, [chromeManifest], 'chrome-extension', pollOptions);
@@ -1917,10 +1954,10 @@ describe('device connector manifests', () => {
     const [run] = (await sql`
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id, connector_key,
-        connector_version, approval_status, status, created_at
+        connector_version, connector_artifact_hash, approval_status, status, created_at
       ) VALUES (
         ${orgId}, 'sync', ${messagesFeed!.id}, ${connectionId}, ${CHROME_MANIFEST_KEY},
-        '2.0.0', 'auto', 'pending', NOW()
+        '2.0.0', ${deviceManifestHash(chromeManifest)}, 'auto', 'pending', NOW()
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
@@ -2021,10 +2058,10 @@ describe('device connector manifests', () => {
     const [run] = (await sql`
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id, connector_key,
-        connector_version, approval_status, status, created_at, target_device_worker_id
+        connector_version, connector_artifact_hash, approval_status, status, created_at, target_device_worker_id
       ) VALUES (
         ${orgId}, 'sync', ${messagesFeed!.id}, ${connectionId}, ${CHROME_MANIFEST_KEY},
-        '1.0.0', 'auto', 'pending', NOW(), ${v1Device.id}::uuid
+        '1.0.0', ${deviceManifestHash(v1Manifest)}, 'auto', 'pending', NOW(), ${v1Device.id}::uuid
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
@@ -2104,7 +2141,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: winningManifest as DeviceConnectorManifest,
     });
 
     const losingPoll = await poll(
@@ -2221,7 +2258,7 @@ describe('device connector manifests', () => {
       orgId,
       connectionId: Number(rows.connections[0].id),
       feedId: Number(messagesFeed!.id),
-      version: '2.0.0',
+      manifest: chromeManifest as DeviceConnectorManifest,
     });
     await sql`
       UPDATE connector_definitions SET name = 'stale metadata'

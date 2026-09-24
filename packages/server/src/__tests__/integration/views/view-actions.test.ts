@@ -229,6 +229,10 @@ describe("view actions", () => {
 			{}
 		);
 		expect(resaved.written).toBe(true);
+		await expect(invokeViewAction({
+			organizationId: orgId, viewKey: "poke-view", action: "retry", value: null,
+			interactionId: "click-before", surface: "web", actor: actor(ownerId),
+		})).resolves.toEqual({ ...before, created: false });
 
 		const after = await invokeViewAction({
 			organizationId: orgId,
@@ -241,6 +245,14 @@ describe("view actions", () => {
 		}).catch((e) => e);
 		expect(after).toBeInstanceOf(ToolUserError);
 		expect((after as ToolUserError).httpStatus).toBe(403);
+	});
+
+	it("rejects an interaction id reused by another actor or for a different value", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const params = { organizationId: orgId, viewKey: "poke-view", action: "retry", value: { id: 7 }, interactionId: "owned-click", surface: "web", actor: actor(ownerId) };
+		await invokeViewAction(params);
+		await expect(invokeViewAction({ ...params, actor: actor(memberCtx.userId!) })).rejects.toMatchObject({ httpStatus: 409 });
+		await expect(invokeViewAction({ ...params, value: { id: 8 } })).rejects.toMatchObject({ httpStatus: 409 });
 	});
 
 	it("rejects an emits kind the registry does not know", async () => {

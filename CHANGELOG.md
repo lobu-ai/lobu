@@ -1,5 +1,44 @@
 # Changelog
 
+## [21.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.3.1...lobu-v21.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* custom connectors must call ctx.commit and return { status }; a bundle using the old shape fails the run loudly.
+
+### Features
+
+* connectors commit each page with ctx.commit(events, checkpoint) ([#3695](https://github.com/lobu-ai/lobu/issues/3695)) ([d5d0e67](https://github.com/lobu-ai/lobu/commit/d5d0e67a1a6833ed42f93e79798bf2183fcc4184))
+* retain editable source for views and connectors ([#3723](https://github.com/lobu-ai/lobu/issues/3723)) ([a1fc6c8](https://github.com/lobu-ai/lobu/commit/a1fc6c83f4fc6a2be2306cd26c192ac7a0d7141c))
+* **server:** add manage_feeds action to re-collect a feed from scratch ([#3722](https://github.com/lobu-ai/lobu/issues/3722)) ([57d3fcf](https://github.com/lobu-ai/lobu/commit/57d3fcf24fae5919f0398a7edac3095fa9384208))
+* **views:** event views: attach a view to an event kind and open it on one event ([#3718](https://github.com/lobu-ai/lobu/issues/3718)) ([f8fcc46](https://github.com/lobu-ai/lobu/commit/f8fcc464cba0d17b2b05c328850ac4b60d941f8a))
+* **views:** select views by path, not a query key ([#3692](https://github.com/lobu-ai/lobu/issues/3692)) ([73b09ec](https://github.com/lobu-ai/lobu/commit/73b09ec0533d6030ca4f43624ca0fb6f53a32ba0))
+
+
+### Bug Fixes
+
+* **auth:** avoid validation sync enqueue deadlocks ([#3716](https://github.com/lobu-ai/lobu/issues/3716)) ([8c10359](https://github.com/lobu-ai/lobu/commit/8c103590c0aa58d85eaebe5e731c7794e9852156))
+* **cli:** prepare project dependencies with frozen installs ([#3720](https://github.com/lobu-ai/lobu/issues/3720)) ([563f964](https://github.com/lobu-ai/lobu/commit/563f96403ab640179098d2fd864ad22695feebdf))
+* retain admitted device manifest hashes on runs ([#3721](https://github.com/lobu-ai/lobu/issues/3721)) ([dcd1bc9](https://github.com/lobu-ai/lobu/commit/dcd1bc91c61f8ed5db52b16f2b5752dc05a54b96))
+* **server:** cancel unclaimed action runs when their connection is deleted ([#3710](https://github.com/lobu-ai/lobu/issues/3710)) ([f5737cf](https://github.com/lobu-ai/lobu/commit/f5737cf4edb7d7e30334b86240634a229e1eecba))
+* **server:** charge a lost claimed sync to its feed in the reaper ([#3699](https://github.com/lobu-ai/lobu/issues/3699)) ([305e868](https://github.com/lobu-ai/lobu/commit/305e868d329f373b701ecb05de766e3dd30af7e2))
+* **server:** device reconcile never resumes a failure-paused feed ([#3694](https://github.com/lobu-ai/lobu/issues/3694)) ([c119df4](https://github.com/lobu-ai/lobu/commit/c119df48e6315b103ff2e2414996167e556383e7))
+* **server:** fail a claimed sync and charge its feed in one transaction ([#3701](https://github.com/lobu-ai/lobu/issues/3701)) ([a9e7463](https://github.com/lobu-ai/lobu/commit/a9e74632b91b162876a5b63fb969227285b143f6))
+* **server:** heartbeat gateway-inline operation runs while they execute ([#3704](https://github.com/lobu-ai/lobu/issues/3704)) ([dd1a971](https://github.com/lobu-ai/lobu/commit/dd1a971a51f605f6fe060233824a035f2b55e52f))
+* **server:** install the image copy when cloud gets source for a built-in key ([#3717](https://github.com/lobu-ai/lobu/issues/3717)) ([7c433f4](https://github.com/lobu-ai/lobu/commit/7c433f4b981c27dc523c84f8b54d4d8f64fa8fad))
+* **server:** keep approved builder runs out of RunsQueue startup recovery ([#3707](https://github.com/lobu-ai/lobu/issues/3707)) ([e91c6a2](https://github.com/lobu-ai/lobu/commit/e91c6a29d0478e1f1bd6c15f3ead782b790d7338))
+* **server:** preserve failure pauses through connect flows ([#3714](https://github.com/lobu-ai/lobu/issues/3714)) ([47e2e01](https://github.com/lobu-ai/lobu/commit/47e2e015662ea6b461d1346dc77d0c2215d840d7))
+* **server:** preserve failure-paused feeds during auth reactivation ([#3700](https://github.com/lobu-ai/lobu/issues/3700)) ([4e65262](https://github.com/lobu-ai/lobu/commit/4e65262266fb90fc14e61600a50994dee7230219))
+* **server:** reconcile re-auth feed resume after [#3700](https://github.com/lobu-ai/lobu/issues/3700) and [#3709](https://github.com/lobu-ai/lobu/issues/3709) both landed ([#3712](https://github.com/lobu-ai/lobu/issues/3712)) ([a78f56a](https://github.com/lobu-ai/lobu/commit/a78f56a8cefa0f9839a19c8393c6b5f6a13bbe83))
+* **server:** reject functions that read outside the scoped tables in caller SQL ([#3711](https://github.com/lobu-ai/lobu/issues/3711)) ([71abf58](https://github.com/lobu-ai/lobu/commit/71abf583d30b9a52382f2ce3127f4bd32f301987))
+* **server:** resolve date aliases on the UTC calendar with Temporal ([#3702](https://github.com/lobu-ai/lobu/issues/3702)) ([c9271ff](https://github.com/lobu-ai/lobu/commit/c9271ff1ec7ed6515b39177da3f93d2006c64b7a))
+* **server:** resolve prototype-named operation keys like any other key ([#3703](https://github.com/lobu-ai/lobu/issues/3703)) ([0eedb95](https://github.com/lobu-ai/lobu/commit/0eedb955c9c2cea2b091e292fa526602f901d1f3))
+* **server:** retain batch validation reasons on failed runs ([#3698](https://github.com/lobu-ai/lobu/issues/3698)) ([1dc0bd3](https://github.com/lobu-ai/lobu/commit/1dc0bd3afa35af6f273f88178863b08f8f944d6b))
+* **server:** start an approved action run's claim clock at approval ([#3705](https://github.com/lobu-ai/lobu/issues/3705)) ([277c3a2](https://github.com/lobu-ai/lobu/commit/277c3a2d08517bc3cc06742c25c070e8784af9a9))
+* **server:** stop auth-readiness writers from resuming paused feeds ([#3709](https://github.com/lobu-ai/lobu/issues/3709)) ([d5df28e](https://github.com/lobu-ai/lobu/commit/d5df28e10427a6e67f9bf1b01b1daa99e5840f33))
+* **server:** stop resetting feed checkpoints when a connector version changes ([#3719](https://github.com/lobu-ai/lobu/issues/3719)) ([aff1eb6](https://github.com/lobu-ai/lobu/commit/aff1eb64b6d5fed364485d67a90a9dbdb90317cd))
+
 ## [20.3.1](https://github.com/lobu-ai/lobu/compare/lobu-v20.3.0...lobu-v20.3.1) (2026-09-23)
 
 

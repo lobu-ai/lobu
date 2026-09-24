@@ -434,6 +434,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           WHERE r.id = c.id
           RETURNING r.id, r.run_type, r.feed_id, r.connection_id, r.connector_key,
                     r.connector_version, r.organization_id, r.dry_run, r.created_at,
+                    r.connector_artifact_hash, r.target_device_worker_id,
                     r.action_key, c.stale_status
         ),
         lost_syncs AS (
@@ -461,11 +462,15 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         retries AS (
           INSERT INTO public.runs (
             organization_id, run_type, feed_id, connection_id,
-            connector_key, connector_version, status, approval_status, created_at
+            connector_key, connector_version, connector_artifact_hash,
+            target_device_worker_id, status, approval_status, created_at
           )
+          -- A retry retains the original admitted contract and execution pin;
+          -- a mutable catalog entry cannot re-admit it against different bytes.
           SELECT
             t.organization_id, 'sync', t.feed_id, t.connection_id,
-            t.connector_key, t.connector_version, 'pending', 'auto', current_timestamp
+            t.connector_key, t.connector_version, t.connector_artifact_hash,
+            t.target_device_worker_id, 'pending', 'auto', current_timestamp
           FROM timed_out t
           JOIN charged_feeds f ON f.run_id = t.id
           -- The charged row is the synchronization point for retry eligibility:
