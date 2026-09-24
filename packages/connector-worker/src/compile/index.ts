@@ -448,7 +448,7 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
     return { compiledCode: bundle.code, ...capture.source() };
   }
 
-  async function bundleConnectorForIsolateFromSource(sourceCode: string, retainSource = false): Promise<IsolateBundle & Partial<RetainedSource>> {
+  async function bundleConnectorForIsolateFromSource(sourceCode: string, retainSource = false, portableOutput = retainSource): Promise<IsolateBundle & Partial<RetainedSource>> {
     const tmpDir = await mkdtemp(join(tmpdir(), 'lobu-connector-isolate-'));
     const sourcePath = join(tmpDir, 'source.ts');
     try {
@@ -461,7 +461,10 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
         write: false,
         metafile: true,
         minify: false,
-        ...(capture && RETAINED_SOURCE_BUILD_OPTIONS),
+        ...(portableOutput && RETAINED_SOURCE_BUILD_OPTIONS),
+        // Uploaded artifacts already have portable identifiers. Renaming them
+        // again changes their hash on every normalization pass.
+        ...(portableOutput && !retainSource && { minify: false, minifyWhitespace: true, minifySyntax: true }),
         sourcemap: false,
         logLevel: 'silent',
         nodePaths: [resolve(process.cwd(), 'node_modules')],
@@ -484,8 +487,8 @@ export function createIsolateConnectorCompiler(options?: IsolateCompileOptions) 
     return { compiledCode: bundle.code, sourceFiles: bundle.sourceFiles!, dependencies: bundle.dependencies! };
   }
 
-  async function compileConnectorForIsolateFromSource(sourceCode: string): Promise<string> {
-    const bundle = await bundleConnectorForIsolateFromSource(sourceCode);
+  async function compileConnectorForIsolateFromSource(sourceCode: string, portableOutput = false): Promise<string> {
+    const bundle = await bundleConnectorForIsolateFromSource(sourceCode, false, portableOutput);
     if (bundle.builtins.length > 0) throw new IsolateLaneIneligibleError(bundle.builtins, '<source>');
     return bundle.code;
   }

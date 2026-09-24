@@ -177,8 +177,8 @@ main();
 
 const isolateCompiler = createIsolateConnectorCompiler();
 
-export async function compileConnectorSource(sourceCode: string): Promise<CompileResult> {
-  const compiledCode = await isolateCompiler.compileConnectorForIsolateFromSource(sourceCode);
+export async function compileConnectorSource(sourceCode: string, portableOutput = false): Promise<CompileResult> {
+  const compiledCode = await isolateCompiler.compileConnectorForIsolateFromSource(sourceCode, portableOutput);
   return { compiledCode, compiledCodeHash: computeCodeHash(compiledCode) };
 }
 

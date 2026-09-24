@@ -230,7 +230,7 @@ async function recompileStoredConnectorVersion(
     ? row.compiled_code : row?.source_code ?? null;
   if (!row || !sourceCode) return null;
 
-  const { compiledCode, compiledCodeHash } = await compileConnectorSource(sourceCode);
+  const { compiledCode, compiledCodeHash } = await compileConnectorSource(sourceCode, !!row.source_complete);
   // By primary key, never (connector_key, version): that pair no longer
   // identifies one row — an org-scoped copy may share it with the shared row,
   // and the fresh artifact belongs only to the row whose source produced it.

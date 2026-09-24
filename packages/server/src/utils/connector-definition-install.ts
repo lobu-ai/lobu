@@ -10,6 +10,7 @@ import {
 } from './connector-catalog';
 import {
   type ConnectorMetadata,
+  compileConnectorSource,
   compileConnectorSourceArtifact,
   extractConnectorMetadata,
   validateConnectorMetadata,
@@ -250,8 +251,15 @@ export async function resolveConnectorInstallSource(params: {
   let compiledCode: string;
   let compiledCodeHash: string;
 
-  if (alreadyCompiled) {
-    compiledCode = params.compiledCode ?? sourceCode;
+  if (params.compiledCode) {
+    // Normalize source-aware uploads at save time. Their retained version must
+    // compare artifact identity, including after runtime normalization, without
+    // temporary build paths changing that identity on each compilation.
+    const compiled = await compileConnectorSource(params.compiledCode, true);
+    compiledCode = compiled.compiledCode;
+    compiledCodeHash = compiled.compiledCodeHash;
+  } else if (alreadyCompiled) {
+    compiledCode = sourceCode;
     compiledCodeHash = computeCodeHash(compiledCode);
   } else if (params.sourceUri && sourcePath) {
     compiledCode = await compileConnectorForIsolateFromFile(sourcePath);
@@ -275,10 +283,9 @@ export async function resolveConnectorInstallSource(params: {
     sourcePath,
     compiledCode,
     compiledCodeHash,
-    // Pre-compiled uploads were NOT produced by this server's pipeline — an
-    // older client may have compiled under a different externals list — so
-    // they carry no fingerprint and get normalized on first resolution.
-    compileConfigHash: alreadyCompiled ? null : COMPILE_CONFIG_HASH,
+    // Legacy precompiled uploads retain unknown provenance until first use;
+    // source-aware uploads were normalized by this server above.
+    compileConfigHash: alreadyCompiled && !params.compiledCode ? null : COMPILE_CONFIG_HASH,
   };
 }
 

@@ -80,11 +80,23 @@ describe('manage_connections connector source lifecycle (#2045)', () => {
       expect(installed).toMatchObject({ connector_key: key });
       const get = () => manageConnections({ action: 'get_connector_source', connector_key: key }, TEST_ENV, ctx);
       expect(await get()).toMatchObject({ source_complete: true, source_code: source, source_files: artifact.sourceFiles, dependencies: {} });
+      const sql = getTestDb();
+      const assertImmutableArtifact = async () => {
+        const before = await sql`SELECT compiled_code, compiled_code_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+        const rejected = await manageConnections({ action: 'update_connector_source', connector_key: key, ...payload, compiled_code: artifact.compiledCode.replace('from imported file', 'changed output') }, TEST_ENV, ctx);
+        expect(rejected).toMatchObject({ error: expect.stringContaining('Bump the version') });
+        const after = await sql`SELECT compiled_code, compiled_code_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
+        expect(after).toEqual(before);
+        const identical = await manageConnections({ action: 'update_connector_source', connector_key: key, ...payload }, TEST_ENV, ctx);
+        expect(identical).toMatchObject({ connector_key: key, version: '1.0.0' });
+      };
+      await assertImmutableArtifact();
       // Remove the author's filesystem before the runtime normalizes a CLI upload.
       await rm(root, { recursive: true, force: true });
-      const sql = getTestDb();
+      await sql`UPDATE connector_versions SET compile_config_hash = NULL WHERE organization_id = ${orgId} AND connector_key = ${key}`;
       const rows = await sql`SELECT id, organization_id, version, compiled_code, compile_config_hash FROM connector_versions WHERE organization_id = ${orgId} AND connector_key = ${key}`;
       const code = await resolveConnectorCode(key, rows[0] as unknown as StoredConnectorVersion);
+      await assertImmutableArtifact();
       expect((await extractConnectorMetadata(code)).key).toBe(key);
       expect(code).toContain('from imported file');
       const executed = await new IsolateExecutor({ timeoutMs: 10_000 }).execute(code, {

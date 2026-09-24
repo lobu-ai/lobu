@@ -69,6 +69,9 @@ describe('source retention', () => {
     expect(first.compiledCode).not.toContain('source-fixture-');
     expect(first.compiledCode).toBe(second.compiledCode);
     expect(first.sourceFiles).toEqual(second.sourceFiles);
+    const normalized = await compiler.compileConnectorForIsolateFromSource(first.compiledCode, true);
+    expect(normalized).not.toContain('source-fixture-');
+    expect(await compiler.compileConnectorForIsolateFromSource(normalized, true)).toBe(normalized);
   });
 
   it('captures the SDK dependency for both CLI file and MCP source compiles', async () => {

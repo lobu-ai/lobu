@@ -707,7 +707,7 @@ export async function updateInstalledConnectorSource(params: {
 	const row = existing[0];
 	const sameCode =
 		!row ||
-		row.source_code === resolved.sourceCode ||
+		(!params.compiledCode && row.source_code === resolved.sourceCode) ||
 		row.compiled_code_hash === resolved.compiledCodeHash;
 	const sameSource = !row?.source_complete || (
 		isDeepStrictEqual(row.source_files, resolved.sourceFiles) &&
