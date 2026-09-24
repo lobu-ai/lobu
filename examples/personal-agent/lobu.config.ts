@@ -12,6 +12,7 @@ import {
   defineSkill,
   every,
   reactionFromFile,
+  scriptFromFile,
   field,
   Type,
 } from "@lobu/cli/config";
@@ -1512,13 +1513,10 @@ const pollVoteReducer = defineAutomation({
       active_run: "queue",
     },
   ],
-  prompt:
-    'Return only {"summary":"Process the trusted poll interaction."}. Do not copy actor identity or mutate poll state; the deterministic reaction owns all writes.',
-  reactionsGuidance:
-    "The reaction reads the exact run-bound event and accepts only template_interaction provenance with a server-stamped actor.",
-  reaction: reactionFromFile<typeof PollVoteReaction>(
-    "./poll-vote.reaction.ts"
-  ),
+  // Keep the run active through every projection write so the existing
+  // Automation queue serializes votes across replicas and recovery attempts.
+  executor: scriptFromFile<typeof PollVoteReaction>("./poll-vote.reaction.ts"),
+  reaction: null,
 });
 
 export default defineConfig({

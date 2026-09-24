@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
 	collectTemplateActionInvocations,
 	type TemplateActionInvocation,
@@ -60,7 +61,8 @@ export interface InvokedTemplateEventAction {
  * Unlike the template path there is no rendered event to match the value
  * against (no server render) and no delivery binding (views render only in
  * frame hosts). The declaration on the CURRENT view row is the whole check: a
- * removed button stops working because the row no longer declares it. Write
+ * removed button stops accepting new clicks because the row no longer declares
+ * it. An exact retry returns its earlier receipt without executing again. Write
  * rules, workspace scoping and Automation activation are identical to the
  * template path, and the appended event carries `origin_type =
  * 'view_interaction'`. There is deliberately no signed offered-action token:
@@ -75,6 +77,76 @@ export interface InvokeViewActionParams {
 	surface: string;
 	actor: TrustedTemplateActor;
 	source?: TemplateActionSource;
+}
+
+type ActionParams = InvokeTemplateEventActionParams | InvokeViewActionParams;
+
+function actionIdempotencyKey(params: ActionParams): string {
+	const source = "sourceEventId" in params
+		? `event-action:${params.sourceEventId}`
+		: `view-action:${params.viewKey}`;
+	return `${source}:${params.surface}:${params.interactionId}`;
+}
+
+/** A receipt proves an earlier acceptance, not permission to execute a new action. */
+async function acceptedAction(params: ActionParams): Promise<InvokedTemplateEventAction | null> {
+	const key = actionIdempotencyKey(params);
+	const [row] = await getDb()<{
+		id: number; origin_id: string; origin_type: string; semantic_type: string;
+		created_by: string | null; metadata: unknown;
+	}>`
+    SELECT id, origin_id, origin_type, semantic_type, created_by, metadata
+    FROM events
+    WHERE organization_id = ${params.organizationId}
+      AND metadata ? '_lobu_idempotency_key'
+      AND metadata->>'_lobu_idempotency_key' = ${key}
+    LIMIT 1
+  `;
+	if (!row) return null;
+	const interaction = record(record(row.metadata).interaction);
+	const actor = record(interaction.actor);
+	const source = params.source;
+	const messagePinsDelivery = source?.messageId
+		? getPlatformDescriptor(params.surface)?.messageIdIdentifiesMessage?.(source.messageId) === true
+		: false;
+	const sameSubject = "sourceEventId" in params
+		? row.origin_type === "template_interaction" && interaction.source_event_id === params.sourceEventId
+		: row.origin_type === "view_interaction" && interaction.view === params.viewKey;
+	// JSONB stores the JSON value, so compare the same representation for view payloads.
+	const value = params.value === null ? null : JSON.parse(JSON.stringify(params.value));
+	if (!sameSubject || row.origin_id !== key ||
+		interaction.action !== params.action || interaction.surface !== params.surface ||
+		interaction.interaction_id !== params.interactionId || !isDeepStrictEqual(interaction.value, value) ||
+		actor.platform !== params.actor.platform || actor.id !== params.actor.platformUserId ||
+		(row.created_by ?? null) !== (params.actor.userId ?? null) ||
+		(interaction.connection_id ?? null) !== (source?.connectionId ?? null) ||
+		(interaction.message_id ?? null) !== (source?.messageId ?? null) ||
+		(!messagePinsDelivery && (interaction.thread_id ?? null) !== (source?.threadId ?? null))) {
+		throw new ToolUserError("This interaction id was already used for a different action, actor, value, or delivery.", 409);
+	}
+	return { created: false, eventId: Number(row.id), eventType: row.semantic_type };
+}
+
+async function replayableAction(
+	params: ActionParams,
+	write: (key: string) => Promise<InvokedTemplateEventAction>,
+): Promise<InvokedTemplateEventAction> {
+	const accepted = await acceptedAction(params);
+	if (accepted) return accepted;
+	let result: InvokedTemplateEventAction;
+	try {
+		result = await write(actionIdempotencyKey(params));
+	} catch (error) {
+		// Acceptance may race source replacement or a lost acknowledgement.
+		const concurrent = await acceptedAction(params);
+		if (concurrent) return concurrent;
+		throw error;
+	}
+	if (result.created) return result;
+	// A concurrent writer may have claimed the key after our first read.
+	const concurrent = await acceptedAction(params);
+	if (concurrent) return concurrent;
+	throw new ToolUserError("The accepted interaction could not be reconciled.", 409);
 }
 
 /** View action payloads ride as JSON (e.g. `{ id }`), not rendered strings. */
@@ -108,6 +180,16 @@ export async function invokeViewAction(
 	params: InvokeViewActionParams,
 ): Promise<InvokedTemplateEventAction> {
 	validateViewInvocation(params);
+	const result = await replayableAction(params, (key) => appendViewAction(params, key));
+	// A retried acknowledgement should still let the caller refresh its view.
+	emit(params.organizationId, { keys: [`view:${params.viewKey}`] });
+	return result;
+}
+
+async function appendViewAction(
+	params: InvokeViewActionParams,
+	idempotencyKey: string,
+): Promise<InvokedTemplateEventAction> {
 	const view = await getView(params.organizationId, params.viewKey);
 	if (!view) {
 		throw new ToolUserError(`Unknown view: ${params.viewKey}`, 404);
@@ -155,7 +237,6 @@ export async function invokeViewAction(
 		throw new ToolUserError(kindValidation.errors.join("\n"), 422);
 	}
 
-	const idempotencyKey = `view-action:${view.key}:${params.surface}:${params.interactionId}`;
 	const inserted = await insertConnectionlessWorkspaceEvent(
 		{
 			entityIds: [],
@@ -173,9 +254,6 @@ export async function invokeViewAction(
 		},
 		idempotencyKey,
 	);
-	// Views render from their own rows, not from the event fan-out, so the
-	// view's frame needs an explicit invalidation to refetch after a click.
-	emit(params.organizationId, { keys: [`view:${view.key}`] });
 	return {
 		created: inserted.change !== "unchanged",
 		eventId: inserted.id,
@@ -300,6 +378,13 @@ export async function invokeTemplateEventAction(
 	params: InvokeTemplateEventActionParams,
 ): Promise<InvokedTemplateEventAction> {
 	validateInvocation(params);
+	return replayableAction(params, (key) => appendTemplateEventAction(params, key));
+}
+
+async function appendTemplateEventAction(
+	params: InvokeTemplateEventActionParams,
+	idempotencyKey: string,
+): Promise<InvokedTemplateEventAction> {
 	const sql = getDb();
 	const rows = await sql<{
 		id: number;
@@ -438,7 +523,6 @@ export async function invokeTemplateEventAction(
 		throw new ToolUserError(kindValidation.errors.join("\n"), 422);
 	}
 
-	const idempotencyKey = `event-action:${sourceEvent.id}:${params.surface}:${params.interactionId}`;
 	const inserted = await insertConnectionlessWorkspaceEvent(
 		{
 			entityIds,
