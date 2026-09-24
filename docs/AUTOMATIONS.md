@@ -183,6 +183,74 @@ contract allows for an empty result rather than dropping the lease; nothing is
 lost by completing an empty window, because the mark only ever moves forward over
 arrivals the run was actually shown.
 
+### External text classification
+
+The `classifier.dev` connector provides a credential-free `classify` operation
+against [the public v1 API](https://classifier.dev/openapi.json). It sends supplied
+text to that service and returns one prediction per input, in order. The connector
+uses the fast tier, single-label classification, at most 100 texts per call,
+32,000 characters per text, 2–100 labels, and up to 4,000 characters of rubric
+instructions. It does not truncate text or store classifications itself.
+
+Compose it with the external processor window above. Configure a stored-event
+SQL source named `posts` that projects `id`, `occurred_at`, and `payload_text`.
+Restrict that source to the intended feeds. Create an org-level classifier whose
+label keys match the supplied labels, including an explicit `uncertain` label.
+The rubric and source selection belong in the workspace's config.
+
+For each source page (claim with `limit: 100`), run this before completion:
+
+```ts
+const rows = claim.context.sources.posts;
+if (rows.length > 0) {
+  const operation = await client.operations.execute({
+    connection_id: classifierConnectionId,
+    operation_key: "classify",
+    // Include the rubric revision and page identity; at most 256 characters.
+    idempotency_key: `classify:${claim.run_id}:${rubricVersion}:${pageIndex}`,
+    input: { inputs: rows.map(row => row.payload_text), labels, instructions },
+  });
+  if (operation.status !== "completed") {
+    throw new Error(`Classification operation is ${operation.status}`);
+  }
+  const stored = await client.classifiers.classify({
+    classifier_slug: classifierSlug,
+    source: "llm",
+    classifications: operation.output.results.map((result, index) => ({
+      content_id: rows[index].id,
+      value: result.confidence !== null && result.confidence >= 0.7
+        ? result.label : "uncertain",
+      reasoning: JSON.stringify({
+        provider: "classifier.dev", rubric_version: rubricVersion, ...result,
+      }),
+    })),
+  });
+  if (stored.data.failed !== 0 || stored.data.updated !== rows.length) {
+    throw new Error("Incomplete classification writes");
+  }
+}
+```
+
+Process every content/source continuation and retain its token as above. Only
+call `completeWindow` after every page and label write succeeds. Empty windows
+still complete. Provider errors, pending operations, and partial writes must
+leave the window incomplete; check `data.failed` even when the batch reports
+`success: true`. Replaying an idempotency key returns the original operation run
+without new inference, including a failed run, so retry a failed operation with a
+new attempt key after resolving the failure. The key is not sent to classifier.dev.
+
+Store against the current `events.id`. A resync creates a new stored version;
+cached inference keyed by connection + `origin_id` + content/rubric revision still
+needs a label write for that new version. Live feed provider IDs are not event IDs.
+
+`classifiers.classify` records an LLM override with native confidence 1.0. Preserve
+the provider confidence, scores, and actual model in `reasoning` as above; they
+are not native probability columns. Null confidence/scores denote an explicitly
+unscored provider fallback. Use `uncertain` for abstention, not `value: null`.
+A high confidence alone cannot detect missing context: the workspace rubric must
+also handle bare links, title-only posts, and scrape boilerplate. This composition
+does not change `classifiers.apply`, which remains embedding similarity.
+
 A feed with `readWindowAxis` uses its live reader for `@feed` sources. Other
 sync-capable feeds retain their stored-arrival read. Read-only feeds must support
 the window contract or fail explicitly. Live rows are not copied into `events`

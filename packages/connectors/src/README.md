@@ -540,6 +540,7 @@ For source-backed bundled connectors, the worker recompiles a `.ts` file after i
 | `github` | app_installation/oauth/env_keys | issues, PRs, comments, discussions, commits, stargazers | create/comment/close/reopen issues; create/merge PRs |
 | `hackernews` | none | stories, front page, comments | - |
 | `market.quotes` | none | - | quote (read-only, quotes returned to the caller, never persisted) |
+| `classifier.dev` | none | - | classify (public fast tier, ordered batches of up to 100 texts; predictions returned to caller) |
 | `producthunt` | env_keys | posts & comments | - |
 | `reddit` | oauth/none | posts, comments, user activity | - |
 | `rss` | none | articles | - |

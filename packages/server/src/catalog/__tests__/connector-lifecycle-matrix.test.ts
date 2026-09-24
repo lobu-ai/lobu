@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { listCatalogConnectorDefinitions } from "../../utils/connector-catalog";
 
 const EXPECTED_BUNDLED_CONNECTORS = [
+	"classifier.dev",
 	"discord",
 	"github",
 	"google.calendar",
@@ -75,6 +76,7 @@ describe("bundled connector lifecycle matrix", () => {
 				]),
 		);
 		expect(actionCounts).toEqual({
+			"classifier.dev": 1,
 			github: 6,
 			"google.calendar": 4,
 			"google.drive": 2,
