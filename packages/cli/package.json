@@ -1,6 +1,6 @@
 {
   "name": "@lobu/cli",
-  "version": "21.0.0",
+  "version": "21.0.1",
   "description": "CLI for deploying and managing AI agents on Lobu",
   "type": "module",
   "main": "dist/index.js",
