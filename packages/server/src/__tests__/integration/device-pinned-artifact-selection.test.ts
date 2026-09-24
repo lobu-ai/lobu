@@ -311,6 +311,29 @@ describe('device-pinned artifact selection', () => {
     expect(claimed.connector_version).toBe(shippedVersion);
   });
 
+  it('approves a queued run on a pinned endpoint after a sibling endpoint advertises a newer version', async () => {
+    const { userId, orgId, workerId: macWorker } = await seedOwnerWithDevice('macos');
+    expect((await poll(macWorker, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
+    const connection = await shellConnection(orgId);
+    const queued = await createConnectorOperationRun({
+      organizationId: orgId, connectionId: Number(connection.id),
+      connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
+      approvalMode: 'queued', createdByUserId: userId,
+    });
+    await insertEvent({
+      entityIds: [], organizationId: orgId, originId: `run_${queued.runId}_pending`,
+      title: 'Shell operation awaiting approval', content: null, semanticType: 'operation',
+      runId: queued.runId, interactionType: 'approval', interactionStatus: 'pending',
+      metadata: { action_key: 'run', run_id: queued.runId }, authorName: 'Test requester',
+    });
+    const headlessWorker = await addDevice(userId, orgId, 'headless');
+    expect((await poll(headlessWorker, [{ ...OS_SHELL_MANIFEST, version: '9.9.9' }], 'headless')).status).toBe(200);
+    const result = await handleApprove({ action: 'approve', run_id: queued.runId }, ownerToolContext(orgId, userId), {} as Env);
+    expect(result).not.toHaveProperty('error');
+    const response = await poll(macWorker, [OS_SHELL_MANIFEST], 'macos');
+    expect((await response.json() as { run_id?: number }).run_id).toBe(queued.runId);
+  });
+
   it('routes each endpoint its own run and never the other endpoint\'s', async () => {
     const { userId, orgId, workerId: macWorker } = await seedOwnerWithDevice('macos');
     expect((await poll(macWorker, [OS_SHELL_MANIFEST], 'macos')).status).toBe(200);
