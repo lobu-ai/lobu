@@ -1,4 +1,4 @@
-import type { ConfigProviderMeta, ModelOption } from "@lobu/core";
+import type { ModelOption } from "@lobu/core";
 import type { BedrockModelCatalog } from "../../services/bedrock-model-catalog.js";
 import { BaseProviderModule } from "../base-provider-module.js";
 import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
@@ -7,7 +7,6 @@ const BEDROCK_ROUTE_PREFIX = "/api/bedrock/openai";
 const BEDROCK_BASE_URL_ENV = "AMAZON_BEDROCK_BASE_URL";
 const BEDROCK_CREDENTIAL_ENV = "AMAZON_BEDROCK_API_KEY";
 const WORKER_TOKEN_ENV = "WORKER_TOKEN";
-const DEFAULT_BEDROCK_MODEL = "amazon.nova-lite-v1:0";
 
 function hasAwsCredentialHint(): boolean {
   // Explicit opt-in always wins
@@ -103,16 +102,8 @@ export class BedrockProviderModule extends BaseProviderModule {
     // OpenAI SDK's `Authorization` header, so the "placeholder" handed to
     // the runtime is the worker's own token. Orchestrated deploys inject
     // the same value through `buildEnvVars` / `injectSystemKeyFallback`;
-    // embedded workers receive it through the session-context endpoint.
+    // isolate turns receive it through the turn envelope.
     return context?.workerToken ?? "";
-  }
-
-  getProviderMetadata(): ConfigProviderMeta {
-    return {
-      sdkCompat: "openai",
-      defaultModel: DEFAULT_BEDROCK_MODEL,
-      baseUrlEnvVar: BEDROCK_BASE_URL_ENV,
-    };
   }
 
   async getModelOptions(

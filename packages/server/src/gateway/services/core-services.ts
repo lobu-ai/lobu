@@ -697,7 +697,6 @@ export class CoreServices {
 				modelsEndpoint: entry.modelsEndpoint,
 				sdkCompat: entry.sdkCompat,
 				defaultModel: entry.defaultModel,
-				registryAlias: entry.registryAlias,
 				apiKeyInstructions: entry.apiKeyInstructions,
 				apiKeyPlaceholder: entry.apiKeyPlaceholder,
 				authProfilesManager: this.authProfilesManager,
@@ -872,7 +871,6 @@ export class CoreServices {
 			this.mcpConfigService,
 			this.instructionService,
 			this.mcpProxy,
-			this.providerCatalogService,
 			this.agentSettingsStore,
 		);
 		logger.debug("Worker gateway initialized");

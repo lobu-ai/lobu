@@ -95,11 +95,8 @@ async function seedOrg(): Promise<void> {
  */
 function registerCatalogModules(): void {
 	// The registry is a process-wide singleton and `bun test` shares one process
-	// across files. Snapshot before registering so afterEach can put it back —
-	// without that, a leaked `gemini` module changes the answer in
-	// worker-session-context-model-fallback.test.ts, which depends on gemini
-	// being ABSENT. (Observed: that suite failed with "Expected byo2, Received
-	// gemini" the moment these registrations leaked.)
+	// across files. Snapshot before registering so afterEach can restore it
+	// without leaking these provider modules into another suite's catalog.
 	savedModules = new Map(
 		(moduleRegistry as unknown as { modules: Map<string, ModuleInterface> })
 			.modules,

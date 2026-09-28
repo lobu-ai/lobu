@@ -119,23 +119,10 @@ export function buildProviderCatalog(
           authType,
         ];
 
-      // sdkCompat/defaultModel come from providers.json when we have it, else
-      // from the module's own metadata (config-driven modules expose it), else
-      // from the module's declared protocol (OAuth modules like Claude set
-      // `sdkCompat` directly since they aren't config-driven).
-      const moduleMeta =
-        module instanceof ApiKeyProviderModule
-          ? module.getProviderMetadata()
-          : null;
-      const sdkCompat =
-        config?.sdkCompat ?? moduleMeta?.sdkCompat ?? module.sdkCompat ?? null;
-      const defaultModel =
-        config?.defaultModel ?? moduleMeta?.defaultModel ?? null;
-
-      const upstream =
-        module instanceof ApiKeyProviderModule
-          ? module.getUpstreamConfig()
-          : null;
+      const apiKeyModule = module instanceof ApiKeyProviderModule ? module : null;
+      const sdkCompat = config?.sdkCompat ?? module.sdkCompat ?? null;
+      const defaultModel = config?.defaultModel ?? apiKeyModule?.defaultModel ?? null;
+      const upstream = apiKeyModule?.getUpstreamConfig();
       const baseUrl = config?.upstreamBaseUrl ?? upstream?.upstreamBaseUrl ?? "";
 
       entries.push({
@@ -551,9 +538,7 @@ export class ProviderCatalogService {
   }
 
   /**
-   * The SINGLE, shared dispatch-model resolver used by BOTH the enqueue gate
-   * (message-consumer) and session-context (gateway), so they always agree on
-   * the effective model for a turn.
+   * Resolve the effective model at the enqueue gate before constructing a turn.
    *
    * Given a requested model, apply the exact allow-list; when the request is
    * disallowed or a sentinel, replace it with the first LISTED ref that is both

@@ -20,6 +20,8 @@ import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload,
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
+import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
+import type { AuthProfilesManager } from '../../gateway/auth/settings/auth-profiles-manager';
 import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurn,
@@ -380,17 +382,20 @@ describe('agent turn producer', () => {
   it.each(['compatible', 'codex'])('executes a %s tool round trip through worker HTTP and an isolate', async (protocol) => {
     const requests: Array<Record<string, any>> = [];
     const serverErrors: string[] = [];
+    const paths: string[] = [];
     const server = createServer(async (req, res) => {
       try {
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        paths.push(path);
+        if (path.endsWith('/session-context')) throw new Error('Turns must use their admitted envelope');
         const chunks = [];
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        const path = new URL(req.url!, 'http://localhost').pathname;
         if (path.startsWith('/lobu/api/proxy/compatible/') || path.startsWith('/lobu/api/proxy/openai-codex/')) {
           requests.push(body);
+          expect(verifyWorkerToken(req.headers.authorization!.slice(7))).toMatchObject({ agentId: AGENT_ID, userId: 'user-turn' });
           if (protocol === 'codex') {
             expect(path.endsWith('/codex/responses')).toBe(true);
-            expect(verifyWorkerToken(req.headers.authorization!.slice(7)).agentId).toBe(AGENT_ID);
             expect(req.headers['chatgpt-account-id']).toBe('lobu-proxy');
             expect(body.store).toBe(false);
             expect(body.model).toBe('gpt-5.6-luna');
@@ -445,22 +450,33 @@ describe('agent turn producer', () => {
       const org = await createTestOrganization();
       const message = messageFor(org.id);
       message.agentOptions!.model = protocol === 'codex' ? 'chatgpt/gpt-5.6-luna' : 'compatible/compatible-model';
+      const storedCredential = 'synthetic-stored-provider-secret';
+      const profiles = {
+        hasProviderProfiles: async () => true,
+        getBestProfile: async () => ({ credential: storedCredential, authType: 'oauth' }),
+      } as unknown as AuthProfilesManager;
+      const provider = protocol === 'codex' ? new ChatGPTOAuthModule(profiles) : new ApiKeyProviderModule({
+        providerId: 'compatible', providerDisplayName: 'Synthetic compatible provider', providerIconUrl: '',
+        envVarName: 'SYNTHETIC_PROVIDER_API_KEY', sdkCompat: 'openai',
+        upstreamBaseUrl: 'https://compatible.example.test/v1', authProfilesManager: profiles,
+      });
+      expect(await provider.hasCredentials(AGENT_ID, { organizationId: org.id, userId: message.userId })).toBe(true);
       await enqueueMessage(message, {
-        agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`,
-        catalog: catalogFor(protocol === 'codex' ? new ChatGPTOAuthModule({} as never) : claudeModule({ providerId: 'compatible', sdkCompat: 'openai',
-          getUpstreamConfig: () => ({ slug: 'compatible', upstreamBaseUrl: 'https://compatible.example.test/v1' }),
-          getProxyBaseUrlMappings: () => ({ OPENAI_BASE_URL: `${origin}/lobu/api/proxy/compatible/a/turn-agent` }),
-        })),
+        agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`, catalog: catalogFor(provider),
       });
       const [run] = await agentTurnRuns();
       const client = new WorkerClient({ apiUrl: origin, workerId: 'synthetic-compat-worker',
         authToken: 'synthetic-compat-fleet', capabilities: { agent_turn: true } });
       const job = await client.poll();
       expect(job.run_id).toBe(Number(run.id));
+      expect(job.credentials?.accessToken).toBe(run.action_input.credential);
+      expect(verifyWorkerToken(job.credentials!.accessToken as string)).toMatchObject({ organizationId: org.id, agentId: AGENT_ID, userId: message.userId });
+      expect(JSON.stringify(job)).not.toContain(storedCredential);
       const result = await executeRun(client, job, {}, {
         executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }), timeoutMs: 20_000,
       });
       expect(serverErrors).toEqual([]);
+      expect(paths.some(path => path.endsWith('/session-context'))).toBe(false);
       expect(result.error).toBeUndefined();
       expect(requests).toHaveLength(2);
       if (protocol === 'codex') {

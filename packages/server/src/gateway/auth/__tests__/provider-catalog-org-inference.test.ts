@@ -162,10 +162,8 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
       apiKeyHeader: undefined,
     });
 
-    // getProviderMetadata() advertises openai sdkCompat + the row's defaultModel.
-    const meta = mod.getProviderMetadata();
-    expect(meta?.sdkCompat).toBe("openai");
-    expect(meta?.defaultModel).toBe("glm-4.6");
+    expect(mod.sdkCompat).toBe("openai");
+    expect(mod.defaultModel).toBe("glm-4.6");
 
     // The slug was registered on the proxy so it becomes routable.
     expect(registered).toEqual([
@@ -194,7 +192,7 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     const mod = modules[0] as ApiKeyProviderModule;
 
     // Protocol resolved from the row's kind → anthropic, not the default openai.
-    expect(mod.getProviderMetadata()?.sdkCompat).toBe("anthropic");
+    expect(mod.sdkCompat).toBe("anthropic");
     // Anthropic keys must present as x-api-key, not Bearer — the proxy reads
     // this off the upstream config at egress.
     expect(mod.getUpstreamConfig()?.apiKeyHeader).toBe("x-api-key");
@@ -272,7 +270,7 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     expect(mod.getUpstreamConfig()?.upstreamBaseUrl).toBe(
       "https://api.openai.com/v1"
     );
-    expect(mod.getProviderMetadata()?.sdkCompat).toBe("openai-responses");
+    expect(mod.sdkCompat).toBe("openai-responses");
   });
 
   test("an OAuth kind contributes NO fallback upstream", async () => {
@@ -512,7 +510,7 @@ describe("ProviderCatalogService.getModelPolicy — exact allow-list", () => {
     expect(allowedRefs).toEqual(["chatgpt/__unresolved__"]);
     // #2(a): the sentinel's slug MUST NOT contribute a provider module — even
     // though a credentialed chatgpt module exists in the registry. Zero modules
-    // means session-context has nothing to fall back to → hard fail closed.
+    // means dispatch has no installed provider to select → hard fail closed.
     expect(modules).toHaveLength(0);
     // And findProviderForModel refuses the sentinel ref outright.
     const provider = await catalog.findProviderForModel(

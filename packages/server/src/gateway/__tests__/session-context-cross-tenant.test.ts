@@ -1,6 +1,6 @@
 /**
  * R6: the orgless cross-tenant guard must cover EVERY agent-scoped read in
- * `/session-context`, not just the model. A DB-backed shared id (e.g.
+ * `/session-context`. A DB-backed shared id (e.g.
  * "lobu-builder", present in every org) with an ORGLESS worker token must NOT
  * id-only read another tenant's identity/soul/skills or derive another tenant's
  * lobu-memory MCP org slug. Declared (SDK-embedded) agents are org-agnostic and

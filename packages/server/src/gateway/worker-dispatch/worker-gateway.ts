@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 
 import type {
-  ConfigProviderMeta,
   InstructionContext,
   WorkerTokenData,
 } from "@lobu/core";
@@ -22,15 +21,10 @@ import {
   resolveAutomationRunSkills,
 } from "../automation-run-session.js";
 import { toPublicWebOrigin } from "../../utils/url-builder.js";
-import type { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { getRevokedTokenStore } from "../auth/revoked-token-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { McpTool } from "../auth/mcp/tool-cache.js";
-import { isUnresolvedModelRef } from "../auth/model-sentinel.js";
-import type { ProviderCatalogService } from "../auth/provider-catalog.js";
-import { composeEffectiveModelRef } from "../auth/settings/model-selection.js";
-import { getOrgDefaultModel } from "../../lobu/stores/provider-secrets.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import {
   commitTerminalReply,
@@ -67,7 +61,6 @@ export class WorkerGateway {
   private instructionService: InstructionService;
   private publicGatewayUrl: string;
   private mcpProxy?: McpProxy;
-  private providerCatalogService?: ProviderCatalogService;
   private agentSettingsStore?: AgentSettingsStore;
   private automationRunSkillResolver: AutomationRunSkillResolver;
   private deploymentActivityTracker?: DeploymentActivityTracker;
@@ -78,7 +71,6 @@ export class WorkerGateway {
     mcpConfigService: McpConfigService,
     instructionService: InstructionService,
     mcpProxy?: McpProxy,
-    providerCatalogService?: ProviderCatalogService,
     agentSettingsStore?: AgentSettingsStore,
     automationRunSkillResolver: AutomationRunSkillResolver = resolveAutomationRunSkills
   ) {
@@ -87,7 +79,6 @@ export class WorkerGateway {
     this.mcpConfigService = mcpConfigService;
     this.instructionService = instructionService;
     this.mcpProxy = mcpProxy;
-    this.providerCatalogService = providerCatalogService;
     this.agentSettingsStore = agentSettingsStore;
     this.automationRunSkillResolver = automationRunSkillResolver;
 
@@ -460,7 +451,7 @@ export class WorkerGateway {
       }
 
       // CROSS-TENANT GUARD (hoisted): compute org-scope safety ONCE, before any
-      // agent-scoped read (instructions, MCP, skills, model). A DB-backed agent's
+      // agent-scoped read (instructions, MCP, skills). A DB-backed agent's
       // settings read MUST be org-scoped — the worker token can be orgless, and a
       // shared id (e.g. "lobu-builder", present in every org) would id-only read
       // ANOTHER org's identity/soul/skills/MCP-slug and ship it to the worker.
@@ -564,54 +555,15 @@ export class WorkerGateway {
         }
       }
 
-      // Resolve dynamic provider configuration. The org-scope guard
-      // (tokenOrgId / orgScopedOk) was hoisted above — a DB-backed agent with no
-      // org reads nothing here (fail closed). `agentSettings` is null in that
-      // case, which is ALSO the correct fail-closed value the skills-sync below
-      // reuses (no duplicate id-only read).
+      // Enabled skills for worker filesystem sync. The settings read is
+      // org-scoped: it is null for an orgless DB-backed agent (the correct
+      // fail-closed value: NO skill content leaks cross-tenant).
       const agentSettings =
         this.agentSettingsStore && agentId && orgScopedOk
           ? await this.agentSettingsStore.getSettings(agentId, {
               organizationId: tokenOrgId,
             })
           : null;
-      // The layered fallback default (agent models[0] or org default). For a
-      // non-empty models list this is models[0] — which may be a SENTINEL.
-      const layeredDefault = orgScopedOk
-        ? await composeEffectiveModelRef(agentSettings, tokenOrgId, getOrgDefaultModel)
-        : undefined;
-      // Resolve the EFFECTIVE dispatch model through the SAME shared resolver the
-      // enqueue gate uses: when models[0] is a sentinel but a later listed ref is
-      // real+routable, this picks that ref (e.g. ["chatgpt/__unresolved__",
-      // "openai/gpt-5"] → "openai/gpt-5" with the OpenAI module published). Only
-      // an all-sentinel / nothing-routable list — or an orgless DB-backed agent
-      // (resolveDispatchModel then reads not-found → deny) — yields undefined
-      // (fail closed).
-      const effectiveModel =
-        agentId && this.providerCatalogService && orgScopedOk
-          ? (
-              await this.providerCatalogService.resolveDispatchModel(
-                agentId,
-                tokenOrgId,
-                layeredDefault,
-                userId
-              )
-            ).model
-          : undefined;
-      const providerConfig = await this.resolveProviderConfig(
-        agentId || "",
-        effectiveModel,
-        baseUrl,
-        auth.token,
-        tokenOrgId,
-        userId
-      );
-
-      // Enabled skills for worker filesystem sync. REUSE the org-scoped
-      // `agentSettings` fetched above — it is null for an orgless DB-backed agent
-      // (the correct fail-closed value: NO skill content leaks cross-tenant), and
-      // this removes the duplicate id-only read that ignored the org guard.
-      //
       // An Automation run uses version-pinned instructions, so the live library
       // must not re-enter the turn. Replace both live surfaces with the pinned
       // snapshot: `skillsConfig` syncs the frozen files, and the compact catalog
@@ -637,7 +589,7 @@ export class WorkerGateway {
         : contextData.skillsInstructions || "";
 
       logger.info(
-        `Session context for ${userId}: ${Object.keys(mcpConfig.mcpServers || {}).length} MCPs, ${contextData.agentLayers.identityMd.length}/${contextData.agentLayers.soulMd.length}/${contextData.agentLayers.userMd.length} chars identity/soul/user, ${contextData.platformInstructions.length} chars platform instructions, ${contextData.networkInstructions.length} chars network instructions, ${mergedSkillsInstructions.length} chars skills instructions, ${enrichedMcpStatus.length} MCP status entries, ${Object.keys(mcpTools).length} MCP tool lists, ${Object.keys(mcpInstructions).length} MCP instructions, ${skillsConfig.length} skills${automationRun ? " (Automation run — pinned snapshot)" : ""}, provider: ${providerConfig.defaultProvider || "none"}`
+        `Session context for ${userId}: ${Object.keys(mcpConfig.mcpServers || {}).length} MCPs, ${contextData.agentLayers.identityMd.length}/${contextData.agentLayers.soulMd.length}/${contextData.agentLayers.userMd.length} chars identity/soul/user, ${contextData.platformInstructions.length} chars platform instructions, ${contextData.networkInstructions.length} chars network instructions, ${mergedSkillsInstructions.length} chars skills instructions, ${enrichedMcpStatus.length} MCP status entries, ${Object.keys(mcpTools).length} MCP tool lists, ${Object.keys(mcpInstructions).length} MCP instructions, ${skillsConfig.length} skills${automationRun ? " (Automation run — pinned snapshot)" : ""}`
       );
 
       return c.json({
@@ -650,7 +602,6 @@ export class WorkerGateway {
         mcpTools,
         mcpInstructions,
         mcpContext,
-        providerConfig,
         skillsConfig,
         // The origin an agent can build user-openable Lobu links against.
         // Deliberately NOT `getRequestBaseUrl(c)`: this endpoint is called by
@@ -831,193 +782,5 @@ export class WorkerGateway {
       return `${protocol}://${host}${basePath}`;
     }
     return this.publicGatewayUrl;
-  }
-
-  /**
-   * Resolve dynamic provider configuration for a given agent, returning
-   * config values the worker reads from its session context.
-   */
-  private async resolveProviderConfig(
-    agentId: string,
-    agentModel?: string,
-    requestBaseUrl?: string,
-    workerToken?: string,
-    organizationId?: string,
-    userId?: string
-  ): Promise<{
-    defaultProvider?: string;
-    defaultProviderSlug?: string;
-    defaultModel?: string;
-    providerBaseUrlMappings?: Record<string, string>;
-    configProviders?: Record<string, ConfigProviderMeta>;
-    installedProviderRoutes?: Record<string, string>;
-  }> {
-    if (!this.providerCatalogService || !agentId) {
-      return {};
-    }
-
-    const effectiveProviders =
-      await this.providerCatalogService.getInstalledModules(
-        agentId,
-        organizationId
-      );
-    if (effectiveProviders.length === 0) {
-      return {};
-    }
-
-    // FAIL CLOSED on a restriction sentinel: a `<slug>/__unresolved__` model is
-    // NOT a real model — it must never route. If the resolved default is a
-    // sentinel, publish NO provider config (no defaultProvider, no defaultModel),
-    // so the worker surfaces "no routable model" instead of stripping the
-    // "__unresolved__" prefix and sending it to a credentialed upstream, or
-    // silently falling back to the first credentialed module.
-    if (agentModel && isUnresolvedModelRef(agentModel)) {
-      logger.warn(
-        { agentId, organizationId, agentModel },
-        "Agent's default model is an unresolved restriction sentinel — publishing no routable model (fail closed)"
-      );
-      return {};
-    }
-
-    // Determine primary provider
-    let primaryProvider = agentModel
-      ? await this.providerCatalogService.findProviderForModel(
-          agentModel,
-          effectiveProviders
-        )
-      : undefined;
-
-    if (!primaryProvider) {
-      for (const candidate of effectiveProviders) {
-        if (
-          candidate.hasSystemKey() ||
-          (await candidate.hasCredentials(agentId, { organizationId, userId }))
-        ) {
-          primaryProvider = candidate;
-          break;
-        }
-      }
-      // The fallback silently re-points the turn at a provider the model does
-      // not belong to, so "<slug>/<model>" goes upstream verbatim and returns an
-      // opaque "400 invalid model ID" naming neither the requested provider nor
-      // the reason it was skipped. The provider is usually INSTALLED but not
-      // routable — commonly an `inference_providers` row with no
-      // `capabilities.<modality>` block, whose org key therefore never resolves.
-      // Without this line the only evidence is a slash surviving in the model id.
-      const requestedSlug = agentModel?.includes("/")
-        ? agentModel.slice(0, agentModel.indexOf("/"))
-        : undefined;
-      if (requestedSlug && requestedSlug !== primaryProvider?.providerId) {
-        logger.warn(
-          {
-            agentId,
-            organizationId,
-            agentModel,
-            requestedProvider: requestedSlug,
-            fallbackProvider: primaryProvider?.providerId ?? null,
-            installedProviders: effectiveProviders.map((p) => p.providerId),
-          },
-          "Requested model's provider is not routable (not installed, or no resolvable credential) — falling back to a credentialed provider; the model keeps its prefix"
-        );
-      }
-    }
-
-    // Build proxy base URL mappings for all installed providers
-    // Use the request base URL (the worker's DISPATCHER_URL) for internal routing
-    const proxyBaseUrl = `${requestBaseUrl || this.publicGatewayUrl}/api/proxy`;
-    const providerBaseUrlMappings: Record<string, string> = {};
-    for (const provider of effectiveProviders) {
-      Object.assign(
-        providerBaseUrlMappings,
-        provider.getProxyBaseUrlMappings(proxyBaseUrl, agentId, {
-          organizationId,
-          userId,
-        })
-      );
-    }
-
-    // Collect metadata from config-driven providers for worker model resolution
-    const configProviders: Record<string, ConfigProviderMeta> = {};
-    for (const provider of effectiveProviders) {
-      const meta = (provider as ApiKeyProviderModule).getProviderMetadata?.();
-      if (meta) {
-        configProviders[provider.providerId] = meta;
-      }
-    }
-
-    // Key placeholders by Lobu provider id: providers can share an SDK env var,
-    // and a turn can select a different provider from the agent's default.
-    // Providers that authenticate via the worker JWT (e.g. Bedrock) receive
-    // the worker token so their placeholder *is* a verifiable credential.
-    const credentialPlaceholders: Record<string, string> = {};
-    for (const provider of effectiveProviders) {
-      if (
-        provider.hasSystemKey() ||
-        (await provider.hasCredentials(agentId, { organizationId, userId }))
-      ) {
-        const placeholder = provider.buildCredentialPlaceholder
-          ? await provider.buildCredentialPlaceholder(agentId, {
-              organizationId,
-              userId,
-              workerToken,
-            })
-          : "lobu-proxy";
-        credentialPlaceholders[provider.providerId] = placeholder;
-      }
-    }
-
-    const result: {
-      defaultProvider?: string;
-      defaultProviderSlug?: string;
-      defaultModel?: string;
-      providerBaseUrlMappings?: Record<string, string>;
-      configProviders?: typeof configProviders;
-      installedProviderRoutes?: Record<string, string>;
-      credentialPlaceholders?: Record<string, string>;
-    } = {};
-
-    if (primaryProvider) {
-      const upstream = primaryProvider.getUpstreamConfig?.();
-      result.defaultProvider = upstream?.slug || primaryProvider.providerId;
-      // The worker is told `defaultProvider` is the UPSTREAM slug (e.g.
-      // "anthropic") and only strips a `<defaultProvider>/` model prefix. But
-      // Lobu stores models under the provider's LOBU id (e.g.
-      // "claude/claude-opus-4-8"), so for a provider whose Lobu id differs from
-      // its upstream slug the prefix is never stripped and reaches the provider
-      // API verbatim → 404. Hand the worker the Lobu slug too so it can strip
-      // that prefix as well (see resolveModelRef). Omitted when the slugs match.
-      if (upstream?.slug && upstream.slug !== primaryProvider.providerId) {
-        result.defaultProviderSlug = primaryProvider.providerId;
-      }
-    }
-
-    // Only an explicitly configured model is used — Lobu no longer silently
-    // resolves a provider default (the worker errors with an actionable
-    // "select a model" message when none is set). A concrete model is chosen at
-    // config time via the model picker (getModelOptions).
-    if (agentModel) {
-      result.defaultModel = agentModel;
-    }
-
-    if (Object.keys(providerBaseUrlMappings).length > 0) {
-      result.providerBaseUrlMappings = providerBaseUrlMappings;
-    }
-
-    if (Object.keys(configProviders).length > 0) {
-      result.configProviders = configProviders;
-    }
-
-    result.installedProviderRoutes = Object.fromEntries(
-      effectiveProviders.map((provider) => [
-        provider.providerId,
-        provider.getUpstreamConfig?.()?.slug || provider.providerId,
-      ])
-    );
-
-    if (Object.keys(credentialPlaceholders).length > 0) {
-      result.credentialPlaceholders = credentialPlaceholders;
-    }
-
-    return result;
   }
 }

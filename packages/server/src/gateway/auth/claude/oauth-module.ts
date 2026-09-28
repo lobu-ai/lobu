@@ -130,9 +130,6 @@ export class ClaudeOAuthModule extends BaseProviderModule {
       }
     }
 
-    // AGENT_DEFAULT_MODEL is now delivered dynamically via session context.
-    // No longer baked into static container env vars.
-
     return envVars;
   }
 

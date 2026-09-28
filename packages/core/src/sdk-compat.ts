@@ -47,7 +47,7 @@ export interface SdkCompatProtocol {
   /**
    * Model-registry provider name a dynamic model maps to. Providers speaking
    * the same protocol share a registry alias (e.g. all OpenAI-compatible ones
-   * resolve as "openai") unless a provider overrides it via `registryAlias`.
+   * resolve as "openai").
    */
   registryAlias: string;
   /**

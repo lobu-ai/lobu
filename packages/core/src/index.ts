@@ -85,7 +85,6 @@ export {
 } from "./otel";
 // Config-driven provider types
 export type {
-  ConfigProviderMeta,
   ProviderConfigEntry,
   ProviderOAuthConfig,
   ProviderOAuthGrantKind,

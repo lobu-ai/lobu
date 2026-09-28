@@ -693,9 +693,8 @@ export class MessageConsumer {
    * guarantees a disallowed/stale/sentinel model can never reach the worker,
    * regardless of whether a deployment is (re)created.
    *
-   * Uses the SHARED `resolveDispatchModel` resolver (same one session-context
-   * uses) so both layers agree on the effective model — a disallowed/sentinel
-   * request is replaced with the first listed ref that is non-sentinel AND
+   * Uses `resolveDispatchModel` so a disallowed/sentinel request is replaced
+   * with the first listed ref that is non-sentinel AND
    * routable, not merely non-sentinel.
    *
    * FAILS CLOSED on a policy-lookup error: a DB/catalog blip must NEVER let a

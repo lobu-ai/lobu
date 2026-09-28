@@ -1,9 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { generateWorkerToken } from "@lobu/core";
-import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
+import { describe, expect, test } from "bun:test";
 import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
 import { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
-import { WorkerGateway } from "../worker-dispatch/worker-gateway.js";
 
 const ORG = "org-credential-test";
 const USER = "user-credential-test";
@@ -32,14 +29,6 @@ function makeManager() {
   });
 }
 
-const savedEnv = { ...process.env };
-afterEach(() => {
-  for (const key of ["ENCRYPTION_KEY", "DISPATCHER_URL", "WORKER_TOKEN"]) {
-    if (savedEnv[key] === undefined) delete process.env[key];
-    else process.env[key] = savedEnv[key];
-  }
-});
-
 describe("ChatGPT subscription credentials", () => {
   test("admits the Codex protocol with the signed turn credential", async () => {
     const module = new ChatGPTOAuthModule(makeManager());
@@ -66,97 +55,4 @@ describe("ChatGPT subscription credentials", () => {
       globalThis.fetch = originalFetch;
     }
   });
-
-  // The placeholder MAP the worker receives is asserted at the session-context
-  // route, not through a worker run: `credentialPlaceholders` is produced only
-  // by `worker-gateway`, and this is its only coverage. The guarantee that
-  // matters is per-provider — a proxied provider gets the worker token, while
-  // ChatGPT's own subscription credential never leaves the gateway.
-  for (const defaultProvider of ["chatgpt", "deepseek"]) {
-    test(`session context proxies keys but never the ChatGPT credential; default=${defaultProvider}`, async () => {
-      process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
-      const manager = makeManager();
-      const chatgpt = new ChatGPTOAuthModule(manager);
-      const apiKeyModule = (providerId: string, envVarName: string) =>
-        new ApiKeyProviderModule({
-          providerId,
-          providerDisplayName: providerId,
-          providerIconUrl: "",
-          envVarName,
-          upstreamBaseUrl: `https://${providerId}.example.invalid`,
-          sdkCompat: "openai",
-          authProfilesManager: manager,
-        });
-      const modules = [
-        chatgpt,
-        apiKeyModule("openai", "OPENAI_API_KEY"),
-        apiKeyModule("deepseek", "DEEPSEEK_API_KEY"),
-      ];
-      // Availability is fixture-owned; the account lookup and placeholder
-      // generation below use the real provider modules.
-      for (const module of modules) module.hasSystemKey = () => true;
-      const model =
-        defaultProvider === "chatgpt"
-          ? "chatgpt/gpt-5.5"
-          : "deepseek/default-model";
-      const gateway = new WorkerGateway(
-        { send: async () => undefined } as never,
-        "https://gateway.example.invalid",
-        { getWorkerConfig: async () => ({ mcpServers: {} }) } as never,
-        {
-          getSessionContext: async () => ({
-            agentLayers: {
-              identityMd: "Synthetic test agent",
-              soulMd: "",
-              userMd: "",
-              unconfiguredNotice: "",
-            },
-            platformInstructions: "",
-            networkInstructions: "",
-            skillsInstructions: "",
-            mcpStatus: [],
-          }),
-        } as never,
-        undefined,
-        {
-          getInstalledModules: async () => modules,
-          resolveDispatchModel: async () => ({ model }),
-          findProviderForModel: async (ref: string) =>
-            modules.find((m) => m.providerId === ref.split("/")[0]),
-        } as never,
-        { getSettings: async () => ({ models: [model] }) } as never,
-      );
-      const conversationId = `conversation-${defaultProvider}`;
-      const workerToken = generateWorkerToken(
-        USER,
-        conversationId,
-        "worker-test",
-        { channelId: "channel-test", agentId: AGENT, organizationId: ORG },
-      );
-      const response = await gateway.getApp().request("/session-context", {
-        headers: {
-          authorization: `Bearer ${workerToken}`,
-          host: "gateway.example.invalid",
-        },
-      });
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as {
-        providerConfig?: Record<string, unknown>;
-      };
-      const providerConfig = body.providerConfig;
-      // The stored subscription credential must never reach the worker.
-      expect(JSON.stringify(providerConfig)).not.toContain(
-        STORED_CREDENTIAL,
-      );
-      const placeholders = providerConfig?.credentialPlaceholders as
-        | Record<string, string>
-        | undefined;
-      expect(placeholders).toBeDefined();
-      // All proxied providers receive only the signed token. The gateway
-      // resolves the subscription under its verified org/agent/user scope.
-      expect(placeholders?.openai).toBe(workerToken);
-      expect(placeholders?.deepseek).toBe(workerToken);
-      expect(placeholders?.chatgpt).toBe(workerToken);
-    }, 30_000);
-  }
 });

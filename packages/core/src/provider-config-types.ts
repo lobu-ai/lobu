@@ -113,8 +113,6 @@ export interface ProviderConfigEntry {
    * takes precedence when available, so this only needs to be roughly current.
    */
   models?: string[];
-  /** Override provider name for model registry lookup */
-  registryAlias?: string;
   /** Whether to show in "Add Provider" catalog (default: true) */
   catalogVisible?: boolean;
   /**
@@ -135,12 +133,4 @@ export interface ProviderConfigEntry {
     /** STT model ID (for OpenAI-compatible endpoints). */
     model?: string;
   };
-}
-
-/** Metadata passed from gateway to worker for config-driven providers. */
-export interface ConfigProviderMeta {
-  sdkCompat?: SdkCompat;
-  defaultModel?: string;
-  registryAlias?: string;
-  baseUrlEnvVar: string;
 }

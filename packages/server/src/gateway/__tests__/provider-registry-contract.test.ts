@@ -64,7 +64,6 @@ function buildModule(
 		modelsEndpoint: provider.modelsEndpoint,
 		sdkCompat: provider.sdkCompat,
 		defaultModel: provider.defaultModel,
-		registryAlias: provider.registryAlias,
 		catalogVisible: provider.catalogVisible,
 		authProfilesManager: stubAuthProfiles,
 	});
@@ -172,26 +171,6 @@ describe("provider registry contract (config/providers.json)", () => {
 						expect(mappings.OPENAI_BASE_URL).toContain(`${proxyUrl}/${id}`);
 					} else {
 						expect(mappings.OPENAI_BASE_URL).toBeUndefined();
-					}
-				}
-			});
-
-			test("provider metadata exposes the worker base-URL env var", () => {
-				const mod = buildModule(id, provider);
-				const meta = mod.getProviderMetadata();
-				// Config-driven providers (sdkCompat/defaultModel/registryAlias set)
-				// must hand the worker a base-URL env var to register dynamically.
-				if (
-					provider.sdkCompat ||
-					provider.defaultModel ||
-					provider.registryAlias
-				) {
-					expect(meta).not.toBeNull();
-					expect(meta!.baseUrlEnvVar).toBe(
-						provider.envVarName.replace("_KEY", "_BASE_URL"),
-					);
-					if (provider.sdkCompat) {
-						expect(meta!.sdkCompat).toBe(provider.sdkCompat);
 					}
 				}
 			});

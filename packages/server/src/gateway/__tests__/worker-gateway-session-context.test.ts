@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
 import type { DbClient } from "../../db/client.js";
 import { resolveAutomationRunSkills } from "../automation-run-session.js";
@@ -49,10 +49,12 @@ describe("WorkerGateway session context", () => {
         }),
       } as any,
       undefined,
-      undefined,
       {
         isDeclaredAgent: () => true,
         getSettings: async () => ({
+          get models() {
+            throw new Error("Session context must not resolve models");
+          },
           skillsConfig: {
             skills: [
               {
@@ -103,6 +105,7 @@ describe("WorkerGateway session context", () => {
     };
 
     const chat = await fetchContext();
+    expect(chat).not.toHaveProperty("providerConfig");
     expect(chat.agentLayers).toEqual({
       identityMd: "I am Aria.",
       soulMd: "Be concise.",
@@ -176,6 +179,7 @@ describe("WorkerGateway session context", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { webOrigin?: string };
+    expect(body).not.toHaveProperty("providerConfig");
     expect(body.webOrigin).toBe("https://app.lobu.ai");
     expect(body.webOrigin).not.toContain("/lobu");
     expect(body.webOrigin).not.toContain("cluster.local");
@@ -213,5 +217,42 @@ describe("WorkerGateway session context", () => {
     expect(queryValues).toContain(42);
     expect(queryValues).toContain(99);
     expect(queryValues).toContain("org-1");
+  });
+
+  test.each([undefined, "synthetic-org"])("keeps settings scoped to the token's org: %s", async organizationId => {
+    const getSettings = mock(async () => ({
+      skillsConfig: { skills: [{ name: "tenant-skill", enabled: true, content: "Tenant instructions" }] },
+    }));
+    const getSessionContext = mock(async () => ({
+      agentLayers: { identityMd: "", soulMd: "", userMd: "", unconfiguredNotice: "" },
+      platformInstructions: "", networkInstructions: "", skillsInstructions: "", mcpStatus: [],
+    }));
+    const gateway = new WorkerGateway(
+      { send: async () => undefined } as never,
+      "https://gateway.example.test",
+      { getWorkerConfig: async () => ({ mcpServers: {} }) } as never,
+      { getSessionContext } as never,
+      undefined,
+      { isDeclaredAgent: () => false, getSettings } as never,
+    );
+    const token = generateWorkerToken("synthetic-user", "synthetic-conversation", "synthetic-worker", {
+      channelId: "synthetic-channel", agentId: "synthetic-shared-agent", organizationId,
+    });
+    const response = await gateway.getApp().request("/session-context", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).not.toHaveProperty("providerConfig");
+    expect(getSessionContext).toHaveBeenCalledWith("unknown", expect.objectContaining({
+      organizationId, orgScoped: Boolean(organizationId),
+    }), expect.any(Object));
+    if (organizationId) {
+      expect(getSettings).toHaveBeenCalledWith("synthetic-shared-agent", { organizationId });
+      expect(body.skillsConfig).toEqual([{ name: "tenant-skill", content: "Tenant instructions" }]);
+    } else {
+      expect(getSettings).not.toHaveBeenCalled();
+      expect(body.skillsConfig).toEqual([]);
+    }
   });
 });

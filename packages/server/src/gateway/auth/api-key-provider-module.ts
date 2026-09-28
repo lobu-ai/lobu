@@ -1,4 +1,4 @@
-import type { ConfigProviderMeta, ModelOption, SdkCompat } from "@lobu/core";
+import type { ModelOption, SdkCompat } from "@lobu/core";
 import { BaseProviderModule } from "./base-provider-module.js";
 import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
 import { fetchModelOptions } from "./utils/fetch-model-options.js";
@@ -25,8 +25,6 @@ interface ApiKeyProviderConfig {
   apiKeyHeader?: "authorization" | "x-api-key";
   /** Default model ID when none is configured */
   defaultModel?: string;
-  /** Override provider name for model registry lookup */
-  registryAlias?: string;
   /** Whether to show in "Add Provider" catalog (default: true) */
   catalogVisible?: boolean;
   /**
@@ -45,8 +43,7 @@ interface ApiKeyProviderConfig {
  * Any model provider that only needs a "paste your API key" flow
  * can be instantiated from this class without writing a full module.
  *
- * Config-driven providers (from providers.json) set sdkCompat,
- * defaultModel, and registryAlias to enable dynamic worker model resolution.
+ * Config-driven providers declare their protocol and picker defaults here.
  */
 export class ApiKeyProviderModule extends BaseProviderModule {
   protected readonly apiKeyConfig: ApiKeyProviderConfig;
@@ -113,26 +110,8 @@ export class ApiKeyProviderModule extends BaseProviderModule {
     return mappings;
   }
 
-  /**
-   * Returns metadata for config-driven providers (sdkCompat, defaultModel, etc.)
-   * so the worker can register them dynamically. Returns null for hardcoded providers.
-   */
-  getProviderMetadata(): ConfigProviderMeta | null {
-    if (
-      !this.apiKeyConfig.sdkCompat &&
-      !this.apiKeyConfig.defaultModel &&
-      !this.apiKeyConfig.registryAlias
-    ) {
-      return null;
-    }
-    return {
-      sdkCompat: this.apiKeyConfig.sdkCompat,
-      defaultModel: this.apiKeyConfig.defaultModel,
-      registryAlias: this.apiKeyConfig.registryAlias,
-      baseUrlEnvVar:
-        this.providerConfig.baseUrlEnvVarName ||
-        this.apiKeyConfig.envVarName.replace("_KEY", "_BASE_URL"),
-    };
+  get defaultModel(): string | undefined {
+    return this.apiKeyConfig.defaultModel;
   }
 
   async getModelOptions(

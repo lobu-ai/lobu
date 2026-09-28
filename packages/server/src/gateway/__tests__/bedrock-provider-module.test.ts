@@ -17,17 +17,6 @@ describe("BedrockProviderModule", () => {
       })
     );
 
-  test("registers as an OpenAI-compatible dynamic provider", () => {
-    const module = createModule();
-    const metadata = module.getProviderMetadata();
-
-    expect(metadata).toEqual({
-      sdkCompat: "openai",
-      defaultModel: "amazon.nova-lite-v1:0",
-      baseUrlEnvVar: "AMAZON_BEDROCK_BASE_URL",
-    });
-  });
-
   test("points workers at the gateway-owned Bedrock route", () => {
     const module = createModule();
 

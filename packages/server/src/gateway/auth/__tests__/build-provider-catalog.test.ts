@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { type ModuleInterface, moduleRegistry } from "@lobu/core";
 import type { ProviderConfigEntry } from "@lobu/core";
+import { ApiKeyProviderModule } from "../api-key-provider-module.js";
 import { buildProviderCatalog } from "../provider-catalog.js";
 
 /**
@@ -42,6 +43,18 @@ function clearRegistry(): void {
 
 describe("buildProviderCatalog", () => {
   beforeEach(() => clearRegistry());
+
+  test("API-key modules supply the catalog protocol, default model, and base URL", () => {
+    moduleRegistry.register(new ApiKeyProviderModule({
+      providerId: "synthetic-compatible", providerDisplayName: "Synthetic", providerIconUrl: "",
+      envVarName: "SYNTHETIC_API_KEY", upstreamBaseUrl: "https://provider.example.test/v1",
+      sdkCompat: "openai", defaultModel: "private-model", authProfilesManager: {} as never,
+    }));
+    expect(buildProviderCatalog()[0]).toMatchObject({
+      slug: "synthetic-compatible", sdkCompat: "openai", defaultModel: "private-model",
+      baseUrl: "https://provider.example.test/v1",
+    });
+  });
 
   test("OAuth modules appear with their auth metadata and null sdkCompat", () => {
     moduleRegistry.register(

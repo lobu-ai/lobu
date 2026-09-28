@@ -35,8 +35,8 @@ export function enforceModelAllowList(
    * Optional routability predicate. When provided, the REPLACEMENT for a
    * disallowed/sentinel requested model is the first listed ref that is BOTH
    * non-sentinel AND routable (`isRoutable(ref) === true`) — not merely the
-   * first non-sentinel. This unifies the enqueue gate and session-context with
-   * the friendly Listen bridge: a list like ["xai/grok-4","openai/gpt-5"] with
+   * first non-sentinel. The enqueue gate and friendly Listen bridge share
+   * this rule: a list like ["xai/grok-4","openai/gpt-5"] with
    * xai UNCREDENTIALED and openai credentialed replaces onto openai/gpt-5, not a
    * dead xai/grok-4. Omitted ⇒ first non-sentinel (structural check only).
    */
