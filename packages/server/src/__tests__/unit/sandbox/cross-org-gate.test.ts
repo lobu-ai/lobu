@@ -14,7 +14,19 @@ describe("cross-org gate", () => {
       mode: "full",
       allowCrossOrg: false,
     });
-    await expect(sdk.org("acme")).rejects.toBeInstanceOf(CrossOrgAccessDenied);
+    const error = await sdk.org("other-workspace").catch((error) => error);
+    expect(error).toBeInstanceOf(CrossOrgAccessDenied);
+    expect(error).toMatchObject({
+      name: "CrossOrgAccessDenied",
+      code: "CrossOrgAccessDenied",
+      reason: "unavailable",
+      workspaceSlug: null,
+    });
+    expect(error.message).toContain("If the same identity already has access to the target workspace");
+    expect(error.message).toContain("invoke there directly via /mcp/{slug}");
+    expect(error.message).toContain("--context <context> --org <slug>");
+    expect(error.message).toContain("use client directly");
+    expect(error.message).not.toMatch(/reconnect|re-consent|other-workspace/i);
   });
 
   it("explicit allowCrossOrg: false overrides a permissive ToolContext", async () => {

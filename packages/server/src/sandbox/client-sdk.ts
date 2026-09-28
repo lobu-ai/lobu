@@ -129,7 +129,7 @@ export async function resolveCrossOrgToolContext(
 ): Promise<ToolContext> {
 	if (!allowCrossOrg) {
 		throw new CrossOrgAccessDenied(
-			"Cross-org access is not available on this connection. Use the unscoped /mcp endpoint with an OAuth session, or reconnect to /mcp/{slug} for the target workspace."
+			"Cross-org access is not available on this connection. If the same identity already has access to the target workspace, invoke there directly via /mcp/{slug} (CLI: --context <context> --org <slug>) and use client directly. For cross-org calls, use the unscoped /mcp endpoint with an OAuth session authorized for the target workspace."
 		);
 	}
 	if (!ctx.userId || !Array.isArray(ctx.grantedOrganizationIds)) {

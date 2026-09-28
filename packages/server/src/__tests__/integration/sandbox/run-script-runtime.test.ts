@@ -525,6 +525,27 @@ describe("sandbox runtime", () => {
     expect(Date.now() - started).toBeLessThan(150);
   });
 
+  it.each(["read", "full"] as const)("guides scoped %s callers to invoke the target workspace directly", async (sdkMode) => {
+    const org = vi.fn();
+    const result = await runScript({
+      source: 'export default async (_ctx, client) => client.org("other-workspace");',
+      sdk: stubSDK({ org }),
+      sdkMode,
+      allowCrossOrg: false,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe("ScriptError");
+    expect(result.error?.message).toMatch(/^CrossOrgAccessDenied:/);
+    expect(result.error?.message).toContain("If the same identity already has access to the target workspace");
+    expect(result.error?.message).toContain("invoke there directly via /mcp/{slug}");
+    expect(result.error?.message).toContain("--context <context> --org <slug>");
+    expect(result.error?.message).toContain("use client directly");
+    expect(result.error?.message).not.toMatch(/reconnect|re-consent|other-workspace/i);
+    expect(result.sdkCalls).toBe(0);
+    expect(org).not.toHaveBeenCalled();
+  });
+
   it("supports direct client.org(slug).namespace.method() chaining", async () => {
     const orgSdk = {
       entities: {

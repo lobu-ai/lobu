@@ -771,7 +771,7 @@ function __makeClient(orgPath) {
       // literal; keep it free of backticks and dollar-brace sequences.)
       if (k === 'org') return __topLevelKeys.has('org')
         ? (slug) => __makeClient([...orgPath, String(slug)])
-        : () => { throw new Error('CrossOrgAccessDenied: cross-org access is not available on this connection. Use the unscoped /mcp endpoint with an OAuth session, or reconnect to the target workspace.'); };
+        : () => { throw new Error('CrossOrgAccessDenied: cross-org access is not available on this connection. If the same identity already has access to the target workspace, invoke there directly via /mcp/{slug} (CLI: --context <context> --org <slug>) and use client directly. For cross-org calls, use the unscoped /mcp endpoint with an OAuth session authorized for the target workspace.'); };
       if (__topLevelKeys.has(k)) return __dispatchCall(k, orgPath);
       if (__namespaceKeys.has(k)) return __makeNamespaceProxy(k, orgPath);
       if (__hiddenNamespaceKeys.has(k)) return __makeHiddenNamespaceProxy(k);
