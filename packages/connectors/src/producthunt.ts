@@ -294,7 +294,9 @@ export default class ProductHuntConnector extends ConnectorRuntime {
         const edges = result.data.posts.edges;
         const pageInfo = result.data.posts.pageInfo;
         const nextCursor = edges.length > 0 && pageInfo.hasNextPage ? pageInfo.endCursor : null;
-        if (nextCursor) cursor = nextCursor;
+        // Retain only pending traversal state. Once exhausted, the next sync
+        // must start at the newest posts instead of replaying the final page.
+        cursor = nextCursor;
         return { items: edges, nextCursor };
       },
       { maxPages, initialCursor: cursor, delayMs: this.RATE_LIMIT_MS }
