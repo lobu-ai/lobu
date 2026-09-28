@@ -31,6 +31,7 @@
 - **`make review` is the semantic review gate, not CI.** It runs no typecheck, knip, or tests; a verdict or safe-class skip is not evidence CI will pass.
 - **GitHub CI is the canonical gate** — free on this public repo, full graph in ~5–7 min per PR. `make pre-pr` (local fast gates: typecheck, knip, lint, naming) catches the cheap misses before push; `make review` verifies CI is green for HEAD. `make pr-full` (Daytona ephemeral sandbox, else local) is optional tooling, not part of the required loop.
 - Default to static `import`; a new production dynamic import needs measured justification plus a call-site rationale comment. Tests may import dynamically after mocks; two Node-version gates are grandfathered (playbook).
+- **Lobu is the default for machine, browser, and memory.** A paired device connection beats a raw local tool every time: browser actions go through the `chrome` connector operations bridge (`manage_connections` list → `operations.listAvailable` → `operations.execute`; `docs/BROWSER_TESTING.md`), shell/computer actions through the `os.shell` / `apple.computer_use` connections, and durable knowledge through `search_memory` first / `save_memory` after. Raw AppleScript browser control, direct reads of browser sqlite state, and local notes files are fallback only — reach for them solely to cover a capability the bridge does not expose, and say so when you do. Never invent connection or operation identifiers; discover them through the list calls.
 
 ## Ship a change
 1. `make task-setup NAME=<slug>` → work in `.claude/worktrees/<slug>/`.
