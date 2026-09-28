@@ -330,7 +330,6 @@
             "qwen3.8-max-preview",
             "qwen-max",
             "qwen-plus",
-            "qwen-turbo",
             "qwen2.5-coder-32b-instruct",
             "qwen2.5-72b-instruct"
           ]

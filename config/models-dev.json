@@ -1,0 +1,28 @@
+{
+  "snapshot": {
+    "url": "https://models.dev/api.json",
+    "sha256": "f53987ddca91825e936eea77e0a17b787aa1e56a1ccf34e054ac2b51077f4447",
+    "providerCount": 225
+  },
+  "providers": {
+    "qwen": {
+      "modelsDevProvider": "alibaba",
+      "shortlist": [
+        "qwen3.8-max",
+        "qwen3.8-max-preview",
+        "qwen-max",
+        "qwen-plus",
+        "qwen2.5-coder-32b-instruct",
+        "qwen2.5-72b-instruct"
+      ],
+      "localModels": {
+        "qwen3.8-max-preview": "Existing Token Plan choice, absent from the pinned alibaba catalog; retain the local upstream instructions.",
+        "qwen2.5-coder-32b-instruct": "Existing DashScope choice absent from the pinned alibaba catalog; preserve pending separate provider verification.",
+        "qwen2.5-72b-instruct": "Existing DashScope choice absent from the pinned alibaba catalog; preserve pending separate provider verification."
+      },
+      "exclude": {
+        "qwen-turbo": "Locally excluded from the Qwen shortlist even while models.dev still lists it."
+      }
+    }
+  }
+}
