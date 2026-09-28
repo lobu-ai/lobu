@@ -68,6 +68,7 @@ interface RedditListingResponse {
 interface RedditCheckpoint {
   last_timestamp?: string;
   pagination_token?: string;
+  pagination_cutoff?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,8 +274,15 @@ export default class RedditConnector extends ConnectorRuntime {
       username = await this.resolveUsername(ctx, userAccessToken);
     }
 
-    const cutoffDate = new Date();
+    const previous = (ctx.checkpoint ?? {}) as RedditCheckpoint;
+    const resumeAfter = previous.pagination_token ?? null;
+    let cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
+    // Keep items eligible for the whole bounded sweep, even across sync runs.
+    if (resumeAfter && previous.pagination_cutoff) {
+      const savedCutoff = new Date(previous.pagination_cutoff);
+      if (Number.isFinite(savedCutoff.getTime())) cutoffDate = savedCutoff;
+    }
 
     const http = createHttpClient({
       token: accessToken,
@@ -283,6 +291,8 @@ export default class RedditConnector extends ConnectorRuntime {
     });
 
     const events: EventEnvelope[] = [];
+    const seenItems = new Set<string>();
+    const seenCursors = new Set<string>();
     let after: string | null = null;
     let reachedCutoff = false;
 
@@ -303,6 +313,12 @@ export default class RedditConnector extends ConnectorRuntime {
           listing = await http.get<RedditListingResponse>(url);
         } catch (error) {
           if (error instanceof HttpStatusError) {
+            // A saved fullname can disappear from a changing listing. The head
+            // was fetched successfully; clear the rejected anchor for next run.
+            if (cursor === resumeAfter && cursor && [400, 404].includes(error.status)) {
+              after = null;
+              return { items: [], nextCursor: null };
+            }
             if (error.status === 404) {
               throw new Error('Subreddit or resource not found. Please check the subreddit name.');
             }
@@ -314,8 +330,19 @@ export default class RedditConnector extends ConnectorRuntime {
         }
 
         const children = listing.data.children;
-        if (children.length > 0) after = listing.data.after;
-        return { items: children, nextCursor: children.length > 0 ? listing.data.after : null };
+        if (cursor) seenCursors.add(cursor);
+        after = children.length > 0 ? listing.data.after : null;
+        // Reject loops (including a provider ignoring `after` and replaying the
+        // head). End the sweep so the next run can start with a fresh listing.
+        if (after && seenCursors.has(after)) after = null;
+        if (cursor === null && after) {
+          seenCursors.add(after);
+          // Spend one page on fresh arrivals, then resume the unfinished sweep.
+          // Arrivals beyond this page are caught by the next full sweep: never
+          // use last_timestamp as a high-water mark on these mutable listings.
+          after = resumeAfter ?? after;
+        }
+        return { items: children, nextCursor: after };
       },
       { maxPages: this.MAX_PAGES, delayMs: this.RATE_LIMIT_MS }
     );
@@ -334,6 +361,8 @@ export default class RedditConnector extends ConnectorRuntime {
 
         // Filter deleted/removed items
         if (itemData.author === '[deleted]') continue;
+        if (seenItems.has(itemData.name)) continue;
+        seenItems.add(itemData.name);
 
         // Use actual Reddit API kind (t3=post, t1=comment) instead of config
         const isPost = child.kind === 't3';
@@ -359,7 +388,8 @@ export default class RedditConnector extends ConnectorRuntime {
 
     const checkpoint: RedditCheckpoint = {
       last_timestamp: new Date().toISOString(),
-      pagination_token: after ?? undefined,
+      pagination_token: !reachedCutoff ? (after ?? undefined) : undefined,
+      pagination_cutoff: !reachedCutoff && after ? cutoffDate.toISOString() : undefined,
     };
 
     await ctx.commit(events, checkpoint as Record<string, unknown>);
