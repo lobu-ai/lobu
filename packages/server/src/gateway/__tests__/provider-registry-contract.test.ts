@@ -75,19 +75,10 @@ describe("provider registry contract (config/providers.json)", () => {
 		expect(flattened.length).toBeGreaterThan(0);
 	});
 
-	test("Qwen excludes qwen-turbo while preserving the other choices and default", () => {
+	test("Qwen uses Alibaba's catalog and preserves its configured default", () => {
 		const qwen = flattened.find(({ id }) => id === "qwen")?.provider;
-		expect(qwen).toBeDefined();
-		expect(qwen!.models).not.toContain("qwen-turbo");
-		expect(qwen!.models).toEqual([
-			"qwen3.8-max",
-			"qwen3.8-max-preview",
-			"qwen-max",
-			"qwen-plus",
-			"qwen2.5-coder-32b-instruct",
-			"qwen2.5-72b-instruct",
-		]);
-		expect(qwen!.defaultModel).toBe("qwen-max");
+		expect(qwen?.registryAlias).toBe("alibaba");
+		expect(qwen?.defaultModel).toBe("qwen-max");
 	});
 
 	test("OpenAI API exposes its supported transcription route", () => {
@@ -109,6 +100,9 @@ describe("provider registry contract (config/providers.json)", () => {
 
 	for (const { id, provider } of flattened) {
 		describe(`provider: ${id}`, () => {
+			test("does not maintain a handwritten model catalog", () => {
+				expect(provider).not.toHaveProperty("models");
+			});
 			test("has the required display/config fields", () => {
 				expect(provider.displayName?.trim()).toBeTruthy();
 				expect(provider.iconUrl?.trim()).toBeTruthy();

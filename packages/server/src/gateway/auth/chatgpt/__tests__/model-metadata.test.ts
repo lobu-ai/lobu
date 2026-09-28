@@ -46,9 +46,9 @@ test.each([null, "not-a-jwt"])("does not fetch without account-scoped credential
   expect(calls).toBe(0);
 });
 
-// A catalog that cannot be read, or reads back as junk, must leave the caller
-// on its registry defaults — including an EMPTY reasoning list, which says
-// nothing rather than "this model cannot reason".
+// A catalog that cannot be read, or reads back as junk, must answer undefined
+// — including an EMPTY reasoning list, which says nothing rather than "this
+// model cannot reason".
 test.each([
   ["network", undefined],
   ["status", undefined],

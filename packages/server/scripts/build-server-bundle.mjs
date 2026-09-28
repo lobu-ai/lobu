@@ -22,6 +22,7 @@
  */
 
 import esbuild from 'esbuild';
+import '../../../scripts/build-model-catalog.mjs';
 import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

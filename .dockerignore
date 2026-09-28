@@ -11,6 +11,7 @@ dist
 **/dist
 tsconfig.tsbuildinfo
 **/tsconfig.tsbuildinfo
+packages/server/src/generated/models-dev.json
 
 # Local/editor noise
 .env

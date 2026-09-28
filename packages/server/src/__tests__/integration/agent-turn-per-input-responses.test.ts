@@ -31,6 +31,7 @@ const AGENT_ID = 'turn-agent';
 function claudeModule(): ModelProviderModule {
   return {
     providerId: 'claude',
+    catalogProvider: 'anthropic',
     sdkCompat: 'anthropic',
     getUpstreamConfig: () => ({
       slug: 'anthropic',

@@ -68,8 +68,8 @@ interface BaseProviderConfig {
   apiKeyPlaceholder?: string;
   catalogDescription?: string;
   catalogVisible?: boolean;
-  /** Static model shortlist for the picker (OAuth modules with no JSON entry). */
-  catalogModels?: string[];
+  /** models.dev provider ID; defaults to `providerId`. */
+  catalogProvider?: string;
   /** Wire protocol this provider speaks (see SDK_COMPAT_PROTOCOLS). */
   sdkCompat?: SdkCompat;
 }
@@ -101,13 +101,8 @@ export abstract class BaseProviderModule
   catalogDescription?: string;
   catalogVisible?: boolean;
   sdkCompat?: SdkCompat;
-  /**
-   * Static shortlist of model IDs for the model picker, for modules with no
-   * `config/providers.json` entry (the OAuth ones — Claude/ChatGPT/Gemini).
-   * Surfaced through `buildProviderCatalog`; the config `models` array takes
-   * precedence when a provider has both.
-   */
-  catalogModels?: string[];
+  /** models.dev provider identity; independent of the wire protocol. */
+  catalogProvider?: string;
 
   protected readonly providerConfig: BaseProviderConfig;
   protected readonly authProfilesManager: AuthProfilesManager;
@@ -131,7 +126,7 @@ export abstract class BaseProviderModule
     this.apiKeyPlaceholder = config.apiKeyPlaceholder;
     this.catalogDescription = config.catalogDescription;
     this.catalogVisible = config.catalogVisible;
-    this.catalogModels = config.catalogModels;
+    this.catalogProvider = config.catalogProvider ?? config.providerId;
     this.sdkCompat = config.sdkCompat;
 
     this.app = new Hono();

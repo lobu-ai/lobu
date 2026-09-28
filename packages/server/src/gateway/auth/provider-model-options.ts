@@ -4,6 +4,7 @@ import {
 	type ModelOption,
 } from "@lobu/core";
 import { getModelProviderModules } from "../modules/module-system.js";
+import { catalogProviderOf, getCatalogModels } from "./model-catalog.js";
 
 const logger = createLogger("provider-model-options");
 
@@ -17,16 +18,13 @@ export async function collectProviderModelOptions(
 
   await Promise.all(
     modules.map(async (mod) => {
+      const catalogProvider = catalogProviderOf(mod);
+      results[mod.providerId] = getCatalogModels(catalogProvider)
+        .map(id => ({ value: `${mod.providerId}/${id}`, label: id }));
       try {
-        if (typeof mod.getModelOptions !== "function") {
-          results[mod.providerId] = [];
-          return;
-        }
-
-        const options = await mod.getModelOptions(agentId, userId);
-        results[mod.providerId] = Array.isArray(options) ? options : [];
+        const options = await mod.getModelOptions?.(agentId, userId);
+        if (options?.length) results[mod.providerId] = options;
       } catch (error) {
-        results[mod.providerId] = [];
         logger.warn(
           {
             providerId: mod.providerId,

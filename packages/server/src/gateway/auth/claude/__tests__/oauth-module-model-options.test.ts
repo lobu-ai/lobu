@@ -63,8 +63,8 @@ describe("ClaudeOAuthModule.getModelOptions — env-key credential", () => {
     const options = await makeModule().getModelOptions("agent-1", "user-1");
 
     expect(options.map((o) => o.value)).toEqual([
-      "claude-newest-1",
-      "claude-older-2",
+      "claude/claude-newest-1",
+      "claude/claude-older-2",
     ]);
     expect(sentApiKeyHeader).toBe("sk-ant-api03-test");
     expect(sentAuthHeader).toBeUndefined();
@@ -86,7 +86,7 @@ describe("ClaudeOAuthModule.getModelOptions — env-key credential", () => {
 
     const options = await makeModule().getModelOptions("agent-1", "user-1");
 
-    expect(options.map((o) => o.value)).toContain("claude-x");
+    expect(options.map((o) => o.value)).toContain("claude/claude-x");
     expect(sentAuthHeader).toBe("Bearer sk-ant-oat-bearer");
     expect(sentApiKeyHeader).toBeUndefined();
   });

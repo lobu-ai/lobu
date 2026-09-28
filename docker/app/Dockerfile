@@ -99,6 +99,7 @@ COPY packages/pgvector-embedded/ packages/pgvector-embedded/
 COPY packages/server/ packages/server/
 COPY packages/cli/ packages/cli/
 COPY scripts/runtime-components.mjs scripts/runtime-components.mjs
+COPY scripts/build-model-catalog.mjs scripts/build-model-catalog.mjs
 # Bundled into the CLI dist by packages/cli/scripts/build.cjs: the starter
 # skill and the embedded-DB migrations.
 COPY skills/lobu/ skills/lobu/
@@ -127,6 +128,10 @@ RUN cd packages/core && bunx tsc \
     `# left the copy with no source and failed the image build.` \
     && cd ../connector-worker && bun run build \
     && cd ../pgvector-embedded && bunx tsc
+
+# Server source imports the generated models.dev snapshot, so it must exist
+# before the type check; build:server below reuses these bytes.
+RUN node scripts/build-model-catalog.mjs
 
 # Type check
 RUN cd packages/server && bunx tsc --noEmit

@@ -54,15 +54,7 @@ export class ClaudeOAuthModule extends BaseProviderModule {
           'Enter your <a href="https://console.anthropic.com/settings/keys" target="_blank" class="text-blue-600 underline">Anthropic API key</a>:',
         apiKeyPlaceholder: "sk-ant-...",
         catalogDescription: "Anthropic's Claude AI with OAuth authentication",
-        // Static shortlist for the model picker — Claude has no
-        // config/providers.json entry (it's this OAuth module), so its models
-        // are declared here. Current Claude 5 family + Opus 4.8.
-        catalogModels: [
-          "claude-opus-4-8",
-          "claude-sonnet-5",
-          "claude-haiku-4-5-20251001",
-          "claude-fable-5",
-        ],
+        catalogProvider: "anthropic",
         // Claude speaks the Anthropic Messages protocol, so an org Claude
         // provider routes via the anthropic-messages adapter.
         sdkCompat: "anthropic",
@@ -164,7 +156,7 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     const addOption = (value: string, label: string) => {
       if (seen.has(value)) return;
       seen.add(value);
-      options.push({ value, label });
+      options.push({ value: `${this.providerId}/${value}`, label });
     };
 
     const defaultEntry = availableModels.find((m) => m.id === defaultModel);

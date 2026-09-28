@@ -9,9 +9,10 @@
 		"node": ">=22 <25 || >=26"
 	},
 	"scripts": {
-		"dev": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
-		"dev:local": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
-		"start": "tsx src/server.ts",
+		"build:catalog": "node ../../scripts/build-model-catalog.mjs",
+		"dev": "node ../../scripts/build-model-catalog.mjs && tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
+		"dev:local": "node ../../scripts/build-model-catalog.mjs && tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
+		"start": "node ../../scripts/build-model-catalog.mjs && tsx src/server.ts",
 		"build:server": "node ./scripts/build-server-bundle.mjs && bun ./scripts/build-catalog-manifests.ts",
 		"test": "vitest",
 		"test:gateway": "dirs=$(find src/gateway -type d -name __tests__ | sort); [ -n \"$dirs\" ] || { echo 'no gateway __tests__ dirs found' >&2; exit 1; }; rc=0; for d in $dirs; do bun test \"$d\" --timeout 30000 || rc=1; done; exit $rc",

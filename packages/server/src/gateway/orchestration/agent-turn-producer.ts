@@ -48,8 +48,8 @@ import {
   verifyWorkerToken,
 } from "@lobu/core";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
-import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
+import { resolveModelMetadata } from "../auth/model-catalog.js";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
 import { resolveAutomationRunContext } from "../automation-run-session.js";
@@ -432,21 +432,15 @@ interface TurnProvider {
   baseUrl: string;
   credential: string;
   host: string;
-  /** pi-ai's `Model.input` for this model — which modalities it accepts. */
+  /** Which modalities this model accepts, from the catalog or provider discovery. */
   input: ("text" | "image")[];
-  /** pi-ai's `Model.contextWindow`, or the native turn default for an unknown model. */
+  /** Context limit from the catalog or provider discovery. */
   contextWindow: number;
-  /** pi-ai's `Model.maxTokens`: the output ceiling this model actually allows. */
+  /** The output ceiling this model allows; null when neither source states one. */
   maxTokens: number | null;
-  /** Registry reasoning support; undefined means the model is unknown. */
+  /** Reasoning support; undefined when neither source states it. */
   reasoning: boolean | undefined;
 }
-
-/**
- * Fallback when a model is not in pi-ai's registry: compaction still needs a
- * finite context window.
- */
-const DEFAULT_CONTEXT_WINDOW = 128_000;
 
 /**
  * The OpenAI-completions capabilities pi-ai cannot work out for itself.
@@ -476,65 +470,6 @@ function resolveTurnCompat(
     // A provider with no parseable upstream declares no capability.
   }
   return { compat: { supportsStore } };
-}
-
-/**
- * What pi-ai's own model registry says about this model: modalities, context
- * window, output ceiling and reasoning support, resolved ONCE.
- *
- * Every field here is read from the registry rather than guessed, because the
- * guest has no registry of its own — it builds its `Model` from this envelope,
- * so a field missing here becomes a hardcoded default there. That is how the
- * lane came to run every agent with `reasoning:false` and an 8192-token
- * ceiling while the registry said `true` and 64000: the envelope only carried
- * modalities and the window, so the rest defaulted.
- *
- * Unknown models keep the retired subprocess lane's rules: `["text","image"]`
- * (it built a dynamic entry declaring both), a finite default window, and no
- * output ceiling — the adapter's own default is a better answer than a number
- * invented here. Reasoning support is left undefined for the same reason: the
- * registry has no answer, so the guest decides from the requested effort
- * instead of being told `false` about a model that may well support it.
- *
- * `known` reports whether those values came from a registry entry at all,
- * which is what decides if the provider is worth asking for live
- * capabilities.
- */
-function resolveModelMetadata(
-  registryProvider: string,
-  modelId: string
-): {
-  known: boolean;
-  metadata: Pick<
-    TurnProvider,
-    "input" | "contextWindow" | "maxTokens" | "reasoning"
-  >;
-} {
-  // `getModel` is typed over pi-ai's static registry and cannot take the
-  // strings Lobu resolves at runtime without a cast; it answers undefined for
-  // a model the registry does not carry.
-  const model = getModel(registryProvider as never, modelId as never) as
-    | Model<never>
-    | undefined;
-  const window = model?.contextWindow;
-  return {
-    known: Boolean(model),
-    metadata: {
-      // pi enforces this one: `transformMessages` replaces every image block
-      // with a "model does not support images" placeholder when `"image"` is
-      // missing, which is what a non-vision model must get.
-      input: model?.input ? [...model.input] : ["text", "image"],
-      contextWindow:
-        typeof window === "number" && window > 0
-          ? window
-          : DEFAULT_CONTEXT_WINDOW,
-      maxTokens:
-        typeof model?.maxTokens === "number" && model.maxTokens > 0
-          ? model.maxTokens
-          : null,
-      reasoning: model?.reasoning,
-    },
-  };
 }
 
 /**
@@ -671,60 +606,7 @@ async function resolveTurnProvider(
     module.providerId,
     module.getUpstreamConfig?.()?.slug
   );
-  const { known, metadata } = resolveModelMetadata(
-    protocol.registryAlias,
-    modelId
-  );
-  // Only a model the registry has never heard of is worth asking the provider
-  // about: this runs once per admitted message, and a provider lookup is a
-  // live call to the provider's catalog. A registry hit already carries the
-  // same four fields, so the common path never leaves the process.
-  if (!known && module.getModelMetadata) {
-    try {
-      const supplied = await module.getModelMetadata(
-        args.agentId,
-        modelId,
-        context
-      );
-      // Each field is validated here rather than trusted from the module: it
-      // originates in a provider's own catalog response, and a nonsense window
-      // or ceiling reaches the guest as a hard limit.
-      const contextWindow = supplied?.contextWindow;
-      const maxTokens = supplied?.maxTokens;
-      if (
-        typeof contextWindow === "number" &&
-        Number.isSafeInteger(contextWindow) &&
-        contextWindow > 0
-      ) {
-        metadata.contextWindow = contextWindow;
-      }
-      if (
-        typeof maxTokens === "number" &&
-        Number.isSafeInteger(maxTokens) &&
-        maxTokens > 0
-      ) {
-        metadata.maxTokens = maxTokens;
-      }
-      if (typeof supplied?.reasoning === "boolean") {
-        metadata.reasoning = supplied.reasoning;
-      }
-      if (
-        supplied?.input?.length &&
-        supplied.input.every(
-          (value) => value === "text" || value === "image"
-        )
-      ) {
-        metadata.input = [...supplied.input];
-      }
-    } catch {
-      // Metadata discovery must not turn a healthy inference credential into
-      // an admission failure. Keep the registry/defaults on lookup failure.
-      logger.warn(
-        { provider: module.providerId, modelId },
-        "Provider model metadata unavailable; using registry defaults"
-      );
-    }
-  }
+  const metadata = await resolveModelMetadata(module, modelId, args.agentId, context);
   return {
     api: protocol.api,
     provider: protocol.registryAlias,

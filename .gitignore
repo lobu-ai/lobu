@@ -1,5 +1,6 @@
 .DS_Store
 node_modules
+packages/server/src/generated/models-dev.json
 
 **/.claude/settings.local.json
 .claude/worktrees/

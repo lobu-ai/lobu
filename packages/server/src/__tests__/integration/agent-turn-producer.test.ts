@@ -5,7 +5,7 @@
  * seam that makes the isolate turn lane REACHABLE — the executor suite proves
  * the turn runs, this proves a real message reaches it and comes back.
  */
-import { getModel } from '@mariozechner/pi-ai';
+import { getCatalogModel } from '../../gateway/auth/model-catalog';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { serve } from '@hono/node-server';
@@ -53,6 +53,7 @@ const AGENT_ID = 'turn-agent';
 function claudeModule(overrides: Partial<ModelProviderModule> = {}): ModelProviderModule {
   return {
     providerId: 'claude',
+    catalogProvider: 'anthropic',
     sdkCompat: 'anthropic',
     getUpstreamConfig: () => ({
       slug: 'anthropic',
@@ -445,12 +446,15 @@ describe('agent turn producer', () => {
       const org = await createTestOrganization();
       const message = messageFor(org.id);
       message.agentOptions!.model = protocol === 'codex' ? 'chatgpt/gpt-5.6-luna' : 'compatible/compatible-model';
+      const provider = protocol === 'codex' ? new ChatGPTOAuthModule({} as never) : claudeModule({
+        providerId: 'compatible', sdkCompat: 'openai',
+        getUpstreamConfig: () => ({ slug: 'compatible', upstreamBaseUrl: 'https://compatible.example.test/v1' }),
+        getProxyBaseUrlMappings: () => ({ OPENAI_BASE_URL: `${origin}/lobu/api/proxy/compatible/a/turn-agent` }),
+      });
+      // Private/account models supply their capabilities at the existing provider boundary.
+      if (protocol === 'codex') provider.getModelMetadata = async () => ({ contextWindow: 64000, input: ['text'], reasoning: true });
       await enqueueMessage(message, {
-        agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`,
-        catalog: catalogFor(protocol === 'codex' ? new ChatGPTOAuthModule({} as never) : claudeModule({ providerId: 'compatible', sdkCompat: 'openai',
-          getUpstreamConfig: () => ({ slug: 'compatible', upstreamBaseUrl: 'https://compatible.example.test/v1' }),
-          getProxyBaseUrlMappings: () => ({ OPENAI_BASE_URL: `${origin}/lobu/api/proxy/compatible/a/turn-agent` }),
-        })),
+        agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`, catalog: catalogFor(provider),
       });
       const [run] = await agentTurnRuns();
       const client = new WorkerClient({ apiUrl: origin, workerId: 'synthetic-compat-worker',
@@ -1363,7 +1367,7 @@ describe('agent turn producer', () => {
     expect(metadata).toHaveBeenCalledWith(AGENT_ID, 'synthetic-new-model', expect.objectContaining({ organizationId: org.id, userId: 'user-turn' }));
   });
 
-  it.each(['failure', 'invalid'])('retains registry defaults when provider metadata is %s', async (mode) => {
+  it.each(['failure', 'invalid'])('keeps private models runnable when provider metadata is %s', async (mode) => {
     const org = await createTestOrganization();
     const module = Object.assign(tokenEchoingModule(), { getModelMetadata: async () => {
       if (mode === 'failure') throw new Error('Synthetic catalog failure');
@@ -1373,7 +1377,6 @@ describe('agent turn producer', () => {
     message.agentOptions = { model: 'claude/synthetic-new-model' };
     await enqueueMessage(message, { agentSettings: settingsStore, catalog: catalogFor(module), gatewayUrl: GATEWAY_URL });
     const [run] = await agentTurnRuns();
-    // The producer's own DEFAULT_CONTEXT_WINDOW, unchanged by the junk answer.
     expect(run.action_input.turn.compaction.context_window).toBe(128000);
     expect(run.action_input.turn.provider.max_tokens).toBeUndefined();
     expect(run.action_input.turn.provider.reasoning).toBeUndefined();
@@ -1391,7 +1394,7 @@ describe('agent turn producer', () => {
     await enqueueMessage(message, { agentSettings: settingsStore, catalog: catalogFor(module), gatewayUrl: GATEWAY_URL });
     const [run] = await agentTurnRuns();
     expect(metadata).not.toHaveBeenCalled();
-    const registryModel = getModel('anthropic' as never, 'claude-sonnet-4-5-20250929' as never) as
+    const registryModel = getCatalogModel('anthropic', 'claude-sonnet-4-5-20250929') as
       | { contextWindow?: number }
       | undefined;
     expect(run.action_input.turn.compaction.context_window).toBe(registryModel?.contextWindow);
@@ -2095,7 +2098,7 @@ describe('agent turn producer', () => {
     ['agent', { agentId: 'other-selected-agent' }],
     ['conversation', { conversationId: 'other-conversation' }],
     ['user', { userId: 'other-user' }],
-    ['model', { agentOptions: { model: 'claude/different-model' } }],
+    ['model', { agentOptions: { model: 'claude/claude-sonnet-5' } }],
     ['tools', { agentOptions: { model: 'claude/claude-opus-4-8', disallowedTools: ['write'] } }],
     ['routing', { channelId: 'different-channel' }],
     ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
@@ -3053,7 +3056,7 @@ describe('agent turn producer', () => {
     expect(secondTurn.message_files).toEqual([{ name: 'shot.png', mime_type: 'image/png' }]);
   });
 
-  it("puts the model's own modalities on the envelope, from pi-ai's registry", async () => {
+  it("puts the model's own modalities on the envelope, from the models.dev snapshot", async () => {
     const org = await createTestOrganization();
     await enqueueMessage(messageFor(org.id), {
       agentSettings: settingsStore,
@@ -3076,7 +3079,7 @@ describe('agent turn producer', () => {
   it("carries the registry's reasoning support and output ceiling for a known model", async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
-    // A model pi-ai's registry actually carries, unlike the suite's default.
+    // A model the models.dev snapshot carries.
     message.agentOptions = { ...message.agentOptions, model: 'claude/claude-sonnet-4-5-20250929' };
     await enqueueMessage(message, {
       agentSettings: settingsStore,
@@ -3089,9 +3092,9 @@ describe('agent turn producer', () => {
       turn: { provider: { model_id: string; reasoning?: boolean; max_tokens?: number } };
     }).turn;
     expect(turn.provider.model_id).toBe('claude-sonnet-4-5-20250929');
-    // Asserted against the registry rather than a literal: pinning 64000 here
-    // would keep passing after pi-ai revised the model.
-    const registryModel = getModel('anthropic' as never, 'claude-sonnet-4-5-20250929' as never) as
+    // Asserted against the snapshot rather than a literal: pinning 64000 here
+    // would keep passing after models.dev revised the model.
+    const registryModel = getCatalogModel('anthropic', 'claude-sonnet-4-5-20250929') as
       | { reasoning?: boolean; maxTokens?: number }
       | undefined;
     expect(registryModel).toBeDefined();
@@ -3101,29 +3104,18 @@ describe('agent turn producer', () => {
     expect(turn.provider.reasoning).toBe(true);
   });
 
-  it("preserves explicit effort without inventing capabilities for an unknown model", async () => {
-    // `claude-opus-4-8` is not in pi-ai's registry, so there is no ceiling and
-    // no reasoning flag to state — and an absent field is how the envelope says
-    // "let the adapter decide" instead of inventing an answer on either side.
-    // Claiming `reasoning: false` here would make the guest reject the effort
-    // the caller configured, for a model that very likely supports it.
+  it("preserves configured effort while using current catalog capabilities", async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
     message.agentOptions = { ...message.agentOptions, effort: 'medium' };
     await enqueueMessage(message, {
-      agentSettings: settingsStore,
-      catalog: catalogFor(claudeModule()),
-      gatewayUrl: GATEWAY_URL,
+      agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL,
     });
-
     const [run] = await agentTurnRuns();
-    const turn = (run?.action_input as {
-      turn: { effort?: string; provider: { model_id: string; reasoning?: boolean; max_tokens?: number } };
-    }).turn;
-    expect(turn.provider.model_id).toBe('claude-opus-4-8');
-    expect(turn.provider.max_tokens).toBeUndefined();
-    expect(turn.provider.reasoning).toBeUndefined();
-    expect(turn.effort).toBe('medium');
+    const model = getCatalogModel('anthropic', 'claude-opus-4-8');
+    expect(run.action_input.turn.provider.max_tokens).toBe(model?.maxTokens);
+    expect(run.action_input.turn.provider.reasoning).toBe(model?.reasoning);
+    expect(run.action_input.turn.effort).toBe('medium');
   });
 
   it('carries ephemeralContext on the turn-scoped channel, NOT the durable message', async () => {

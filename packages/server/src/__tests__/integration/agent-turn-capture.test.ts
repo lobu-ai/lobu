@@ -110,6 +110,7 @@ describe('native capture over HTTP and Postgres', () => {
       getUpstreamConfig: () => ({ slug: 'anthropic', upstreamBaseUrl: `${origin}/upstream`, apiKeyHeader: 'x-api-key' }),
       getProxyBaseUrlMappings: (url: string, agentId: string) => ({ ANTHROPIC_BASE_URL: `${url}/anthropic/a/${agentId}/o/${org.id}/u/${owner.id}` }),
       buildCredentialPlaceholder: (_agentId: string, context: { workerToken: string }) => context.workerToken,
+      getModelMetadata: async () => ({ contextWindow: 64000, input: ['text' as const] }),
     };
     const message = { userId: owner.id, conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
       agentId: AGENT, organizationId: org.id, platform: 'slack', messageText: 'Capture tool attempts',

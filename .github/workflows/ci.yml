@@ -195,6 +195,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Prepare models.dev snapshot (also on a build-cache hit)
+        run: node scripts/build-model-catalog.mjs
+
       - name: Connector runtime deps tripwire
         # Catches "added a dep to the compiler's external list but forgot to
         # install it in the worker runtime image" before it ships.
@@ -433,6 +436,9 @@ jobs:
           key: ${{ steps.cache-keys.outputs.bun-key }}
       - name: Install dependencies
         run: bun install
+
+      - name: Prepare models.dev snapshot (also on a build-cache hit)
+        run: node scripts/build-model-catalog.mjs
       - name: Dead-code report (knip full, non-blocking)
         continue-on-error: true
         run: bun run knip
@@ -784,6 +790,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Prepare models.dev snapshot (also on a build-cache hit)
+        run: node scripts/build-model-catalog.mjs
+
       - name: Build packages server depends on
         # embeddings → connector-worker order matters: connector-worker's
         # src/embeddings.ts imports `@lobu/embeddings` and resolves it via
@@ -934,6 +943,9 @@ jobs:
           key: ${{ steps.cache-keys.outputs.dist-key }}
       - name: Install dependencies
         run: bun install
+
+      - name: Prepare models.dev snapshot (also on a build-cache hit)
+        run: node scripts/build-model-catalog.mjs
 
       - name: Build packages server depends on
         if: steps.dist-cache.outputs.cache-hit != 'true'
@@ -1389,6 +1401,9 @@ jobs:
           key: ${{ steps.cache-keys.outputs.dist-key }}
       - name: Install dependencies
         run: bun install
+
+      - name: Prepare models.dev snapshot (also on a build-cache hit)
+        run: node scripts/build-model-catalog.mjs
 
       - name: Build workspace packages (needed for downstream tsc resolution)
         if: steps.dist-cache.outputs.cache-hit != 'true'

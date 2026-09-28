@@ -12,6 +12,7 @@ import {
   type ProviderUpstreamConfig,
 } from "../modules/module-system.js";
 import { ApiKeyProviderModule } from "./api-key-provider-module.js";
+import { catalogProviderOf, getCatalogModels } from "./model-catalog.js";
 import { isUnresolvedModelRef } from "./model-sentinel.js";
 import type { AgentSettingsStore } from "./settings/agent-settings-store.js";
 import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
@@ -82,8 +83,7 @@ export interface ProviderCatalogEntry {
   /** True when this deployment has a process-level credential for the provider. */
   systemAvailable: boolean;
   /**
-   * Static fallback model IDs (from providers.json), used by the model picker
-   * when a provider has no live `modelsEndpoint` or the live fetch is empty.
+   * models.dev model IDs for this provider; account discovery may narrow these.
    */
   models: string[];
   apiKeyPlaceholder: string;
@@ -149,7 +149,7 @@ export function buildProviderCatalog(
         defaultModel,
         modelsEndpoint: config?.modelsEndpoint ?? null,
         systemAvailable: module.hasSystemKey?.() ?? false,
-        models: config?.models ?? module.catalogModels ?? [],
+        models: getCatalogModels(catalogProviderOf(module)),
         apiKeyPlaceholder:
           config?.apiKeyPlaceholder ?? module.apiKeyPlaceholder ?? "",
         apiKeyInstructions:
@@ -308,7 +308,8 @@ export class ProviderCatalogService {
   private synthesizeOrgProviderModule(
     row: InferenceProviderListItem,
     sdkCompat: SdkCompat,
-    catalogBaseUrl?: string
+    catalogBaseUrl?: string,
+    catalogProvider?: string
   ): ApiKeyProviderModule | null {
     const textUpstream = row.capabilities.text?.base_url || catalogBaseUrl;
     if (!textUpstream) return null;
@@ -324,6 +325,7 @@ export class ProviderCatalogService {
       apiKeyHeader: SDK_COMPAT_PROTOCOLS[sdkCompat].apiKeyHeader,
       upstreamBaseUrl: textUpstream,
       defaultModel: row.capabilities.text?.model,
+      registryAlias: catalogProvider,
       envVarName: orgProviderKeyEnvVarName(row.slug),
       providerDisplayName: row.displayName || row.slug,
       providerIconUrl: "",
@@ -522,7 +524,8 @@ export class ProviderCatalogService {
         const synthesized = this.synthesizeOrgProviderModule(
           row,
           sdkCompat,
-          catalogEntry?.baseUrl
+          catalogEntry?.baseUrl,
+          catalogProviderOf(moduleMap.get(row.kind) ?? { providerId: row.kind })
         );
         if (synthesized) modules.push(synthesized);
       }
@@ -626,41 +629,16 @@ export class ProviderCatalogService {
     return { ...gate, modules, allowedRefs };
   }
 
-  /**
-   * Find the provider module whose model options include the given model string.
-   */
+  /** Route a qualified model reference without consulting remote discovery. */
   async findProviderForModel(
     model: string,
-    providers?: ModelProviderModule[]
+    providers = getModelProviderModules()
   ): Promise<ModelProviderModule | undefined> {
-    // A restriction sentinel is never a real model — it must NOT resolve to a
-    // credentialed provider by slug-prefix (that would route the sentinel as if
-    // real, widening the restriction). Return undefined so the run fails closed.
+    // A restriction sentinel carries a provider prefix but is never a real
+    // model; routing it would widen the restriction, so fail closed.
     if (isUnresolvedModelRef(model)) return undefined;
-    const candidates = providers || getModelProviderModules();
-    for (const provider of candidates) {
-      if (!provider.getModelOptions) continue;
-      const options = await provider.getModelOptions("", "");
-      if (options.some((opt) => opt.value === model)) {
-        return provider;
-      }
-    }
-    // Fallback: a "<providerId>/<model>" ref names its provider directly, so
-    // match by the leading segment even when the provider's option list didn't
-    // contain an exact value. This is essential for providers whose models are
-    // fetched live and may be empty in this resolution context (e.g. Claude,
-    // whose `getModelOptions` lists BARE ids like "claude-opus-4-8" while the
-    // stored model is prefixed "claude/claude-opus-4-8"). Without it, a
-    // claude/… model fails to match and falls through to the first credentialed
-    // provider, mis-routing the request to the wrong upstream.
-    const slashIndex = model.indexOf("/");
-    if (slashIndex > 0) {
-      const prefix = model.slice(0, slashIndex);
-      const byProviderId = candidates.find((p) => p.providerId === prefix);
-      if (byProviderId) {
-        return byProviderId;
-      }
-    }
-    return undefined;
+    const slash = model.indexOf("/");
+    if (slash <= 0 || slash === model.length - 1) return undefined;
+    return providers.find(provider => provider.providerId === model.slice(0, slash));
   }
 }

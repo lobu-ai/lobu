@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import "./build-model-catalog.mjs";
 
 const knownArgs = new Set(["--skip-applications"]);
 const unknownArgs = process.argv.slice(2).filter((arg) => !knownArgs.has(arg));

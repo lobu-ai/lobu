@@ -25,7 +25,7 @@ interface ApiKeyProviderConfig {
   apiKeyHeader?: "authorization" | "x-api-key";
   /** Default model ID when none is configured */
   defaultModel?: string;
-  /** Override provider name for model registry lookup */
+  /** models.dev provider ID when different from `providerId` */
   registryAlias?: string;
   /** Whether to show in "Add Provider" catalog (default: true) */
   catalogVisible?: boolean;
@@ -71,6 +71,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
         apiKeyPlaceholder: config.apiKeyPlaceholder,
         catalogVisible: config.catalogVisible,
         sdkCompat: config.sdkCompat,
+        catalogProvider: config.registryAlias,
         apiKeyHeader: config.apiKeyHeader,
       },
       config.authProfilesManager,

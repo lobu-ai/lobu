@@ -88,7 +88,6 @@ import type {
 	InferenceProviderCredentialSource,
 } from "./inference-provider-source.js";
 import { InstructionService } from "./instruction-service.js";
-import { ProviderConfigResolver } from "./provider-config-resolver.js";
 import {
 	ProviderRegistryService,
 	resolveProviderRegistryPath,
@@ -147,7 +146,6 @@ export class CoreServices {
 	// Bundled Provider Registry
 	// ============================================================================
 	private providerRegistryService?: ProviderRegistryService;
-	private providerConfigResolver?: ProviderConfigResolver;
 
 	// ============================================================================
 	// Worker Gateway
@@ -591,12 +589,9 @@ export class CoreServices {
 				);
 			}
 		}
-		this.providerConfigResolver = new ProviderConfigResolver(
-			this.providerRegistryService,
-		);
 
 		const configProvidersEarly =
-			await this.providerConfigResolver.getProviderConfigs();
+			await this.providerRegistryService.getProviderConfigs();
 		const oauthLoaded = loadOAuthProvidersFromConfigs(configProvidersEarly);
 		if (oauthLoaded.length === 0) {
 			logger.warn(
@@ -649,9 +644,7 @@ export class CoreServices {
 		logger.debug("Bedrock provider module registered");
 
 		this.transcriptionService?.setProviderConfigSource(() =>
-			this.providerConfigResolver
-				? this.providerConfigResolver.getProviderConfigs()
-				: Promise.resolve({}),
+			this.providerRegistryService?.getProviderConfigs() ?? Promise.resolve({}),
 		);
 
 		// Inference-provider config source: resolves an org's `inference_providers`
@@ -1183,10 +1176,6 @@ export class CoreServices {
 
 	getProviderRegistryService(): ProviderRegistryService | undefined {
 		return this.providerRegistryService;
-	}
-
-	getProviderConfigResolver(): ProviderConfigResolver | undefined {
-		return this.providerConfigResolver;
 	}
 
 	getExternalAuthClient(): ExternalAuthClient | undefined {

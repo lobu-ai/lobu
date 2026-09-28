@@ -45,11 +45,8 @@ export interface ModelProviderModule extends OrchestratorModule {
   apiKeyPlaceholder?: string;
   catalogDescription?: string;
   catalogVisible?: boolean;
-  /**
-   * Static model shortlist for the picker — for OAuth modules (Claude/ChatGPT/
-   * Gemini) that have no `config/providers.json` entry to carry a `models` list.
-   */
-  catalogModels?: string[];
+  /** models.dev provider identity; independent of the wire protocol. */
+  catalogProvider?: string;
   /**
    * Wire protocol this provider speaks (see SDK_COMPAT_PROTOCOLS). Lets the
    * catalog know a module's protocol uniformly — including OAuth modules like
@@ -83,9 +80,9 @@ export interface ModelProviderModule extends OrchestratorModule {
   getModelOptions?(agentId: string, userId: string): Promise<ModelOption[]>;
   /**
    * Gateway-only capability lookup, consulted ONLY for a model the bundled
-   * registry does not carry — a provider that shipped a new model since this
-   * release. Never on the happy path: a registry hit answers without leaving
-   * the process.
+   * models.dev snapshot does not carry — a private or account model, or one
+   * shipped since this release. Never on the happy path: a snapshot hit
+   * answers without leaving the process.
    */
   getModelMetadata?(
     agentId: string,

@@ -60,7 +60,7 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
     }>({
       url: "https://chatgpt.com/backend-api/models",
       headers: { Authorization: `Bearer ${token}` },
-      prefix: "openai-codex",
+      prefix: this.providerId,
       pick: (payload) =>
         (payload.models || []).map((m) => {
           const id = m.slug?.trim();
@@ -70,10 +70,10 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
   }
 
   /**
-   * Capabilities for a model the bundled registry has never heard of, read
+   * Capabilities for a model the bundled snapshot has never heard of, read
    * from the account's own Codex catalog. Answers `undefined` for every
    * failure — no credential, no account identity, an unreachable or
-   * unparseable catalog — so the caller keeps its registry defaults.
+   * unparseable catalog — so the caller retains the dynamic-provider defaults.
    */
   async getModelMetadata(
     agentId: string,
@@ -130,7 +130,7 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
         // JSON parse errors can quote upstream body fragments; do not log
         // arbitrary response or transport text from an authenticated request.
         { category: error instanceof SyntaxError ? "invalid_json" : "transport" },
-        "Codex model catalog lookup failed; retaining registry defaults"
+        "Codex model catalog lookup failed"
       );
       return undefined;
     }

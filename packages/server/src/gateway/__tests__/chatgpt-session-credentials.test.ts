@@ -59,7 +59,7 @@ describe("ChatGPT subscription credentials", () => {
     }) as typeof fetch;
     try {
       expect(await module.getModelOptions(AGENT, USER)).toEqual([
-        { value: "openai-codex/test-model", label: "Test model" },
+        { value: "chatgpt/test-model", label: "Test model" },
       ]);
       expect(authorization).toBe(`Bearer ${STORED_CREDENTIAL}`);
     } finally {

@@ -13,14 +13,9 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://console.anthropic.com/settings/keys\" target=\"_blank\" class=\"text-blue-600 hover:underline\">Anthropic Console</a>, or sign in with Claude",
           "apiKeyPlaceholder": "sk-ant-...",
           "sdkCompat": "anthropic",
+          "registryAlias": "anthropic",
           "modalities": ["text"],
           "defaultModel": "claude-sonnet-5",
-          "models": [
-            "claude-opus-4-8",
-            "claude-sonnet-5",
-            "claude-haiku-4-5-20251001",
-            "claude-fable-5"
-          ],
           "oauth": {
             "clientId": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
             "authUrl": "https://claude.com/cai/oauth/authorize",
@@ -96,12 +91,7 @@
             "sdkCompat": "openai",
             "transcriptionPath": "/audio/transcriptions",
             "model": "whisper-large-v3-turbo"
-          },
-          "models": [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768"
-          ]
+          }
         }
       ]
     },
@@ -118,9 +108,9 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://aistudio.google.com/apikey\" target=\"_blank\" class=\"text-blue-600 hover:underline\">Google AI Studio</a>",
           "apiKeyPlaceholder": "AIza...",
           "sdkCompat": "openai",
+          "registryAlias": "google",
           "modalities": ["text", "image"],
-          "defaultModel": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+          "defaultModel": "gemini-2.5-pro"
         }
       ]
     },
@@ -137,14 +127,10 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://api.together.ai/settings/api-keys\" target=\"_blank\" class=\"text-blue-600 hover:underline\">Together AI Dashboard</a>",
           "apiKeyPlaceholder": "tok_...",
           "sdkCompat": "openai",
+          "registryAlias": "togetherai",
           "modalities": ["text"],
           "defaultModel": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-          "modelsEndpoint": "/models",
-          "models": [
-            "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            "Qwen/Qwen2.5-72B-Instruct-Turbo",
-            "deepseek-ai/DeepSeek-V3"
-          ]
+          "modelsEndpoint": "/models"
         }
       ]
     },
@@ -163,12 +149,7 @@
           "sdkCompat": "openai",
           "modalities": ["text"],
           "modelsEndpoint": "/models",
-          "defaultModel": "nvidia/moonshotai/kimi-k2.6",
-          "models": [
-            "nvidia/moonshotai/kimi-k2.6",
-            "meta/llama-3.3-70b-instruct",
-            "deepseek-ai/deepseek-r1"
-          ]
+          "defaultModel": "nvidia/moonshotai/kimi-k2.6"
         }
       ]
     },
@@ -185,14 +166,10 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://fireworks.ai/account/api-keys\" target=\"_blank\" class=\"text-blue-600 hover:underline\">Fireworks Dashboard</a>",
           "apiKeyPlaceholder": "fw_...",
           "sdkCompat": "openai",
+          "registryAlias": "fireworks-ai",
           "modalities": ["text"],
           "defaultModel": "accounts/fireworks/models/llama-v3p3-70b-instruct",
-          "modelsEndpoint": "/models",
-          "models": [
-            "accounts/fireworks/models/llama-v3p3-70b-instruct",
-            "accounts/fireworks/models/deepseek-v3",
-            "accounts/fireworks/models/qwen2p5-72b-instruct"
-          ]
+          "modelsEndpoint": "/models"
         }
       ]
     },
@@ -211,12 +188,7 @@
           "sdkCompat": "openai",
           "modalities": ["text"],
           "defaultModel": "mistral-large-latest",
-          "modelsEndpoint": "/models",
-          "models": [
-            "mistral-large-latest",
-            "mistral-small-latest",
-            "codestral-latest"
-          ]
+          "modelsEndpoint": "/models"
         }
       ]
     },
@@ -235,8 +207,7 @@
           "sdkCompat": "openai",
           "modalities": ["text"],
           "defaultModel": "deepseek-v4-flash",
-          "modelsEndpoint": "/v1/models",
-          "models": ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]
+          "modelsEndpoint": "/v1/models"
         }
       ]
     },
@@ -261,12 +232,7 @@
             "sdkCompat": "openai",
             "transcriptionPath": "/audio/transcriptions",
             "model": "whisper-1"
-          },
-          "models": [
-            "anthropic/claude-sonnet-5",
-            "openai/gpt-5.6-sol",
-            "google/gemini-2.5-pro"
-          ]
+          }
         }
       ]
     },
@@ -285,8 +251,7 @@
           "sdkCompat": "openai",
           "modalities": ["text"],
           "defaultModel": "llama-3.3-70b",
-          "modelsEndpoint": "/models",
-          "models": ["llama-3.3-70b", "llama3.1-8b", "qwen-3-32b"]
+          "modelsEndpoint": "/models"
         }
       ]
     },
@@ -303,6 +268,7 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://opencode.ai/auth\" target=\"_blank\" class=\"text-blue-600 hover:underline\">OpenCode Zen</a>",
           "apiKeyPlaceholder": "zen-...",
           "sdkCompat": "openai",
+          "registryAlias": "opencode",
           "modalities": ["text"],
           "defaultModel": "claude-sonnet-4-6",
           "modelsEndpoint": "/models"
@@ -322,17 +288,10 @@
           "apiKeyInstructions": "Get your API key from the <a href=\"https://dashscope.console.aliyun.com/apiKey\" target=\"_blank\" class=\"text-blue-600 hover:underline\">DashScope Console</a>. A Qoder / Token Plan subscription is served from a different host — set a custom upstream of <code>https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1</code> and paste that plan's key. The <code>qwen3.8-max</code> tiers are only reachable that way.",
           "apiKeyPlaceholder": "sk-...",
           "sdkCompat": "openai",
+          "registryAlias": "alibaba",
           "modalities": ["text"],
           "defaultModel": "qwen-max",
-          "modelsEndpoint": "/models",
-          "models": [
-            "qwen3.8-max",
-            "qwen3.8-max-preview",
-            "qwen-max",
-            "qwen-plus",
-            "qwen2.5-coder-32b-instruct",
-            "qwen2.5-72b-instruct"
-          ]
+          "modelsEndpoint": "/models"
         }
       ]
     },
@@ -352,7 +311,6 @@
           "modalities": ["text"],
           "defaultModel": "grok-4",
           "modelsEndpoint": "/models",
-          "models": ["grok-4", "grok-3", "grok-3-mini"],
           "oauth": {
             "clientId": "b1a00492-073a-47ea-816f-4c329264a828",
             "tokenUrl": "https://auth.x.ai/oauth2/token",
@@ -383,8 +341,7 @@
           "sdkCompat": "openai",
           "modalities": ["text"],
           "defaultModel": "sonar",
-          "modelsEndpoint": "/v1/models",
-          "models": ["sonar", "sonar-pro", "sonar-reasoning-pro"]
+          "modelsEndpoint": "/v1/models"
         }
       ]
     },
@@ -403,8 +360,7 @@
           "sdkCompat": "openai",
           "modalities": ["text"],
           "defaultModel": "command-a-03-2025",
-          "modelsEndpoint": "/models",
-          "models": ["command-a-03-2025", "command-r-plus", "command-r"]
+          "modelsEndpoint": "/models"
         }
       ]
     },
@@ -429,8 +385,7 @@
             "model": "gpt-4o-transcribe"
           },
           "defaultModel": "gpt-5.6-sol",
-          "modelsEndpoint": "/models",
-          "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
+          "modelsEndpoint": "/models"
         }
       ]
     }
