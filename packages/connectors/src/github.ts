@@ -77,6 +77,12 @@ interface GitHubConfig {
 
 interface GitHubCheckpoint {
   last_sync_at?: string;
+  commits?: {
+    since: string;
+    started_at: string;
+    head_sha?: string;
+    next_page: number;
+  };
   stargazers?: GitHubStargazerCheckpoint[];
 }
 
@@ -280,9 +286,7 @@ const LOOKBACK_PROP = {
 const STARGAZER_PROFILE_REFRESH_MS = 30 * 24 * 60 * 60 * 1000;
 const STARGAZER_PROFILE_FETCH_LIMIT = 25;
 
-// Bound a single commits sync to 30 pages (3000 commits). Incremental `since`
-// keeps steady-state runs tiny; the cap only matters on a cold backfill of a
-// busy repo, where the remaining history rides subsequent runs.
+// Resume after at most 30 data pages, keeping the same immutable commit graph.
 const COMMITS_MAX_PAGES = 30;
 
 const LABELS_PROP = {
@@ -919,20 +923,25 @@ export default class GitHubConnector extends ConnectorRuntime {
       };
     }
 
-    const events = await this.syncContent({
-      repo,
-      contentType,
-      sinceIso,
-      labelsFilter: config.labels_filter ?? [],
-      token,
-    });
+    const result = contentType === 'commits'
+      ? await this.syncCommits(repo, sinceIso, ctx.checkpoint, token)
+      : {
+          events: await this.syncContent({
+            repo,
+            contentType,
+            sinceIso,
+            labelsFilter: config.labels_filter ?? [],
+            token,
+          }),
+          checkpoint: { last_sync_at: new Date().toISOString() },
+          status: 'complete' as const,
+        };
+    const { events } = result;
     this.stampRepoAttribution(events, repo, { attachAutomationSignals });
 
-    await ctx.commit(events, {
-      last_sync_at: new Date().toISOString(),
-    } as Record<string, unknown>);
+    await ctx.commit(events, result.checkpoint as Record<string, unknown>);
     return {
-      status: 'complete',
+      status: result.status,
       metadata: {
         items_found: events.length,
       },
@@ -1157,7 +1166,7 @@ export default class GitHubConnector extends ConnectorRuntime {
 
   private async syncContent(params: {
     repo: RepoRef;
-    contentType: Exclude<GitHubContentType, 'stargazers'>;
+    contentType: Exclude<GitHubContentType, 'stargazers' | 'commits'>;
     sinceIso: string;
     labelsFilter: string[];
     token: string | null;
@@ -1176,39 +1185,64 @@ export default class GitHubConnector extends ConnectorRuntime {
         return await this.syncDiscussions(repo, sinceIso, token);
       case 'discussion_comments':
         return await this.syncDiscussionComments(repo, sinceIso, token);
-      case 'commits':
-        return await this.syncCommits(repo, sinceIso, token);
     }
   }
 
   private async syncCommits(
     repo: RepoRef,
     sinceIso: string,
+    rawCheckpoint: Record<string, unknown> | null,
     token: string | null
-  ): Promise<EventEnvelope[]> {
+  ): Promise<{ events: EventEnvelope[]; checkpoint: GitHubCheckpoint; status: SyncResult['status'] }> {
     const events: EventEnvelope[] = [];
-
-    // Commits are durable and fully queryable, so polling recovers the complete
-    // "who committed when" history — no webhook dependency. `since` filters by
-    // commit date for incremental syncs; pagination is bounded so one run can't
-    // walk an unbounded history (deeper backfill rides subsequent runs).
-    const pages = paginateByOffset<GitHubCommitLike>(
-      async (offset, pageSize) => {
-        const query = new URLSearchParams({
-          per_page: String(pageSize),
-          page: String(offset / pageSize + 1),
+    const checkpoint = (rawCheckpoint ?? {}) as GitHubCheckpoint;
+    const progress: NonNullable<GitHubCheckpoint['commits']> = checkpoint.commits
+      ? { ...checkpoint.commits }
+      : {
           since: sinceIso,
-        });
-        const url = `${githubRepoApiUrl(repo, '/commits')}?${query.toString()}`;
-        const commits = asArray(
-          await this.requestJson<GitHubCommitLike[]>({ url, token })
-        );
-        return { items: commits, hasMore: commits.length === pageSize };
-      },
-      { pageSize: 100, maxPages: COMMITS_MAX_PAGES }
-    );
+          // Use the start, not the end of a potentially multi-run scan. Round down
+          // to GitHub's timestamp precision so commits in this second are replayed.
+          started_at: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString(),
+          next_page: 1,
+        };
+    const more = () => ({
+      events,
+      checkpoint: { ...checkpoint, commits: progress },
+      status: 'more' as const,
+    });
+    const complete = () => ({
+      events,
+      checkpoint: { last_sync_at: progress.started_at },
+      status: 'complete' as const,
+    });
 
-    for await (const commits of pages) {
+    if (!progress.head_sha) {
+      // Resolve the unfiltered default-branch head before paging. A date-filtered
+      // first commit need not be the tip; pinning that could omit merge ancestry.
+      const head = await this.requestJson<GitHubCommitLike[]>({
+        url: `${githubRepoApiUrl(repo, '/commits')}?per_page=1`,
+        token,
+      });
+      if (!Array.isArray(head)) return more();
+      if (head.length === 0) return complete();
+      progress.head_sha = head[0]?.sha;
+      if (!progress.head_sha) return more();
+    }
+
+    for (let page = 0; page < COMMITS_MAX_PAGES; page++) {
+      const query = new URLSearchParams({
+        per_page: '100',
+        page: String(progress.next_page),
+        since: progress.since,
+        // New commits and force pushes cannot move offsets in this snapshot.
+        sha: progress.head_sha,
+      });
+      const commits = await this.requestJson<GitHubCommitLike[]>({
+        url: `${githubRepoApiUrl(repo, '/commits')}?${query.toString()}`,
+        token,
+      });
+      // An empty body is indeterminate, not evidence that history is exhausted.
+      if (!Array.isArray(commits)) return more();
       for (const commit of commits) {
         if (!commit.sha) continue;
         const authoredAtIso = commit.commit?.author?.date;
@@ -1242,9 +1276,11 @@ export default class GitHubConnector extends ConnectorRuntime {
           },
         });
       }
+      progress.next_page += 1;
+      if (commits.length < 100) return complete();
     }
 
-    return events;
+    return more();
   }
 
   private async syncIssuesAndPulls(

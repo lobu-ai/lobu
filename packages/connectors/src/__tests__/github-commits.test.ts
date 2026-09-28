@@ -53,9 +53,10 @@ function buildConnector(commits: unknown[]) {
 	const calls: Array<{ url: string }> = [];
 	connector.requestJson = async (params: { url: string }) => {
 		calls.push({ url: params.url });
-		// First page returns the canned commits (< per_page=100 → pagination stops);
-		// any later page is empty.
-		return calls.length === 1 ? commits : [];
+		const query = new URL(params.url).searchParams;
+		// Resolve the unfiltered head, then serve the snapshot's first data page.
+		if (query.get('per_page') === '1') return commits.slice(0, 1);
+		return query.get('page') === '1' ? commits : [];
 	};
 	return { connector, calls };
 }
