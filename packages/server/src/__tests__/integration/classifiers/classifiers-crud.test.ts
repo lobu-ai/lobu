@@ -7,7 +7,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   addUserToOrganization,
-  createTestAgent,
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
@@ -16,8 +15,6 @@ import { cleanupTestDatabase } from '../../setup/test-db';
 
 describe('classifier CRUD', () => {
   let owner: TestApiClient;
-  let entityId: number;
-  let automationId: string;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -29,55 +26,29 @@ describe('classifier CRUD', () => {
       userId: user.id,
       memberRole: 'owner',
     });
-
-    await owner.entity_schema.createType({ slug: 'company', name: 'Company' });
-    const entity = (await owner.entities.create({
-      type: 'company',
-      name: 'Classifier Target',
-    })) as { entity: { id: number } };
-    entityId = entity.entity.id;
-
-    const agent = await createTestAgent({
-      organizationId: org.id,
-      ownerUserId: user.id,
-    });
-    const w = (await owner.automations.create({
-      entity_id: entityId,
-      slug: 'cls-automation',
-      name: 'Classifier Automation',
-      prompt: 'gather signals.',
-      managed_agent_id: agent.agentId,
-    })) as { automation_id: string };
-    automationId = w.automation_id;
   });
 
   it('creates → reads back → deletes a classifier', async () => {
-    // Provide embeddings directly so the test doesn't depend on a live
-    // EMBEDDINGS_SERVICE_URL — the values themselves are arbitrary.
-    const stubEmbedding = Array.from({ length: 768 }, () => 0);
     const created = (await owner.classifiers.create({
       slug: 'sentiment',
       name: 'Sentiment',
       attribute_key: 'sentiment',
-      automation_id: automationId,
       attribute_values: {
         positive: {
           description: 'positive sentiment',
           examples: ['great'],
-          embedding: stubEmbedding,
         },
         negative: {
           description: 'negative sentiment',
           examples: ['bad'],
-          embedding: stubEmbedding,
         },
       },
     })) as { data?: { classifier_id: number } };
     expect(created.data?.classifier_id).toBeGreaterThan(0);
     const classifierId = created.data!.classifier_id;
 
-    // List with no filter — the classifier is attached to an automation, not an
-    // entity, so list({entity_id}) wouldn't include it.
+    // List with no filter — the classifier is org-level, not entity-scoped,
+    // so list({entity_id}) wouldn't include it.
     const list = (await owner.classifiers.list({})) as {
       data?: { classifiers?: Array<{ id: number }> };
     };
@@ -88,15 +59,13 @@ describe('classifier CRUD', () => {
 
   it('blocks a member from creating classifiers (admin-only)', async () => {
     const member = owner.withAuth({ memberRole: 'member' });
-    const stubEmbedding = Array.from({ length: 768 }, () => 0);
     await expect(
       member.classifiers.create({
         slug: 'blocked-cls',
         name: 'Blocked',
         attribute_key: 'sentiment',
-        automation_id: automationId,
         attribute_values: {
-          v: { description: 'v', examples: ['v'], embedding: stubEmbedding },
+          v: { description: 'v', examples: ['v'] },
         },
       })
     ).rejects.toThrow(/admin|owner|access/i);

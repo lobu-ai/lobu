@@ -28,7 +28,6 @@ import { runAutomationScriptTask } from '../automations/script-task';
 import { checkStalledExecutions } from './check-stalled-executions';
 import { runConnectorHealthCheck } from '../connectors/connector-health';
 import { retryPendingFeedAutoPausedSignals } from '../automations/platform-events';
-import { runClassificationReconciliation } from './classification-reconciliation';
 import { refreshConnectorDefinitions } from './refresh-connector-definitions';
 import {
   isDeliverableChatPlatform,
@@ -324,15 +323,6 @@ function registerMaintenanceTasks(
       }
     },
     { cron: '0 * * * *' },
-  );
-
-  scheduler.register(
-    'classification-reconciliation',
-    async () => {
-      const result = await runClassificationReconciliation(env);
-      logger.info({ ...result }, '[task] classification-reconciliation completed');
-    },
-    { cron: '*/5 * * * *' },
   );
 
   // Connector-definition refresh — re-syncs every org's existing built-in

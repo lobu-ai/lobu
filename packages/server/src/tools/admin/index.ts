@@ -254,7 +254,8 @@ const ENTRIES: AdminToolEntry[] = [
 	},
 	{
 		name: "manage_classifiers",
-		description: "Classifier management. SDK alternative: client.classifiers.",
+		description:
+			"Classifiers (label schemas) and labels. `classify` is the only way labels are written; an Automation labels events by calling it with source 'llm'. SDK alternative: client.classifiers.",
 		schema: ManageClassifiersSchema,
 		resultSchema: ManageClassifiersResultSchema,
 		handler: manageClassifiers,

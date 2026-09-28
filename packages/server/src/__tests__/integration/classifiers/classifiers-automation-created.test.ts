@@ -1,7 +1,7 @@
 /**
  * An Automation must be able to DEFINE a classifier, not just use one.
  *
- * `manage_classifiers` create/apply/classify/delete sit in `OWNER_ADMIN_ACTIONS`,
+ * `manage_classifiers` create/classify/delete sit in `OWNER_ADMIN_ACTIONS`,
  * but `action-router.ts` returns early for a system context — so an Automation
  * reaction (`userId: null`, `memberRole: null`, `isAuthenticated: true`, exactly
  * what `automations/reaction-executor.ts` builds) is NOT stopped by the admin gate.
@@ -11,10 +11,8 @@
  *     violates not-null constraint
  *
  * `created_by` was resolved as `args.created_by ?? ctx.userId`, and an Automation
- * has no user identity. Measured on an Automation context before the fix: `list`
- * and `apply` both succeeded, so `create` was the verb blocking an agent from
- * inventing a classifier to automate its own work. (`classify` and `delete`
- * were not exercised; neither writes `created_by`.) The failure surfaced as a
+ * has no user identity, so `create` was the verb blocking an agent from
+ * inventing a classifier to automate its own work. The failure surfaced as a
  * raw Postgres 23502, not a ToolUserError, so the agent got a constraint dump
  * instead of guidance.
  *
@@ -34,16 +32,9 @@ import {
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 
-const DIM = 768;
-function basisVector(slot: number): number[] {
-  const v = new Array<number>(DIM).fill(0);
-  v[slot] = 1;
-  return v;
-}
-
 const ATTRIBUTE_VALUES = {
-  positive: { description: 'Positive', examples: ['great'], embedding: basisVector(0) },
-  negative: { description: 'Negative', examples: ['awful'], embedding: basisVector(1) },
+  positive: { description: 'Positive', examples: ['great'] },
+  negative: { description: 'Negative', examples: ['awful'] },
 };
 
 /**
@@ -65,7 +56,7 @@ function automationCtx(organizationId: string): ToolContext {
 }
 
 describe('an Automation can define and use its own classifier', () => {
-  it('creates one with no user identity, then applies it end to end', async () => {
+  it('creates one with no user identity, then labels with it', async () => {
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
     const org = await createTestOrganization({ name: 'Automation Author Org' });
@@ -79,7 +70,6 @@ describe('an Automation can define and use its own classifier', () => {
         name: 'Agent invented',
         attribute_key: 'agent-invented',
         attribute_values: ATTRIBUTE_VALUES,
-        min_similarity: 0.5,
       } as never,
       {} as never,
       ctx
@@ -93,26 +83,27 @@ describe('an Automation can define and use its own classifier', () => {
     `) as unknown as Array<{ created_by: string; automation_id: number | null }>;
     expect(rows).toHaveLength(1);
     expect(rows[0].created_by).toBe('system');
-    // Org-level, so the embedding engine can actually match it.
+    // Org-level: `create` never makes an Automation-scoped classifier.
     expect(rows[0].automation_id).toBeNull();
 
     // The point of defining it: the same Automation can immediately use it.
-    const event = await createTestEvent({
-      organization_id: org.id,
-      content: 'great',
-      embedding: basisVector(0),
-    });
-    const applied = await manageClassifiers(
+    const event = await createTestEvent({ organization_id: org.id, content: 'great' });
+    const labelled = await manageClassifiers(
       {
-        action: 'apply',
+        action: 'classify',
         classifier_slug: 'agent-invented',
-        content_ids: [Number(event.id)],
+        source: 'llm',
+        content_id: Number(event.id),
+        value: 'positive',
       } as never,
       {} as never,
       ctx
     );
-    expect(applied.success).toBe(true);
-    expect((applied.data as { classified: number }).classified).toBe(1);
+    expect(labelled.success).toBe(true);
+    const [label] = (await sql`
+      SELECT source, is_manual FROM event_classifications WHERE event_id = ${event.id}
+    `) as unknown as Array<{ source: string; is_manual: boolean }>;
+    expect(label).toEqual({ source: 'llm', is_manual: false });
   });
 
   it('still prefers a real user id when one is available', async () => {

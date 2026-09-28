@@ -413,7 +413,6 @@ async function handleCreate(
 		slug: args.slug,
 		parent_id: args.parent_id ?? null,
 		metadata: args.metadata ?? {},
-		enabled_classifiers: args.enabled_classifiers ?? null,
 		organization_id: ctx.organizationId,
 	};
 	// created_by is NOT NULL, FK → "user"; a headless script-executor create
@@ -602,7 +601,6 @@ async function handleCreate(
 			parent_name: entityDetails.parent_name,
 			parent_slug: entityDetails.parent_slug ?? null,
 			metadata: entityDetails.metadata ?? {},
-			enabled_classifiers: entityDetails.enabled_classifiers,
 			created_at: createdAtIso,
 			view_url: viewUrl,
 		},
@@ -689,8 +687,6 @@ async function handleUpdate(
 	if (args.name !== undefined) updateData.name = args.name;
 	if (args.slug !== undefined) updateData.slug = args.slug;
 	if (args.parent_id !== undefined) updateData.parent_id = args.parent_id;
-	if (args.enabled_classifiers !== undefined)
-		updateData.enabled_classifiers = args.enabled_classifiers;
 
 	// Type-specific fields
 	if (args.domain !== undefined) updateData.domain = args.domain;
@@ -846,7 +842,6 @@ async function handleUpdate(
 			parent_name: entityDetails.parent_name,
 			parent_slug: entityDetails.parent_slug ?? null,
 			metadata: entityDetails.metadata ?? {},
-			enabled_classifiers: entityDetails.enabled_classifiers,
 			view_url: viewUrl,
 		},
 		applied_fields: updatedEntity.fieldMerge?.applied,
@@ -1408,7 +1403,6 @@ async function handleList(
 				parent_slug: e.parent_slug,
 				parent_entity_type: e.parent_entity_type,
 				metadata,
-				enabled_classifiers: e.enabled_classifiers,
 				// Row `created_at` is a Date; the schema (and wire shape) is an ISO
 				// string, so convert at the source rather than leaning on the emission
 				// layer's coercion.
@@ -1613,7 +1607,6 @@ async function handleGet(
       parent_name: entity.parent_name,
       parent_slug: entity.parent_slug ?? null,
       metadata,
-      enabled_classifiers: entity.enabled_classifiers,
       created_at: toIsoStringOrNow(entity.created_at),
       view_url: viewUrl,
     },

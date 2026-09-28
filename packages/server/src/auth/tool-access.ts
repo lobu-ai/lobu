@@ -177,12 +177,8 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 	]),
 	manage_classifiers: new Set([
 		"create",
-		"generate_embeddings",
 		"delete",
 		"classify",
-		// `apply` persists rows into event_classifications for arbitrary
-		// caller-supplied content ids — a mutation, same tier as `classify`.
-		"apply",
 	]),
 	manage_views: new Set(["set", "remove"]),
 };

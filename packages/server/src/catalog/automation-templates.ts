@@ -89,14 +89,6 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 			outputs: { sentiment_reports: { event: "summary" } },
 			prompt:
 				'Analyze the overall sentiment of the activity in this window. Return exactly one standard summary event draft in `sentiment_reports`. Put the explanation in `content`; put `{ kind: "sentiment_report", sentiment, score, drivers }` in `metadata`, where sentiment is positive, neutral, or negative and score is from -1 to 1.\n',
-			classifiers: [
-				{
-					slug: "sentiment",
-					name: "Sentiment",
-					source_path: "$.sentiment_reports[*].metadata",
-					value_field: "sentiment",
-				},
-			],
 			tags: ["sentiment", "monitoring"],
 		},
 	},

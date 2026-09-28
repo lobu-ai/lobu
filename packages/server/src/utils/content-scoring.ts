@@ -281,7 +281,10 @@ async function buildFilterConditionsAndJoins(
     classificationFilters.length > 0 ? groupClassificationFilters(classificationFilters) : null;
 
   if (filtersBySlug && filtersBySlug.size > 0) {
-    const classifierIds = await resolveClassifierIds(sql, filtersBySlug, entityId);
+    const classifierIds = await resolveClassifierIds(sql, filtersBySlug, {
+      organizationId: filters?.visibility_scope?.organizationId,
+      entityId,
+    });
     const classificationExists = buildClassificationExistsClauses(
       filtersBySlug,
       classifierIds,

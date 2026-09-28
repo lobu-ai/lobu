@@ -296,7 +296,6 @@ export function buildAttributionAndOwned(
         d.executor
       ),
       outputs: p.outputs,
-      classifiers: p.classifiers,
     };
   });
   const owned: string[] = [];

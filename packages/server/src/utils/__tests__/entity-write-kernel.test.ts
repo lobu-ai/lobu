@@ -145,7 +145,6 @@ describe("entity row write kernel", () => {
 				slug: "keep-me",
 				content: "clear me",
 				metadata: { old: true },
-				enabledClassifiers: ["sentiment"],
 				createdBy: user.id,
 			},
 		});
@@ -156,7 +155,6 @@ describe("entity row write kernel", () => {
 			patch: {
 				content: null,
 				metadata: { current: true },
-				enabledClassifiers: [],
 			},
 		});
 
@@ -165,9 +163,8 @@ describe("entity row write kernel", () => {
 			name: string;
 			content: string | null;
 			metadata: Record<string, unknown>;
-			enabled_classifiers: string;
 		}>`
-			SELECT name, content, metadata, enabled_classifiers::text
+			SELECT name, content, metadata
 			FROM entities
 			WHERE id = ${entity.id}
 		`;
@@ -175,7 +172,6 @@ describe("entity row write kernel", () => {
 			name: "Keep me",
 			content: null,
 			metadata: { current: true },
-			enabled_classifiers: "{}",
 		});
 	});
 

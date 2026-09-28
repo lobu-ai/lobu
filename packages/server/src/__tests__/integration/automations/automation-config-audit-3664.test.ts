@@ -121,7 +121,7 @@ describe('automation config audit #3664', () => {
       'name', 'slug', 'status', 'version', 'entity_ids', 'schedule', 'timezone',
       'triggers', 'managed_agent_id', 'agent_kind', 'device_worker_id',
       'model_config', 'execution_config', 'sources', 'tags', 'delivery_target',
-      'min_cooldown_seconds', 'prompt', 'description', 'outputs', 'classifiers',
+      'min_cooldown_seconds', 'prompt', 'description', 'outputs',
       'reactions_guidance', 'reaction_script', 'reaction_input_schema',
     ]) {
       expect(meta.changed_fields).toContain(field);

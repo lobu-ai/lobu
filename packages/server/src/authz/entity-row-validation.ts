@@ -102,7 +102,6 @@ export class EntityRowValidationError extends Error {
  */
 const UNGOVERNED_COLUMNS: ReadonlySet<string> = new Set([
 	"fieldControls",
-	"enabledClassifiers",
 	"embedding",
 	"contentHash",
 ]);

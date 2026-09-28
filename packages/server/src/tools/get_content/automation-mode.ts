@@ -43,7 +43,7 @@ import {
   normalizeAutomationSources,
 } from '../../automations/source-refs';
 import type { GetContentArgs } from './schema';
-import type { ClassifierConfig, GetContentResult } from './types';
+import type { GetContentResult } from './types';
 import { parseJson, parseRecordArray } from './types';
 import { stableJson } from '../../utils/insert-event';
 
@@ -767,24 +767,6 @@ export async function handleAutomationMode(
     ];
   }
 
-  // Fetch classifiers attached to this automation
-  const classifiersResult = await sql`
-    SELECT
-      cc.slug,
-      cc.extraction_config,
-      cc.attribute_values
-    FROM classify_facet cc
-    WHERE cc.automation_id = ${automationId}
-      AND cc.status = 'active'
-    ORDER BY cc.slug
-  `;
-
-  const classifiers: ClassifierConfig[] = classifiersResult.map((row: any) => ({
-    slug: row.slug as string,
-    extraction_config: row.extraction_config as Record<string, unknown> | null,
-    attribute_values: row.attribute_values as ClassifierConfig['attribute_values'],
-  }));
-
   // A bound run owns its queued window. Interactive previews may still request
   // an explicit range or fall back to the Automation's arrival mark.
   let windowStart: Date, windowEnd: Date, lastCompletedWindowStart: Date | null;
@@ -1073,7 +1055,6 @@ export async function handleAutomationMode(
     // this is how a caller tells a fully-read source from a truncated one.
     sources_page: sourcesPage,
     entities: boundEntities.length > 0 ? boundEntities : undefined,
-    classifiers: classifiers.length > 0 ? classifiers : undefined,
     unprocessed_ranges: unprocessedRanges,
     reactions_guidance: reactionsGuidance,
     past_reactions: pastReactions,

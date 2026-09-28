@@ -160,7 +160,6 @@ export function summarizeResults(results: AutomationOperationResult[]) {
 
 function validateAutomationConfig(input: {
   prompt?: string;
-  classifiers?: unknown[];
   sources?: Array<{ name: string; query: string; context?: boolean }>;
 }): string | null {
   // Instruction PRESENCE is trigger-shape-dependent (event-turn Automations may
@@ -176,32 +175,6 @@ function validateAutomationConfig(input: {
 
   // An Automation version declares only durable output targets. Entity row schemas
   // remain owned by entity types; event rows use the standard event draft.
-
-  if (input.classifiers !== undefined) {
-    if (!Array.isArray(input.classifiers)) {
-      return 'classifiers must be an array';
-    }
-    // Guard the write hole behind the classifier corruption bug (#2033 item 4):
-    // a classifier's `attribute_values` MUST be a keyed object-MAP, never an
-    // array. An array shape read back through Object.entries becomes numeric
-    // keys `{"0":…}` and, after embedding-stripping, the corrupted
-    // `{"0":{},"1":{}}`. Reject the array shape at save time so it can never be
-    // persisted into an automation version's `classifiers` blob.
-    for (let i = 0; i < input.classifiers.length; i++) {
-      const def = input.classifiers[i];
-      if (def === null || typeof def !== 'object' || Array.isArray(def)) {
-        return `classifiers[${i}]: each classifier definition must be an object`;
-      }
-      const attributeValues = (def as Record<string, unknown>).attribute_values;
-      if (attributeValues !== undefined && attributeValues !== null) {
-        if (typeof attributeValues !== 'object' || Array.isArray(attributeValues)) {
-          return `classifiers[${i}].attribute_values: must be an object map keyed by value (got ${
-            Array.isArray(attributeValues) ? 'array' : typeof attributeValues
-          }). An array shape corrupts on read.`;
-        }
-      }
-    }
-  }
 
   if (input.sources) {
     for (const source of input.sources) {
@@ -229,20 +202,18 @@ function validateAutomationConfig(input: {
 }
 
 /**
- * Run the shared automation-version validation (config shape + classifier/schema
- * source-path compatibility) and throw a `ToolUserError` (422) on the first
+ * Run the shared automation-version validation (config shape + source
+ * compatibility) and throw a `ToolUserError` (422) on the first
  * failure. Schedule validation is intentionally left to the caller because
  * `create` and `create_version` surface schedule errors with different error
  * types.
  */
 export function assertAutomationVersionConfigValid(parsed: {
   prompt?: string;
-  classifiers?: unknown[];
   sources?: Array<{ name: string; query: string; context?: boolean }>;
 }): void {
   const validation = validateAutomationConfig({
     prompt: parsed.prompt,
-    classifiers: parsed.classifiers,
     sources: parsed.sources,
   });
   if (validation) {

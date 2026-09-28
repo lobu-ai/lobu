@@ -50,7 +50,6 @@ import {
 } from './query';
 import {
   buildContentItems,
-  fetchClassificationExcerpts,
   hydrateToolInvocationRequests,
   refreshEventArtifactDownloadUrls,
 } from './render';
@@ -781,9 +780,6 @@ async function getContentImpl(
       });
     }
 
-    // Fetch excerpts for evidence highlighting when filtering by a single classification value
-    const excerptsMap = await fetchClassificationExcerpts(sql, classificationFilters, rawContent);
-
     // Map to the canonical content item shape used across the app.
     const contentItems: ContentItem[] = await buildContentItems({
       sql,
@@ -791,7 +787,6 @@ async function getContentImpl(
       organizationId: ctx.organizationId,
       ownerSlug,
       baseUrl,
-      excerptsMap,
       includePrivateAttribution: ctx.memberRole != null,
     });
     refreshEventArtifactDownloadUrls({

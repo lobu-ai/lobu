@@ -275,7 +275,10 @@ export async function listContentInternal(
     });
 
   if (hasClassificationFilters && filtersBySlug) {
-    const classifierIds = await resolveClassifierIds(sql, filtersBySlug, entityId);
+    const classifierIds = await resolveClassifierIds(sql, filtersBySlug, {
+      organizationId,
+      entityId,
+    });
     const connectionFilterClause = buildConnectionFilter(connectionIdsArray);
     const feedFilterClause = buildFeedFilter(feedIdsArray);
     const runFilterClause = buildRunFilter(runIdsArray);

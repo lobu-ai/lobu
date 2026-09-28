@@ -3,7 +3,7 @@
  *
  * Covers:
  *  1. Read guard round-trip: rich object-map values survive list() exactly
- *     (description/examples preserved, embedding stripped) and a seeded
+ *     (description/examples preserved) and a seeded
  *     ARRAY-shaped row NEVER surfaces the corrupted `{"0":{}}` numeric-key shape.
  */
 
@@ -55,16 +55,14 @@ describe('classifier attribute_values corruption (item 4)', () => {
     automationId = w.automation_id;
   });
 
-  it('round-trips rich object-map values through list() exactly (embedding stripped)', async () => {
-    const stubEmbedding = Array.from({ length: 768 }, () => 0.1);
+  it('round-trips rich object-map values through list() exactly', async () => {
     const created = (await owner.classifiers.create({
       slug: 'quality',
       name: 'Quality',
       attribute_key: 'quality',
-      automation_id: automationId,
       attribute_values: {
-        high: { description: 'high quality', examples: ['excellent', 'superb'], embedding: stubEmbedding },
-        low: { description: 'low quality', examples: ['poor'], embedding: stubEmbedding },
+        high: { description: 'high quality', examples: ['excellent', 'superb'] },
+        low: { description: 'low quality', examples: ['poor'] },
       },
     })) as { data?: { classifier_id: number } };
     const classifierId = created.data!.classifier_id;
@@ -74,16 +72,13 @@ describe('classifier attribute_values corruption (item 4)', () => {
     };
     const row = list.data?.classifiers?.find((c) => c.id === classifierId);
     expect(row).toBeDefined();
-    const av = row!.attribute_values as Record<string, { description: string; examples: string[]; embedding?: unknown }>;
+    const av = row!.attribute_values as Record<string, { description: string; examples: string[] }>;
 
     // Keys are the value strings — NOT numeric indices.
     expect(Object.keys(av).sort()).toEqual(['high', 'low']);
     expect(av.high.description).toBe('high quality');
     expect(av.high.examples).toEqual(['excellent', 'superb']);
     expect(av.low.description).toBe('low quality');
-    // Embedding dropped on the wire.
-    expect(av.high.embedding).toBeUndefined();
-    expect(av.low.embedding).toBeUndefined();
   });
 
   it('never emits {"0":{}} for a seeded ARRAY-shaped row', async () => {

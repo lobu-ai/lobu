@@ -613,7 +613,7 @@ export default async (_ctx, client) => {
 	},
 	"automations.createVersion": {
 		summary:
-			"Create a new Automation version. Version-owned fields include name, description, prompt, skills, sources, outputs, classifiers, and reactions guidance. Outputs use the same entity/event contract as create and require window execution.",
+			"Create a new Automation version. Version-owned fields include name, description, prompt, skills, sources, outputs, and reactions guidance. Outputs use the same entity/event contract as create and require window execution.",
 		access: "admin",
 	},
 	"automations.trigger": {
@@ -1057,20 +1057,12 @@ export default async (_ctx, client) => {
 	},
 	"classifiers.create": {
 		summary:
-			"Create a classifier template. Requires `slug`, `name`, `attribute_key`, and `attribute_values`. `attribute_values` is an OBJECT keyed by value slug — each entry needs a `description` and `examples` (string array), not a flat list. OMIT `automation_id` for an org-level classifier, which is the only kind `apply` and the reconciliation job can match; pass it only to scope the classifier to one Automation.",
+			"Create a classifier (a label schema). Requires `slug`, `name`, `attribute_key`, and `attribute_values`. `attribute_values` is an OBJECT keyed by value slug — each entry needs a `description` and `examples` (string array), not a flat list. Labels are then written with `classifiers.classify`.",
 		access: "admin",
 		signature:
-			"classifiers.create(input: { slug: string; name: string; attribute_key: string; attribute_values: Record<string, { description: string; examples: string[]; embedding?: number[] | null }>; automation_id?: string; entity_id?: number; description?: string; min_similarity?: number; fallback_value?: unknown; created_by?: string; embedding_model?: string }): Promise<unknown>",
+			"classifiers.create(input: { slug: string; name: string; attribute_key: string; attribute_values: Record<string, { description: string; examples: string[] }>; entity_id?: number; description?: string; created_by?: string }): Promise<unknown>",
 		example:
 			"await client.classifiers.create({ slug: 'sentiment', name: 'Sentiment', attribute_key: 'sentiment', attribute_values: { positive: { description: 'Positive tone', examples: ['Great work!'] } } });",
-	},
-	"classifiers.generateEmbeddings": {
-		summary:
-			"Generate embeddings for attribute values (cost-heavy). `embedding_model` picks the vector space; it defaults to the deployment's configured model, and must match the model the events were embedded under or `apply` will match nothing.",
-		access: "admin",
-		cost: "expensive",
-		signature:
-			"classifiers.generateEmbeddings(input: { classifier_id: number; force_regenerate?: boolean; embedding_model?: string }): Promise<unknown>",
 	},
 	"classifiers.delete": {
 		summary: "Delete a classifier.",
@@ -1079,22 +1071,12 @@ export default async (_ctx, client) => {
 	},
 	"classifiers.classify": {
 		summary:
-			"Apply a manual classification to one or many content records (single or batch). The classifier is addressed by `classifier_slug` (a string — NOT the numeric `classifier_id` other CRUD methods use); `source` accepts only 'llm' or 'user'.",
+			"Write labels on one or many content records (single or batch); the only way labels are written. An Automation labels events by reading them and calling this with `source: 'llm'`; only `source: 'user'` labels are manual and they win at read time. `confidence` (0..1) defaults to 1. `value: null` removes your label. The classifier is addressed by `classifier_slug` (a string — NOT the numeric `classifier_id` other CRUD methods use).",
 		access: "admin",
 		signature:
-			"classifiers.classify(input: { classifier_slug: string; content_id?: number; value?: string | null; reasoning?: string; classifications?: Array<{ content_id: number; value: string | null; reasoning?: string }>; source?: 'llm' | 'user' }): Promise<unknown>",
+			"classifiers.classify(input: { classifier_slug: string; content_id?: number; value?: string | null; confidence?: number; reasoning?: string; classifications?: Array<{ content_id: number; value: string | null; confidence?: number; reasoning?: string }>; source?: 'llm' | 'user' }): Promise<unknown>",
 		example:
-			"await client.classifiers.classify({ classifier_slug: 'sentiment', content_id: 101, value: 'positive', source: 'user' });",
-	},
-	"classifiers.apply": {
-		summary:
-			"Run a classifier's embedding match over content ids you supply and STORE the labels. Needs no entity link, so this is how org-scoped feed content gets classified. Returns `classified` plus a `skipped` breakdown (not_in_organization | superseded | not_embedded | below_threshold) — a zero result always says why. Only matches org-level classifiers (those created without `automation_id`). `embedding_model` selects the vector space for BOTH the labels and the events; ids with no vector in that model are reported `not_embedded`.",
-		access: "admin",
-		cost: "expensive",
-		signature:
-			"classifiers.apply(input: { classifier_slug: string; content_ids: number[]; embedding_model?: string }): Promise<unknown>",
-		example:
-			"await client.classifiers.apply({ classifier_slug: 'sentiment', content_ids: [101, 102, 103] });",
+			"await client.classifiers.classify({ classifier_slug: 'sentiment', source: 'llm', classifications: [{ content_id: 101, value: 'positive', confidence: 0.9 }] });",
 	},
 
 	// views

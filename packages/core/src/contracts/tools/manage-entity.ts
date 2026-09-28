@@ -46,9 +46,6 @@ const EntityFields = {
     description:
       "[create/update/list] Parent entity ID (for hierarchical entities). On list, only that parent's children.",
   }),
-  enabled_classifiers: Type.Array(Type.String(), {
-    description: "[create/update] Enabled classifier slugs",
-  }),
   domain: Type.String({
     description: "[create/update] Primary domain (e.g., spotify.com)",
   }),
@@ -154,7 +151,6 @@ export const CreateEntityAction = Type.Object({
   content: Type.Optional(EntityFields.content),
   slug: Type.Optional(EntityFields.slug),
   parent_id: Type.Optional(EntityFields.parent_id),
-  enabled_classifiers: Type.Optional(EntityFields.enabled_classifiers),
   domain: Type.Optional(EntityFields.domain),
   category: Type.Optional(EntityFields.category),
   platform_type: Type.Optional(EntityFields.platform_type),
@@ -175,7 +171,6 @@ export const UpdateEntityAction = Type.Object({
   content: Type.Optional(EntityFields.content),
   slug: Type.Optional(EntityFields.slug),
   parent_id: Type.Optional(EntityFields.parent_id),
-  enabled_classifiers: Type.Optional(EntityFields.enabled_classifiers),
   domain: Type.Optional(EntityFields.domain),
   category: Type.Optional(EntityFields.category),
   platform_type: Type.Optional(EntityFields.platform_type),
@@ -472,9 +467,6 @@ export const ManageEntityItemSchema = Type.Object({
   parent_slug: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   parent_entity_type: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-  enabled_classifiers: Type.Optional(
-    Type.Union([Type.Array(Type.String()), Type.Null()])
-  ),
   // `created_at` arrives from the row as a `Date`; the structuredContent
   // validation layer coerces it to an ISO string before the check (Value.Convert
   // on Type.String() converts Date → ISO), so the schema declares the honest

@@ -7,7 +7,6 @@ const createArgs = {
 	slug: "sentiment",
 	name: "Sentiment",
 	attribute_key: "sentiment",
-	automation_id: "42",
 };
 
 describe("manage_classifiers attribute_values validation", () => {
@@ -26,6 +25,16 @@ describe("manage_classifiers attribute_values validation", () => {
 		[
 			"a missing examples list",
 			{ positive: { description: "Positive sentiment" } },
+		],
+		[
+			"a label vector (retired with the embedding engine)",
+			{
+				positive: {
+					description: "Positive sentiment",
+					examples: ["great"],
+					embedding: [0.1, 0.2],
+				},
+			},
 		],
 		[
 			"an unsupported nested field",
@@ -54,7 +63,6 @@ describe("manage_classifiers attribute_values validation", () => {
 					positive: {
 						description: "Positive sentiment",
 						examples: ["great"],
-						embedding: [0.1, 0.2],
 					},
 					negative: {
 						description: "Negative sentiment",

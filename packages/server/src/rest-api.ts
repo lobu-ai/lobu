@@ -16,7 +16,7 @@ import {
 } from "./auth/tool-access";
 import { getScopedConnectorDefinition } from "./catalog/connector-definitions";
 import { listOrgInstalled } from "./catalog/installed";
-import { getDb } from "./db/client";
+import { getDb, parsePgTextArray } from "./db/client";
 import { streamInvalidationEvents } from "./events/sse";
 import { fixedActionArgs } from "./http/rest-tool-routes";
 import type { Env } from "./index";
@@ -1015,19 +1015,26 @@ export async function restUpdateContentClassification(
       JOIN classify_facet fc ON cc.classifier_id = fc.id
       WHERE cc.event_id = ${contentId}
         AND fc.slug = ${classifierSlug}
+        AND fc.organization_id = ${ctx.organizationId}
       ORDER BY
         CASE cc.source WHEN 'user' THEN 1 WHEN 'llm' THEN 2 ELSE 3 END,
         cc.created_at DESC
       LIMIT 1
     `;
 
+		// An unset with no remaining label from another source leaves nothing.
 		if (classificationResult.length === 0) {
-			return c.json({ error: "Classification not found after update" }, 500);
+			return c.json({ classification: null });
 		}
 
 		const { attribute_key, values, confidences, source, is_manual } =
 			classificationResult[0];
-		const classificationData = { values, confidences, source, is_manual };
+		const classificationData = {
+			values: parsePgTextArray(values),
+			confidences,
+			source,
+			is_manual,
+		};
 
 		return c.json(
 			toJsonSafe({

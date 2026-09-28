@@ -186,7 +186,6 @@ export interface RemoteAutomation {
    * so the first re-apply of a config that references skills pins them.
    */
   skills?: Array<{ name: string; content: string }> | null;
-  classifiers?: unknown[] | null;
   outputs?: Record<string, unknown> | null;
   reactions_guidance?: string | null;
   // NB: reaction_script is not included in Automation lists — push always (idempotent).
@@ -1108,7 +1107,7 @@ export class ApplyClient {
 
   async listAutomations(): Promise<RemoteAutomation[]> {
     // `include_details=true` pulls the version-bound fields (prompt,
-    // classifiers, outputs, reactions_guidance) too.
+    // outputs, reactions_guidance) too.
     // Apply diffs against these to detect drift on prompt / sources / etc.
     const { body } = await this.request<{ automations?: RemoteAutomation[] }>(
       "GET",
@@ -1138,7 +1137,6 @@ export class ApplyClient {
     agent_kind?: string;
     execution_config?: Record<string, unknown> | null;
     outputs?: Record<string, unknown> | null;
-    classifiers?: unknown[];
   }): Promise<{ automation_id?: string }> {
     const { body } = await this.request<{ automation_id?: string }>(
       "POST",
@@ -1175,9 +1173,6 @@ export class ApplyClient {
           ? { execution_config: payload.execution_config }
           : {}),
         ...(payload.outputs !== undefined ? { outputs: payload.outputs } : {}),
-        ...(payload.classifiers !== undefined
-          ? { classifiers: payload.classifiers }
-          : {}),
       }
     );
     return {
@@ -1188,7 +1183,7 @@ export class ApplyClient {
   /**
    * Update the **scalar** fields on the `automations` row — these don't require
    * a new version. Version-bound fields (prompt / sources / reactions_guidance /
-   * outputs / classifiers) require `createAutomationVersion`
+   * outputs) require `createAutomationVersion`
    * instead.
    *
    * `null` clears nullable fields (device_worker_id, agent_kind) per the
@@ -1241,7 +1236,6 @@ export class ApplyClient {
     skills?: Array<{ name: string; content: string }>;
     sources?: AutomationSource[];
     outputs?: Record<string, unknown> | null;
-    classifiers?: unknown[];
     reactions_guidance?: string;
     change_notes?: string;
     /** When set, written atomically with the new version (set_as_current). */
@@ -1262,9 +1256,6 @@ export class ApplyClient {
         ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
         ...(payload.sources !== undefined ? { sources: payload.sources } : {}),
         ...(payload.outputs !== undefined ? { outputs: payload.outputs } : {}),
-        ...(payload.classifiers !== undefined
-          ? { classifiers: payload.classifiers }
-          : {}),
         ...(payload.reactions_guidance !== undefined
           ? { reactions_guidance: payload.reactions_guidance }
           : {}),

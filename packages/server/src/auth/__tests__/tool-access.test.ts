@@ -49,12 +49,9 @@ describe('requiresOwnerAdmin', () => {
 
   it('should require admin for manage_classifiers mutating actions', () => {
     expect(requiresOwnerAdmin('manage_classifiers', { action: 'create' }, false)).toBe(true);
+    // `classify` is the only writer of event_classifications.
     expect(requiresOwnerAdmin('manage_classifiers', { action: 'classify' }, false)).toBe(true);
-    // `apply` writes event_classifications in bulk. The pinned access-matrix
-    // fixture would also catch a regression, but it is a snapshot — this states
-    // the requirement directly, and names the tier a reader should expect.
-    expect(requiresOwnerAdmin('manage_classifiers', { action: 'apply' }, false)).toBe(true);
-    expect(isPublicReadable('manage_classifiers', { action: 'apply' })).toBe(false);
+    expect(isPublicReadable('manage_classifiers', { action: 'classify' })).toBe(false);
   });
 
   it('should NOT require admin for manage_operations execute; it is member-write (handler re-checks per-principal visibility)', () => {
@@ -816,7 +813,7 @@ manage_schedules: create=admin list=admin update=admin pause=admin cancel=admin 
 manage_automations: create=admin list=read+public update=admin create_version=admin complete_window=write claim_next_window=write trigger=write delete=admin set_reaction_script=admin get_versions=read+public get_version_details=read+public get_component_reference=read+public submit_feedback=admin get_feedback=read+public list_promoted=read create_from_version=admin ?=read
 get_automation: read+public ?=read+public
 read_knowledge: read+public ?=read+public
-manage_classifiers: create=admin list=read+public generate_embeddings=admin delete=admin classify=admin apply=admin ?=read
+manage_classifiers: create=admin list=read+public delete=admin classify=admin ?=read
 manage_views: set=admin get=read list=read remove=admin ?=read
 list_organizations: read ?=read
 list_metrics: read ?=read

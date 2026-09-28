@@ -110,7 +110,7 @@ async function readAccountContent(
   const content = await buildContentItems({
     sql, rawContent, organizationId: null, ownerSlug: 'me',
     baseUrl,
-    excerptsMap: new Map(), includePrivateAttribution: true,
+    includePrivateAttribution: true,
   });
   for (const item of content) {
     item.permalink = `${baseUrl ?? ''}/me/events?content_ids=${item.id}`;

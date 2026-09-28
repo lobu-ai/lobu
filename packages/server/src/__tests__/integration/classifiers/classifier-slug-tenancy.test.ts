@@ -4,8 +4,7 @@
  * `classify_facet_unique_per_insight` was UNIQUE NULLS NOT DISTINCT
  * (entity_id, automation_id, slug) — no organization_id. Org-level classifiers are
  * exactly (entity_id NULL, automation_id NULL, slug), which is what
- * `manage_classifiers create` produces and the only kind `apply` and the
- * reconciliation job can match. So the FIRST tenant to create `sentiment` took
+ * `manage_classifiers create` produces. So the FIRST tenant to create `sentiment` took
  * the name away from every other tenant in the install, and the second one's
  * create died on a unique violation naming a row it cannot see.
  *
@@ -19,7 +18,6 @@
 
 import { describe, expect, it } from 'vitest';
 import { manageClassifiers } from '../../../tools/admin/manage_classifiers';
-import { createClassifiersForAutomation } from '../../../automations/classifier-extraction';
 import type { ToolContext } from '../../../tools/registry';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -29,16 +27,9 @@ import {
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 
-const DIM = 768;
-function basisVector(slot: number): number[] {
-  const v = new Array<number>(DIM).fill(0);
-  v[slot] = 1;
-  return v;
-}
-
 const ATTRIBUTE_VALUES = {
-  positive: { description: 'Positive', examples: ['great'], embedding: basisVector(0) },
-  negative: { description: 'Negative', examples: ['awful'], embedding: basisVector(1) },
+  positive: { description: 'Positive', examples: ['great'] },
+  negative: { description: 'Negative', examples: ['awful'] },
 };
 
 function ownerCtx(organizationId: string, userId: string): ToolContext {
@@ -106,7 +97,7 @@ describe('classifier slugs are scoped per organization', () => {
     const sql = getTestDb();
 
     // Widening to per-org must not degrade into "no uniqueness at all" —
-    // `apply` resolves a classifier BY SLUG, so a tenant holding two rows for
+    // `classify` resolves a classifier BY SLUG, so a tenant holding two rows for
     // one slug makes which-one-wins arbitrary.
     expect((await createSentiment(a.ctx)).success).toBe(true);
     const second = await createSentiment(a.ctx);
@@ -142,57 +133,5 @@ describe('classifier slugs are scoped per organization', () => {
       SELECT count(*)::int AS n FROM classify_facet WHERE slug = 'shared-entity-slug'
     `) as unknown as Array<{ n: number }>;
     expect(n).toBe(2);
-  });
-
-  it('the extraction upsert resolves the new 4-column conflict target', async () => {
-    await cleanupTestDatabase();
-    await seedSystemEntityTypes();
-    const a = await orgWithOwner('Upsert Tenant A', 'ups-a@test.example.com');
-    const b = await orgWithOwner('Upsert Tenant B', 'ups-b@test.example.com');
-
-    // An ON CONFLICT column list must resolve to a live unique index at
-    // execution time, not at parse time — so retargeting the upsert without
-    // running it would leave "no unique or exclusion constraint matching the
-    // ON CONFLICT specification" to fire in prod. This is the only test that
-    // executes it. classify_facet has no FKs, so the ids are arbitrary.
-    const def = {
-      slug: 'extracted',
-      name: 'Extracted v1',
-      source_path: '$.items[*]',
-      value_field: 'value',
-    };
-    const sql = getTestDb();
-    const automationId = 9001;
-    const entityId = 9002;
-
-    const [firstId] = await createClassifiersForAutomation(sql, automationId, entityId, [def], {
-      createdBy: 'system',
-      organizationId: a.org.id,
-    });
-
-    // Re-apply in the same tenant: the conflict arm fires — same row, name refreshed.
-    const [againId] = await createClassifiersForAutomation(
-      sql,
-      automationId,
-      entityId,
-      [{ ...def, name: 'Extracted v2' }],
-      { createdBy: 'system', organizationId: a.org.id }
-    );
-    expect(againId).toBe(firstId);
-
-    // Same (entity, automation, slug) in ANOTHER tenant: a new row, not an update
-    // of tenant A's — the exact pair the old 3-column key conflated.
-    const [otherId] = await createClassifiersForAutomation(sql, automationId, entityId, [def], {
-      createdBy: 'system',
-      organizationId: b.org.id,
-    });
-    expect(otherId).not.toBe(firstId);
-
-    const rows = (await sql`
-      SELECT organization_id, name FROM classify_facet WHERE slug = 'extracted' ORDER BY id
-    `) as unknown as Array<{ organization_id: string; name: string }>;
-    expect(rows).toHaveLength(2);
-    expect(rows[0]).toEqual({ organization_id: a.org.id, name: 'Extracted v2' });
-    expect(rows[1]).toEqual({ organization_id: b.org.id, name: 'Extracted v1' });
   });
 });

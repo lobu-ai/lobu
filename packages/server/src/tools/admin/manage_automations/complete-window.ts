@@ -1,7 +1,7 @@
 /**
  * complete_window action handler for manage_automations.
  *
- * Validates token, writes the run result + content links, processes classifications,
+ * Validates token, writes the run result + content links,
  * marks run completed, advances schedule, and queues the reaction script as a
  * durable task inside the same transaction (see automations/reaction-enqueue).
  */
@@ -31,11 +31,6 @@ import { isUniqueViolation } from '../../../utils/pg-errors';
 import { persistAutomationEventOutput } from '../../../utils/persist-automation-event-output';
 import { validateStableKeyComponents } from '../../../utils/stable-keys';
 import { deriveAutomationExtractionSchema } from '../../../utils/automation-extraction-schema';
-import {
-  getFieldsToStrip,
-  processAutomationClassifications,
-  stripFields,
-} from '../../../automations/classifier-extraction';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
 import { enqueueAutomationReaction } from '../../../automations/reaction-enqueue';
 import { enqueueAutomationDigest } from '../../../automations/digest-enqueue';
@@ -288,7 +283,7 @@ export async function handleCompleteWindow(
     ctx.executionMode === 'capture' ? AUTOMATION_EVAL_RUN_TYPE : AUTOMATION_RUN_TYPE;
 
   // ============================================
-  // STEP 2: Combined query - automation + classifiers + template schema
+  // STEP 2: Combined query - automation + template schema
   // ============================================
   // Resolve the version this run was started against. The agent extracted
   // data using that version's prompt/schema; we MUST validate against the
@@ -406,26 +401,6 @@ export async function handleCompleteWindow(
   delete provenanceMetadata.source_coverage;
   if (sourceCoverage.length) provenanceMetadata.source_coverage = sourceCoverage;
 
-  // Fetch classifiers separately
-  const classifierRows = await sql`
-    SELECT
-      cc.id,
-      cc.slug,
-      cc.id as version_id,
-      cc.extraction_config
-    FROM classify_facet cc
-    WHERE cc.automation_id = ${automationId}
-      AND cc.status = 'active'
-      AND cc.extraction_config IS NOT NULL
-  `;
-
-  const classifiers = classifierRows.map((r) => ({
-    id: r.id as number,
-    slug: r.slug as string,
-    version_id: r.version_id as number,
-    extraction_config: r.extraction_config as any,
-  }));
-
   const resolvedVersionId =
     automationRows[0].version_id != null ? Number(automationRows[0].version_id) : null;
   const outputs = parseJson(automationRows[0].outputs) as Outputs | null;
@@ -536,18 +511,12 @@ export async function handleCompleteWindow(
   );
 
   // ============================================
-  // STEP 4: Process extracted_data BEFORE any writes (in-memory)
-  // ============================================
-  const fieldsToStrip = getFieldsToStrip(classifiers);
-  const cleanedExtractedData = stripFields(extractedData, Array.from(fieldsToStrip));
-
-  // ============================================
   // STEP 5: Capture mode — an eval replay records its output, never commits it
   // ============================================
   // Everything above is validation and reads, so a capture run takes exactly
   // the same 400s a live run would and only the side effect diverges.
   // Everything below is writes: the result run, entity promotion,
-  // output events, classifications, the schedule cursor, and the reaction
+  // output events, the schedule cursor, and the reaction
   // script.
   //
   // This return is load-bearing, not defensive. An eval replays the SAME window
@@ -570,7 +539,7 @@ export async function handleCompleteWindow(
             automation_id: String(automationId),
             window_start,
             window_end,
-            extracted_data: cleanedExtractedData as never,
+            extracted_data: extractedData as never,
             content_ids: batchContentIds.slice(0, CAPTURE_PREVIEW_CONTENT_CAP),
             content_linked: batchContentIds.length,
             content_ids_truncated: batchContentIds.length > CAPTURE_PREVIEW_CONTENT_CAP,
@@ -617,10 +586,6 @@ export async function handleCompleteWindow(
 
   // ============================================
   // STEP 6: Wrap all DB operations in a transaction
-  // If classification processing fails (e.g., embeddings service unavailable),
-  // the entire operation rolls back - no corrupted data is saved.
-  //
-  // Transaction for data writes.
   // ============================================
   // Owned-field changes and policy-held creates an automation proposed but couldn't
   // apply; surfaced out of the transaction as deferred approvals and flushed once
@@ -759,9 +724,8 @@ export async function handleCompleteWindow(
       );
     }
 
-    // The content this window_token actually granted. Both promotion (8.5) and
-    // classification (9) validate agent-supplied content references against it,
-    // so it is defined once here rather than per-consumer.
+    // The content this window_token actually granted. Promotion (8.5) validates
+    // agent-supplied content references against it.
     const validContentIds = new Set(batchContentIds);
 
     // ============================================
@@ -897,25 +861,11 @@ export async function handleCompleteWindow(
       }
     }
 
-    // ============================================
-    // STEP 9: Process classifications
-    // If this fails (e.g., embeddings service down), the transaction rolls back
-    // ============================================
-    await processAutomationClassifications(
-      tx,
-      automationId,
-      runId,
-      extractedData,
-      classifiers,
-      validContentIds,
-      env
-    );
-
     const [completedRun] = await tx`
       UPDATE runs
       SET status = 'completed',
           outcome = ${classifyRunOutcome({ status: "completed" })},
-          action_output = ${tx.json(cleanedExtractedData)},
+          action_output = ${tx.json(extractedData)},
           approved_input = COALESCE(approved_input, '{}'::jsonb) || ${tx.json({
             window_start,
             window_end,

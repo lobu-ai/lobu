@@ -13,10 +13,6 @@ import { recordChangeEvent, recordLifecycleEvent } from '../../../utils/insert-e
 import { insertToolConfigChange } from '../helpers/config-audit';
 import logger from '../../../utils/logger';
 import { buildAutomationUrl, getOrganizationSlug, getPublicWebUrl } from '../../../utils/url-builder';
-import {
-  createClassifiersForAutomation,
-  enableClassifiersOnEntity,
-} from '../../../automations/classifier-extraction';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { assertDeviceWorkerAccess } from '../automation-device-access';
 import {
@@ -179,7 +175,6 @@ export async function handleCreate(
   // String inputs pass the wire union unparsed — enforce the declared shape
   // here so both input forms meet the same contract.
   assertOutputsShape(outputs);
-  const classifiers = parseJsonInput<unknown[]>(args.classifiers, 'classifiers');
 
   // Build sources array. Sources are authored two ways and merged here:
   //   1. `@`-mention tokens in the prompt (the owletto composer's primary path)
@@ -205,7 +200,6 @@ export async function handleCreate(
   // Validate automation config
   assertAutomationVersionConfigValid({
     prompt: args.prompt,
-    classifiers,
     sources,
   });
 
@@ -311,7 +305,6 @@ export async function handleCreate(
     triggers: triggerWrite.triggers,
     skills,
     outputs,
-    classifiers,
   });
   assertAutomationInstructions(
     triggerWrite.triggers,
@@ -391,7 +384,6 @@ export async function handleCreate(
     prompt: args.prompt ?? '',
     description: args.description ?? null,
     outputs: outputs ?? null,
-    classifiers: classifiers ?? null,
     reactions_guidance: args.reactions_guidance ?? null,
     reaction_script: reactionScript,
     reaction_input_schema: reactionInputSchema ?? null,
@@ -451,12 +443,12 @@ export async function handleCreate(
       INSERT INTO automation_versions (
         id, automation_id, version, name, description,
         prompt, version_sources, skills,
-        outputs, classifiers,
+        outputs,
         reactions_guidance, change_notes, created_by, created_at
       ) VALUES (
         ${versionId}, ${automationId}, 1, ${args.name ?? args.slug}, ${args.description ?? null},
         ${args.prompt ?? ''}, ${toJsonParam(tx, sources)}, ${tx.json(skills)},
-        ${toJsonParam(tx, outputs)}, ${toJsonParam(tx, classifiers)},
+        ${toJsonParam(tx, outputs)},
         ${args.reactions_guidance ?? null}, ${'Initial version'}, ${createdBy}, NOW()
       )
     `;
@@ -468,22 +460,7 @@ export async function handleCreate(
       WHERE id = ${automationId}
     `;
 
-      // 4. Auto-create classifiers (entity-level only)
-      if (entityId && classifiers && Array.isArray(classifiers) && classifiers.length > 0) {
-        if (!ctx.userId) {
-          throw new ToolUserError('Authenticated user is required to create Automation classifiers', 403);
-        }
-
-        await createClassifiersForAutomation(tx, automationId as number, entityId, classifiers as any[], {
-          createdBy: ctx.userId,
-          organizationId: ctx.organizationId,
-        });
-
-        const slugs = (classifiers as any[]).map((d: any) => d.slug);
-        await enableClassifiersOnEntity(tx, entityId, slugs);
-      }
-
-      // 5. Immutable config audit shares the commit (#3664): a failed audit
+      // 4. Immutable config audit shares the commit (#3664): a failed audit
       // rolls the create back rather than diverging from it.
       if (organizationId) {
         await insertToolConfigChange(ctx, {
@@ -516,7 +493,6 @@ export async function handleCreate(
             'prompt',
             'description',
             'outputs',
-            'classifiers',
             'reactions_guidance',
             'reaction_script',
             'reaction_input_schema',
@@ -604,7 +580,7 @@ export async function handleUpdate(
            w.delivery_target, w.reaction_script, w.execution_config, w.model_config, w.tags,
            w.min_cooldown_seconds, w.consecutive_scheduled_failures, w.schedule_auto_paused_at, w.next_run_at,
            cv.prompt AS current_prompt, cv.skills AS current_skills,
-           cv.outputs AS current_outputs, cv.classifiers AS current_classifiers
+           cv.outputs AS current_outputs
     FROM automations w
     LEFT JOIN automation_versions cv ON cv.id = w.current_version_id
     WHERE w.id = ${args.automation_id} AND w.organization_id = ${ctx.organizationId}
@@ -636,7 +612,6 @@ export async function handleUpdate(
     current_prompt: string | null;
     current_skills: Array<{ name: string; content: string }> | null;
     current_outputs: Record<string, unknown> | null;
-    current_classifiers: unknown[] | null;
   };
   // Judge the model against the lane the Automation will be on AFTER this
   // patch, not the one it is on now: clearing a device pin in the same call
@@ -717,7 +692,6 @@ export async function handleUpdate(
     executionConfig: effectiveExecutionConfig, ...effectiveDefaults,
     triggers: triggerWrite.triggers,
     skills: currentRow.current_skills, outputs: currentRow.current_outputs,
-    classifiers: currentRow.current_classifiers,
     validateSource: args.execution_config !== undefined,
   });
   // Clearing a sole script executor must not leave an instruction-free job.
@@ -1243,8 +1217,7 @@ export async function handleCreateFromVersion(
         );
         await assertAutomationScriptExecutor({ executionConfig: version.execution_config, ...cloneDefaults,
           triggers: cloneTriggers as AutomationTrigger[], skills: version.skills as unknown[] | null,
-          outputs: clonedOutputs, classifiers: version.classifiers as unknown[] | null,
-          validateSource: false });
+          outputs: clonedOutputs, validateSource: false });
         // `tags` is a text[] column read under fetch_types:false, so postgres.js
         // hands back a raw array literal string (e.g. "{}" or "{system:chat-link}"),
         // not a JS array. Parse it before filtering.
@@ -1322,7 +1295,6 @@ export async function handleCreateFromVersion(
             tags: cloneTags,
             prompt: version.prompt ?? null,
             outputs: version.outputs ?? null,
-            classifiers: version.classifiers ?? null,
             reactions_guidance: version.reactions_guidance ?? null,
             reaction_script: (version.reaction_script as string | null) ?? null,
             reaction_input_schema: (version.reaction_input_schema as unknown) ?? null,
@@ -1345,7 +1317,6 @@ export async function handleCreateFromVersion(
             'tags',
             'prompt',
             'outputs',
-            'classifiers',
             'reactions_guidance',
             'reaction_script',
             'reaction_input_schema',

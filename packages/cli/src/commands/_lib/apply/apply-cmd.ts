@@ -951,7 +951,6 @@ export async function executePlan(
               ? automationExecutionConfig(w.model, undefined, w.executor)
               : undefined,
           outputs: w.outputs,
-          classifiers: w.classifiers,
         });
         automationId = created.automation_id;
       } else if (row.verb === "update") {
@@ -1059,9 +1058,6 @@ export async function executePlan(
               : {}),
             ...(versionBound.has("outputs")
               ? { outputs: w.outputs ?? null }
-              : {}),
-            ...(versionBound.has("classifiers") && w.classifiers !== undefined
-              ? { classifiers: w.classifiers }
               : {}),
             ...(triggersWithVersionChange
               ? { triggers: w.triggers ?? [] }

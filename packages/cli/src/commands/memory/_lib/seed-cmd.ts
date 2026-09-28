@@ -360,8 +360,6 @@ async function seedDataEntity(
   };
   if (entity.content) payload.content = entity.content;
   if (entity.metadata) payload.metadata = entity.metadata;
-  if (entity.enabled_classifiers)
-    payload.enabled_classifiers = entity.enabled_classifiers;
   if (entity.parent) {
     const parentId = resolveEntityRef(entityMap, entity.parent);
     if (!parentId) {

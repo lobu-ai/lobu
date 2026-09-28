@@ -112,7 +112,6 @@ export async function handleList(
       cv.description,
       cv.prompt,
       cv.skills,
-      cv.classifiers,
       cv.outputs,
       cv.reactions_guidance
     `;
@@ -234,7 +233,6 @@ export async function handleList(
 		if (!args.include_details) {
 			delete (rest as Record<string, unknown>).prompt;
 			delete (rest as Record<string, unknown>).skills;
-			delete (rest as Record<string, unknown>).classifiers;
 			delete (rest as Record<string, unknown>).description;
 		}
 

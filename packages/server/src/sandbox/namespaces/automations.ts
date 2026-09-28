@@ -61,7 +61,6 @@ export type AutomationCreateInput = Input<
 	| "name"
 	| "description"
 	| "outputs"
-	| "classifiers"
 	| "reactions_guidance"
 	| "reaction_script"
 	| "managed_agent_id"

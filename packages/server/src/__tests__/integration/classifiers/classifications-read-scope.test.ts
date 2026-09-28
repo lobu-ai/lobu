@@ -13,11 +13,10 @@
  * event_classifications` returned a confident 0 while the event itself was
  * queryable in the same breath.
  *
- * That is precisely the content `manage_classifiers apply` exists to label —
- * its own contract says it "needs no entity link, so it is the only way to
- * classify org-scoped feed content". Measured against prod on 2026-07-31: `apply`
- * reported 280 rows written, the physical table held them, and query_sql
- * returned 0 of 281 because they hung off entity-less feed events.
+ * Entity-less feed content is exactly what an Automation labels with
+ * `classify`. Measured against prod on 2026-07-31: 280 rows were written, the
+ * physical table held them, and query_sql returned 0 of 281 because they hung
+ * off entity-less feed events.
  *
  * These tests execute the query rather than asserting on the generated SQL —
  * the string shape is not the boundary, the returned rows are.
@@ -50,7 +49,7 @@ function ctxFor(organizationId: string, userId: string): ToolContext {
   } as ToolContext;
 }
 
-/** Minimal classifier row; `apply`'s own writer path is covered elsewhere. */
+/** Minimal classifier row; the `classify` writer path is covered elsewhere. */
 async function seedClassifier(
   organizationId: string,
   createdBy: string,
@@ -95,8 +94,8 @@ describe('event_classifications read scope', () => {
     await addUserToOrganization(user.id, org.id, 'owner');
     const ctx = ctxFor(org.id, user.id);
 
-    // No entity_id: exactly the shape feed ingestion produces, and exactly what
-    // `apply` is for. The org stamp is on the event row itself.
+    // No entity_id: exactly the shape feed ingestion produces. The org stamp
+    // is on the event row itself.
     const event = await createTestEvent({
       organization_id: org.id,
       content: 'an entity-less feed post',

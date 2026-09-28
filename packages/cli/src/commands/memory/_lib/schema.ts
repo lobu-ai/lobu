@@ -21,7 +21,6 @@ export interface SeedEntitySchema {
   content?: string;
   parent?: string;
   metadata?: Record<string, unknown>;
-  enabled_classifiers?: string[];
 }
 
 export interface SeedRelationshipSchema {
@@ -118,19 +117,6 @@ export function validateDataRecord(
     requireString(parsed, "name", file, errors);
     if (parsed.metadata !== undefined) {
       requireObject(parsed, "metadata", file, errors);
-    }
-    if (
-      parsed.enabled_classifiers !== undefined &&
-      !(
-        Array.isArray(parsed.enabled_classifiers) &&
-        parsed.enabled_classifiers.every((value) => typeof value === "string")
-      )
-    ) {
-      errors.push({
-        file,
-        field: "enabled_classifiers",
-        message: '"enabled_classifiers" must be an array of strings',
-      });
     }
     return errors;
   }

@@ -72,7 +72,7 @@ describe('SAFE_COLUMN_DEFS', () => {
   it('should emit direct columns for automation_versions', () => {
     const cols = colList('automation_versions');
     expect(cols).toContain('"prompt"');
-    expect(cols).toContain('"classifiers"');
+    expect(cols).toContain('"outputs"');
   });
 
   it('should prefix columns with alias', () => {
@@ -235,7 +235,11 @@ describe('validateAndScopeQuery', () => {
  */
 describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
   const INTENTIONALLY_OMITTED: Record<string, Set<string>> = {
-    entities: new Set(['embedding', 'content_tsv', 'content_hash', 'field_controls']),
+    // enabled_classifiers (entities) and classifiers (automation_versions) were
+    // retired with Automation classifier extraction. Schema exposure is removed
+    // ahead of the two-phase column drop.
+    entities: new Set(['embedding', 'content_tsv', 'content_hash', 'field_controls', 'enabled_classifiers']),
+    automation_versions: new Set(['classifiers']),
     // superseded_by: the query_sql events CTE reads from current_event_records,
     // which doesn't expose the column — and never usefully can: the Stage-2
     // flip makes the view `WHERE superseded_by IS NULL`, so through the view

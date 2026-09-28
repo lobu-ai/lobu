@@ -8,15 +8,13 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ClientSdkActionError } from '../../../sandbox/namespaces/action-call';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestAgent, createTestEvent } from '../../setup/test-fixtures';
+import { createTestEvent } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
 
-const stubEmbedding = Array.from({ length: 768 }, () => 0);
 
 type SeededClassifier = {
   workspace: TestWorkspace;
   entityId: number;
-  automationId: number;
   classifierId: number;
   eventId: number;
 };
@@ -36,33 +34,18 @@ async function seedClassifier(workspace: TestWorkspace, slug: string): Promise<S
     name: `${slug} Target`,
   })) as { entity: { id: number } };
 
-  const agent = await createTestAgent({
-    organizationId: workspace.org.id,
-    ownerUserId: workspace.users.owner.id,
-  });
-  const automation = (await workspace.owner.automations.create({
-    entity_id: entity.entity.id,
-    slug: `${slug}-automation`,
-    name: `${slug} Automation`,
-    prompt: 'collect signals.',
-    managed_agent_id: agent.agentId,
-  })) as { automation_id: string };
-
   const created = (await workspace.owner.classifiers.create({
     slug,
     name: `${slug} Classifier`,
     attribute_key: slug,
-    automation_id: automation.automation_id,
     attribute_values: {
       positive: {
         description: 'positive signal',
         examples: ['great'],
-        embedding: stubEmbedding,
       },
       negative: {
         description: 'negative signal',
         examples: ['bad'],
-        embedding: stubEmbedding,
       },
     },
   })) as { data?: { classifier_id: number } };
@@ -77,7 +60,6 @@ async function seedClassifier(workspace: TestWorkspace, slug: string): Promise<S
   return {
     workspace,
     entityId: entity.entity.id,
-    automationId: Number(automation.automation_id),
     classifierId: created.data!.classifier_id,
     eventId: event.id,
   };

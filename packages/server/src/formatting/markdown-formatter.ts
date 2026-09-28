@@ -1236,7 +1236,6 @@ function formatGetContentResult(result: any, _options: FormatterOptions): string
     extraction_schema,
     sources,
     entities,
-    classifiers,
     unprocessed_ranges,
     reactions_guidance,
     past_reactions,
@@ -1291,18 +1290,6 @@ function formatGetContentResult(result: any, _options: FormatterOptions): string
     if (past_feedback) {
       const body = past_feedback.replace(/^## Past Corrections from User Feedback\s*\n?/, '');
       md += `### Past Feedback\n\n${body}\n\n`;
-    }
-
-    // Show classifiers for worker extraction
-    if (classifiers && classifiers.length > 0) {
-      md += `### Classifiers (${classifiers.length})\n\n`;
-      for (const classifier of classifiers) {
-        const attrCount = Object.keys(classifier.attribute_values || {}).length;
-        const hasExtractionConfig =
-          classifier.extraction_config && Object.keys(classifier.extraction_config).length > 0;
-        md += `- **${classifier.slug}**: ${attrCount} values${hasExtractionConfig ? ' (has extraction_config)' : ''}\n`;
-      }
-      md += '\n';
     }
   }
 

@@ -108,7 +108,6 @@ describe("manage_entity union contract", () => {
 				content: "body",
 				slug: "acme",
 				parent_id: 1,
-				enabled_classifiers: ["sentiment"],
 				domain: "acme.com",
 				category: "saas",
 				platform_type: "b2b",

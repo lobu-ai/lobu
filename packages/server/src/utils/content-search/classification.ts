@@ -21,49 +21,34 @@ function collectClassifierIds(rows: unknown[], mapping: Map<string, number[]>): 
   }
 }
 
+/**
+ * Classifier ids for each filtered slug, resolved inside ONE organization.
+ * A slug is a tenant-scoped name, so another organization's classifier with
+ * the same slug must never contribute ids. The organization is the caller's
+ * when known, otherwise the owner of the scoped entity.
+ */
 export async function resolveClassifierIds(
   sql: DbClient,
   filtersBySlug: Map<string, string[]>,
-  entityId: number | undefined
+  scope: { organizationId?: string | null; entityId?: number | null }
 ): Promise<Map<string, number[]>> {
   const slugs = Array.from(filtersBySlug.keys())
     .map((slug) => String(slug).trim())
     .filter((slug) => slug.length > 0);
 
-  if (slugs.length === 0) return new Map();
-
-  const placeholders = slugs.map((_, index) => `$${index + 1}`).join(', ');
   const mapping = new Map<string, number[]>();
+  if (slugs.length === 0 || (!scope.organizationId && scope.entityId == null)) return mapping;
 
-  if (entityId) {
-    const entityRows = await sql.unsafe(
-      `
-      SELECT ccl.slug, ccl.id as classifier_id
-      FROM classify_facet ccl
-      JOIN automations i ON i.id = ccl.automation_id
-      WHERE ccl.slug IN (${placeholders})
-        AND $${slugs.length + 1} = ANY(i.entity_ids)
-    `,
-      [...slugs, entityId]
-    );
-    collectClassifierIds(entityRows, mapping);
-  }
-
-  const missingSlugs = slugs.filter((slug) => !mapping.has(slug));
-  if (missingSlugs.length > 0) {
-    const globalPlaceholders = missingSlugs.map((_, index) => `$${index + 1}`).join(', ');
-    const globalRows = await sql.unsafe(
-      `
-      SELECT ccl.slug, ccl.id as classifier_id
-      FROM classify_facet ccl
-      WHERE ccl.slug IN (${globalPlaceholders})
-        AND ccl.automation_id IS NULL
-    `,
-      missingSlugs
-    );
-    collectClassifierIds(globalRows, mapping);
-  }
-
+  const rows = await sql`
+    SELECT ccl.slug, ccl.id AS classifier_id
+    FROM classify_facet ccl
+    WHERE ccl.slug = ANY(${pgTextArray(slugs)}::text[])
+      AND ccl.organization_id = COALESCE(
+        ${scope.organizationId ?? null}::text,
+        (SELECT organization_id FROM entities WHERE id = ${scope.entityId ?? null}::bigint)
+      )
+  `;
+  collectClassifierIds(rows, mapping);
   return mapping;
 }
 

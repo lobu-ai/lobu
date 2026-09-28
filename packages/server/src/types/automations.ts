@@ -155,10 +155,6 @@ export const AutomationMetadataSchema = Type.Object({
   prompt: Type.Optional(Type.String()),
   description: Type.Optional(Type.String()),
   outputs: Type.Optional(Type.Union([OutputsSchema, Type.Null()])),
-  /** Version-owned config surfaced so the edit form can round-trip them
-   *  (create_version preserves prev values on omit, but prefilling avoids
-   *  the empty-form-state clobber). */
-  classifiers: Type.Optional(Type.Array(Type.Unknown())),
   reactions_guidance: Type.Optional(Type.String()),
   available_versions: Type.Optional(Type.Array(AutomationVersionInfoSchema)),
   reaction_script: Type.Optional(Type.String()),

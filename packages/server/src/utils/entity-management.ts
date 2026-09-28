@@ -335,9 +335,6 @@ export interface EntityData {
   // user exists — when omitted.
   created_by?: string | null;
 
-  // Common fields
-  enabled_classifiers?: string[] | null;
-
   // Content & embeddings (used by memory entities and any content-bearing entity)
   content?: string | null;
   embedding?: number[] | null;
@@ -379,7 +376,6 @@ export interface CreatedEntity {
   parent_slug?: string | null;
   parent_entity_type?: string | null;
   metadata?: Record<string, any> | null;
-  enabled_classifiers?: string[] | null;
   created_at: Date;
   total_content?: number | null;
   active_connections?: number | null;
@@ -431,7 +427,6 @@ export interface EntityRowInsert {
 	slug: string;
 	parentId?: number | null;
 	metadata?: Record<string, unknown>;
-	enabledClassifiers?: string[] | null;
 	createdBy: string;
 	content?: string | null;
 	embedding?: number[] | null;
@@ -445,7 +440,6 @@ export interface EntityRowPatch {
 	parentId?: number | null;
 	metadata?: Record<string, unknown> | null;
 	fieldControls?: Record<string, unknown>;
-	enabledClassifiers?: string[] | null;
 	content?: string | null;
 	embedding?: number[] | null;
 	/** true stamps deleted_at. This path never clears an existing tombstone. */
@@ -486,12 +480,11 @@ async function insertEntityRowWithConflictMode(
 	const rows = await tx<InsertedEntityRow>`
     INSERT INTO entities (
       organization_id, entity_type_id, name, slug, parent_id, metadata,
-      enabled_classifiers, created_by, content, embedding, content_hash,
+      created_by, content, embedding, content_hash,
       created_at, updated_at
     ) VALUES (
       ${row.organizationId}, ${row.entityTypeId}, ${row.name}, ${row.slug},
       ${row.parentId ?? null}, ${tx.json(row.metadata ?? {})},
-      ${row.enabledClassifiers != null ? pgTextArray(row.enabledClassifiers) : null}::text[],
       ${row.createdBy}, ${row.content ?? null}, ${embeddingLiteral}::vector,
       ${row.contentHash ?? null}, current_timestamp, current_timestamp
     )
@@ -562,7 +555,6 @@ export async function patchEntityRows(params: {
 	const hasParent = patch.parentId !== undefined;
 	const hasMetadata = patch.metadata !== undefined;
 	const hasFieldControls = patch.fieldControls !== undefined;
-	const hasEnabledClassifiers = patch.enabledClassifiers !== undefined;
 	const hasContent = patch.content !== undefined;
 	const hasEmbedding = patch.embedding !== undefined;
 
@@ -575,7 +567,6 @@ export async function patchEntityRows(params: {
       parent_id = CASE WHEN ${hasParent} THEN ${patch.parentId ?? null}::bigint ELSE parent_id END,
       metadata = CASE WHEN ${hasMetadata} THEN ${patch.metadata == null ? null : tx.json(patch.metadata)} ELSE metadata END,
       field_controls = CASE WHEN ${hasFieldControls} THEN ${tx.json(patch.fieldControls ?? {})} ELSE field_controls END,
-      enabled_classifiers = CASE WHEN ${hasEnabledClassifiers} THEN ${patch.enabledClassifiers != null ? pgTextArray(patch.enabledClassifiers) : null}::text[] ELSE enabled_classifiers END,
       content = CASE WHEN ${hasContent} THEN ${patch.content ?? null} ELSE content END,
       embedding = CASE WHEN ${hasEmbedding} THEN ${embeddingLiteral}::vector ELSE embedding END,
       deleted_at = CASE WHEN ${patch.softDelete === true} THEN current_timestamp ELSE deleted_at END,
@@ -1022,7 +1013,6 @@ export async function createEntity(
 							createData.metadata || {},
 							"create",
 						),
-						enabledClassifiers: createData.enabled_classifiers,
 						createdBy: createData.created_by || "system",
 						content: createData.content?.trim() || null,
 						embedding: createData.embedding,
@@ -1369,9 +1359,6 @@ export async function updateEntity(
 		if (applyParent) rowPatch.parentId = data.parent_id ?? null;
 		if (hasMetadataUpdates && fieldMerge?.applied.length) rowPatch.metadata = mergedMetadata;
 		if (mergedControls !== null) rowPatch.fieldControls = mergedControls;
-		if (data.enabled_classifiers !== undefined) {
-			rowPatch.enabledClassifiers = data.enabled_classifiers;
-		}
 		if (applyContent) rowPatch.content = contentValue;
 		if (hasEmbedding && (applyContent || !hasContent)) {
 			rowPatch.embedding = data.embedding ?? null;

@@ -3,6 +3,7 @@
  * helpers used by both the listing and search paths.
  */
 
+import { parsePgTextArray } from '../../db/client';
 import type { ContentSearchResult } from './types';
 import {
   boundedAttachmentsSql,
@@ -147,7 +148,8 @@ function aggregateClassifications(
       map.set(row.id, obj);
     }
     obj[row.classifier_attribute_key] = {
-      values: row.classifier_values,
+      // text[] reads back as a `{a,b}` literal under fetch_types:false.
+      values: parsePgTextArray(row.classifier_values),
       confidences: row.classifier_confidences,
       source: row.classifier_source,
       is_manual: row.classifier_is_manual,

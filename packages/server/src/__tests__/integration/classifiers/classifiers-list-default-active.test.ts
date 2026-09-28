@@ -12,7 +12,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   addUserToOrganization,
-  createTestAgent,
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
@@ -23,7 +22,6 @@ type ClassifierList = { data?: { classifiers?: Array<{ id: number; status: strin
 
 describe('classifier list — default excludes deprecated', () => {
   let owner: TestApiClient;
-  let automationId: string;
   let activeId: number;
   let deprecatedId: number;
 
@@ -38,24 +36,13 @@ describe('classifier list — default excludes deprecated', () => {
       memberRole: 'owner',
     });
 
-    const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
-    const w = (await owner.automations.create({
-      slug: 'cls-list-automation',
-      name: 'Classifier List Automation',
-      prompt: 'gather signals.',
-      managed_agent_id: agent.agentId,
-    })) as { automation_id: string };
-    automationId = w.automation_id;
-
-    const stubEmbedding = Array.from({ length: 768 }, () => 0);
     const mkClassifier = async (slug: string): Promise<number> => {
       const created = (await owner.classifiers.create({
         slug,
         name: slug,
         attribute_key: 'sentiment',
-        automation_id: automationId,
         attribute_values: {
-          positive: { description: 'p', examples: ['great'], embedding: stubEmbedding },
+          positive: { description: 'p', examples: ['great'] },
         },
       })) as { data?: { classifier_id: number } };
       return created.data!.classifier_id;

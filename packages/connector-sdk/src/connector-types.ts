@@ -1313,8 +1313,6 @@ export interface ContentItem {
   created_at: string;
   occurred_at: string;
   content_date?: string;
-  /** Excerpt for highlighted evidence (when filtering by classification value) */
-  excerpt?: string;
   /** Search score fields (only present when query is provided) */
   similarity?: number;
   text_rank?: number;

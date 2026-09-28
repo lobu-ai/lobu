@@ -639,9 +639,9 @@ export const readKnowledge = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Classifier management
+ * Classifiers (label schemas) and labels
  *
- * Classifier management. SDK alternative: client.classifiers.
+ * Classifiers (label schemas) and labels. `classify` is the only way labels are written; an Automation labels events by calling it with source 'llm'. SDK alternative: client.classifiers.
  */
 export const manageClassifiers = <ThrowOnError extends boolean = false>(
   options: Options<ManageClassifiersData, ThrowOnError>,

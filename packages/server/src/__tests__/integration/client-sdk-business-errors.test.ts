@@ -179,17 +179,15 @@ describe("ClientSDK business failure boundary", () => {
 	});
 
 	it("throws when classifiers.create returns success false", async () => {
-		const stubEmbedding = Array.from({ length: 768 }, () => 0);
 		const promise = workspace.owner.classifiers.create({
-			slug: "missing-automation-classifier",
-			name: "Missing Automation Classifier",
+			slug: "missing-entity-classifier",
+			name: "Missing Entity Classifier",
 			attribute_key: "sentiment",
-			automation_id: 999_999,
+			entity_id: 999_999,
 			attribute_values: {
 				positive: {
 					description: "positive sentiment",
 					examples: ["great"],
-					embedding: stubEmbedding,
 				},
 			},
 		});
@@ -197,7 +195,7 @@ describe("ClientSDK business failure boundary", () => {
 		await expect(promise).rejects.toMatchObject({
 			name: "ClientSdkActionError",
 			action: "create",
-			message: "Automation not found: 999999",
+			message: "Entity not found: 999999",
 			httpStatus: 400,
 		});
 	});

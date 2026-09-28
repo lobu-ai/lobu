@@ -129,7 +129,7 @@ function failureMessage(
 	};
 }
 
-/** `generate_embeddings` → `generateEmbeddings`; leaves already-camel/plain names intact. */
+/** `list_links` → `listLinks`; leaves already-camel/plain names intact. */
 function snakeToCamel(name: string): string {
 	return name.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }

@@ -72,47 +72,6 @@ describe('entity CRUD', () => {
     expect(got.entity.name).toBe('New Name');
   });
 
-  it('persists a non-empty enabled_classifiers array on create + update (fetch_types:false array-param fix)', async () => {
-    // Before the pgTextArray() fix, binding a raw string[] to the text[] column under
-    // the prod client (fetch_types:false) emitted a malformed array literal that
-    // Postgres rejected — so create()/update() with a non-empty enabled_classifiers
-    // 500'd. This asserts the value round-trips. (text[] reads back as the pg-literal
-    // string under fetch_types:false.)
-    const sql = getTestDb();
-
-    const created = (await owner.entities.create({
-      type: 'company',
-      name: 'Classified Co',
-      enabled_classifiers: ['sentiment', 'priority'],
-    })) as { entity: { id: number } };
-
-    const [row] = (await sql`
-      SELECT enabled_classifiers::text AS ec FROM entities WHERE id = ${created.entity.id}
-    `) as Array<{ ec: string }>;
-    expect(row.ec).toBe('{sentiment,priority}');
-
-    // The UPDATE CASE-WHEN branch replaces it (also a raw-array bind before the fix).
-    await owner.entities.update({
-      entity_id: created.entity.id,
-      enabled_classifiers: ['urgency'],
-    });
-    const [updated] = (await sql`
-      SELECT enabled_classifiers::text AS ec FROM entities WHERE id = ${created.entity.id}
-    `) as Array<{ ec: string }>;
-    expect(updated.ec).toBe('{urgency}');
-
-    // Empty array is truthy → stays an empty text[] '{}', NOT null (matches the prior
-    // `?? null` intent; the load-bearing edge the pgTextArray() fix must preserve).
-    await owner.entities.update({
-      entity_id: created.entity.id,
-      enabled_classifiers: [],
-    });
-    const [emptied] = (await sql`
-      SELECT enabled_classifiers::text AS ec FROM entities WHERE id = ${created.entity.id}
-    `) as Array<{ ec: string }>;
-    expect(emptied.ec).toBe('{}');
-  });
-
   it('hard-deletes a fresh entity with no event history', async () => {
     const created = (await owner.entities.create({
       type: 'company',

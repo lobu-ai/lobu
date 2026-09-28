@@ -1021,10 +1021,6 @@ export type ManageEntityData = {
          */
         parent_id?: number;
         /**
-         * [create/update] Enabled classifier slugs
-         */
-        enabled_classifiers?: Array<string>;
-        /**
          * [create/update] Primary domain (e.g., spotify.com)
          */
         domain?: string;
@@ -1093,10 +1089,6 @@ export type ManageEntityData = {
          * [create/update/list] Parent entity ID (for hierarchical entities). On list, only that parent's children.
          */
         parent_id?: number;
-        /**
-         * [create/update] Enabled classifier slugs
-         */
-        enabled_classifiers?: Array<string>;
         /**
          * [create/update] Primary domain (e.g., spotify.com)
          */
@@ -1520,7 +1512,6 @@ export type ManageEntityResponses = {
           metadata?: {
             [key: string]: unknown;
           };
-          enabled_classifiers?: Array<string> | null;
           created_at?: string;
           total_content?: number | null;
           active_connections?: number | null;
@@ -1557,7 +1548,6 @@ export type ManageEntityResponses = {
           metadata?: {
             [key: string]: unknown;
           };
-          enabled_classifiers?: Array<string> | null;
           created_at?: string;
           total_content?: number | null;
           active_connections?: number | null;
@@ -1593,7 +1583,6 @@ export type ManageEntityResponses = {
           metadata?: {
             [key: string]: unknown;
           };
-          enabled_classifiers?: Array<string> | null;
           created_at?: string;
           total_content?: number | null;
           active_connections?: number | null;
@@ -1640,7 +1629,6 @@ export type ManageEntityResponses = {
           metadata?: {
             [key: string]: unknown;
           };
-          enabled_classifiers?: Array<string> | null;
           created_at?: string;
           total_content?: number | null;
           active_connections?: number | null;
@@ -5126,27 +5114,6 @@ export type ManageAutomationsData = {
         }
       | null;
     /**
-     * [create/create_version] Classifier definitions for extraction. Each attribute_values MUST be an object map keyed by value, never an array.
-     */
-    classifiers?:
-      | string
-      | Array<{
-          slug?: string;
-          name?: string;
-          source_path?: string;
-          value_field?: string;
-          description_field?: string;
-          examples_field?: string;
-          attribute_key?: string;
-          /**
-           * Object MAP keyed by value string. An array here corrupts on read (#2033).
-           */
-          attribute_values?: {
-            [key: string]: unknown;
-          };
-          [key: string]: unknown;
-        }>;
-    /**
      * [create/update/create_version] Canonical Automation activations. Use a schedule trigger for cadence and timezone.
      */
     triggers?: Array<
@@ -5959,7 +5926,6 @@ export type GetAutomationResponses = {
               key?: Array<string>;
             };
       } | null;
-      classifiers?: Array<unknown>;
       reactions_guidance?: string;
       available_versions?: Array<{
         version: number;
@@ -6276,7 +6242,6 @@ export type ReadKnowledgeResponses = {
           };
     };
     entities?: Array<unknown>;
-    classifiers?: Array<unknown>;
     unprocessed_ranges?: Array<unknown>;
     reactions_guidance?: string;
     past_reactions?: string;
@@ -6309,17 +6274,13 @@ export type ManageClassifiersData = {
   body:
     | {
         /**
-         * Create a classifier. Org-level by default; pass automation_id to scope it to one Automation.
+         * Create a classifier: the label schema that `classify` writes against.
          */
         action: "create";
         /**
          * [create/list] Entity ID to scope classifiers (global if omitted)
          */
         entity_id?: number;
-        /**
-         * [create] Persisted Automation ID returned by manage_automations (numeric string). OMIT for an org-level classifier — only those are matched by `apply` and the reconciliation job. Pass it only to scope the classifier to a single Automation.
-         */
-        automation_id?: string;
         /**
          * [create] Unique identifier (e.g., "sentiment", "quality")
          */
@@ -6337,7 +6298,7 @@ export type ManageClassifiersData = {
          */
         attribute_key: string;
         /**
-         * [create] Map of attribute values to descriptions, examples, and optional embeddings.
+         * [create] Map of attribute values to descriptions and examples.
          */
         attribute_values: {
           [key: string]:
@@ -6345,25 +6306,12 @@ export type ManageClassifiersData = {
             | {
                 description: string;
                 examples: Array<string>;
-                embedding?: Array<number> | null;
               };
         };
-        /**
-         * [create] Minimum similarity threshold (default: 0.7)
-         */
-        min_similarity?: number;
-        /**
-         * [create] Fallback value if no match (default: null)
-         */
-        fallback_value?: unknown;
         /**
          * [create] Creator identifier
          */
         created_by?: string;
-        /**
-         * [create/generate_embeddings/apply] Embedding model to use. Defaults to this deployment's configured model; only set it to work in a different vector space. Label vectors and event vectors must share a model — a classifier embedded under one model matches nothing when applied under another, and `apply` will report every id as not_embedded until the events are embedded under the same model.
-         */
-        embedding_model?: string;
       }
     | {
         /**
@@ -6381,39 +6329,21 @@ export type ManageClassifiersData = {
       }
     | {
         /**
-         * Generate/regenerate attribute-value embeddings.
-         */
-        action: "generate_embeddings";
-        /**
-         * [generate_embeddings/delete] Classifier ID
-         */
-        classifier_id: number;
-        /**
-         * [generate_embeddings] Force regenerate existing embeddings (default: false)
-         */
-        force_regenerate?: boolean;
-        /**
-         * [create/generate_embeddings/apply] Embedding model to use. Defaults to this deployment's configured model; only set it to work in a different vector space. Label vectors and event vectors must share a model — a classifier embedded under one model matches nothing when applied under another, and `apply` will report every id as not_embedded until the events are embedded under the same model.
-         */
-        embedding_model?: string;
-      }
-    | {
-        /**
          * Archive a classifier (status -> deprecated).
          */
         action: "delete";
         /**
-         * [generate_embeddings/delete] Classifier ID
+         * [delete] Classifier ID
          */
         classifier_id: number;
       }
     | {
         /**
-         * Manual single/batch classification.
+         * Write labels (single or batch). The only way labels are written: an Automation labels events by calling this with source 'llm'. A null value removes your label for that content.
          */
         action: "classify";
         /**
-         * [classify/apply] Classifier slug (e.g., "sentiment", "bug-severity")
+         * [classify] Classifier slug (e.g., "sentiment", "bug-severity")
          */
         classifier_slug: string;
         /**
@@ -6424,6 +6354,10 @@ export type ManageClassifiersData = {
          * [classify] Classification value for single update, or null to unset
          */
         value?: string | null;
+        /**
+         * [classify] Confidence in the value, 0..1 (default: 1)
+         */
+        confidence?: number;
         /**
          * [classify] Array of classifications to update (batch mode)
          */
@@ -6437,36 +6371,22 @@ export type ManageClassifiersData = {
            */
           value: string | null;
           /**
+           * [classify] Confidence in the value, 0..1 (default: 1)
+           */
+          confidence?: number;
+          /**
            * Reasoning/justification for this classification
            */
           reasoning?: string;
         }>;
         /**
-         * [classify] Classification source: "llm" (AI-generated) or "user" (manual). Defaults to "user".
+         * [classify] Classification source: "llm" (AI-generated, e.g. an Automation) or "user" (manual). Defaults to "user". Only "user" labels are manual, and they win over "llm" labels at read time.
          */
         source?: "llm" | "user";
         /**
          * [classify] Reasoning/justification for the classification(s)
          */
         reasoning?: string;
-      }
-    | {
-        /**
-         * Run a classifier over specific content ids (embedding match, no LLM). Re-running re-labels: it replaces prior embedding results and never touches manual/LLM ones. Use after editing a classifier — run generate_embeddings first.
-         */
-        action: "apply";
-        /**
-         * [classify/apply] Classifier slug (e.g., "sentiment", "bug-severity")
-         */
-        classifier_slug: string;
-        /**
-         * [apply] Content ids to classify. Get them with a read-only SQL query first, then pass them here. Ids outside your organization, or without an embedding, are skipped and reported — never silently dropped.
-         */
-        content_ids: Array<number>;
-        /**
-         * [create/generate_embeddings/apply] Embedding model to use. Defaults to this deployment's configured model; only set it to work in a different vector space. Label vectors and event vectors must share a model — a classifier embedded under one model matches nothing when applied under another, and `apply` will report every id as not_embedded until the events are embedded under the same model.
-         */
-        embedding_model?: string;
       };
   path: {
     /**

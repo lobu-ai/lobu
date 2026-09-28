@@ -64,7 +64,7 @@ export async function handleCreateVersion(
   const auditAutomationId: string | number = args.automation_id;
 
   // Get current automation + resolve the group root. Versioned config
-  // (prompt/schema/template/classifiers) is shared across the entire group
+  // (prompt/schema/template) is shared across the entire group
   // and version rows live on the group root, so we read from and write to
   // `automation_id = automation_group_id`. The arg's automation_id is only used to
   // identify the group and to apply the per-assignment writes (sources,
@@ -89,7 +89,7 @@ export async function handleCreateVersion(
   const prevRows = await sql`
     SELECT
       name, description, prompt, version_sources, skills,
-      outputs, classifiers,
+      outputs,
       reactions_guidance
     FROM automation_versions
     WHERE automation_id = ${groupId}
@@ -155,14 +155,11 @@ export async function handleCreateVersion(
           prev.outputs,
           undefined as Record<string, unknown> | undefined
         ));
-  const classifiers =
-    parseJsonInput<unknown[]>(args.classifiers, 'classifiers') ??
-    normalizeStoredJsonField(prev.classifiers, undefined as unknown[] | undefined);
 
   // Validate. The output contract is not authored on the automation: the
   // declared outputs derive it from entity/event contracts at runtime; an
   // Automation without outputs or a reaction uses the free-form summary fallback.
-  assertAutomationVersionConfigValid({ prompt, classifiers, sources });
+  assertAutomationVersionConfigValid({ prompt, sources });
 
   // Resolve every source against the org now (broken source → 422, not silent
   // empty context at read_knowledge): @refs are existence-checked, custom SQL is
@@ -286,7 +283,6 @@ export async function handleCreateVersion(
         deviceWorkerId: sibling.device_worker_id as string | null,
         skills,
         outputs,
-        classifiers,
         validateSource: false,
       });
       assertAutomationOutputsUseWindowExecution(siblingTriggers, outputs);
@@ -307,7 +303,6 @@ export async function handleCreateVersion(
       deviceWorkerId: automationRows[0].device_worker_id as string | null,
       skills,
       outputs,
-      classifiers,
       validateSource: false,
     });
     assertAutomationOutputsUseWindowExecution(previousTriggers, outputs);
@@ -363,14 +358,14 @@ export async function handleCreateVersion(
       INSERT INTO automation_versions (
         id, automation_id, version, name, description,
         prompt, version_sources, skills,
-        outputs, classifiers,
+        outputs,
         reactions_guidance, change_notes, created_by, created_at
       ) VALUES (
         ${versionId}, ${groupId}, ${lockedNextVersion},
         ${args.name ?? (prev.name as string) ?? 'Automation'},
         ${args.description !== undefined ? (args.description ?? null) : ((prev.description as string) ?? null)},
         ${prompt}, NULL, ${tx.json(skills)},
-        ${toJsonParam(tx, outputs)}, ${toJsonParam(tx, classifiers)},
+        ${toJsonParam(tx, outputs)},
         ${args.reactions_guidance ?? (prev.reactions_guidance as string) ?? null},
         ${args.change_notes ?? null}, ${createdBy}, NOW()
       )
@@ -448,7 +443,6 @@ export async function handleCreateVersion(
           prompt: prev.prompt ?? null,
           sources: storedSources,
           outputs: prev.outputs ?? null,
-          classifiers: prev.classifiers ?? null,
           reactions_guidance: (prev.reactions_guidance as string) ?? null,
           ...(touchesCadenceForAudit ? {
             schedule: (automationRows[0].schedule as string | null) ?? null,
@@ -464,7 +458,6 @@ export async function handleCreateVersion(
           prompt,
           sources,
           outputs: outputs ?? null,
-          classifiers: classifiers ?? null,
           reactions_guidance: args.reactions_guidance ?? (prev.reactions_guidance as string) ?? null,
           change_notes: args.change_notes ?? null,
           ...(touchesCadenceForAudit ? { schedule: triggerWrite.schedule } : {}),
@@ -477,7 +470,6 @@ export async function handleCreateVersion(
           ...(args.name !== undefined ? ['name'] : []),
           ...(args.sources !== undefined ? ['sources'] : []),
           ...(args.outputs !== undefined ? ['outputs'] : []),
-          ...(args.classifiers !== undefined ? ['classifiers'] : []),
           ...(args.reactions_guidance !== undefined ? ['reactions_guidance'] : []),
           ...(touchesCadenceForAudit ? ['schedule', 'timezone'] : []),
           ...(touchesCadenceForAudit ? ['triggers'] : []),
@@ -610,7 +602,7 @@ export async function handleGetVersionDetails(
       SELECT
         id, version, name, description, prompt,
         version_sources, skills,
-        outputs, classifiers,
+        outputs,
         reactions_guidance
       FROM automation_versions
       WHERE automation_id = ${groupId} AND version = ${args.version}
@@ -621,7 +613,7 @@ export async function handleGetVersionDetails(
       SELECT
         v.id, v.version, v.name, v.description, v.prompt,
         v.version_sources, v.skills,
-        v.outputs, v.classifiers,
+        v.outputs,
         v.reactions_guidance
       FROM automation_versions v
       JOIN automations w ON v.id = w.current_version_id
@@ -667,7 +659,6 @@ export async function handleGetVersionDetails(
             [] as Array<{ name: string; query: string }>
           ),
     outputs: normalizeStoredJsonField(v.outputs, undefined as unknown),
-    classifiers: normalizeStoredJsonField(v.classifiers, undefined as unknown[] | undefined),
     reactions_guidance: v.reactions_guidance as string | undefined,
   };
 }

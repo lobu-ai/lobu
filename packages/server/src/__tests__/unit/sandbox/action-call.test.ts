@@ -177,20 +177,20 @@ describe("createActionCaller", () => {
 	});
 
 	it("derives a CAMEL-CASE public method from a snake_case action when none is supplied", async () => {
-		// `generate_embeddings` (internal) → the real method is
-		// client.classifiers.generateEmbeddings, NOT ...generate_embeddings.
+		// `list_links` (internal) → the real method is
+		// client.entities.listLinks, NOT ...list_links.
 		const handler = async () => {
 			throw new ToolUserError(
-				"Invalid arguments for manage_classifiers: /entity_type: Expected required property",
+				"Invalid arguments for manage_entity: /entity_type: Expected required property",
 			);
 		};
-		const { method } = createTestCaller(handler as never, "classifiers");
-		const thrown = (await method("generate_embeddings")({}).catch(
+		const { method } = createTestCaller(handler as never, "entities");
+		const thrown = (await method("list_links")({}).catch(
 			(e: unknown) => e,
 		)) as ToolUserError;
-		expect(thrown.message).not.toMatch(/manage_classifiers/);
-		expect(thrown.message).not.toMatch(/generate_embeddings/);
-		expect(thrown.message).toMatch(/client\.classifiers\.generateEmbeddings/);
+		expect(thrown.message).not.toMatch(/manage_entity/);
+		expect(thrown.message).not.toMatch(/list_links/);
+		expect(thrown.message).toMatch(/client\.entities\.listLinks/);
 	});
 
 	it("leaves non-validator errors from namespaced callers untouched", async () => {

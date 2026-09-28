@@ -1369,7 +1369,6 @@ interface AutomationProjection {
   tags?: string[] | null;
   agentKind?: string | null;
   outputs?: Record<string, unknown> | null;
-  classifiers?: unknown[] | null;
 }
 
 /**
@@ -1424,8 +1423,6 @@ export const projectDesiredAutomation = (
     d.agentKind !== undefined ? d.agentKind : (remote?.agent_kind ?? null),
   // Config is declarative for outputs: omitting means "no durable outputs".
   outputs: d.outputs ?? null,
-  classifiers:
-    d.classifiers !== undefined ? d.classifiers : (remote?.classifiers ?? []),
 });
 
 const projectRemoteAutomation = (
@@ -1452,7 +1449,6 @@ const projectRemoteAutomation = (
   tags: w.tags ?? [],
   agentKind: w.agent_kind ?? null,
   outputs: w.outputs ?? null,
-  classifiers: w.classifiers ?? [],
 });
 
 function diffAutomationWithBaseline(
@@ -1660,12 +1656,6 @@ function diffAutomation(
   // declaration clears the previous version instead of silently inheriting it.
   if (!deepEqual(desired.outputs ?? null, remote.outputs ?? null)) {
     versionBound.push("outputs");
-  }
-  if (
-    desired.classifiers !== undefined &&
-    !deepEqual(desired.classifiers, remote.classifiers ?? [])
-  ) {
-    versionBound.push("classifiers");
   }
   const changed = [...scalar, ...versionBound];
   if (reactionScriptDeclared) changed.push("reaction_script");

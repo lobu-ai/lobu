@@ -227,7 +227,6 @@ interface AutomationQueryRow {
   sel_version_description: string | null;
   sel_version_prompt: string | null;
   sel_version_version_sources: unknown;
-  sel_version_classifiers: unknown;
   sel_version_outputs: unknown;
   sel_version_reactions_guidance: string | null;
   // Latest window end (folded MAX(window_end) lookup)
@@ -524,7 +523,6 @@ async function getAutomationImpl(
         sv.description as sel_version_description,
         sv.prompt as sel_version_prompt,
         sv.version_sources as sel_version_version_sources,
-        sv.classifiers as sel_version_classifiers,
         sv.outputs as sel_version_outputs,
         sv.reactions_guidance as sel_version_reactions_guidance,
         -- Latest window end for the unprocessedCount bound.
@@ -709,7 +707,6 @@ async function getAutomationImpl(
           description: automationRow.sel_version_description,
           prompt: automationRow.sel_version_prompt,
           version_sources: automationRow.sel_version_version_sources,
-          classifiers: automationRow.sel_version_classifiers,
           outputs: automationRow.sel_version_outputs,
           reactions_guidance: automationRow.sel_version_reactions_guidance,
         }
@@ -774,7 +771,6 @@ async function getAutomationImpl(
       prompt: version?.prompt as string | undefined,
       description: (version?.description as string) || undefined,
       outputs: (version?.outputs as Outputs | null | undefined) ?? undefined,
-      classifiers: (version?.classifiers as unknown[] | null | undefined) ?? undefined,
       reactions_guidance:
         (version?.reactions_guidance as string | null | undefined) ?? undefined,
       ...(availableVersions !== undefined && { available_versions: availableVersions }),

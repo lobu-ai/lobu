@@ -254,7 +254,7 @@ export async function generateEmbeddings(
  * @param expectedDimensions - Expected dimensions (default: 768)
  * @returns true if valid, false otherwise
  */
-export function isValidEmbedding(
+function isValidEmbedding(
   embedding: number[] | null | undefined,
   expectedDimensions: number = EMBEDDING_DIMENSIONS
 ): embedding is number[] {

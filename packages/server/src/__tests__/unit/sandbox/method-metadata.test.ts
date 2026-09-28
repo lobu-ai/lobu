@@ -412,11 +412,11 @@ describe("method-metadata", () => {
 				"automations.create",
 				["device_worker_id?: string | null", "'agy' | null"],
 			],
-			["classifiers.classify", ["classifier_slug: string", "'llm' | 'user'"]],
 			[
-				"classifiers.create",
-				["automation_id?: string", "attribute_values", "examples: string[]"],
+				"classifiers.classify",
+				["classifier_slug: string", "'llm' | 'user'", "confidence?: number"],
 			],
+			["classifiers.create", ["attribute_values", "examples: string[]"]],
 		];
 		for (const [path, fragments] of expectations) {
 			const sig = METHOD_METADATA[path]?.signature ?? "";

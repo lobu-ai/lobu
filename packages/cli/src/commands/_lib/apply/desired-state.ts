@@ -154,8 +154,6 @@ export interface DesiredAutomation {
   agentKind?: string;
   /** Named durable outputs; explicit null clears existing declarations. */
   outputs?: Record<string, unknown> | null;
-  /** Classifier definitions for extraction (server-side feature). */
-  classifiers?: unknown[];
 }
 
 /** Apply-internal trigger form; `connectionSlug` is resolved before mutation. */

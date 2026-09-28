@@ -640,7 +640,6 @@ const AUTOMATION_APPROVAL_FIELD_TITLES: Record<string, string> = {
   sources: 'Sources',
   model_config: 'Model config',
   outputs: 'Outputs',
-  classifiers: 'Classifiers',
   tags: 'Tags',
   change_notes: 'Change notes',
   set_as_current: 'Set as current',

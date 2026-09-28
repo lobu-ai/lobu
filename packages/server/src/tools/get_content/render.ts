@@ -1,6 +1,6 @@
 /**
  * Tool: read_knowledge — turning raw query rows into the canonical
- * ContentItem shape (excerpt highlighting, client/parent-context resolution,
+ * ContentItem shape (client/parent-context resolution,
  * row mapping).
  */
 
@@ -13,7 +13,6 @@ import {
 } from '../../gateway/files/artifact-store';
 import { resolveEntityRender } from '../../utils/default-entity-template';
 import { resolveEventKindDefinition } from '../../utils/event-kind-validation';
-import logger from '../../utils/logger';
 import { buildResourcePermalink } from '../../utils/url-builder';
 import { AUDIT_SEMANTIC_TYPE } from '../constants';
 import type { ContentRow } from './types';
@@ -163,52 +162,6 @@ export async function hydrateToolInvocationRequests(opts: {
 }
 
 /**
- * Fetch excerpts for evidence highlighting when filtering by a single
- * classification value.
- */
-export async function fetchClassificationExcerpts(
-  sql: DbClient,
-  classificationFilters: Array<{ classifier_slug: string; value: string }> | undefined,
-  rawContent: ContentRow[]
-): Promise<Map<number, string>> {
-  const excerptsMap = new Map<number, string>();
-  if (classificationFilters?.length === 1 && rawContent.length > 0) {
-    const { classifier_slug: classifierSlug, value: filterValue } = classificationFilters[0];
-    const contentIds = rawContent.map((f) => f.id);
-    const contentIdPlaceholders = contentIds.map((_, i) => `$${i + 3}`).join(',');
-    const excerptsResult = await sql.unsafe(
-      `
-      SELECT
-        cc.event_id,
-        cc.excerpts::jsonb->>$1 as excerpt
-      FROM event_classifications cc
-      JOIN classify_facet cl ON cc.classifier_id = cl.id
-      WHERE cc.event_id IN (${contentIdPlaceholders})
-        AND cl.slug = $2
-        AND $1 = ANY(cc."values")
-        AND cc.excerpts::jsonb ? $1
-    `,
-      [filterValue, classifierSlug, ...contentIds]
-    );
-
-    for (const row of excerptsResult as unknown as Array<{
-      event_id: number;
-      excerpt: string;
-    }>) {
-      if (row.excerpt) {
-        excerptsMap.set(Number(row.event_id), row.excerpt);
-      }
-    }
-
-    logger.debug(
-      { classifierSlug, filterValue, excerptCount: excerptsMap.size },
-      '[get_content] Fetched excerpts for evidence highlighting'
-    );
-  }
-  return excerptsMap;
-}
-
-/**
  * Map raw query rows to the canonical content item shape used across the app,
  * batch-resolving client_name and parent_context first.
  */
@@ -219,7 +172,6 @@ export async function buildContentItems(opts: {
   organizationId: string | null;
   ownerSlug: string | null;
   baseUrl: string | undefined;
-  excerptsMap: Map<number, string>;
   includePrivateAttribution: boolean;
 }): Promise<ContentItem[]> {
   const {
@@ -228,7 +180,6 @@ export async function buildContentItems(opts: {
     organizationId,
     ownerSlug,
     baseUrl,
-    excerptsMap,
     includePrivateAttribution,
   } = opts;
 
@@ -396,7 +347,6 @@ export async function buildContentItems(opts: {
       created_at: f.created_at,
       occurred_at: f.occurred_at || f.created_at,
       content_date: f.occurred_at || f.created_at,
-      excerpt: excerptsMap.get(f.id),
       similarity: toNumberOrUndefined(f.similarity),
       text_rank: toNumberOrUndefined(f.text_rank),
       combined_score: toNumberOrUndefined(f.combined_score),
