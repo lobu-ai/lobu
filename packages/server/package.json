@@ -9,7 +9,6 @@
 		"node": ">=22 <25 || >=26"
 	},
 	"scripts": {
-		"build:catalog": "node ../../scripts/build-model-catalog.mjs",
 		"dev": "node ../../scripts/build-model-catalog.mjs && tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
 		"dev:local": "node ../../scripts/build-model-catalog.mjs && tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
 		"start": "node ../../scripts/build-model-catalog.mjs && tsx src/server.ts",

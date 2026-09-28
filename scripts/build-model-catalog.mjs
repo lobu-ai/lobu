@@ -6,15 +6,37 @@ const output = new URL(
   import.meta.url
 );
 
+// This bootstrap runs before workspace packages (including core) are built.
+async function downloadCatalog() {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch("https://models.dev/api.json", {
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok)
+        throw Object.assign(new Error(`models.dev: HTTP ${response.status}`), {
+          status: response.status,
+        });
+      return await response.text();
+    } catch (error) {
+      if (
+        attempt === 3 ||
+        (error.status &&
+          ![408, 429].includes(error.status) &&
+          error.status < 500)
+      )
+        throw error;
+      console.warn(`models.dev download failed; retrying (${attempt}/3)`);
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+}
+
 // A release packages this immutable snapshot. Reuse it for subsequent builds
 // in the same checkout; --refresh explicitly starts a new catalog revision.
 async function buildModelCatalog() {
   if (existsSync(output) && !process.argv.includes("--refresh")) return;
-  const response = await fetch("https://models.dev/api.json", {
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`models.dev: HTTP ${response.status}`);
-  const raw = await response.text();
+  const raw = await downloadCatalog();
   const providers = JSON.parse(raw);
   const models = {};
   for (const [providerId, provider] of Object.entries(providers)) {

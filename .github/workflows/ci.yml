@@ -176,7 +176,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-unit-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"
@@ -373,7 +373,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-sdk-cli-build-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"
@@ -626,7 +626,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-frontend-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"
@@ -771,7 +771,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-integration-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"
@@ -925,7 +925,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-integration-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"
@@ -1383,7 +1383,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-typecheck-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"
@@ -1961,7 +1961,7 @@ jobs:
         shell: bash
         run: |
           PKG_TREE=$(git rev-parse HEAD:packages 2>/dev/null || echo no-tree)
-          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
+          ROOT=$( { git hash-object tsconfig.json bunfig.toml Makefile package.json scripts/build-packages.mjs scripts/build-model-catalog.mjs 2>/dev/null; git rev-parse HEAD:patches HEAD:config HEAD:db HEAD:skills 2>/dev/null; } | git hash-object --stdin || echo no-root)
           LOCK=$(git hash-object bun.lock 2>/dev/null || echo no-lock)
           echo "bun-key=bun-$LOCK" >> "$GITHUB_OUTPUT"
           echo "dist-key=dist-connector-parity-$PKG_TREE-$LOCK-$ROOT" >> "$GITHUB_OUTPUT"

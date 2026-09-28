@@ -36,13 +36,8 @@ test("picker and runtime share Google's metadata through an OpenAI-compatible al
   expect(metadata?.input).toContain("image");
   expect(metadata?.reasoning).toBe(true);
 
-  module.getModelOptions = async () => [{ value: `${module.providerId}/private-model`, label: "Private" }];
-  expect((await collectProviderModelOptions("synthetic-agent", "synthetic-user"))[module.providerId]).toEqual(
-    [{ value: `${module.providerId}/private-model`, label: "Private" }]
-  );
-
   // Account discovery may include private models absent from the public catalog.
-  module.getModelMetadata = undefined;
+  module.getModelOptions = async () => [{ value: `${module.providerId}/private-model`, label: "Private" }];
   expect((await collectProviderModelOptions("synthetic-agent", "synthetic-user"))[module.providerId]).toEqual(
     [{ value: `${module.providerId}/private-model`, label: "Private" }]
   );

@@ -81,8 +81,8 @@ export interface ModelProviderModule extends OrchestratorModule {
   /**
    * Gateway-only capability lookup, consulted ONLY for a model the bundled
    * models.dev snapshot does not carry — a private or account model, or one
-   * shipped since this release. Never on the happy path: a snapshot hit
-   * answers without leaving the process.
+   * shipped since this release. A snapshot hit answers without leaving the
+   * process; account-only providers may need a live lookup on every turn.
    */
   getModelMetadata?(
     agentId: string,

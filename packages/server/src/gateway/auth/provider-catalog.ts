@@ -611,8 +611,8 @@ export class ProviderCatalogService {
     }
     // A Lobu model ref is "<provider-slug>/<model>", and OpenRouter-style refs
     // keep their own slug first ("openrouter/openai/gpt-4o"), so the leading
-    // segment is the provider — the same prefix `findProviderForModel` falls
-    // back to.
+    // segment is the provider — the same prefix `findProviderForModel` routes
+    // by.
     const isHealthy = (ref: string): boolean => {
       const slash = ref.indexOf("/");
       if (slash <= 0) return true;
