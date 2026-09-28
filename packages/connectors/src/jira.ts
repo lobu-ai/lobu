@@ -554,13 +554,17 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     // window from its first page instead of wedging the feed.
     let staleCursorRecoverable = pageToken !== undefined;
     let found = 0;
+    const seenTokens = new Set<string>();
     for (let page = 0; page < this.MAX_PAGES; page++) {
       const params = new URLSearchParams({
         jql,
         maxResults: String(this.PAGE_SIZE),
         fields: ISSUE_FIELDS,
       });
-      if (pageToken) params.set('nextPageToken', pageToken);
+      if (pageToken) {
+        seenTokens.add(pageToken);
+        params.set('nextPageToken', pageToken);
+      }
       let data: JiraSearchResponse;
       try {
         data = await http.json<JiraSearchResponse>(
@@ -571,6 +575,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
         if (staleCursorRecoverable && error instanceof HttpStatusError && error.status === 400) {
           staleCursorRecoverable = false;
           pageToken = undefined;
+          seenTokens.clear();
           page--;
           continue;
         }
@@ -586,17 +591,21 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
       }
       found += events.length;
 
-      // An empty page ends the walk even when a token is returned — guards
-      // against a degenerate self-referential cursor.
-      if (!data.nextPageToken || issues.length === 0) {
+      if (!data.nextPageToken) {
         await ctx.commit(events, { last_sync_at: window.end });
         return { status: 'complete', metadata: { items_found: found } };
+      }
+      if (seenTokens.has(data.nextPageToken)) {
+        throw new Error('Jira returned a repeated page token.');
       }
       pageToken = data.nextPageToken;
       await ctx.commit(events, {
         ...(checkpoint.last_sync_at ? { last_sync_at: checkpoint.last_sync_at } : {}),
         pending: { window, page_token: pageToken },
       });
+      if (issues.length === 0) {
+        return { status: 'more', metadata: { items_found: found } };
+      }
     }
     // The page cap stopped the walk; its committed token resumes it next run.
     return { status: 'more', metadata: { items_found: found } };

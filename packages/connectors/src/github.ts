@@ -17,7 +17,6 @@ import {
   createHttpClient,
   type EventAttributionRule,
   type EventEnvelope,
-  paginateByOffset,
   SubscriptionCandidateSchema,
   type SyncContext,
   type SyncResult,
@@ -75,6 +74,39 @@ interface GitHubConfig {
   installation_ref?: number | string;
 }
 
+interface GitHubPosition {
+  page?: number;
+  cursor?: string;
+  comment_cursor?: string;
+}
+
+interface GitHubContentProgress extends GitHubPosition {
+  scope: string;
+  since: string;
+  started_at: string;
+}
+
+interface GitHubPage {
+  events: EventEnvelope[];
+  next?: GitHubPosition;
+}
+
+interface GitHubPageInfo {
+  hasNextPage: boolean;
+  endCursor?: string | null;
+}
+
+function nextGitHubCursor(info: GitHubPageInfo | undefined, current?: string): string | undefined {
+  if (!info || typeof info.hasNextPage !== 'boolean') {
+    throw new Error('GitHub omitted pagination information.');
+  }
+  if (!info.hasNextPage) return undefined;
+  if (!info.endCursor || info.endCursor === current) {
+    throw new Error('GitHub returned a missing or repeated page cursor.');
+  }
+  return info.endCursor;
+}
+
 interface GitHubCheckpoint {
   last_sync_at?: string;
   commits?: {
@@ -83,7 +115,9 @@ interface GitHubCheckpoint {
     head_sha?: string;
     next_page: number;
   };
+  content?: GitHubContentProgress;
   stargazers?: GitHubStargazerCheckpoint[];
+  stargazer_scan?: { scope: string; page: number; started_at: string; current: GitHubStargazerCheckpoint[] };
 }
 
 interface GitHubStargazerCheckpoint {
@@ -247,18 +281,6 @@ function toInt(value: unknown, fallback: number): number {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
-}
-
-/**
- * Coerce a GitHub list response to an array. `http.json()` returns
- * `await response.json()`, which is `null`/`undefined` for an empty-body 200
- * (GitHub occasionally serves these). The list sync paths immediately read
- * `.length` / iterate, so a bare null threw
- * `Cannot read properties of undefined (reading 'length')` and crashed the
- * whole sync (#2033). Treat any non-array response as an empty page.
- */
-function asArray<T>(value: T[] | null | undefined): T[] {
-  return Array.isArray(value) ? value : [];
 }
 
 function toIsoOrUndefined(value: unknown): string | undefined {
@@ -906,36 +928,31 @@ export default class GitHubConnector extends ConnectorRuntime {
     );
     const sinceIso = this.resolveSince(ctx.checkpoint, config.lookback_days ?? 365);
 
+    const checkpoint = (ctx.checkpoint ?? {}) as GitHubCheckpoint;
+    let result: { events: EventEnvelope[]; checkpoint: GitHubCheckpoint; status: SyncResult['status'] };
     if (contentType === 'stargazers') {
-      const result = await this.syncStargazers(repo, ctx.checkpoint, token);
-      this.stampRepoAttribution(result.events, repo, { attachAutomationSignals });
-      // One commit: removed stargazers are only known against the full snapshot.
-      await ctx.commit(result.events, {
-        last_sync_at: new Date().toISOString(),
-        stargazers: result.currentStargazers,
-      } as Record<string, unknown>);
-      return {
-        status: 'complete',
-        metadata: {
-          items_found: result.events.length,
-          current_stargazers: result.currentStargazers.length,
-        },
+      result = await this.syncStargazers(repo, checkpoint, token);
+    } else if (contentType === 'commits') {
+      result = await this.syncCommits(repo, sinceIso, ctx.checkpoint, token);
+    } else {
+      const labelsFilter = config.labels_filter ?? [];
+      const scope = JSON.stringify([repo.owner, repo.repo, contentType, labelsFilter, config.lookback_days ?? 365]);
+      const progress = checkpoint.content?.scope === scope ? checkpoint.content : {
+        scope,
+        since: sinceIso,
+        // The REST `since` boundary is exclusive and timestamps have second
+        // precision. Overlap that second to recover updates made during a scan.
+        started_at: new Date(Math.floor(Date.now() / 1000) * 1000 - 1000).toISOString(),
+      };
+      const page = await this.syncContent({ repo, contentType, progress, labelsFilter, token });
+      result = {
+        events: page.events,
+        checkpoint: page.next
+          ? { ...checkpoint, content: { scope, since: progress.since, started_at: progress.started_at, ...page.next } }
+          : { last_sync_at: progress.started_at },
+        status: page.next ? 'more' : 'complete',
       };
     }
-
-    const result = contentType === 'commits'
-      ? await this.syncCommits(repo, sinceIso, ctx.checkpoint, token)
-      : {
-          events: await this.syncContent({
-            repo,
-            contentType,
-            sinceIso,
-            labelsFilter: config.labels_filter ?? [],
-            token,
-          }),
-          checkpoint: { last_sync_at: new Date().toISOString() },
-          status: 'complete' as const,
-        };
     const { events } = result;
     this.stampRepoAttribution(events, repo, { attachAutomationSignals });
 
@@ -1167,24 +1184,24 @@ export default class GitHubConnector extends ConnectorRuntime {
   private async syncContent(params: {
     repo: RepoRef;
     contentType: Exclude<GitHubContentType, 'stargazers' | 'commits'>;
-    sinceIso: string;
+    progress: GitHubContentProgress;
     labelsFilter: string[];
     token: string | null;
-  }): Promise<EventEnvelope[]> {
-    const { repo, contentType, sinceIso, labelsFilter, token } = params;
+  }): Promise<GitHubPage> {
+    const { repo, contentType, progress, labelsFilter, token } = params;
 
     switch (contentType) {
       case 'issues':
       case 'pull_requests':
-        return await this.syncIssuesAndPulls(repo, contentType, sinceIso, labelsFilter, token);
+        return await this.syncIssuesAndPulls(repo, contentType, progress, labelsFilter, token);
       case 'issue_comments':
-        return await this.syncIssueComments(repo, sinceIso, token);
+        return await this.syncIssueComments(repo, progress, token);
       case 'pr_comments':
-        return await this.syncPullRequestComments(repo, sinceIso, token);
+        return await this.syncPullRequestComments(repo, progress, token);
       case 'discussions':
-        return await this.syncDiscussions(repo, sinceIso, token);
+        return await this.syncDiscussions(repo, progress, token);
       case 'discussion_comments':
-        return await this.syncDiscussionComments(repo, sinceIso, token);
+        return await this.syncDiscussionComments(repo, progress, token);
     }
   }
 
@@ -1286,23 +1303,26 @@ export default class GitHubConnector extends ConnectorRuntime {
   private async syncIssuesAndPulls(
     repo: RepoRef,
     contentType: 'issues' | 'pull_requests',
-    sinceIso: string,
+    progress: GitHubContentProgress,
     labelsFilter: string[],
     token: string | null
-  ): Promise<EventEnvelope[]> {
+  ): Promise<GitHubPage> {
     const query = new URLSearchParams({
       state: 'all',
       per_page: '100',
-      sort: 'updated',
-      direction: 'desc',
-      since: sinceIso,
+      // Updates must not move consumed records to a different offset.
+      sort: 'created',
+      direction: 'asc',
+      since: progress.since,
+      page: String(progress.page ?? 1),
     });
     if (labelsFilter.length > 0) {
       query.set('labels', labelsFilter.join(','));
     }
 
     const url = `${githubRepoApiUrl(repo, '/issues')}?${query.toString()}`;
-    const items = asArray(await this.requestJson<GitHubIssueLike[]>({ url, token }));
+    const items = await this.requestJson<GitHubIssueLike[]>({ url, token });
+    if (!Array.isArray(items)) return { events: [], next: progress };
     const events: EventEnvelope[] = [];
 
     for (const item of items) {
@@ -1339,26 +1359,27 @@ export default class GitHubConnector extends ConnectorRuntime {
       });
     }
 
-    return events;
+    return { events, next: items.length === 100 ? { page: (progress.page ?? 1) + 1 } : undefined };
   }
 
   private async syncIssueComments(
     repo: RepoRef,
-    sinceIso: string,
+    progress: GitHubContentProgress,
     token: string | null
-  ): Promise<EventEnvelope[]> {
+  ): Promise<GitHubPage> {
     const query = new URLSearchParams({
       per_page: '100',
-      sort: 'updated',
-      direction: 'desc',
-      since: sinceIso,
+      // Updates must not move consumed records to a different offset.
+      sort: 'created',
+      direction: 'asc',
+      since: progress.since,
+      page: String(progress.page ?? 1),
     });
     const url = `${githubRepoApiUrl(repo, '/issues/comments')}?${query.toString()}`;
-    const comments = asArray(
-      await this.requestJson<GitHubCommentLike[]>({ url, token })
-    );
+    const comments = await this.requestJson<GitHubCommentLike[]>({ url, token });
+    if (!Array.isArray(comments)) return { events: [], next: progress };
 
-    return comments
+    const events = comments
       .map((comment): EventEnvelope | null => {
         const createdAt = new Date(comment.created_at);
         if (Number.isNaN(createdAt.getTime())) return null;
@@ -1384,25 +1405,27 @@ export default class GitHubConnector extends ConnectorRuntime {
         };
       })
       .filter((value): value is EventEnvelope => value !== null);
+    return { events, next: comments.length === 100 ? { page: (progress.page ?? 1) + 1 } : undefined };
   }
 
   private async syncPullRequestComments(
     repo: RepoRef,
-    sinceIso: string,
+    progress: GitHubContentProgress,
     token: string | null
-  ): Promise<EventEnvelope[]> {
+  ): Promise<GitHubPage> {
     const query = new URLSearchParams({
       per_page: '100',
-      sort: 'updated',
-      direction: 'desc',
-      since: sinceIso,
+      // Updates must not move consumed records to a different offset.
+      sort: 'created',
+      direction: 'asc',
+      since: progress.since,
+      page: String(progress.page ?? 1),
     });
     const url = `${githubRepoApiUrl(repo, '/pulls/comments')}?${query.toString()}`;
-    const comments = asArray(
-      await this.requestJson<GitHubCommentLike[]>({ url, token })
-    );
+    const comments = await this.requestJson<GitHubCommentLike[]>({ url, token });
+    if (!Array.isArray(comments)) return { events: [], next: progress };
 
-    return comments
+    const events = comments
       .map((comment): EventEnvelope | null => {
         const createdAt = new Date(comment.created_at);
         if (Number.isNaN(createdAt.getTime())) return null;
@@ -1428,17 +1451,19 @@ export default class GitHubConnector extends ConnectorRuntime {
         };
       })
       .filter((value): value is EventEnvelope => value !== null);
+    return { events, next: comments.length === 100 ? { page: (progress.page ?? 1) + 1 } : undefined };
   }
 
   private async syncDiscussions(
     repo: RepoRef,
-    sinceIso: string,
+    progress: GitHubContentProgress,
     token: string | null
-  ): Promise<EventEnvelope[]> {
+  ): Promise<GitHubPage> {
     const query = `
-      query($owner: String!, $repo: String!) {
+      query($owner: String!, $repo: String!, $cursor: String) {
         repository(owner: $owner, name: $repo) {
-          discussions(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          discussions(first: 100, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               id
               number
@@ -1460,19 +1485,21 @@ export default class GitHubConnector extends ConnectorRuntime {
     const response = await this.requestGraphQL<{
       data?: {
         repository?: {
-          discussions?: { nodes?: GraphQLDiscussionNode[] };
+          discussions?: { nodes?: GraphQLDiscussionNode[]; pageInfo?: GitHubPageInfo };
         };
       };
     }>({
       token,
       query,
-      variables: { owner: repo.owner, repo: repo.repo },
+      variables: { owner: repo.owner, repo: repo.repo, cursor: progress.cursor },
     });
 
-    const discussions = response.data?.repository?.discussions?.nodes ?? [];
-    const since = new Date(sinceIso).getTime();
+    const connection = response.data?.repository?.discussions;
+    const cursor = nextGitHubCursor(connection?.pageInfo, progress.cursor);
+    const discussions = connection?.nodes ?? [];
+    const since = new Date(progress.since).getTime();
 
-    return discussions
+    const events = discussions
       .map((discussion): EventEnvelope | null => {
         const createdAt = new Date(discussion.createdAt);
         const updatedAt = new Date(discussion.updatedAt).getTime();
@@ -1500,20 +1527,23 @@ export default class GitHubConnector extends ConnectorRuntime {
         };
       })
       .filter((value): value is EventEnvelope => value !== null);
+    return { events, next: cursor ? { cursor } : undefined };
   }
 
   private async syncDiscussionComments(
     repo: RepoRef,
-    sinceIso: string,
+    progress: GitHubContentProgress,
     token: string | null
-  ): Promise<EventEnvelope[]> {
+  ): Promise<GitHubPage> {
     const query = `
-      query($owner: String!, $repo: String!) {
+      query($owner: String!, $repo: String!, $cursor: String, $commentCursor: String) {
         repository(owner: $owner, name: $repo) {
-          discussions(first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          discussions(first: 1, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               number
-              comments(first: 50) {
+              comments(first: 100, after: $commentCursor) {
+                pageInfo { hasNextPage endCursor }
                 nodes {
                   id
                   body
@@ -1534,9 +1564,10 @@ export default class GitHubConnector extends ConnectorRuntime {
       data?: {
         repository?: {
           discussions?: {
+            pageInfo?: GitHubPageInfo;
             nodes?: Array<{
               number: number;
-              comments?: { nodes?: Array<Omit<GraphQLDiscussionCommentNode, 'discussion'>> };
+              comments?: { nodes?: Array<Omit<GraphQLDiscussionCommentNode, 'discussion'>>; pageInfo?: GitHubPageInfo };
             }>;
           };
         };
@@ -1544,11 +1575,16 @@ export default class GitHubConnector extends ConnectorRuntime {
     }>({
       token,
       query,
-      variables: { owner: repo.owner, repo: repo.repo },
+      variables: { owner: repo.owner, repo: repo.repo, cursor: progress.cursor, commentCursor: progress.comment_cursor },
     });
 
-    const discussions = response.data?.repository?.discussions?.nodes ?? [];
-    const since = new Date(sinceIso).getTime();
+    const connection = response.data?.repository?.discussions;
+    const cursor = nextGitHubCursor(connection?.pageInfo, progress.cursor);
+    const discussions = connection?.nodes ?? [];
+    const commentCursor = discussions[0]
+      ? nextGitHubCursor(discussions[0].comments?.pageInfo, progress.comment_cursor)
+      : undefined;
+    const since = new Date(progress.since).getTime();
     const result: EventEnvelope[] = [];
 
     for (const discussion of discussions) {
@@ -1579,97 +1615,96 @@ export default class GitHubConnector extends ConnectorRuntime {
       }
     }
 
-    return result;
+    return {
+      events: result,
+      next: commentCursor ? { cursor: progress.cursor, comment_cursor: commentCursor }
+        : cursor ? { cursor } : undefined,
+    };
   }
 
   private async syncStargazers(
     repo: RepoRef,
-    checkpoint: Record<string, unknown> | null,
+    checkpoint: GitHubCheckpoint,
     token: string | null
-  ): Promise<{ events: EventEnvelope[]; currentStargazers: GitHubStargazerCheckpoint[] }> {
-    const previous = this.parseStargazerCheckpoint(checkpoint);
+  ): Promise<{ events: EventEnvelope[]; checkpoint: GitHubCheckpoint; status: SyncResult['status'] }> {
+    const previous = this.parseStargazerCheckpoint(checkpoint as Record<string, unknown>);
     const previousByKey = new Map(previous.map((stargazer) => [stargazer.key, stargazer]));
-    const currentStargazers: GitHubStargazerCheckpoint[] = [];
+    const scope = JSON.stringify([repo.owner, repo.repo]);
+    const scan = checkpoint.stargazer_scan?.scope === scope ? checkpoint.stargazer_scan : {
+      scope, page: 1, started_at: new Date().toISOString(), current: [],
+    };
+    const currentStargazers = [...scan.current];
     const events: EventEnvelope[] = [];
-    const now = new Date();
+    const now = new Date(scan.started_at);
     const repoInfo = await this.fetchRepository(repo, token);
     const target = this.buildRepoTarget(repo, repoInfo);
     let remainingProfileFetches = STARGAZER_PROFILE_FETCH_LIMIT;
 
-    const pages = paginateByOffset<GitHubStargazerLike>(
-      async (offset, pageSize) => {
-        const query = new URLSearchParams({
-          per_page: String(pageSize),
-          page: String(offset / pageSize + 1),
-        });
-        const url = `${githubRepoApiUrl(repo, '/stargazers')}?${query.toString()}`;
-        const stargazers = asArray(
-          await this.requestJson<GitHubStargazerLike[]>({
-            url,
+    const query = new URLSearchParams({ per_page: '100', page: String(scan.page) });
+    const stargazers = await this.requestJson<GitHubStargazerLike[]>({
+      url: `${githubRepoApiUrl(repo, '/stargazers')}?${query.toString()}`,
+      token, accept: 'application/vnd.github.star+json',
+    });
+    if (!Array.isArray(stargazers)) {
+      return { events: [], checkpoint: { ...checkpoint, stargazer_scan: scan }, status: 'more' };
+    }
+    for (const stargazer of stargazers) {
+      const user = stargazer.user ?? stargazer;
+      const login = user.login;
+      if (!login) continue;
+
+      const key = githubUserIdentityKey({ userId: user.id, login });
+      const starredAtIso = toIsoOrUndefined(stargazer.starred_at) ?? now.toISOString();
+      const starredAt = new Date(starredAtIso);
+      if (Number.isNaN(starredAt.getTime())) continue;
+
+      const previousStargazer = previousByKey.get(key);
+      const shouldRefreshProfile = this.shouldRefreshStargazerProfile(previousStargazer, now);
+      const profileFetchedAt = shouldRefreshProfile && remainingProfileFetches > 0
+        ? await this.enqueueStargazerProfileEvent({
+            events,
+            login,
             token,
-            accept: 'application/vnd.github.star+json',
+            fallback: user,
+            fetchedAt: now,
           })
-        );
-        return { items: stargazers, hasMore: stargazers.length === pageSize };
-      },
-      { pageSize: 100 }
-    );
+        : (previousStargazer?.profile_fetched_at ?? null);
+      if (shouldRefreshProfile && remainingProfileFetches > 0) remainingProfileFetches -= 1;
 
-    for await (const stargazers of pages) {
-      for (const stargazer of stargazers) {
-        const user = stargazer.user ?? stargazer;
-        const login = user.login;
-        if (!login) continue;
+      currentStargazers.push({
+        key,
+        login,
+        starred_at: starredAt.toISOString(),
+        user_id: user.id ?? previousStargazer?.user_id ?? null,
+        user_type: user.type ?? previousStargazer?.user_type ?? null,
+        html_url: user.html_url ?? previousStargazer?.html_url ?? `https://github.com/${login}`,
+        profile_fetched_at: profileFetchedAt,
+      });
 
-        const key = githubUserIdentityKey({ userId: user.id, login });
-        const starredAtIso = toIsoOrUndefined(stargazer.starred_at) ?? now.toISOString();
-        const starredAt = new Date(starredAtIso);
-        if (Number.isNaN(starredAt.getTime())) continue;
-
-        const previousStargazer = previousByKey.get(key);
-        const shouldRefreshProfile = this.shouldRefreshStargazerProfile(previousStargazer, now);
-        const profileFetchedAt = shouldRefreshProfile && remainingProfileFetches > 0
-          ? await this.enqueueStargazerProfileEvent({
-              events,
-              login,
-              token,
-              fallback: user,
-              fetchedAt: now,
-            })
-          : (previousStargazer?.profile_fetched_at ?? null);
-        if (shouldRefreshProfile && remainingProfileFetches > 0) remainingProfileFetches -= 1;
-
-        currentStargazers.push({
-          key,
-          login,
-          starred_at: starredAt.toISOString(),
-          user_id: user.id ?? previousStargazer?.user_id ?? null,
-          user_type: user.type ?? previousStargazer?.user_type ?? null,
-          html_url: user.html_url ?? previousStargazer?.html_url ?? `https://github.com/${login}`,
-          profile_fetched_at: profileFetchedAt,
+      if (!previousStargazer) {
+        events.push({
+          origin_id: `stargazer_${repo.owner}_${repo.repo}_${githubKeyForOriginId(key)}`,
+          title: `${login} starred ${repo.owner}/${repo.repo}`,
+          payload_text: `${login} starred ${repo.owner}/${repo.repo}.`,
+          author_name: login,
+          source_url: user.html_url ?? `https://github.com/${login}`,
+          occurred_at: starredAt,
+          origin_type: 'stargazer',
+          score: 1,
+          metadata: {
+            actor: this.buildActor(user, login),
+            target,
+            action: 'starred',
+            starred_at: starredAt.toISOString(),
+            source: 'github_stargazers_snapshot',
+            ...this.buildAuthorMetadata({ login, id: user.id }),
+          },
         });
-
-        if (!previousStargazer) {
-          events.push({
-            origin_id: `stargazer_${repo.owner}_${repo.repo}_${githubKeyForOriginId(key)}`,
-            title: `${login} starred ${repo.owner}/${repo.repo}`,
-            payload_text: `${login} starred ${repo.owner}/${repo.repo}.`,
-            author_name: login,
-            source_url: user.html_url ?? `https://github.com/${login}`,
-            occurred_at: starredAt,
-            origin_type: 'stargazer',
-            score: 1,
-            metadata: {
-              actor: this.buildActor(user, login),
-              target,
-              action: 'starred',
-              starred_at: starredAt.toISOString(),
-              source: 'github_stargazers_snapshot',
-              ...this.buildAuthorMetadata({ login, id: user.id }),
-            },
-          });
-        }
       }
+    }
+    const current = [...new Map(currentStargazers.map(star => [star.key, star])).values()];
+    if (stargazers.length === 100) {
+      return { events, checkpoint: { ...checkpoint, stargazer_scan: { ...scan, page: scan.page + 1, current } }, status: 'more' };
     }
 
     const currentKeys = new Set(currentStargazers.map((stargazer) => stargazer.key));
@@ -1697,7 +1732,7 @@ export default class GitHubConnector extends ConnectorRuntime {
       });
     }
 
-    return { events, currentStargazers };
+    return { events, checkpoint: { last_sync_at: scan.started_at, stargazers: current }, status: 'complete' };
   }
 
   private shouldRefreshStargazerProfile(
@@ -2119,7 +2154,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     query: string;
     variables?: Record<string, unknown>;
   }): Promise<T> {
-    return await this.requestJson<T>({
+    const response = await this.requestJson<T & { errors?: Array<{ message: string }> }>({
       method: 'POST',
       url: 'https://api.github.com/graphql',
       token: params.token,
@@ -2131,6 +2166,10 @@ export default class GitHubConnector extends ConnectorRuntime {
       // on a 5xx even though it goes out as POST. A mutation must not set this.
       idempotent: true,
     });
+    if (response?.errors?.length) {
+      throw new Error(`GitHub GraphQL error: ${response.errors.map(error => error.message).join('; ')}`);
+    }
+    return response;
   }
 
   private readonly http = createHttpClient({ errorPrefix: 'GitHub API' });

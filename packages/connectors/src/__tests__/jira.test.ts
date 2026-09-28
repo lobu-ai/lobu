@@ -1,7 +1,4 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
-// The connector delegates its sync loop to the cursor paginator; the shared mock
-// provides a faithful real generator (not a throwing stub), so this exercises
-// the genuine paging semantics while keeping the browser stack out.
 import { connectorSdkMock, HttpStatusError } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
@@ -81,21 +78,32 @@ describe('JiraConnector.sync pagination', () => {
     expect(result.metadata).toEqual({ items_found: 4 });
   });
 
-  test('stops on an empty page even when a token is returned (degenerate cursor guard)', async () => {
+  test('parks an empty continuation page and resumes its unread tail', async () => {
     const connector = new JiraConnector();
-    const { client, calls } = fakeHttp([
+    const { client, calls, jqls } = fakeHttp([
       { issues: [{ id: '1' }], nextPageToken: 'p2' },
-      { issues: [], nextPageToken: 'p3' }, // empty page but token present -> must stop
-      { issues: [{ id: 'should-not-fetch' }] },
+      { issues: [], nextPageToken: 'p3' },
+      { issues: [{ id: 'tail' }] },
     ]);
     connector.client = () => client;
-
-    const result = await runSync(connector, makeCtx());
-
-    expect(result.events).toHaveLength(1);
-    // Only two fetches: page 1, then the empty page 2; page 3 is never requested.
-    expect(calls).toEqual([null, 'p2']);
+    const first = await runSync(connector, makeCtx({ last_sync_at: WINDOW.start }));
+    expect(first.status).toBe('more');
+    expect(first.checkpoint).toMatchObject({ last_sync_at: WINDOW.start, pending: { page_token: 'p3' } });
+    const second = await runSync(connector, makeCtx(first.checkpoint));
+    expect(second.events.map(e => e.origin_id)).toEqual(['jira_issue_tail']);
+    expect(second.status).toBe('complete');
+    expect(calls).toEqual([null, 'p2', 'p3']);
+    expect(new Set(jqls).size).toBe(1);
   });
+
+  test('rejects a repeated token without closing the window', async () => {
+    const connector = new JiraConnector();
+    connector.client = () => fakeHttp([{ issues: [], nextPageToken: 'p2' }]).client;
+    await expect(runSync(connector, makeCtx({
+      last_sync_at: WINDOW.start, pending: { window: WINDOW, page_token: 'p2' },
+    }))).rejects.toThrow('repeated page token');
+  });
+
 });
 
 describe('JiraConnector.sync resumable traversal', () => {

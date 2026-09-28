@@ -1,7 +1,4 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
-// The connector drives both sync loops through the cursor paginator; the shared
-// mock provides a faithful real generator (not a throwing stub), so this
-// exercises the genuine paging semantics while keeping the browser stack out.
 import { connectorSdkMock } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
@@ -273,34 +270,54 @@ describe('GoogleCalendarConnector full sync', () => {
     ).rejects.toThrow(/503/);
   });
 
-  test('incremental paging keeps its page size and fails closed at the safety bound', async () => {
+  test.each(['events', 'changes'])('incremental %s resumes beyond the page bound', async (feedKey) => {
     const connector = new GoogleCalendarConnector();
-    const { client, urls } = fakeHttp(
-      Array.from({ length: 200 }, (_, i) => ({
+    const { client, urls } = fakeHttp([
+      ...Array.from({ length: 200 }, (_, i) => ({
         items: [calEvent(String(i), '2026-01-01T10:00:00Z')],
         nextPageToken: `page-${i + 1}`,
-      }))
-    );
+      })),
+      { items: [calEvent('tail', '2026-01-01T10:00:00Z')], nextSyncToken: 'NEXT' },
+    ]);
     connector.client = () => client;
-
-    // An incremental cursor only advances on the last page, so running out of
-    // pages has to fail rather than persist a partial batch.
-    await expect(
-      runSync(connector, {
-        feedKey: 'events',
-        config: { max_results: 2 },
-        credentials: { accessToken: 'tok' },
-        checkpoint: { scope: SCOPE, sync_token: 'CURRENT' },
-      })
-    ).rejects.toThrow(/page bound/);
-
-    expect(urls).toHaveLength(200);
-    // `max_results` caps the bootstrap only; it never shrinks the page size and
-    // with it the number of changes the bound can carry.
-    expect(new Set(urls.map((url) => new URL(url).searchParams.get('maxResults')))).toEqual(
-      new Set(['250'])
-    );
+    const ctx = { feedKey, config: { max_results: 2500 }, credentials: { accessToken: 'tok' } };
+    const first = await runSync(connector, {
+      ...ctx, checkpoint: { scope: SCOPE, sync_token: 'CURRENT' },
+    });
+    expect(first.status).toBe('more');
+    expect(first.events).toHaveLength(200);
+    expect(first.commits).toHaveLength(200);
+    expect(first.checkpoint).toMatchObject({ sync_token: 'CURRENT', pending: { page_token: 'page-200' } });
+    const second = await runSync(connector, { ...ctx, checkpoint: first.checkpoint });
+    expect(second.status).toBe('complete');
+    expect(second.events.map(originId)).toEqual(['tail']);
+    expect(second.checkpoint.sync_token).toBe('NEXT');
+    expect(second.checkpoint.pending).toBeUndefined();
+    const resumed = new URL(urls[200]);
+    expect(resumed.searchParams.get('pageToken')).toBe('page-200');
+    resumed.searchParams.delete('pageToken');
+    expect(resumed.toString()).toBe(urls[0]);
   });
+
+  test('an incremental failure resumes after the last durable page', async () => {
+    const connector = new GoogleCalendarConnector();
+    const { client, calls } = fakeHttp([
+      { items: [calEvent('first', '2026-01-01T10:00:00Z')], nextPageToken: 'p2' },
+      { status: 503 },
+      { items: [calEvent('tail', '2026-01-01T10:00:00Z')], nextSyncToken: 'NEXT' },
+    ]);
+    connector.client = () => client;
+    let checkpoint: Record<string, unknown> = { scope: SCOPE, sync_token: 'CURRENT' };
+    const ctx = { feedKey: 'changes', config: {}, credentials: { accessToken: 'tok' } };
+    await expect(runSync(connector, { ...ctx, checkpoint,
+      commit: async (_events, next) => { if (next) checkpoint = next; },
+    })).rejects.toThrow('503');
+    expect(checkpoint).toMatchObject({ sync_token: 'CURRENT', pending: { page_token: 'p2' } });
+    const resumed = await runSync(connector, { ...ctx, checkpoint });
+    expect(resumed.events.map(originId)).toEqual(['tail']);
+    expect(calls).toEqual([null, 'p2', 'p2']);
+  });
+
 });
 
 /**
