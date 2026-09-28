@@ -11,8 +11,8 @@ ALTER TABLE public.classify_facet
   ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'embedding';
 
 ALTER TABLE public.classify_facet DROP CONSTRAINT IF EXISTS classify_facet_engine_check;
-ALTER TABLE public.classify_facet
-  ADD CONSTRAINT classify_facet_engine_check CHECK (engine IN ('embedding', 'service'));
+-- squawk-ignore constraint-missing-not-valid -- config-scale table; the validating scan is trivial
+ALTER TABLE public.classify_facet ADD CONSTRAINT classify_facet_engine_check CHECK (engine IN ('embedding', 'service'));
 
 -- Rows written by the service engine carry source 'service'.
 --
@@ -20,7 +20,6 @@ ALTER TABLE public.classify_facet
 -- NOT VALID, so it is an O(1) catalog change that enforces new writes only. Every existing row
 -- already satisfied the narrower predicate, so skipping VALIDATE loses nothing.
 ALTER TABLE public.event_classifications DROP CONSTRAINT IF EXISTS event_classifications_source_check;
--- squawk-ignore constraint-missing-not-valid -- it is NOT VALID; see the cost note above
 ALTER TABLE public.event_classifications
   ADD CONSTRAINT event_classifications_source_check
   CHECK (source IN ('embedding', 'llm', 'user', 'service')) NOT VALID;
