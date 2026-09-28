@@ -38,7 +38,7 @@ import { createLogger } from "@lobu/core";
 import { GITHUB_IDENTITY } from "@lobu/connectors/github-identity";
 import { ensureMemberOfType } from "../../../authz/access-graph.js";
 import { upsertEdges } from "../../../utils/edge-writes.js";
-import { resolveEventAttributionsForItems } from "../../../utils/entity-link-upsert.js";
+import { applyEventAttributions } from "../../../utils/entity-link-upsert.js";
 import { withAclEdgeWrite } from "../../../utils/relationship-validation.js";
 
 const logger = createLogger("github-team-graph");
@@ -165,7 +165,7 @@ async function ensureOrgCompany(params: {
 				: {}),
 		},
 	};
-	const resolved = await resolveEventAttributionsForItems({
+	const resolved = await applyEventAttributions({
 		connectorKey: GITHUB_CONNECTOR_KEY,
 		orgId: params.orgId,
 		items: [item],
@@ -195,7 +195,7 @@ async function ensureOrgCompany(params: {
 			],
 		},
 	});
-	const ids = resolved.get(0) ?? [];
+	const ids = resolved.entityIdsByItem.get(0) ?? [];
 	return ids.length > 0 ? ids[0] : null;
 }
 
@@ -247,7 +247,7 @@ export async function buildGithubTeamGraph(params: {
 			...(typeof m.id === "number" ? { author_id: String(m.id) } : {}),
 		},
 	}));
-	const resolvedMembers = await resolveEventAttributionsForItems({
+	const resolvedMembers = await applyEventAttributions({
 		connectorKey: GITHUB_CONNECTOR_KEY,
 		orgId: params.organizationId,
 		items: memberItems,
@@ -280,7 +280,7 @@ export async function buildGithubTeamGraph(params: {
 
 	const memberEntityIds: number[] = [];
 	for (let i = 0; i < memberItems.length; i++) {
-		const ids = resolvedMembers.get(i);
+		const ids = resolvedMembers.entityIdsByItem.get(i);
 		if (ids && ids.length > 0) memberEntityIds.push(ids[0]);
 	}
 	const uniqueMemberIds = [...new Set(memberEntityIds)];

@@ -6,7 +6,7 @@
  */
 
 import { retryWithBackoff } from '@lobu/core';
-import { type DbClient, getDb } from '../db/client';
+import { type DbClient, getDb, parsePgNumberArray } from '../db/client';
 import { stripIdentityScopeProjectionMetadata } from '../identity/scope-projection';
 import { getActingAutomationScope } from './acting-automation-context';
 import {
@@ -350,6 +350,7 @@ async function findCurrentEventByOrigin(
 ): Promise<
   | {
       id: number;
+      entity_ids: number[] | string | null;
       title: string | null;
       payload_text: string | null;
       payload_type: string;
@@ -376,7 +377,7 @@ async function findCurrentEventByOrigin(
   if (!params.connectionId || !params.originId) return undefined;
 
   const rows = await sql`
-    SELECT e.id, e.title, e.payload_text, e.payload_type, e.payload_data, e.payload_template,
+    SELECT e.id, e.entity_ids, e.title, e.payload_text, e.payload_type, e.payload_data, e.payload_template,
            e.attachments, e.author_name, e.source_url, e.occurred_at, e.semantic_type, e.origin_type,
            e.metadata, e.score, e.origin_parent_id, e.interaction_type, e.interaction_status,
            e.interaction_input_schema, e.interaction_input, e.interaction_output, e.interaction_error
@@ -417,6 +418,8 @@ function isSemanticallyEqual(
   params: InsertEventParams
 ): boolean {
   return (
+    stableJson([...new Set(parsePgNumberArray(existing.entity_ids))].sort((a, b) => a - b)) ===
+      stableJson([...new Set(params.entityIds)].sort((a, b) => a - b)) &&
     semanticEventTitle(existing.title, params.semanticType) ===
       semanticEventTitle(params.title, params.semanticType) &&
     (existing.payload_text ?? null) === (params.content ?? null) &&

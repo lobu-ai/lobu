@@ -41,7 +41,7 @@ import {
 } from '@lobu/connector-sdk';
 import { getDb, pgBigintArray, pgTextArray } from '../db/client.js';
 import { runtimeConnectionIdToSlug } from '../lobu/stores/connections-projection.js';
-import { resolveEventAttributionsForItems } from '../utils/entity-link-upsert.js';
+import { applyEventAttributions } from '../utils/entity-link-upsert.js';
 import {
   patchEntityRows,
   withEntityWriteTransaction,
@@ -293,7 +293,7 @@ async function resolveMembers(
   }
 
   // Which entity a member's claims resolve to follows the tier semantics the
-  // create path below (`resolveEventAttributionsForItems`) already implements —
+  // create path below (`applyEventAttributions`) already implements —
   // see `primary` in connector-types.ts. Stopping at the first array hit made
   // the answer depend on the order a connector pushed its identities, and
   // `member_of` is a read ACL, so that was a mis-grant waiting to happen: a
@@ -357,7 +357,7 @@ async function resolveMembers(
     for (const id of m.identities) metadata[id.namespace] = id.value;
     return { origin_type: 'access_member', metadata };
   });
-  const resolved = await resolveEventAttributionsForItems({
+  const resolved = await applyEventAttributions({
     connectorKey,
     connectionId,
     orgId,
@@ -379,7 +379,7 @@ async function resolveMembers(
     },
   });
   for (let i = 0; i < toCreate.length; i++) {
-    const ids = resolved.get(i);
+    const ids = resolved.entityIdsByItem.get(i);
     if (ids && ids.length > 0) byKey.set(toCreate[i].key, ids[0]);
   }
   return byKey;
@@ -461,7 +461,7 @@ export async function buildAccessGraph(params: {
     origin_type: 'access_resource',
     metadata: { resource_key: r.key, resource_name: r.name ?? r.key },
   }));
-  const resolvedResources = await resolveEventAttributionsForItems({
+  const resolvedResources = await applyEventAttributions({
     connectorKey,
     connectionId: identityConnectionId,
     orgId: organizationId,
@@ -487,7 +487,7 @@ export async function buildAccessGraph(params: {
   const resourceEntityIds: Record<string, number> = {};
   const resourceEntityIdByIndex = new Map<number, number>();
   for (let i = 0; i < resources.length; i++) {
-    const ids = resolvedResources.get(i);
+    const ids = resolvedResources.entityIdsByItem.get(i);
     if (ids && ids.length > 0) {
       resourceEntityIds[resources[i].key] = ids[0];
       resourceEntityIdByIndex.set(i, ids[0]);

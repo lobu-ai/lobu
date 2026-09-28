@@ -13,8 +13,8 @@
  *      multiple distinct entities.
  *   4) Merges declared `traits` onto entities.metadata per merge strategy.
  *
- * Never mutates `events.entity_ids` — events stay immutable, JOIN-at-read
- * recovers the relationship via entity_identities.
+ * Returns entity ids for the new event version; existing events stay immutable.
+ * Identity metadata also supports historical read-time attribution.
  */
 
 import { validateEntityRowInsert, validateEntityRowPatch } from '../authz/entity-row-validation';
@@ -110,11 +110,6 @@ interface EventAttributionPlan {
 
 interface AttributionResolution {
   entityIdsByItem: Map<number, number[]>;
-  namedEntityIdsByItem: Map<number, Map<string, number>>;
-  unresolvedNamedAttributionsByItem: Map<number, Set<string>>;
-}
-
-interface AppliedEventAttributions {
   /** Entity id per attribution `name`, keyed by the caller's item index. */
   namedEntityIdsByItem: Map<number, Map<string, number>>;
   /** Named rules that were applicable but did not resolve for this item. */
@@ -931,8 +926,9 @@ async function applyTraits(
 /**
  * Per-batch ingestion hook. Looks up or creates target entities for each
  * item using the normalized entity_identities index, then merges declared
- * traits onto the resolved entity. Rules are loaded from the connector
- * definition (poll/sync path).
+ * traits onto the resolved entity. Poll/sync loads rules from its feed;
+ * webhooks and access graphs supply rules directly. Both receive resolved
+ * ids and named endpoints; feed plans also return relationship declarations.
  *
  * Connector attribution is one logical entity write: match/create, identity
  * claim, aliases, traits, and provisional cleanup commit together. A rejected
@@ -943,108 +939,53 @@ export async function applyEventAttributions(
   params: {
     connectorKey: string;
     connectionId?: number | null;
-    feedKey: string | null;
     orgId: string;
     items: BatchItem[];
-  },
-  // Optional transaction handle, same contract the webhook path already uses via
-  // resolveEventAttributionsForItems. A supplied tx is joined; a pool or omitted
-  // handle opens a transaction here. The sync dry-run path threads its rolled-
-  // back tx so auto-created entities disappear with their events.
+  } & ({ feedKey: string | null } | { rules: RuleMap }),
+  // Join a supplied transaction or open one for a pool/omitted handle. Sync
+  // dry runs pass their rolled-back tx; webhooks share their event transaction.
   sql?: DbClient
-): Promise<AppliedEventAttributions> {
+): Promise<AttributionResolution> {
   scrubIdentityScopeProjections(params.items);
-  const empty: AppliedEventAttributions = {
+  const empty: AttributionResolution = {
+    entityIdsByItem: new Map(),
     namedEntityIdsByItem: new Map(),
     unresolvedNamedAttributionsByItem: new Map(),
     relationshipsByKind: {},
   };
-  if (!params.feedKey || params.items.length === 0) return empty;
+  if (params.items.length === 0) return empty;
 
   // Resolved BEFORE the rule load: the sync dry-run path supplies its
   // rolled-back transaction, and reading rules on the pool while that is open is
   // the starvation this file exists to avoid (#2818).
   const db = sql ?? getDb();
 
-  const plan = await loadEventAttributionPlan(db, {
-    connectorKey: params.connectorKey,
-    feedKey: params.feedKey,
-    orgId: params.orgId,
-  });
+  const plan = 'rules' in params
+    ? { rulesByKind: params.rules, relationshipsByKind: {} }
+    : params.feedKey
+      ? await loadEventAttributionPlan(db, { ...params, feedKey: params.feedKey })
+      : { rulesByKind: {}, relationshipsByKind: {} };
   if (Object.keys(plan.rulesByKind).length === 0) {
     return { ...empty, relationshipsByKind: plan.relationshipsByKind };
   }
   const resolved = await withEntityWriteTransaction(db, (tx) =>
     resolveLinksByKind(
       {
-        connectorKey: params.connectorKey,
-        connectionId: params.connectionId,
-        orgId: params.orgId,
-        items: params.items,
+        ...params,
         rulesByKind: plan.rulesByKind,
       },
       tx
     )
   );
   return {
-    namedEntityIdsByItem: resolved.namedEntityIdsByItem,
-    unresolvedNamedAttributionsByItem: resolved.unresolvedNamedAttributionsByItem,
+    ...resolved,
     relationshipsByKind: plan.relationshipsByKind,
   };
 }
 
 /**
- * Resolve entity links for items using caller-supplied rules instead of the
- * connector-definition store. The live webhook path (handleWebhookIngest /
- * app-webhooks router) lands under `connector_key='webhook:%'` with no feed, so
- * it can't load rules from `connector_definitions` — it passes the rule set
- * directly here. Same machinery as the poll path (normalize → match-or-create →
- * stamp metadata → merge traits), but it ALSO returns the resolved entity ids
- * per item (keyed by `items` array index) so the caller can write
- * `events.entity_ids` (a webhook row is read by id, not via a feed-time JOIN).
- * `rules` is keyed by event kind (origin_type). Tenant-scoped on `orgId`;
- * entity_identities are UNIQUE per
- * (org, namespace, identifier, COALESCE(scope_key, '')), so resolution
- * never crosses organizations.
- */
-export async function resolveEventAttributionsForItems(
-  params: {
-    connectorKey: string;
-    connectionId?: number | null;
-    orgId: string;
-    items: BatchItem[];
-    rules: RuleMap;
-  },
-  // Optional transaction handle — the webhook winner passes its tx so the actor
-  // graph writes commit atomically with the event insert. A pool or omitted
-  // handle opens a transaction here.
-  sql?: DbClient
-): Promise<Map<number, number[]>> {
-  scrubIdentityScopeProjections(params.items);
-  if (params.items.length === 0) return new Map();
-  if (Object.keys(params.rules).length === 0) return new Map();
-  const db = sql ?? getDb();
-  const resolved = await withEntityWriteTransaction(db, (tx) =>
-    resolveLinksByKind(
-      {
-        connectorKey: params.connectorKey,
-        connectionId: params.connectionId,
-        orgId: params.orgId,
-        items: params.items,
-        rulesByKind: params.rules,
-      },
-      tx
-    )
-  );
-  return resolved.entityIdsByItem;
-}
-
-/**
- * Core resolver shared by the poll path ({@link applyEventAttributions}) and the
- * webhook path ({@link resolveEventAttributionsForItems}). Given rules grouped by
- * event kind, resolve or auto-create the target entity for each item, stamp the
- * canonical identifier metadata slots (for read-time JOINs), and merge declared
- * traits. Returns a per-item map (by array index) of resolved entity ids.
+ * Resolve or auto-create targets from rules grouped by event kind, stamp
+ * canonical identifier metadata for read-time JOINs, and merge declared traits.
  */
 async function resolveLinksByKind(
   params: {
@@ -1054,20 +995,11 @@ async function resolveLinksByKind(
     items: BatchItem[];
     rulesByKind: RuleMap;
   },
-  // A real transaction handle for ALL match/insert/update writes. Public entry
-  // points either join the caller's tx or open one before reaching this core.
+  // applyEventAttributions supplies a transaction for every entity write.
   sql: DbClient
-): Promise<AttributionResolution> {
+): Promise<Omit<AttributionResolution, 'relationshipsByKind'>> {
   const resolvedByItem = new Map<number, number[]>();
   const namedEntityIdsByItem = new Map<number, Map<string, number>>();
-  scrubIdentityScopeProjections(params.items);
-  if (Object.keys(params.rulesByKind).length === 0 || params.items.length === 0) {
-    return {
-      entityIdsByItem: resolvedByItem,
-      namedEntityIdsByItem,
-      unresolvedNamedAttributionsByItem: new Map(),
-    };
-  }
 
   // entities.created_by is NOT NULL; resolve an org owner/admin once per batch
   // so auto-created entities attribute to a real member rather than a seed user.

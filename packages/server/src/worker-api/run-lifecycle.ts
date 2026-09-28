@@ -750,7 +750,10 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 					// it lost it for good.
 					const inserted = await insertEvent(
 						{
-							entityIds: entityIds,
+							entityIds: [...new Set([
+								...entityIds,
+								...(appliedAttributions.entityIdsByItem.get(itemIndex) ?? []),
+							])],
 							organizationId: run.organization_id,
 							originId: item.id,
 							title: item.title,

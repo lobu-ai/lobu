@@ -43,7 +43,7 @@ import type { ToolContext } from '../../../tools/registry';
 import { search } from '../../../tools/search';
 import {
   clearEntityLinkRulesCache,
-  resolveEventAttributionsForItems,
+  applyEventAttributions,
 } from '../../../utils/entity-link-upsert';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -285,13 +285,13 @@ describe('github repo visibility gate (e2e via search_memory content)', () => {
         { namespace: 'github_repo_full_name', eventPath: 'metadata.github_repo_full_name', primary: true },
       ],
     };
-    const resolved = await resolveEventAttributionsForItems({
+    const resolved = await applyEventAttributions({
       connectorKey: 'github',
       orgId: org.id,
       items: [{ origin_type: 'issue', metadata: { github_repo_full_name: 'acme/repo-a' } }],
       rules: { issue: [githubRepoLinkRule] },
     });
-    const ingestedRepoIds = resolved.get(0) ?? [];
+    const ingestedRepoIds = resolved.entityIdsByItem.get(0) ?? [];
     // The repo entity ingestion links to IS the one the graph gates on.
     expect(ingestedRepoIds).toContain(repoAId);
 

@@ -16,7 +16,6 @@ import {
   applyEventAttributions,
   clearEntityLinkRulesCache,
   loadAttributionRuleByType,
-  resolveEventAttributionsForItems,
   resolveSenderIdentity,
 } from '../entity-link-upsert';
 import { ensureMemberEntityType } from '../member-entity-type';
@@ -136,13 +135,13 @@ describe('applyEventAttributions', () => {
       },
     };
     await expect(
-      resolveEventAttributionsForItems({
+      applyEventAttributions({
         connectorKey: 'webhook:scope-projection-scrub',
         orgId: org.id,
         items: [webhookItem],
         rules: {},
       })
-    ).resolves.toEqual(new Map());
+    ).resolves.toMatchObject({ entityIdsByItem: new Map() });
     expect(webhookItem.metadata).toEqual({ visible: 'also-kept' });
   });
 
@@ -799,13 +798,13 @@ describe('applyEventAttributions', () => {
     // identity insert; the loser's freshly-inserted entity row gets zero
     // identities (ON CONFLICT) and must be discarded (no orphan), not used.
     await Promise.all([
-      resolveEventAttributionsForItems({
+      applyEventAttributions({
         connectorKey: 'whatsapp',
         orgId: org.id,
         items: [{ ...item, metadata: { ...item.metadata } }],
         rules: { msg: [rule] },
       }),
-      resolveEventAttributionsForItems({
+      applyEventAttributions({
         connectorKey: 'whatsapp',
         orgId: org.id,
         items: [{ ...item, metadata: { ...item.metadata } }],
@@ -897,13 +896,13 @@ describe('applyEventAttributions', () => {
     const second = { origin_type: 'msg', metadata: { phone: '14155553002' } };
     try {
       await Promise.all([
-        resolveEventAttributionsForItems({
+        applyEventAttributions({
           connectorKey: 'whatsapp',
           orgId: org.id,
           items: [first, second],
           rules: { msg: [rule] },
         }),
-        resolveEventAttributionsForItems({
+        applyEventAttributions({
           connectorKey: 'whatsapp',
           orgId: org.id,
           items: [second, first],
@@ -1172,7 +1171,7 @@ describe('applyEventAttributions', () => {
     ]);
   });
 
-  it('resolveEventAttributionsForItems writes through the passed transaction handle', async () => {
+  it('applyEventAttributions writes through the passed transaction handle', async () => {
     const { org } = await setupOrg('tx-threaded org');
     const sql = getTestDb();
 
@@ -1186,7 +1185,7 @@ describe('applyEventAttributions', () => {
     // through the passed handle, the entity must NOT survive the rollback.
     await sql
       .begin(async (tx) => {
-        await resolveEventAttributionsForItems(
+        await applyEventAttributions(
           {
             connectorKey: 'whatsapp',
             orgId: org.id,
@@ -1224,7 +1223,7 @@ describe('applyEventAttributions', () => {
     const missingConnectionId = 2_147_483_647;
 
     await expect(
-      resolveEventAttributionsForItems(
+      applyEventAttributions(
         {
           connectorKey: 'whatsapp',
           connectionId: missingConnectionId,

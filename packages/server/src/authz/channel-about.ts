@@ -18,7 +18,7 @@ import {
 	RELATIONSHIP_CLAIMS_METADATA_KEY,
 	retractRelationshipClaimExcept,
 } from "../utils/relationship-claims.js";
-import { resolveEventAttributionsForItems } from "../utils/entity-link-upsert.js";
+import { applyEventAttributions } from "../utils/entity-link-upsert.js";
 import { ensureResourceEntityType } from "./access-graph.js";
 import { EDGE_SOURCE_MANUAL } from "../utils/relationship-validation";
 import { aclSourceFor, channelReadIdentityFor } from "./sources.js";
@@ -135,7 +135,7 @@ export async function ensureChannelResourceEntity(opts: {
 	// a pooled query inside one starves the pool (#2818).
 	await ensureResourceEntityType(sql, opts.organizationId);
 
-	const resolved = await resolveEventAttributionsForItems(
+	const resolved = await applyEventAttributions(
 		{
 			connectorKey: opts.connectorKey,
 			orgId: opts.organizationId,
@@ -168,7 +168,7 @@ export async function ensureChannelResourceEntity(opts: {
 		},
 		sql,
 	);
-	const ids = resolved.get(0);
+	const ids = resolved.entityIdsByItem.get(0);
 	return ids?.[0] ?? null;
 }
 

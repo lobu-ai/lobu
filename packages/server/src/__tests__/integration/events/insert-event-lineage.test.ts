@@ -6,12 +6,13 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getDb } from '../../../db/client';
+import { getDb, parsePgNumberArray } from '../../../db/client';
 import { supersedeActionEvent } from '../../../tools/admin/approval-events';
 import { insertEvent } from '../../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   createTestConnection,
+  createTestEntity,
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
@@ -319,6 +320,44 @@ describe('insertEvent lineage on supersede', () => {
     const resync = await insertEvent(resyncParams, { onConflictUpdate: true });
     expect(resync.change).toBe('unchanged');
     expect(Number(resync.id)).toBe(Number(superseded.id));
+  });
+
+  it('supersedes changed entity attribution and deduplicates reordered replay', async () => {
+    const org = await createTestOrganization();
+    const connection = await createTestConnection({ organization_id: org.id, connector_key: 'reddit' });
+    const first = await createTestEntity({ organization_id: org.id, name: 'First' });
+    const second = await createTestEntity({ organization_id: org.id, name: 'Second' });
+    const base = {
+      organizationId: org.id,
+      connectionId: Number(connection.id),
+      originId: 'attribution-resync',
+      semanticType: 'observation',
+      title: 'Unchanged source record',
+    };
+    const upsert = (entityIds: number[]) => insertEvent({ ...base, entityIds }, { onConflictUpdate: true });
+    const prior = await upsert([]);
+    const next = await upsert([first.id, second.id]);
+    expect(next.change).toBe('superseded');
+    expect(parsePgNumberArray(next.entity_ids)).toEqual([first.id, second.id]);
+    const replay = await upsert([second.id, first.id, first.id]);
+    expect(replay.change).toBe('unchanged');
+    expect(replay.id).toBe(next.id);
+    const removed = await upsert([second.id]);
+    expect(removed.change).toBe('superseded');
+    const cleared = await upsert([]);
+    expect(cleared.change).toBe('superseded');
+    expect(parsePgNumberArray(cleared.entity_ids)).toEqual([]);
+    const emptyReplay = await upsert([]);
+    expect(emptyReplay.change).toBe('unchanged');
+    expect(emptyReplay.id).toBe(cleared.id);
+    const rows = await getDb()`
+      SELECT id, entity_ids, supersedes_event_id FROM events
+      WHERE organization_id = ${org.id} AND origin_id = ${base.originId} ORDER BY id
+    `;
+    expect(rows.map((row) => parsePgNumberArray(row.entity_ids))).toEqual([
+      [], [first.id, second.id], [second.id], [],
+    ]);
+    expect(rows.map((row) => row.supersedes_event_id)).toEqual([null, prior.id, next.id, removed.id]);
   });
 
   it('fails closed when the predecessor is missing', async () => {

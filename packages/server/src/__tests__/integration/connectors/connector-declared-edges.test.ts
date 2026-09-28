@@ -6,7 +6,9 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { parsePgNumberArray } from '../../../db/client';
 import { clearEntityLinkRulesCache } from '../../../utils/entity-link-upsert';
+import { entityLinkMatchSql } from '../../../utils/content-search/entity-link';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { post } from '../../setup/test-helpers';
 import {
@@ -164,6 +166,16 @@ describe('connector-declared relationships', () => {
         AND rt.slug = 'invoice_customer'
     `;
     expect(edges).toHaveLength(1);
+    const recalledInvoiceEvents = await sql.unsafe(
+      `SELECT e.id, e.entity_ids FROM events e
+       WHERE e.organization_id = $1 AND e.origin_type = 'invoice'
+         AND ${entityLinkMatchSql('$2', 'e')}`,
+      [workspace.org.id, manualInvoice.entity.id],
+    );
+    expect(recalledInvoiceEvents).toHaveLength(1);
+    expect(parsePgNumberArray(recalledInvoiceEvents[0].entity_ids).sort((a, b) => a - b)).toEqual(
+      [manualInvoice.entity.id, manualCustomer.entity.id].sort((a, b) => a - b)
+    );
     expect(edges[0]).toMatchObject({
       from_name: 'INV-1001',
       to_name: 'Acme Ltd',

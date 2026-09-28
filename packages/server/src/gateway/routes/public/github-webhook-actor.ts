@@ -12,7 +12,7 @@ import {
 import { type DbClient, getDb } from "../../../db/client.js";
 import {
 	loadAttributionRuleByType,
-	resolveEventAttributionsForItems,
+	applyEventAttributions,
 } from "../../../utils/entity-link-upsert.js";
 
 interface GithubActor {
@@ -145,7 +145,7 @@ export async function resolveGithubWebhookActor(params: {
 		},
 	};
 
-	const resolved = await resolveEventAttributionsForItems(
+	const resolved = await applyEventAttributions(
 		{
 			connectorKey: "github",
 			connectionId: params.connectionId,
@@ -156,8 +156,8 @@ export async function resolveGithubWebhookActor(params: {
 		sql,
 	);
 
-	const entityIds = resolved.get(0) ?? [];
-	// resolveEventAttributionsForItems stamped the canonical namespace slots onto
+	const entityIds = resolved.entityIdsByItem.get(0) ?? [];
+	// applyEventAttributions stamped the canonical namespace slots onto
 	// item.metadata; forward only those onto the landed row.
 	const metadata: Record<string, string> = {};
 	for (const ns of [GITHUB_IDENTITY.LOGIN, GITHUB_IDENTITY.USER_ID]) {
