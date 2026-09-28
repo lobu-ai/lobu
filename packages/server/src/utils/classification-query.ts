@@ -266,6 +266,7 @@ async function fetchTargetContent(
        WHERE cf.slug IN (${classifierPlaceholders})
          AND cf.status = 'active'
          AND cf.automation_id IS NULL
+         AND cf.engine = 'embedding'
          AND cf.organization_id = $${enabledClassifiers.length + 1}`,
       [...enabledClassifiers, options.organizationId]
     );
@@ -367,6 +368,8 @@ async function fetchClassifierTemplates(
      WHERE cf.slug IN (${classifierPlaceholders})
        AND cf.status = 'active'
        AND cf.automation_id IS NULL
+       -- Service classifiers have no label vectors; \`apply\` runs them through the service.
+       AND cf.engine = 'embedding'
        AND cf.organization_id = $${enabledClassifiers.length + 1}`,
     [...enabledClassifiers, organizationId]
   );

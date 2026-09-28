@@ -13,7 +13,7 @@
  * - classify: Update content classification manually (single or batch)
  *
  * Bulk classification:
- * - apply: Run a classifier's embedding match over given content ids
+ * - apply: Run a classifier's engine (embedding match or classification service) over given content ids
  */
 
 import {
@@ -32,6 +32,7 @@ import type { DbClient } from '../../db/client';
 import { getDb, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
 import { executeClassificationQuery } from '../../utils/classification-query';
+import { classifyViaService } from '../../utils/classifier-service';
 import {
   generateEmbeddings as generateEmbeddingsViaService,
   resolveEmbeddingModel,
@@ -233,7 +234,7 @@ const manageClassifiersTool = defineActionTool('manage_classifiers', {
   ),
   delete: action(DeleteClassifierAction, handleDelete),
   classify: action(ClassifyContentAction, handleClassify),
-  apply: action(ApplyClassifierAction, handleApply),
+  apply: action(ApplyClassifierAction, (args, ctx, env) => handleApply(args, ctx, env)),
 });
 
 export const manageClassifiers = manageClassifiersTool.run;
@@ -316,24 +317,35 @@ async function handleCreate(
   // preserve the pre-existing user attribution when both are set. An Automation
   // sets neither, so it lands on 'system'.
   const createdBy = args.created_by ?? ctx.userId ?? ctx.agentId ?? 'system';
+  const engine = args.engine ?? 'embedding';
+  if (engine === 'service' && Object.keys(args.attribute_values).length < 2) {
+    return {
+      success: false,
+      action: 'create',
+      message: 'A service classifier needs at least two attribute values to choose between.',
+    };
+  }
   // Config lives on the single classify_facet row now (no version table) — hydrate embeddings first,
-  // then one insert carrying identity + config.
-  const { attributeValues: withEmbeddings, generatedCount } = await hydrateAttributeEmbeddings(
-    args.attribute_values,
-    env,
-    { embeddingModel: args.embedding_model }
-  );
+  // then one insert carrying identity + config. A service classifier never reads label vectors, so
+  // it skips the embeddings service entirely.
+  const { attributeValues: withEmbeddings, generatedCount } =
+    engine === 'service'
+      ? { attributeValues: args.attribute_values, generatedCount: 0 }
+      : await hydrateAttributeEmbeddings(args.attribute_values, env, {
+          embeddingModel: args.embedding_model,
+        });
 
   const classifierResult = await sql`
     INSERT INTO classify_facet (
       organization_id, slug, name, description, attribute_key, status, created_by,
-      entity_id, entity_ids, automation_id, attribute_values, min_similarity, fallback_value
+      entity_id, entity_ids, automation_id, attribute_values, min_similarity, fallback_value, engine
     ) VALUES (
       ${ctx.organizationId},
       ${args.slug}, ${args.name}, ${args.description || null}, ${args.attribute_key},
       'active', ${createdBy}, ${entityId},
       CASE WHEN ${entityId}::bigint IS NULL THEN ARRAY[]::bigint[] ELSE ARRAY[${entityId}]::bigint[] END,
-      ${automationId}, ${sql.json(withEmbeddings)}, ${args.min_similarity ?? 0.7}, ${args.fallback_value ?? null}
+      ${automationId}, ${sql.json(withEmbeddings)}, ${args.min_similarity ?? 0.7}, ${args.fallback_value ?? null},
+      ${engine}
     )
     RETURNING id, slug, name, attribute_key, entity_id, entity_ids, automation_id as automation_id
   `;
@@ -387,7 +399,7 @@ async function handleList(
     `SELECT
       fc.id, fc.slug, fc.name, fc.description, fc.attribute_key, fc.entity_ids,
       et.slug AS entity_type, fc.status, fc.created_at, fc.updated_at,
-      fc.min_similarity, fc.fallback_value, fc.attribute_values,
+      fc.min_similarity, fc.fallback_value, fc.attribute_values, fc.engine,
       fc.automation_id as automation_id,
       w.name as automation_name,
       CASE
@@ -428,7 +440,7 @@ async function handleGenerateEmbeddings(
   const sql = getDb();
 
   const facet = await sql`
-    SELECT cf.attribute_values
+    SELECT cf.attribute_values, cf.engine
     FROM classify_facet cf
     WHERE cf.id = ${args.classifier_id}
       AND cf.status = 'active'
@@ -443,6 +455,13 @@ async function handleGenerateEmbeddings(
   }
 
   const current = facet[0];
+  if (current.engine === 'service') {
+    return {
+      success: false,
+      action: 'generate_embeddings',
+      message: `Classifier ${args.classifier_id} uses the classification service and has no label embeddings.`,
+    };
+  }
   const attributeValues = current.attribute_values as Record<string, any>;
   const { attributeValues: updatedValues, generatedCount } = await hydrateAttributeEmbeddings(
     attributeValues,
@@ -638,14 +657,236 @@ async function handleClassify(
  * Why an id the caller asked for produced no classification. These are the
  * engine's own target-selection conjuncts, in the order it applies them.
  */
-type SkipReason = 'not_in_organization' | 'superseded' | 'not_embedded' | 'below_threshold';
+type SkipReason =
+  | 'not_in_organization'
+  | 'superseded'
+  | 'not_embedded'
+  | 'no_text'
+  | 'below_threshold';
 
 const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   not_in_organization: 'not in this organization',
   superseded: 'superseded',
   not_embedded: 'not embedded',
+  no_text: 'no text',
   below_threshold: 'below min_similarity',
 };
+
+/** Each engine's target-selection conjuncts, in the order it applies them. */
+const EMBEDDING_SKIP_REASONS: SkipReason[] = [
+  'not_in_organization',
+  'superseded',
+  'not_embedded',
+  'below_threshold',
+];
+const SERVICE_SKIP_REASONS: SkipReason[] = [
+  'not_in_organization',
+  'superseded',
+  'no_text',
+  'below_threshold',
+];
+
+/**
+ * Longest text sent per event. classifier.dev bills inputs above this as paid
+ * long-context work, and it bounds the payload for small local models too.
+ */
+const SERVICE_MAX_INPUT_CHARS = 32_000;
+
+interface ApplyClassifier {
+  classifier_id: number;
+  engine: 'embedding' | 'service';
+  description: string | null;
+  attribute_values: unknown;
+  min_similarity: string | number | null;
+  fallback_value: string | null;
+}
+
+function applyResult(
+  slug: string,
+  requested: number,
+  classified: number,
+  skipped: Array<{ id: number; reason: SkipReason }>,
+  reasons: SkipReason[]
+): ManageClassifiersResult {
+  const counts = Object.fromEntries(reasons.map((reason) => [reason, 0])) as Partial<
+    Record<SkipReason, number>
+  >;
+  for (const s of skipped) counts[s.reason] = (counts[s.reason] ?? 0) + 1;
+
+  const detail = (Object.entries(counts) as Array<[SkipReason, number]>)
+    .filter(([, n]) => n > 0)
+    .map(([reason, n]) => `${n} ${SKIP_REASON_TEXT[reason]}`);
+
+  return {
+    success: true,
+    action: 'apply',
+    message:
+      `Classified ${classified}/${requested} with "${slug}"` +
+      (detail.length > 0 ? `; ${detail.join('; ')}` : ''),
+    data: {
+      requested,
+      classified,
+      skipped: counts,
+      // Bounded sample: enough to go look at the actual events behind a
+      // disappointing run, without returning thousands of ids into the agent's
+      // context. Truncation is visible from `skipped` vs this length.
+      sample_skipped: skipped.slice(0, 20),
+    },
+  };
+}
+
+/**
+ * The rubric sent with every service request: the classifier's description,
+ * then each label with its description and examples.
+ */
+function buildServiceInstructions(
+  description: string | null,
+  attributeValues: Record<string, unknown>
+): string {
+  const lines: string[] = [];
+  if (description?.trim()) lines.push(description.trim(), '');
+  lines.push('Labels:');
+  for (const [label, entry] of Object.entries(attributeValues)) {
+    const config = (entry && typeof entry === 'object' ? entry : {}) as {
+      description?: unknown;
+      examples?: unknown;
+    };
+    const text = typeof config.description === 'string' ? config.description.trim() : '';
+    lines.push(text ? `- ${label}: ${text}` : `- ${label}`);
+    if (Array.isArray(config.examples)) {
+      const examples = config.examples.filter(
+        (example): example is string => typeof example === 'string' && example.trim() !== ''
+      );
+      if (examples.length > 0) {
+        lines.push(`  Examples: ${examples.map((example) => JSON.stringify(example)).join('; ')}`);
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+function parseAttributeValues(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * Service engine: send each live event's text to the classification service
+ * and store its answer with the provider's own confidences.
+ *
+ * All-or-nothing per call: a service error rejects before anything is written,
+ * so a failed apply never leaves half the ids relabelled.
+ */
+async function runServiceApply(
+  args: Static<typeof ApplyClassifierAction>,
+  ctx: ToolContext,
+  env: Env,
+  classifier: ApplyClassifier,
+  requestedIds: number[]
+): Promise<ManageClassifiersResult> {
+  const sql = getDb();
+  const attributeValues = parseAttributeValues(classifier.attribute_values);
+  const labels = Object.keys(attributeValues);
+  const threshold = Number(classifier.min_similarity ?? 0.7);
+
+  const inOrg = (await sql`
+    SELECT e.id,
+           (e.superseded_by IS NULL) AS is_live,
+           concat_ws(E'\\n\\n', NULLIF(btrim(e.title), ''), NULLIF(btrim(e.payload_text), '')) AS text
+    FROM events e
+    WHERE e.organization_id = ${ctx.organizationId}
+      AND e.id = ANY(${pgBigintArray(requestedIds)}::bigint[])
+  `) as unknown as Array<{ id: number; is_live: boolean; text: string }>;
+  const byId = new Map(inOrg.map((r) => [Number(r.id), { ...r, text: r.text.trim() }]));
+  // Request order, not row order: the service answers positionally.
+  const targets = requestedIds.flatMap((id) => {
+    const row = byId.get(id);
+    return row?.is_live && row.text !== ''
+      ? [{ id, text: row.text.slice(0, SERVICE_MAX_INPUT_CHARS) }]
+      : [];
+  });
+
+  const predictions =
+    targets.length > 0
+      ? await classifyViaService(
+          targets.map((t) => t.text),
+          labels,
+          buildServiceInstructions(classifier.description, attributeValues),
+          env
+        )
+      : [];
+
+  const rows = targets.flatMap((target, index) => {
+    const prediction = predictions[index];
+    const accepted = prediction.confidence !== null && prediction.confidence >= threshold;
+    const value = accepted ? prediction.label : classifier.fallback_value;
+    if (!value) return [];
+    const confidences =
+      prediction.scores ??
+      (prediction.confidence !== null ? { [prediction.label]: prediction.confidence } : {});
+    return [
+      {
+        event_id: target.id,
+        value,
+        confidences,
+        met_threshold: accepted,
+        best: prediction.label,
+        reasoning: JSON.stringify({
+          engine: 'service',
+          model: prediction.model,
+          label: prediction.label,
+          confidence: prediction.confidence,
+        }),
+      },
+    ];
+  });
+
+  // Re-running re-labels every scored id — including one that now falls below
+  // the threshold — and never touches manual or other-source rows.
+  await sql.begin(async (tx) => {
+    await tx`
+      DELETE FROM event_classifications
+      WHERE classifier_id = ${classifier.classifier_id}
+        AND event_id = ANY(${pgBigintArray(targets.map((t) => t.id))}::bigint[])
+        AND source = 'service'
+        AND NOT is_manual
+        AND automation_id IS NULL
+    `;
+    if (rows.length > 0) {
+      await tx`
+        INSERT INTO event_classifications (
+          event_id, classifier_id, automation_id, run_id, "values", confidences, source,
+          is_manual, reasoning, met_threshold, threshold, best_match_attribute
+        )
+        SELECT r.event_id, ${classifier.classifier_id}, NULL, NULL, ARRAY[r.value], r.confidences,
+               'service', false, r.reasoning, r.met_threshold, ${threshold}, r.best
+        FROM jsonb_to_recordset(${sql.json(rows)}) AS r(
+          event_id bigint, value text, confidences jsonb, reasoning text,
+          met_threshold boolean, best text
+        )
+      `;
+    }
+  });
+
+  const classified = new Set(rows.map((r) => r.event_id));
+  const skipped: Array<{ id: number; reason: SkipReason }> = [];
+  for (const id of requestedIds) {
+    const row = byId.get(id);
+    if (!row) skipped.push({ id, reason: 'not_in_organization' });
+    else if (!row.is_live) skipped.push({ id, reason: 'superseded' });
+    else if (row.text === '') skipped.push({ id, reason: 'no_text' });
+    else if (!classified.has(id)) skipped.push({ id, reason: 'below_threshold' });
+  }
+  return applyResult(
+    args.classifier_slug,
+    requestedIds.length,
+    classified.size,
+    skipped,
+    SERVICE_SKIP_REASONS
+  );
+}
 
 /**
  * Run a classifier's embedding match over caller-supplied content ids.
@@ -661,7 +902,8 @@ const SKIP_REASON_TEXT: Record<SkipReason, string> = {
  */
 async function runApply(
   args: Static<typeof ApplyClassifierAction>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageClassifiersResult> {
   const sql = getDb();
 
@@ -678,13 +920,14 @@ async function runApply(
   // automation_id IS NULL). Diverging here would report an automation-owned classifier
   // as "found" and then blame its zero results on min_similarity.
   const classifierRows = (await sql`
-    SELECT cf.id AS classifier_id
+    SELECT cf.id AS classifier_id, cf.engine, cf.description, cf.attribute_values,
+           cf.min_similarity, cf.fallback_value
     FROM classify_facet cf
     WHERE cf.slug = ${args.classifier_slug}
       AND cf.status = 'active'
       AND cf.automation_id IS NULL
       AND cf.organization_id = ${ctx.organizationId}
-  `) as unknown as Array<{ classifier_id: number }>;
+  `) as unknown as ApplyClassifier[];
 
   if (classifierRows.length === 0) {
     return {
@@ -692,6 +935,9 @@ async function runApply(
       action: 'apply',
       message: `Classifier not found or inactive: ${args.classifier_slug}`,
     };
+  }
+  if (classifierRows[0].engine === 'service') {
+    return runServiceApply(args, ctx, env, classifierRows[0], requestedIds);
   }
 
   // Partition the request BEFORE classifying so each skip has a real reason
@@ -764,34 +1010,13 @@ async function runApply(
     else if (!classified.has(id)) skipped.push({ id, reason: 'below_threshold' });
   }
 
-  const counts: Record<SkipReason, number> = {
-    not_in_organization: 0,
-    superseded: 0,
-    not_embedded: 0,
-    below_threshold: 0,
-  };
-  for (const s of skipped) counts[s.reason]++;
-
-  const detail = (Object.entries(counts) as Array<[SkipReason, number]>)
-    .filter(([, n]) => n > 0)
-    .map(([reason, n]) => `${n} ${SKIP_REASON_TEXT[reason]}`);
-
-  return {
-    success: true,
-    action: 'apply',
-    message:
-      `Classified ${classifiedIds.length}/${requestedIds.length} with "${args.classifier_slug}"` +
-      (detail.length > 0 ? `; ${detail.join('; ')}` : ''),
-    data: {
-      requested: requestedIds.length,
-      classified: classifiedIds.length,
-      skipped: counts,
-      // Bounded sample: enough to go look at the actual events behind a
-      // disappointing run, without returning thousands of ids into the agent's
-      // context. Truncation is visible from `skipped` vs this length.
-      sample_skipped: skipped.slice(0, 20),
-    },
-  };
+  return applyResult(
+    args.classifier_slug,
+    requestedIds.length,
+    classifiedIds.length,
+    skipped,
+    EMBEDDING_SKIP_REASONS
+  );
 }
 
 /**
@@ -801,10 +1026,11 @@ async function runApply(
  */
 async function handleApply(
   args: Static<typeof ApplyClassifierAction>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageClassifiersResult> {
   try {
-    return await runApply(args, ctx);
+    return await runApply(args, ctx, env);
   } catch (error) {
     logger.error(
       { error, classifier_slug: args.classifier_slug, requested: args.content_ids.length },

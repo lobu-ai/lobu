@@ -51,7 +51,7 @@ interface NormalizedScoreFilters {
   /** Restrict to events this Automation WROTE (events.automation_id). */
   produced_by_automation_id?: number;
   classification_filters?: Array<{ classifier_slug: string; value: string }>;
-  classification_source?: 'user' | 'embedding' | 'llm';
+  classification_source?: 'user' | 'embedding' | 'llm' | 'service';
   semantic_type?: string | string[];
   interaction_status?: 'pending' | 'approved' | 'rejected' | 'completed' | 'failed';
   /**

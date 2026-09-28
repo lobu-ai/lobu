@@ -77,7 +77,7 @@ export async function resolveClassifierIds(
  * `tableAlias` is the alias of the outer event row (always `f` in both paths).
  */
 export function buildSourceOnlyExistsClause(
-  classificationSource: 'user' | 'embedding' | 'llm',
+  classificationSource: 'user' | 'embedding' | 'llm' | 'service',
   baseParamIndex: number,
   tableAlias = 'f'
 ): { clause: string; params: any[] } {
@@ -96,7 +96,7 @@ export function buildSourceOnlyExistsClause(
 export function buildClassificationExistsClauses(
   filtersBySlug: Map<string, string[]>,
   classifierIdsBySlug: Map<string, number[]>,
-  classificationSource: 'user' | 'embedding' | 'llm' | undefined,
+  classificationSource: 'user' | 'embedding' | 'llm' | 'service' | undefined,
   baseParamIndex: number
 ): { clauses: string[]; params: any[] } | null {
   const clauses: string[] = [];

@@ -107,7 +107,7 @@ export interface ContentSearchOptions {
   // Classification options (only JOINs when needed)
   include_classifications?: boolean; // Include classifications in results
   classification_filters?: ClassificationFilter[]; // Filter by classifications
-  classification_source?: 'user' | 'embedding' | 'llm'; // Filter by classification source
+  classification_source?: 'user' | 'embedding' | 'llm' | 'service'; // Filter by classification source
 
   // Sorting options
   sort_by?: 'date' | 'score'; // Sort by date or engagement score (default: date)

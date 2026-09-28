@@ -224,10 +224,15 @@ export const GetContentSchema = Type.Object({
   ),
   classification_source: Type.Optional(
     Type.Union(
-      [Type.Literal("user"), Type.Literal("embedding"), Type.Literal("llm")],
+      [
+        Type.Literal("user"),
+        Type.Literal("embedding"),
+        Type.Literal("llm"),
+        Type.Literal("service"),
+      ],
       {
         description:
-          "Filter content by classification source: user (manual), embedding (system), or llm (AI-generated)",
+          "Filter content by classification source: user (manual), embedding (system), llm (AI-generated), or service (classification service)",
       }
     )
   ),

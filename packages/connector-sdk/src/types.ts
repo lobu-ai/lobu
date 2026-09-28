@@ -53,6 +53,11 @@ export interface Env {
   EMBEDDINGS_DIMENSIONS?: string; // Embeddings vector dimensions
   EMBEDDINGS_TIMEOUT_MS?: string; // Optional timeout for embeddings requests
 
+  // Classifier service (engine: 'service' classifiers)
+  CLASSIFIER_SERVICE_URL?: string; // Base URL of a POST /v1/classify server (classifier.dev, local model, …)
+  CLASSIFIER_SERVICE_TOKEN?: string; // Optional bearer token for the classifier service
+  CLASSIFIER_SERVICE_TIMEOUT_MS?: string; // Optional timeout for classifier service requests
+
   // Better-Auth Configuration
   BETTER_AUTH_SECRET?: string; // Session signing secret
   GITHUB_CLIENT_ID?: string; // GitHub OAuth client ID

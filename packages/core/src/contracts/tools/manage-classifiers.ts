@@ -65,9 +65,16 @@ export const CreateClassifierAction = Type.Object({
         "[create] Map of attribute values to descriptions, examples, and optional embeddings.",
     }
   ),
+  engine: Type.Optional(
+    Type.Union([Type.Literal("embedding"), Type.Literal("service")], {
+      description:
+        '[create] How `apply` labels content. "embedding" (default): cosine match between label and event vectors. "service": send the event text, label keys, and label descriptions/examples to the classification service at CLASSIFIER_SERVICE_URL (any POST /v1/classify server — classifier.dev, a local model, …). Service classifiers need no embeddings.',
+    })
+  ),
   min_similarity: Type.Optional(
     Type.Number({
-      description: "[create] Minimum similarity threshold (default: 0.7)",
+      description:
+        '[create] Minimum score to accept a label (default: 0.7). Cosine similarity for engine "embedding", provider confidence for engine "service".',
     })
   ),
   fallback_value: Type.Optional(
@@ -167,14 +174,14 @@ export const ClassifyContentAction = Type.Object({
 export const ApplyClassifierAction = Type.Object({
   action: Type.Literal("apply", {
     description:
-      "Run a classifier over specific content ids (embedding match, no LLM). Re-running re-labels: it replaces prior embedding results and never touches manual/LLM ones. Use after editing a classifier — run generate_embeddings first.",
+      "Run a classifier over specific content ids with its engine (embedding match, or the classification service). Re-running re-labels: it replaces the engine's prior results and never touches manual/LLM ones. After editing an embedding classifier, run generate_embeddings first.",
   }),
   classifier_slug: ClassifierSlug,
   content_ids: Type.Array(Type.Number(), {
     minItems: 1,
     maxItems: 2000,
     description:
-      "[apply] Content ids to classify. Get them with a read-only SQL query first, then pass them here. Ids outside your organization, or without an embedding, are skipped and reported — never silently dropped.",
+      "[apply] Content ids to classify. Get them with a read-only SQL query first, then pass them here. Ids outside your organization, without an embedding (embedding engine), or without text (service engine) are skipped and reported — never silently dropped.",
   }),
   embedding_model: Type.Optional(EmbeddingModel),
 });

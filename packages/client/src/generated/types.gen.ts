@@ -6161,9 +6161,9 @@ export type ReadKnowledgeData = {
      */
     include_superseded?: boolean;
     /**
-     * Filter content by classification source: user (manual), embedding (system), or llm (AI-generated)
+     * Filter content by classification source: user (manual), embedding (system), llm (AI-generated), or service (classification service)
      */
-    classification_source?: "user" | "embedding" | "llm";
+    classification_source?: "user" | "embedding" | "llm" | "service";
     /**
      * Filter to specific content IDs. This is the full-fidelity read: list and Automation reads return a bounded payload_text head (payload_truncated: true, with the full character count in content_length) and drop oversized attachments (attachments_truncated: true), so re-read those ids here to get the complete payload. With automation_id, these exact durable rows are added to the Automation read and signed into its window token in addition to authored sources; this is how workspace-sourced event activations pass bounded event pointers without copying payloads.
      */
@@ -6346,7 +6346,11 @@ export type ManageClassifiersData = {
               };
         };
         /**
-         * [create] Minimum similarity threshold (default: 0.7)
+         * [create] How `apply` labels content. "embedding" (default): cosine match between label and event vectors. "service": send the event text, label keys, and label descriptions/examples to the classification service at CLASSIFIER_SERVICE_URL (any POST /v1/classify server — classifier.dev, a local model, …). Service classifiers need no embeddings.
+         */
+        engine?: "embedding" | "service";
+        /**
+         * [create] Minimum score to accept a label (default: 0.7). Cosine similarity for engine "embedding", provider confidence for engine "service".
          */
         min_similarity?: number;
         /**
@@ -6449,7 +6453,7 @@ export type ManageClassifiersData = {
       }
     | {
         /**
-         * Run a classifier over specific content ids (embedding match, no LLM). Re-running re-labels: it replaces prior embedding results and never touches manual/LLM ones. Use after editing a classifier — run generate_embeddings first.
+         * Run a classifier over specific content ids with its engine (embedding match, or the classification service). Re-running re-labels: it replaces the engine's prior results and never touches manual/LLM ones. After editing an embedding classifier, run generate_embeddings first.
          */
         action: "apply";
         /**
@@ -6457,7 +6461,7 @@ export type ManageClassifiersData = {
          */
         classifier_slug: string;
         /**
-         * [apply] Content ids to classify. Get them with a read-only SQL query first, then pass them here. Ids outside your organization, or without an embedding, are skipped and reported — never silently dropped.
+         * [apply] Content ids to classify. Get them with a read-only SQL query first, then pass them here. Ids outside your organization, without an embedding (embedding engine), or without text (service engine) are skipped and reported — never silently dropped.
          */
         content_ids: Array<number>;
         /**
