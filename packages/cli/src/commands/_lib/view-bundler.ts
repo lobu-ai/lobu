@@ -233,17 +233,25 @@ export function assertBundlePortable(
   compiledCode: string,
   entry: string
 ): void {
+  // Decode percent escapes individually: a JavaScript bundle can also contain
+  // literal percent signs, so decoding the whole bundle as a URI would throw.
+  const decodedCode = compiledCode.replace(/%([0-9a-f]{2})/gi, (_, hex) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
   const suspects: string[] = [entry, dirname(entry)];
   const home = process.env.HOME ?? process.env.USERPROFILE;
   if (home) suspects.push(home);
   for (const suspect of suspects) {
-    if (suspect && compiledCode.includes(suspect)) {
+    if (
+      suspect &&
+      (compiledCode.includes(suspect) || decodedCode.includes(suspect))
+    ) {
       throw new Error(
         `view bundle embeds the local path ${JSON.stringify(suspect)} — bundles must be portable`
       );
     }
   }
-  const encoded = compiledCode.match(/file:\/\/[^"'\s]*/g) ?? [];
+  const encoded = decodedCode.match(/file:\/\/[^"'\s]*/gi) ?? [];
   for (const url of encoded) {
     // A browser bundle has no business with file URLs: any of them embeds a
     // build-machine path (or its encoding), so reject the bundle outright

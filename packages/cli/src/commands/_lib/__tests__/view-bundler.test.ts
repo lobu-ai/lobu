@@ -126,6 +126,35 @@ export default function BoardView() { return Board({}); }
     expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
   });
 
+  test.each([
+    "file%3A%2F%2F%2FUsers%2Fforeign-builder%2Fproject%2Fview.tsx",
+    "FiLe:%2f%2f%2fhome%2fforeign-builder%2fproject%2fview.tsx",
+  ])("rejects a generated bundle containing %s", async (path) => {
+    const entry = mkView({
+      "views/deal/pipeline.tsx": `import { defineView } from "@lobu/views";
+export const view = defineView({ key: "pipeline", attach: [] });
+export default function Pipeline() { return ${JSON.stringify(path)}; }
+`,
+    });
+    await expect(bundleFixture(entry)).rejects.toThrow("must be portable");
+  });
+
+  test("rejects an encoded checkout path in the generated bundle", async () => {
+    const entry = mkView({ "views/deal/pipeline.tsx": PIPELINE_SOURCE });
+    const encodedPath = encodeURIComponent(entry).replace(
+      /%[0-9A-F]{2}/g,
+      (s) => s.toLowerCase()
+    );
+    writeFileSync(
+      entry,
+      `import { defineView } from "@lobu/views";
+export const view = defineView({ key: "pipeline", attach: [] });
+export default function Pipeline() { return ${JSON.stringify(encodedPath)}; }
+`
+    );
+    await expect(bundleFixture(entry)).rejects.toThrow("must be portable");
+  });
+
   test("a module without a view export fails loud", async () => {
     const entry = mkView(
       {
@@ -180,6 +209,24 @@ describe("assertBundlePortable", () => {
       )
     ).toThrow("must be portable");
     expect(() => assertBundlePortable("var x = 1;", entry)).not.toThrow();
+  });
+
+  test("allows ordinary URL encoding and literal percent signs", () => {
+    expect(() =>
+      assertBundlePortable(
+        'var label = "100% complete"; var url = "https://example.test/search?q=hello%20world";',
+        "/Users/synthetic-builder/project/view.tsx"
+      )
+    ).not.toThrow();
+  });
+
+  test.each([
+    "/tmp/synthetic%20builder/project/view.tsx",
+    "/tmp/synthetic%2Fbuilder/project/view.tsx",
+  ])("rejects literal percent escapes in checkout paths: %s", (entry) => {
+    expect(() =>
+      assertBundlePortable(`var path = ${JSON.stringify(entry)};`, entry)
+    ).toThrow("must be portable");
   });
 });
 
