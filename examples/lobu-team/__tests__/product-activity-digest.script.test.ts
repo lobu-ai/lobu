@@ -165,6 +165,55 @@ describe("Lobu Team product activity digest script", () => {
     );
   });
 
+  it("notifies on failed SDK calls even without log errors or presence rows", async () => {
+    const send = mock();
+    await productActivityDigest(
+      context,
+      {
+        query: mock()
+          .mockResolvedValue(healthyFeeds)
+          .mockResolvedValueOnce([
+            {
+              connection_slug: "lobu-product-activity-db",
+              title: "Failed tool call",
+              payload_text: "Ada · ada@example.com · run_sdk · TimeoutError",
+            },
+          ]),
+        notifications: { send },
+        log: mock(),
+      } as unknown as ReactionClient,
+      params
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]?.[0]?.body).toContain("1 failed tool calls");
+    expect(JSON.stringify(send.mock.calls[0]?.[0]?.card)).toContain(
+      "TimeoutError"
+    );
+  });
+
+  it("counts every failure but caps Slack details at the latest ten", () => {
+    const rows = Array.from({ length: 100 }, (_, index) => ({
+      connection_slug: "lobu-product-activity-db",
+      title: "Failed tool call",
+      payload_text: `Ada · ada@example.com · synthetic-error-${index}`,
+    }));
+    const digest = collectProductActivityDigest(rows);
+    const card = JSON.stringify(
+      buildProductActivityCard(
+        digest,
+        {
+          start: context.window.window_start,
+          end: context.window.window_end,
+        },
+        healthyCoverage
+      )
+    );
+    expect(card).toContain('"label":"Failed tool calls","value":"100"');
+    expect(card).not.toContain("synthetic-error-89");
+    expect(card).toContain("synthetic-error-90");
+    expect(card).toContain("synthetic-error-99");
+  });
+
   it("sends one rich digest containing users, emails, clients, and log details", async () => {
     const rows = [
       {
@@ -321,6 +370,12 @@ describe("Lobu Team product activity digest script", () => {
         connection_slug: "lobu-product-activity-db",
         title: "MCP activity",
         payload_text: "lobu-cli · Operator · operator@example.test",
+      },
+      {
+        connection_slug: "lobu-product-activity-db",
+        title: "Failed tool call",
+        payload_text:
+          "Operator · operator@example.test · query_sdk · VALIDATION",
       },
     ];
     const send = mock();

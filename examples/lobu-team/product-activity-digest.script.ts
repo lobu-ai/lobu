@@ -121,6 +121,7 @@ export interface ProductActivityDigest {
   logins: string[];
   connections: string[];
   mcp_conversations: string[];
+  tool_failures: string[];
   errors: number;
   warnings: number;
   error_samples: string[];
@@ -137,6 +138,7 @@ export function collectProductActivityDigest(
     logins: [],
     connections: [],
     mcp_conversations: [],
+    tool_failures: [],
     errors: 0,
     warnings: 0,
     error_samples: [],
@@ -148,12 +150,12 @@ export function collectProductActivityDigest(
     if (row.connection_slug === PRODUCT_ACTIVITY_CONNECTION) {
       const text = row.payload_text?.trim();
       if (!text) continue;
-      // Presence rows carry the acting user's email; drop the excluded one
-      // (typically the operator's own) so "online users" reflects the rest of
-      // the team and a window where only that email was active reports nothing.
+      // Exclude the operator's presence and diagnostic failures from user activity.
       if (
         excludedEmail &&
-        (row.title === "User login" || row.title === "MCP activity") &&
+        (row.title === "User login" ||
+          row.title === "MCP activity" ||
+          row.title === "Failed tool call") &&
         belongsToEmail(text, excludedEmail)
       ) {
         continue;
@@ -162,6 +164,7 @@ export function collectProductActivityDigest(
       if (row.title === "User login") digest.logins.push(text);
       if (row.title === "New connection") digest.connections.push(text);
       if (row.title === "MCP activity") digest.mcp_conversations.push(text);
+      if (row.title === "Failed tool call") digest.tool_failures.push(text);
       continue;
     }
 
@@ -186,6 +189,7 @@ export function hasProductActivity(digest: ProductActivityDigest): boolean {
     digest.logins.length > 0 ||
     digest.connections.length > 0 ||
     digest.mcp_conversations.length > 0 ||
+    digest.tool_failures.length > 0 ||
     digest.errors > 0 ||
     digest.warnings > 0
   );
@@ -212,6 +216,7 @@ export function buildProductActivityCard(
           productCount(digest.mcp_conversations.length)
         ),
         field("Errors / warnings", logCounts(digest, coverage)),
+        field("Failed tool calls", productCount(digest.tool_failures.length)),
       ],
     },
   ];
@@ -227,6 +232,11 @@ export function buildProductActivityCard(
     digest.mcp_conversations.map(safe)
   );
   appendSection(children, "Recent errors", digest.error_samples.map(safe));
+  appendSection(
+    children,
+    "Latest failed tool calls",
+    digest.tool_failures.slice(-10).map(safe)
+  );
   appendSection(children, "Recent warnings", digest.warning_samples.map(safe));
   if (digest.logs_url) {
     children.push({
@@ -336,6 +346,7 @@ function summaryBody(
     `${uniqueUsers([...digest.logins, ...digest.mcp_conversations]).length} online users · ` +
     `${digest.connections.length} new connections · ` +
     `${digest.mcp_conversations.length} active MCP conversations · ` +
+    `${digest.tool_failures.length} failed tool calls · ` +
     (coverage.logs
       ? `${digest.errors} errors · ${digest.warnings} warnings`
       : `Errors / warnings: ${logCounts(digest, coverage)}`)

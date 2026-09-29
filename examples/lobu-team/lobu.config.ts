@@ -302,8 +302,9 @@ const productActivityDb = defineConnection({
         primary_key: "activity_id",
         cursor_column: "occurred_at",
         max_rows_per_sync: 5000,
-        // The connector adds keyset pagination. Keep each row human-readable so
-        // the digest does not depend on connector-specific payload_data fields.
+        // The durable keyset cursor bounds reads, including catch-up after an
+        // outage; a feed without a checkpoint starts from the oldest row. Keep
+        // rows readable without connector-specific payload fields.
         query: `SELECT *
           FROM (
             SELECT
@@ -323,7 +324,6 @@ const productActivityDb = defineConnection({
               ) AS payload_text
             FROM "user" u
             WHERE coalesce(u.principal_kind, 'human') = 'human'
-              AND u."createdAt" > now() - interval '24 hours'
 
             UNION ALL
 
@@ -345,7 +345,6 @@ const productActivityDb = defineConnection({
             FROM session s
             JOIN "user" u ON u.id = s."userId"
             WHERE coalesce(u.principal_kind, 'human') = 'human'
-              AND s."createdAt" > now() - interval '24 hours'
 
             UNION ALL
 
@@ -364,12 +363,11 @@ const productActivityDb = defineConnection({
             JOIN organization o ON o.id = c.organization_id
             LEFT JOIN "user" u ON u.id = c.created_by
             WHERE c.deleted_at IS NULL
-              AND c.created_at > now() - interval '24 hours'
 
             UNION ALL
 
             SELECT
-              concat_ws(':', 'mcp', m.organization_id, m.client_identity, m.conversation_id),
+              'mcp:' || jsonb_build_array(m.user_id, m.client_identity, m.conversation_id)::text,
               m.last_activity_at,
               'MCP activity'::text,
               concat_ws(
@@ -377,16 +375,37 @@ const productActivityDb = defineConnection({
                 coalesce(m.client_software_id, 'Unknown client'),
                 coalesce(nullif(u.name, ''), 'Unknown user'),
                 u.email,
-                o.name,
+                coalesce(o.name, 'Account activity'),
                 CASE WHEN m.last_action IS NOT NULL THEN 'last action: ' || m.last_action END,
-                m.call_count || ' total calls',
-                m.failed_count || ' failed'
+                m.call_count || ' total calls'
               )
             FROM mcp_client_conversations m
-            JOIN organization o ON o.id = m.organization_id
-            LEFT JOIN "user" u ON u.id = m.user_id
+            LEFT JOIN organization o ON o.id = m.organization_id
+            JOIN "user" u ON u.id = m.user_id
             WHERE m.call_count > 0
-              AND m.last_activity_at > now() - interval '24 hours'
+              AND coalesce(u.principal_kind, 'human') = 'human'
+
+            UNION ALL
+
+            SELECT
+              'tool-failure:' || e.origin_id,
+              e.created_at,
+              'Failed tool call'::text,
+              concat_ws(
+                ' · ',
+                coalesce(nullif(u.name, ''), 'Unknown user'),
+                u.email,
+                coalesce(o.name, 'Account activity'),
+                e.payload_data->>'tool_name',
+                coalesce(e.payload_data->'error'->>'code', e.payload_data->'error'->>'name', 'Unknown error')
+              )
+            FROM events e
+            JOIN "user" u ON u.id = e.created_by
+            LEFT JOIN organization o ON o.id = e.organization_id
+            WHERE e.semantic_type = 'audit'
+              AND e.origin_type = 'tool_invocation'
+              AND e.payload_data->>'success' = 'false'
+              AND coalesce(u.principal_kind, 'human') = 'human'
           ) activity`,
         mapping: {
           title: "title",
