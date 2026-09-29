@@ -102,6 +102,9 @@ describe('HTTP delivery using env profiles', () => {
     await f.call();
     expect(new Headers(transport.mock.calls[1][1].headers).get('authorization')).toBe(rotated);
     expect((await profiles.getAuthProfileById(f.org.id, f.profile.id))?.metadata?.http).toEqual(binding);
+    await expect(profiles.updateAuthProfile({
+      organizationId: f.org.id, slug: f.profile.slug, authData: { AUTHORIZATION: rotated, API_URL: 'https://api.example.com' },
+    })).rejects.toThrow('mapped to a header');
   });
 
   it('refuses different origins, userinfo and cross-organization use before transport', async () => {
@@ -151,6 +154,15 @@ describe('HTTP delivery using env profiles', () => {
     await expect(f.call()).rejects.toThrow(/^HTTP credential request failed$/);
     await profiles.updateAuthProfile({ organizationId: f.org.id, slug: f.profile.slug, authData: { AUTHORIZATION: `${secret}\r\ninvalid` } });
     await expect(f.call()).rejects.toThrow(/^Invalid HTTP credential header value$/);
+  });
+
+  it.each(['body', 'header', 'statusText'])('rejects a bound credential echoed in the upstream %s', async (location) => {
+    const f = await fixture();
+    transport.mockResolvedValueOnce(new Response(location === 'body' ? `echo: ${secret}` : 'ok', {
+      headers: location === 'header' ? { 'x-debug-auth': secret } : {},
+      statusText: location === 'statusText' ? secret : 'OK',
+    }));
+    await expect(f.call()).rejects.toThrow(/^HTTP response contained a bound credential$/);
   });
 
   it('uses the real egress guard to reject a private destination even when bound', async () => {

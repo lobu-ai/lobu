@@ -76,10 +76,17 @@ export async function fetchConnectionHttp(params: {
   const bytes = response.body === null
     ? Buffer.alloc(0)
     : await readResponseBytesWithLimit(response, CONNECTOR_HTTP_MAX_BYTES, 'HTTP response too large');
+  const responseHeaders = Object.fromEntries(response.headers);
+  const responseMetadata = [response.statusText, ...Object.values(responseHeaders)];
+  if (Object.values(binding.headers).some((field) =>
+    bytes.includes(credentials[field]) || responseMetadata.some((value) => value.includes(credentials[field]))
+  )) {
+    throw new Error('HTTP response contained a bound credential');
+  }
   return {
     status: response.status,
     statusText: response.statusText,
-    headers: Object.fromEntries(response.headers),
+    headers: responseHeaders,
     body: bytes.toString('base64'),
   };
 }

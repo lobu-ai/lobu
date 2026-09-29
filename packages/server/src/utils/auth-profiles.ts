@@ -33,6 +33,12 @@ export function validateHttpAuthBinding(value: unknown): HttpAuthBinding {
   return { origin: url.origin, headers };
 }
 
+function assertHttpBoundFields(binding: HttpAuthBinding, authData?: Record<string, unknown>): void {
+  if (Object.keys(authData ?? {}).some((key) => !Object.values(binding.headers).includes(key))) {
+    throw new ToolUserError('Every HTTP-bound credential must be mapped to a header; put public configuration on the connection');
+  }
+}
+
 export function readHttpAuthBinding(metadata?: Record<string, unknown>): HttpAuthBinding | null {
   // Malformed stored bindings must fail closed, never fall back to raw env delivery.
   return metadata && Object.hasOwn(metadata, 'http') ? validateHttpAuthBinding(metadata.http) : null;
@@ -354,9 +360,7 @@ export async function createAuthProfile(params: {
   if (http && params.profileKind !== 'env') {
     throw new ToolUserError('HTTP delivery requires an env auth profile');
   }
-  if (http && Object.keys(params.authData ?? {}).some((key) => !Object.values(http.headers).includes(key))) {
-    throw new ToolUserError('Every HTTP-bound credential must be mapped to a header; put public configuration on the connection');
-  }
+  if (http) assertHttpBoundFields(http, params.authData);
   const normalizedProvider = params.provider ? params.provider.toLowerCase() : null;
 
   // ensureUniqueAuthProfileSlug is a non-locking SELECT loop: two concurrent
@@ -546,6 +550,8 @@ export async function updateAuthProfile(params: {
     existing.profile_kind === 'env' &&
     params.authData !== undefined
   ) {
+    const http = readHttpAuthBinding(existing.metadata);
+    if (http) assertHttpBoundFields(http, params.authData);
     await persistAuthCredentials({
       organizationId: params.organizationId,
       authProfileId: existing.id,
