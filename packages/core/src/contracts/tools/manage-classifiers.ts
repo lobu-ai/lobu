@@ -122,7 +122,7 @@ export const ClassifyContentAction = Type.Object({
   source: Type.Optional(
     Type.Union([Type.Literal("llm"), Type.Literal("user")], {
       description:
-        '[classify] Classification source: "llm" (AI-generated, e.g. an Automation) or "user" (manual). Defaults to "user". Only "user" labels are manual, and they win over "llm" labels at read time.',
+        '[classify] Classification source: "llm" (AI-generated) or "user" (manual). Defaults to "user" for a person and "llm" for an Automation or agent, which cannot write "user". Only "user" labels are manual, and they win over "llm" labels at read time.',
     })
   ),
   reasoning: Type.Optional(

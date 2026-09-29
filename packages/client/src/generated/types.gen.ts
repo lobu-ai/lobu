@@ -6392,7 +6392,7 @@ export type ManageClassifiersData = {
           reasoning?: string;
         }>;
         /**
-         * [classify] Classification source: "llm" (AI-generated, e.g. an Automation) or "user" (manual). Defaults to "user". Only "user" labels are manual, and they win over "llm" labels at read time.
+         * [classify] Classification source: "llm" (AI-generated) or "user" (manual). Defaults to "user" for a person and "llm" for an Automation or agent, which cannot write "user". Only "user" labels are manual, and they win over "llm" labels at read time.
          */
         source?: "llm" | "user";
         /**

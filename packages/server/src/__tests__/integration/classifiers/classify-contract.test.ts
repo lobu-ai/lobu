@@ -4,6 +4,8 @@
  *
  * - `is_manual` is derived from `source` (only a `user` label is manual), so
  *   `source='llm'` has one meaning.
+ * - `source` follows the acting principal: an Automation or agent writes
+ *   `llm` and cannot claim `user`.
  * - a per-item `confidence` is stored as `confidences[value]`, defaulting to 1.
  * - `value: null` UNSETS the caller's label. It used to insert `'{}'`, which
  *   violates `event_classifications_values_not_empty`.
@@ -277,6 +279,87 @@ describe('manage_classifiers classify contract', () => {
     expect(sharedRows).toHaveLength(1);
     expect(sharedRows[0].automation_id).toBeNull();
     expect(parsePgTextArray(sharedRows[0].values)).toEqual(['negative']);
+  });
+  it('derives source from the acting principal: only a person writes user labels', async () => {
+    const { orgId, userId, ctx } = await seed();
+    const sql = getTestDb();
+    const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
+    const [automation] = (await sql`
+      INSERT INTO automations (organization_id, managed_agent_id, automation_group_id, name, created_by, status)
+      VALUES (${orgId}, ${agent.agentId}, 0, 'labeller', ${userId}, 'active')
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+    const [run] = (await sql`
+      INSERT INTO runs (organization_id, run_type, automation_id, status)
+      VALUES (${orgId}, 'automation', ${automation.id}, 'running')
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+    const byScript = await createTestEvent({ organization_id: orgId, content: 'script' });
+    const claimed = await createTestEvent({ organization_id: orgId, content: 'claimed' });
+    const byAgent = await createTestEvent({ organization_id: orgId, content: 'agent' });
+    const byPerson = await createTestEvent({ organization_id: orgId, content: 'person' });
+
+    const runScript = (body: string) =>
+      compileReactionScript(`export default async (ctx, client) => {\n${body}\n};`).then((compiled) =>
+        executeReaction({
+          compiledScript: compiled,
+          context: {
+            extracted_data: {},
+            entities: [],
+            window: {
+              id: Number(run.id),
+              run_id: Number(run.id),
+              automation_id: Number(automation.id),
+              window_start: new Date('2026-01-01').toISOString(),
+              window_end: new Date('2026-01-02').toISOString(),
+              granularity: 'day',
+              content_analyzed: 1,
+            },
+            automation: { id: Number(automation.id), slug: 'labeller', name: 'labeller', version: 1 },
+            organization_id: orgId,
+          } as never,
+          env: process.env as Record<string, string | undefined>,
+        })
+      );
+
+    // An Automation that omits source writes a model label, not a manual one.
+    const omitted = await runScript(
+      `  const r = await client.classifiers.classify({ classifier_slug: "sentiment", content_id: ${Number(byScript.id)}, value: "positive" });\n` +
+        '  if (!r.success) throw new Error(JSON.stringify(r));'
+    );
+    expect(omitted.error ?? null).toBeNull();
+    expect((await labels(Number(byScript.id))).map((r) => [r.source, r.is_manual])).toEqual([['llm', false]]);
+
+    // An Automation cannot pass itself off as a person; the refusal fails the script.
+    const spoofed = await runScript(
+      `  await client.classifiers.classify({ classifier_slug: "sentiment", source: "user", content_id: ${Number(claimed.id)}, value: "positive" });`
+    );
+    expect(spoofed.success).toBe(false);
+    expect(spoofed.error).toContain("Only a person can write source 'user' labels");
+    expect(await labels(Number(claimed.id))).toEqual([]);
+
+    // Neither can an agent turn.
+    const agentCtx = { ...ctx, agentId: agent.agentId } as ToolContext;
+    const agentResult = await manageClassifiers(
+      { action: 'classify', classifier_slug: 'sentiment', source: 'user', content_id: Number(byAgent.id), value: 'negative' } as never,
+      {} as never,
+      agentCtx
+    );
+    expect(agentResult.success).toBe(false);
+    await manageClassifiers(
+      { action: 'classify', classifier_slug: 'sentiment', content_id: Number(byAgent.id), value: 'negative' } as never,
+      {} as never,
+      agentCtx
+    );
+    expect((await labels(Number(byAgent.id))).map((r) => r.source)).toEqual(['llm']);
+
+    // A person still writes manual labels by default.
+    await manageClassifiers(
+      { action: 'classify', classifier_slug: 'sentiment', content_id: Number(byPerson.id), value: 'negative' } as never,
+      {} as never,
+      ctx
+    );
+    expect((await labels(Number(byPerson.id))).map((r) => [r.source, r.is_manual])).toEqual([['user', true]]);
   });
 });
 

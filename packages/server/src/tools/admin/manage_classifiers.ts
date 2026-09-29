@@ -13,6 +13,7 @@
  * - classify: Write or unset labels (single or batch)
  */
 
+import { classifyMutationPrincipal } from '../../authz/entity-policy';
 import {
   ClassifyContentAction,
   CreateClassifierAction,
@@ -286,7 +287,22 @@ async function handleClassify(
     }
 
     const classifier = classifierResult[0];
-    const source = args.source || 'user';
+    // `user` marks a human label that outranks model labels and serves as
+    // ground truth, so it follows the acting principal, never the caller's word.
+    const humanCaller =
+      classifyMutationPrincipal({
+        userId: ctx.userId,
+        agentId: ctx.agentId,
+        automationSource: ctx.actingAutomationId,
+      }) === 'user';
+    if (!humanCaller && args.source === 'user') {
+      return {
+        success: false,
+        action: 'classify',
+        message: "Only a person can write source 'user' labels; Automations and agents write 'llm'.",
+      };
+    }
+    const source = args.source ?? (humanCaller ? 'user' : 'llm');
 
     if (isSingleMode) {
       if (args.content_id === undefined)
