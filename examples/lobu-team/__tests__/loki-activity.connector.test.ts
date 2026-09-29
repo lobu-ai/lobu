@@ -1,11 +1,89 @@
 import { runSync } from "./sync-harness";
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import LokiActivityConnector, {
   queryLokiActivity,
   windowsToCollect,
 } from "../loki-activity.connector.ts";
 
 describe("Lobu Team Loki activity connector", () => {
+  it("keeps completed windows when a later query fails and resumes after them", async () => {
+    const initialCheckpoint = { window_end: "2026-08-13T11:40:00.000Z" };
+    const completedWindowEnd = "2026-08-13T12:00:00.000Z";
+    let checkpoint = initialCheckpoint;
+    const committedOrigins: string[] = [];
+    const requestedTimes: string[] = [];
+    let requests = 0;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      async (input) => {
+        requestedTimes.push(new URL(String(input)).searchParams.get("time")!);
+        if (++requests > 1) throw new Error("upstream unavailable");
+        return Response.json({
+          status: "success",
+          data: { resultType: "vector", result: [] },
+        });
+      }
+    );
+    const run = () =>
+      runSync(new LokiActivityConnector(), {
+        feedKey: "activity",
+        checkpoint,
+        config: {
+          LOKI_URL: "https://loki.example.test",
+          namespace: "synthetic",
+        },
+        commit: async (events, nextCheckpoint) => {
+          committedOrigins.push(...events.map((event) => event.origin_id));
+          checkpoint = nextCheckpoint as typeof checkpoint;
+        },
+      });
+
+    try {
+      await expect(run()).rejects.toThrow("upstream unavailable");
+      expect(committedOrigins).toEqual([completedWindowEnd]);
+      expect(checkpoint).toEqual({ window_end: completedWindowEnd });
+
+      requestedTimes.length = 0;
+      await expect(run()).rejects.toThrow("upstream unavailable");
+      expect(requestedTimes).toEqual([
+        String(new Date("2026-08-13T12:20:00.000Z").getTime() / 1000),
+      ]);
+      expect(committedOrigins).toEqual([completedWindowEnd]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("does not commit a window whose sample query fails", async () => {
+    const commit = mock(async () => undefined);
+    const fetchSpy = spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          status: "success",
+          data: {
+            resultType: "vector",
+            result: [{ metric: { level: "error" }, value: [0, "1"] }],
+          },
+        })
+      )
+      .mockRejectedValueOnce(new Error("sample query failed"));
+    try {
+      await expect(
+        runSync(new LokiActivityConnector(), {
+          feedKey: "activity",
+          checkpoint: null,
+          config: {
+            LOKI_URL: "https://loki.example.test",
+            namespace: "synthetic",
+          },
+          commit,
+        })
+      ).rejects.toThrow("sample query failed");
+      expect(commit).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("persists a successful empty window as coverage evidence", async () => {
     const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({

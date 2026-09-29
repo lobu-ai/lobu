@@ -252,7 +252,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     name: "Kubernetes logs",
     description:
       "Collect error and warning counts plus recent samples from Lobu production Loki in aligned 20-minute windows.",
-    version: "1.1.0",
+    version: "1.1.1",
     authSchema: {
       methods: [
         {
@@ -306,12 +306,11 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     if (!ctx.config.namespace?.trim()) throw new Error("namespace is required");
 
     const windows = windowsToCollect(ctx.checkpoint, new Date());
-    const events: EventEnvelope[] = [];
     for (const window of windows) {
       const activity = await queryLokiActivity(ctx.config, window);
       // Persist empty windows too: a durable zero distinguishes successful
       // collection from a missing or failed log feed.
-      events.push({
+      const event: EventEnvelope = {
         origin_id: window.end.toISOString(),
         origin_type: "log_activity",
         title: `${activity.errors} errors · ${activity.warnings} warnings`,
@@ -326,12 +325,10 @@ export default class LokiActivityConnector extends ConnectorRuntime<
           window_end: window.end.toISOString(),
           namespace: ctx.config.namespace,
         },
-      });
+      };
+      await ctx.commit([event], { window_end: window.end.toISOString() });
     }
 
-    const windowEnd =
-      windows.at(-1)?.end.toISOString() ?? ctx.checkpoint?.window_end;
-    await ctx.commit(events, windowEnd ? { window_end: windowEnd } : {});
     return { status: "complete" };
   }
 }
