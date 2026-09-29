@@ -326,6 +326,7 @@ async function handleCreateAuthProfile(
   args: Static<typeof CreateAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
+  // OAuth and browser-session creation below use separate early-return paths.
   if (args.http && args.profile_kind !== 'env') {
     return { error: 'HTTP delivery requires an env auth profile.' };
   }

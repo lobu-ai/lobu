@@ -16,6 +16,7 @@ async function seedRun(overrides: {
   claimant?: string;
   stale?: boolean;
   deleted?: boolean;
+  paused?: boolean;
   mismatchedOrg?: boolean;
 } = {}) {
   const sql = getTestDb();
@@ -28,6 +29,9 @@ async function seedRun(overrides: {
   });
   if (overrides.deleted) {
     await sql`UPDATE connections SET deleted_at = NOW() WHERE id = ${connection.id}`;
+  }
+  if (overrides.paused) {
+    await sql`UPDATE connections SET status = 'paused' WHERE id = ${connection.id}`;
   }
   const runOrg = overrides.mismatchedOrg ? (await seedOwnerContext()).org.id : org.id;
   const [run] = await sql`
@@ -108,6 +112,7 @@ describe('gateway HTTP worker route', () => {
     { runType: 'auth' },
     { runType: 'automation' },
     { deleted: true },
+    { paused: true },
     { mismatchedOrg: true },
   ])('refuses a run outside its live authorization: %j', async (overrides) => {
     const { runId } = await seedRun(overrides);

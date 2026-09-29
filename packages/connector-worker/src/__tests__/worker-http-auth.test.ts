@@ -60,6 +60,6 @@ describe('worker gateway HTTP authentication', () => {
       new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
     ]);
     expect({ exitCode, stderr, stdout: exitCode ? stdout : '' }).toEqual({ exitCode: 0, stderr: '', stdout: '' });
-    expect(stdout).toContain('tests 11');
+    expect(stdout).toContain('tests 10');
   }, 30_000);
 });

@@ -44,7 +44,7 @@ export async function fetchWorkerHttp(c: Context<{ Bindings: Env }>) {
       AND r.approval_status IN ('auto', 'approved')
       AND COALESCE(r.last_heartbeat_at, r.claimed_at)
         >= current_timestamp - make_interval(secs => ${intervals.runsReaperStaleAfterSeconds})
-      AND con.deleted_at IS NULL
+      AND con.deleted_at IS NULL AND con.status = 'active'
     LIMIT 1
   `;
   if (!run) return c.json({ error: 'Run is not an authorized live claim' }, 409);

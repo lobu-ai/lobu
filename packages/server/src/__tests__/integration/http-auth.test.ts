@@ -127,6 +127,33 @@ describe('HTTP delivery using env profiles', () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
+  it('tears down a paused connection webhook with gateway-held credentials', async () => {
+    const f = await fixture();
+    const code = vi.spyOn(await import('../../utils/ensure-connector-installed'), 'resolveConnectorCodeForKey')
+      .mockResolvedValue(`module.exports.default = class {
+        sync() {}
+        execute() {}
+        async unregisterWebhook(ctx) {
+          if (ctx.credentials || ctx.config.AUTHORIZATION) throw new Error('Credential reached connector');
+          await fetch('https://api.example.com/webhooks/' + ctx.externalId, { method: 'DELETE' });
+        }
+      };`);
+    try {
+      await getTestDb()`UPDATE connections SET status = 'paused',
+        config = '{"webhook_external_id":"synthetic-subscription","keep":"public"}'::jsonb
+        WHERE id = ${f.connection.id}`;
+      const { unregisterConnectorWebhook } = await import('../../connect/webhook-registration');
+      await unregisterConnectorWebhook({ organizationId: f.org.id, connectionId: f.connection.id, throwOnError: true });
+      expect(String(transport.mock.calls[0][0])).toBe('https://api.example.com/webhooks/synthetic-subscription');
+      expect(transport.mock.calls[0][1].method).toBe('DELETE');
+      expect(new Headers(transport.mock.calls[0][1].headers).get('authorization')).toBe(secret);
+      const [stored] = await getTestDb()`SELECT config FROM connections WHERE id = ${f.connection.id}`;
+      expect(stored.config).toEqual({ keep: 'public' });
+    } finally {
+      code.mockRestore();
+    }
+  });
+
   it('refuses redirects and oversized bodies', async () => {
     const f = await fixture();
     transport.mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: 'https://other.example.com' } }));
@@ -188,6 +215,13 @@ describe('HTTP delivery using env profiles', () => {
     await getTestDb()`UPDATE auth_profiles SET metadata = '{"http":null}'::jsonb WHERE id = ${f.profile.id}`;
     await expect(resolveExecutionAuth({ organizationId: f.org.id, connectionId: f.connection.id, authProfileId: f.profile.id, credentialDb: getTestDb() })).rejects.toThrow('binding');
     expect(transport).not.toHaveBeenCalled();
+  });
+
+  it('rejects HTTP binding before the separate browser-session creation path', async () => {
+    const f = await fixture();
+    expect(await manageAuthProfiles({
+      action: 'create_auth_profile', profile_kind: 'browser_session', display_name: 'Invalid HTTP session', http: binding,
+    }, {} as Env, f.ctx)).toEqual({ error: 'HTTP delivery requires an env auth profile.' });
   });
 
   it('worker auth completion cannot add, replace or remove the protected binding', async () => {

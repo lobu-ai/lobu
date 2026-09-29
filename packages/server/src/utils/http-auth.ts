@@ -20,10 +20,11 @@ export async function fetchConnectionHttp(params: {
 }): Promise<ConnectorHttpResponse> {
   if (!Value.Check(ConnectorHttpRequestSchema, params.request)) throw new Error('Invalid HTTP request');
   const sql = getDb();
+  // Callers authorize use; paused connections still need gateway webhook teardown.
   const [connection] = await sql`
     SELECT auth_profile_id FROM connections
     WHERE id = ${params.connectionId} AND organization_id = ${params.organizationId}
-      AND deleted_at IS NULL AND status = 'active'
+      AND deleted_at IS NULL
   `;
   const profile = await getAuthProfileById(params.organizationId, connection?.auth_profile_id ?? null);
   const binding = readHttpAuthBinding(profile?.metadata);

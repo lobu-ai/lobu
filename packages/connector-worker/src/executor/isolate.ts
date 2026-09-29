@@ -1255,9 +1255,6 @@ export class IsolateExecutor implements SyncExecutor {
         throw new RangeError(`fetch response body exceeded the ${limit}-byte cap`);
       }
       const responseHeaders = new Headers(response.headers);
-      if (response.status >= 300 && response.status <= 399 && response.status !== 304 && responseHeaders.has('location') && request.redirect !== 'manual') {
-        throw new TypeError('fetch failed: gateway-authenticated requests cannot follow redirects');
-      }
       return {
         status: response.status,
         statusText: response.statusText,

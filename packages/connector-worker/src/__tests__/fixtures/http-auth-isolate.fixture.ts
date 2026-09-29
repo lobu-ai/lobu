@@ -96,17 +96,6 @@ test('bound requests retain the host domain restriction and require HTTPS', asyn
   assert.equal(calls, 0);
 });
 
-test('bound requests never follow a gateway redirect', async () => {
-  let calls = 0;
-  await assert.rejects(run(`await fetch('https://service.example/read');`, {
-    onHttpFetch: async () => {
-      calls++;
-      return { ...reply(), status: 302, headers: { location: 'https://elsewhere.example/' } };
-    },
-  }), /cannot follow redirects/);
-  assert.equal(calls, 1);
-});
-
 test('a gateway 304 with Location remains a bodyless response', async () => {
   let calls = 0;
   const result = await run(`
