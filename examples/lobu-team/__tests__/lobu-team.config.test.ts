@@ -88,7 +88,11 @@ describe("Lobu Team configuration", () => {
       config.connections?.find(
         (connection) => connection.slug === "lobu-production-logs"
       )
-    ).toMatchObject({ connector: "loki.activity" });
+    ).toMatchObject({
+      connector: "loki.activity",
+      authProfile: "lobu-production-loki-http",
+      config: { LOKI_URL: "https://loki.lobu.ai" },
+    });
 
     const digest = config.automations?.find(
       (automation) => automation.slug === "product-activity-digest"

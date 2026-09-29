@@ -398,22 +398,14 @@ const productActivityDb = defineConnection({
   ],
 });
 
-const productionLogsAuth = defineAuthProfile({
-  slug: "lobu-production-loki",
-  connector: "loki.activity",
-  authKind: "env",
-  name: "Lobu production Loki",
-  credentials: {
-    LOKI_URL: secret("LOBU_PRODUCT_OPS_LOKI_URL"),
-  },
-});
-
 const productionLogs = defineConnection({
   slug: "lobu-production-logs",
   connector: "loki.activity",
   name: "Lobu production Kubernetes logs",
-  authProfile: productionLogsAuth,
+  // Provisioned with an immutable HTTP binding through authProfiles.create.
+  authProfile: "lobu-production-loki-http",
   config: {
+    LOKI_URL: "https://loki.lobu.ai",
     namespace: "summaries-prod",
     grafana_url:
       "https://monitoring-kube-prometheus-stack-grafana.brill-kanyu.ts.net",
@@ -474,7 +466,7 @@ export default defineConfig({
   orgDescription: "Lobu Team agents and internal operations",
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
   agents: [foodOrdering, developer, productOps],
-  authProfiles: [productActivityDbAuth, productionLogsAuth],
+  authProfiles: [productActivityDbAuth],
   entities: [lunchRun, engineeringTask],
   relationships: [targetsRepository],
   connections: [

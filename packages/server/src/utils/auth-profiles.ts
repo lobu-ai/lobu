@@ -6,7 +6,7 @@ import { persistAuthCredentials } from './auth-credential-secrets';
 import { ToolUserError } from './errors';
 import { isUniqueViolation } from './pg-errors';
 
-const TRANSPORT_HEADERS = new Set([
+export const HTTP_AUTH_TRANSPORT_HEADERS = new Set([
   'host', 'connection', 'content-length', 'transfer-encoding', 'upgrade',
   'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'keep-alive',
 ]);
@@ -25,7 +25,7 @@ export function validateHttpAuthBinding(value: unknown): HttpAuthBinding {
   const headers: Record<string, string> = {};
   for (const [name, field] of Object.entries(value.headers)) {
     const lower = name.toLowerCase();
-    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(lower) || TRANSPORT_HEADERS.has(lower) || !field.trim() || headers[lower]) {
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(lower) || HTTP_AUTH_TRANSPORT_HEADERS.has(lower) || !field.trim() || headers[lower]) {
       throw new ToolUserError('Invalid or duplicate HTTP credential header');
     }
     headers[lower] = field;

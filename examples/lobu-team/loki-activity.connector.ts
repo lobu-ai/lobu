@@ -252,7 +252,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     name: "Kubernetes logs",
     description:
       "Collect error and warning counts plus recent samples from Lobu production Loki in aligned 20-minute windows.",
-    version: "1.1.1",
+    version: "1.1.2",
     authSchema: {
       methods: [
         {
@@ -261,8 +261,8 @@ export default class LokiActivityConnector extends ConnectorRuntime<
           scope: "connection",
           fields: [
             {
-              key: "LOKI_URL",
-              label: "Loki URL",
+              key: "AUTHORIZATION",
+              label: "Authorization header",
               secret: true,
               required: true,
             },
@@ -290,8 +290,9 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     },
     optionsSchema: {
       type: "object",
-      required: ["namespace"],
+      required: ["LOKI_URL", "namespace"],
       properties: {
+        LOKI_URL: { type: "string", format: "uri" },
         namespace: { type: "string", minLength: 1 },
         grafana_url: { type: "string", format: "uri" },
       },

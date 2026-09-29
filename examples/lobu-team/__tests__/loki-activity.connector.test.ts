@@ -6,6 +6,19 @@ import LokiActivityConnector, {
 } from "../loki-activity.connector.ts";
 
 describe("Lobu Team Loki activity connector", () => {
+  it("keeps the endpoint in public config and declares only the HTTP credential", () => {
+    const { definition } = new LokiActivityConnector();
+    expect(definition.optionsSchema).toMatchObject({
+      required: ["LOKI_URL", "namespace"],
+      properties: { LOKI_URL: { type: "string", format: "uri" } },
+    });
+    expect(definition.authSchema).toMatchObject({
+      methods: [
+        { fields: [{ key: "AUTHORIZATION", secret: true, required: true }] },
+      ],
+    });
+  });
+
   it("keeps completed windows when a later query fails and resumes after them", async () => {
     const initialCheckpoint = { window_end: "2026-08-13T11:40:00.000Z" };
     const completedWindowEnd = "2026-08-13T12:00:00.000Z";

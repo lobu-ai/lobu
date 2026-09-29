@@ -7,7 +7,7 @@ import {
 } from '@lobu/core/contracts/worker/protocol';
 import { Value } from '@sinclair/typebox/value';
 import { getDb } from '../db/client';
-import { getAuthProfileById, readHttpAuthBinding } from './auth-profiles';
+import { getAuthProfileById, HTTP_AUTH_TRANSPORT_HEADERS, readHttpAuthBinding } from './auth-profiles';
 import { resolveAuthCredentials } from './auth-credential-secrets';
 import { cancelResponseBody, readResponseBytesWithLimit } from './bounded-response';
 
@@ -43,7 +43,7 @@ export async function fetchConnectionHttp(params: {
     throw new Error('Invalid or oversized HTTP request body');
   }
   const headers = new Headers(params.request.headers);
-  for (const name of ['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'proxy-authorization', 'te', 'trailer', 'keep-alive']) {
+  for (const name of HTTP_AUTH_TRANSPORT_HEADERS) {
     headers.delete(name);
   }
   const credentials = await resolveAuthCredentials({
