@@ -6,6 +6,7 @@
  * managed Cloud, and future credential leases cannot drift apart.
  */
 
+import { parseJsonObject } from '@lobu/core';
 import { getDb } from '../db/client';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from '../utils/connector-auth';
 import { resolveExecutionAuth } from '../utils/execution-context';
@@ -22,11 +23,15 @@ export interface ResolvedCredentials {
  * `rejectedAccessToken` triggers a refresh when that exact stored token was
  * rejected with a 401. Passing the value, rather than a boolean, lets the
  * account lock reuse a token another replica already rotated.
+ *
+ * `requireDeclaredAnonymous` narrows the null result to connectors whose auth
+ * schema offers a `none` method: any other connection without credentials
+ * throws, so a caller never sends an unauthenticated request by accident.
  */
 export async function resolveCredentialsByConnectionId(
   connectionId: number,
   organizationId: string,
-  opts?: { rejectedAccessToken?: string }
+  opts?: { rejectedAccessToken?: string; requireDeclaredAnonymous?: boolean }
 ): Promise<ResolvedCredentials | null> {
   const sql = getDb();
 
@@ -78,7 +83,12 @@ export async function resolveCredentialsByConnectionId(
     connection.auth_profile_id !== null ||
     connection.app_auth_profile_id !== null ||
     hasManagedBy(connection.config);
-  if (expectedCredentials) {
+  // Normalization defaults empty or malformed schemas to `none`; that is not
+  // an explicit declaration allowing an unauthenticated HTTP operation.
+  const declaredMethods = parseJsonObject(connection.auth_schema).methods;
+  const anonymousDeclared = Array.isArray(declaredMethods) &&
+    declaredMethods.some((method) => method?.type === 'none');
+  if (expectedCredentials || (opts?.requireDeclaredAnonymous && !anonymousDeclared)) {
     throw new Error(`MCP credentials are unavailable for connection ${connectionId}`);
   }
   return null;

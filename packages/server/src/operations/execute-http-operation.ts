@@ -183,16 +183,8 @@ export async function executeHttpOperation(
 		const credentials = await resolveCredentialsByConnectionId(
 			connection.id,
 			organizationId,
+			{ requireDeclaredAnonymous: true },
 		);
-		if (!credentials) {
-			return failRun(
-				runId,
-				organizationId,
-				`No active OAuth credentials found for '${connection.connector_key}'.`,
-				deferTerminalWrite,
-				claimedBy,
-			);
-		}
 
 		const headersInput =
 			actionInput.headers && typeof actionInput.headers === "object"
@@ -209,10 +201,12 @@ export async function executeHttpOperation(
 			}
 			headers.set(key, String(value));
 		}
-		headers.set(
-			"Authorization",
-			`${credentials.tokenType} ${credentials.accessToken}`,
-		);
+		if (credentials) {
+			headers.set(
+				"Authorization",
+				`${credentials.tokenType} ${credentials.accessToken}`,
+			);
+		}
 
 		const body = actionInput.body;
 		let requestBody: string | undefined;

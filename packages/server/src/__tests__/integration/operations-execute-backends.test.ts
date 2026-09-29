@@ -295,6 +295,11 @@ describe("operations.execute backend lifecycle", () => {
 							headers: { "content-type": "application/json" },
 						});
 					}
+					if (body.value === "echo-authorization") {
+						return jsonResponse({
+							authorization: new Headers(init?.headers).get("authorization"),
+						});
+					}
 					if (body.value === "nul-failure") {
 						return new Response("upstream\u0000failed", { status: 500 });
 					}
@@ -1399,14 +1404,29 @@ describe("operations.execute backend lifecycle", () => {
 		});
 	});
 
-	it("finalizes the run when HTTP credentials are missing", async () => {
+	it.each([
+		["OAuth", { methods: [{ type: "oauth", provider: "test" }] }],
+		["missing methods", {}],
+		["empty methods", { methods: [] }],
+		["malformed OAuth", { methods: [{ type: "oauth" }] }],
+		["unknown method", { methods: [{ type: "unknown" }] }],
+	])("finalizes the run when HTTP credentials are missing (%s)", async (_label, authSchema) => {
 		const sql = getTestDb();
 		const [connection] = await sql<{ auth_profile_id: string }>`
 			SELECT auth_profile_id FROM connections WHERE id = ${httpConnectionId}
 		`;
-		await sql`UPDATE connections SET auth_profile_id = NULL WHERE id = ${httpConnectionId}`;
+		const [definition] = await sql<{ auth_schema: Record<string, unknown> }>`
+			SELECT auth_schema FROM connector_definitions
+			WHERE organization_id = ${orgId} AND key = ${HTTP}
+		`;
 
 		try {
+			await sql`UPDATE connections SET auth_profile_id = NULL WHERE id = ${httpConnectionId}`;
+			await sql`
+				UPDATE connector_definitions SET auth_schema = ${sql.json(authSchema)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
+			const fetchCallsBefore = vi.mocked(fetch).mock.calls.length;
 			const result = await manageOperations(
 				{
 					action: "execute",
@@ -1420,7 +1440,13 @@ describe("operations.execute backend lifecycle", () => {
 			expect(result).toMatchObject({
 				action: "execute",
 				status: "failed",
+				error_message: `MCP credentials are unavailable for connection ${httpConnectionId}`,
 			});
+			expect(
+				vi.mocked(fetch).mock.calls.slice(fetchCallsBefore).filter(
+					([url]) => String(url) === "https://api.example.test/items",
+				),
+			).toHaveLength(0);
 			const [run] = await sql<{ status: string; completed_at: Date | null }>`
 				SELECT status, completed_at FROM runs
 				WHERE id = ${(result as { run_id: number }).run_id}
@@ -1428,6 +1454,63 @@ describe("operations.execute backend lifecycle", () => {
 			expect(run.status).toBe("failed");
 			expect(run.completed_at).not.toBeNull();
 		} finally {
+			await sql`
+				UPDATE connector_definitions SET auth_schema = ${sql.json(definition.auth_schema)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
+			await sql`
+				UPDATE connections SET auth_profile_id = ${connection.auth_profile_id}
+				WHERE id = ${httpConnectionId}
+			`;
+		}
+	});
+
+	it.each([false, true])("executes an HTTP operation declaring no auth (credentials attached: %s)", async (withCredentials) => {
+		const sql = getTestDb();
+		const [connection] = await sql<{ auth_profile_id: string }>`
+			SELECT auth_profile_id FROM connections WHERE id = ${httpConnectionId}
+		`;
+		const [definition] = await sql<{ auth_schema: Record<string, unknown> }>`
+			SELECT auth_schema FROM connector_definitions
+			WHERE organization_id = ${orgId} AND key = ${HTTP}
+		`;
+		try {
+			if (!withCredentials) {
+				await sql`UPDATE connections SET auth_profile_id = NULL WHERE id = ${httpConnectionId}`;
+			}
+			await sql`
+				UPDATE connector_definitions SET auth_schema = ${sql.json({ methods: [{ type: "none" }] })}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
+			const result = await manageOperations(
+				{
+					action: "execute",
+					connection_id: httpConnectionId,
+					operation_key: "create_item",
+					input: {
+						body: { value: "echo-authorization" },
+						headers: { Authorization: "Bearer caller-supplied-token" },
+					},
+				},
+				{} as Env,
+				ctx,
+			);
+			expect(result).toMatchObject({
+				action: "execute",
+				status: "completed",
+				output: {
+					body: {
+						authorization: withCredentials
+							? `Bearer backend-test-token-${httpConnectionId}`
+							: null,
+					},
+				},
+			});
+		} finally {
+			await sql`
+				UPDATE connector_definitions SET auth_schema = ${sql.json(definition.auth_schema)}
+				WHERE organization_id = ${orgId} AND key = ${HTTP}
+			`;
 			await sql`
 				UPDATE connections SET auth_profile_id = ${connection.auth_profile_id}
 				WHERE id = ${httpConnectionId}
