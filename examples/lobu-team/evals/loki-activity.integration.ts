@@ -121,6 +121,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   vi.doUnmock("@lobu/connector-worker/egress");
+  vi.resetModules();
   if (gateway) {
     gateway.closeAllConnections();
     await new Promise<void>((resolve) => gateway.close(() => resolve()));
