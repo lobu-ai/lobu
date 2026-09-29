@@ -9,8 +9,12 @@
  * Contract with the host (our web host, Claude, any MCP Apps host):
  *  - `ui/notifications/tool-input` `arguments` = `{ scope, params }`
  *    (in Claude these are the `open_view` tool arguments).
- *  - reads: any tool with an `outputSchema` (`query_sql`, `query_sdk`,
- *    `manage_connections`, …); actions: `invoke_view_action`.
+ *  - reads: `query_sql`, `query_sdk`, and tools the registry marks
+ *    `readOnlyHint` (`read_knowledge`, `get_automation`, `query_metric`, …);
+ *    actions: `invoke_view_action`. The web host refuses every other tool, so
+ *    mixed read/write tools such as `manage_connections` are not reachable
+ *    from a view: read that data with a `query_sdk` script
+ *    (`client.connections.list()`) instead.
  *  - `setParams` → `ui/update-model-context` `{ structuredContent: { view,
  *    params } }`; the web host mirrors it into the address bar. Hosts without
  *    that capability keep params local to the frame.
@@ -203,8 +207,9 @@ export function escapeLiteral(value: unknown): string {
   );
 }
 
-/** Direct tool read: for tools that return their JSON as `structuredContent`
- *  on MCP hosts (any tool with an `outputSchema`, e.g. `manage_connections`). */
+/** Direct tool read, for a tool the registry marks `readOnlyHint`
+ *  (`read_knowledge`, `get_automation`, …). The web host refuses mixed
+ *  read/write tools such as `manage_connections`; use `query_sdk` for those reads. */
 export interface ToolQuery {
   kind: "tool";
   name: string;

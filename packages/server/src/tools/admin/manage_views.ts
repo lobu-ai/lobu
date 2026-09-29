@@ -26,6 +26,10 @@ import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
 import { ToolUserError } from '../../utils/errors';
 import {
+  refreshMemberEventKinds,
+  validateSaveContentSemanticType,
+} from '../../utils/event-kind-validation';
+import {
   isShellOwnedParam,
   VIEW_ACTION_NAME_RE,
   VIEW_COMPILED_MAX_BYTES,
@@ -66,9 +70,9 @@ function requireWriter(ctx: ToolContext): void {
   if (!ctx.userId) throw new ToolUserError('Authentication required', 401);
 }
 
-// Event-kind names are `<subject>.<op>` (`deal.won`); the semantic check
-// against the kind registry happens when the action fires, but a malformed
-// name is rejected at authoring so it can never be stored.
+// Event-kind names are `<subject>.<op>` (`deal.won`). A malformed name is
+// rejected here; whether the registry knows the kind is checked by
+// `assertActionKindsRegistered`.
 const EMITS_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
 
 /**
@@ -181,6 +185,33 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
   }
 }
 
+/**
+ * Every declared action must emit a kind the org registry accepts, checked
+ * with the resolver the click runs (`invokeViewAction`: org-wide, no entity
+ * context). Otherwise a view saves cleanly and every button returns 422 for
+ * whoever clicks it. The click keeps its own check, which still catches a
+ * kind the registry dropped after the save.
+ */
+async function assertActionKindsRegistered(
+  organizationId: string,
+  actions: Record<string, { emits: string }>
+): Promise<void> {
+  const entries = Object.entries(actions);
+  if (entries.length === 0) return;
+  // The kind may have been registered moments ago or on another replica, so
+  // validate against the committed registry, not this pod's cached copy.
+  await refreshMemberEventKinds(organizationId);
+  for (const [name, decl] of entries) {
+    const result = await validateSaveContentSemanticType(decl.emits, null, organizationId, []);
+    if (!result.valid) {
+      throw new ToolUserError(
+        `Action '${name}' emits '${decl.emits}', which this organization does not register. Declare it in the $member event_kinds first.\n${result.errors.join('\n')}`,
+        422
+      );
+    }
+  }
+}
+
 // ============================================
 // Action Handlers
 // ============================================
@@ -199,6 +230,7 @@ async function handleSet(
   const attach = (args.attach ?? []) as SetViewInput['attach'];
   const params = (args.params ?? {}) as SetViewInput['params'];
   const actions = (args.actions ?? {}) as SetViewInput['actions'];
+  await assertActionKindsRegistered(ctx.organizationId, actions);
   // Resolve the executable artifact BEFORE the identity: a supplied bundle is
   // validated (non-empty, under the cap) and source-only input is compiled,
   // so the no-op comparison below sees the same bytes `setView` would store.

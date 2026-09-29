@@ -5,8 +5,9 @@
  * 'view_interaction'`) and enqueues Automations like the template path; the
  * same interaction_id is idempotent; an undeclared action is rejected; an
  * action removed from the CURRENT view stops working; unknown views 404;
- * an emits kind the registry does not know is a 422; unauthenticated callers
- * get 401; and every fire emits the `view:<key>` SSE invalidation.
+ * an emits kind the registry does not know is a 422 at save and at click, and
+ * saves use the committed registry even with a stale replica cache;
+ * unauthenticated callers get 401; every fire emits the `view:<key>` SSE invalidation.
  */
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
@@ -255,14 +256,34 @@ describe("view actions", () => {
 		await expect(invokeViewAction({ ...params, value: { id: 8 } })).rejects.toMatchObject({ httpStatus: 409 });
 	});
 
-	it("rejects an emits kind the registry does not know", async () => {
-		await setView("poke-view", VIEW_SOURCE, {
+	it("rejects a view whose action emits a kind the registry does not know", async () => {
+		const err = await setView("poke-view", VIEW_SOURCE, {
 			mystery: { emits: "test.never-declared" },
-		});
+		}).catch((e) => e);
+		expect(err).toBeInstanceOf(ToolUserError);
+		expect((err as ToolUserError).httpStatus).toBe(422);
+		expect((err as Error).message).toContain("test.never-declared");
+		const sql = getTestDb();
+		const stored = await sql`
+      SELECT 1 FROM views WHERE organization_id = ${orgId} AND key = 'poke-view'
+    `;
+		expect(stored.length).toBe(0);
+	});
+
+	it("still rejects the click when the registry drops the kind after the save", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const remaining = { "test.other": { description: "Unrelated kind" } };
+		const sql = getTestDb();
+		await sql`
+      UPDATE entity_types
+      SET event_kinds = ${sql.json(remaining)}
+      WHERE slug = '$member' AND organization_id = ${orgId}
+    `;
+		primeMemberEventKinds(orgId, remaining);
 		const err = await invokeViewAction({
 			organizationId: orgId,
 			viewKey: "poke-view",
-			action: "mystery",
+			action: "retry",
 			value: null,
 			interactionId: "click-4",
 			surface: "web",
@@ -270,6 +291,54 @@ describe("view actions", () => {
 		}).catch((e) => e);
 		expect(err).toBeInstanceOf(ToolUserError);
 		expect((err as ToolUserError).httpStatus).toBe(422);
+	});
+
+	it("accepts a kind registered through manage_entity_schema despite a stale cache", async () => {
+		// Warm this pod's cache with the registry that lacks the new kind, as
+		// any earlier save or click in the org would.
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		await executeTool(
+			"manage_entity_schema",
+			{
+				schema_type: "entity_type",
+				action: "update",
+				slug: "$member",
+				event_kinds: {
+					"test.poked": { description: "A view action fired" },
+					"test.fresh": { description: "Registered just now" },
+				},
+			},
+			TEST_ENV,
+			ownerCtx
+		);
+		await setView("fresh-view", VIEW_SOURCE, { go: { emits: "test.fresh" } });
+		const result = await invokeViewAction({
+			organizationId: orgId,
+			viewKey: "fresh-view",
+			action: "go",
+			value: null,
+			interactionId: "click-fresh",
+			surface: "web",
+			actor: actor(ownerId),
+		});
+		expect(result.eventType).toBe("test.fresh");
+	});
+
+	it("rejects a removed kind despite a warm cache and preserves the saved view", async () => {
+		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
+		const sql = getTestDb();
+		// A registry edit on another replica does not refresh this pod's cache.
+		await sql`
+      UPDATE entity_types SET event_kinds = ${sql.json({})}
+      WHERE slug = '$member' AND organization_id = ${orgId}
+    `;
+		await expect(setView("poke-view", VIEW_SOURCE, {
+			removed: { emits: "test.poked" },
+		})).rejects.toMatchObject({ httpStatus: 422 });
+		const stored = await sql`
+      SELECT actions FROM views WHERE organization_id = ${orgId} AND key = 'poke-view'
+    `;
+		expect(stored[0].actions).toEqual({ retry: { emits: "test.poked" } });
 	});
 
 	it("fires over the MCP tool and emits the view SSE key", async () => {

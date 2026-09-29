@@ -112,6 +112,27 @@ export function primeMemberEventKinds(
   eventKindsCache.set(`${orgId}:$member`, kinds);
 }
 
+async function loadMemberEventKinds(
+  orgId: string
+): Promise<Record<string, EventKindDefinition> | null> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT event_kinds
+    FROM entity_types
+    WHERE slug = '$member'
+      AND organization_id = ${orgId}
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  if (rows.length > 0) {
+    const eventKinds = rows[0].event_kinds;
+    if (eventKinds && typeof eventKinds === 'object') {
+      return eventKinds as Record<string, EventKindDefinition>;
+    }
+  }
+  return null;
+}
+
 /**
  * Fetch event_kinds for the $member entity type in a given org.
  * Returns null if no $member type or no event_kinds defined (accept any kind).
@@ -119,24 +140,17 @@ export function primeMemberEventKinds(
 async function getMemberEventKinds(
   orgId: string
 ): Promise<Record<string, EventKindDefinition> | null> {
-  return eventKindsCache.getOrSet(`${orgId}:$member`, async () => {
-    const sql = getDb();
-    const rows = await sql`
-      SELECT event_kinds
-      FROM entity_types
-      WHERE slug = '$member'
-        AND organization_id = ${orgId}
-        AND deleted_at IS NULL
-      LIMIT 1
-    `;
-    if (rows.length > 0) {
-      const eventKinds = rows[0].event_kinds;
-      if (eventKinds && typeof eventKinds === 'object') {
-        return eventKinds as Record<string, EventKindDefinition>;
-      }
-    }
-    return null;
-  });
+  return eventKindsCache.getOrSet(`${orgId}:$member`, () => loadMemberEventKinds(orgId));
+}
+
+/**
+ * Re-read an org's $member event_kinds from the DB and overwrite this pod's
+ * cached copy. For writes that must validate against committed registry state
+ * (a kind registered on another replica, or seconds ago on this one) rather
+ * than a copy up to the TTL old.
+ */
+export async function refreshMemberEventKinds(orgId: string): Promise<void> {
+  primeMemberEventKinds(orgId, await loadMemberEventKinds(orgId));
 }
 
 /**
