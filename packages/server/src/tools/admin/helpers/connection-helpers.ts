@@ -950,6 +950,7 @@ export function serializeAuthProfile(authProfile: AuthProfileRow): Record<string
     device_worker_id: authProfile.device_worker_id,
     browser_kind: authProfile.browser_kind,
     is_default_for_connector: authProfile.is_default_for_connector,
+    ...(authProfile.metadata?.http ? { http: authProfile.metadata.http } : {}),
     ...(authProfile.profile_kind === 'oauth_account'
       ? {
           requested_scopes: readRequestedScopesFromAuthData(authProfile.auth_data),

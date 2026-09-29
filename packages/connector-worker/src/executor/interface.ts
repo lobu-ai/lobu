@@ -13,13 +13,17 @@ import type {
   SyncCredentials,
   WebhookRegistration,
 } from '@lobu/connector-sdk';
+import type { ConnectorHttpRequest, ConnectorHttpResponse } from '@lobu/core/contracts/worker/protocol';
 
 /**
  * Executor mode discriminator. The executor speaks the same V1 SDK shapes
  * the connector code expects: `SyncContext` / `ActionContext` / `AuthContext`
  * in, `SyncResult` / `ActionResult` / `AuthResult` out, no envelope.
  */
-export type ExecutorJob =
+export type ExecutorJob = {
+  /** HTTP credentials stay in the gateway; every fetch uses the host hook. */
+  httpAuth?: boolean;
+} & (
   | {
       mode: 'sync';
       feedKey?: string | null;
@@ -108,7 +112,7 @@ export type ExecutorJob =
       sessionState: Record<string, unknown> | null;
       externalId: string;
       env: Record<string, string | undefined>;
-    };
+    });
 
 /**
  * Result shape returned by the executor. One discriminated union per mode
@@ -169,6 +173,8 @@ export type ExecutorResult =
     };
 
 export interface ExecutionHooks {
+  /** Gateway-bound HTTP execution. The callback and its authority never enter the guest. */
+  onHttpFetch?: (request: ConnectorHttpRequest, signal?: AbortSignal) => Promise<ConnectorHttpResponse>;
   /**
    * Stop the run from outside: the guest is terminated and `execute` rejects
    * with the abort as its error. An agent turn arms this when the gateway's

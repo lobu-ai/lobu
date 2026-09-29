@@ -1,8 +1,42 @@
 import { slugify } from '@lobu/core';
+import { HttpAuthBindingSchema, type HttpAuthBinding } from '@lobu/core/contracts/tools/manage-auth-profiles';
+import { Value } from '@sinclair/typebox/value';
 import { getDb, type DbClient } from '../db/client';
 import { persistAuthCredentials } from './auth-credential-secrets';
 import { ToolUserError } from './errors';
 import { isUniqueViolation } from './pg-errors';
+
+const TRANSPORT_HEADERS = new Set([
+  'host', 'connection', 'content-length', 'transfer-encoding', 'upgrade',
+  'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'keep-alive',
+]);
+
+export function validateHttpAuthBinding(value: unknown): HttpAuthBinding {
+  if (!Value.Check(HttpAuthBindingSchema, value)) {
+    throw new ToolUserError('Invalid HTTP credential binding');
+  }
+  let url: URL;
+  try { url = new URL(value.origin); } catch {
+    throw new ToolUserError('HTTP credential origin must be an HTTPS origin');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new ToolUserError('HTTP credential origin must be an HTTPS origin without a path or userinfo');
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, field] of Object.entries(value.headers)) {
+    const lower = name.toLowerCase();
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(lower) || TRANSPORT_HEADERS.has(lower) || !field.trim() || headers[lower]) {
+      throw new ToolUserError('Invalid or duplicate HTTP credential header');
+    }
+    headers[lower] = field;
+  }
+  return { origin: url.origin, headers };
+}
+
+export function readHttpAuthBinding(metadata?: Record<string, unknown>): HttpAuthBinding | null {
+  // Malformed stored bindings must fail closed, never fall back to raw env delivery.
+  return metadata && Object.hasOwn(metadata, 'http') ? validateHttpAuthBinding(metadata.http) : null;
+}
 
 /**
  * Thrown when an INSERT into auth_profiles with status='pending_auth' collides
@@ -43,6 +77,7 @@ export interface AuthProfileRow {
   profile_kind: AuthProfileKind;
   status: AuthProfileStatus;
   auth_data: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   account_id: string | null;
   provider: string | null;
   created_by: string | null;
@@ -229,7 +264,7 @@ export async function ensureUniqueAuthProfileSlug(params: {
 
 const AUTH_PROFILE_COLUMNS = `
   id, organization_id, slug, display_name, connector_key,
-  profile_kind, status, auth_data, account_id, provider,
+  profile_kind, status, auth_data, metadata, account_id, provider,
   created_by, created_at, updated_at,
   device_worker_id, browser_kind,
   is_default_for_connector
@@ -306,6 +341,7 @@ export async function createAuthProfile(params: {
   slug?: string | null;
   profileKind: AuthProfileKind;
   authData?: Record<string, unknown>;
+  http?: HttpAuthBinding;
   accountId?: string | null;
   provider?: string | null;
   status?: AuthProfileStatus;
@@ -314,6 +350,13 @@ export async function createAuthProfile(params: {
   browserKind?: BrowserKind | null;
 }, db: DbClient = getDb()): Promise<AuthProfileRow> {
   const sql = db;
+  const http = params.http ? validateHttpAuthBinding(params.http) : null;
+  if (http && params.profileKind !== 'env') {
+    throw new ToolUserError('HTTP delivery requires an env auth profile');
+  }
+  if (http && Object.keys(params.authData ?? {}).some((key) => !Object.values(http.headers).includes(key))) {
+    throw new ToolUserError('Every HTTP-bound credential must be mapped to a header; put public configuration on the connection');
+  }
   const normalizedProvider = params.provider ? params.provider.toLowerCase() : null;
 
   // ensureUniqueAuthProfileSlug is a non-locking SELECT loop: two concurrent
@@ -339,6 +382,7 @@ export async function createAuthProfile(params: {
           profile_kind,
           status,
           auth_data,
+          metadata,
           account_id,
           provider,
           created_by,
@@ -356,6 +400,7 @@ export async function createAuthProfile(params: {
               ? {}
               : normalizeAuthData(params.profileKind, params.authData ?? {})
           )},
+          ${sql.json(http ? { http } : {})},
           ${params.accountId ?? null},
           ${normalizedProvider},
           ${params.createdBy ?? null},

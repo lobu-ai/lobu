@@ -39,7 +39,7 @@ import {
 	type SecretStore,
 	type WritableSecretStore,
 } from "../gateway/secrets/index.js";
-import { normalizeAuthValues } from "./auth-profiles";
+import { getAuthProfileById, normalizeAuthValues, readHttpAuthBinding } from "./auth-profiles";
 
 const logger = createLogger("auth-credential-secrets");
 
@@ -346,8 +346,16 @@ export async function resolveAuthCredentials(params: {
 	authProfileId: number;
 	authData: Record<string, unknown> | null | undefined;
 	secretStore?: SecretStore;
+	/** Gateway egress only: checked against the persisted immutable binding. */
+	httpOrigin?: string;
 }): Promise<Record<string, string>> {
-	const values = normalizeAuthValues(params.authData ?? {});
+	const profile = await getAuthProfileById(params.organizationId, params.authProfileId);
+	const binding = readHttpAuthBinding(profile?.metadata);
+	if (binding && (params.httpOrigin !== binding.origin || profile?.status !== 'active')) {
+		throw new Error('HTTP-bound credentials are only available at their gateway destination');
+	}
+	if (params.httpOrigin && !binding) throw new Error('HTTP credential binding is unavailable');
+	const values = normalizeAuthValues(binding ? profile?.auth_data ?? {} : params.authData ?? {});
 	if (Object.keys(values).length === 0) return {};
 
 	const store = params.secretStore ?? new PostgresSecretStore();

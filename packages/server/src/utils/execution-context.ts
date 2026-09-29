@@ -2,7 +2,9 @@ import { CredentialService } from '../auth/credentials';
 import { resolveCloudCredential } from '../connect/cloud-credential';
 import { getBuiltinProviderConfig } from '../connect/oauth-providers';
 import { type DbClient, getDb } from '../db/client';
-import { getAuthProfileById, normalizeAuthValues } from './auth-profiles';
+import { getAuthProfileById, normalizeAuthValues, readHttpAuthBinding } from './auth-profiles';
+import type { ConnectorHttpRequest, ConnectorHttpResponse } from '@lobu/core/contracts/worker/protocol';
+import { fetchConnectionHttp } from './http-auth';
 import { resolveAuthCredentials } from './auth-credential-secrets';
 import {
   getAppInstallationAuthMethods,
@@ -32,6 +34,8 @@ interface ResolvedExecutionAuth {
   credentials: ExecutionOAuthCredentials | null;
   connectionCredentials: Record<string, string>;
   sessionState: Record<string, unknown> | null;
+  httpAuth?: boolean;
+  onHttpFetch?: (request: ConnectorHttpRequest, signal?: AbortSignal) => Promise<ConnectorHttpResponse>;
 }
 
 interface ResolveExecutionAuthParams {
@@ -60,6 +64,21 @@ export async function resolveExecutionAuth(
   );
 
   let credentials: ExecutionOAuthCredentials | null = null;
+
+  if (readHttpAuthBinding(appAuthProfile?.metadata)) {
+    throw new Error('HTTP-bound credentials cannot be used as an OAuth app');
+  }
+  if (readHttpAuthBinding(authProfile?.metadata)) {
+    if (authProfile?.profile_kind !== 'env' || authProfile.status !== 'active') {
+      throw new Error('HTTP credential binding is unavailable');
+    }
+    return {
+      credentials: null, connectionCredentials: {}, sessionState: null, httpAuth: true,
+      onHttpFetch: (request, signal) => fetchConnectionHttp({
+        organizationId: params.organizationId, connectionId: params.connectionId, request, signal,
+      }),
+    };
+  }
 
   // Managed-connector branch: when the LOCAL connection is `managedBy` a cloud
   // (public) org, the grant lives in the cloud — fetch a fresh access token for

@@ -124,7 +124,7 @@ export async function runFeed(feed: FeedRecord): Promise<{ itemCount: number }> 
     compile_config_hash: feed.compile_config_hash,
   });
 
-  const { credentials, connectionCredentials, sessionState } = await resolveExecutionAuth({
+  const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
     organizationId: feed.organization_id,
     connectionId: feed.connection_id,
     authProfileId: feed.auth_profile_id,
@@ -153,11 +153,13 @@ export async function runFeed(feed: FeedRecord): Promise<{ itemCount: number }> 
       }),
       sessionState,
       credentials,
+      httpAuth,
       feedKey: feed.feed_key,
       feedId: feed.id,
       entityIds: feed.entity_ids,
     },
     hooks: {
+      onHttpFetch,
       onCommit: async (events) => {
         itemCount += events.length;
       },

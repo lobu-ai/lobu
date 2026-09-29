@@ -38,6 +38,7 @@ export interface ConnectorClaimContext {
   orgScopeIds: string[];
   baseOrgScopeIds: string[];
   workerHardensDbEgress: boolean;
+  workerSupportsHttpAuth: boolean;
   /**
    * Capacity advertised for each execution backend by this worker. Required:
    * an omitted map reads as zero capacity for every backend, so the worker
@@ -68,6 +69,7 @@ interface ConnectorClaimLaneRefs {
   runManifestBacked: SqlFragment;
   runManifestHash: SqlFragment;
   runRuntime: SqlFragment;
+  runRequiresHttpAuth: SqlFragment;
 }
 
 /**
@@ -168,6 +170,10 @@ export function connectorClaimLaneSql(
   return sql`
     (
       ${selectedBackendReady}
+      AND (
+        NOT COALESCE(${refs.runRequiresHttpAuth}, false)
+        OR ${!context.isUserScopedWorker && context.workerSupportsHttpAuth === true}
+      )
       AND (
         -- Trusted/anonymous fleet worker. Execution-pinned connections stay on
         -- their exact device; browser-affinity parent runs stay on fleet.

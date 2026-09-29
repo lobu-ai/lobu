@@ -15,6 +15,13 @@ const job: ExecutorJob = {
 };
 
 describe('IsolateExecutor options', () => {
+  it('refuses a gateway-authenticated job without its host HTTP hook before starting the guest', async () => {
+    await expect(new IsolateExecutor().execute(
+      'module.exports.default = class { sync() {} execute() {} };',
+      { ...job, httpAuth: true },
+    )).rejects.toThrow('HTTP authentication requires a gateway fetch hook');
+  });
+
   it('accepts the defaults and partial overrides', () => {
     expect(() => new IsolateExecutor()).not.toThrow();
     expect(() => new IsolateExecutor({ timeoutMs: 0, memoryMb: 8, allowedDomains: ['Example.COM'] })).not.toThrow();

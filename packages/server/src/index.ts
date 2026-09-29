@@ -751,6 +751,7 @@ import {
 	deleteMyDeviceFeed,
 	emitAuthArtifact,
 	fetchEventsForEmbedding,
+	fetchWorkerHttp,
 	getActiveAuthRun,
 	getAuthRun,
 	heartbeat,
@@ -923,6 +924,8 @@ app.use("/api/workers/*", async (c, next) => {
 	});
 });
 
+// HTTP credentials stay gateway-side; user workers cannot access this route.
+app.post("/api/workers/http-fetch", fetchWorkerHttp);
 app.post("/api/workers/poll", pollWorkerJob);
 app.post("/api/workers/activate-page", activatePageRun);
 app.post("/api/workers/heartbeat", heartbeat);

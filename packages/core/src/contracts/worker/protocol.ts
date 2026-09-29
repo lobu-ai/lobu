@@ -27,6 +27,28 @@
 
 import { type Static, Type } from "@sinclair/typebox";
 
+export const CONNECTOR_HTTP_AUTH_CAPABILITY = "http_auth";
+export const CONNECTOR_HTTP_MAX_BYTES = 4 * 1024 * 1024;
+
+export const ConnectorHttpRequestSchema = Type.Object(
+  {
+    url: Type.String({ maxLength: 16_384 }),
+    method: Type.String({ maxLength: 32 }),
+    headers: Type.Record(Type.String(), Type.String()),
+    body: Type.Optional(
+      Type.String({ maxLength: Math.ceil(CONNECTOR_HTTP_MAX_BYTES / 3) * 4 })
+    ),
+  },
+  { additionalProperties: false }
+);
+export type ConnectorHttpRequest = Static<typeof ConnectorHttpRequestSchema>;
+export interface ConnectorHttpResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: string;
+}
+
 // Wire mirror of connector-sdk's ConnectorAutomationSignalDraftSchema. Core is
 // deliberately dependency-free from connector-sdk; both the worker and gateway
 // compile against this schema at the HTTP boundary.
@@ -747,6 +769,8 @@ export const PollResponseSchema = Type.Object({
   connection_credentials: Type.Optional(
     Type.Record(Type.String(), Type.Unknown())
   ),
+  /** Gateway-only credential delivery. Requires the http_auth worker capability. */
+  http_auth: Type.Optional(Type.Boolean()),
   connection_id: Type.Optional(Type.Integer()),
   feed_id: Type.Optional(Type.Integer()),
   compiled_code: Type.Optional(Type.String()),

@@ -53,6 +53,8 @@ export interface ExecutorClient {
    * — multi-replica safe because the wait is Postgres-mediated.
    */
   dispatchChromeAction(req: DispatchChromeActionRequest): Promise<Record<string, unknown>>;
+  /** Spend only the current run's gateway-held HTTP credentials. */
+  httpFetch(runId: number, request: ConnectorHttpRequest, signal?: AbortSignal): Promise<ConnectorHttpResponse>;
   /**
    * Post a device-side automation exit report and read the server's decision.
    * `status: "resume"` means the run is still claimed and the caller should
@@ -117,6 +119,8 @@ export type {
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
 import type {
+  ConnectorHttpRequest,
+  ConnectorHttpResponse,
   CompleteActionRequest,
   CompleteAgentTurnRequest,
   CompleteAgentTurnResponse,
@@ -535,6 +539,14 @@ export class WorkerClient implements ExecutorClient {
     throw new Error(
       result.error_message ??
         `Chrome action '${req.action_key}' ${result.status === 'timeout' ? 'timed out' : 'failed'}`
+    );
+  }
+
+  async httpFetch(runId: number, request: ConnectorHttpRequest, signal?: AbortSignal): Promise<ConnectorHttpResponse> {
+    return this.requestJson<ConnectorHttpResponse>(
+      '/api/workers/http-fetch',
+      { worker_id: this.id, run_id: runId, request },
+      signal,
     );
   }
 

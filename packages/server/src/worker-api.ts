@@ -8,6 +8,8 @@
  * Routes are registered in packages/server/src/index.ts.
  */
 
+export { fetchWorkerHttp } from './worker-api/http-fetch';
+
 // Polling (device registration + run claiming)
 export { pollWorkerJob } from './worker-api/poll';
 export { activatePageRun } from './worker-api/page-activation';

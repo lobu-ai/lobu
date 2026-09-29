@@ -88,6 +88,7 @@ export async function materializeDueFeeds(
         runManifestBacked: sql`run_cv.manifest_backed`,
         runManifestHash: sql`run_cv.artifact_hash`,
         runRuntime: sql`cd.run_runtime`,
+        runRequiresHttpAuth: sql`http_ap.metadata ? 'http'`,
       })
     : sql`true`;
 
@@ -105,6 +106,8 @@ export async function materializeDueFeeds(
         END AS eligibility_lane
       FROM feeds f
       JOIN connections c ON c.id = f.connection_id
+      LEFT JOIN auth_profiles http_ap
+        ON http_ap.id = c.auth_profile_id AND http_ap.organization_id = f.organization_id
       LEFT JOIN device_workers pin_dw ON pin_dw.id = c.device_worker_id
       LEFT JOIN LATERAL (
         SELECT

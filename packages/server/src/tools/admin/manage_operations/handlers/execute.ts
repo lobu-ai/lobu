@@ -229,7 +229,7 @@ async function executeLocalActionInline(
 		);
 	}
 
-	const { credentials, connectionCredentials, sessionState } =
+	const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } =
 		await resolveExecutionAuth({
 			organizationId,
 			connectionId: connection.id,
@@ -269,8 +269,10 @@ async function executeLocalActionInline(
 				env: envStrings,
 				sessionState,
 				credentials,
+				httpAuth,
 			},
 			hooks: {
+				onHttpFetch,
 				// Let an inline connector action drive the paired Owletto Chrome
 				// extension (the Lobu Team Deliveroo connector scrapes restaurant
 				// search + menu pages this way). The connector calls

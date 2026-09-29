@@ -379,6 +379,7 @@ async function executeSyncRun(
       executor: laneExecutor,
       job: {
         mode: 'sync',
+        httpAuth: job.http_auth,
         config: mergeEnv(env, job.connection_credentials, feedConfig),
         checkpoint: checkpoint as Record<string, unknown> | null,
         env,
@@ -389,6 +390,7 @@ async function executeSyncRun(
         entityIds: job.entity_ids ?? [],
       },
       hooks: {
+        ...(job.http_auth ? { onHttpFetch: (request, signal) => client.httpFetch(run_id, request, signal) } : {}),
         // One chunk of a `ctx.commit`, sent as one page: the gateway stores its
         // events and checkpoint in one transaction or not at all. Any failure
         // propagates and ends the run; the next run resumes from the last
@@ -576,6 +578,7 @@ async function executeActionRun(
       executor: laneExecutor,
       job: {
         mode: 'action',
+        httpAuth: job.http_auth,
         // NOTE: unlike the gateway's inline action path (manage_operations
         // `executeLocalActionInline`, which merges the connection's own config
         // so an action can read e.g. a `restaurants_url`), this worker-fleet
@@ -595,6 +598,7 @@ async function executeActionRun(
         credentials: credentials ?? null,
       },
       hooks: {
+        ...(job.http_auth ? { onHttpFetch: (request, signal) => client.httpFetch(run_id, request, signal) } : {}),
         onChromeDispatch: async (actionKey, actionInput) => {
           return client.dispatchChromeAction({
             parent_run_id: run_id,

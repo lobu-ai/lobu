@@ -127,7 +127,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     p.scope.organizationId
   );
 
-  const { credentials, connectionCredentials, sessionState } = await resolveExecutionAuth({
+  const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
     organizationId: p.scope.organizationId,
     connectionId: conn.id,
     authProfileId: Number(conn.auth_profile_id) || null,
@@ -159,10 +159,12 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
       env: dbEgressConfig(),
       sessionState,
       credentials,
+      httpAuth,
       limit: p.limit,
       offset: p.offset,
       sort: p.sort,
     },
+    hooks: { onHttpFetch },
     timeoutMs,
   });
 
@@ -486,7 +488,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     feed.pinned_version ?? feed.definition_version
   );
 
-  const { credentials, connectionCredentials, sessionState } = await resolveExecutionAuth({
+  const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
     organizationId: p.scope.organizationId,
     connectionId: feed.connection_id,
     authProfileId: Number(feed.auth_profile_id) || null,
@@ -518,10 +520,12 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
       env: dbEgressConfig(),
       sessionState,
       credentials,
+      httpAuth,
       limit: p.limit,
       offset: p.offset,
       sort: p.sort,
     },
+    hooks: { onHttpFetch },
     timeoutMs,
   });
 

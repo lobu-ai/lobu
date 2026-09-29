@@ -342,6 +342,7 @@ describe('scheduled feed device liveness', () => {
       orgScopeIds: [''],
       baseOrgScopeIds: [''],
       workerHardensDbEgress: true,
+      workerSupportsHttpAuth: false,
       backendCapacity: { compiled_connector: 1 },
     };
     const macContext: DueFeedClaimContext = {
@@ -355,6 +356,7 @@ describe('scheduled feed device liveness', () => {
       orgScopeIds: [org.id],
       baseOrgScopeIds: [org.id],
       workerHardensDbEgress: false,
+      workerSupportsHttpAuth: false,
       // Deliberately the map a headless daemon advertises, both backends open,
       // so the claim assertions below double as the regression test: `headless`
       // is the default platform of `lobu daemon` and that daemon asserts its
@@ -375,6 +377,7 @@ describe('scheduled feed device liveness', () => {
       orgScopeIds: [org.id],
       baseOrgScopeIds: [org.id],
       workerHardensDbEgress: false,
+      workerSupportsHttpAuth: false,
       // Matches what poll.ts advertises for a non-headless platform. This
       // feed claims through the manifest/bridge lane, which does not consult
       // compiled capacity at all -- so the value here must mirror production

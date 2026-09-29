@@ -326,6 +326,9 @@ async function handleCreateAuthProfile(
   args: Static<typeof CreateAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
+  if (args.http && args.profile_kind !== 'env') {
+    return { error: 'HTTP delivery requires an env auth profile.' };
+  }
   // Only oauth_account profiles are user-personal; every other kind is an
   // org-shared credential (env keys, OAuth app client_id/secret, browser
   // session, interactive). Gate non-personal kinds on admin role.
@@ -525,6 +528,7 @@ async function handleCreateAuthProfile(
     slug: args.slug,
     profileKind: args.profile_kind,
     authData: credentials,
+    http: args.http,
     provider,
     createdBy: ctx.userId ?? 'api',
   });

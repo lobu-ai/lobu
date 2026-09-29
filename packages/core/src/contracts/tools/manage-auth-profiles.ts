@@ -17,6 +17,22 @@ const AuthProfileKind = Type.Union([
   Type.Literal("browser_session"),
 ]);
 
+/** Immutable delivery binding; credential values stay in the existing secret store. */
+export const HttpAuthBindingSchema = Type.Object(
+  {
+    origin: Type.String({
+      description: "Exact HTTPS origin allowed to receive these credentials",
+    }),
+    headers: Type.Record(Type.String(), Type.String(), {
+      minProperties: 1,
+      description:
+        "Header name to credential field; each field holds the complete header value",
+    }),
+  },
+  { additionalProperties: false }
+);
+export type HttpAuthBinding = Static<typeof HttpAuthBindingSchema>;
+
 export const ListAuthProfilesAction = Type.Object({
   action: Type.Literal("list_auth_profiles", {
     description: "List reusable auth profiles with filters.",
@@ -71,6 +87,7 @@ export const CreateAuthProfileAction = Type.Object({
       description: "Schema-driven auth values for env or OAuth app profiles",
     })
   ),
+  http: Type.Optional(HttpAuthBindingSchema),
   auth_data: Type.Optional(
     Type.Record(Type.String(), Type.Any(), {
       description: "Raw auth/session payload for browser-backed profiles",

@@ -31,6 +31,7 @@ import { decideEgress } from '@lobu/connector-sdk/egress-policy';
 import { type EgressAddressPolicy, isReservedIp, stripIpv6Brackets } from '@lobu/connector-sdk/ip-reachability';
 import { normalizeDomainPattern } from '@lobu/core';
 import { CredentialVault } from '../egress/credentials.js';
+import { CONNECTOR_HTTP_MAX_BYTES } from '@lobu/core/contracts/worker/protocol';
 import {
   EgressDispatcher,
   fetchPublicUrl,
@@ -423,6 +424,7 @@ interface RunNetwork {
   /** `placeholder\nhost` pairs already logged: one audit line per credential per host, however chatty the connector. */
   spends: Set<string>;
   log: RunLog;
+  onHttpFetch?: ExecutionHooks['onHttpFetch'];
   /** Native turns use one gateway credential, pinned outside guest control. */
   agentGateway?: {
     origin: string;
@@ -552,6 +554,9 @@ export class IsolateExecutor implements SyncExecutor {
     job: ExecutorJob,
     hooks?: ExecutionHooks
   ): Promise<ExecutorResult> {
+    if (job.httpAuth && !hooks?.onHttpFetch) {
+      throw new Error('HTTP authentication requires a gateway fetch hook');
+    }
     assertIsolateEligible(compiledCode);
     const ivm = await this.requireIsolatedVm();
 
@@ -709,6 +714,7 @@ export class IsolateExecutor implements SyncExecutor {
 
     const network: RunNetwork = {
       egress, vault, spends: new Set<string>(), log,
+      onHttpFetch: job.httpAuth ? hooks?.onHttpFetch : undefined,
       ...(job.mode === 'agent_turn' && job.credentials?.accessToken ? {
         agentGateway: {
           origin: new URL(job.turn.provider.baseUrl).origin,
@@ -1226,6 +1232,43 @@ export class IsolateExecutor implements SyncExecutor {
     let headers = new Headers(request.headers);
     let requestBody: Uint8Array | null =
       body instanceof Uint8Array ? body : body instanceof ArrayBuffer ? new Uint8Array(body) : null;
+    if (net.onHttpFetch) {
+      // Authenticated jobs never dial from the worker or resolve its vault.
+      // The gateway owns credential injection and pinned-address transport.
+      await this.assertHostAllowed('fetch', url.hostname, net.log);
+      if (url.protocol !== 'https:') throw refuse(net.log, 'gateway HTTP authentication requires HTTPS');
+      if (requestBody && requestBody.byteLength > CONNECTOR_HTTP_MAX_BYTES) {
+        throw new RangeError(`fetch request body exceeded the ${CONNECTOR_HTTP_MAX_BYTES}-byte cap`);
+      }
+      const response = await net.onHttpFetch({
+        url: url.href,
+        method,
+        headers: Object.fromEntries(headers.entries()),
+        ...(requestBody ? { body: Buffer.from(requestBody).toString('base64') } : {}),
+      }, signal);
+      const limit = Math.min(CONNECTOR_HTTP_MAX_BYTES, this.options.fetchBodyBytes);
+      if (response.body.length > Math.ceil(limit / 3) * 4) {
+        throw new RangeError(`fetch response body exceeded the ${limit}-byte cap`);
+      }
+      const bytes = Buffer.from(response.body, 'base64');
+      if (bytes.byteLength > limit) {
+        throw new RangeError(`fetch response body exceeded the ${limit}-byte cap`);
+      }
+      const responseHeaders = new Headers(response.headers);
+      if (response.status >= 300 && response.status <= 399 && response.status !== 304 && responseHeaders.has('location') && request.redirect !== 'manual') {
+        throw new TypeError('fetch failed: gateway-authenticated requests cannot follow redirects');
+      }
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        url: url.href,
+        redirected: false,
+        headers: [...responseHeaders.entries()],
+        body: method === 'HEAD' || [204, 205, 304].includes(response.status)
+          ? null
+          : new Response(bytes).body,
+      };
+    }
     const redirectMode = request.redirect;
     let redirected = false;
     /** Headers a placeholder was resolved into: they never follow a redirect off this origin, whatever their name. */

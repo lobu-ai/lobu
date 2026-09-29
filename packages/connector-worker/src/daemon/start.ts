@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 import { hostname } from 'node:os';
 import { isKnownPlatform } from '@lobu/core';
 import {
+  CONNECTOR_HTTP_AUTH_CAPABILITY,
   EXECUTION_BACKENDS,
 } from '@lobu/core/contracts/worker/protocol';
 import { assertExternalDepsResolvable } from '../compile/index.js';
@@ -157,7 +158,7 @@ export async function startDaemonCommand(
   // keep draining under the single-reply contract they were admitted with.
   const workerCapabilities: Record<string, boolean> = platform
     ? Object.fromEntries(capabilities.map((name) => [name, true]))
-    : { db_egress_hardening: true, agent_turn: true, agent_turn_per_input_responses: true };
+    : { db_egress_hardening: true, agent_turn: true, agent_turn_per_input_responses: true, [CONNECTOR_HTTP_AUTH_CAPABILITY]: true };
   // Auto-discover device identity from the host when not passed: a device
   // worker defaults to `<platform>:<short-hostname>` and a hostname label. An
   // interactive daemon instead derives its id from the exact inherited

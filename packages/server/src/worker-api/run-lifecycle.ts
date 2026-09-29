@@ -206,7 +206,8 @@ async function reactivateProfileCascade(
 		await tx`
       UPDATE auth_profiles
       SET auth_data = ${tx.json(nextAuthData)},
-          metadata = ${tx.json(authData.metadata)},
+          metadata = (${tx.json(authData.metadata)}::jsonb - 'http')
+            || CASE WHEN metadata ? 'http' THEN jsonb_build_object('http', metadata->'http') ELSE '{}'::jsonb END,
           status = 'active',
           updated_at = current_timestamp
       WHERE id = ${authProfileId}

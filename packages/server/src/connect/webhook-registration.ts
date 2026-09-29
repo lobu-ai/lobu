@@ -169,7 +169,7 @@ export async function registerConnectorWebhook(params: {
         organizationId
       );
 
-      const { credentials, connectionCredentials, sessionState } = await resolveExecutionAuth({
+      const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
         organizationId,
         connectionId,
         authProfileId: toNumberOrNull(connection.auth_profile_id),
@@ -193,10 +193,12 @@ export async function registerConnectorWebhook(params: {
           mode: 'webhook_register',
           config: mergeExecutionConfig(connection.config, connectionCredentials),
           credentials,
+          httpAuth,
           sessionState,
           callbackUrl,
           env: envStrings,
         },
+        hooks: { onHttpFetch },
       });
 
       if (result.mode !== 'webhook_register') {
@@ -286,7 +288,7 @@ export async function unregisterConnectorWebhook(params: {
         connection.connector_key,
         organizationId
       );
-      const { credentials, connectionCredentials, sessionState } = await resolveExecutionAuth({
+      const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
         organizationId,
         connectionId,
         authProfileId: toNumberOrNull(connection.auth_profile_id),
@@ -307,10 +309,12 @@ export async function unregisterConnectorWebhook(params: {
           mode: 'webhook_unregister',
           config: mergeExecutionConfig(connection.config, connectionCredentials),
           credentials,
+          httpAuth,
           sessionState,
           externalId,
           env: envStrings,
         },
+        hooks: { onHttpFetch },
       });
       if (result.mode !== 'webhook_unregister') {
         throw new Error(`Expected webhook_unregister result, got mode=${result.mode}`);

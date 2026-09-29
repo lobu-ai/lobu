@@ -14,6 +14,7 @@ import {
 import { Value } from '@sinclair/typebox/value';
 import {
   AutomationExecutionConfigSchema,
+  CONNECTOR_HTTP_AUTH_CAPABILITY,
   DEVICE_CHAT_MAX_CONTEXT_LENGTH,
   PollRequestSchema,
   defaultBackendCapacity,
@@ -511,6 +512,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // worker, not a device-authorized one, so the platform-authorized set does not
   // apply. Gated in the shared fleet claim lane; only active in cloud mode.
   const workerHardensDbEgress = capabilities.db_egress_hardening === true;
+  const workerSupportsHttpAuth =
+    !isUserScopedWorker && capabilities[CONNECTOR_HTTP_AUTH_CAPABILITY] === true;
 
   // An agent turn runs Lobu's own agent-session guest bundle through
   // IsolateExecutor. `executeRun`'s default arm is a connector sync, so a
@@ -720,6 +723,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     orgScopeIds,
     baseOrgScopeIds,
     workerHardensDbEgress,
+    workerSupportsHttpAuth,
     backendCapacity,
   };
   const workerKind = isUserScopedWorker ? 'device' : 'fleet';
@@ -812,6 +816,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           r.action_input->'turn'->>'conversation_id' AS turn_conversation_id
         FROM runs r
         LEFT JOIN connections con ON con.id = r.connection_id
+        LEFT JOIN auth_profiles http_ap
+          ON http_ap.id = con.auth_profile_id AND http_ap.organization_id = r.organization_id
         -- Pin target platform: chrome-extension pins on non-chrome connectors mean
         -- browser affinity (scrape via that extension), not "run parent sync on
         -- the extension". See dispatch-chrome-action preferredBrowserWorkerForConnection.
@@ -894,6 +900,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                 runManifestBacked: tx`(r.connector_artifact_hash IS NOT NULL OR COALESCE(run_cv.manifest_backed, false))`,
                 runManifestHash: tx`r.connector_artifact_hash`,
                 runRuntime: tx`cd.run_runtime`,
+                runRequiresHttpAuth: tx`http_ap.metadata ? 'http'`,
               })}
             )
             -- (1a) Agent turns: one conversation turn as one isolate job.
@@ -2008,7 +2015,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const connectionIsDevicePinned = row.connection_device_worker_id != null;
   const deliverConnectionAuth =
     !isDeviceOwnedRun && !!row.connection_id && (!isUserScopedWorker || connectionIsDevicePinned);
-  const { credentials, connectionCredentials, sessionState } = deliverConnectionAuth
+  const { credentials, connectionCredentials, sessionState, httpAuth } = deliverConnectionAuth
     ? await resolveExecutionAuth({
         organizationId: row.organization_id,
         connectionId: row.connection_id!,
@@ -2022,7 +2029,18 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         credentials: null,
         connectionCredentials: {},
         sessionState: null,
+        httpAuth: undefined,
       };
+
+  // A binding may have been attached after claim selection. Never serialize
+  // its execution envelope to a worker that cannot use the gateway bridge.
+  if (httpAuth && (!workerSupportsHttpAuth || !['sync', 'action'].includes(row.run_type))) {
+    const message = 'Worker cannot execute gateway HTTP authentication for this run';
+    await failClaimedWorkerRun({
+      runId: row.run_id, workerId: worker_id, errorMessage: message, chargeSyncFeed: true,
+    });
+    return c.json({ ...pollMetadata, next_poll_seconds: 1, skipped_run_id: row.run_id, error: message });
+  }
 
   // `auth_data` holds `secret://` refs, not values. An `authenticate` run
   // consumes these as REAL credentials (e.g. to refresh an expiring token),
@@ -2124,6 +2142,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     checkpoint: row.checkpoint ?? undefined,
     entity_ids: row.feed_entity_ids ?? undefined,
     credentials,
+    http_auth: httpAuth || undefined,
     connection_credentials:
       Object.keys(connectionCredentials).length > 0 ? connectionCredentials : undefined,
     compiled_code: compiledCode,

@@ -19,6 +19,7 @@
  */
 
 import { hostname } from 'node:os';
+import { CONNECTOR_HTTP_AUTH_CAPABILITY } from '@lobu/core/contracts/worker/protocol';
 import { WorkerDaemon } from '@lobu/connector-worker/daemon';
 import { buildConnectorWorkerEnv } from '@lobu/connector-worker/env';
 import { intervals } from '../config/intervals';
@@ -70,7 +71,7 @@ export function startEmbeddedConnectorWorker(
       // hand this process an `agent_turn` row at all. Per-input attribution
       // (#3662) rides along: the bundled guest always attributes one reply,
       // tool ledger, and verbatim first error per consumed input.
-      capabilities: { db_egress_hardening: true, agent_turn: true, agent_turn_per_input_responses: true },
+      capabilities: { db_egress_hardening: true, agent_turn: true, agent_turn_per_input_responses: true, [CONNECTOR_HTTP_AUTH_CAPABILITY]: true },
       pollIntervalMs: intervals.embeddedWorkerPollIntervalMs,
       maxConcurrentJobs: 1,
     },

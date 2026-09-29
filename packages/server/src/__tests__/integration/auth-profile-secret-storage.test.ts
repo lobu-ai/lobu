@@ -106,6 +106,24 @@ describe("auth_profiles credential storage", () => {
 		};
 	});
 
+	it("withholds HTTP-bound env credentials from execution and raw resolution", async () => {
+		const sql = getTestDb();
+		const orgId = workspace.org.id;
+		const conn = await createTestConnection({ organization_id: orgId, connector_key: "postgres" });
+		const profile = await createAuthProfile({
+			organizationId: orgId, connectorKey: "postgres", displayName: "HTTP bound",
+			profileKind: "env", authData: { AUTHORIZATION: "Bearer synthetic-http-secret" },
+		});
+		await sql`UPDATE auth_profiles SET metadata = ${sql.json({ http: {
+			origin: "https://api.example.com", headers: { authorization: "AUTHORIZATION" },
+		} })} WHERE id = ${profile.id}`;
+		await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${conn.id}`;
+		expect(await resolveCredentials(orgId, conn.id, profile.id)).toEqual({});
+		await expect(resolveAuthCredentials({
+			organizationId: orgId, authProfileId: profile.id, authData: profile.auth_data,
+		})).rejects.toThrow("HTTP-bound");
+	});
+
 	/**
 	 * ITEM 1 — WRITE. The persisted row must not contain the password in any
 	 * form. Asserted on the serialized raw row so a nested/re-encoded copy
