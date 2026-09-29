@@ -4095,6 +4095,18 @@ export type ManageAuthProfilesData = {
         credentials?: {
           [key: string]: unknown | string;
         };
+        http?: {
+          /**
+           * Exact HTTPS origin allowed to receive these credentials
+           */
+          origin: string;
+          /**
+           * Header name to credential field; each field holds the complete header value
+           */
+          headers: {
+            [key: string]: unknown | string;
+          };
+        };
         /**
          * Raw auth/session payload for browser-backed profiles
          */
