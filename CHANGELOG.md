@@ -1,5 +1,31 @@
 # Changelog
 
+## [21.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v21.0.0...lobu-v21.1.0) (2026-09-29)
+
+
+### Features
+
+* **auth:** deliver HTTP credentials at gateway and fix Loki sync ([#3747](https://github.com/lobu-ai/lobu/issues/3747)) ([754f6ec](https://github.com/lobu-ai/lobu/commit/754f6ecc5096cfdc7278920fa1b15a829a48cad3))
+
+
+### Bug Fixes
+
+* **cli:** reject encoded local paths in view bundles ([#3749](https://github.com/lobu-ai/lobu/issues/3749)) ([424d954](https://github.com/lobu-ai/lobu/commit/424d9542f4665c46b62641dca37e93f19591fa92))
+* **connectors:** persist bounded traversal continuations ([#3735](https://github.com/lobu-ai/lobu/issues/3735)) ([631b018](https://github.com/lobu-ai/lobu/commit/631b0182dffe54fc632f0096785cb786231936b9))
+* **examples:** serialize poll vote reduction in the Automation run ([#3727](https://github.com/lobu-ai/lobu/issues/3727)) ([304acaf](https://github.com/lobu-ai/lobu/commit/304acaf9622c6ae3729d939a72664eb379995a7b))
+* **github:** resume commits beyond page cap ([#3732](https://github.com/lobu-ai/lobu/issues/3732)) ([b1a0808](https://github.com/lobu-ai/lobu/commit/b1a08080119a03548bc57688f3f84050b4ae5258))
+* **interactions:** reconcile accepted action retries from durable receipts ([#3725](https://github.com/lobu-ai/lobu/issues/3725)) ([271db39](https://github.com/lobu-ai/lobu/commit/271db39b193a6e0cdea6fcefb286882352c92db5))
+* **loki:** checkpoint completed activity windows ([#3746](https://github.com/lobu-ai/lobu/issues/3746)) ([e3e9d78](https://github.com/lobu-ai/lobu/commit/e3e9d78e86fcfbb20d6dfecac8c58d0a09ad4727))
+* normalize empty delivery IDs on accepted action retries ([#3729](https://github.com/lobu-ai/lobu/issues/3729)) ([d270318](https://github.com/lobu-ai/lobu/commit/d27031861a69915c3c5faccabc993e735a7400ee))
+* **ops:** include account activity and SDK failures in digest ([#3750](https://github.com/lobu-ai/lobu/issues/3750)) ([d91e64e](https://github.com/lobu-ai/lobu/commit/d91e64efc85a11438a4ac7d262268d0c17c04fca))
+* **producthunt:** reset cursor after completed traversal ([#3730](https://github.com/lobu-ai/lobu/issues/3730)) ([0c85c3e](https://github.com/lobu-ai/lobu/commit/0c85c3efaaff8912c2e7ceb7189aadfd0a590e7c))
+* **reddit:** resume bounded listing after page cap ([#3731](https://github.com/lobu-ai/lobu/issues/3731)) ([b2ded67](https://github.com/lobu-ai/lobu/commit/b2ded67c34d879897665fca91ea6b4654d501030))
+* remove retiring qwen-turbo from Qwen choices ([#3734](https://github.com/lobu-ai/lobu/issues/3734)) ([06cdc7c](https://github.com/lobu-ai/lobu/commit/06cdc7ccb30134efae3e60ae76d12bcfd5601eaa))
+* **server:** clarify target-workspace invocation guidance ([#3743](https://github.com/lobu-ai/lobu/issues/3743)) ([9467dc8](https://github.com/lobu-ai/lobu/commit/9467dc89de03f1fd5a1585bd3d764f633be5025a))
+* **server:** consolidate event entity attribution ([#3741](https://github.com/lobu-ai/lobu/issues/3741)) ([a4adbfe](https://github.com/lobu-ai/lobu/commit/a4adbfe5fff1548f4ed6782b75308dfa626bc0f5))
+* **views:** reject unregistered action kinds when a view is saved ([#3751](https://github.com/lobu-ai/lobu/issues/3751)) ([3d1c138](https://github.com/lobu-ai/lobu/commit/3d1c13895158174017cbd6d6a1bbc181495013cc))
+* **views:** require explicit scope outside workspace views ([#3724](https://github.com/lobu-ai/lobu/issues/3724)) ([d163557](https://github.com/lobu-ai/lobu/commit/d16355777803eaf5ec777cffbde5fb6c433adbf3))
+
 ## [21.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v20.3.1...lobu-v21.0.0) (2026-09-24)
 
 
