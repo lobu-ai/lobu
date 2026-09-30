@@ -57,6 +57,19 @@ describe('classifier CRUD', () => {
     await owner.classifiers.delete({ classifier_id: classifierId });
   });
 
+  it('creates a classifier whose values carry only descriptions', async () => {
+    const created = (await owner.classifiers.create({
+      slug: 'topic',
+      name: 'Topic',
+      attribute_key: 'topic',
+      attribute_values: {
+        security: { description: 'Security, privacy, vulnerabilities' },
+        other: { description: 'Anything else' },
+      },
+    })) as { data?: { classifier_id: number } };
+    expect(created.data?.classifier_id).toBeGreaterThan(0);
+  });
+
   it('blocks a member from creating classifiers (admin-only)', async () => {
     const member = owner.withAuth({ memberRole: 'member' });
     await expect(

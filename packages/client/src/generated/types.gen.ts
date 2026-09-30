@@ -6317,7 +6317,7 @@ export type ManageClassifiersData = {
             | unknown
             | {
                 description: string;
-                examples: Array<string>;
+                examples?: Array<string>;
               };
         };
         /**
@@ -6367,9 +6367,9 @@ export type ManageClassifiersData = {
          */
         value?: string | null;
         /**
-         * [classify] Confidence in the value, 0..1 (default: 1)
+         * [classify] Confidence in the value, 0..1. Omitted or null: unscored for an 'llm' label, 1 for a 'user' label
          */
-        confidence?: number;
+        confidence?: number | null;
         /**
          * [classify] Array of classifications to update (batch mode)
          */
@@ -6383,9 +6383,9 @@ export type ManageClassifiersData = {
            */
           value: string | null;
           /**
-           * [classify] Confidence in the value, 0..1 (default: 1)
+           * [classify] Confidence in the value, 0..1. Omitted or null: unscored for an 'llm' label, 1 for a 'user' label
            */
-          confidence?: number;
+          confidence?: number | null;
           /**
            * Reasoning/justification for this classification
            */

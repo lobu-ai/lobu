@@ -23,10 +23,6 @@ describe("manage_classifiers attribute_values validation", () => {
 		["an empty map", {}],
 		["a missing description", { positive: { examples: ["great"] } }],
 		[
-			"a missing examples list",
-			{ positive: { description: "Positive sentiment" } },
-		],
-		[
 			"a label vector (retired with the embedding engine)",
 			{
 				positive: {
@@ -53,6 +49,15 @@ describe("manage_classifiers attribute_values validation", () => {
 				attribute_values: attributeValues,
 			}),
 		).toThrow(/Invalid arguments for manage_classifiers.*attribute_values/);
+	});
+
+	it("accepts values that carry only a description (examples are optional context)", () => {
+		expect(
+			validateToolArgs("manage_classifiers", ManageClassifiersSchema, {
+				...createArgs,
+				attribute_values: { positive: { description: "Positive sentiment" } },
+			}),
+		).toBeTruthy();
 	});
 
 	it("accepts the structured attribute-value map consumed by classifier creation", () => {

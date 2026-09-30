@@ -1057,10 +1057,10 @@ export default async (_ctx, client) => {
 	},
 	"classifiers.create": {
 		summary:
-			"Create a classifier (a label schema). Requires `slug`, `name`, `attribute_key`, and `attribute_values`. `attribute_values` is an OBJECT keyed by value slug — each entry needs a `description` and `examples` (string array), not a flat list. Labels are then written with `classifiers.classify`.",
+			"Create a classifier (a label schema). Requires `slug`, `name`, `attribute_key`, and `attribute_values`. `attribute_values` is an OBJECT keyed by value slug — each entry needs a `description` and may carry `examples` (string array), not a flat list. Labels are then written with `classifiers.classify`.",
 		access: "admin",
 		signature:
-			"classifiers.create(input: { slug: string; name: string; attribute_key: string; attribute_values: Record<string, { description: string; examples: string[] }>; entity_id?: number; description?: string; created_by?: string }): Promise<unknown>",
+			"classifiers.create(input: { slug: string; name: string; attribute_key: string; attribute_values: Record<string, { description: string; examples?: string[] }>; entity_id?: number; description?: string; created_by?: string }): Promise<unknown>",
 		example:
 			"await client.classifiers.create({ slug: 'sentiment', name: 'Sentiment', attribute_key: 'sentiment', attribute_values: { positive: { description: 'Positive tone', examples: ['Great work!'] } } });",
 	},
@@ -1071,10 +1071,10 @@ export default async (_ctx, client) => {
 	},
 	"classifiers.classify": {
 		summary:
-			"Write labels on one or many content records (single or batch); the only way labels are written. An Automation labels events by reading them and calling this with `source: 'llm'`; only `source: 'user'` labels are manual and they win at read time. `confidence` (0..1) defaults to 1. `value: null` removes your label. The classifier is addressed by `classifier_slug` (a string — NOT the numeric `classifier_id` other CRUD methods use).",
+			"Write labels on one or many content records (single or batch); the only way labels are written. An Automation labels events by reading them and calling this with `source: 'llm'`; only `source: 'user'` labels are manual and they win at read time. `confidence` is 0..1; omitted or null leaves an 'llm' label unscored and defaults a 'user' label to 1. `value: null` removes your label. The classifier is addressed by `classifier_slug` (a string — NOT the numeric `classifier_id` other CRUD methods use).",
 		access: "admin",
 		signature:
-			"classifiers.classify(input: { classifier_slug: string; content_id?: number; value?: string | null; confidence?: number; reasoning?: string; classifications?: Array<{ content_id: number; value: string | null; confidence?: number; reasoning?: string }>; source?: 'llm' | 'user' }): Promise<unknown>",
+			"classifiers.classify(input: { classifier_slug: string; content_id?: number; value?: string | null; confidence?: number | null; reasoning?: string; classifications?: Array<{ content_id: number; value: string | null; confidence?: number | null; reasoning?: string }>; source?: 'llm' | 'user' }): Promise<unknown>",
 		example:
 			"await client.classifiers.classify({ classifier_slug: 'sentiment', source: 'llm', classifications: [{ content_id: 101, value: 'positive', confidence: 0.9 }] });",
 	},

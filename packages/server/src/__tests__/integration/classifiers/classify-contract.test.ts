@@ -6,7 +6,8 @@
  *   `source='llm'` has one meaning.
  * - `source` follows the acting principal: an Automation or agent writes
  *   `llm` and cannot claim `user`.
- * - a per-item `confidence` is stored as `confidences[value]`, defaulting to 1.
+ * - a per-item `confidence` is stored as `confidences[value]`; without one a
+ *   `user` label stores 1 and an `llm` label stays unscored (`{}`).
  * - `value: null` UNSETS the caller's label. It used to insert `'{}'`, which
  *   violates `event_classifications_values_not_empty`.
  * - a call made by an Automation reaction records that Automation and run, and
@@ -106,6 +107,33 @@ describe('manage_classifiers classify contract', () => {
     ]);
     expect(rows[0].confidences).toEqual({ positive: 0.62 });
     expect(rows[1].confidences).toEqual({ negative: 1 });
+  });
+
+  it.each([
+    ['llm', 'single'], ['llm', 'batch'], ['user', 'single'], ['user', 'batch'],
+  ] as const)('stores %s confidence defaults and explicit scores in %s mode', async (source, mode) => {
+    const { orgId, ctx } = await seed();
+    for (const confidence of [undefined, null, 0, 0.62, 1]) {
+      const event = await createTestEvent({ organization_id: orgId, content: String(confidence) });
+      const item = {
+        content_id: Number(event.id),
+        value: 'positive',
+        ...(confidence === undefined ? {} : { confidence }),
+      };
+      const result = await manageClassifiers(
+        {
+          action: 'classify',
+          classifier_slug: 'sentiment',
+          source,
+          ...(mode === 'single' ? item : { classifications: [item] }),
+        } as never,
+        {} as never,
+        ctx
+      );
+      expect(result.data?.failed).toBe(0);
+      const expected = confidence == null ? (source === 'user' ? { positive: 1 } : {}) : { positive: confidence };
+      expect((await labels(Number(event.id)))[0].confidences).toEqual(expected);
+    }
   });
 
   it('rejects a confidence outside 0..1', async () => {

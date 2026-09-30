@@ -414,9 +414,9 @@ describe("method-metadata", () => {
 			],
 			[
 				"classifiers.classify",
-				["classifier_slug: string", "'llm' | 'user'", "confidence?: number"],
+				["classifier_slug: string", "'llm' | 'user'", "confidence?: number | null"],
 			],
-			["classifiers.create", ["attribute_values", "examples: string[]"]],
+			["classifiers.create", ["attribute_values", "examples?: string[]"]],
 		];
 		for (const [path, fragments] of expectations) {
 			const sig = METHOD_METADATA[path]?.signature ?? "";

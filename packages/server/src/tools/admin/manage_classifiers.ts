@@ -44,7 +44,7 @@ export { ManageClassifiersResultSchema, ManageClassifiersSchema };
  */
 function readAttributeValues(
   attributeValues: unknown
-): Record<string, { description: string; examples: string[] }> | null {
+): Record<string, { description: string; examples?: string[] }> | null {
   if (!attributeValues) return null;
   let parsed: unknown = attributeValues;
   if (typeof attributeValues === 'string') {
@@ -57,7 +57,7 @@ function readAttributeValues(
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return null;
   }
-  return parsed as Record<string, { description: string; examples: string[] }>;
+  return parsed as Record<string, { description: string; examples?: string[] }>;
 }
 
 // ============================================
@@ -407,7 +407,7 @@ async function writeLabel(
   classifierId: number,
   label: {
     value: string | null;
-    confidence?: number;
+    confidence?: number | null;
     source: 'llm' | 'user';
     reasoning?: string;
   }
@@ -423,6 +423,7 @@ async function writeLabel(
   const automationId = ctx.actingAutomationId ?? null;
   const runId = ctx.actingRunId ?? null;
   const { value, source } = label;
+  const confidence = label.confidence ?? (source === 'user' ? 1 : null);
 
   await sql.begin(async (tx) => {
     await tx`
@@ -434,7 +435,7 @@ async function writeLabel(
     await tx`
       INSERT INTO event_classifications (event_id, classifier_id, automation_id, run_id, "values", confidences, source, is_manual, reasoning)
       VALUES (${contentId}, ${classifierId}, ${automationId}, ${runId}, ${pgTextArray([value])}::text[],
-              ${sql.json({ [value]: label.confidence ?? 1 })}, ${source}, ${source === 'user'}, ${label.reasoning || null})
+              ${sql.json(confidence === null ? {} : { [value]: confidence })}, ${source}, ${source === 'user'}, ${label.reasoning || null})
     `;
   });
 

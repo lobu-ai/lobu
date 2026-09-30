@@ -19,11 +19,13 @@ const ClassifierId = Type.Number({
 const ClassifierSlug = Type.String({
   description: '[classify] Classifier slug (e.g., "sentiment", "bug-severity")',
 });
-const Confidence = Type.Number({
-  minimum: 0,
-  maximum: 1,
-  description: "[classify] Confidence in the value, 0..1 (default: 1)",
-});
+const Confidence = Type.Union(
+  [Type.Number({ minimum: 0, maximum: 1 }), Type.Null()],
+  {
+    description:
+      "[classify] Confidence in the value, 0..1. Omitted or null: unscored for an 'llm' label, 1 for a 'user' label",
+  }
+);
 
 export const CreateClassifierAction = Type.Object({
   action: Type.Literal("create", {
@@ -46,7 +48,7 @@ export const CreateClassifierAction = Type.Object({
     Type.Object(
       {
         description: Type.String(),
-        examples: Type.Array(Type.String()),
+        examples: Type.Optional(Type.Array(Type.String())),
       },
       { additionalProperties: false }
     ),
