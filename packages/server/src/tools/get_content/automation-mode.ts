@@ -1007,7 +1007,6 @@ export async function handleAutomationMode(
         operation_key: string;
         name: string;
         kind: 'read' | 'write';
-        requires_approval: boolean;
       }>
     | undefined;
 
@@ -1015,7 +1014,7 @@ export async function handleAutomationMode(
   try {
     const [pastReactionsResult, operations, feedbackSummary] = await Promise.all([
       getPastReactionsSummary(automationId, 30),
-      getAvailableOperations(automationEntityIds),
+      getAvailableOperations(automationEntityIds, context.organizationId, Number(automationId)),
       getRecentFeedbackSummary(automationId, 10),
     ]);
     pastReactions = pastReactionsResult;

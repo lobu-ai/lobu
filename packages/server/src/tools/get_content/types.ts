@@ -135,7 +135,6 @@ export const GetContentResultSchema = Type.Object({
         operation_key: Type.String(),
         name: Type.String(),
         kind: Type.Union([Type.Literal('read'), Type.Literal('write')]),
-        requires_approval: Type.Boolean(),
       })
     )
   ),

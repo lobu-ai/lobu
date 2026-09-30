@@ -3,6 +3,7 @@ import { activateMatchingPage, replacePageActivations } from "../../../../owlett
 import { Hono } from "hono";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { restRecreateBrowserHandoff } from "../../notifications/routes";
 import {
 	createNotificationForUsers,
@@ -16,6 +17,7 @@ import { dispatchChromeActionToExtension } from "../../worker-api/dispatch-chrom
 import { activatePageRun } from "../../worker-api/page-activation";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
+	createTestAgent,
 	createTestConnectorDefinition,
 	createTestEvent,
 	createTestOrganization,
@@ -38,11 +40,12 @@ async function seed() {
 	await sql`
 		UPDATE connector_definitions
 		SET actions_schema = ${sql.json({
-			prepare_reply: { name: "Prepare reply", kind: "write", requiresApproval: false },
+			prepare_reply: { name: "Prepare reply", kind: "write" },
 		})}
 		WHERE organization_id = ${org.id}
 		  AND key = 'x'
 	`;
+	await upsertEntityApprovalPolicy(org.id, { resourceClass: "connector_action", connectorKey: "x", effects: { execute: "auto" } });
 	await sql`
 		INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
 		VALUES (${`member-${Date.now()}`}, ${org.id}, ${user.id}, 'owner', NOW())
@@ -69,11 +72,11 @@ async function seed() {
 		INSERT INTO runs (
 			organization_id, run_type, connection_id, connector_key, action_key,
 			action_input, approval_status, status, created_at, expires_at,
-			activation_kind, activation_target_urls, created_by_user_id, run_metadata
+			activation_kind, activation_target_urls, created_by_user_id, run_metadata, policy_principal_kind
 		) VALUES (
 			${org.id}, 'action', ${connection.id}, 'x', 'prepare_reply',
 			${sql.json({ body: "draft" })}, 'auto', 'pending', NOW(), NOW() + interval '1 day',
-			'page_visit', ARRAY['https://x.com/ada/status/123']::text[], ${user.id}, ${sql.json({ page_activation_identity: 'exact' })}
+			'page_visit', ARRAY['https://x.com/ada/status/123']::text[], ${user.id}, ${sql.json({ page_activation_identity: 'exact' })}, 'user'
 		)
 		RETURNING id
 	`;
@@ -326,12 +329,12 @@ describe("page-activated operation runs", () => {
 			INSERT INTO runs (
 				organization_id, run_type, connection_id, connector_key, action_key,
 				action_input, approval_status, status, created_at, expires_at,
-				activation_kind, activation_target_urls, created_by_user_id, run_metadata
+				activation_kind, activation_target_urls, created_by_user_id, run_metadata, policy_principal_kind
 			) VALUES (
 				${seeded.org.id}, 'action', ${seeded.connection.id}, 'x', 'prepare_reply',
 				${sql.json({ body: "raised mid-hold" })}, 'auto', 'pending', NOW(), NOW() + interval '1 day',
 				'page_visit', ARRAY['https://x.com/ada/status/456']::text[], ${seeded.user.id},
-				${sql.json({ page_activation_identity: "exact" })}
+				${sql.json({ page_activation_identity: "exact" })}, 'user'
 			)
 			RETURNING id
 		`;
@@ -440,7 +443,7 @@ describe("page-activated operation runs", () => {
 		expect(result).toEqual({
 			status: "failed",
 			error_message:
-				"This browser operation requires an exact user page visit before it can run.",
+				"The parent connector run is no longer authorized to execute.",
 		});
 		const childRuns = await sql<{ count: number }[]>`
 			SELECT count(*)::int AS count FROM runs WHERE connector_key = 'chrome'
@@ -461,6 +464,7 @@ describe("page-activated operation runs", () => {
 			},
 			idempotencyKey: "page-activation-replay",
 			approvalMode: "inline",
+			policyPrincipalKind: "user",
 			activation: {
 				kind: "page_visit",
 				urls: ["https://x.com/grace/status/456"],
@@ -514,11 +518,13 @@ describe("page-activated operation runs", () => {
 					expiresInSeconds: 86_400,
 				},
 			}),
-		).rejects.toThrow("Page activation requires inline execution");
+		).rejects.toThrow("Page activation requires a server-executed connector operation");
 	});
 
 	it("carries the browser action URL through notifications and the shared activity feed", async () => {
 		const seeded = await seed();
+		const agent = await createTestAgent({ organizationId: seeded.org.id, agentId: "page-draft-agent" });
+		await sql`UPDATE runs SET policy_principal_kind = 'agent', policy_principal_id = ${agent.agentId} WHERE id = ${seeded.run.id}`;
 		const ctx = {
 			organizationId: seeded.org.id,
 			userId: seeded.user.id,
@@ -629,6 +635,8 @@ describe("page-activated operation runs", () => {
 			  AND user_id = ${seeded.user.id}
 		`;
 		expect(target?.browser_run_id).toBe(recreated.browser_handoff.run_id);
+		const [requester] = await sql`SELECT policy_principal_kind, policy_principal_id FROM runs WHERE id = ${recreated.browser_handoff.run_id}`;
+		expect(requester).toMatchObject({ policy_principal_kind: "agent", policy_principal_id: agent.agentId });
 		const recreatedList = await listNotifications({
 			organizationId: seeded.org.id,
 			userId: seeded.user.id,
@@ -637,6 +645,13 @@ describe("page-activated operation runs", () => {
 			run_id: recreated.browser_handoff.run_id,
 			state: "ready",
 		});
+		for (const effect of ["deny", "approval"] as const) {
+			await upsertEntityApprovalPolicy(seeded.org.id, { resourceClass: "connector_action", connectorKey: "x", effects: { execute: effect } });
+			const refused = await recreateApp.request(recreatePath, { method: "POST" });
+			expect(refused.status).toBe(409);
+			expect(await refused.json()).toMatchObject({ error: expect.stringContaining(effect === "deny" ? "blocks" : "requires approval") });
+		}
+		await upsertEntityApprovalPolicy(seeded.org.id, { resourceClass: "connector_action", connectorKey: "x", effects: { execute: "auto" } });
 
 		await sql`
 			UPDATE runs

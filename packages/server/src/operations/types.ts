@@ -15,7 +15,6 @@ export interface AvailableOperation {
   description?: string;
   kind: OperationKind;
   backend: OperationBackend;
-  requires_approval: boolean;
   required_scopes?: string[];
   annotations?: OperationAnnotations;
   input_schema?: Record<string, unknown>;

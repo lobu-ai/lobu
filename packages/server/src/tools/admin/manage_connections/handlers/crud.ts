@@ -40,11 +40,6 @@ import {
   getOperationsSummary,
   getOperationsSummaryBatch,
 } from "../../../../operations/connector-operations";
-import {
-  actionModesChanged,
-  denyNonHumanActionModesWrite,
-  hasActionModes,
-} from "./action-modes-guard";
 import { denyOperatorOnlyChatSettings } from "./chat-settings-guard";
 import { projectConnectionForReader } from "../public-projection";
 import {
@@ -765,11 +760,6 @@ export async function handleCreate(
 ): Promise<ManageConnectionsResult> {
   if (hasDeviceAutowireSuppressionMarker(args.config)) {
     return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
-  }
-  // Refuse before connector installation or any other create-path side effect.
-  if (hasActionModes(args.config)) {
-    const denied = denyNonHumanActionModesWrite(ctx);
-    if (denied) return denied;
   }
   const sql = getDb();
   const { organizationId, userId } = ctx;
@@ -2100,10 +2090,6 @@ export async function handleUpdate(
           : lockedConfig;
       if (explicitlyNoAuth && (lockedResultingConfig.managedBy || lockedResultingConfig.installation_ref || lockedResultingConfig.consent_only)) {
         return { denial: { error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' } };
-      }
-      if (actionModesChanged(lockedConfig, lockedResultingConfig)) {
-        const denied = denyNonHumanActionModesWrite(ctx);
-        if (denied) return { denial: denied };
       }
 
       const rows = await tx`

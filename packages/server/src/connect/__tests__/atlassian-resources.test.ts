@@ -192,11 +192,11 @@ describe('mergeJiraSiteIntoConnectionConfig', () => {
     ]);
     if (!site) throw new Error('Expected a unique Jira site fixture');
     const merged = mergeJiraSiteIntoConnectionConfig(
-      { action_modes: { create_issue: 'approval' }, webhook_external_id: '99' },
+      { project_key: 'DEMO', webhook_external_id: '99' },
       site
     );
     expect(merged).toEqual({
-      action_modes: { create_issue: 'approval' },
+      project_key: 'DEMO',
       webhook_external_id: '99',
       cloud_id: 'cloud-1',
       site_cloud_id: 'cloud-1',

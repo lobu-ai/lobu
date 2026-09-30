@@ -57,7 +57,7 @@ describe('requiresOwnerAdmin', () => {
   it('should NOT require admin for manage_operations execute; it is member-write (handler re-checks per-principal visibility)', () => {
     // Members run connector operations on connections VISIBLE to them; the
     // execute handler re-runs the per-principal visibility query and every
-    // existing gate (active status, action_modes, connector_action policy).
+    // existing gate (active status and connector operation policy).
     expect(requiresOwnerAdmin('manage_operations', { action: 'execute' }, false)).toBe(false);
     expect(requiresMemberWrite('manage_operations', { action: 'execute' }, false)).toBe(true);
     // Owner-routed approvals: the recorded field owner (a plain member) may

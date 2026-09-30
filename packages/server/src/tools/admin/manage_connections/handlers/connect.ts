@@ -35,10 +35,6 @@ import {
   resolveConnectionDisplayName,
   resolveConnectionVisibility,
 } from "../../helpers/connection-helpers";
-import {
-  denyNonHumanActionModesWrite,
-  hasActionModes,
-} from "./action-modes-guard";
 import { assertEntityIdsInOrg } from "../../helpers/db-helpers";
 import {
   buildAppInstallationSetupUrl,
@@ -103,11 +99,6 @@ async function handleConnectImpl(
 ): Promise<ManageConnectionsResult> {
   if (hasDeviceAutowireSuppressionMarker(args.config)) {
     return { error: DEVICE_AUTOWIRE_SUPPRESSION_ERROR };
-  }
-  // A new row has no stored modes to compare against.
-  if (hasActionModes(args.config)) {
-    const denied = denyNonHumanActionModesWrite(ctx);
-    if (denied) return denied;
   }
   const sql = getDb();
   const { organizationId, userId } = ctx;

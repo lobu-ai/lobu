@@ -1,3 +1,4 @@
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
 import { fileInputSchema } from "@lobu/connector-sdk";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -115,7 +116,6 @@ describe("operations.execute backend lifecycle", () => {
 				echo: {
 					name: "Echo",
 					kind: "write",
-					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },
@@ -125,13 +125,11 @@ describe("operations.execute backend lifecycle", () => {
 				needs_approval: {
 					name: "Needs approval",
 					kind: "write",
-					requiresApproval: true,
 				},
 				delete_event: GOOGLE_CALENDAR_DELETE_ACTION,
 				stage_browser: {
 					name: "Stage browser",
 					kind: "write",
-					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { browser_connection_id: { type: "integer" } },
@@ -193,26 +191,29 @@ describe("operations.execute backend lifecycle", () => {
 			connector_key: MCP,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { remote_echo: "auto" } },
 		});
 		const secondMcp = await createTestConnection({
 			organization_id: orgId,
 			connector_key: MCP,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { remote_echo: "auto" } },
 		});
 		const http = await createTestConnection({
 			organization_id: orgId,
 			connector_key: HTTP,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { create_item: "auto" } },
 		});
 		localConnectionId = local.id;
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser"]], [MCP, ["remote_echo"]], [HTTP, ["create_item"]]] as const) {
+			for (const operationKey of keys) await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "connector_action", operationKey: `${connectorKey}::${operationKey}`, effects: { execute: "auto" },
+			});
+		}
+
 		for (const [connectorKey, connectionId] of [
 			[LOCAL, local.id],
 			[MCP, mcp.id],
@@ -467,14 +468,14 @@ describe("operations.execute backend lifecycle", () => {
 		const store = new ArtifactStore(directory);
 		const services = vi.spyOn(gateway, "getLobuCoreServices").mockReturnValue({ getArtifactStore: () => store });
 		const sql = getTestDb();
-		const [{ config }] = await sql`SELECT config FROM connections WHERE id = ${httpConnectionId}`;
+
 		try {
 			const files = await ingestInputFiles([
 				{ name: "photo.png", mimeType: "image/png", data: Buffer.from("photo") },
 				{ name: "other.png", mimeType: "image/png", data: Buffer.from("other") },
 			], ctx, store, "https://gateway.test/lobu");
 			if (mode !== "auto") {
-				await sql`UPDATE connections SET config = ${sql.json({ ...config, action_modes: { create_item: "approval" } })} WHERE id = ${httpConnectionId}`;
+				await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", operationKey: `${HTTP}::create_item`, effects: { execute: "approval" } });
 			}
 			const queued = await manageOperations({
 				action: "execute", connection_id: httpConnectionId, operation_key: "create_item",
@@ -498,7 +499,7 @@ describe("operations.execute backend lifecycle", () => {
 			}
 		} finally {
 			services.mockRestore();
-			await sql`UPDATE connections SET config = ${sql.json(config)} WHERE id = ${httpConnectionId}`;
+			await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", operationKey: `${HTTP}::create_item`, effects: { execute: "auto" } });
 			await rm(directory, { recursive: true, force: true });
 		}
 	});

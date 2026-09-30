@@ -13,7 +13,7 @@
  * through their bot.
  *
  * An allowlist, so a privileged key added later is refused on the day it lands.
- * Refused rather than stripped, like `action-modes-guard.ts`: the honest answer
+ * Refused rather than stripped: the honest answer
  * to a request for cross-org privilege is no, not yes-and-quietly-ignored. On
  * the handler rather than `upsertByoChatConnection` because the service is also
  * the seam an operator provisioning Lobu's own relay goes through, and that row

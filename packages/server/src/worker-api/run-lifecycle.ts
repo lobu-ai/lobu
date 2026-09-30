@@ -2496,7 +2496,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 		// card INSERT failure rolls the run terminal state back instead of
 		// leaving a terminal run whose timeline is stuck at the prior card. Both
 		// approval-gated and auto action runs carry a card now — an auto run is
-		// pre-approved by `action_modes`, not unrecorded — so both supersede
+		// pre-approved by organization policy, not unrecorded — so both supersede
 		// here; only the approval-gated lane fails closed on a missing card,
 		// because an auto run created before the dispatch card existed has none
 		// and must still finalize. A no-op (0 rows) means the row was already

@@ -4,10 +4,6 @@ import { resolveManagedAuthConnectorOffer } from '../../../../workspace/managed-
 import type { ConnectionsArgs, ManageConnectionsResult } from '../schemas';
 import { handleRequiredManagedConnect } from './connect';
 import {
-	denyNonHumanActionModesWrite,
-	hasActionModes,
-} from './action-modes-guard';
-import {
 	DEVICE_AUTOWIRE_SUPPRESSION_ERROR,
 	hasDeviceAutowireSuppressionMarker,
 } from '../../../../utils/device-autowire-suppression';
@@ -30,13 +26,6 @@ export async function handleConnectManaged(
 	if (!ctx.isAuthenticated || !ctx.userId) {
 		return { error: 'Lobu login is required before using managed auth.' };
 	}
-	// Refuse before joinPublicOrganization mutates membership. The delegated
-	// connect handler repeats this at the connection-insert boundary.
-	if (hasActionModes(args.config)) {
-		const denied = denyNonHumanActionModesWrite(ctx);
-		if (denied) return denied;
-	}
-
 	const organizationSlug = await resolveManagedAuthConnectorOffer({
 		organizationSlug: args.managed_by_org,
 		connectorKey: args.connector_key,

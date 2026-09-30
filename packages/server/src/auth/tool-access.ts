@@ -69,7 +69,7 @@ export const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 	// admin-access message. `execute` is write-tier too: a member runs connector
 	// operations only on connections VISIBLE to them (the handler re-runs the
 	// per-principal visibility query), and every existing gate (active status,
-	// input validation, per-connection action_modes, per-principal
+	// input validation, organization policy, per-principal
 	// connector_action policy) still applies. This is the "ready means the
 	// TARGET is ready" contract made caller-aware: an action advertised as
 	// ready/executable must be invocable by the caller who sees it.

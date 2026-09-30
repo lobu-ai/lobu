@@ -20,7 +20,12 @@
  * high-volume provenance plumbing, not collaboration edits; gating them would
  * flood approvals. Any new user-facing entity write path MUST call this module.
  */
-import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
+import { type DbClient, getDb, pgBigintArray } from "../db/client";
+import {
+	type ConnectorPolicyCategory,
+	type ConnectorPolicyScope,
+	evaluateConnectorPolicy,
+} from "./connector-policy";
 import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
 	WRITE_ACTION_MANIFEST,
@@ -32,15 +37,8 @@ import {
 export type EntityPolicyDecision = "allow" | "deny" | "require_approval";
 export type EntityPolicyPrincipalKind = "user" | "agent" | "automation";
 export type EntityMutationAction = "read" | "create" | "update" | "delete";
-/**
- * A stored per-action mode. `auto`/`approval` are the two entity modes; `deny`
- * (a hard floor — the write never applies and no approval is queued) and
- * `disabled` (the action is turned off entirely, used by the connector-action
- * class) are admitted by the widened DB CHECK. The resolver maps each to an
- * {@link EntityPolicyDecision}; unknown values coerce to the caller's fallback
- * so a mode this build predates can never silently read as `allow`.
- */
-export type EntityMutationMode = "auto" | "approval" | "deny" | "disabled";
+/** Stored policy effects: automatic execution, human approval, or a hard block. */
+export type EntityMutationMode = "auto" | "approval" | "deny";
 
 /**
  * Which class of write a policy row governs. `entity` is the original class;
@@ -76,7 +74,7 @@ export interface EntityApprovalDeliveryTarget {
 	channelName: string | null;
 }
 
-export interface EntityApprovalPolicy {
+export interface EntityApprovalPolicy extends Required<ConnectorPolicyScope> {
 	id: number;
 	organizationId: string;
 	resourceClass: WriteResourceClass;
@@ -104,7 +102,7 @@ export interface EntityApprovalPolicy {
 	deliveryTarget: EntityApprovalDeliveryTarget;
 }
 
-export interface EntityApprovalPolicyInput {
+export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 	resourceClass?: WriteResourceClass;
 	principalKind?: PolicyPrincipalKind | null;
 	principalId?: string | null;
@@ -122,7 +120,7 @@ export interface EntityApprovalPolicyInput {
 	/**
 	 * A raw per-action effect map. When present it is the source of truth for the
 	 * persisted child rows (clamped to what the manifest declares legal for the
-	 * class), letting a caller express `deny`/`disabled`/`execute` that the
+	 * class), letting a caller express `deny`/`execute` that the
 	 * create/update/delete triple can't. When absent, effects derive from the mode
 	 * triple (the legacy entity-settings path). Only actions the class governs are
 	 * written; an illegal (action, effect) is clamped to the class default.
@@ -150,6 +148,9 @@ export interface EntityApprovalPolicyInput {
  * mode columns; every per-action decision reads `effects`.
  */
 type EntityApprovalPolicyRow = {
+	connector_key: string | null;
+	connection_id: number | null;
+	operation_category: ConnectorPolicyCategory | null;
 	id: number;
 	organization_id: string;
 	resource_class: string;
@@ -176,8 +177,7 @@ export function isEntityMutationMode(
 	return (
 		value === "auto" ||
 		value === "approval" ||
-		value === "deny" ||
-		value === "disabled"
+		value === "deny"
 	);
 }
 
@@ -227,6 +227,9 @@ function rowToPolicy(row: EntityApprovalPolicyRow): EntityApprovalPolicy {
 		principalKind: normalizePrincipalKind(row.principal_kind),
 		principalId: row.principal_id,
 		operationKey: row.operation_key,
+		connectorKey: row.connector_key,
+		connectionId: row.connection_id === null ? null : Number(row.connection_id),
+		operationCategory: row.operation_category,
 		targetAgentId: row.target_agent_id ?? null,
 		entityTypeSlug: row.entity_type_slug,
 		fieldPath: row.field_path,
@@ -254,6 +257,9 @@ export function defaultEntityApprovalPolicy(
 		principalKind: null,
 		principalId: null,
 		operationKey: null,
+		connectorKey: null,
+		connectionId: null,
+		operationCategory: null,
 		targetAgentId: null,
 		entityTypeSlug: null,
 		fieldPath: null,
@@ -521,7 +527,7 @@ export async function resolveWriteCreatorUserId(
 
 /** True iff an agent row with this id exists in the org. Org-scoped so a caller
  * can't probe another tenant's agent namespace. */
-export async function agentExistsInOrg(
+async function agentExistsInOrg(
 	sql: DbClient,
 	agentId: string,
 	organizationId: string,
@@ -535,13 +541,13 @@ export async function agentExistsInOrg(
 }
 
 /**
- * The winning mode's effect on a mutation. `deny` and `disabled` both stop the
+ * The winning mode's effect on a mutation. `deny` stops the
  * write with no approval queued; `approval` queues one; `auto` applies inline.
  * Centralized so the create/delete and per-field update paths agree — and so a
  * future mode can never be read as `allow` by omission.
  */
 function modeToDecision(mode: EntityMutationMode): EntityPolicyDecision {
-	if (mode === "deny" || mode === "disabled") return "deny";
+	if (mode === "deny") return "deny";
 	if (mode === "approval") return "require_approval";
 	return "allow";
 }
@@ -573,31 +579,13 @@ function principalSpecificity(row: EntityApprovalPolicyRow): number {
 /** Restrictive rank of a single stored mode — higher = more restrictive. */
 function modeRestrictiveness(mode: EntityMutationMode): number {
 	if (mode === "deny") return 3;
-	if (mode === "disabled") return 3;
 	if (mode === "approval") return 2;
 	return 1; // auto
 }
 
-/**
- * The more-restrictive of two modes (deny/disabled > approval > auto).
- *
- * `deny` and `disabled` are equally restrictive (both stop the write), so a fold
- * that mixes them must pick one DETERMINISTICALLY — not by candidate order, which
- * would make the resolved effect depend on scope specificity and diverge from what
- * the UI (which folds the same rows without that ordering) shows. We break the tie
- * toward `deny`: it is the safer, more-visible outcome — `list_available` still
- * SURFACES the op and gates it, rather than silently hiding it as `disabled` does.
- * The UI mirrors this exact rule (see EFFECT_STRICTNESS + stricterEffect).
- */
-function moreRestrictive(
-	a: EntityMutationMode,
-	b: EntityMutationMode,
-): EntityMutationMode {
-	const ra = modeRestrictiveness(a);
-	const rb = modeRestrictiveness(b);
-	if (ra !== rb) return ra > rb ? a : b;
-	// Equal rank: only deny/disabled tie here; prefer deny deterministically.
-	return a === "deny" || b === "deny" ? "deny" : a;
+/** The more restrictive effect wins within a principal's restrictions. */
+function moreRestrictive(a: EntityMutationMode, b: EntityMutationMode): EntityMutationMode {
+	return modeRestrictiveness(a) >= modeRestrictiveness(b) ? a : b;
 }
 
 /**
@@ -745,13 +733,6 @@ async function loadCandidatePolicies(args: {
 	ownerAgentId?: string | null;
 	entityTypeSlug?: string | null;
 	entityId?: number | null;
-	/** The connector operation being run (connector_action only). Loads BOTH the
-	 * blanket row (operation_key IS NULL) and any row scoped to this operation; the
-	 * op-specific row wins via {@link scopeSpecificity}. */
-	operationKey?: string | null;
-	/** Batch form used by operation discovery: load the blanket plus every named
-	 * operation in one header query, then fold each operation in memory. */
-	operationKeys?: string[];
 	/** agent_config: target agents.id being updated/deleted. Loads blanket + that target. */
 	targetAgentId?: string | null;
 	sql?: DbClient;
@@ -761,12 +742,9 @@ async function loadCandidatePolicies(args: {
 	const principalKind = args.principalKind ?? null;
 	const principalId = args.principalId ?? null;
 	const ownerAgentId = args.ownerAgentId ?? null;
-	const operationKeys =
-		args.operationKeys ??
-		(args.operationKey == null ? [] : [args.operationKey]);
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
-       operation_key, target_agent_id, entity_type_slug, field_path, entity_id,
+       operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     FROM write_approval_policies
@@ -784,7 +762,8 @@ async function loadCandidatePolicies(args: {
           AND (principal_id IS NULL OR principal_id = ${ownerAgentId})
         )
       )
-		AND (operation_key IS NULL OR operation_key = ANY(${pgTextArray(operationKeys)}::text[]))
+		AND connector_key IS NULL AND connection_id IS NULL AND operation_category IS NULL
+		AND operation_key IS NULL
       AND (target_agent_id IS NULL OR target_agent_id = ${args.targetAgentId ?? null})
       AND (entity_type_slug IS NULL OR entity_type_slug = ${args.entityTypeSlug ?? null})
       AND (entity_id IS NULL OR entity_id = ${args.entityId ?? null})
@@ -904,7 +883,7 @@ export async function evaluateEntityMutation(args: {
  */
 export async function resolveWritePolicyDecision(args: {
 	organizationId: string;
-	resourceClass: Exclude<WriteResourceClass, "entity">;
+	resourceClass: Exclude<WriteResourceClass, "entity" | "connector_action">;
 	principalKind: EntityPolicyPrincipalKind;
 	principalId?: string | null;
 	/**
@@ -918,9 +897,6 @@ export async function resolveWritePolicyDecision(args: {
 	/** See {@link resolveWriteEffect}. Fail closed (deny) when an automation owner is unresolved. */
 	ownerResolved?: boolean;
 	action: WriteAction;
-	/** connector_action only: the operation being run — a per-op row tightens the
-	 * blanket execute rule for it alone. Forwarded to {@link resolveWriteEffect}. */
-	operationKey?: string | null;
 	/** agent_config only: target agent id for read/update/delete. */
 	targetAgentId?: string | null;
 	sql?: DbClient;
@@ -931,16 +907,10 @@ export async function resolveWritePolicyDecision(args: {
 	return decision;
 }
 
-/**
- * The raw folded EFFECT (auto/approval/deny/disabled) for a non-scoped resource,
- * before it collapses to a decision. `disabled` and `deny` both stop the write,
- * but callers that must DISTINGUISH them — e.g. `list_available` hides a disabled
- * connector's operations rather than surfacing them to fail on execute — need the
- * effect, not the decision. A human always resolves `auto`.
- */
+/** Resolve a non-connector resource effect before mapping it to a write decision. */
 export async function resolveWriteEffect(args: {
 	organizationId: string;
-	resourceClass: Exclude<WriteResourceClass, "entity">;
+	resourceClass: Exclude<WriteResourceClass, "entity" | "connector_action">;
 	principalKind: EntityPolicyPrincipalKind;
 	principalId?: string | null;
 	ownerAgentId?: string | null;
@@ -951,9 +921,6 @@ export async function resolveWriteEffect(args: {
 	 */
 	ownerResolved?: boolean;
 	action: WriteAction;
-	/** connector_action only: the operation being run (e.g. 'slack.send_message').
-	 * A row scoped to this op tightens the blanket execute rule for it alone. */
-	operationKey?: string | null;
 	/** agent_config only: target agent id for read/update/delete. */
 	targetAgentId?: string | null;
 	sql?: DbClient;
@@ -966,59 +933,10 @@ export async function resolveWriteEffect(args: {
 		principalKind: args.principalKind,
 		principalId: args.principalId ?? null,
 		ownerAgentId: args.ownerAgentId ?? null,
-		operationKey: args.operationKey ?? null,
 		targetAgentId: args.targetAgentId ?? null,
 		sql: args.sql,
 	});
 	return foldEffectForDecision(candidates, args.resourceClass, args.action);
-}
-
-/**
- * Batch connector-operation effects for discovery. Candidate headers and child
- * effects are loaded once, then each operation is folded in memory.
- */
-export async function resolveWriteEffects(args: {
-	organizationId: string;
-	resourceClass: "connector_action";
-	principalKind: EntityPolicyPrincipalKind;
-	principalId?: string | null;
-	ownerAgentId?: string | null;
-	ownerResolved?: boolean;
-	action: WriteAction;
-	operationKeys: string[];
-	sql?: DbClient;
-}): Promise<Map<string | null, EntityMutationMode>> {
-	const keys = [...new Set(args.operationKeys)];
-	const effects = new Map<string | null, EntityMutationMode>();
-	if (args.principalKind === "user" || args.ownerResolved === false) {
-		const effect = args.principalKind === "user" ? "auto" : "deny";
-		effects.set(null, effect);
-		for (const key of keys) effects.set(key, effect);
-		return effects;
-	}
-
-	const candidates = await loadCandidatePolicies({
-		organizationId: args.organizationId,
-		resourceClass: args.resourceClass,
-		principalKind: args.principalKind,
-		principalId: args.principalId ?? null,
-		ownerAgentId: args.ownerAgentId ?? null,
-		operationKeys: keys,
-		sql: args.sql,
-	});
-	const foldFor = (operationKey: string | null) =>
-		foldEffectForDecision(
-			candidates.filter(
-				(candidate) =>
-					candidate.operation_key === null ||
-					candidate.operation_key === operationKey,
-			),
-			args.resourceClass,
-			args.action,
-		);
-	effects.set(null, foldFor(null));
-	for (const key of keys) effects.set(key, foldFor(key));
-	return effects;
 }
 
 /**
@@ -1075,7 +993,7 @@ export async function evaluateEntityFieldUpdates(args: {
 			foldEffectForDecision(forField, "entity", "update"),
 		);
 		// A human-owned field always needs approval regardless of policy mode; a
-		// deny/disabled policy stops even a human-owned change (deny is a hard floor).
+		// deny policy stops even a human-owned change (deny is a hard floor).
 		decisions[field] =
 			policyDecision === "deny"
 				? "deny"
@@ -1093,11 +1011,11 @@ export async function evaluateEntityFieldUpdates(args: {
 export async function listEntityApprovalPolicies(
 	organizationId: string,
 	resourceClass?: WriteResourceClass,
+	sql: DbClient = getDb(),
 ): Promise<EntityApprovalPolicy[]> {
-	const sql = getDb();
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
-       operation_key, target_agent_id, entity_type_slug, field_path, entity_id,
+       operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     FROM write_approval_policies
@@ -1124,10 +1042,8 @@ export async function listEntityApprovalPolicies(
 
 /**
  * Turn a policy input into the action→effect set to persist for the given class.
- * For the entity-shaped classes the effects come from create/update/delete (and
- * read); for connector_action the single `execute` effect is taken from
- * `createMode` when no effects map is provided. Effects are clamped to what the
- * manifest declares legal for the class.
+ * Entity-shaped classes retain their create/update/delete input. Connector and
+ * schema rules declare an explicit effects map. The manifest defines legal effects.
  */
 function actionEffectSetForInput(
 	resourceClass: WriteResourceClass,
@@ -1154,16 +1070,8 @@ function actionEffectSetForInput(
 				effect: clamp(action, input.effects?.[action] as EntityMutationMode),
 			}));
 	}
-	if (resourceClass === "connector_action") {
-		return [
-			{
-				action: "execute",
-				effect: clamp("execute", normalizeMode(input.createMode, "auto")),
-			},
-		];
-	}
-	if (resourceClass === "entity_schema") {
-		throw new Error("entity_schema policies require an explicit effects map");
+	if (resourceClass === "connector_action" || resourceClass === "entity_schema") {
+		throw new Error(`${resourceClass} policies require an explicit effects map`);
 	}
 	return [
 		{
@@ -1210,6 +1118,8 @@ export async function upsertEntityApprovalPolicy(
 		resourceClass === "connector_action"
 			? input.operationKey?.trim() || null
 			: null;
+	const { connectorKey = null, connectionId = null, operationCategory = null } =
+		resourceClass === "connector_action" ? input : {};
 	const targetAgentId =
 		resourceClass === "agent_config"
 			? input.targetAgentId?.trim() || null
@@ -1262,12 +1172,15 @@ export async function upsertEntityApprovalPolicy(
         AND principal_kind IS NOT DISTINCT FROM ${principalKind}
         AND principal_id IS NOT DISTINCT FROM ${principalId}
         AND operation_key IS NOT DISTINCT FROM ${operationKey}
+        AND connector_key IS NOT DISTINCT FROM ${connectorKey}
+        AND connection_id IS NOT DISTINCT FROM ${connectionId}
+        AND operation_category IS NOT DISTINCT FROM ${operationCategory}
         AND target_agent_id IS NOT DISTINCT FROM ${targetAgentId}
         AND entity_type_slug IS NOT DISTINCT FROM ${entityTypeSlug}
         AND field_path IS NOT DISTINCT FROM ${fieldPath}
         AND entity_id IS NOT DISTINCT FROM ${entityId}
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
-       operation_key, target_agent_id, entity_type_slug, field_path, entity_id,
+       operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1279,19 +1192,19 @@ export async function upsertEntityApprovalPolicy(
 			const inserted = await tx<EntityApprovalPolicyRow>`
       INSERT INTO write_approval_policies (
         organization_id, resource_class, principal_kind, principal_id,
-        operation_key, target_agent_id, entity_type_slug, field_path, entity_id,
+        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
         approval_connection_id, approval_channel_id, approval_team_id,
         approval_channel_name, created_at, updated_at
       ) VALUES (
         ${organizationId}, ${resourceClass}, ${principalKind}, ${principalId},
-        ${operationKey}, ${targetAgentId}, ${entityTypeSlug}, ${fieldPath}, ${entityId},
+        ${operationKey}, ${connectorKey}, ${connectionId}, ${operationCategory}, ${targetAgentId}, ${entityTypeSlug}, ${fieldPath}, ${entityId},
         ${approvalConnectionId},
         ${approvalChannelId}, ${approvalTeamId}, ${approvalChannelName},
         now(), now()
       )
       ON CONFLICT DO NOTHING
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
-       operation_key, target_agent_id, entity_type_slug, field_path, entity_id,
+       operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1310,7 +1223,7 @@ export async function upsertEntityApprovalPolicy(
 	return rowToPolicy(row);
 }
 
-export async function deleteEntityApprovalPolicy(args: {
+export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	organizationId: string;
 	resourceClass?: WriteResourceClass;
 	principalKind?: PolicyPrincipalKind | null;
@@ -1328,6 +1241,8 @@ export async function deleteEntityApprovalPolicy(args: {
 		resourceClass === "connector_action"
 			? args.operationKey?.trim() || null
 			: null;
+	const { connectorKey = null, connectionId = null, operationCategory = null } =
+		resourceClass === "connector_action" ? args : {};
 	const targetAgentId =
 		resourceClass === "agent_config"
 			? args.targetAgentId?.trim() || null
@@ -1356,6 +1271,9 @@ export async function deleteEntityApprovalPolicy(args: {
       AND principal_kind IS NOT DISTINCT FROM ${principalKind}
       AND principal_id IS NOT DISTINCT FROM ${principalId}
       AND operation_key IS NOT DISTINCT FROM ${operationKey}
+      AND connector_key IS NOT DISTINCT FROM ${connectorKey}
+      AND connection_id IS NOT DISTINCT FROM ${connectionId}
+      AND operation_category IS NOT DISTINCT FROM ${operationCategory}
       AND target_agent_id IS NOT DISTINCT FROM ${targetAgentId}
       AND entity_type_slug IS NOT DISTINCT FROM ${entityTypeSlug}
       AND field_path IS NOT DISTINCT FROM ${fieldPath}
@@ -1363,4 +1281,35 @@ export async function deleteEntityApprovalPolicy(args: {
     RETURNING id
   `;
 	return rows.length > 0;
+}
+
+/** Connector decisions share one evaluator across admission, discovery and inspection. */
+export async function resolveConnectorPolicy(
+	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies"> & { sql?: DbClient },
+) {
+	return evaluateConnectorPolicy({
+		...args,
+		policies: await listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
+	});
+}
+
+/** Reconstruct the original requester from a durable operation, never its reviewer. */
+export async function resolveStoredActingPrincipal(
+	sql: DbClient,
+	organizationId: string,
+	principalKind: string | null,
+	principalId: string | null,
+): Promise<ActingPrincipal> {
+	if (principalKind === "user") {
+		return { kind: "user", id: null, ownerAgentId: null, ownerResolved: true };
+	}
+	if (principalKind === "agent") {
+		return { kind: "agent", id: principalId, ownerAgentId: null,
+			ownerResolved: principalId === null || await agentExistsInOrg(sql, principalId, organizationId) };
+	}
+	const automationId = principalKind === "automation" ? automationIdFromPrincipalId(principalId) : null;
+	if (automationId !== null) {
+		return resolveActingPrincipal(sql, { organizationId, sessionAutomationId: automationId });
+	}
+	return { kind: "agent", id: principalId, ownerAgentId: null, ownerResolved: false };
 }

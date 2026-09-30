@@ -11,7 +11,8 @@ import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { resolveActingPrincipal, resolveWritePolicyDecision } from "../../../../authz/entity-policy";
+import { resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
+import { applyRunConnectorPolicyAtClaim } from "../../../../authz/operation-run-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { type DbClient, getDb } from "../../../../db/client";
 import type { Env } from "../../../../index";
@@ -23,7 +24,6 @@ import { callTool as callProxyTool } from "../../../../mcp-proxy/client";
 import { resolveActionOrigin } from "../../../../notifications/action-origin";
 import { notifyActionApprovalNeeded } from "../../../../notifications/triggers";
 import { resolveApprovalChatOrigin } from "../../approval-delivery";
-import { resolveActionMode } from "../../../../operations/action-modes";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import {
 	keepInlineRunLeaseAlive,
@@ -75,7 +75,6 @@ import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
 import { waitForDeviceActionRun } from "../../device-action-wait";
 import {
-	qualifiedOperationKey,
 	type ConnectionRow,
 	type InlineExecutionResult,
 } from "./shared";
@@ -419,6 +418,15 @@ export async function executeOperationInline(
 	abortSignal: AbortSignal | undefined,
 	options: InlineExecutionOptions,
 ): Promise<InlineExecutionResult> {
+	const admitted = await getDb().begin((sql) => applyRunConnectorPolicyAtClaim({
+		organizationId, runId, sql, claimedBy: options.claimedBy,
+	}));
+	if (!admitted) {
+		const [run] = await getDb()`SELECT approval_status FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}`;
+		return run?.approval_status === "pending"
+			? { status: "pending_approval" }
+			: { status: "blocked", error_message: "Operation was blocked or is no longer available for execution." };
+	}
 	// Every backend below runs under this one lease refresher, so no inline
 	// execution can be reaped as stale while it is still in flight.
 	const stopHeartbeat = keepInlineRunLeaseAlive(
@@ -520,37 +528,45 @@ async function resolveConnectionCardEntityIds(
 		: rawEntityIds.map(Number);
 }
 
-/** Return the durable outcome of a run claimed by an earlier request. */
+/** Return the durable approval card after admission or a policy change. */
+async function pendingApprovalResult(
+	runId: number,
+	operationName: string,
+	ctx: ToolContext,
+): Promise<ManageOperationsResult> {
+	const sql = getDb();
+	const eventRows = await sql<{ id: number }>`
+		SELECT id
+		FROM events
+		WHERE organization_id = ${ctx.organizationId}
+		  AND run_id = ${runId}
+		  AND interaction_type = 'approval'
+		ORDER BY id DESC
+		LIMIT 1
+	`;
+	const { ownerSlug: orgSlug, baseUrl } = await getOrgUrlContext(ctx);
+	const approvalUrl = buildResourcePermalink(
+		orgSlug,
+		{ kind: "run", runId },
+		baseUrl,
+	);
+	return {
+		action: "execute",
+		run_id: runId,
+		...(eventRows[0] ? { event_id: Number(eventRows[0].id) } : {}),
+		approval_url: approvalUrl,
+		status: "pending_approval",
+		message: `Operation '${operationName}' requires approval. Share the approval_url with the user to confirm.`,
+	};
+}
+
 async function replayExistingOperationRun(
 	claim: Awaited<ReturnType<typeof createConnectorOperationRun>>,
 	operationName: string,
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
-	const sql = getDb();
 	if (claim.approvalStatus === "pending" && claim.status === "pending") {
-		const eventRows = await sql<{ id: number }>`
-			SELECT id
-			FROM events
-			WHERE organization_id = ${ctx.organizationId}
-			  AND run_id = ${claim.runId}
-			  AND interaction_type = 'approval'
-			ORDER BY id DESC
-			LIMIT 1
-		`;
-		const { ownerSlug: orgSlug, baseUrl } = await getOrgUrlContext(ctx);
-		const approvalUrl = buildResourcePermalink(
-			orgSlug,
-			{ kind: "run", runId: claim.runId },
-			baseUrl,
-		);
-		return {
-			action: "execute",
-			run_id: claim.runId,
-			...(eventRows[0] ? { event_id: Number(eventRows[0].id) } : {}),
-			approval_url: approvalUrl,
-			status: "pending_approval",
-			message: `Operation '${operationName}' requires approval. Share the approval_url with the user to confirm.`,
-		};
+		return pendingApprovalResult(claim.runId, operationName, ctx);
 	}
 
 	if (claim.status === "completed") {
@@ -699,23 +715,6 @@ export async function handleExecute(
 		};
 	}
 
-	const mode = resolveActionMode(operation, connection.config);
-	if (mode === "disabled") {
-		return {
-			error: `Operation '${operation.operation_key}' is disabled on this connection.`,
-		};
-	}
-
-	// Org-level connector-action policy, from the SAME write-gate the entity and
-	// agent_config classes use. It folds with the per-connection action_modes by
-	// restrictive-wins: a `deny` blocks outright; an `approval` upgrades a
-	// connection that would auto-run to queued. A human applies immediately (the
-	// policy governs non-human principals); with no policy row, the class default
-	// is auto, so the connection mode alone decides — existing semantics remain intact.
-	// Resolve WHO is acting through the single seam — merges the explicit
-	// automation_source and the reaction session's own automation, looks up the owning
-	// agent, and pins autonomous mode for an automation. Persisted with the run so the
-	// approve-time recheck re-evaluates in the SAME mode/principal.
 	const actor = await resolveActingPrincipal(sql, {
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
@@ -723,32 +722,15 @@ export async function handleExecute(
 		explicitAutomationId: args.automation_source?.automation_id ?? null,
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 	});
-	// Agent write-policy applies to WRITE ops only. Reads stay available under
-	// connection action_modes alone (default auto) — same idea as MCP readOnlyHint.
-	const policyDecision =
-		operation.kind === "read"
-			? "allow"
-			: await resolveWritePolicyDecision({
-					organizationId: ctx.organizationId,
-					resourceClass: "connector_action",
-					principalKind: actor.kind,
-					principalId: actor.id,
-					ownerAgentId: actor.ownerAgentId,
-					ownerResolved: actor.ownerResolved,
-					action: "execute",
-					// A per-operation rule (e.g. deliveroo::place_order = approval) tightens the
-					// blanket execute for this op alone; the blanket applies to every other op. The
-					// key is connector-qualified so the rule can't leak to another connector that
-					// exposes the same bare operation key.
-					operationKey: qualifiedOperationKey(
-						connection.connector_key,
-						operation.operation_key,
-					),
-				});
-	if (policyDecision === "deny") {
-		return {
-			error: `Policy denies '${operation.operation_key}' for this principal.`,
-		};
+	const policy = await resolveConnectorPolicy({
+		organizationId: ctx.organizationId,
+		connectionId: connection.id,
+		operation,
+		actor,
+		sql,
+	});
+	if (policy.effect === "deny") {
+		return { error: `Policy blocks '${operation.operation_key}' for this principal.` };
 	}
 	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
 	input = preparedFiles.input;
@@ -757,14 +739,7 @@ export async function handleExecute(
 		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
 		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
 	}
-	const shouldQueue =
-		mode === "approval" || policyDecision === "require_approval";
-	if (args.activation && shouldQueue) {
-		throw new ToolUserError(
-			"Page-activated operations cannot also require human approval.",
-			422,
-		);
-	}
+	const shouldQueue = policy.effect === "approval";
 	const activation = args.activation
 		? {
 				kind: args.activation.kind,
@@ -854,6 +829,7 @@ export async function handleExecute(
 				operationKey: operation.operation_key,
 				operationInput: input,
 				approvalMode,
+				activation,
 				requireCompiledCode: operation.backend === "local_action",
 				// Persist the TRUSTED principal so a queued run's policy is
 				// re-evaluated at approve time against who queued it, not who
@@ -862,7 +838,7 @@ export async function handleExecute(
 				// attended recheck.
 				policyPrincipalKind: actor.kind,
 				policyPrincipalId: actor.id,
-				createdByUserId: ctx.userId,
+				createdByUserId: activation ? visibilityUserId : ctx.userId,
 				automationId: ctx.actingAutomationId,
 				parentRunId: ctx.actingRunId,
 				runMetadata,
@@ -1040,7 +1016,7 @@ export async function handleExecute(
 				connectionId: args.connection_id,
 				runId: createdRunId,
 				interactionType: "approval",
-				// Pre-approved by configuration: `action_modes` granted this
+				// Pre-approved by the organization policy: it granted this
 				// operation standing approval, which is the same fact
 				// `runs.approval_status='auto'` records. No decision is pending, so
 				// the chain starts one state later than a queued run's.
@@ -1062,7 +1038,7 @@ export async function handleExecute(
 					// awaiting review, and offering review affordances for a decision
 					// that was already made by configuration would be a lie.
 					status: bornFailed ? "failed" : AUTO_APPROVED_CARD_STATUS,
-					action_mode: mode,
+					policy,
 					...(bornFailed && createdRun.errorMessage
 						? { error_message: createdRun.errorMessage }
 						: {}),
@@ -1116,6 +1092,7 @@ export async function handleExecute(
 				output: result.output ?? {},
 			};
 		}
+		if (result.status === "pending_approval") return pendingApprovalResult(runId, operation.name, ctx);
 		if (result.status === "timeout") {
 			return {
 				action: "execute",
@@ -1163,6 +1140,7 @@ export async function handleExecute(
 			...(result.metadata ? { metadata: result.metadata } : {}),
 		};
 	}
+	if (result.status === "pending_approval") return pendingApprovalResult(runId, operation.name, ctx);
 	return {
 		action: "execute",
 		run_id: runId,

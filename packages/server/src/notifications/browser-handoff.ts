@@ -1,7 +1,7 @@
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
 import { getDb, parsePgTextArray } from "../db/client";
 import { emit } from "../events/emitter";
-import { resolveActionMode } from "../operations/action-modes";
+import { resolveRunConnectorPolicy } from "../authz/operation-run-policy";
 import { getOperationForConnection } from "../operations/connector-operations";
 import { validateOperationInput } from "../operations/input-validation";
 import { DEFAULT_PAGE_ACTIVATION_SECONDS } from "../runs/page-activation";
@@ -18,6 +18,8 @@ type HandoffSource = {
 	action_input: Record<string, unknown> | null;
 	automation_id: number | null;
 	parent_run_id: number | null;
+	policy_principal_kind: "agent" | "automation" | "user" | null;
+	policy_principal_id: string | null;
 	status: string;
 	approval_status: string;
 	activation_kind: string | null;
@@ -48,6 +50,8 @@ async function loadHandoffSource(
 			r.action_input,
 			r.automation_id,
 			r.parent_run_id,
+			r.policy_principal_kind,
+			r.policy_principal_id,
 			r.status,
 			r.approval_status,
 			r.activation_kind,
@@ -84,7 +88,7 @@ function isReady(source: HandoffSource): boolean {
 	return (
 		source.run_metadata?.page_activation_identity === "exact" &&
 		source.status === "pending" &&
-		source.approval_status === "auto" &&
+		["auto", "approved"].includes(source.approval_status) &&
 		source.activation_kind === "page_visit" &&
 		source.activated_at == null &&
 		source.expires_at != null &&
@@ -117,6 +121,13 @@ export async function recreateBrowserHandoff(
 	};
 }> {
 	const source = await loadHandoffSource(organizationId, userId, eventId);
+	const policy = await resolveRunConnectorPolicy({ organizationId, runId: source.browser_run_id });
+	if (!policy || policy.effect === "deny") {
+		throw new ToolUserError("Current policy blocks this draft operation.", 409);
+	}
+	if (policy.effect === "approval" && (!isReady(source) || source.approval_status !== "approved")) {
+		throw new ToolUserError("Current policy requires approval. Request this draft again and approve it before visiting its page.", 409);
+	}
 	if (isReady(source)) {
 		return {
 			browser_url: source.browser_url,
@@ -139,7 +150,7 @@ export async function recreateBrowserHandoff(
 	}
 	if (
 		source.activation_kind !== "page_visit" ||
-		source.approval_status !== "auto" ||
+		!["auto", "approved"].includes(source.approval_status) ||
 		!source.action_input
 	) {
 		throw new ToolUserError(
@@ -159,10 +170,7 @@ export async function recreateBrowserHandoff(
 			409,
 		);
 	}
-	if (
-		resolved.operation.backend !== "local_action" ||
-		resolveActionMode(resolved.operation, resolved.connection.config) !== "auto"
-	) {
+	if (resolved.operation.backend !== "local_action") {
 		throw new ToolUserError(
 			"This draft action is no longer enabled for automatic page activation.",
 			409,
@@ -217,8 +225,11 @@ export async function recreateBrowserHandoff(
 			},
 			requireCompiledCode: true,
 			createdByUserId: userId,
+			policyPrincipalKind: source.policy_principal_kind,
+			policyPrincipalId: source.policy_principal_id,
 			automationId: source.automation_id,
 			parentRunId: source.parent_run_id,
+			runMetadata: source.run_metadata,
 			idempotencyKey: `notification-browser-handoff:${eventId}:retry:${source.browser_run_id}`,
 			db: tx,
 		});

@@ -1,4 +1,4 @@
-import { getDb } from "../db/client";
+import { type DbClient, getDb } from "../db/client";
 import { fetchPublicUrl } from "@lobu/connector-worker/egress";
 import { discoverTools } from "../mcp-proxy/client";
 import type { DiscoveredTool, McpProxyConfig } from "../mcp-proxy/types";
@@ -9,7 +9,6 @@ import {
 	readResponseTextWithLimit,
 } from "../utils/bounded-response";
 import logger from "../utils/logger";
-import { filterOperationsByActionModes } from "./action-modes";
 import type {
 	AvailableOperation,
 	OperationAnnotations,
@@ -370,7 +369,6 @@ async function getOpenApiOperations(
 				continue;
 
 			const kind = method === "get" || method === "head" ? "read" : "write";
-			const requiresApproval = kind === "write";
 			operations.push({
 				connector_key: connectorKey,
 				connector_name: connectorName,
@@ -388,7 +386,6 @@ async function getOpenApiOperations(
 							: undefined,
 				kind,
 				backend: "http_operation",
-				requires_approval: requiresApproval,
 				annotations:
 					kind === "read"
 						? { idempotentHint: true }
@@ -417,8 +414,7 @@ async function getOpenApiOperations(
 }
 
 function getMcpToolKind(tool: DiscoveredTool): "read" | "write" {
-	// Preserve the upstream classification for display and policy targeting.
-	// Authorization does not trust it: remote reads are approval-gated below.
+	// Upstream-declared: organization policy categories (Reads, Writes) match on it.
 	return tool.annotations?.readOnlyHint ? "read" : "write";
 }
 
@@ -445,11 +441,6 @@ async function getMcpOperations(
 		description: tool.description || undefined,
 		kind: getMcpToolKind(tool),
 		backend: "mcp_tool",
-		// Upstream annotations describe a tool but are not an authorization
-		// boundary. Default every dynamically discovered operation to approval;
-		// a human may explicitly configure a narrower action mode on this
-		// connection.
-		requires_approval: true,
 		annotations:
 			tool.annotations ??
 			(getMcpToolKind(tool) === "read"
@@ -490,7 +481,6 @@ function getLocalActionOperations(
 		description: def.description,
 		kind: getLocalActionKind(def),
 		backend: "local_action",
-		requires_approval: def.requiresApproval ?? getLocalActionKind(def) === "write",
 		required_scopes: normalizeRequiredScopes(def.requiredScopes),
 		annotations: normalizeAnnotations(def.annotations),
 		input_schema: def.input_schema ?? def.inputSchema,
@@ -634,8 +624,6 @@ export async function listOperations(params: {
 	backend?: "local_action" | "mcp_tool" | "http_operation";
 	includeInputSchema?: boolean;
 	includeOutputSchema?: boolean;
-	/** Keep disabled operations visible so callers can render enablement help. */
-	includeDisabled?: boolean;
 	limit?: number;
 	offset?: number;
 }): Promise<{
@@ -645,7 +633,7 @@ export async function listOperations(params: {
 	offset: number;
 }> {
 	const connectors = await getConnectorsForListing(params);
-	let operations = (
+	const operations = (
 		await Promise.all(
 			connectors.map((connector) =>
 				buildConnectorOperations(connector, params.organizationId, {
@@ -655,26 +643,6 @@ export async function listOperations(params: {
 			),
 		)
 	).flat();
-
-	// When listing for a specific connection, hide ops the user has marked
-	// 'disabled' in connection.config.action_modes so they never reach the
-	// agent (e.g. Automation reaction context). manage_operations.list_available
-	// opts out via includeDisabled to surface them with readiness 'disabled'
-	// and enablement help instead; execution still refuses disabled ops.
-	if (params.connectionId && !params.includeDisabled) {
-		const sql = getDb();
-		const configRows = await sql`
-      SELECT config FROM connections
-      WHERE id = ${params.connectionId}
-        AND organization_id = ${params.organizationId}
-        AND deleted_at IS NULL
-      LIMIT 1
-    `;
-		const config =
-			(configRows[0] as { config: Record<string, unknown> | null } | undefined)
-				?.config ?? null;
-		operations = filterOperationsByActionModes(operations, config);
-	}
 
 	const filtered = operations.filter((operation) => {
 		if (params.kind && operation.kind !== params.kind) return false;
@@ -706,6 +674,7 @@ export async function getOperationForConnection(
 	organizationId: string,
 	connectionId: number,
 	operationKey: string,
+	sql: DbClient = getDb(),
 ): Promise<{
 	connection: {
 		id: number;
@@ -726,7 +695,6 @@ export async function getOperationForConnection(
 	};
 	operation: OperationDescriptor;
 } | null> {
-	const sql = getDb();
 	const rows = await sql`
     SELECT
       c.id,

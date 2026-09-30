@@ -3,6 +3,8 @@
  */
 
 import { getDb } from '../db/client';
+import { resolveActingPrincipal, listEntityApprovalPolicies } from '../authz/entity-policy';
+import { evaluateConnectorPolicy } from '../authz/connector-policy';
 import { listOperations } from '../operations/connector-operations';
 import logger from './logger';
 
@@ -11,52 +13,40 @@ import logger from './logger';
  */
 export async function getAvailableOperations(
   entityIds: number[],
-  organizationId?: string
+  organizationId: string,
+  automationId: number
 ): Promise<
   Array<{
     connection_id: number;
     operation_key: string;
     name: string;
     kind: 'read' | 'write';
-    requires_approval: boolean;
   }>
 > {
   if (entityIds.length === 0) return [];
   const sql = getDb();
   const idsLiteral = `{${entityIds.map(Number).join(',')}}`;
-  const rows = organizationId
-    ? await sql`
-        SELECT DISTINCT c.id as connection_id
-        FROM connections c
-        JOIN feeds f ON f.connection_id = c.id
-        WHERE c.status = 'active'
-          AND f.entity_ids && ${idsLiteral}::bigint[]
-          AND f.deleted_at IS NULL
-          AND c.organization_id = ${organizationId}
-      `
-    : await sql`
-        SELECT DISTINCT c.id as connection_id, c.organization_id
-        FROM connections c
-        JOIN feeds f ON f.connection_id = c.id
-        WHERE c.status = 'active'
-          AND f.entity_ids && ${idsLiteral}::bigint[]
-          AND f.deleted_at IS NULL
-      `;
+  const rows = await sql`
+    SELECT DISTINCT c.id as connection_id
+    FROM connections c JOIN feeds f ON f.connection_id = c.id
+    WHERE c.status = 'active' AND c.deleted_at IS NULL
+      AND f.entity_ids && ${idsLiteral}::bigint[] AND f.deleted_at IS NULL
+      AND c.organization_id = ${organizationId}
+  `;
+  const actor = await resolveActingPrincipal(sql, { organizationId, sessionAutomationId: automationId });
+  const policies = await listEntityApprovalPolicies(organizationId, 'connector_action');
 
   const result: Array<{
     connection_id: number;
     operation_key: string;
     name: string;
     kind: 'read' | 'write';
-    requires_approval: boolean;
   }> = [];
-  for (const row of rows as Array<{ connection_id: number; organization_id?: string }>) {
-    const orgId = organizationId ?? row.organization_id;
-    if (!orgId) continue;
+  for (const row of rows as Array<{ connection_id: number }>) {
     let operations: Awaited<ReturnType<typeof listOperations>>['operations'];
     try {
       ({ operations } = await listOperations({
-        organizationId: orgId,
+        organizationId,
         connectionId: Number(row.connection_id),
         includeInputSchema: false,
         includeOutputSchema: false,
@@ -73,12 +63,12 @@ export async function getAvailableOperations(
       continue;
     }
     for (const operation of operations) {
+      if (evaluateConnectorPolicy({ organizationId, connectionId: Number(row.connection_id), operation, actor, policies }).effect === 'deny') continue;
       result.push({
         connection_id: Number(row.connection_id),
         operation_key: operation.operation_key,
         name: operation.name,
         kind: operation.kind,
-        requires_approval: operation.requires_approval,
       });
     }
   }

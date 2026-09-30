@@ -369,7 +369,7 @@ export const manageEntitySchema = <ThrowOnError extends boolean = false>(
 /**
  * Connection and connector lifecycle
  *
- * Connection and connector lifecycle. Use `manage_catalog` → `install_connector` → `connect`; poll `get` until active.
+ * Connection and connector lifecycle. Use `manage_catalog` → `install_connector` → `connect`; poll `get` until active. Also: list/get/update/delete connections and connector config. Event/message subscriptions are Automations managed through `manage_automations`.
  */
 export const manageConnections = <ThrowOnError extends boolean = false>(
   options: Options<ManageConnectionsData, ThrowOnError>,

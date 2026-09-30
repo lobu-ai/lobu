@@ -142,7 +142,7 @@ const ENTRIES: AdminToolEntry[] = [
 	{
 		name: "manage_connections",
 		description:
-			"Connection and connector lifecycle. Use `manage_catalog` → `install_connector` → `connect`; poll `get` until active. Setting, changing, or removing `action_modes` or connector `default_connection_config` requires a human web session; agents/tokens may only round-trip the map unchanged. Also: list/get/update/delete connections and connector config. Event/message subscriptions are Automations managed through `manage_automations`. Note: some connectors auto-register from a paired device (Chrome extension / Mac app advertising a capability) and appear in `list` without an explicit install. SDK alternative: client.connections.",
+			"Connection and connector lifecycle. Use `manage_catalog` → `install_connector` → `connect`; poll `get` until active. Also: list/get/update/delete connections and connector config. Event/message subscriptions are Automations managed through `manage_automations`. Note: some connectors auto-register from a paired device (Chrome extension / Mac app advertising a capability) and appear in `list` without an explicit install. SDK alternative: client.connections.",
 		schema: ManageConnectionsSchema,
 		resultSchema: ManageConnectionsResultSchema,
 		handler: manageConnections,

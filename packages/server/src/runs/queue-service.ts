@@ -1352,9 +1352,9 @@ export async function createConnectorOperationRun(params: {
   claimedBy: string | null;
 }> {
   const sql = params.db ?? getDb();
-  if (params.activation && params.approvalMode !== 'inline') {
+  if (params.activation && params.approvalMode === 'device') {
     throw new Error(
-      'Page activation requires inline execution; device and approval-queued operations cannot be parked.'
+      'Page activation requires a server-executed connector operation.'
     );
   }
 
@@ -1374,9 +1374,9 @@ export async function createConnectorOperationRun(params: {
   // claiming the run when the caller gives up, and the reaper terminalizes it
   // on its next tick. Durable human-gated runs (`queued`) get NO expiry here —
   // the long-horizon approval reaper owns their lifecycle. `inline` runs
-  // execute immediately on the gateway and are already claimed — unless they
-  // carry an activation, which parks them pending until the user visits a
-  // matching page; the caller's activation deadline is then the claim horizon.
+  // execute immediately on the gateway and are already claimed. A run of
+  // either mode that carries an activation parks pending until the user visits
+  // a matching page; the caller's activation deadline is then the claim horizon.
   const expiresAtSeconds = params.activation
     ? params.activation.expiresInSeconds
     : params.approvalMode === 'device'

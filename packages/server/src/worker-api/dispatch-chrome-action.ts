@@ -23,6 +23,8 @@ import type { DispatchChromeActionRequest } from '@lobu/core/contracts/worker/pr
 import type { Context } from 'hono';
 import { resolveAutomationConnectionVisibilityUserId } from '../authz/automation-connection-visibility';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
+import { resolveActingPrincipal, resolveStoredActingPrincipal } from '../authz/entity-policy';
+import { applyRunConnectorPolicyAtClaim, CONNECTOR_PARENT_RUN_METADATA_KEY } from '../authz/operation-run-policy';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
 import type { Env } from '../index';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
@@ -615,7 +617,7 @@ export async function dispatchChromeActionToExtension(params: {
   actionKey: string;
   actionInput: Record<string, unknown>;
   /** Parent connector run id, also used to scope extension-owned tabs. */
-  parentRunId?: number;
+  parentRunId: number;
   /**
    * Data connection that owns the parent connector run. When pinned to
    * a chrome-extension, scrapes target that browser.
@@ -637,60 +639,60 @@ export async function dispatchChromeActionToExtension(params: {
   } = params;
   const sql = getDb();
 
-  let createdByUserId = visibilityUserId;
-  let automationId: number | null = null;
-  let activatedDeviceWorkerId: string | null = null;
-  let activationTabId: number | null = null;
-  let activationTargetUrls: string[] = [];
-  let browserContext: ReturnType<typeof runScopedBrowserActionContext> | null = null;
-  if (parentRunId != null) {
-    const parentRows = (await sql`
-      SELECT created_by_user_id, automation_id,
-             activated_by_device_worker_id, activation_tab_id,
-             activation_target_urls, run_metadata, activation_kind, status
-      FROM runs
-      WHERE id = ${parentRunId}
-        AND organization_id = ${organizationId}
-      LIMIT 1
-    `) as Array<{
-      created_by_user_id: string | null;
-      automation_id: number | null;
-      activated_by_device_worker_id: string | null;
-      activation_tab_id: number | null;
-      activation_target_urls: string | string[] | null;
-      run_metadata: Record<string, unknown> | null;
-      activation_kind: string | null;
-      status: string;
-    }>;
-    if (parentRows.length === 0) {
-      return {
-        status: 'failed',
-        error_message: `Parent run ${parentRunId} was not found in this organization.`,
-      };
-    }
-    if (parentRows[0].activation_kind === 'page_visit' && (
-      parentRows[0].run_metadata?.page_activation_identity !== 'exact' ||
-      !['pending', 'running'].includes(parentRows[0].status)
-    )) {
-      return { status: 'failed', error_message: 'This page activation is no longer executable. Create a new draft with its full URL.' };
-    }
-    createdByUserId = parentRows[0].created_by_user_id;
-    automationId =
-      parentRows[0].automation_id == null ? null : Number(parentRows[0].automation_id);
-    activatedDeviceWorkerId = parentRows[0].activated_by_device_worker_id;
-    activationTabId =
-      parentRows[0].activation_tab_id == null
-        ? null
-        : Number(parentRows[0].activation_tab_id);
-    activationTargetUrls = parsePgTextArray(
-      parentRows[0].activation_target_urls
-    );
-    browserContext = browserContextWithFlow(
-      browserActionContextFromMetadata(parentRows[0].run_metadata) ??
-        runScopedBrowserActionContext(parentRunId),
-      parentRunId
-    );
+  const parentRows = (await sql`
+    SELECT created_by_user_id, automation_id,
+           activated_by_device_worker_id, activation_tab_id,
+           activation_target_urls, run_metadata, activation_kind, status,
+           run_type, approval_status, policy_principal_kind, policy_principal_id
+    FROM runs
+    WHERE id = ${parentRunId}
+      AND organization_id = ${organizationId}
+    LIMIT 1
+  `) as Array<{
+    created_by_user_id: string | null;
+    automation_id: number | null;
+    activated_by_device_worker_id: string | null;
+    activation_tab_id: number | null;
+    activation_target_urls: string | string[] | null;
+    run_metadata: Record<string, unknown> | null;
+    activation_kind: string | null;
+    status: string;
+    run_type: string;
+    approval_status: string;
+    policy_principal_kind: string | null;
+    policy_principal_id: string | null;
+  }>;
+  if (parentRows.length === 0) {
+    return {
+      status: 'failed',
+      error_message: `Parent run ${parentRunId} was not found in this organization.`,
+    };
   }
+  const parent = parentRows[0];
+  if (parent.status !== 'running' || !['auto', 'approved'].includes(parent.approval_status)
+    || !['sync', 'action'].includes(parent.run_type)) {
+    return { status: 'failed', error_message: 'The parent connector run is no longer authorized to execute.' };
+  }
+  const actor = parent.run_type === 'sync'
+    ? await resolveActingPrincipal(sql, { organizationId, userId: parent.created_by_user_id, sessionAutomationId: parent.automation_id })
+    : await resolveStoredActingPrincipal(sql, organizationId, parent.policy_principal_kind, parent.policy_principal_id);
+  if (!actor.ownerResolved) {
+    return { status: 'failed', error_message: 'The parent connector run has no valid requesting principal.' };
+  }
+  if (parent.activation_kind === 'page_visit' && parent.run_metadata?.page_activation_identity !== 'exact') {
+    return { status: 'failed', error_message: 'This page activation is no longer executable. Create a new draft with its full URL.' };
+  }
+  const createdByUserId = parent.created_by_user_id;
+  const automationId = parent.automation_id == null ? null : Number(parent.automation_id);
+  const activatedDeviceWorkerId = parent.activated_by_device_worker_id;
+  const activationTabId =
+    parent.activation_tab_id == null ? null : Number(parent.activation_tab_id);
+  const activationTargetUrls = parsePgTextArray(parent.activation_target_urls);
+  const browserContext = browserContextWithFlow(
+    browserActionContextFromMetadata(parent.run_metadata) ??
+      runScopedBrowserActionContext(parentRunId),
+    parentRunId
+  );
 
   const requiresPageActivation = actionInput.require_page_activation === true;
   if (
@@ -786,18 +788,30 @@ export async function dispatchChromeActionToExtension(params: {
 
   let runId: number;
   try {
-    const claim = await createConnectorOperationRun({
-      organizationId,
-      connectionId: chromeConnection.connectionId,
-      connectorKey: 'chrome',
-      operationKey: actionKey,
-      operationInput,
-      approvalMode: 'device',
-      requireCompiledCode: false,
-      createdByUserId,
-      automationId,
-      parentRunId,
-      runMetadata: browserContext ? { browser_context: browserContext } : undefined,
+    const claim = await sql.begin(async (tx) => {
+      const child = await createConnectorOperationRun({
+        organizationId,
+        connectionId: chromeConnection.connectionId,
+        connectorKey: 'chrome',
+        operationKey: actionKey,
+        operationInput,
+        approvalMode: 'device',
+        requireCompiledCode: false,
+        policyPrincipalKind: actor.kind,
+        policyPrincipalId: actor.id,
+        createdByUserId,
+        automationId,
+        parentRunId,
+        runMetadata: {
+          browser_context: browserContext,
+          [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
+        },
+        db: tx,
+      });
+      if (child.status === 'pending') {
+        await applyRunConnectorPolicyAtClaim({ organizationId, runId: child.runId, sql: tx });
+      }
+      return child;
     });
     runId = claim.runId;
   } catch (err) {
@@ -825,11 +839,14 @@ export async function dispatchChromeActionToExtension(params: {
   );
 
   const result = await waitForDeviceActionRun(runId, organizationId, abortSignal);
+  if (result.status === 'pending_approval') {
+    return { status: 'failed', error_message: 'The delegated browser step no longer has parent approval.' };
+  }
   const output =
     result.output && typeof result.output === 'object' && !Array.isArray(result.output)
       ? (result.output as Record<string, unknown>)
       : undefined;
-  return { ...result, output };
+  return { ...result, status: result.status, output };
 }
 
 export async function dispatchChromeAction(c: Context<{ Bindings: Env }>) {

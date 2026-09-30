@@ -4,7 +4,8 @@ type InlineExecutionResult =
 			output: Record<string, unknown>;
 			metadata?: Record<string, unknown>;
 	  }
-	| { status: "failed"; error_message: string; output?: Record<string, unknown> };
+	| { status: "failed" | "blocked"; error_message: string; output?: Record<string, unknown> }
+	| { status: "pending_approval" };
 
 type ConnectionRow = {
 	id: number;

@@ -46,6 +46,7 @@ import {
   type RecordedFeedSyncFailure,
 } from '../connectors/feed-sync-failure';
 import { resolveOperationFiles } from '../operations/file-inputs';
+import { applyRunConnectorPolicyAtClaim } from '../authz/operation-run-policy';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
 import { withDbRetry } from '../db/with-retry';
@@ -782,7 +783,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               AND created_by_user_id = ${effectiveWorkerUserId}
               AND run_type = 'action'
               AND status = 'pending'
-              AND approval_status = 'auto'
+              AND approval_status IN ('auto', 'approved')
               AND activation_kind = 'page_visit'
               AND run_metadata->>'page_activation_identity' = 'exact'
               AND activated_at IS NULL
@@ -1027,6 +1028,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         turn_conversation_id: string | null;
       };
       const runId = Number(candidate.id);
+      if (candidate.run_type === 'action' && (!candidate.organization_id ||
+        !await applyRunConnectorPolicyAtClaim({ organizationId: candidate.organization_id, runId, sql: tx }))) {
+        return null;
+      }
       if (candidate.run_type === 'agent_turn') {
         // Hold the conversation through commit: a lower-id insert can become
         // visible after the recheck and otherwise claim a different locked row.

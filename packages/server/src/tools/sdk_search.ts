@@ -139,7 +139,7 @@ async function agentConfigBlanketDenied(
 		action,
 		targetAgentId: null,
 	});
-	return effect === "deny" || effect === "disabled";
+	return effect === "deny";
 }
 
 /** Paths hidden for this agent principal by agent_config blanket policy. */

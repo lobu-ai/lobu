@@ -1,21 +1,7 @@
 /**
- * The operation ledger card for a run that needs NO human approval.
- *
- * `events` with `semantic_type='operation'` is the audit trail for connector
- * operations, and it was written only on the approval-queued branch. Auto is
- * the mode `resolveActionMode` returns for every read and every
- * `requiresApproval: false` write, plus anything a human set to `auto` in
- * `connection.config.action_modes` — so the runs that left no trace at all
- * were the majority, and the only ones that did were the ones a human had
- * already seen.
- *
- * An auto run gets the SAME card family as a queued one
- * (`semantic_type='operation'`, `interaction_type='approval'`) so every
- * existing reader, permalink and supersede path keeps working unchanged. Its
- * chain is shorter and starts one state later: a queued run runs
- * pending → approved → completed, an auto run starts at `approved` because the
- * connection's `action_modes` granted that approval in advance (the same fact
- * `runs.approval_status='auto'` records) and there is no decision left to make.
+ * Auto operations use the same append-only ledger cards as approval runs.
+ * Their card starts at auto_approved because organization policy admitted
+ * execution, then follows the shared completion and failure transitions.
  */
 
 import { getDb } from "../db/client";

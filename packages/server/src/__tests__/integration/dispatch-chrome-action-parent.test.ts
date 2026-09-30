@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../index';
+import { mutationPrincipalId, resolveActingPrincipal, upsertEntityApprovalPolicy } from '../../authz/entity-policy';
+import { CONNECTOR_PARENT_RUN_METADATA_KEY } from '../../authz/operation-run-policy';
 import { createAutomationRun } from '../../runs/queue-service';
 import {
   dispatchChromeAction,
@@ -12,6 +14,7 @@ import {
   addUserToOrganization,
   createTestAgent,
   createTestConnectorDefinition,
+  createTestConnection,
   createTestOrganization,
   createTestUser,
 } from '../setup/test-fixtures';
@@ -19,6 +22,24 @@ import {
 const sql = getTestDb();
 const app = new Hono<{ Bindings: Env }>();
 app.post('/dispatch', dispatchChromeAction);
+
+/** Exercise browser delegation from a real public operation with durable requester identity. */
+async function seedParentAuthority(organizationId: string, runId: number) {
+  const connectorKey = 'browser-parent-fixture';
+  await createTestConnectorDefinition({ key: connectorKey, name: 'Browser parent fixture', organization_id: organizationId });
+  await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({
+    prepare_reply: { name: 'Prepare reply', kind: 'write' },
+    prepare_comment: { name: 'Prepare comment', kind: 'write' },
+  })} WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
+  await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ navigate: { name: 'Navigate', kind: 'write' } })}
+    WHERE organization_id = ${organizationId} AND key = 'chrome'`;
+  const connection = await createTestConnection({ organization_id: organizationId, connector_key: connectorKey, createDefaultFeed: false });
+  const [run] = await sql`SELECT created_by_user_id, automation_id FROM runs WHERE id = ${runId}`;
+  const actor = await resolveActingPrincipal(sql, { organizationId, userId: run.created_by_user_id, sessionAutomationId: run.automation_id });
+  await sql`UPDATE runs SET connection_id = ${connection.id}, connector_key = ${connectorKey},
+    policy_principal_kind = ${actor.kind}, policy_principal_id = ${actor.id} WHERE id = ${runId}`;
+  await upsertEntityApprovalPolicy(organizationId, { resourceClass: 'connector_action', connectorKey, effects: { execute: 'auto' } });
+}
 
 describe('dispatchChromeAction parent run authorization', () => {
   beforeEach(cleanupTestDatabase);
@@ -34,6 +55,8 @@ describe('dispatchChromeAction parent run authorization', () => {
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
+
+    await seedParentAuthority(org.id, Number(run.id));
 
     const response = await app.request('/dispatch', {
       method: 'POST',
@@ -119,6 +142,7 @@ describe('dispatchChromeAction parent run authorization', () => {
       RETURNING id
     `;
     const parentRunId = Number(parent.id);
+    await seedParentAuthority(org.id, parentRunId);
 
     const responsePromise = app.request('/dispatch', {
       method: 'POST',
@@ -141,7 +165,7 @@ describe('dispatchChromeAction parent run authorization', () => {
 
     await vi.waitFor(async () => {
       const children = await sql`
-        SELECT id, action_input, run_metadata
+        SELECT id, action_input, run_metadata, policy_principal_kind, policy_principal_id
         FROM runs
         WHERE organization_id = ${org.id}
           AND connector_key = 'chrome'
@@ -151,11 +175,14 @@ describe('dispatchChromeAction parent run authorization', () => {
       `;
       expect(children).toHaveLength(1);
       const child = children[0];
+      expect(child.policy_principal_kind).toBe('user');
+      expect(child.policy_principal_id).toBeNull();
       expect(child.action_input).toEqual({
         url: 'https://example.com/',
         normal: 'kept',
       });
       expect(child.run_metadata).toEqual({
+        [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
         browser_context: {
           id: 'automation:700',
           title: 'Owletto · Automation 700',
@@ -213,6 +240,7 @@ describe('dispatchChromeAction target browser routing', () => {
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;
+    await seedParentAuthority(orgId, Number(run.id));
     return Number(run.id);
   }
 
@@ -430,7 +458,7 @@ describe('dispatchChromeAction target browser routing', () => {
 
     await vi.waitFor(async () => {
       const childRows = await sql`
-        SELECT id, created_by_user_id, automation_id, parent_run_id
+        SELECT id, created_by_user_id, automation_id, parent_run_id, policy_principal_kind, policy_principal_id
         FROM runs
         WHERE organization_id = ${org.id}
           AND connector_key = 'chrome'
@@ -443,6 +471,8 @@ describe('dispatchChromeAction target browser routing', () => {
       expect(child.created_by_user_id).toBeNull();
       expect(Number(child.automation_id)).toBe(Number(automation.id));
       expect(Number(child.parent_run_id)).toBe(runId);
+      expect(child.policy_principal_kind).toBe('automation');
+      expect(child.policy_principal_id).toBe(mutationPrincipalId({ automationId: Number(automation.id) }));
       await sql`
         UPDATE runs
         SET status = 'completed', action_output = '{}'::jsonb, completed_at = NOW()

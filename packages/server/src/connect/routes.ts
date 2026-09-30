@@ -1030,7 +1030,7 @@ async function handleOAuthCallback(
         !tokenRow.auth_profile_id && isPersonalCredentialKind(attachedKind);
 
       // Stamp Jira cloud_id via atomic JSONB merge so a concurrent replica
-      // updating action_modes / webhook state is not clobbered by a full
+      // updating webhook state is not clobbered by a full
       // config rewrite. Drop prior site keys then || the patch.
       if (jiraSite) {
         const sitePatch = jiraSiteConfigPatch(jiraSite);

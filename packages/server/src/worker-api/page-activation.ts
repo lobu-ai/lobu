@@ -72,7 +72,7 @@ export async function activatePageRun(
 		  AND created_by_user_id = ${c.var.workerUserId}
 		  AND run_type = 'action'
 		  AND status = 'pending'
-		  AND approval_status = 'auto'
+		  AND approval_status IN ('auto', 'approved')
 		  AND activation_kind = 'page_visit'
 		  AND run_metadata->>'page_activation_identity' = 'exact'
 		  AND activated_at IS NULL

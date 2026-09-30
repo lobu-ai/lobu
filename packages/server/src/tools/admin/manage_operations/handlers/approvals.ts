@@ -8,12 +8,7 @@ import {
 	RejectBatchAction,
 } from "../schemas";
 import type { Static } from "@sinclair/typebox";
-import {
-	agentExistsInOrg,
-	resolveAutomationOwner,
-	resolveWritePolicyDecision,
-	automationIdFromPrincipalId,
-} from "../../../../authz/entity-policy";
+import { resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { EntityRowValidationError } from "../../../../authz/entity-row-validation";
 import { lockOrgForAclInvalidation } from "../../../../authz/acl-generation";
 import { type DbClient, getDb, parsePgNumberArray, pgTextArray } from "../../../../db/client";
@@ -21,7 +16,6 @@ import { lockResolutionCandidate, wasResolutionRejected } from "../../../../enti
 import { droppedEvidence } from "../../../../entity-resolution/evidence-strength";
 import { ResolutionFingerprintError } from "../../../../entity-resolution/staleness";
 import type { Env } from "../../../../index";
-import { resolveActionMode } from "../../../../operations/action-modes";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import { validateOperationInput } from "../../../../operations/input-validation";
 import { insertEvent } from "../../../../utils/insert-event";
@@ -67,7 +61,6 @@ import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
 import { selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
 import { runLeaseFence } from "../../../../runs/run-lease";
 import { executeOperationInline } from "./execute";
-import { qualifiedOperationKey } from "./shared";
 /**
  * Durably persist a claimed run's apply/execution output in its OWN
  * transaction, BEFORE the terminalization attempt. If the terminal card write
@@ -1562,83 +1555,14 @@ export async function handleApprove(
 		if (admissionError) return { error: admissionError };
 	}
 
-	// (sol #5) Re-evaluate the connector-action write-gate NOW, at approve time,
-	// against the CURRENT connection mode + org policy — using the trusted
-	// principal persisted when the run was queued (not the approver). A deny or
-	// disabled installed after queueing but before this approval must cancel it,
-	// not sail through on the stale queue-time check.
-	const currentMode = resolveActionMode(
-		resolved.operation,
-		resolved.connection.config,
-	);
-	const recheckPrincipalKind =
-		pendingRun.policy_principal_kind === "agent" ||
-		pendingRun.policy_principal_kind === "automation"
-			? pendingRun.policy_principal_kind
-			: "user";
-	// An automation-attributed run must fold its OWNING AGENT'S envelope at recheck too,
-	// exactly as at queue time — else an agent-level deny installed before approval
-	// would be missed. Re-resolve the owner from the persisted `automation:<id>` id
-	// (no need to persist it separately).
-	const recheckAutomationId = automationIdFromPrincipalId(
-		pendingRun.policy_principal_id,
-	);
-	// Re-resolve the principal's resolvability from persistence. A AUTOMATION principal
-	// re-resolves its owning agent via `automation:<id>`. A direct AGENT principal must be
-	// existence-checked too: if the agent was DELETED between queue and approve, the
-	// r16 cascade removed its deny/approval rows, so folding candidates for a gone
-	// agent would fall back to the looser org default (connector_action → auto) and let
-	// a human's Approve execute the run as a deleted agent — strictly looser than
-	// before the delete. Either GONE → resolved:false → resolveWriteEffect denies,
-	// cancelling the approval. (Same fail-closed invariant resolveActingPrincipal
-	// enforces for live sessions; this is the persisted-principal path.)
-	let recheckOwner: { ownerAgentId: string | null; resolved: boolean };
-	if (recheckAutomationId != null) {
-		recheckOwner = await resolveAutomationOwner(
-			sql,
-			recheckAutomationId,
-			ctx.organizationId,
-		);
-	} else if (
-		recheckPrincipalKind === "agent" &&
-		pendingRun.policy_principal_id != null
-	) {
-		recheckOwner = {
-			ownerAgentId: null,
-			resolved: await agentExistsInOrg(
-				sql,
-				pendingRun.policy_principal_id,
-				ctx.organizationId,
-			),
-		};
-	} else {
-		recheckOwner = { ownerAgentId: null, resolved: true };
-	}
-	const recheckDecision =
-		recheckPrincipalKind === "user"
-			? "allow"
-			: await resolveWritePolicyDecision({
-					organizationId: ctx.organizationId,
-					resourceClass: "connector_action",
-					principalKind: recheckPrincipalKind,
-					principalId: pendingRun.policy_principal_id,
-					ownerAgentId: recheckOwner.ownerAgentId,
-					ownerResolved: recheckOwner.resolved,
-					action: "execute",
-					// Recheck against the SAME operation the run was queued under, using the
-					// connector-qualified key (connector_key from the resolved connection +
-					// the persisted action_key), so a per-op rule installed after queueing
-					// still binds — mirrors the queue-time gate above.
-					operationKey: qualifiedOperationKey(
-						resolved.connection.connector_key,
-						pendingRun.action_key,
-					),
-				});
-	if (currentMode === "disabled" || recheckDecision === "deny") {
-		const why =
-			currentMode === "disabled"
-				? `Operation '${pendingRun.action_key}' is now disabled on this connection.`
-				: `Policy now denies '${pendingRun.action_key}' for the requesting principal.`;
+	// Recheck the persisted requesting principal, not the human approver.
+	const policy = await resolveRunConnectorPolicy({
+		organizationId: ctx.organizationId,
+		runId: args.run_id,
+		sql,
+	});
+	if (policy?.effect === "deny") {
+		const why = `Policy now blocks '${pendingRun.action_key}' for the requesting principal.`;
 		const reviewer = await resolveReviewer(ctx);
 		// The claim re-asserts `approval_status = 'pending'`, so a run approved
 		// concurrently (or otherwise no longer pending) matches ZERO rows. In
@@ -1776,6 +1700,10 @@ export async function handleApprove(
 		undefined,
 		{ deferTerminalWrite: true, claimedBy: inlineOwner, runMetadata: run.run_metadata },
 	);
+
+	if (result.status === "pending_approval" || result.status === "blocked") {
+		return { error: "Policy or run state changed before execution. Refresh the run to review its current status." };
+	}
 
 	if (result.status === "completed") {
 		// Phase 2a (durable): persist the execution output BEFORE the

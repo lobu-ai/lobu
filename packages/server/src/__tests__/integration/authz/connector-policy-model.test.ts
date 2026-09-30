@@ -50,7 +50,7 @@ describe("org connector policy scopes", () => {
 		});
 	beforeEach(async () => {
 		orgId = (await createTestOrganization()).id;
-		// Exercise fallback behavior independently of the explicit new-org read grant.
+	// Exercise the fallback decision independently of the explicit new-org read grant.
 		await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", operationCategory: "read" });
 		await createTestAgent({ organizationId: orgId, agentId: "policy-agent" });
 		await createTestConnectorDefinition({

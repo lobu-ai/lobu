@@ -172,7 +172,7 @@ function positiveIntegerMs(value: string | null | undefined): number | null {
 }
 
 interface DeviceActionRunOutcome {
-  status: 'completed' | 'failed' | 'timeout';
+  status: 'completed' | 'failed' | 'timeout' | 'pending_approval';
   // `action_output` is arbitrary connector/device JSON — object, array, or
   // scalar — so the completed output is `unknown`, not an object.
   output?: unknown;
@@ -241,12 +241,13 @@ export async function waitForDeviceActionRunWithOptions(
 
   while (true) {
     const rows = (await sql`
-      SELECT status, action_output, error_message, claimed_at
+      SELECT status, approval_status, action_output, error_message, claimed_at
       FROM runs
       WHERE id = ${runId} AND organization_id = ${organizationId}
       LIMIT 1
     `) as Array<{
       status: string;
+      approval_status: string;
       action_output: unknown;
       error_message: string | null;
       claimed_at: Date | string | null;
@@ -264,9 +265,12 @@ export async function waitForDeviceActionRunWithOptions(
         output: row.action_output ?? {},
       };
     }
-    if (row.status === 'failed' || row.status === 'timeout') {
+    if (row.status === 'pending' && row.approval_status === 'pending') {
+      return { status: 'pending_approval' };
+    }
+    if (row.status === 'failed' || row.status === 'timeout' || row.status === 'cancelled') {
       return {
-        status: row.status as 'failed' | 'timeout',
+        status: row.status === 'timeout' ? 'timeout' : 'failed',
         error_message: row.error_message ?? `Run ${runId} ${row.status}`,
       };
     }
@@ -328,6 +332,7 @@ export async function waitForDeviceActionRunWithOptions(
       WHERE id = ${runId}
         AND organization_id = ${organizationId}
         AND status IN ('pending', 'running')
+        AND approval_status <> 'pending'
       RETURNING id, action_key
     `) as Array<{ id: number; action_key: string | null }>;
     if (rows.length === 0) return rows;
@@ -348,12 +353,13 @@ export async function waitForDeviceActionRunWithOptions(
   if (updated.length === 0) {
     // Worker won the race. Re-read to return whatever it actually said.
     const finalRows = (await sql`
-      SELECT status, action_output, error_message
+      SELECT status, approval_status, action_output, error_message
       FROM runs
       WHERE id = ${runId} AND organization_id = ${organizationId}
       LIMIT 1
     `) as Array<{
       status: string;
+      approval_status: string;
       action_output: Record<string, unknown> | null;
       error_message: string | null;
     }>;
@@ -364,7 +370,10 @@ export async function waitForDeviceActionRunWithOptions(
         output: (final.action_output ?? {}) as Record<string, unknown>,
       };
     }
-    if (final?.status === 'failed') {
+    if (final?.status === 'pending' && final.approval_status === 'pending') {
+      return { status: 'pending_approval' };
+    }
+    if (final?.status === 'failed' || final?.status === 'cancelled') {
       return {
         status: 'failed',
         error_message: final.error_message ?? `Run ${runId} failed`,

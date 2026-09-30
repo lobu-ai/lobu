@@ -6,7 +6,7 @@
  * update_connector_auth, update_connector_default_config.
  */
 
-import { getErrorMessage, parseJsonObject } from "@lobu/core";
+import { getErrorMessage } from "@lobu/core";
 import { getDb } from "../../../../db/client";
 import { recordToolConfigChange } from "../../helpers/config-audit";
 import { normalizeAuthValues } from "../../../../utils/auth-profiles";
@@ -15,10 +15,6 @@ import {
 	hasDeviceAutowireSuppressionMarker,
 } from "../../../../utils/device-autowire-suppression";
 import logger from "../../../../utils/logger";
-import {
-	actionModesChanged,
-	denyNonHumanActionModesWrite,
-} from "./action-modes-guard";
 import type { ToolContext } from "../../../registry";
 import {
 	getInstalledConnectorSource,
@@ -458,11 +454,6 @@ export async function handleUpdateConnectorDefaultConfig(
 				FOR UPDATE
 			`) as unknown as Array<{ default_connection_config: unknown }>;
 			if (rows.length === 0) return "not_found";
-			const storedDefaults = parseJsonObject(rows[0].default_connection_config);
-			if (actionModesChanged(storedDefaults, args.default_connection_config)) {
-				const denied = denyNonHumanActionModesWrite(ctx);
-				if (denied) return denied;
-			}
 			await tx`
 				UPDATE connector_definitions
 				SET default_connection_config = ${tx.json(args.default_connection_config)},

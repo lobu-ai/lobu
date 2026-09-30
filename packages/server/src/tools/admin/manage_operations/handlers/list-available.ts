@@ -10,14 +10,10 @@ import {
 import { resolveMaxAccessLevel, type ToolAccessLevel } from "../../../../auth/tool-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { resolveActingPrincipal, resolveWriteEffects } from "../../../../authz/entity-policy";
+import { resolveActingPrincipal, listEntityApprovalPolicies } from "../../../../authz/entity-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { getDb } from "../../../../db/client";
-import {
-	defaultActionModeForOperation,
-	getActionModes,
-	resolveActionMode,
-} from "../../../../operations/action-modes";
+import { evaluateConnectorPolicy, type ConnectorPolicyResult } from "../../../../authz/connector-policy";
 import { listOperations } from "../../../../operations/connector-operations";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { AvailableOperation, OperationDescriptor } from "../../../../operations/types";
@@ -42,7 +38,6 @@ import {
 import { isSystemContext } from "../../../access-control";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
-import { qualifiedOperationKey } from "./shared";
 
 type ExecutionTarget = {
 	connection_id: number;
@@ -51,10 +46,10 @@ type ExecutionTarget = {
 	status: string;
 	executable: boolean;
 	reason: string;
+	policy?: ConnectorPolicyResult;
 };
 
 type InternalExecutionTarget = ExecutionTarget & {
-	config: Record<string, unknown> | null;
 	auth_profile_kind: string | null;
 	granted_scopes: string[];
 	granted_scopes_known: boolean;
@@ -67,7 +62,6 @@ type OperationTargetRow = {
 	slug: string;
 	display_name: string | null;
 	status: string;
-	config: Record<string, unknown> | null;
 	device_worker_id: string | null;
 	device_online: boolean;
 	device_last_seen_at: Date | string | null;
@@ -91,7 +85,6 @@ function executionTargetFromRow(
 		connection_id: Number(row.id),
 		slug: row.slug,
 		display_name: row.display_name ?? row.slug,
-		config: row.config,
 		auth_profile_kind: row.auth_profile_kind,
 		granted_scopes: readGrantedScopesFromAuthData(row.auth_data),
 		granted_scopes_known: Object.hasOwn(row.auth_data ?? {}, "granted_scopes"),
@@ -230,8 +223,8 @@ function operationReadinessReason(
 	if (readiness === "membership_required") {
 		return MEMBERSHIP_REASON;
 	}
-	if (readiness === "disabled") {
-		return "This operation is disabled on every visible connection.";
+	if (readiness === "blocked") {
+		return "Organization policy blocks this operation on every visible connection.";
 	}
 	return `A visible connection has status ${readiness}.`;
 }
@@ -252,14 +245,14 @@ function resolveOperationReadiness(targets: ExecutionTarget[]): {
 			readiness: "disconnected",
 		};
 	}
-	if (targets.every((target) => target.status === "disabled")) {
-		return { readyTarget: undefined, executable: false, readiness: "disabled" };
+	if (targets.every((target) => target.status === "blocked")) {
+		return { readyTarget: undefined, executable: false, readiness: "blocked" };
 	}
 	return {
 		readyTarget: undefined,
 		executable: false,
 		readiness:
-			targets.find((target) => target.status !== "disabled")?.status ??
+			targets.find((target) => target.status !== "blocked")?.status ??
 			"inactive",
 	};
 }
@@ -298,7 +291,6 @@ function buildOperationNextAction(args: {
 	readyTarget: ExecutionTarget | undefined;
 	readiness: string;
 	remediationTarget: ExecutionTarget | undefined;
-	remediationConfig: Record<string, unknown> | null | undefined;
 	remediationAuthKind: string | null | undefined;
 	missingScopes: string[];
 	requestedScopes: string[];
@@ -309,7 +301,6 @@ function buildOperationNextAction(args: {
 		readyTarget,
 		readiness,
 		remediationTarget,
-		remediationConfig,
 		remediationAuthKind,
 		missingScopes,
 		requestedScopes,
@@ -388,23 +379,8 @@ function buildOperationNextAction(args: {
 			...(viewUrl ? { view_url: viewUrl } : {}),
 		};
 	}
-	if (readiness === "disabled") {
-		return {
-			action: "enable_operation",
-			sdk_method: "connections.update",
-			arguments: [
-				{
-					connection_id: remediationTarget?.connection_id,
-					config: {
-						action_modes: {
-							...getActionModes(remediationConfig),
-							[operation.operation_key]:
-								defaultActionModeForOperation(operation),
-						},
-					},
-				},
-			],
-		};
+	if (readiness === "blocked") {
+		return { action: "edit_policy", manual: true, instructions: "Ask a workspace administrator to change the organization policy." };
 	}
 	if (readiness === "paused") {
 		return {
@@ -456,27 +432,24 @@ function buildAvailableOperation(args: {
 	 * blocker is workspace membership, not MCP scope, so readiness must say so.
 	 */
 	callerLacksMembership: boolean;
+	policyFor: (operation: OperationDescriptor, connectionId: number | null) => ConnectorPolicyResult;
+	hideBlocked: boolean;
 }): AvailableOperation & Record<string, unknown> {
 	const { operation, internalTargets, includeInputSchema, viewUrl, callerMax, callerLacksMembership } = args;
 	const { backend_config: _privateBackendConfig, ...publicOperation } =
 		operation;
 	const requiredScopes = operation.required_scopes ?? [];
-	const targets = internalTargets.map((target): ExecutionTarget => {
+	const targets = internalTargets.filter((target) => !args.hideBlocked || args.policyFor(operation, target.connection_id).effect !== "deny").map((target): ExecutionTarget => {
 		const {
-			config,
 			auth_profile_kind: _authProfileKind,
 			granted_scopes,
 			granted_scopes_known,
 			requested_scopes: _requestedScopes,
 			...publicTarget
 		} = target;
-		if (resolveActionMode(operation, config) === "disabled") {
-			return {
-				...publicTarget,
-				status: "disabled",
-				executable: false,
-				reason: "This operation is disabled on the connection.",
-			};
+		publicTarget.policy = args.policyFor(operation, target.connection_id);
+		if (publicTarget.policy.effect === "deny") {
+			return { ...publicTarget, status: "blocked", executable: false, reason: "Organization policy blocks this operation." };
 		}
 		const missing = getMissingKnownOAuthScopes(
 			granted_scopes,
@@ -525,7 +498,7 @@ function buildAvailableOperation(args: {
 		: SESSION_SCOPE_REASON;
 	// Only a caller-blocked op whose TARGET was ready gets downgraded. An op
 	// already not-executable for its own reasons (unsupported/disconnected/
-	// disabled) keeps its target-state verdict — the caller override must not
+	// blocked) keeps its target-state verdict — the caller override must not
 	// replace it. Downgraded targets carry the caller readiness as their status
 	// too, so no per-target row contradicts the top-level verdict.
 	const shouldOverride = !callerCanExecute && base.executable;
@@ -560,6 +533,7 @@ function buildAvailableOperation(args: {
 			: [];
 	return {
 		...(publicOperation as AvailableOperation),
+		policy: readyTarget?.policy ?? remediationTarget?.policy ?? args.policyFor(operation, null),
 		...(includeInputSchema ? {} : { input_schema: undefined }),
 		executable,
 		readiness,
@@ -571,7 +545,6 @@ function buildAvailableOperation(args: {
 			readyTarget,
 			readiness,
 			remediationTarget,
-			remediationConfig: remediationInternalTarget?.config,
 			remediationAuthKind: remediationInternalTarget?.auth_profile_kind,
 			missingScopes,
 			requestedScopes: remediationInternalTarget?.requested_scopes ?? [],
@@ -718,28 +691,13 @@ export async function handleListAvailable(
 	});
 	const targetsByConnector = groupExecutionTargets(targetRows, deviceReadiness);
 
-  // A `disabled` connector_action effect turns an operation OFF for this principal
-  // — it shouldn't be listed at all (Disabled HIDES the action, unlike deny/approval
-  // which surface then gate on execute). Two levels now: the BLANKET `execute` rule
-  // (operation_key NULL) can disable the whole connector, and a PER-OPERATION rule
-  // can disable a single op while the rest stay listed.
   const actor = await resolveActingPrincipal(getDb(), {
     organizationId: ctx.organizationId,
     userId: ctx.userId,
     agentId: ctx.agentId,
     sessionAutomationId: ctx.actingAutomationId ?? null,
   });
-  // Fetch the FULL filtered set (offset 0, no caller limit), drop per-op-disabled
-  // ops across the WHOLE set, THEN paginate. Filtering a single page and subtracting
-  // its hidden count from the global total gives an inconsistent `total` across pages
-  // and can return a short page while visible ops remain past the offset (a client
-  // treating "short page = end" would silently truncate the catalog). Pagination must
-  // run on the post-filter list.
-	// For an explicit connection, targetRows already performed the visibility and
-	// authorization lookup. Query the connector catalog by that row's key instead
-	// of applying listOperations' legacy per-connection action-mode filter; the
-	// readiness mapper below must retain disabled capabilities and explain how to
-	// enable them.
+	// Apply policy to the complete catalog before pagination.
 	const catalogConnectorKey =
 		args.connection_id !== undefined
 			? targetRows[0]?.connector_key
@@ -755,45 +713,20 @@ export async function handleListAvailable(
 		// descriptor copy from the public response.
 		includeInputSchema: true,
     includeOutputSchema: args.include_output_schema ?? false,
-		includeDisabled: true,
-    // Fetch the WHOLE filtered set — listOperations defaults to limit 100, which
-    // would silently drop ops past index 100 and make them unreachable at any
-    // caller offset. We must filter per-op-disabled across the full set BEFORE
-    // slicing, so no internal cap here; the caller's limit/offset apply below.
     limit: Number.MAX_SAFE_INTEGER,
     offset: 0,
   });
-	const qualifiedWriteKeys = full.operations
-		.filter((operation) => operation.kind === "write")
-		.map((operation) =>
-			qualifiedOperationKey(operation.connector_key, operation.operation_key),
-		);
-	const policyEffects = await resolveWriteEffects({
-		organizationId: ctx.organizationId,
-		resourceClass: "connector_action",
-		principalKind: actor.kind,
-		principalId: actor.id,
-		ownerAgentId: actor.ownerAgentId,
-		ownerResolved: actor.ownerResolved,
-		action: "execute",
-		operationKeys: qualifiedWriteKeys,
+	const policies = await listEntityApprovalPolicies(ctx.organizationId, "connector_action");
+	const policyFor = (operation: OperationDescriptor, connectionId: number | null) =>
+		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies });
+	const hideBlocked = actor.kind !== "user";
+	const policyVisible = full.operations.filter((operation) => {
+		if (!hideBlocked) return true;
+		const targets = targetsByConnector.get(operation.connector_key) ?? [];
+		return targets.length
+			? targets.some((target) => policyFor(operation, target.connection_id).effect !== "deny")
+			: policyFor(operation, null).effect !== "deny";
 	});
-	const blanketDisabled = policyEffects.get(null) === "disabled";
-
-  // Hide WRITE ops whose per-op (or blanket) policy is disabled. Reads are never
-  // filtered by agent write-policy. Humans always resolve auto for policy.
-	const visibleFlags = full.operations.map((op) => {
-			if (op.kind === "read") return "auto" as const;
-			if (blanketDisabled) return "disabled" as const;
-			return (
-				policyEffects.get(
-					qualifiedOperationKey(op.connector_key, op.operation_key),
-				) ?? "auto"
-  );
-		});
-	const policyVisible = full.operations.filter(
-		(_op, i) => visibleFlags[i] !== "disabled",
-  );
 
 	const queryTokens = (args.query ?? "")
 		.toLocaleLowerCase()
@@ -828,6 +761,8 @@ export async function handleListAvailable(
 					? buildConnectionAuthUrl(ownerSlug, operation.connector_key, id, baseUrl) : undefined,
 				callerMax,
 				callerLacksMembership,
+				policyFor,
+				hideBlocked,
 			}),
 		)
 		.filter((operation) => {
