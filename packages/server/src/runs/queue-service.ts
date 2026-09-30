@@ -109,6 +109,8 @@ export interface AutomationRunPayload {
   trigger_output?: 'silent' | 'reply_to_source';
   trigger_key?: string;
   source_fingerprint?: string;
+  /** Arrivals remain beyond the script window; successful progress may resume before the next cron tick. */
+  window_truncated?: boolean;
 }
 
 function automationEventTriggerKey(trigger: AutomationActivationTrigger): string {
@@ -768,6 +770,7 @@ async function createAutomationRunWithClient(
     agent_kind: normalizedAgentKind,
     // A fingerprint of the full backlog cannot prove the remainder was processed.
     source_fingerprint: windowEnd === params.windowEnd ? params.sourceFingerprint : undefined,
+    ...(windowEnd !== params.windowEnd ? { window_truncated: true } : {}),
   };
   const idempotencyKey = [
     'automation',

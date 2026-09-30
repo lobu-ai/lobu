@@ -130,16 +130,24 @@ export async function runAutomationScriptTask(
     `;
     if (!completed) return;
     if (input.dispatch_source !== 'event') {
-      await advanceAutomationArrivalMark(
+      const markMoved = await advanceAutomationArrivalMark(
         tx,
         payload.automationId,
         new Date(input.window_start),
         new Date(input.window_end)
       );
-      await advanceAutomationScheduleAfterSuccessfulWindow(
+      const nextTick = await advanceAutomationScheduleAfterSuccessfulWindow(
         tx,
         payload.automationId
       );
+      // Resume actual backlog progress promptly, but preserve a later retry
+      // boundary and leave historical replays on the normal cadence.
+      if (markMoved && input.window_truncated === true && nextTick) {
+        await tx`
+          UPDATE automations SET next_run_at = current_timestamp
+          WHERE id = ${payload.automationId} AND next_run_at <= ${nextTick}::timestamptz
+        `;
+      }
     }
     if (automation?.reaction_script_compiled) {
       await enqueueAutomationReaction(

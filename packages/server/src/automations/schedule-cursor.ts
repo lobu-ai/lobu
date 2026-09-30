@@ -320,6 +320,8 @@ export function deviceProviderQuotaResetNotBefore(
  * Pass either the singleton `sql` client or a transaction handle from
  * `sql.begin(...)` to advance inside the caller's transaction. Schedule-less
  * automations (manual-only) are no-ops.
+ * Returns the normal next cron tick, when schedulable, so backlog completion
+ * can distinguish that cadence from a later retry boundary.
  *
  * Errors are split by whether a retry could ever succeed, because the callers
  * are terminal state transitions inside a transaction:
@@ -340,7 +342,7 @@ export async function advanceAutomationSchedule(
 	automationId: number | null | undefined,
 	notBefore?: Date | null,
 	allowBeforeNextTick = false
-): Promise<void> {
+): Promise<string | undefined> {
 	if (automationId == null) return;
 	const rows = await sql`
     SELECT schedule, timezone, schedule_auto_paused_at
@@ -389,19 +391,19 @@ export async function advanceAutomationSchedule(
     WHERE id = ${automationId}
       AND schedule_auto_paused_at IS NULL
   `;
+	return nextTick;
 }
 
 /**
- * A completed window clears the failure streak and moves the cron cursor to
- * the next tick. There is no catch-up loop: one arrival window covers however
- * long a device was offline, so the next tick already reads everything since.
+ * Clear the failure streak and advance the cron cursor. Return the normal
+ * next tick so a truncated script window can resume without erasing a later park.
  */
 export async function advanceAutomationScheduleAfterSuccessfulWindow(
 	sql: DbClient,
 	automationId: number
-): Promise<void> {
+): Promise<string | undefined> {
 	await resetScheduledFailureState(sql, automationId);
-	await advanceAutomationSchedule(sql, automationId);
+	return advanceAutomationSchedule(sql, automationId);
 }
 
 /**
