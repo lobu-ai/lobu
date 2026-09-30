@@ -742,6 +742,154 @@ const HOME_FEED_SCRAPE_CONFIG = {
 } as const;
 
 /**
+ * Profile activity lists render the same cards as the home feed under their own
+ * FeedType, so they share its fields and identity parsing. Read only comments
+ * already rendered on those pages, without expanding threads.
+ */
+const MY_ACTIVITY_LISTS = {
+  posts: { path: "all", feedType: "FeedType_CREATOR_PROFILE_ALL_CONTENT_VIEW" },
+  comments: { path: "comments", feedType: "FeedType_PROFILE_COMMENTS" },
+} as const;
+
+function myActivityScrapeConfig(feedType: string, maxScrolls: number) {
+  const { expandRows: _expandRows, ...cardConfig } = HOME_FEED_SCRAPE_CONFIG;
+  // post_url opens every card's control menu and waits for a copy-link item it
+  // never uses; activity cards carry post_identity, so skip that per-row wait.
+  const { post_url: _postUrl, ...fields } = cardConfig.fields;
+  return {
+    ...cardConfig,
+    fields,
+    rowSelector: `div[componentkey^="expanded"][componentkey*="${feedType}"], [id^="replaceableComment_urn:li:comment:"]`,
+    scroll: { ...cardConfig.scroll, max: maxScrolls },
+  };
+}
+
+/** UI prefixes on post cards, stripped before resolving the author's name. */
+const MY_ACTIVITY_CHROME_PREFIXES = [
+  /^Feed post(?:\s+|$)/i,
+  /^Promote this post to reach people who matter to you\.\s*Boost\s*/i,
+  /^This post type can['’]t be boosted\.\s*/i,
+];
+
+function stripMyActivityChrome(text: string): string {
+  let out = text.trim();
+  for (const prefix of MY_ACTIVITY_CHROME_PREFIXES) {
+    out = out.replace(prefix, "");
+  }
+  return out;
+}
+
+function linkedInProfileSlugFromUrl(
+  url: string | undefined
+): string | undefined {
+  const match = url?.match(/linkedin\.com\/in\/([^/?#]+)/i);
+  const slug = match?.[1] ? decodeURIComponent(match[1]) : undefined;
+  return slug && slug.toLowerCase() !== "me" ? slug : undefined;
+}
+
+async function readMyLinkedInActivity(
+  ctx: ActionContext
+): Promise<ActionResult> {
+  const requested = Array.isArray(ctx.input.kinds)
+    ? ctx.input.kinds.filter(
+        (kind): kind is keyof typeof MY_ACTIVITY_LISTS =>
+          kind === "posts" || kind === "comments"
+      )
+    : [];
+  const kinds =
+    requested.length > 0 ? requested : (["posts", "comments"] as const);
+  const rawScrolls = Number(ctx.input.max_scrolls ?? 3);
+  const maxScrolls = Number.isFinite(rawScrolls)
+    ? Math.min(10, Math.max(1, Math.trunc(rawScrolls)))
+    : 3;
+  const dispatcher = requireExtensionDispatcher(ctx);
+
+  // Resolve the /in/me/ redirect before constructing canonical activity URLs.
+  const profile = await extensionDomScrape<Record<string, unknown>>({
+    dispatcher,
+    url: "https://www.linkedin.com/in/me/",
+    config: {
+      rowSelector: "main",
+      requireFields: [],
+      fields: {},
+      loggedOutWhen: HOME_FEED_SCRAPE_CONFIG.loggedOutWhen,
+    },
+    parseRows: (rows) => rows,
+    allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
+    // One action run reads several pages; a run-scoped scratch tab is released
+    // after each scrape, so reuse LinkedIn's anchor tab like home_feed does.
+    persistent: true,
+  });
+  if (!profile.loggedIn) {
+    return {
+      success: false,
+      error:
+        "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.",
+    };
+  }
+  const slug = linkedInProfileSlugFromUrl(profile.landedUrl);
+  if (!slug) {
+    return {
+      success: false,
+      error: `Could not resolve the signed-in LinkedIn profile from ${JSON.stringify(profile.landedUrl ?? null)}.`,
+    };
+  }
+
+  const items: Array<Record<string, unknown>> = [];
+  for (const kind of kinds) {
+    const list = MY_ACTIVITY_LISTS[kind];
+    const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
+      dispatcher,
+      url: `https://www.linkedin.com/in/${encodeURIComponent(slug)}/recent-activity/${list.path}/`,
+      config: myActivityScrapeConfig(list.feedType, maxScrolls),
+      parseRows: (raw) =>
+        (raw as HomeFeedRow[]).map((row) => ({
+          ...row,
+          body: parseHomeFeedCommentIdentity(row.id)
+            ? row.body
+            : stripMyActivityChrome(row.body ?? ""),
+          post_identity: decodeHomeFeedPostIdentity(row.post_identity),
+        })),
+      allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
+      persistent: true,
+    });
+    if (!loggedIn) {
+      return {
+        success: false,
+        error:
+          "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.",
+      };
+    }
+    for (const event of buildHomeFeedEvents(rows, new Date())) {
+      const metadata = (event.metadata ?? {}) as Record<string, unknown>;
+      const authorSlug = metadata.author_linkedin_slug;
+      items.push({
+        list: kind,
+        type: event.origin_type,
+        id: event.origin_id,
+        ...(event.origin_parent_id
+          ? { parent_id: event.origin_parent_id }
+          : {}),
+        is_mine:
+          typeof authorSlug === "string" &&
+          authorSlug.toLowerCase() === slug.toLowerCase(),
+        author: event.author_name ?? null,
+        text: event.payload_text ?? "",
+        url: event.source_url ?? null,
+        ...(typeof metadata.parent_author === "string"
+          ? { parent_author: metadata.parent_author }
+          : {}),
+      });
+    }
+  }
+
+  return {
+    success: true,
+    output: { profile_slug: slug, count: items.length, items },
+  };
+}
+
+/**
  * Best-effort author extraction from a home-feed row's body text. Social
  * context appears before the post author in two shapes: actor banners name an
  * engaging member ("X likes this", "X commented", "X reposted this") and
@@ -2998,7 +3146,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.12.1",
+    version: "3.13.0",
     faviconDomain: "linkedin.com",
     // Auth is `none`: every live feed authenticates implicitly through the
     // paired Owletto Chrome extension (the user's own signed-in linkedin.com
@@ -3377,11 +3525,44 @@ export default class LinkedInConnector extends ConnectorRuntime<
           },
         },
       },
+      read_my_activity: {
+        key: "read_my_activity",
+        name: "Read my activity",
+        description:
+          "Read the signed-in member's own recent LinkedIn posts and comments from their profile activity pages in the paired Chrome browser, and return them without storing any events. Read-only.",
+        requiresApproval: false,
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            kinds: {
+              type: "array",
+              items: { type: "string", enum: ["posts", "comments"] },
+              description:
+                'Which activity lists to read. Default ["posts", "comments"].',
+            },
+            max_scrolls: {
+              type: "integer",
+              minimum: 1,
+              maximum: 10,
+              description: "Scroll passes per list (default 3).",
+            },
+          },
+        },
+      },
     },
   };
 
   async execute(ctx: ActionContext): Promise<ActionResult> {
     try {
+      if (ctx.actionKey === "read_my_activity") {
+        return await readMyLinkedInActivity(ctx);
+      }
       if (
         ctx.actionKey !== "prepare_comment" &&
         ctx.actionKey !== "verify_staged_comment"

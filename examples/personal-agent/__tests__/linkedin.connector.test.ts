@@ -3299,7 +3299,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.12.1");
+    expect(c.definition.version).toBe("3.13.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
@@ -3683,6 +3683,184 @@ describe("prepare_comment helpers", () => {
     expect(result.output?.status).toBe("prepared");
     expect(result.output?.tab_id).toBe(5);
     expect(result.output?.method).toBe("evaluate");
+  });
+
+  test.each([
+    "Promote this post to reach people who matter to you. Boost ",
+    "This post type can't be boosted. ",
+    "This post type can’t be boosted. ",
+    "",
+  ])("read_my_activity resolves authors behind UI prefix %j and preserves comments", async (prefix) => {
+    const visited: string[] = [];
+    const result = await new LinkedInConnector().execute({
+      actionKey: "read_my_activity",
+      input: {},
+      credentials: null,
+      config: {},
+      sessionState: {
+        chrome_dispatcher: {
+          dispatch: async (key: string, input: Record<string, unknown>) => {
+            if (key !== "navigate") return {};
+            const url = String(input.url);
+            visited.push(url);
+            if (url === "https://www.linkedin.com/in/me/") {
+              return {
+                result: {
+                  loggedIn: true,
+                  landedUrl:
+                    "https://www.linkedin.com/in/fixture-member/?isSelfProfile=true",
+                  rows: [],
+                },
+              };
+            }
+            const member = {
+              href: "https://www.linkedin.com/in/fixture-member/",
+              name: "View Fixture Member’s profile",
+            };
+            if (url.endsWith("/recent-activity/all/")) {
+              return {
+                result: {
+                  loggedIn: true,
+                  rows: [
+                    {
+                      id: "post_token",
+                      body: `Feed post ${prefix}Fixture Member • You Founder 1d • A post the member wrote with enough text`,
+                      post_identity: "urn:li:activity:1111111111111111111",
+                      links: [member],
+                    },
+                  ],
+                },
+              };
+            }
+            return {
+              result: {
+                loggedIn: true,
+                rows: [
+                  {
+                    id: "parent_token",
+                    body: "Feed post Fixture Post Author • 2nd Role at Co 3h • Somebody else's post with enough text",
+                    author_control_label:
+                      "Open control menu for post by Fixture Post Author",
+                    post_identity: "urn:li:activity:3333333333333333333",
+                    links: [
+                      {
+                        href: "https://www.linkedin.com/in/fixture-post-author/",
+                        name: "View Fixture Post Author’s profile",
+                      },
+                    ],
+                  },
+                  {
+                    id: "replaceableComment_urn:li:comment:(activity:3333333333333333333,4444444444444444444)",
+                    body: "Feed post recommendations are useful",
+                    author: "Fixture Member",
+                    links: [member],
+                  },
+                ],
+              },
+            };
+          },
+        },
+      },
+    } as never);
+
+    expect(result.success).toBe(true);
+    expect(visited).toEqual([
+      "https://www.linkedin.com/in/me/",
+      "https://www.linkedin.com/in/fixture-member/recent-activity/all/",
+      "https://www.linkedin.com/in/fixture-member/recent-activity/comments/",
+    ]);
+    const output = result.output as {
+      profile_slug: string;
+      items: Array<{
+        list: string;
+        type: string;
+        id: string;
+        is_mine: boolean;
+        parent_id?: string;
+      }>;
+    };
+    expect(output.profile_slug).toBe("fixture-member");
+    expect((output.items[0] as { text?: string }).text).toBe(
+      "Fixture Member • You Founder 1d • A post the member wrote with enough text"
+    );
+    expect((output.items[0] as { author?: string }).author).toBe(
+      "Fixture Member"
+    );
+    expect((output.items[2] as { text?: string }).text).toBe(
+      "Feed post recommendations are useful"
+    );
+    expect(
+      output.items.map(({ list, type, id, is_mine, parent_id }) => ({
+        list,
+        type,
+        id,
+        is_mine,
+        parent_id,
+      }))
+    ).toEqual([
+      {
+        list: "posts",
+        type: "post",
+        id: "li_home_activity_1111111111111111111",
+        is_mine: true,
+        parent_id: undefined,
+      },
+      {
+        list: "comments",
+        type: "post",
+        id: "li_home_activity_3333333333333333333",
+        is_mine: false,
+        parent_id: undefined,
+      },
+      {
+        list: "comments",
+        type: "comment",
+        id: "li_comment_4444444444444444444",
+        is_mine: true,
+        parent_id: "li_home_activity_3333333333333333333",
+      },
+    ]);
+  });
+
+  test.each([
+    1, 2, 3,
+  ])("read_my_activity fails on an auth wall at scrape %i", async (authWallAt) => {
+    let scrapes = 0;
+    const result = await new LinkedInConnector().execute({
+      actionKey: "read_my_activity",
+      input: {},
+      sessionState: {
+        chrome_dispatcher: {
+          dispatch: async (_key: string, input: Record<string, unknown>) => {
+            scrapes++;
+            const config = input.scrape_config as {
+              loggedOutWhen?: { pathRegex?: string };
+            };
+            const landedUrl =
+              scrapes === authWallAt
+                ? "https://www.linkedin.com/checkpoint/challenge/"
+                : scrapes === 1
+                  ? "https://www.linkedin.com/in/fixture-member/"
+                  : String(input.url);
+            return {
+              result: {
+                landedUrl,
+                loggedIn:
+                  !config.loggedOutWhen?.pathRegex ||
+                  !new RegExp(config.loggedOutWhen.pathRegex).test(
+                    new URL(landedUrl).pathname
+                  ),
+                rows: [],
+              },
+            };
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Not logged into LinkedIn/);
+    expect(result.output).toBeUndefined();
+    expect(scrapes).toBe(authWallAt);
   });
 
   test("execute verify_staged_comment routes through the read path", async () => {
