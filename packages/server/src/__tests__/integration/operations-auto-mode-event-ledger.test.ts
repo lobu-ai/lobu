@@ -1,5 +1,5 @@
 /**
- * An operation that runs under `auto` action mode must leave a trace in the
+ * An operation that runs under an Auto policy must leave a trace in the
  * event ledger.
  *
  * Before this suite the `semantic_type='operation'` card was written ONLY on
@@ -16,6 +16,8 @@
  *   - the approval path still writes exactly ONE pending card (no double-write).
  */
 
+import { qualifiedOperationKey } from "../../tools/admin/manage_operations/handlers/shared";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
 import { manageOperations } from "../../tools/admin/manage_operations";
@@ -65,7 +67,7 @@ async function operationLedger(
 	`) as unknown as LedgerRow[];
 }
 
-describe("operation ledger under auto action mode", () => {
+describe("operation ledger under Auto policy", () => {
 	let orgId: string;
 	let userId: string;
 	let ctx: ToolContext;
@@ -107,7 +109,6 @@ describe("operation ledger under auto action mode", () => {
 				needs_approval: {
 					name: "Needs approval",
 					kind: "write",
-					requiresApproval: true,
 				},
 			})},
 			supports_execute = true
@@ -128,16 +129,19 @@ describe("operation ledger under auto action mode", () => {
 			WHERE connector_key = ${CONNECTOR}
 		`;
 
-		// Every operation on this connection is `auto`, including one the
-		// connector marks `requiresApproval` — the per-connection override wins.
+		// The organization explicitly permits every operation on this connection.
 		const conn = await createTestConnection({
 			organization_id: orgId,
 			connector_key: CONNECTOR,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { echo: "auto", needs_approval: "auto" } },
 		});
 		connectionId = conn.id;
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: connectionId,
+			effects: { execute: "auto" },
+		});
 
 		const accountId = `acct_${connectionId}_auto_ledger`;
 		await sql`
@@ -257,7 +261,11 @@ describe("operation ledger under auto action mode", () => {
 			connector_key: CONNECTOR,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { echo: "auto" } },
+		});
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: deviceConn.id,
+			effects: { execute: "auto" },
 		});
 		await sql`
 			UPDATE connections SET device_worker_id = ${String(device.id)}::uuid
@@ -329,12 +337,12 @@ describe("operation ledger under auto action mode", () => {
 	});
 
 	it("still writes exactly one pending card on the approval path", async () => {
-		const sql = getTestDb();
-		await sql`
-			UPDATE connections
-			SET config = ${sql.json({ action_modes: { echo: "auto", needs_approval: "approval" } })}
-			WHERE id = ${connectionId}
-		`;
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: connectionId,
+			operationKey: qualifiedOperationKey(CONNECTOR, "needs_approval"),
+			effects: { execute: "approval" },
+		});
 		const queued = (await manageOperations(
 			{
 				action: "execute",
@@ -380,7 +388,11 @@ describe("operation ledger under auto action mode", () => {
 			connector_key: CONNECTOR,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { echo: "auto" } },
+		});
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: deviceConn.id,
+			effects: { execute: "auto" },
 		});
 		await sql`
 			UPDATE connections SET device_worker_id = ${String(device.id)}::uuid

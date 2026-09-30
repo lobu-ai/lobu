@@ -62,7 +62,6 @@ describe("stale-run reaper claim clock for approved action runs", () => {
 				needs_approval: {
 					name: "Needs approval",
 					kind: "write",
-					requiresApproval: true,
 				},
 			})}
 			WHERE organization_id = ${orgId} AND key = ${CONNECTOR}

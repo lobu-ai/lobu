@@ -23,28 +23,24 @@ const ACTIONS_SCHEMA = {
 		key: "create_event",
 		name: "Create Event",
 		kind: "write",
-		requiresApproval: true,
 		requiredScopes: [WRITE_SCOPE],
 	},
 	update_event: {
 		key: "update_event",
 		name: "Update Event",
 		kind: "write",
-		requiresApproval: true,
 		requiredScopes: [WRITE_SCOPE],
 	},
 	delete_event: {
 		key: "delete_event",
 		name: "Delete Event",
 		kind: "write",
-		requiresApproval: true,
 		requiredScopes: [WRITE_SCOPE],
 	},
 	get_event: {
 		key: "get_event",
 		name: "Get Event",
 		kind: "read",
-		requiresApproval: false,
 	},
 };
 

@@ -2,11 +2,8 @@
  * reconcileDeviceCapabilities — auto-wired device connections must seed
  * `default_connection_config` exactly like manage_connections create/connect do.
  *
- * Auto-wire was the only connection creation path that skipped the merge, so a
- * device swap (old row tombstoned, new device polls in) minted a connection with
- * `config = NULL` and effective action modes silently fell back to raw descriptor
- * `requires_approval`. Prod 2026-08: org 8dc12bdd, chrome rows 369 (upload_file
- * auto, tombstoned) / 432 / 479 (new device, config NULL, requires approval).
+ * Auto-wire must preserve connector settings when a device reconnects or a
+ * replacement device creates a new connection.
  *
  * The same pass must (a) seed new rows from the org definition default, (b) heal
  * a surviving NULL-config row once a default exists, and (c) never clobber an
@@ -30,7 +27,7 @@ const CONNECTOR = 'test.device_config_seed';
 const CAPABILITY = 'test_device_config_seed';
 const VERSION = '1.0.0';
 
-const DEFAULT_CONFIG = { action_modes: { upload_file: 'auto' } };
+const DEFAULT_CONFIG = { fetch_limit: 25 };
 
 async function seedDefinition(
   orgId: string,
@@ -194,7 +191,7 @@ describe('device reconcile config seeding', () => {
   it('never clobbers an explicit per-connection config', async () => {
     await seedDefinition(orgId, DEFAULT_CONFIG);
     await seedWorker(userId, orgId);
-    const explicit = { action_modes: { upload_file: 'approval' } };
+    const explicit = { fetch_limit: 50 };
     const id = await seedConn(orgId, userId, explicit);
 
     await reconcileDeviceCapabilities(userId);

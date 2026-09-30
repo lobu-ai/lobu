@@ -13,7 +13,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
 	evaluateEntityMutation,
 	listEntityApprovalPolicies,
-	resolveWriteEffect,
+	resolveConnectorPolicy,
 	resolveWritePolicyDecision,
 	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
@@ -437,16 +437,14 @@ describe("write-gate floor + single-envelope semantics", () => {
 		expect(allowed).toBe("allow");
 	});
 
-	it("resolveWriteEffect also fails closed on an unresolved automation owner (codex-8)", async () => {
-		const effect = await resolveWriteEffect({
+	it("connector policy fails closed on an unresolved Automation owner", async () => {
+		const result = await resolveConnectorPolicy({
 			organizationId: orgId,
-			resourceClass: "connector_action",
-			principalKind: "automation",
-			principalId: "automation:999",
-			ownerResolved: false,
-			action: "execute",
+			connectionId: null,
+			operation: { connector_key: "demo.policy", operation_key: "send", kind: "write" },
+			actor: { kind: "automation", id: "automation:999", ownerAgentId: null, ownerResolved: false },
 		});
-		expect(effect).toBe("deny");
+		expect(result.effect).toBe("deny");
 	});
 
 	it("preserveDelivery keeps a stored approval target across an effect-only update (codex-7)", async () => {

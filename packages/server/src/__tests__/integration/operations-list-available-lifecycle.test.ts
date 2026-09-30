@@ -10,6 +10,8 @@
  * operation name/key, description, and schema terms.
  */
 
+import { qualifiedOperationKey } from "../../tools/admin/manage_operations/handlers/shared";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { pgTextArray } from "../../db/client";
 import {
@@ -736,82 +738,42 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 		expect(operations).toHaveLength(0);
 	});
 
-	it("marks an operation disabled when every visible connection disables it", async () => {
-		const { org, user } = await setupOwner("Ops Disabled Org");
-		await seedConnector(org.id, KEY_READY, "Disabled Action Connector");
+	it("shows Block to humans and changes policy without rewriting connection config", async () => {
+		const { org, user } = await setupOwner("Ops Blocked Org");
+		await seedConnector(org.id, KEY_READY, "Blocked Action Connector");
 		const conn = await createTestConnection({
-			organization_id: org.id,
-			connector_key: KEY_READY,
-			status: "active",
+			organization_id: org.id, connector_key: KEY_READY, status: "active",
+			config: { preserved: true },
 		});
-		const sql = getTestDb();
-		await sql`UPDATE connections SET config = ${sql.json({ action_modes: { create_issue: "disabled", list_issues: "approval" }, preserved: true })} WHERE id = ${conn.id}`;
-
-		const { operations } = await listAll(org.id, user.id, {
-			connector_key: KEY_READY,
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "connector_action", connectionId: conn.id,
+			operationKey: qualifiedOperationKey(KEY_READY, "create_issue"), effects: { execute: "deny" },
 		});
+		const { operations } = await listAll(org.id, user.id, { connector_key: KEY_READY });
 		const create = getOperation(operations, "create_issue");
-		const list = getOperation(operations, "list_issues");
-
 		expect(create).toMatchObject({
-			executable: false,
-			readiness: "disabled",
-			next_action: {
-				action: "enable_operation",
-				sdk_method: "connections.update",
-				arguments: [
-					{
-						connection_id: conn.id,
-						config: {
-							action_modes: {
-								create_issue: "approval",
-								list_issues: "approval",
-							},
-						},
-					},
-				],
-			},
+			executable: false, readiness: "blocked", policy: { effect: "deny" },
+			next_action: { action: "edit_policy", manual: true },
 		});
+		expect(create.next_action.sdk_method).toBeUndefined();
 		expect(create.execution_targets).toMatchObject([
-			{ connection_id: conn.id, status: "disabled", executable: false },
+			{ connection_id: conn.id, status: "blocked", executable: false, policy: { effect: "deny" } },
 		]);
-		expect(list).toMatchObject({ executable: true, readiness: "ready" });
-
+		expect(getOperation(operations, "list_issues")).toMatchObject({ executable: true, readiness: "ready" });
 		const scoped = await listAll(org.id, user.id, { connection_id: conn.id });
 		expect(getOperation(scoped.operations, "create_issue")).toMatchObject({
-			executable: false,
-			readiness: "disabled",
-			next_action: {
-				action: "enable_operation",
-				sdk_method: "connections.update",
-			},
+			executable: false, readiness: "blocked", next_action: { action: "edit_policy", manual: true },
 		});
 
-		const [updateInput] = create.next_action.arguments as Array<
-			Record<string, unknown>
-		>;
-		const updated = await manageConnections(
-			{ action: "update", ...updateInput } as never,
-			TEST_ENV(),
-			ctxFor(org.id, user.id),
-		);
-		expect(updated).toMatchObject({ action: "update" });
-
-		const [stored] =
-			await sql`SELECT config FROM connections WHERE id = ${conn.id}`;
-		expect(stored.config).toMatchObject({
-			preserved: true,
-			action_modes: {
-				create_issue: "approval",
-				list_issues: "approval",
-			},
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "connector_action", connectionId: conn.id,
+			operationKey: qualifiedOperationKey(KEY_READY, "create_issue"), effects: { execute: "approval" },
 		});
-		const afterEnable = await listAll(org.id, user.id, {
-			connection_id: conn.id,
-		});
-		expect(getOperation(afterEnable.operations, "create_issue")).toMatchObject({
-			executable: true,
-			readiness: "ready",
+		const [stored] = await getTestDb()`SELECT config FROM connections WHERE id = ${conn.id}`;
+		expect(stored.config).toEqual({ preserved: true });
+		const afterChange = await listAll(org.id, user.id, { connection_id: conn.id });
+		expect(getOperation(afterChange.operations, "create_issue")).toMatchObject({
+			executable: true, readiness: "ready", policy: { effect: "approval" },
 		});
 	});
 
@@ -820,17 +782,19 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 		await Promise.all([
 			seedConnector(org.id, KEY_DEVICE, "Mixed Offline Connector"),
 			seedConnector(org.id, KEY_INACTIVE, "Mixed Inactive Connector"),
-			seedConnector(org.id, KEY_READY, "All Disabled Connector"),
+			seedConnector(org.id, KEY_READY, "All Blocked Connector"),
 		]);
 		const sql = getTestDb();
-		const disabledConfig = { action_modes: { create_issue: "disabled" } };
+		const block = (connectionId: number) => upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "connector_action", connectionId, effects: { execute: "deny" },
+		});
 
-		const disabledBeforeOffline = await createTestConnection({
+		const blockedBeforeOffline = await createTestConnection({
 			organization_id: org.id,
 			connector_key: KEY_DEVICE,
 			status: "active",
 		});
-		await sql`UPDATE connections SET config = ${sql.json(disabledConfig)} WHERE id = ${disabledBeforeOffline.id}`;
+		await block(blockedBeforeOffline.id);
 		const offline = await createTestConnection({
 			organization_id: org.id,
 			connector_key: KEY_DEVICE,
@@ -839,12 +803,12 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 		const workerId = await createOfflineDeviceWorker(user.id, org.id);
 		await sql`UPDATE connections SET device_worker_id = ${workerId} WHERE id = ${offline.id}`;
 
-		const disabledBeforeInactive = await createTestConnection({
+		const blockedBeforeInactive = await createTestConnection({
 			organization_id: org.id,
 			connector_key: KEY_INACTIVE,
 			status: "active",
 		});
-		await sql`UPDATE connections SET config = ${sql.json(disabledConfig)} WHERE id = ${disabledBeforeInactive.id}`;
+		await block(blockedBeforeInactive.id);
 		const inactive = await createTestConnection({
 			organization_id: org.id,
 			connector_key: KEY_INACTIVE,
@@ -852,12 +816,12 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			createDefaultFeed: false,
 		});
 
-		const disabled = await createTestConnection({
+		const blocked = await createTestConnection({
 			organization_id: org.id,
 			connector_key: KEY_READY,
 			status: "active",
 		});
-		await sql`UPDATE connections SET config = ${sql.json(disabledConfig)} WHERE id = ${disabled.id}`;
+		await block(blocked.id);
 
 		for (const expected of [
 			{ connectorKey: KEY_DEVICE, readiness: "device_offline", id: offline.id },
@@ -866,23 +830,17 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 				readiness: "pending_auth",
 				id: inactive.id,
 			},
-			{ connectorKey: KEY_READY, readiness: "disabled", id: disabled.id },
+			{ connectorKey: KEY_READY, readiness: "blocked", id: blocked.id },
 		]) {
 			const { operations } = await listAll(org.id, user.id, {
 				connector_key: expected.connectorKey,
 			});
 			const create = getOperation(operations, "create_issue");
 			expect(create.readiness).toBe(expected.readiness);
-			expect(create.next_action.arguments).toEqual(
-				expected.readiness === "disabled"
-					? [
-							{
-								connection_id: expected.id,
-								config: { action_modes: { create_issue: "approval" } },
-							},
-						]
-					: undefined,
-			);
+			expect(create.next_action.arguments).toBeUndefined();
+			if (expected.readiness === "blocked") {
+				expect(create.next_action).toMatchObject({ action: "edit_policy", manual: true });
+			}
 			expect(create.execution_targets).toContainEqual(
 				expect.objectContaining({
 					connection_id: expected.id,
@@ -1136,9 +1094,9 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 	});
 });
 
-it("fails closed when a declared write action omits requiresApproval", async () => {
-	const { org, user } = await setupOwner("Ops Missing Approval Metadata Org");
-	await seedConnector(org.id, KEY_READY, "Missing Approval Metadata Connector");
+it("reports Ask for an unmatched write operation", async () => {
+	const { org, user } = await setupOwner("Ops Default Ask Org");
+	await seedConnector(org.id, KEY_READY, "Default Ask Connector");
 	await createTestConnection({
 		organization_id: org.id,
 		connector_key: KEY_READY,
@@ -1147,5 +1105,5 @@ it("fails closed when a declared write action omits requiresApproval", async () 
 	const { operations } = await listAll(org.id, user.id, {
 		connector_key: KEY_READY,
 	});
-	expect(getOperation(operations, "create_issue").requires_approval).toBe(true);
+	expect(getOperation(operations, "create_issue").policy).toMatchObject({ effect: "approval", reason: "default_approval" });
 });

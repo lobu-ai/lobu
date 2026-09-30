@@ -12,6 +12,7 @@
  * reads the event; they diverge).
  */
 
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Context } from "hono";
@@ -302,9 +303,13 @@ describe("approval-run transition atomicity", () => {
 			connector_key: CONNECTOR,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { create_item: "approval" } },
 		});
 		connectionId = conn.id;
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: connectionId,
+			effects: { execute: "approval" },
+		});
 
 		const accountId = `acct_${connectionId}_transition`;
 		await sql`
@@ -337,9 +342,13 @@ describe("approval-run transition atomicity", () => {
 			connector_key: CONNECTOR,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { create_item: "auto" } },
 		});
 		autoConnectionId = autoConn.id;
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: autoConnectionId,
+			effects: { execute: "auto" },
+		});
 		await sql`
 			UPDATE connections
 			SET auth_profile_id = ${profile.id}
@@ -936,7 +945,12 @@ describe("approval-run transition atomicity", () => {
 			connector_key: CONNECTOR,
 			created_by: userId,
 			visibility: "private",
-			config: { action_modes: { create_item: "approval" } },
+		});
+
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: lockConn.id,
+			effects: { execute: "approval" },
 		});
 
 		const locker = postgres(process.env.DATABASE_URL as string, { max: 1 });

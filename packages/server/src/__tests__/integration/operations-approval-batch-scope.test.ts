@@ -68,7 +68,6 @@ describe("manage_operations batch scope (connector-approval lane)", () => {
 				needs_approval: {
 					name: "Needs approval",
 					kind: "write",
-					requiresApproval: true,
 				},
 			})}
       WHERE organization_id = ${org.id}
@@ -105,7 +104,7 @@ describe("manage_operations batch scope (connector-approval lane)", () => {
         ${orgId}, 'action', 'pending', 'pending',
         ${opts.connectionId ?? null},
         ${opts.connectorKey}, ${opts.actionKey},
-        ${opts.automationId === undefined ? null : "automation"},
+        ${opts.automationId === undefined ? "user" : "automation"},
         ${opts.automationId === undefined ? null : `automation:${opts.automationId}`},
         NOW() - (${opts.ageDays ?? 0}::int * interval '1 day')
       )

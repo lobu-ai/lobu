@@ -10,7 +10,6 @@ function operation(inputSchema?: Record<string, unknown>): OperationDescriptor {
     name: 'Send',
     kind: 'write',
     backend: 'mcp_tool',
-    requires_approval: true,
     ...(inputSchema ? { input_schema: inputSchema } : {}),
     output_schema: undefined,
     backend_config: {

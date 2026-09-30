@@ -332,14 +332,12 @@ describe('OAuth-protected MCP connector installation', () => {
           operation_key: 'get_issue',
           kind: 'read',
           backend: 'mcp_tool',
-          requires_approval: true,
           readiness: 'ready',
         }),
         expect.objectContaining({
           operation_key: 'create_issue',
           kind: 'write',
           backend: 'mcp_tool',
-          requires_approval: true,
           readiness: 'ready',
         }),
       ])

@@ -1,3 +1,4 @@
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { COMPILE_CONFIG_HASH } from "@lobu/connector-worker/compile";
 import type { Env } from "../../index";
@@ -80,6 +81,11 @@ describe("device run targeting and execution invariants", () => {
 			organization_id: org.id,
 			auth_schema: { methods: [{ type: "none" }] },
 		});
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "connector_action",
+			connectorKey: CONNECTOR_KEY,
+			effects: { execute: "auto" },
+		});
 		const sql = getTestDb();
 		await sql`
 			UPDATE connector_definitions
@@ -89,7 +95,6 @@ describe("device run targeting and execution invariants", () => {
 					[ACTION_KEY]: {
 						name: "Echo",
 						kind: "write",
-						requiresApproval: false,
 						input_schema: {
 							type: "object",
 							required: ["value"],

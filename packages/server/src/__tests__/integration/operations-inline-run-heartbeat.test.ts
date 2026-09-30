@@ -11,6 +11,7 @@
  * for as long as it executes.
  */
 
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
 import { LOST_LEASE_MESSAGE } from "../../runs/run-lease";
@@ -78,9 +79,13 @@ describe("gateway-inline run heartbeat", () => {
 			connector_key: HTTP,
 			created_by: user.id,
 			visibility: "private",
-			config: { action_modes: { create_item: "auto" } },
 		});
 		connectionId = connection.id;
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: connectionId,
+			effects: { execute: "auto" },
+		});
 		const accountId = `acct_${connectionId}_inline_heartbeat`;
 		await sql`
 			INSERT INTO "account" (

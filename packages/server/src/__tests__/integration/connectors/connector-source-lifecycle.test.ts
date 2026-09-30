@@ -235,9 +235,9 @@ export default class ActionProbeConnector {
       },
     },
     actions: {
-      read_thing: { key: 'read_thing', name: 'Read thing', kind: 'read', requiresApproval: false, requiredScopes: ['probe.read'] },
-      hinted_read: { key: 'hinted_read', name: 'Hinted read', requiresApproval: false, annotations: { readOnlyHint: true } },
-      write_thing: { key: 'write_thing', name: 'Write thing', requiresApproval: true, requiredScopes: ['probe.write'] },
+      read_thing: { key: 'read_thing', name: 'Read thing', kind: 'read', requiredScopes: ['probe.read'] },
+      hinted_read: { key: 'hinted_read', name: 'Hinted read', annotations: { readOnlyHint: true } },
+      write_thing: { key: 'write_thing', name: 'Write thing', requiredScopes: ['probe.write'] },
     },
   };
   async sync(ctx) { await ctx.commit([], null); return { status: 'complete' }; }
@@ -255,7 +255,6 @@ export default class ActionProbeConnector {
     }
     expect(withActions.actions.read_thing).toEqual({
       kind: 'read',
-      requires_approval: false,
       required_scopes: ['probe.read'],
     });
     // annotations.readOnlyHint:true classifies as read too — must match the
@@ -264,7 +263,6 @@ export default class ActionProbeConnector {
     // kind defaults to write when omitted (matches the runtime default).
     expect(withActions.actions.write_thing).toEqual({
       kind: 'write',
-      requires_approval: true,
       required_scopes: ['probe.write'],
     });
     expect(withActions.feed_keys).toEqual(['articles']);

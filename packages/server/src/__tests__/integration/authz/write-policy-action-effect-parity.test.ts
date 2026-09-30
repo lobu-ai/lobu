@@ -4,17 +4,16 @@
  * The migration replaced create_mode/update_mode/delete_mode columns with a
  * write_policy_action_effects child table. This test proves, against a real
  * migrated database, that the resolver reaches the SAME decision the old
- * mode-column model would have — for entity, agent_config, and connector_action,
- * including the global-delivery-inheritance case and the connector_action
- * execute-from-create_mode mapping. It also exercises the fail-closed path on a
- * stored effect this build declares illegal.
+ * mode-column model would have — for entity and agent_config, including global
+ * delivery inheritance. Connector actions use the org policy evaluator; retired
+ * stored effects are rejected by the database.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
 	evaluateEntityMutation,
 	resolveEntityApprovalPolicy,
-	resolveWriteEffect,
+	resolveConnectorPolicy,
 	resolveWritePolicyDecision,
 	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
@@ -170,102 +169,38 @@ describe("write-policy action/effect decision parity", () => {
 		expect(await resolveWritePolicyDecision({ ...base, action: "delete" })).toBe("deny");
 	});
 
-	it("connector_action: execute effect (backfilled from create_mode) governs the decision", async () => {
-		// all-automations: execute → approval
+	it("connector_action: stored effects tighten the org decision", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", effects: { execute: "auto" },
+		});
 		await seedPolicy({
-			orgId,
-			resourceClass: "connector_action",
-			principalKind: "automation",
+			orgId, resourceClass: "connector_action", principalKind: "automation",
 			effects: [{ action: "execute", effect: "approval" }],
 		});
-		// specific agent: execute → deny
 		await seedPolicy({
-			orgId,
-			resourceClass: "connector_action",
-			principalKind: "agent",
-			principalId: "agent_xyz",
-			effects: [{ action: "execute", effect: "deny" }],
-		});
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: orgId,
-				resourceClass: "connector_action",
-				principalKind: "automation",
-				principalId: "automation:9",
-				action: "execute",
-			}),
-		).toBe("require_approval");
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: orgId,
-				resourceClass: "connector_action",
-				principalKind: "agent",
-				principalId: "agent_xyz",
-				action: "execute",
-			}),
-		).toBe("deny");
-	});
-
-	it("connector_action: resolveWriteEffect exposes `disabled` (decision collapses it to deny)", async () => {
-		await seedPolicy({
-			orgId,
-			resourceClass: "connector_action",
-			principalKind: "agent",
-			principalId: "agent_off",
-			effects: [{ action: "execute", effect: "disabled" }],
-		});
-		const base = {
-			organizationId: orgId,
-			resourceClass: "connector_action" as const,
-			principalKind: "agent" as const,
-			principalId: "agent_off",
-			action: "execute" as const,
-		};
-		// The DECISION collapses disabled→deny (both stop the write)...
-		expect(await resolveWritePolicyDecision(base)).toBe("deny");
-		// ...but the raw EFFECT is preserved so list_available can HIDE the op.
-		expect(await resolveWriteEffect(base)).toBe("disabled");
-	});
-
-	it("connector_action: no row → auto (connection mode alone governs)", async () => {
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: orgId,
-				resourceClass: "connector_action",
-				principalKind: "agent",
-				action: "execute",
-			}),
-		).toBe("allow");
-	});
-
-	it("connector_action: org disabled + exact-agent deny resolves deny deterministically (codex-7)", async () => {
-		// deny and disabled are equally restrictive; the fold must pick ONE regardless
-		// of candidate/scope order, or the resolved effect (and list_available's
-		// hide-vs-surface decision) becomes order-dependent and diverges from the UI.
-		// We break the tie toward deny — it still SURFACES the op and gates it.
-		await seedPolicy({
-			orgId,
-			resourceClass: "connector_action",
-			principalKind: null, // org-wide
-			effects: [{ action: "execute", effect: "disabled" }],
-		});
-		await seedPolicy({
-			orgId,
-			resourceClass: "connector_action",
-			principalKind: "agent",
-			principalId: "agent_tie",
+			orgId, resourceClass: "connector_action", principalKind: "agent", principalId: "agent_xyz",
 			effects: [{ action: "execute", effect: "deny" }],
 		});
 		const base = {
 			organizationId: orgId,
-			resourceClass: "connector_action" as const,
-			principalKind: "agent" as const,
-			principalId: "agent_tie",
-			action: "execute" as const,
+			connectionId: null,
+			operation: { connector_key: "demo.policy", operation_key: "send", kind: "write" as const },
 		};
-		// The raw effect resolves deny (not disabled), so list_available surfaces it.
-		expect(await resolveWriteEffect(base)).toBe("deny");
-		expect(await resolveWritePolicyDecision(base)).toBe("deny");
+		expect((await resolveConnectorPolicy({ ...base,
+			actor: { kind: "automation", id: "automation:9", ownerAgentId: null, ownerResolved: true },
+		})).effect).toBe("approval");
+		expect((await resolveConnectorPolicy({ ...base,
+			actor: { kind: "agent", id: "agent_xyz", ownerAgentId: null, ownerResolved: true },
+		})).effect).toBe("deny");
+	});
+
+	it("connector_action: unmatched writes require approval", async () => {
+		expect((await resolveConnectorPolicy({
+			organizationId: orgId,
+			connectionId: null,
+			operation: { connector_key: "demo.policy", operation_key: "send", kind: "write" },
+			actor: { kind: "agent", id: null, ownerAgentId: null, ownerResolved: true },
+		})).effect).toBe("approval");
 	});
 
 	it("the permissions-PUT input guards reject payloads that would erase/mis-target a row (codex-11)", async () => {
@@ -314,13 +249,13 @@ describe("write-policy action/effect decision parity", () => {
 		// NOT disabled.
 		expect(isLegalActionEffect("entity", "create", "approval")).toBe(true);
 		expect(isLegalActionEffect("entity", "execute", "auto")).toBe(false); // illegal action
-		expect(isLegalActionEffect("entity", "create", "disabled")).toBe(false); // illegal effect
-		expect(isLegalActionEffect("connector_action", "execute", "disabled")).toBe(true);
+		expect(isLegalActionEffect("entity", "create", "disabled" as never)).toBe(false); // illegal effect
+		expect(isLegalActionEffect("connector_action", "execute", "disabled" as never)).toBe(false);
 		expect(isLegalActionEffect("connector_action", "create", "auto")).toBe(false);
 		expect(isLegalActionEffect("entity_schema", "create_type", "approval")).toBe(true);
 		expect(isLegalActionEffect("entity_schema", "update_relationship_type", "deny")).toBe(true);
 		expect(isLegalActionEffect("entity_schema", "create", "auto")).toBe(false);
-		expect(isLegalActionEffect("entity_schema", "delete_type", "disabled")).toBe(false);
+		expect(isLegalActionEffect("entity_schema", "delete_type", "disabled" as never)).toBe(false);
 	});
 
 	it("entity_schema policy writes fail loudly when the effects map is omitted", async () => {
@@ -329,26 +264,12 @@ describe("write-policy action/effect decision parity", () => {
 		).rejects.toThrow("entity_schema policies require an explicit effects map");
 	});
 
-	it("fail-closed: a stored effect illegal for the class resolves to deny, not the default", async () => {
-		// 'disabled' is legal only for connector_action; an entity row carrying it
-		// is corrupt/forward data and must fail closed, not read as the create=auto default.
-		await seedPolicy({
+	it("the database rejects retired effects instead of storing ambiguous policy", async () => {
+		await expect(seedPolicy({
 			orgId,
 			resourceClass: "entity",
 			entityTypeSlug: "task",
-			effects: [
-				{ action: "create", effect: "disabled" },
-				{ action: "update", effect: "auto" },
-				{ action: "delete", effect: "approval" },
-			],
-		});
-		expect(
-			await evaluateEntityMutation({
-				organizationId: orgId,
-				principalKind: "agent",
-				action: "create",
-				entityTypeSlug: "task",
-			}),
-		).toBe("deny");
+			effects: [{ action: "create", effect: "disabled" }],
+		})).rejects.toThrow();
 	});
 });

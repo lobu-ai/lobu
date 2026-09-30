@@ -103,7 +103,7 @@ describe('Jira OAuth callback stamps cloud_id (e2e)', () => {
       )
       VALUES (
         ${org.id}, 'jira', 'jira-conn', 'Jira Connection', 'pending_auth', 'org', ${user.id},
-        ${sql.json({ action_modes: { transition_issue: 'approval' } })}
+        ${sql.json({ fetch_limit: 25 })}
       )
       RETURNING id
     `) as Array<{ id: number }>;
@@ -155,7 +155,7 @@ describe('Jira OAuth callback stamps cloud_id (e2e)', () => {
     expect(after.visibility).toBe('private');
     expect(after.external_tenant_id).toBe('49140293-40ce-45b6-8cdc-ec4e1356a7c8');
     expect(after.config).toMatchObject({
-      action_modes: { transition_issue: 'approval' },
+      fetch_limit: 25,
       cloud_id: '49140293-40ce-45b6-8cdc-ec4e1356a7c8',
       site_url: 'https://rakam1.atlassian.net',
       site_name: 'rakam1',

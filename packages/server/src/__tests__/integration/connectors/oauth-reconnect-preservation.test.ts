@@ -520,14 +520,14 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     await s.client.update({ connection_id: s.connection.id, display_name: 'Renamed synthetic account' });
     expect(await state(s.connection.id)).toEqual(before);
     const humanClient = buildConnectionsNamespace({ ...s.ctx, tokenType: 'session' }, {} as Env);
-    await humanClient.update({ connection_id: s.connection.id, config: { action_modes: { inspect: 'approval' } } });
+    await humanClient.update({ connection_id: s.connection.id, config: { fetch_limit: 25 } });
     expect(await state(s.connection.id)).toEqual(before);
     await s.client.update({ connection_id: s.connection.id,
       auth_profile_slug: s.profile.slug, app_auth_profile_slug: s.app.slug });
     expect(await state(s.connection.id)).toEqual(before);
     const [row] = await sql`SELECT display_name, config, auth_profile_id, app_auth_profile_id FROM connections WHERE id = ${s.connection.id}`;
     expect(row).toMatchObject({ display_name: 'Renamed synthetic account',
-      config: { action_modes: { inspect: 'approval' } }, auth_profile_id: s.profile.id, app_auth_profile_id: s.app.id });
+      config: { fetch_limit: 25 }, auth_profile_id: s.profile.id, app_auth_profile_id: s.app.id });
     expect((await sql`SELECT status FROM auth_profiles WHERE id = ${profile.id}`)[0].status).toBe(status);
   });
 

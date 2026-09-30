@@ -8,6 +8,7 @@
  * bytes land in the jsonb column and come straight back to the requester, which
  * is both a multi-megabyte tool result and a binary blob in the database.
  */
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,12 +54,16 @@ describe('inline connector action attachments', () => {
       name: 'Inline attachment test',
       organization_id: ctx.organizationId,
     });
+    await upsertEntityApprovalPolicy(ctx.organizationId, {
+      resourceClass: "connector_action",
+      connectorKey: CONNECTOR,
+      effects: { execute: "auto" },
+    });
     const sql = getTestDb();
     await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({
       download: {
         name: 'Download a file',
         kind: 'read',
-        requiresApproval: false,
         input_schema: { type: 'object', properties: {} },
       },
     })} WHERE organization_id = ${ctx.organizationId} AND key = ${CONNECTOR}`;

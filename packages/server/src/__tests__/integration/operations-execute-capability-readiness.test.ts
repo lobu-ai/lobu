@@ -9,6 +9,7 @@
  * true → "ready".
  */
 
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
 import {
@@ -111,7 +112,11 @@ describe("execute capability readiness (item 2)", () => {
 					connector_key: key,
 					created_by: userId,
 					visibility: "private",
-					config: { action_modes: { doit: "auto" } },
+				});
+				await upsertEntityApprovalPolicy(orgId, {
+					resourceClass: "connector_action",
+					connectionId: conn.id,
+					effects: { execute: "auto" },
 				});
 				const accountId = `acct_${conn.id}_${key}`;
 				await sql`

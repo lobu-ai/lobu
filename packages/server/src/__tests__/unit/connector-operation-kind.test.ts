@@ -15,7 +15,6 @@ describe("local connector operation classification", () => {
 	it("fails closed to write when no semantic kind is declared", () => {
 		expect(
 			getLocalActionKind({
-				requiresApproval: false,
 				annotations: { idempotentHint: true, destructiveHint: false },
 			}),
 		).toBe("write");

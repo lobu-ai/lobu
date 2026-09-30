@@ -62,7 +62,6 @@ describe("connection delete cancels approved-but-unclaimed action runs", () => {
 				needs_approval: {
 					name: "Needs approval",
 					kind: "write",
-					requiresApproval: true,
 				},
 			})}
 			WHERE organization_id = ${orgId} AND key = ${CONNECTOR}

@@ -86,13 +86,10 @@ describe("generateStrictToolPaths", () => {
 		expect(body.anyOf ?? body.oneOf, "union must survive").toBeDefined();
 	});
 
-	it("keeps the human-only action_modes rule in the generated-client description", () => {
+	it("keeps the connector install workflow in the generated-client description", () => {
 		const description =
 			paths["/api/{orgSlug}/manage_connections"].post.description;
 		expect(description).toContain("manage_catalog");
-		expect(description).toContain("action_modes");
-		expect(description).toMatch(/human web session/i);
-		expect(description).toMatch(/round-trip the map unchanged/i);
 		expect(description.length).toBeLessThanOrEqual(300);
 	});
 

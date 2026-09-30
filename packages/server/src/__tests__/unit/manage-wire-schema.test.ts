@@ -178,15 +178,6 @@ describe("manage_connections × manage_catalog: the browse → install link", ()
 	});
 });
 
-describe("manage_connections: the human-only action_modes rule on the wire", () => {
-	it("advertises the human-only action_modes mutation rule", () => {
-		const description = byName.get("manage_connections")?.description ?? "";
-		expect(description).toContain("action_modes");
-		expect(description).toMatch(/human web session/i);
-		expect(description).toMatch(/round-trip the map unchanged/i);
-	});
-});
-
 describe("run_sdk / query_sdk: script contract on the wire", () => {
 	it("both tools advertise the sandbox result outputSchema", () => {
 		for (const name of ["run_sdk", "query_sdk"]) {

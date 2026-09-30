@@ -76,7 +76,6 @@ describe("approval-event atomicity (item 16)", () => {
 				needs_approval: {
 					name: "Needs approval",
 					kind: "write",
-					requiresApproval: true,
 				},
 			})},
 			supports_execute = true

@@ -6,6 +6,7 @@
  * inline on the gateway.
  */
 
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { COMPILE_CONFIG_HASH } from "@lobu/connector-worker/compile";
 import type { Env } from "../../index";
@@ -160,6 +161,7 @@ describe("connection-to-device operation routing lifecycle", () => {
 			organization_id: org.id,
 			auth_schema: { methods: [{ type: "none" }] },
 		});
+		await upsertEntityApprovalPolicy(org.id, { resourceClass: "connector_action", effects: { execute: "auto" } });
 		const sql = getTestDb();
 		await sql`
 			UPDATE connector_definitions
@@ -167,7 +169,6 @@ describe("connection-to-device operation routing lifecycle", () => {
 				[ACTION_KEY]: {
 					name: "Echo",
 					kind: "write",
-					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },
@@ -405,7 +406,6 @@ describe("connection-to-device operation routing lifecycle", () => {
 				[ACTION_KEY]: {
 					name: "Echo",
 					kind: "write",
-					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },
@@ -481,7 +481,6 @@ describe("connection-to-device operation routing lifecycle", () => {
 				[ACTION_KEY]: {
 					name: "Echo",
 					kind: "write",
-					requiresApproval: false,
 					input_schema: {
 						type: "object",
 						properties: { value: { type: "string" } },

@@ -1,203 +1,118 @@
-/**
- * Real-PG tests for per-operation connector_action scope. A policy row scoped to a
- * single operation_key tightens the blanket `execute` rule for THAT operation alone;
- * every other operation still follows the blanket. The op-specific row wins over the
- * blanket via the resolver's scope specificity — mirrored in the UI model.
- */
-
+/** Real-PG connector scopes use the same evaluator as execution and discovery. */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { evaluateConnectorPolicy } from "../../../authz/connector-policy";
 import {
-	resolveWriteEffect,
-	resolveWriteEffects,
+	listEntityApprovalPolicies,
+	resolveConnectorPolicy,
+	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
 import type { DbClient } from "../../../db/client";
+import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import {
-	createTestAgent,
-	createTestOrganization,
-} from "../../setup/test-fixtures";
+import { createTestAgent, createTestOrganization } from "../../setup/test-fixtures";
 
-async function seedConnectorPolicy(args: {
-	orgId: string;
-	principalKind?: string | null;
-	principalId?: string | null;
-	operationKey?: string | null;
-	effect: string;
-}): Promise<number> {
-	const sql = getTestDb();
-	const rows = await sql<{ id: number }>`
-    INSERT INTO write_approval_policies
-      (organization_id, resource_class, principal_kind, principal_id, operation_key)
-    VALUES
-      (${args.orgId}, 'connector_action', ${args.principalKind ?? null},
-       ${args.principalId ?? null}, ${args.operationKey ?? null})
-    RETURNING id
-  `;
-	const id = Number(rows[0].id);
-	await sql`
-    INSERT INTO write_policy_action_effects (policy_id, action, effect)
-    VALUES (${id}, 'execute', ${args.effect})
-  `;
-	return id;
-}
-
-const execFor = (orgId: string, agentId: string, operationKey: string | null) =>
-	resolveWriteEffect({
-		organizationId: orgId,
-		resourceClass: "connector_action",
-		principalKind: "agent",
-		principalId: agentId,
-		action: "execute",
-		operationKey,
-	});
+const actor = { kind: "agent", id: "op-agent", ownerAgentId: null, ownerResolved: true } as const;
+const operation = (connector_key: string, operation_key: string) => ({
+	connector_key,
+	operation_key,
+	kind: "write" as const,
+});
+const execFor = async (organizationId: string, connectorKey: string, operationKey: string) =>
+	(await resolveConnectorPolicy({
+		organizationId,
+		connectionId: null,
+		operation: operation(connectorKey, operationKey),
+		actor,
+	})).effect;
 
 describe("connector_action per-operation scope", () => {
-	afterAll(async () => {
-		await cleanupTestDatabase();
-	});
-
+	afterAll(cleanupTestDatabase);
 	let orgId: string;
 	beforeEach(async () => {
-		const org = await createTestOrganization();
-		orgId = org.id;
-		await createTestAgent({ organizationId: orgId, agentId: "op-agent" });
+		orgId = (await createTestOrganization()).id;
+		await createTestAgent({ organizationId: orgId, agentId: actor.id });
 	});
 
-	it("a per-op rule tightens ONLY its operation; others follow the blanket", async () => {
-		// Blanket: every op auto. Per-op: place_order needs approval.
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			effect: "auto",
+	it("an exact operation rule tightens only that operation", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", effects: { execute: "auto" },
 		});
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			operationKey: "deliveroo.place_order",
-			effect: "approval",
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			operationKey: qualifiedOperationKey("demo.first", "send"),
+			effects: { execute: "approval" },
 		});
-		// The scoped op resolves approval; a different op resolves the blanket auto.
-		expect(await execFor(orgId, "op-agent", "deliveroo.place_order")).toBe(
-			"approval",
-		);
-		expect(await execFor(orgId, "op-agent", "slack.send_message")).toBe("auto");
-		// The blanket itself (no op) stays auto.
-		expect(await execFor(orgId, "op-agent", null)).toBe("auto");
+		expect(await execFor(orgId, "demo.first", "send")).toBe("approval");
+		expect(await execFor(orgId, "demo.first", "inspect")).toBe("auto");
 	});
 
-	it("a per-op rule can only TIGHTEN — the blanket floor still binds if stricter", async () => {
-		// Blanket denies; a per-op 'auto' must NOT loosen it below the blanket.
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			effect: "deny",
+	it("agent restrictions cannot be loosened by a more specific agent Auto rule", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", effects: { execute: "auto" },
 		});
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			operationKey: "slack.send_message",
-			effect: "auto",
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", principalKind: "agent", principalId: actor.id,
+			effects: { execute: "deny" },
 		});
-		// Blanket deny + per-op auto → folded most-restrictive → deny.
-		expect(await execFor(orgId, "op-agent", "slack.send_message")).toBe("deny");
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", principalKind: "agent", principalId: actor.id,
+			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "auto" },
+		});
+		expect(await execFor(orgId, "demo.first", "send")).toBe("deny");
 	});
 
-	it("with no per-op rule, an op follows the blanket", async () => {
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			operationKey: "slack.send_message",
-			effect: "approval",
+	it("unmatched writes default to Ask", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "auto" },
 		});
-		// A DIFFERENT op with no rule and no blanket → class default (auto).
-		expect(await execFor(orgId, "op-agent", "deliveroo.place_order")).toBe(
-			"auto",
-		);
-		// The op that DOES have a rule resolves it.
-		expect(await execFor(orgId, "op-agent", "slack.send_message")).toBe(
-			"approval",
-		);
+		expect(await execFor(orgId, "demo.first", "inspect")).toBe("approval");
+		expect(await execFor(orgId, "demo.first", "send")).toBe("auto");
 	});
 
-	it("an org (any-principal) per-op floor binds the agent for that op", async () => {
-		// Org floor: place_order approval for ANY principal. Agent has no override.
-		await seedConnectorPolicy({
-			orgId,
-			operationKey: "deliveroo.place_order",
-			effect: "approval",
+	it("an exact org Auto overrides the broader org Block for that operation", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", effects: { execute: "deny" },
 		});
-		expect(await execFor(orgId, "op-agent", "deliveroo.place_order")).toBe(
-			"approval",
-		);
-		// Another op falls back to the class default (auto).
-		expect(await execFor(orgId, "op-agent", "slack.send_message")).toBe("auto");
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "auto" },
+		});
+		expect(await execFor(orgId, "demo.first", "send")).toBe("auto");
+		expect(await execFor(orgId, "demo.first", "inspect")).toBe("deny");
 	});
 
-	it("connector-qualified keys don't alias: two connectors' same bare op are distinct (F1)", async () => {
-		// linear::create_issue = deny, but github::create_issue must stay auto. The
-		// qualified key is what the gate passes, so a rule on one connector's op can't
-		// leak to another connector that exposes the same bare operation key.
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			operationKey: "linear::create_issue",
-			effect: "deny",
+	it("connector-qualified operation keys do not alias across connectors", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", effects: { execute: "auto" },
 		});
-		expect(await execFor(orgId, "op-agent", "linear::create_issue")).toBe(
-			"deny",
-		);
-		expect(await execFor(orgId, "op-agent", "github::create_issue")).toBe(
-			"auto",
-		);
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", principalKind: "agent", principalId: actor.id,
+			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "deny" },
+		});
+		expect(await execFor(orgId, "demo.first", "send")).toBe("deny");
+		expect(await execFor(orgId, "demo.second", "send")).toBe("auto");
 	});
 
-	it("batches blanket and per-operation effects into one header/effects query pair", async () => {
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			effect: "auto",
+	it("loads one bounded policy set for batch discovery decisions", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", effects: { execute: "auto" },
 		});
-		await seedConnectorPolicy({
-			orgId,
-			principalKind: "agent",
-			principalId: "op-agent",
-			operationKey: "github::create_issue",
-			effect: "disabled",
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", principalKind: "agent", principalId: actor.id,
+			operationKey: qualifiedOperationKey("demo.first", "send"), effects: { execute: "deny" },
 		});
-
 		let queryCount = 0;
-		const raw = getTestDb();
-		const counting = new Proxy(raw, {
+		const counting = new Proxy(getTestDb(), {
 			apply(target, thisArg, args) {
 				queryCount += 1;
 				return Reflect.apply(target, thisArg, args);
 			},
 		}) as DbClient;
-		const effects = await resolveWriteEffects({
-			organizationId: orgId,
-			resourceClass: "connector_action",
-			principalKind: "agent",
-			principalId: "op-agent",
-			action: "execute",
-			operationKeys: [
-				"github::create_issue",
-				"github::list_issues",
-				"linear::create_issue",
-			],
-			sql: counting,
-		});
-
+		const policies = await listEntityApprovalPolicies(orgId, "connector_action", counting);
+		const effects = [operation("demo.first", "send"), operation("demo.first", "inspect"), operation("demo.second", "send")]
+			.map((operation) => evaluateConnectorPolicy({ organizationId: orgId, connectionId: null, operation, actor, policies }).effect);
 		expect(queryCount).toBe(2);
-		expect(effects.get(null)).toBe("auto");
-		expect(effects.get("github::create_issue")).toBe("disabled");
-		expect(effects.get("github::list_issues")).toBe("auto");
-		expect(effects.get("linear::create_issue")).toBe("auto");
+		expect(effects).toEqual(["deny", "auto", "auto"]);
 	});
 });

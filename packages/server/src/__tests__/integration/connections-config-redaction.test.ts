@@ -668,12 +668,12 @@ describe("connection config redaction > sentinel round-trip", () => {
 
 		await workspace.owner.connections.update({
 			connection_id: connectionId,
-			config: { ...fetched, action_modes: { some_op: "auto" } },
+			config: { ...fetched, fetch_limit: 25 },
 		});
 
 		const stored = await storedConfig();
 		// The unrelated edit landed...
-		expect(stored.action_modes).toEqual({ some_op: "auto" });
+		expect(stored.fetch_limit).toBe(25);
 		// ...and every secret survived, at every depth and shape.
 		expect(stored.password).toBe(SECRET_PROBES.password);
 		expect(stored.api_key).toBe(SECRET_PROBES.api_key);
@@ -750,7 +750,7 @@ describe("connection config redaction > sentinel round-trip", () => {
 
 			updatePromise = workspace.owner.connections.update({
 				connection_id: connectionId,
-				config: { ...staleFetched, action_modes: { later_op: "manual" } },
+				config: { ...staleFetched, fetch_limit: 50 },
 			});
 
 			// Let A run until it blocks on the row lock this transaction holds.
@@ -768,7 +768,7 @@ describe("connection config redaction > sentinel round-trip", () => {
 
 		const stored = await storedConfig();
 		// A's unrelated edit landed...
-		expect(stored.action_modes).toEqual({ later_op: "manual" });
+		expect(stored.fetch_limit).toBe(50);
 		// ...without clobbering B's rotation with A's stale plaintext.
 		expect(stored.password).toBe("rotated-by-replica-b");
 	});

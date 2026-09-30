@@ -63,7 +63,7 @@ describe('multipart file → operation approval → connector execution', () => 
     await createTestConnectorDefinition({ key: CONNECTOR, name: 'File handoff test', organization_id: ctx.organizationId });
     const sql = getTestDb();
     await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ upload: {
-      name: 'Upload test image', kind: 'write', requiresApproval: true,
+      name: 'Upload test image', kind: 'write',
       input_schema: { type: 'object', properties: {
         image: fileInputSchema({ maxBytes: 5 * 1024 * 1024, contentTypes: ['image/png'] }),
         alt_text: { type: 'string' }, rank: { type: 'integer' },

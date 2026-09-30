@@ -1,3 +1,4 @@
+import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { clearInMemoryMcpSessionsForTests } from '../../../mcp-handler';
 import { McpSessionStore } from '../../../mcp-session-store';
@@ -32,7 +33,7 @@ describe('REST tool execution with an existing MCP session', () => {
     const sql = getTestDb();
     await sql`
       UPDATE connector_definitions
-      SET actions_schema = ${sql.json({ echo: { name: 'Echo', kind: 'write', requiresApproval: false } })}
+      SET actions_schema = ${sql.json({ echo: { name: 'Echo', kind: 'write' } })}
       WHERE key = ${key} AND organization_id = ${org.id}
     `;
     await sql`
@@ -48,6 +49,11 @@ describe('REST tool execution with an existing MCP session', () => {
       organization_id: org.id, connector_key: key, created_by: user.id, visibility: 'org',
     });
     connectionId = connection.id;
+    await upsertEntityApprovalPolicy(org.id, {
+      resourceClass: "connector_action",
+      connectionId: connectionId,
+      effects: { execute: "auto" },
+    });
   });
 
   afterAll(async () => {
