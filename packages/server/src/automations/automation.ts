@@ -794,9 +794,12 @@ async function resetOrphanedAutomationRuns(
 
 export async function materializeDueAutomationRuns(
 	_env: Env,
-	db?: DbClient
+	db?: DbClient,
+	automationId?: number
 ): Promise<MaterializeDueAutomationRunsResult> {
 	const sql = db ?? getDb();
+	const onlyAutomation =
+		automationId === undefined ? sql`` : sql`AND w.id = ${automationId}`;
 
 	let unrunnable = 0;
 
@@ -820,6 +823,7 @@ export async function materializeDueAutomationRuns(
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
+          ${onlyAutomation}
           AND (
             (
               w.device_worker_id IS NOT NULL
@@ -872,6 +876,7 @@ export async function materializeDueAutomationRuns(
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
+          ${onlyAutomation}
           AND w.device_worker_id IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM agents a
@@ -1554,6 +1559,33 @@ export async function dispatchPendingAutomationRuns(options?: {
 	}
 
 	return { claimed, dispatched, reconciled, failed };
+}
+
+/**
+ * Materialize and dispatch one Automation's due window now instead of on the
+ * next scheduler tick. Same gates as the tick: active, runnable, not already
+ * in flight, and a non-empty pending window.
+ */
+export async function startDueAutomationWindow(
+	env: Env,
+	automationId: number,
+	db?: DbClient
+): Promise<DispatchAutomationRunsResult> {
+	const sql = db ?? getDb();
+	await materializeDueAutomationRuns(env, sql, automationId);
+	const pending = await sql<{ id: string }>`
+		SELECT id FROM runs
+		WHERE automation_id = ${automationId}
+		  AND run_type = 'automation'
+		  AND status = 'pending'
+	`;
+	if (pending.length === 0) {
+		return { claimed: 0, dispatched: 0, reconciled: 0, failed: 0 };
+	}
+	return dispatchPendingAutomationRuns({
+		db: sql,
+		runIds: pending.map((row) => Number(row.id)),
+	});
 }
 
 export async function queueAndDispatchAutomationRun(

@@ -72,8 +72,13 @@ const TEST_ENV = { ENVIRONMENT: 'test', DATABASE_URL: process.env.DATABASE_URL }
 
 /** Dispatch a created script run and execute its task to completion. */
 async function completeScriptRun(orgId: string, automationId: number, runId: number): Promise<void> {
-  const sql = getTestDb();
   expect(await dispatchPendingAutomationRuns({ runIds: [runId] })).toMatchObject({ dispatched: 1, failed: 0 });
+  await executeScriptTask(orgId, automationId, runId);
+}
+
+/** Execute an already-dispatched script run's task to completion. */
+async function executeScriptTask(orgId: string, automationId: number, runId: number): Promise<void> {
+  const sql = getTestDb();
   const [task] = await sql`SELECT id FROM runs WHERE parent_run_id = ${runId} AND action_key = 'automation-script'`;
   const taskRunId = Number(task!.id);
   await sql`UPDATE runs SET status = 'claimed', claimed_by = 'script-fixture', claimed_at = now() WHERE id = ${taskRunId}`;
@@ -229,7 +234,7 @@ describe('script executor window bound', () => {
     expect((await claimedWindow(run.runId)).end).toBe(WINDOW_END);
   });
 
-  it.each(['scheduled', 'manual'] as const)('drains a truncated %s window on the next scheduler tick', async (dispatchSource) => {
+  it.each(['scheduled', 'manual'] as const)('starts the next window as soon as a truncated %s window completes', async (dispatchSource) => {
     const seed = await seedAutomation('script');
     const stamps = await seedArrivals(seed.orgId, 250);
     await getTestDb()`UPDATE automations SET next_window_start = ${WINDOW_START}::timestamptz WHERE id = ${seed.automationId}`;
@@ -244,25 +249,58 @@ describe('script executor window bound', () => {
 
     await completeScriptRun(seed.orgId, seed.automationId, run.runId);
 
-    // The mark moved to where the window stopped, and the remainder is due now
-    // rather than at the next cron slot.
-    expect(await scheduleState(seed.automationId)).toEqual({
-      next_window_start: stamps[200].toISOString(),
-      due: true,
-    });
-
-    expect(await materializeDueAutomationRuns(TEST_ENV)).toMatchObject({ runsCreated: 1 });
+    // The mark moved to where the window stopped, and the remainder is already
+    // dispatched rather than waiting for the next scheduler tick.
+    expect((await scheduleState(seed.automationId)).next_window_start).toBe(stamps[200].toISOString());
     const [next] = await getTestDb()`
       SELECT id FROM runs WHERE automation_id = ${seed.automationId}
-        AND run_type = 'automation' AND status = 'pending'
+        AND run_type = 'automation' AND status = 'running'
     `;
+    expect(next).toBeDefined();
     const nextWindow = await claimedWindow(Number(next.id));
     expect(nextWindow.start).toBe(stamps[200].toISOString());
     // Count the seeded backlog separately from recent configuration events.
     expect(await arrivalsIn(seed.orgId, { start: nextWindow.start, end: WINDOW_END })).toBe(50);
-    await completeScriptRun(seed.orgId, seed.automationId, Number(next.id));
+    await executeScriptTask(seed.orgId, seed.automationId, Number(next.id));
     expect(await scheduleState(seed.automationId)).toEqual({ next_window_start: nextWindow.end, due: false });
     expect(await materializeDueAutomationRuns(TEST_ENV)).toMatchObject({ runsCreated: 0 });
+  });
+
+  it('does not dispatch another Automation after the current one is archived', async () => {
+    const seed = await seedAutomation('script');
+    await seedArrivals(seed.orgId, 250);
+    const sql = getTestDb();
+    await sql`UPDATE automations SET next_window_start = ${WINDOW_START}::timestamptz WHERE id = ${seed.automationId}`;
+    const run = await createAutomationRun({
+      organizationId: seed.orgId,
+      agentId: seed.agentId,
+      automationId: seed.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource: 'scheduled',
+    });
+    expect(await dispatchPendingAutomationRuns({ runIds: [run.runId] })).toMatchObject({ dispatched: 1, failed: 0 });
+    await sql`UPDATE automations SET status = 'archived' WHERE id = ${seed.automationId}`;
+
+    const other = await seedAutomation('script');
+    const pending = await createAutomationRun({
+      organizationId: other.orgId,
+      agentId: other.agentId,
+      automationId: other.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource: 'manual',
+    });
+
+    await executeScriptTask(seed.orgId, seed.automationId, run.runId);
+
+    const [untouched] = await sql`SELECT status FROM runs WHERE id = ${pending.runId}`;
+    expect(untouched.status).toBe('pending');
+    const next = await sql`
+      SELECT id FROM runs WHERE automation_id = ${seed.automationId}
+        AND run_type = 'automation' AND id <> ${run.runId}
+    `;
+    expect(next).toHaveLength(0);
   });
 
   it.each(['historical replay', 'later retry boundary'] as const)(
@@ -295,6 +333,11 @@ describe('script executor window bound', () => {
       });
       const [after] = await getTestDb()`SELECT next_run_at FROM automations WHERE id = ${seed.automationId}`;
       expect(new Date(after.next_run_at).getTime()).toBeGreaterThanOrEqual(new Date(before.next_run_at).getTime());
+      const started = await getTestDb()`
+        SELECT id FROM runs WHERE automation_id = ${seed.automationId}
+          AND run_type = 'automation' AND id <> ${run.runId}
+      `;
+      expect(started).toHaveLength(0);
     }
   );
 
