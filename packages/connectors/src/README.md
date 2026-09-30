@@ -360,13 +360,16 @@ ad-hoc SQL and warehouse pushdown; configured feed reads belong on
 
 Actions let connectors write back to external services (e.g. create a GitHub
 issue). Define them in the `actions` record passed to `defineConnector`. The
-record key becomes the action key and `requiresApproval` defaults to `false`:
+record key becomes the action key. Declare what the operation does; the
+organization controls approval through Auto, Ask, or Block policies. An action
+with no matching policy requires approval. A non-destructive hint does not grant
+automatic execution:
 
 ```typescript
 interface ConnectorActionSpec {
   name: string;                   // Display name
   description?: string;           // What this action does
-  requiresApproval?: boolean;     // Whether user must approve before execution
+  kind?: "read" | "write";        // Defaults to write
   inputSchema?: object;           // JSON Schema for action input
   outputSchema?: object;          // JSON Schema for action output
   annotations?: {                 // MCP tool annotations for client-side UX
@@ -385,7 +388,7 @@ actions: {
   create_issue: {
     name: 'Create Issue',
     description: 'Create a new issue in the repository.',
-    requiresApproval: true,
+    kind: "write",
     annotations: {
       openWorldHint: true,
       idempotentHint: false,

@@ -3232,10 +3232,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Prepare comment",
         description:
           "Stage a comment draft after the user opens the exact LinkedIn post (fill composer, banner). NEVER opens a tab or submits — the human must click Post.",
-        // The user-opened page is the approval surface: this action can only
-        // fill its composer. The human still performs the irreversible Post
-        // click, which safeDispatch structurally refuses above.
-        requiresApproval: false,
+        // Page activation is separate from org policy approval. This action only
+        // fills the composer; the human performs the irreversible Post click,
+        // which safeDispatch structurally refuses above.
         kind: "write",
         annotations: {
           openWorldHint: true,
@@ -3307,7 +3306,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Verify staged comment",
         description:
           "Re-open a LinkedIn post in the paired Chrome browser and check whether a comment matching the draft body is visible. Read-only — never posts. Best-effort DOM scrape (not a guarantee of publication).",
-        requiresApproval: false,
         kind: "read",
         annotations: {
           openWorldHint: true,

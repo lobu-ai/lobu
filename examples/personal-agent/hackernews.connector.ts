@@ -449,7 +449,6 @@ export default class HackerNewsConnector extends ConnectorRuntime {
         name: "Prepare comment",
         description:
           "Stage a reply draft in the HN reply form for the exact item. NEVER submits — the human must click 'add comment'. Requires the user to visit the item page.",
-        requiresApproval: false,
         kind: "write",
         annotations: {
           openWorldHint: true,

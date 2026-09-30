@@ -44,8 +44,9 @@ All of these are `manage_connections` actions available to agents:
    update re-validates), with `rollback_connector_version` to revert.
 
 Prefer validate → install → test → read over installing blind. Two gates are
-deliberately human-only: `connection.config.action_modes` (approval overrides)
-and connector-run approvals.
+deliberately human-only: changing connector approval policies and approving
+connector runs. Approval policy belongs to the organization, not connector code
+or connection configuration.
 
 ## The contract
 
@@ -85,7 +86,7 @@ export default defineConnector({
   actions: {
     create_item: {
       name: "Create item",
-      requiresApproval: true,
+      kind: "write",
       annotations: { openWorldHint: true },
       inputSchema: {
         type: "object",
@@ -217,9 +218,16 @@ timeout, and one failure does not discard successful results from the others.
 
 ### Actions (write-back)
 
-Declare `actions` with an `inputSchema`, `requiresApproval`, and annotations
-(`destructiveHint`, `openWorldHint`, `idempotentHint`); handle them in
+Declare `actions` with an `inputSchema`, a `kind` (`read` or `write`), and
+annotations (`destructiveHint`, `openWorldHint`, `idempotentHint`); handle them in
 `execute(ctx)`. Omit it entirely if the connector has no actions.
+
+The organization chooses Auto, Ask, or Block through its connector policies.
+Unmatched actions require approval. Declaring an action as non-destructive does
+not make it Auto: add an explicit policy for that connector or operation when
+automatic execution is intended. OpenAPI-imported POST operations remain writes,
+even for side-effect-free APIs such as classification; an explicit Auto policy
+authorizes those calls without provider-specific runtime code.
 
 For binary inputs, use `fileInputSchema` from `@lobu/connector-sdk` on the
 file-valued field, for example `image: fileInputSchema({ maxBytes: 5 * 1024 *

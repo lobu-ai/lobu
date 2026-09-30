@@ -369,7 +369,7 @@ export const manageEntitySchema = <ThrowOnError extends boolean = false>(
 /**
  * Connection and connector lifecycle
  *
- * Connection and connector lifecycle. Use `manage_catalog` → `install_connector` → `connect`; poll `get` until active. Setting, changing, or removing `action_modes` or connector `default_connection_config` requires a human web session; agents/tokens may only round-trip the map unchanged.
+ * Connection and connector lifecycle. Use `manage_catalog` → `install_connector` → `connect`; poll `get` until active.
  */
 export const manageConnections = <ThrowOnError extends boolean = false>(
   options: Options<ManageConnectionsData, ThrowOnError>,

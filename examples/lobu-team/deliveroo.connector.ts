@@ -254,7 +254,6 @@ export default class DeliverooConnector extends ConnectorRuntime {
         name: "Search restaurants",
         description:
           "Search Deliveroo restaurants near the office. Returns matching restaurants as { name, url } — feed a url to read_menu.",
-        requiresApproval: false,
         annotations: { idempotentHint: true, openWorldHint: true },
         inputSchema: searchInputSchema,
       },
@@ -263,7 +262,6 @@ export default class DeliverooConnector extends ConnectorRuntime {
         name: "Read menu",
         description:
           "Read a Deliveroo restaurant's menu. Returns items as { name, price, price_minor, description, kcal }.",
-        requiresApproval: false,
         annotations: { idempotentHint: true, openWorldHint: true },
         inputSchema: readMenuInputSchema,
       },

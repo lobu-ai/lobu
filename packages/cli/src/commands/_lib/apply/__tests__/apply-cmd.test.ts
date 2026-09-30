@@ -1621,7 +1621,7 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
           status: "active",
           auth_profile_slug: null,
           app_auth_profile_slug: null,
-          config: { action_modes: { send: "auto" } },
+          config: { fetch_limit: 25 },
         },
       ],
       feedsByConnectionId: new Map([
@@ -1705,8 +1705,7 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
       unknown
     >;
     expect(Object.keys(payload)).toEqual(["name"]);
-    // action_modes rides in connection config; sending `{}` here made the
-    // server's human-only gate fail the whole apply.
+    // A name change must not clear settings owned by the connection UI.
     expect("config" in payload).toBe(false);
   });
 });

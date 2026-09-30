@@ -427,19 +427,15 @@ async function main() {
     );
   });
   // A disposable local owner's real web session authorizes subsequent tests.
-  // Tokens never change action_modes or approve operations.
-  const current = await json(`/api/${org.slug}/manage_connections`, {
-    method: "POST",
-    headers: sessionHeaders,
-    body: { action: "get", connection_id: connection.connection_id },
-  });
-  await json(`/api/${org.slug}/manage_connections`, {
-    method: "POST",
+  // Tokens never change connector policies or approve operations.
+  await json(`/api/${org.slug}/write-permissions`, {
+    method: "PUT",
     headers: sessionHeaders,
     body: {
-      action: "update",
+      resource_class: "connector_action",
       connection_id: connection.connection_id,
-      config: { ...current.connection.config, action_modes: { run: "auto" } },
+      operation_key: "os.shell::run",
+      effects: { execute: "auto" },
     },
   });
   await scenario(

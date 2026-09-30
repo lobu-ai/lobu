@@ -2905,7 +2905,7 @@ export type ManageConnectionsData = {
          */
         connector_key: string;
         /**
-         * Default connection config (action_modes, etc.)
+         * Default connection config
          */
         default_connection_config: {
           [key: string]: unknown;
@@ -3337,7 +3337,6 @@ export type ManageConnectionsResponses = {
             | unknown
             | {
                 kind: "read" | "write";
-                requires_approval: boolean;
                 required_scopes: Array<string>;
               };
         };
@@ -6263,7 +6262,6 @@ export type ReadKnowledgeResponses = {
       operation_key: string;
       name: string;
       kind: "read" | "write";
-      requires_approval: boolean;
     }>;
     total_count?: number;
     total_count_chars?: number;

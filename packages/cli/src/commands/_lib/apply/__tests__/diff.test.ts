@@ -1327,9 +1327,7 @@ describe("apply diff — connectors", () => {
   });
 
   // A connection block with no `config` key does not manage the connection's
-  // settings. Sending `{}` with replace_config wiped UI-set settings, and on a
-  // connection carrying `action_modes` the server's human-only gate rejected
-  // the write, failing the whole apply.
+  // settings. Sending `{}` with replace_config wiped UI-set settings.
   test("an undeclared connection config does not diff against a remote config", () => {
     const state = connectorState();
     const conn = state.connectors.connections[0];
@@ -1338,7 +1336,7 @@ describe("apply diff — connectors", () => {
     const remote = remoteWithFeedCron("0 * * * *");
     const remoteConn = remote.connections[0];
     if (remoteConn) {
-      remoteConn.config = { action_modes: { evaluate: "auto" } };
+      remoteConn.config = { fetch_limit: 25 };
     }
 
     const plan = computeDiff(state, remote);
