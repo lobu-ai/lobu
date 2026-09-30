@@ -3299,7 +3299,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.13.0");
+    expect(c.definition.version).toBe("3.13.1");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
@@ -3641,6 +3641,11 @@ describe("prepare_comment helpers", () => {
 
     expect(inputs.length).toBeGreaterThan(0);
     expect(inputs[0]?.require_page_activation).toBe(true);
+    // LinkedIn rewrites /feed/update/<urn> to its trailing-slash form after
+    // load, and the extension only drives an activated tab on the exact URL.
+    expect(inputs[0]?.url).toBe(
+      "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567/"
+    );
     expect(inputs[0]).not.toHaveProperty("open_in_new_tab");
     expect(inputs.every((input) => !input.target_browser_connection_id)).toBe(
       true

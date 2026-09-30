@@ -2277,7 +2277,10 @@ export async function prepareLinkedInComment(
     current_url?: string;
     title?: string;
   }>("navigate", {
-    url: postUrl,
+    // LinkedIn rewrites /feed/update/<urn> to its trailing-slash form after
+    // load, and an activated tab is only drivable on its exact URL, so the
+    // caller's activation target is this same trailing-slash page URL.
+    url: `${postUrl}/`,
     require_page_activation: true,
     ...chromeOriginsInput(),
   });
@@ -3147,7 +3150,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.13.0",
+    version: "3.13.1",
     faviconDomain: "linkedin.com",
     // Auth is `none`: every live feed authenticates implicitly through the
     // paired Owletto Chrome extension (the user's own signed-in linkedin.com
@@ -3377,7 +3380,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "prepare_comment",
         name: "Prepare comment",
         description:
-          "Stage a comment draft after the user opens the exact LinkedIn post (fill composer, banner). NEVER opens a tab or submits — the human must click Post.",
+          "Stage a comment draft after the user opens the exact LinkedIn post (fill composer, banner). The page-activation target is the post page URL with a trailing slash (https://www.linkedin.com/feed/update/urn:li:activity:<id>/), the form LinkedIn settles on. NEVER opens a tab or submits — the human must click Post.",
         // Page activation is separate from org policy approval. This action only
         // fills the composer; the human performs the irreversible Post click,
         // which safeDispatch structurally refuses above.
