@@ -574,7 +574,10 @@ export async function restListTools(c: Context<{ Bindings: Env }>) {
  * - query (required on auth route): Search text (min 3 characters)
  * - entity_id, connection_ids / connection_id, feed_ids, run_ids
  * - platforms / platform (singular is mapped to platforms[])
- * - since, until, min_similarity, limit, offset, cursors
+ * - since, until, min_similarity, limit, offset, sort_by, sort_order, cursors
+ * - engagement_min, engagement_max, run_id, content_ids, interaction_status
+ * - classification_filters (JSON object, e.g. {"topic":["security"]}) and
+ *   classification_source; malformed filters are a 400, never ignored
  * - include_classification (optional): aggregates only — "summary"
  *
  * Per-item classifications are always attached by the tool handler; there is
@@ -612,43 +615,81 @@ export function parsePlatformsQuery(
 	return [...fromList, singular];
 }
 
+function parseClassificationFiltersParam(
+	raw: string | undefined
+): Record<string, unknown> | undefined {
+	if (raw === undefined) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		parsed = undefined;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		// Searching unfiltered would silently answer a different question.
+		throw new ToolUserError(
+			'classification_filters must be a JSON object, e.g. {"topic":["security"]}',
+			400
+		);
+	}
+	return parsed as Record<string, unknown>;
+}
+
+/** Query string → read_knowledge args, shared by the signed-in and public routes. */
+export function parseKnowledgeSearchQuery(c: Context<{ Bindings: Env }>) {
+	const connectionId = safeParseInt(c.req.query("connection_id"), { min: 1 });
+	return {
+		query: c.req.query("query")?.trim() || undefined,
+		entity_id: safeParseInt(c.req.query("entity_id"), { min: 1 }),
+		connection_ids:
+			parseIdListParam(c.req.query("connection_ids")) ??
+			(connectionId ? [connectionId] : undefined),
+		feed_ids: parseIdListParam(c.req.query("feed_ids")),
+		run_ids: parseIdListParam(c.req.query("run_ids")),
+		platforms: parsePlatformsQuery(
+			c.req.query("platforms"),
+			c.req.query("platform")
+		),
+		since: c.req.query("since"),
+		until: c.req.query("until"),
+		engagement_min: safeParseInt(c.req.query("engagement_min"), {
+			min: 0,
+			max: 100,
+		}),
+		engagement_max: safeParseInt(c.req.query("engagement_max"), {
+			min: 0,
+			max: 100,
+		}),
+		classification_filters: parseClassificationFiltersParam(
+			c.req.query("classification_filters")
+		),
+		classification_source: c.req.query("classification_source") || undefined,
+		run_id: safeParseInt(c.req.query("run_id"), { min: 1 }),
+		content_ids: parseIdListParam(c.req.query("content_ids")),
+		min_similarity: safeParseFloat(c.req.query("min_similarity"), {
+			min: 0,
+			max: 1,
+		}),
+		include_classification: c.req.query("include_classification") || undefined,
+		limit: safeParseInt(c.req.query("limit"), { min: 1, max: 500 }),
+		offset: safeParseInt(c.req.query("offset"), { min: 0 }),
+		sort_by: c.req.query("sort_by") || undefined,
+		sort_order: c.req.query("sort_order") || undefined,
+		before_occurred_at: c.req.query("before_occurred_at") || undefined,
+		before_id: safeParseInt(c.req.query("before_id"), { min: 1 }),
+		after_occurred_at: c.req.query("after_occurred_at") || undefined,
+		after_id: safeParseInt(c.req.query("after_id"), { min: 1 }),
+		interaction_status: c.req.query("interaction_status") || undefined,
+		entity_types: parseStringListParam(c.req.query("entity_types")),
+	};
+}
+
 export async function restSearchKnowledge(c: Context<{ Bindings: Env }>) {
 	try {
-		const query = c.req.query("query");
-		if (!query || query.trim().length < 3) {
+		const params = parseKnowledgeSearchQuery(c);
+		if (!params.query || params.query.length < 3) {
 			return c.json({ error: "Query must be at least 3 characters" }, 400);
 		}
-
-		const connectionId = safeParseInt(c.req.query("connection_id"), { min: 1 });
-		const params = {
-			query,
-			entity_id: safeParseInt(c.req.query("entity_id"), { min: 1 }),
-			connection_ids:
-				parseIdListParam(c.req.query("connection_ids")) ??
-				(connectionId ? [connectionId] : undefined),
-			feed_ids: parseIdListParam(c.req.query("feed_ids")),
-			run_ids: parseIdListParam(c.req.query("run_ids")),
-			platforms: parsePlatformsQuery(
-				c.req.query("platforms"),
-				c.req.query("platform")
-			),
-			since: c.req.query("since"),
-			until: c.req.query("until"),
-			min_similarity: safeParseFloat(c.req.query("min_similarity"), {
-				min: 0,
-				max: 1,
-			}),
-			include_classification:
-				c.req.query("include_classification") || undefined,
-			limit: safeParseInt(c.req.query("limit"), { min: 1, max: 500 }),
-			offset: safeParseInt(c.req.query("offset"), { min: 0 }),
-			before_occurred_at: c.req.query("before_occurred_at") || undefined,
-			before_id: safeParseInt(c.req.query("before_id"), { min: 1 }),
-			after_occurred_at: c.req.query("after_occurred_at") || undefined,
-			after_id: safeParseInt(c.req.query("after_id"), { min: 1 }),
-			interaction_status: c.req.query("interaction_status") || undefined,
-			entity_types: parseStringListParam(c.req.query("entity_types")),
-		};
 
 		const ctx = toToolContext(extractAuthContext(c));
 		const result = await getContent(params as any, c.env, ctx);
@@ -660,74 +701,13 @@ export async function restSearchKnowledge(c: Context<{ Bindings: Env }>) {
 }
 
 export async function publicRestSearchKnowledge(c: Context<{ Bindings: Env }>) {
-	return withPublicOrg(c, async (organizationId) => {
-		const query = c.req.query("query");
-
-		const connectionId = safeParseInt(c.req.query("connection_id"), { min: 1 });
-		const contentIds = c.req.query("content_ids");
-		const params = {
-			query: query?.trim() || undefined,
-			entity_id: safeParseInt(c.req.query("entity_id"), { min: 1 }),
-			connection_ids:
-				parseIdListParam(c.req.query("connection_ids")) ??
-				(connectionId ? [connectionId] : undefined),
-			feed_ids: parseIdListParam(c.req.query("feed_ids")),
-			run_ids: parseIdListParam(c.req.query("run_ids")),
-			platforms: parsePlatformsQuery(
-				c.req.query("platforms"),
-				c.req.query("platform")
-			),
-			since: c.req.query("since"),
-			until: c.req.query("until"),
-			engagement_min: safeParseInt(c.req.query("engagement_min"), {
-				min: 0,
-				max: 100,
-			}),
-			engagement_max: safeParseInt(c.req.query("engagement_max"), {
-				min: 0,
-				max: 100,
-			}),
-			classification_filters: (() => {
-				const raw = c.req.query("classification_filters");
-				if (!raw) return undefined;
-				try {
-					return JSON.parse(raw);
-				} catch {
-					return undefined;
-				}
-			})(),
-			classification_source: c.req.query("classification_source") || undefined,
-			run_id: safeParseInt(c.req.query("run_id"), { min: 1 }),
-			content_ids: contentIds
-				? contentIds
-						.split(",")
-						.map((id) => safeParseInt(id.trim(), { min: 1 }))
-						.filter((id): id is number => id !== undefined)
-				: undefined,
-			min_similarity: safeParseFloat(c.req.query("min_similarity"), {
-				min: 0,
-				max: 1,
-			}),
-			include_classification:
-				c.req.query("include_classification") || undefined,
-			limit: safeParseInt(c.req.query("limit"), { min: 1, max: 500 }),
-			offset: safeParseInt(c.req.query("offset"), { min: 0 }),
-			sort_by: c.req.query("sort_by") || undefined,
-			sort_order: c.req.query("sort_order") || undefined,
-			before_occurred_at: c.req.query("before_occurred_at") || undefined,
-			before_id: safeParseInt(c.req.query("before_id"), { min: 1 }),
-			after_occurred_at: c.req.query("after_occurred_at") || undefined,
-			after_id: safeParseInt(c.req.query("after_id"), { min: 1 }),
-			interaction_status: c.req.query("interaction_status") || undefined,
-			entity_types: parseStringListParam(c.req.query("entity_types")),
-		};
-
-		return getContent(
-			params as any,
+	return withPublicOrg(c, async (organizationId) =>
+		getContent(
+			parseKnowledgeSearchQuery(c) as any,
 			c.env,
 			publicToolContext(c.req.url, organizationId)
-		);
-	});
+		)
+	);
 }
 
 export async function publicRestListClassifiers(c: Context<{ Bindings: Env }>) {
