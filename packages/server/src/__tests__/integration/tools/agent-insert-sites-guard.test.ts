@@ -2,13 +2,12 @@
  * Structural guard: every `INSERT INTO agents` site must seed the shared
  * fresh-agent provisioning defaults.
  *
- * This bug was six divergent create paths. Two baked a system-key `models` list,
- * one seeded only `pre_approved_tools`, and three seeded neither — so whether a
- * brand-new agent could run at all depended on which code path happened to
- * create it. Convergence is not self-enforcing: the next create path added
- * without `resolveNewAgentProvisioningDefaults()` silently reintroduces it, and
- * the symptom surfaces far away ("Agent reply finished without calling
- * completeWindow") with no hint at provisioning.
+ * This bug was six divergent create paths. Two baked a system-key `models` list
+ * and four seeded no models, so whether a brand-new agent could run depended on
+ * which code path created it. Convergence is not self-enforcing: the next create
+ * path added without `resolveNewAgentProvisioningDefaults()` silently
+ * reintroduces it, and the symptom surfaces far away ("Agent reply finished
+ * without calling completeWindow") with no hint at provisioning.
  *
  * So this test fails on an UNKNOWN insert site rather than trying to prove
  * runtime semantics. A new site is not necessarily wrong — but it must be looked
@@ -36,7 +35,7 @@ const SERVER_SRC = path.resolve(
 const SANCTIONED_INSERT_SITES = [
 	// The shared UPSERT — reached by AgentMetadataStore.createAgent, i.e. the
 	// POST /api/v1/agents route. Also the UPDATE path, so its DO UPDATE SET
-	// clause deliberately omits models/pre_approved_tools.
+	// clause deliberately omits models.
 	"lobu/stores/postgres-stores.ts",
 	// The web UI create route (POST /agents).
 	"lobu/agent-routes.ts",
@@ -97,8 +96,7 @@ describe("agents insert-site guard", () => {
 			expect(
 				source.includes(PROVISIONING_HELPER),
 				`${relPath} inserts into agents but never calls ${PROVISIONING_HELPER}(). ` +
-					"A freshly created agent must carry a system-key models list and the " +
-					"lobu-memory pre-approval, or it silently fails to run.",
+					"A freshly created agent must resolve a model from its defaults or the organization default.",
 			).toBe(true);
 		}
 	});

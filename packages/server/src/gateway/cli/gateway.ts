@@ -9,11 +9,6 @@ import { createPostgresAppInstallationStore } from "../../lobu/stores/app-instal
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { isAllowedCorsOrigin } from "../../utils/cors-origin.js";
 import { getConfiguredPublicOrigin } from "../../utils/public-origin.js";
-import {
-  pairAdminGrant,
-  type PendingToolClaimant,
-  takePendingTool,
-} from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
 import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
 import { SystemEnvStore } from "../auth/system-env-store.js";
@@ -303,9 +298,6 @@ export function createGatewayApp(
     const publicUrl = coreServices.getPublicGatewayUrl();
 
     if (queueProducer && sessionMgr && interactionSvc) {
-      const approveGrantStore = coreServices.getGrantStore();
-      const approveMcpProxy = coreServices.getMcpProxy();
-
       const agentApi = createAgentApi({
         queueProducer,
         sessionManager: sessionMgr,
@@ -318,75 +310,6 @@ export function createGatewayApp(
         userAgentsStore: coreServices.getUserAgentsStore(),
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
-        approveToolCall: async (
-          requestId: string,
-          decision: string,
-          claimant: PendingToolClaimant,
-        ) => {
-          const expiresMap = {
-            "1h": Date.now() + 3_600_000,
-            "24h": Date.now() + 86_400_000,
-            always: null,
-          } satisfies Record<string, number | null>;
-          const isGrantDecision = (
-            value: string,
-          ): value is keyof typeof expiresMap => value in expiresMap;
-          if (decision !== "deny" && !isGrantDecision(decision)) {
-            return { success: false, error: "Invalid decision" };
-          }
-
-          // DELETE ... RETURNING atomically claims the pending invocation
-          // so a retry of POST /api/v1/agents/approve (CLI re-tries,
-          // double-clicks, Slack webhook retries) cannot double-execute the
-          // tool. The Slack/Telegram interaction-bridge path uses the same
-          // helper.
-          const pending = await takePendingTool(requestId, claimant);
-          if (!pending)
-            return { success: false, error: "Request not found or expired" };
-          if (!pending.organizationId) {
-            return {
-              success: false,
-              error: "Tool approval missing organization context",
-            };
-          }
-          const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
-          if (decision === "deny") {
-            await approveGrantStore?.grant(
-              pending.agentId,
-              pattern,
-              null,
-              true,
-            );
-            return { success: true };
-          }
-          await approveGrantStore?.grant(
-            pending.agentId,
-            pattern,
-            expiresMap[decision],
-          );
-          if (approveMcpProxy) {
-            const result = await approveMcpProxy.executeToolDirect(
-              pending.agentId,
-              pending.userId,
-              pending.mcpId,
-              pending.toolName,
-              pending.args,
-              {
-                organizationId: pending.organizationId,
-                conversationId: pending.conversationId,
-                channelId: pending.channelId,
-                teamId: pending.teamId,
-                connectionId: pending.connectionId,
-                platform: pending.platform,
-                source: pending.source,
-                ...pairAdminGrant(pending.adminTools, pending.adminActorUserId),
-                deploymentName: pending.deploymentName,
-              },
-            );
-            return { success: true, result } as any;
-          }
-          return { success: true };
-        },
       });
       app.route("", agentApi);
       logger.debug(

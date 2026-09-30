@@ -4,7 +4,7 @@
  * Covers:
  *  1. Automation-run-race regression — classifyQueue never maps to
  *     'automation', so RunsQueue can never claim connector-worker lanes.
- *  2. invalidateGrantSyncCache / clearAllGrantSyncCaches.
+ *  2. Network grant synchronization without an agent.
  *  3. generateDeploymentName / buildCanonicalConversationKey determinism.
  *  4. backoffSeconds correctness.
  *
@@ -217,20 +217,10 @@ describe("automation-run-race regression — classifyQueue never emits connector
 });
 
 // ============================================================================
-// 2. SPAWN FAILURE HANDLING
+// 2. NETWORK GRANT SYNCHRONIZATION
 // ============================================================================
 
-describe("grant sync cache — invalidateGrantSyncCache / clearAllGrantSyncCaches", () => {
-  test("invalidateGrantSyncCache does not throw for unknown agent", () => {
-    const mgr = makeManager();
-    expect(() => mgr.invalidateGrantSyncCache("nonexistent")).not.toThrow();
-  });
-
-  test("clearAllGrantSyncCaches does not throw", () => {
-    const mgr = makeManager();
-    expect(() => mgr.clearAllGrantSyncCaches()).not.toThrow();
-  });
-
+describe("network grant synchronization", () => {
   test("syncNetworkConfigGrants is a no-op when no agentId", async () => {
     const mgr = makeManager();
     // messageData without agentId

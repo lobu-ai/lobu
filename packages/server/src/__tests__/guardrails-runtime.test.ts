@@ -31,13 +31,8 @@ import { MessageConsumer } from '../gateway/orchestration/message-consumer';
 import type {
   DeploymentManager,
 } from '../gateway/orchestration/deployment-manager';
-import { GrantStore } from '../gateway/permissions/grant-store';
-import {
-  PostgresSecretStore,
-} from '../lobu/stores/postgres-secret-store';
 import { orgContext } from '../lobu/stores/org-context';
 import { createPostgresAgentConfigStore } from '../lobu/stores/postgres-stores';
-import { SecretStoreRegistry } from '../gateway/secrets/index';
 import { cleanupTestDatabase, getTestDb } from './setup/test-db';
 import {
   createTestAgent,
@@ -572,8 +567,6 @@ describe('MessageConsumer — wired input guardrail', () => {
       setProviderCatalogService: () => {},
       setProviderModules: () => {},
       reconcileDeployments: async () => {},
-      invalidateGrantSyncCache: () => {},
-      clearAllGrantSyncCaches: () => {},
     } as unknown as DeploymentManager;
 
     const consumer = new TestableMessageConsumer(fakeDeployments);
@@ -854,8 +847,6 @@ describe('MessageConsumer — wired custom inline guardrail', () => {
       setProviderCatalogService: () => {},
       setProviderModules: () => {},
       reconcileDeployments: async () => {},
-      invalidateGrantSyncCache: () => {},
-      clearAllGrantSyncCaches: () => {},
     } as unknown as DeploymentManager;
 
     const consumer = new TestableMessageConsumer(fakeDeployments);
@@ -930,7 +921,7 @@ describe('McpProxy — wired pre-tool guardrail', () => {
     await db`TRUNCATE agents CASCADE`;
   });
 
-  it('blocks a forbidden tool with generic policy text and audits the trip', async () => {
+  it.each(['JSON-RPC', 'REST'])('blocks a forbidden tool over %s and audits the trip', async (transport) => {
     // Minimal McpConfigSource that always returns an HTTP server config —
     // we don't need real upstream execution, only the gate before forwardRequest.
     const fakeConfigService = {
@@ -941,19 +932,12 @@ describe('McpProxy — wired pre-tool guardrail', () => {
       getAllHttpServers: async () => new Map(),
     };
 
-    const defaultSecretStore = new PostgresSecretStore();
-    const secretStore = new SecretStoreRegistry(defaultSecretStore, {
-      secret: defaultSecretStore,
-    });
-    const grantStore = new GrantStore();
     const settingsStore = new AgentSettingsStore(createPostgresAgentConfigStore());
 
     const registry = new GuardrailRegistry();
     registerBuiltinGuardrails(registry);
 
     const proxy = new McpProxy(fakeConfigService as any, {
-      secretStore,
-      grantStore,
       agentSettingsStore: settingsStore,
       guardrailRegistry: registry,
     });
@@ -978,13 +962,13 @@ describe('McpProxy — wired pre-tool guardrail', () => {
       { organizationId: orgId },
       async () => {
         return proxy.getApp().fetch(
-          new Request('http://localhost/test-mcp', {
+          new Request(transport === 'REST' ? 'http://localhost/test-mcp/tools/delete_repo' : 'http://localhost/test-mcp', {
             method: 'POST',
             headers: {
               authorization: `Bearer ${token}`,
               'content-type': 'application/json',
             },
-            body,
+            body: transport === 'REST' ? JSON.stringify({ repo: 'org/x' }) : body,
           })
         );
       }
@@ -992,12 +976,15 @@ describe('McpProxy — wired pre-tool guardrail', () => {
 
     expect(response.status).toBe(200);
     const json = (await response.json()) as any;
-    expect(json.jsonrpc).toBe('2.0');
-    expect(json.id).toBe(42);
-    expect(json.result.isError).toBe(true);
+    if (transport === 'JSON-RPC') {
+      expect(json.jsonrpc).toBe('2.0');
+      expect(json.id).toBe(42);
+    }
+    const result = transport === 'REST' ? json : json.result;
+    expect(result.isError).toBe(true);
     // Generic text — no reason leak.
-    expect(json.result.content[0].text).toBe('Tool call blocked by policy.');
-    expect(json.result.content[0].text).not.toMatch(/delete_repo/);
+    expect(result.content[0].text).toBe('Tool call blocked by policy.');
+    expect(result.content[0].text).not.toMatch(/delete_repo/);
 
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'pre-tool');
@@ -1026,11 +1013,6 @@ describe('McpProxy — wired pre-tool guardrail', () => {
       getAllHttpServers: async () => new Map(),
     };
 
-    const defaultSecretStore = new PostgresSecretStore();
-    const secretStore = new SecretStoreRegistry(defaultSecretStore, {
-      secret: defaultSecretStore,
-    });
-    const grantStore = new GrantStore();
     const settingsStore = new AgentSettingsStore(
       createPostgresAgentConfigStore()
     );
@@ -1039,8 +1021,6 @@ describe('McpProxy — wired pre-tool guardrail', () => {
     registerBuiltinGuardrails(registry);
 
     const proxy = new McpProxy(fakeConfigService as any, {
-      secretStore,
-      grantStore,
       agentSettingsStore: settingsStore,
       guardrailRegistry: registry,
     });

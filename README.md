@@ -223,7 +223,7 @@ Docs: [Memory](https://lobu.ai/getting-started/memory/) · [Connectors](https://
 
 A Lobu specialist has a stable role, instructions, memory, tools, and conversation history. It can be reached from web chat or Slack and called by external agents through `client.conversations.send`.
 
-Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.md`, and `USER.md`. Guardrails can inspect input, output, and tool calls. Destructive MCP calls require in-thread approval unless they are explicitly pre-approved through `defineAgent({ tools: { preApproved } })` in `lobu.config.ts`; action results return to the shared event log.
+Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.md`, and `USER.md`. Guardrails can inspect input, output, and tool calls. Connector actions follow organization Auto, Ask, or Block rules in Settings → Policies; guardrails still apply under Auto, and action results return to the shared event log.
 
 External agents do not ask users to write delegation code. They pass scripts like these to Lobu's `query_sdk` and `run_sdk` MCP tools:
 
@@ -295,7 +295,7 @@ Use the embedded runtime locally or self-host Lobu with external Postgres. Produ
 
 ## Security and privacy
 
-Permissions and audit stay on Lobu's gateway. Lobu MCP servers and the credential-brokering layer handle provider and connector credentials, OAuth and token refresh, and third-party API proxying. Workers receive scoped placeholders or short-lived provider-derived access, never OAuth tokens or durable stored credentials. Destructive MCP calls require in-thread approval unless explicitly pre-approved, and connected data remains organization-scoped.
+Permissions and audit stay on Lobu's gateway. Lobu MCP servers and the credential-brokering layer handle provider and connector credentials, OAuth and token refresh, and third-party API proxying. Workers receive scoped placeholders or short-lived provider-derived access, never OAuth tokens or durable stored credentials. Connector actions follow organization approval policies, and connected data remains organization-scoped.
 
 The built-in `just-bash` and embedded execution modes are policy and convenience boundaries, not VMs for hostile code. Use a remote sandbox provider when the workload needs a stronger isolation boundary.
 

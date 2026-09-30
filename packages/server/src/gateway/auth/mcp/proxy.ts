@@ -1,7 +1,5 @@
-import { randomUUID } from "node:crypto";
 import {
 	createLogger,
-	generateWorkerToken,
 	getErrorMessage,
 	type GuardrailRegistry,
 	runGuardrailInstances,
@@ -15,14 +13,7 @@ import {
 } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
 import { parseJsonRpcResponse } from "../../../mcp-proxy/http-response.js";
-import { requiresToolApproval } from "../../permissions/approval-policy.js";
-import type { GrantStore } from "../../permissions/grant-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
-import {
-	pairAdminGrant,
-	type PendingAdminGrant,
-	storePendingTool,
-} from "./pending-tool-store.js";
 import { handleProxyRequest } from "./proxy-forward.js";
 import {
 	handleCallTool,
@@ -56,28 +47,9 @@ async function waitForMcpRetry(delayMs: number, signal?: AbortSignal): Promise<v
 	});
 }
 
-export type DirectToolExecutionOptions = {
-	organizationId: string;
-	conversationId?: string;
-	channelId?: string;
-	teamId?: string;
-	connectionId?: string;
-	platform?: string;
-	source?: string;
-	deploymentName?: string;
-} & PendingAdminGrant;
-
 export class McpProxy {
-	// Tool-approval cards may sit in-thread for a long time before the user
-	// actually clicks (Slack notifications, async review, etc.). The pending
-	// invocation key holds the args needed to execute the tool after approval;
-	// 24h gives users a realistic window to respond. Anything shorter silently
-	// drops late clicks (the take-on-claim returns null and the click no-ops).
-	private readonly PENDING_TOOL_TTL = 24 * 60 * 60; // 24 hours
 	private app: Hono;
 	private readonly toolCache?: McpToolCache;
-	/** @internal Used by the route-handler modules (proxy-forward, proxy-rest-routes). */
-	readonly grantStore?: GrantStore;
 	/** @internal Used by the route-handler modules (proxy-forward, proxy-rest-routes). */
 	readonly agentSettingsStore?: AgentSettingsStore;
 	/** @internal Used by the route-handler modules (proxy-forward, proxy-rest-routes). */
@@ -85,29 +57,10 @@ export class McpProxy {
 	/** @internal Upstream transport client (sessions, credentials, egress). */
 	readonly upstream: McpUpstreamClient;
 
-	/** Callback invoked when a tool call is blocked for approval. */
-	public onToolBlocked?: (
-		requestId: string,
-		agentId: string,
-		userId: string,
-		mcpId: string,
-		toolName: string,
-		args: Record<string, unknown>,
-		grantPattern: string,
-		channelId: string,
-		conversationId: string,
-		teamId: string | undefined,
-		connectionId: string | undefined,
-		platform: string | undefined,
-		source: string | undefined,
-		turnMessageId: string | undefined,
-	) => Promise<void>;
-
 	constructor(
 		readonly configService: McpConfigSource,
 		options: {
 			toolCache?: McpToolCache;
-			grantStore?: GrantStore;
 			/** Source of per-agent guardrail enable lists for the pre-tool stage. */
 			agentSettingsStore?: AgentSettingsStore;
 			/** Shared registry of guardrails; pre-tool stage entries are queried. */
@@ -115,7 +68,6 @@ export class McpProxy {
 		},
 	) {
 		this.toolCache = options.toolCache;
-		this.grantStore = options.grantStore;
 		this.agentSettingsStore = options.agentSettingsStore;
 		this.guardrailRegistry = options.guardrailRegistry;
 		this.upstream = new McpUpstreamClient();
@@ -126,169 +78,6 @@ export class McpProxy {
 
 	getApp(): Hono {
 		return this.app;
-	}
-
-	/**
-	 * Execute an MCP tool call directly (internal use, no HTTP auth).
-	 * Used by the interaction bridge to execute tool calls after user approval.
-	 */
-	async executeToolDirect(
-		agentId: string,
-		userId: string,
-		mcpId: string,
-		toolName: string,
-		args: Record<string, unknown>,
-		options: DirectToolExecutionOptions,
-	): Promise<{
-		content: Array<{ type: string; text: string }>;
-		isError: boolean;
-	}> {
-		return runWithOrganizationContext(options?.organizationId, () =>
-			this.executeToolDirectScoped(
-				agentId,
-				userId,
-				mcpId,
-				toolName,
-				args,
-				options,
-			),
-		);
-	}
-
-	private async executeToolDirectScoped(
-		agentId: string,
-		userId: string,
-		mcpId: string,
-		toolName: string,
-		args: Record<string, unknown>,
-		options: DirectToolExecutionOptions,
-	): Promise<{
-		content: Array<{ type: string; text: string }>;
-		isError: boolean;
-	}> {
-		const { organizationId } = options;
-		const httpServer = await this.configService.getHttpServer(
-			mcpId,
-			agentId,
-			organizationId,
-		);
-		if (!httpServer) {
-			return {
-				content: [{ type: "text", text: `MCP server '${mcpId}' not found` }],
-				isError: true,
-			};
-		}
-		let directAuthToken: string | undefined;
-		if (httpServer.internal) {
-			if (!options.conversationId || !options.channelId) {
-				return {
-					content: [{ type: "text", text: "Approved tool execution is missing signed routing context" }],
-					isError: true,
-				};
-			}
-			directAuthToken = generateWorkerToken(
-				userId,
-				options.conversationId,
-				options.deploymentName ?? `tool-approval:${agentId}`,
-				{
-					channelId: options.channelId,
-					teamId: options.teamId,
-					agentId,
-					organizationId,
-					connectionId: options.connectionId,
-					platform: options.platform,
-					source: options.source,
-					// Unpaired admin grant → mint without the admin tier at all.
-					...pairAdminGrant(options.adminTools, options.adminActorUserId),
-				},
-			);
-		}
-
-		const scopeKey = computeScopeKey(userId);
-		const sessionKey = buildSessionKey(agentId, mcpId, scopeKey);
-
-		const jsonRpcBody = JSON.stringify({
-			jsonrpc: "2.0",
-			method: "tools/call",
-			params: { name: toolName, arguments: args },
-			id: 1,
-		});
-
-		try {
-			// Approval webhooks can land on a different gateway replica than the
-			// blocked call. Upstream MCP sessions are intentionally replica-local,
-			// so initialize on this replica before resuming the tool.
-			if (!this.upstream.getSession(sessionKey)) {
-				await this.upstream.reinitializeSession(
-					httpServer,
-					agentId,
-					mcpId,
-					scopeKey,
-					directAuthToken,
-				);
-			}
-
-			const sendToolCall = () =>
-				this.upstream.sendUpstreamRequest(
-					httpServer,
-					agentId,
-					mcpId,
-					"POST",
-					jsonRpcBody,
-					scopeKey,
-					directAuthToken,
-					undefined,
-					undefined,
-					false,
-				);
-			let response = await sendToolCall();
-
-			if (!response.ok) {
-				const text = await response.text();
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Tool call failed: ${response.status} ${text}`,
-						},
-					],
-					isError: true,
-				};
-			}
-
-			let json = (await parseJsonRpcResponse(response)) as {
-				result?: {
-					content?: Array<{ type: string; text: string }>;
-					isError?: boolean;
-				};
-				content?: Array<{ type: string; text: string }>;
-				isError?: boolean;
-				error?: { code?: number; message?: string };
-			};
-			if (json.error) {
-				return {
-					content: [{ type: "text", text: json.error.message ?? JSON.stringify(json.error) }],
-					isError: true,
-				};
-			}
-			const result = json.result || json;
-			return {
-				content: result.content || [
-					{ type: "text", text: JSON.stringify(result) },
-				],
-				isError: result.isError || false,
-			};
-		} catch (error) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Tool execution error: ${String(error)}`,
-					},
-				],
-				isError: true,
-			};
-		}
 	}
 
 	/**
@@ -493,8 +282,7 @@ export class McpProxy {
 	*
 	* Shared by BOTH tool-call entrypoints — the JSON-RPC forward path
 	* (`handleProxyRequest`) and the REST `handleCallTool` — so neither can
-	* bypass the stage, and independent of `grantStore` so guardrails enforce
-	* even when the approval subsystem isn't configured.
+	* bypass the stage. Operation authorization runs in the upstream handlers.
 	*
 	* Fails OPEN on store/registry-level errors (per-guardrail throws already
 	* fail open in the runner); judge guardrails fail CLOSED by design.
@@ -585,144 +373,4 @@ export class McpProxy {
 		}
 	}
 
-	/**
-	 * Shared tool-approval gate used by the REST (`handleCallTool`) and JSON-RPC
-	 * (`handleProxyRequest`) call paths. Resolves tool annotations, checks the
-	 * grant store, and — if blocked — stores the pending invocation and fires
-	 * `onToolBlocked`. Returns:
-	 * - `"allow"`: not blocked (no approval needed, or a grant exists);
-	 * - `"blocked-notified"`: blocked and the user was asked to approve;
-	 * - `"blocked-no-channel"`: blocked but no `onToolBlocked` handler is wired,
-	 *   so no approval card could be sent.
-	 *
-	 * @internal Public only for the route-handler modules.
-	 */
-	async evaluateToolApproval(
-		mcpId: string,
-		toolName: string,
-		toolArgs: Record<string, unknown>,
-		agentId: string,
-		tokenData: WorkerTokenData,
-		token: string,
-	): Promise<"allow" | "blocked-notified" | "blocked-no-channel"> {
-		if (!this.grantStore) return "allow";
-
-		const { found, annotations } = await this.getToolAnnotations(
-			mcpId,
-			toolName,
-			agentId,
-			tokenData,
-			token,
-		);
-		// Fail closed: when tool annotations can't be fetched (upstream error,
-		// SSRF block, timeout, etc.), `found` is false. The previous semantics
-		// returned "allow" here, which let destructive tools bypass approval
-		// whenever discovery failed. Require approval unless we have annotations
-		// that explicitly say the tool is safe.
-		if (found && !requiresToolApproval(annotations)) return "allow";
-
-		const pattern = `/mcp/${mcpId}/tools/${toolName}`;
-		if (await this.grantStore.hasGrant(agentId, pattern)) return "allow";
-
-		logger.info("Tool call blocked: requires approval", {
-			agentId,
-			mcpId,
-			toolName,
-			pattern,
-		});
-
-		if (!this.onToolBlocked) return "blocked-no-channel";
-		if (!tokenData.organizationId) {
-			logger.error(
-				{ agentId, mcpId, toolName },
-				"Refusing to store pending MCP tool approval without organizationId",
-			);
-			return "blocked-no-channel";
-		}
-
-		const requestId = `ta_${randomUUID()}`;
-		await storePendingTool(
-			requestId,
-			{
-				mcpId,
-				toolName,
-				args: toolArgs,
-				agentId,
-				userId: tokenData.userId,
-				organizationId: tokenData.organizationId,
-				channelId: tokenData.channelId || "",
-				conversationId: tokenData.conversationId || "",
-				teamId: tokenData.teamId,
-				connectionId: tokenData.connectionId,
-				platform: tokenData.platform,
-				source: tokenData.source,
-				...pairAdminGrant(tokenData.adminTools, tokenData.adminActorUserId),
-				deploymentName: tokenData.deploymentName,
-			},
-			this.PENDING_TOOL_TTL,
-		).catch((err: unknown) =>
-			logger.error(
-				{ requestId, error: String(err) },
-				"Failed to store pending tool invocation",
-			),
-		);
-
-		await this.onToolBlocked(
-			requestId,
-			agentId,
-			tokenData.userId,
-			mcpId,
-			toolName,
-			toolArgs,
-			pattern,
-			tokenData.channelId || "",
-			tokenData.conversationId || "",
-			tokenData.teamId,
-			tokenData.connectionId,
-			tokenData.platform,
-			tokenData.source,
-			tokenData.messageId,
-		).catch((err) =>
-			logger.error(
-				{ requestId, error: String(err) },
-				"onToolBlocked callback failed",
-			),
-		);
-
-		return "blocked-notified";
-	}
-
-	private async getToolAnnotations(
-		mcpId: string,
-		toolName: string,
-		agentId: string,
-		tokenData: WorkerTokenData,
-		workerToken?: string,
-	): Promise<{ found: boolean; annotations?: McpTool["annotations"] }> {
-		let tools: McpTool[] | null = null;
-		if (this.toolCache) {
-			tools = this.toolCache.get(mcpId, agentId);
-		}
-
-		if (!tools) {
-			// Forward the worker JWT so internal MCPs (lobu-memory) can enumerate
-			// tools — without it the discovery call goes unauthenticated and
-			// returns an empty list, which would silently bypass the approval gate
-			// (`found=false` means "no approval needed" at call sites).
-			const result = await this.fetchToolsForMcp(
-				mcpId,
-				agentId,
-				tokenData,
-				workerToken,
-			);
-			tools = result.tools;
-		}
-
-		if (tools.length === 0) {
-			return { found: false };
-		}
-
-		const tool = tools.find((t) => t.name === toolName);
-		return { found: true, annotations: tool?.annotations };
-	}
 }

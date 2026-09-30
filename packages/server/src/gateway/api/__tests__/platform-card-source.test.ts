@@ -96,6 +96,13 @@ describe("ApiPlatform durable approval card (builder gate)", () => {
   });
 
   test("enqueues a tool-approval frame carrying run_id + action + diff", async () => {
+    ctx.interactionService.emit("tool:approval-needed", {
+      platform: "api",
+      conversationId: "api:conv-1",
+      id: "retired-approval",
+    });
+    expect(ctx.sends).toHaveLength(0);
+
     await ctx.interactionService.postDurableApprovalCard(
       "u1",
       "api:conv-1",
@@ -184,12 +191,11 @@ test("interaction cards retain request correlation independently of their queue 
   await svc.postQuestion(...route, "Continue?", ["yes"], undefined, "synthetic-request");
   await svc.postLinkButton(...route, "https://example.test", "Sign in", "oauth", undefined, undefined, "synthetic-request");
   await svc.postSuggestion("synthetic-org", ...route, [{ title: "Next", message: "Continue" }], undefined, "synthetic-request");
-  await svc.postDurableApprovalCard(...route, 123, "create", {}, null, undefined, null, null, "agent", "synthetic-request");
-  await svc.postToolApproval("synthetic-approval", "synthetic-agent", ...route, "synthetic-mcp", "write", {}, "write", undefined, "synthetic-request");
-  expect(ctx.sends).toHaveLength(5);
+  const approval = await svc.postDurableApprovalCard(...route, 123, "create", {}, null, undefined, null, null, "agent", "synthetic-request");
+  expect(ctx.sends).toHaveLength(4);
   for (const { payload } of ctx.sends) {
     expect(payload.messageId).not.toBe("synthetic-request");
     expect(payload.customEvent.data.turnMessageId).toBe("synthetic-request");
   }
-  expect(ctx.sends[4]!.payload.customEvent.data.requestId).toBe("synthetic-approval");
+  expect(ctx.sends[3]!.payload.customEvent.data.requestId).toBe(approval.id);
 });

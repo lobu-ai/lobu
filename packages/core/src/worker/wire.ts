@@ -8,7 +8,7 @@
  *
  * Before this lived in core, the worker had its own `MessagePayload`
  * declaration that was a structural subset of the gateway's (missing
- * `organizationId`, `networkConfig`, `nixConfig`, `preApprovedTools`). At
+ * `organizationId`, `networkConfig`, `nixConfig`). At
  * runtime the worker's zod schema was patched with
  * `.passthrough()` so the extra fields survived parsing, but the static type
  * silently lied. Hoisting closes the gap.
@@ -135,12 +135,6 @@ export interface MessagePayload {
 
   /** Nix environment configuration for the agent workspace. */
   nixConfig?: NixConfig;
-
-  /**
-   * MCP tool grant patterns the operator has pre-approved.
-   * Synced to the grant store at deployment time to bypass the approval card.
-   */
-  preApprovedTools?: string[];
 
   /**
    * Digest of the org's connector-contributed agent tooling (which connections

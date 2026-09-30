@@ -132,9 +132,6 @@ export async function resolveAgentOptions(
   if (settings.toolsConfig) {
     mergedOptions.toolsConfig = settings.toolsConfig;
   }
-  if (settings.preApprovedTools?.length) {
-    mergedOptions.preApprovedTools = settings.preApprovedTools;
-  }
   if (settings.verboseLogging !== undefined) {
     mergedOptions.verboseLogging = settings.verboseLogging;
   }
@@ -144,7 +141,7 @@ export async function resolveAgentOptions(
 
 /**
  * Build a MessagePayload from common fields.
- * Extracts networkConfig, guardrailsInline, nixConfig, preApprovedTools from
+ * Extracts networkConfig, guardrailsInline, nixConfig from
  * agentOptions before constructing the payload.
  */
 export function buildMessagePayload(params: {
@@ -173,7 +170,6 @@ export function buildMessagePayload(params: {
     networkConfig,
     guardrailsInline,
     nixConfig,
-    preApprovedTools,
     ...remainingOptions
   } = params.agentOptions;
 
@@ -197,7 +193,6 @@ export function buildMessagePayload(params: {
     networkConfig,
     guardrailsInline,
     nixConfig,
-    preApprovedTools,
   };
 }
 

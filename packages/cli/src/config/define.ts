@@ -969,11 +969,6 @@ export interface NetworkConfig {
 
 /** Worker-side tool permissions. */
 export interface ToolsConfig {
-  /**
-   * MCP tool grant patterns pre-approved by the operator (e.g.
-   * `/mcp/gmail/tools/send_email`), bypassing the in-chat approval card.
-   */
-  preApproved?: string[];
   allowed?: string[];
   denied?: string[];
   /** Reject tool calls that aren't in `allowed`. */
@@ -1013,6 +1008,11 @@ export interface Agent {
 }
 
 export function defineAgent(config: Omit<Agent, "kind">): Agent {
+  if (config.tools && "preApproved" in config.tools) {
+    throw new Error(
+      `Agent '${config.id}' declares removed 'tools.preApproved'. Delete it from your config; connector approvals are managed in Settings → Policies.`
+    );
+  }
   return { ...config, kind: "agent" };
 }
 

@@ -34,13 +34,6 @@ export {
 const logger = createLogger("orchestrator");
 
 /**
- * Maximum number of agents tracked in the grant-sync LRU. Oldest entry is
- * evicted when the cache grows past this bound, which prevents unbounded
- * memory growth for long-running gateways that see a large agent churn.
- */
-const GRANT_SYNC_CACHE_MAX = 1000;
-
-/**
  * Nix binary-cache hosts auto-allowed while an agent has a Nix environment
  * configured. Config-derived like `networkConfig` domains: granted by the
  * sync while `nixConfig` is present, reconciled away when it is removed.
@@ -127,22 +120,6 @@ export class DeploymentManager {
    * contribute their packages and domains but no credentials.
    */
   protected leaseRegistry?: CredentialLeaseRegistry;
-  /**
-   * Authenticated worker-connection probe, wired at the composition root once
-   * WorkerGateway exists. A spawned child is not ready merely because spawn()
-   * returned: it must establish its SSE stream before its durable queue can be
-   * consumed.
-   */
-  /**
-   * Per-(org, agent) cache of the last-synced `preApprovedTools` patterns,
-   * used to diff tool grants/revokes (domains reconcile against Postgres
-   * instead — see syncNetworkConfigGrants). Keyed by `org|agent` — agent
-   * ids are only unique within an organization, and grants are org-scoped
-   * rows, so an agent-id-only key would let org A's sync suppress org B's
-   * writes.
-   */
-  private grantSyncCache = new Map<string, Set<string>>();
-
   /**
    * Earliest connector-lease expiry per deployment, recorded at env-build time.
    *
@@ -399,9 +376,8 @@ export class DeploymentManager {
   }
 
   /**
-   * Sync per-agent grants (network domains + Nix cache domains +
-   * pre-approved MCP tool patterns) to the grant store. Called on worker
-   * create AND on every message so config changes pick up without
+   * Sync per-agent network and Nix cache domain grants to the grant store.
+   * Called on worker create and every message so config changes pick up without
    * redeploying. Also refreshes the in-memory egress judge policy store,
    * which is read by the shared HTTP proxy rather than by the worker
    * process.
@@ -414,10 +390,6 @@ export class DeploymentManager {
    * (re-)granted. A cache-based skip is multi-replica-unsafe here (an
    * X→Y→X config sequence across two replicas leaves Y's rows active on
    * the replica whose warm cache still says X).
-   *
-   * MCP tool patterns stay cache-diffed: user "always" tool approvals share
-   * the store and are indistinguishable from operator `preApprovedTools`,
-   * so a durable reconcile would wrongly revoke them.
    */
   async syncNetworkConfigGrants(messageData: MessagePayload): Promise<void> {
     const agentId = messageData.agentId;
@@ -485,56 +457,7 @@ export class DeploymentManager {
         await this.grantStore.grant(agentId, pattern, null, denied, orgId);
       }
     }
-
-    // ── MCP tool patterns: cache-diffed ─────────────────────────────────
-    const nextTools = new Set(messageData.preApprovedTools ?? []);
-    const cacheKey = `${orgId ?? ""}|${agentId}`;
-    const previousTools = this.grantSyncCache.get(cacheKey);
-
-    for (const pattern of previousTools ?? []) {
-      if (!nextTools.has(pattern)) {
-        await this.grantStore.revoke(agentId, pattern, orgId);
-      }
-    }
-    for (const pattern of nextTools) {
-      if (!previousTools?.has(pattern)) {
-        await this.grantStore.grant(agentId, pattern, null, undefined, orgId);
-      }
-    }
-
-    // LRU touch: delete + re-insert so the agent becomes the newest key.
-    this.grantSyncCache.delete(cacheKey);
-    this.grantSyncCache.set(cacheKey, nextTools);
-
-    // Evict the oldest entry if we've exceeded the cap.
-    if (this.grantSyncCache.size > GRANT_SYNC_CACHE_MAX) {
-      const oldest = this.grantSyncCache.keys().next().value;
-      if (oldest !== undefined) {
-        this.grantSyncCache.delete(oldest);
-      }
-    }
   }
-
-  /**
-   * Clear the grant sync cache for an agent. Call this when the agent's
-   * networkConfig or preApprovedTools change (deployment teardown, config
-   * reload) so the next message re-syncs grants.
-   */
-  invalidateGrantSyncCache(agentId: string): void {
-    // Keys are `org|agent`; drop the agent's entry across every org.
-    const suffix = `|${agentId}`;
-    for (const key of this.grantSyncCache.keys()) {
-      if (key.endsWith(suffix)) {
-        this.grantSyncCache.delete(key);
-      }
-    }
-  }
-
-  /** Clear the entire grant sync cache. Call on whole-config reload. */
-  clearAllGrantSyncCaches(): void {
-    this.grantSyncCache.clear();
-  }
-
 
   /**
    * Deployment lifecycle is a no-op in the isolate lane: a turn is claimed

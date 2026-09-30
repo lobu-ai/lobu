@@ -112,27 +112,12 @@ export interface PostedLinkButton extends PostedInteraction {
 }
 
 /**
- * Payload emitted on "tool:approval-needed" — platform renderers listen for this.
- */
-export interface PostedToolApproval extends PostedInteraction {
-  agentId: string;
-  userId: string;
-  platform: string;
-  mcpId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  grantPattern: string;
-}
-
-/**
  * Payload emitted on "tool:durable-approval-card" — a durable, runs/events-backed
  * approval (today: an agent's manage_agents create/update/delete gate).
  *
- * Distinct from `tool:approval-needed` (the pre-tool MCP grant): this card does
- * NOT block a worker tool call. The write is already a pending `runs` row;
- * Approve/Reject ride the durable runs/events primitive (manage_operations
- * approve/reject). Only the API platform renders it — the chat-platform bridge
- * intentionally does not subscribe (it would mis-handle this as an MCP grant).
+ * The write is already a pending `runs` row; Approve/Reject use
+ * manage_operations. The API platform renders this event; chat approvals
+ * arrive through the notification service.
  */
 export interface PostedDurableApproval extends PostedInteraction {
   userId: string;
@@ -152,7 +137,7 @@ export interface PostedDurableApproval extends PostedInteraction {
   attribution: ApprovalAttribution | null;
   /** Discriminator for the SPA: "agent" | "automation" | "entity". */
   resourceKind: InteractionResourceKind | null;
-  /** Headless-origin marker (parity with PostedQuestion/PostedToolApproval). */
+  /** Headless-origin marker (parity with PostedQuestion). */
   source?: string;
 }
 
@@ -274,64 +259,10 @@ export class InteractionService extends EventEmitter {
   }
 
   /**
-   * Post a tool approval request with duration buttons (non-blocking, fire-and-forget).
-   * Emits "tool:approval-needed" for platform renderers.
-   *
-   * `requestId` MUST be the same value the MCP proxy used as the
-   * `PendingToolStore` key. It's embedded into the button `actionId` so the
-   * interaction bridge can look up the pending invocation on click.
-   */
-  async postToolApproval(
-    requestId: string,
-    agentId: string,
-    userId: string,
-    conversationId: string,
-    channelId: string,
-    teamId: string | undefined,
-    connectionId: string | undefined,
-    platform: string,
-    mcpId: string,
-    toolName: string,
-    args: Record<string, unknown>,
-    grantPattern: string,
-    source?: string,
-    turnMessageId?: string
-  ): Promise<PostedToolApproval> {
-    assertRoutableInteraction(connectionId, platform, "tool approval");
-    if (this.beforeCreateHook) {
-      await this.beforeCreateHook(userId, conversationId);
-    }
-
-    const posted: PostedToolApproval = {
-      id: requestId,
-      agentId,
-      userId,
-      conversationId,
-      channelId,
-      teamId,
-      connectionId,
-      platform,
-      mcpId,
-      toolName,
-      args,
-      grantPattern,
-      source,
-      turnMessageId,
-    };
-
-    logger.info(
-      `Posted tool approval ${posted.id} for ${mcpId}/${toolName} agent=${agentId}`
-    );
-
-    this.emit("tool:approval-needed", posted);
-    return posted;
-  }
-
-  /**
    * Post a durable approval card (runs/events-backed; today: the builder
    * agent's manage_agents write gate). Fire-and-forget, like postQuestion.
-   * Emits "tool:durable-approval-card" — only the API platform renders it,
-   * so the chat-platform bridge never mistakes it for a pre-tool MCP grant.
+   * Emits "tool:durable-approval-card" for the API platform. Chat approvals
+   * are delivered through the notification service.
    * Delivery is the SAME owner-gated thread_response path the other cards use.
    */
   async postDurableApprovalCard(

@@ -29,8 +29,6 @@ export type ClientOptions = {
     | `${string}://${string}/lobu`
     | `${string}://${string}/lobu`
     | `${string}://${string}/lobu`
-    | `${string}://${string}/lobu`
-    | `${string}://${string}/lobu`
     | (string & {});
 };
 
@@ -7763,36 +7761,6 @@ export type PostApiV1AgentsByAgentIdMessagesResponses = {
 
 export type PostApiV1AgentsByAgentIdMessagesResponse =
   PostApiV1AgentsByAgentIdMessagesResponses[keyof PostApiV1AgentsByAgentIdMessagesResponses];
-
-export type PostApiV1AgentsApproveData = {
-  body?: never;
-  path?: never;
-  query?: never;
-  url: "/api/v1/agents/approve";
-};
-
-export type PostApiV1AgentsApproveResponses = {
-  /**
-   * OK
-   */
-  200: unknown;
-};
-
-export type GetApiV1AgentsByAgentIdPendingApprovalsData = {
-  body?: never;
-  path: {
-    agentId: string;
-  };
-  query?: never;
-  url: "/api/v1/agents/{agentId}/pending-approvals";
-};
-
-export type GetApiV1AgentsByAgentIdPendingApprovalsResponses = {
-  /**
-   * OK
-   */
-  200: unknown;
-};
 
 export type GetConnectClaimData = {
   body?: never;

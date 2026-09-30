@@ -4,9 +4,8 @@
  * `POST /api/v1/agents` accepts `intent: {kind:"automation_run", runId, automationId}`
  * from the request body and turns it into `userId = automation_<automationId>` /
  * `thread = run_<runId>`, hence a conversationId ending
- * `_automation_<automationId>_run_<runId>`. Downstream consumers — the MCP
- * tool-approval gate among them — read an Automation's identity out of that
- * suffix.
+ * `_automation_<automationId>_run_<runId>`. Downstream consumers recover the
+ * verified Automation correlation from that suffix.
  *
  * Without this check the whole chain is caller-authored. The worker token is
  * encrypted, so its claims cannot be tampered with AFTER minting, but the
@@ -39,7 +38,7 @@ export interface AutomationRunIntent {
 }
 
 /**
- * Parse the internal correlation suffix consumed by the MCP approval policy.
+ * Parse the internal Automation correlation suffix.
  * Callers without a verified `automation_run` intent must never be allowed to
  * construct this shape through arbitrary user/thread fields.
  */

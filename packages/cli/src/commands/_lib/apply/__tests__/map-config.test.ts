@@ -1363,7 +1363,6 @@ describe("mapProjectToDesiredState", () => {
     const agent = defineAgent({
       id: "a",
       tools: {
-        preApproved: ["/mcp/gmail/tools/send_email"],
         allowed: ["Bash", "Bash"],
         denied: ["Delete"],
         strict: true,
@@ -1375,7 +1374,6 @@ describe("mapProjectToDesiredState", () => {
       defineConfig({ agents: [agent] }),
       env
     ).agents[0]?.settings;
-    expect(settings?.preApprovedTools).toEqual(["/mcp/gmail/tools/send_email"]);
     expect(settings?.toolsConfig).toEqual({
       allowedTools: ["Bash"],
       deniedTools: ["Delete"],
@@ -1410,7 +1408,6 @@ describe("mapProjectToDesiredState", () => {
     ).agents[0]?.settings;
     expect(settings).not.toHaveProperty("networkConfig");
     expect(settings).not.toHaveProperty("toolsConfig");
-    expect(settings).not.toHaveProperty("preApprovedTools");
     expect(settings).not.toHaveProperty("guardrails");
     expect(settings).not.toHaveProperty("nixConfig");
   });

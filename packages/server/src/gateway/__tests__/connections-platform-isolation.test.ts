@@ -226,19 +226,12 @@ describe("InteractionService — connectionId is required", () => {
     ).rejects.toThrow(/connectionId is required/);
   });
 
-  test("postToolApproval throws when connectionId is undefined", async () => {
-    const svc = new InteractionService();
-    await expect(
-      svc.postToolApproval("req-1", "agent-1", "u", "conv", "ch", undefined,
-        undefined, "slack", "mcp", "t", {}, "/mcp/mcp/tools/t")
-    ).rejects.toThrow(/connectionId is required/);
-  });
 
   // platform "api" has no Chat SDK connection — its cards are routed by
   // conversationId through the API platform's event.platform === "api"
   // subscriptions, and chat bridges drop foreign-platform events in
   // shouldHandle. Requiring a connectionId here is the #847 regression that
-  // silently broke ask_user/tool-approval for every API/SPA session (the
+  // silently broke ask_user for every API/SPA session (the
   // worker token for API rows never carries one).
   test("postQuestion succeeds for platform api without a connectionId", async () => {
     const svc = new InteractionService();
@@ -253,16 +246,6 @@ describe("InteractionService — connectionId is required", () => {
     expect(received).toHaveLength(1);
   });
 
-  test("postToolApproval succeeds for platform api without a connectionId", async () => {
-    const svc = new InteractionService();
-    const received: unknown[] = [];
-    svc.on("tool:approval-needed", (e) => received.push(e));
-
-    await svc.postToolApproval("req-1", "agent-1", "u", "api:conv-1", "api:conv-1",
-      undefined, undefined, "api", "mcp", "t", {}, "/mcp/mcp/tools/t");
-
-    expect(received).toHaveLength(1);
-  });
 
   // The bridge-side half of the api exemption: a chat bridge must drop a
   // connectionless event posted for a different platform, otherwise the
@@ -299,7 +282,6 @@ describe("InteractionService — connectionId is required", () => {
     const received: unknown[] = [];
     svc.on("question:created", (e) => received.push(e));
     svc.on("link-button:created", (e) => received.push(e));
-    svc.on("tool:approval-needed", (e) => received.push(e));
 
     await svc
       .postQuestion("u", "conv", "ch", undefined, undefined, "slack", "?", ["A"])
@@ -338,17 +320,6 @@ describe("InteractionService — platform field on emitted events", () => {
     expect(received[0].platform).toBe("slack");
   });
 
-  test("postToolApproval carries platform", async () => {
-    const svc = new InteractionService();
-    const received: any[] = [];
-    svc.on("tool:approval-needed", (e) => received.push(e));
-
-    await svc.postToolApproval("req-1", "agent-1", "u", "conv", "ch", undefined,
-      "conn-1", "discord", "mcp-id", "tool_name", {}, "/mcp/mcp-id/tools/tool_name");
-
-    expect(received).toHaveLength(1);
-    expect(received[0].platform).toBe("discord");
-  });
 
 });
 
@@ -509,7 +480,6 @@ describe("registerInteractionBridge — cross-platform isolation", () => {
     // After cleanup, no listeners remain for these events
     expect(svc.listenerCount("question:created")).toBe(0);
     expect(svc.listenerCount("link-button:created")).toBe(0);
-    expect(svc.listenerCount("tool:approval-needed")).toBe(0);
 
     // Emit after unregister — should be completely silent
     const slackEvent: PostedQuestion = {

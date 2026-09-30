@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import chalk from "chalk";
 import { LOBU_CONFIG_DIR } from "../internal/context.js";
 import {
@@ -73,7 +72,6 @@ interface ChatOptions {
   continue?: boolean;
   context?: string;
   org?: string;
-  autoApprove?: boolean;
   json?: boolean;
 }
 
@@ -188,7 +186,6 @@ export async function chatCommand(
       thread: threadId,
       dryRun: options.dryRun,
       forceNew: options.new && !threadId,
-      autoApprove: options.autoApprove,
       json: options.json,
       contextName,
       org,
@@ -289,7 +286,6 @@ interface ApiSendOptions {
   thread?: string;
   dryRun?: boolean;
   forceNew?: boolean;
-  autoApprove?: boolean;
   json?: boolean;
   contextName?: string;
   org?: string;
@@ -376,7 +372,6 @@ async function sendViaApi(
   // an unhandled rejection. Every send outcome releases the subscription.
   const streaming = streamResponse(sseUrl, session.token, sseController, {
     expectedMessageId: messageId,
-    autoApprove: opts.autoApprove,
     json: opts.json,
     org: opts.org,
   }).then(
@@ -444,7 +439,6 @@ async function writeStderr(text: string): Promise<void> {
 
 interface StreamOptions {
   expectedMessageId: string;
-  autoApprove?: boolean;
   json?: boolean;
   org?: string;
 }
@@ -521,8 +515,8 @@ async function streamResponse(
     } finally {
       clearIdleTimer();
       // Charge only the time spent inside this wait. Everything after it —
-      // rendering to stdout, a human answering a tool-approval prompt — is
-      // this client being slow, not the agent going quiet.
+      // rendering to stdout — is this client being slow, not the agent going
+      // quiet.
       idleBudgetMs = Math.max(0, idleBudgetMs - (Date.now() - waitStartedAt));
     }
   };
@@ -631,89 +625,7 @@ async function streamResponse(
               }
               controller.abort();
               return;
-            case "tool-approval": {
-              const args = data.args as Record<string, unknown> | undefined;
-              const argsText = args
-                ? Object.entries(args)
-                    .map(
-                      ([k, v]) =>
-                        `  ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`
-                    )
-                    .join("\n")
-                : "";
-              await writeStderr(
-                chalk.yellow(
-                  `\n  Tool Approval Required\n  ${data.mcpId} → ${data.toolName}\n${argsText}\n`
-                )
-              );
-
-              let decision: string;
-              if (options.autoApprove) {
-                decision = "always";
-                await writeStderr(
-                  chalk.dim("\n  --auto-approve: approving (always).\n")
-                );
-              } else {
-                const choices = ["1h", "24h", "always", "deny"];
-                const labels: Record<string, string> = {
-                  "1h": "1h",
-                  "24h": "24h",
-                  always: "always",
-                  deny: "deny always",
-                };
-                await writeStderr(
-                  `${choices
-                    .map(
-                      (o, i) =>
-                        `  ${chalk.bold(`${i + 1}`)}. ${o === "deny" ? chalk.red(labels[o]) : chalk.green(labels[o])}`
-                    )
-                    .join("\n")}\n`
-                );
-
-                const rl = createInterface({
-                  input: process.stdin,
-                  output: process.stderr,
-                });
-                const answer = await new Promise<string>((resolve) =>
-                  rl.question(chalk.dim("\n  Choice (1-4): "), (a) => {
-                    rl.close();
-                    resolve(a.trim());
-                  })
-                );
-                const idx = Number.parseInt(answer, 10) - 1;
-                decision = choices[idx] || "deny";
-              }
-
-              const approveUrl = sseUrl
-                .replace(/\/events$/, "")
-                .replace(/\/api\/v1\/agents\/[^/]+/, "/api/v1/agents/approve");
-              const approveRes = await fetch(approveUrl, {
-                method: "POST",
-                headers: agentApiHeaders(token, options.org, {
-                  "Content-Type": "application/json",
-                }),
-                body: JSON.stringify({ requestId: data.requestId, decision }),
-              });
-              if (approveRes.ok) {
-                const result = (await approveRes.json()) as any;
-                if (result.result?.content) {
-                  const text = result.result.content
-                    .map((c: any) => c.text)
-                    .join("\n");
-                  await writeStdout(renderMarkdown(text));
-                }
-                await writeStderr(
-                  chalk.green(
-                    `\n  Tool ${decision === "deny" ? "denied" : "approved"} (${decision})\n`
-                  )
-                );
-              } else {
-                await writeStderr(
-                  chalk.red(`\n  Approval failed: ${await approveRes.text()}\n`)
-                );
-              }
-              break;
-            }
+            case "tool-approval":
             case "link-button":
             case "question":
             case "suggestion":

@@ -825,43 +825,9 @@ export class CoreServices {
 		const mcpToolCache = new McpToolCache();
 		this.mcpProxy = new McpProxy(this.mcpConfigService, {
 			toolCache: mcpToolCache,
-			grantStore: this.grantStore,
 			agentSettingsStore: this.agentSettingsStore,
 			guardrailRegistry: this.guardrailRegistry,
 		});
-		this.mcpProxy.onToolBlocked = async (
-			requestId,
-			agentId,
-			userId,
-			mcpId,
-			toolName,
-			args,
-			grantPattern,
-			channelId,
-			conversationId,
-			teamId,
-			connectionId,
-			platform,
-			source,
-			turnMessageId,
-		) => {
-			await this.interactionService?.postToolApproval(
-				requestId,
-				agentId,
-				userId,
-				conversationId,
-				channelId,
-				teamId,
-				connectionId,
-				platform || "unknown",
-				mcpId,
-				toolName,
-				args,
-				grantPattern,
-				source,
-				turnMessageId,
-			);
-		};
 		logger.debug("MCP proxy initialized");
 
 		// Initialize worker gateway

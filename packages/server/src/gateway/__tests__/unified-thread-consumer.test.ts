@@ -722,10 +722,10 @@ describe("chat interaction fan-out producer (registerChatInteractionFanout)", ()
     expect(send).not.toHaveBeenCalled();
   });
 
-  test("fans out every interaction channel (approval, link-button)", () => {
+  test("fans out suggestion and link-button interactions", () => {
     const { svc, send } = makeFanout({ warmLocally: false });
 
-    svc.emit("tool:approval-needed", {
+    svc.emit("suggestion:created", {
       ...slackQuestion,
       id: "req_1",
     });
@@ -739,7 +739,7 @@ describe("chat interaction fan-out producer (registerChatInteractionFanout)", ()
       (c: any[]) => c[1].customEvent.data.eventName
     );
     expect(names).toEqual([
-      "tool:approval-needed",
+      "suggestion:created",
       "link-button:created",
     ]);
   });

@@ -17,11 +17,6 @@
  * and its Automation failed with "Agent reply finished without calling
  * completeWindow" — while the SAME Automation succeeded on an older agent whose
  * create path had baked the models list in.
- *
- * `pre_approved_tools` had the same shape of divergence: the web create route
- * seeds `/mcp/lobu-memory/tools/*` so the agent may call `query_sdk` / `run_sdk`
- * (which is how an Automation reaches `completeWindow`) without an interactive
- * approval, and the tool path seeded nothing.
  */
 
 import path from "node:path";
@@ -156,17 +151,6 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		expect(rows[0]?.models).toContain("claude/claude-sonnet-5");
 	});
 
-	it("create seeds the lobu-memory pre-approval so query_sdk / run_sdk need no interactive approval", async () => {
-		const sql = getTestDb();
-		const rows = await sql`
-			SELECT pre_approved_tools FROM agents
-			WHERE organization_id = ${orgId} AND id = 'envkey-bot'
-		`;
-		// An Automation reaches completeWindow through run_sdk on the lobu-memory
-		// MCP. The web create route already seeds this; the tool path did not.
-		expect(rows[0]?.pre_approved_tools).toContain("/mcp/lobu-memory/tools/*");
-	});
-
 	it("an explicit default_model still wins over the system-key default", async () => {
 		// Regression guard: baking a default must not override a caller's choice.
 		// The ref is validated against the org's providers, so this uses a real
@@ -214,11 +198,11 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		await orgContext.run({ organizationId: org.id }, async () => {
 			await sql`
 				INSERT INTO agents (
-					id, organization_id, name, owner_platform, models, pre_approved_tools,
+					id, organization_id, name, owner_platform, models,
 					created_at, updated_at
 				) VALUES (
 					'contrast-bot', ${org.id}, 'Contrast', 'external',
-					${sql.json(defaults.models)}, ${sql.json(defaults.preApprovedTools)},
+					${sql.json(defaults.models)},
 					now(), now()
 				)
 			`;
@@ -257,11 +241,10 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 
 		const sql = getTestDb();
 		const rows = await sql`
-			SELECT models, pre_approved_tools FROM agents
+			SELECT models FROM agents
 			WHERE organization_id = ${freshOrg.id} AND id = 'store-fresh-bot'
 		`;
 		expect(rows[0]?.models).toContain("claude/claude-sonnet-5");
-		expect(rows[0]?.pre_approved_tools).toContain("/mcp/lobu-memory/tools/*");
 	});
 
 	it("an org WITH a default seeds no models list (inherits the fallback)", async () => {
@@ -296,7 +279,7 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		expect(rows[0]?.models).toEqual([]);
 	});
 
-	it("a re-save does NOT clobber a curated models list or pre-approvals", async () => {
+	it("a re-save does NOT clobber a curated models list", async () => {
 		// Seeding on INSERT must not leak into the CONFLICT path — otherwise a
 		// re-save of an existing agent would reset an admin's allow-list. Driven
 		// through `saveMetadata` itself (the UPSERT), since that is the only
@@ -312,11 +295,10 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		await orgContext.run({ organizationId: orgId }, async () => {
 			await store.saveMetadata("store-curated-bot", metadata);
 		});
-		// An admin curates the allow-list and narrows the pre-approvals.
+		// An admin curates the model allow-list.
 		await sql`
 			UPDATE agents
-			SET models = ${sql.json(["myco/myco-large"])},
-			    pre_approved_tools = ${sql.json(["/mcp/lobu-memory/tools/query_sdk"])}
+			SET models = ${sql.json(["myco/myco-large"])}
 			WHERE organization_id = ${orgId} AND id = 'store-curated-bot'
 		`;
 
@@ -327,17 +309,14 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		});
 
 		const rows = await sql`
-			SELECT name, models, pre_approved_tools FROM agents
+			SELECT name, models FROM agents
 			WHERE organization_id = ${orgId} AND id = 'store-curated-bot'
 		`;
 		expect(rows[0]?.name).toBe("v2");
 		expect(rows[0]?.models).toEqual(["myco/myco-large"]);
-		expect(rows[0]?.pre_approved_tools).toEqual([
-			"/mcp/lobu-memory/tools/query_sdk",
-		]);
 	});
 
-	it("updateMetadata renames WITHOUT touching models or pre-approvals", async () => {
+	it("updateMetadata renames WITHOUT touching models", async () => {
 		// The direct-UPDATE path: a metadata-only edit must not run provisioning
 		// at all, and must leave the policy columns untouched.
 		const store = createPostgresAgentConfigStore();
@@ -479,13 +458,11 @@ describe("agent create — an org default is inherited, never shadowed", () => {
 
 		const sql = getTestDb();
 		const rows = await sql`
-			SELECT models, pre_approved_tools FROM agents
+			SELECT models FROM agents
 			WHERE organization_id = ${orgId} AND id = 'store-inherits-bot'
 		`;
 		const models = rows[0]?.models as string[] | null;
 		expect(models === null || models.length === 0).toBe(true);
-		// The pre-approval is unconditional — it is not model policy.
-		expect(rows[0]?.pre_approved_tools).toContain("/mcp/lobu-memory/tools/*");
 	});
 
 	it("an explicit default_model still outranks the org default", async () => {

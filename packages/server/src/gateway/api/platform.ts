@@ -96,23 +96,9 @@ export class ApiPlatform implements PlatformAdapter {
       });
     });
 
-    interactionService.on("tool:approval-needed", (event: any) => {
-      if (event.platform !== "api") return;
-      this.enqueueInteractionCard(queue, event, "tool-approval", {
-        type: "tool-approval",
-        requestId: event.id,
-        mcpId: event.mcpId,
-        toolName: event.toolName,
-        args: event.args,
-        grantPattern: event.grantPattern,
-        durationOptions: ["1h", "24h", "always"],
-      });
-    });
-
     // Durable approval card (runs/events-backed — an agent's manage_agents
-    // write gate). Same SSE event name ("tool-approval") + same
-    // owner-gated thread_response delivery as the MCP grant above, but the
-    // payload carries run_id + action + the proposed-vs-current diff so the SPA
+    // write gate). The owner-gated "tool-approval" thread_response payload
+    // carries run_id + action + the proposed-vs-current diff so the SPA
     // ToolApprovalPart renders the interactive Approve/Reject card. The chat
     // bridge does NOT subscribe to this event, so it never mis-renders it.
     interactionService.on("tool:durable-approval-card", (event: any) => {
@@ -264,11 +250,7 @@ export class ApiPlatform implements PlatformAdapter {
     const sessionManager = this.services.getSessionManager();
     const queueProducer = this.services.getQueueProducer();
     const messageId = randomUUID();
-    // The AUTHENTICATED caller, never a digest of the token. This value is
-    // carried by the worker token and stored as a blocked tool call's pending
-    // claimant; `POST /api/v1/agents/approve` claims with `authContext.userId`,
-    // so a synthetic `api-<token8>` could never be presented by anyone and
-    // every API-platform approval was unclaimable.
+    // Preserve the authenticated caller through session and worker routing.
     const userId = options.callerUserId;
 
     // For API platform: agentId = channelId = conversationId (all same)

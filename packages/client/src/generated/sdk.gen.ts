@@ -42,8 +42,6 @@ import type {
   GetApiV1AgentsByAgentIdHistoryThreadsByThreadIdMessagesResponses,
   GetApiV1AgentsByAgentIdHistoryThreadsData,
   GetApiV1AgentsByAgentIdHistoryThreadsResponses,
-  GetApiV1AgentsByAgentIdPendingApprovalsData,
-  GetApiV1AgentsByAgentIdPendingApprovalsResponses,
   GetApiV1AgentsByAgentIdResponses,
   GetApiV1AgentsData,
   GetApiV1AgentsResponses,
@@ -116,8 +114,6 @@ import type {
   PatchApiV1AgentsByAgentIdResponses,
   PostApiBedrockOpenaiAByAgentIdV1ChatCompletionsData,
   PostApiBedrockOpenaiAByAgentIdV1ChatCompletionsResponses,
-  PostApiV1AgentsApproveData,
-  PostApiV1AgentsApproveResponses,
   PostApiV1AgentsByAgentIdMessagesData,
   PostApiV1AgentsByAgentIdMessagesErrors,
   PostApiV1AgentsByAgentIdMessagesResponses,
@@ -985,36 +981,6 @@ export const postApiV1AgentsByAgentIdMessages = <
       ...options.headers,
     },
   });
-
-/**
- * POST /api/v1/agents/approve
- */
-export const postApiV1AgentsApprove = <ThrowOnError extends boolean = false>(
-  options?: Options<PostApiV1AgentsApproveData, ThrowOnError>,
-): RequestResult<PostApiV1AgentsApproveResponses, unknown, ThrowOnError> =>
-  (options?.client ?? client).post<
-    PostApiV1AgentsApproveResponses,
-    unknown,
-    ThrowOnError
-  >({ url: "/api/v1/agents/approve", ...options });
-
-/**
- * GET /api/v1/agents/{agentId}/pending-approvals
- */
-export const getApiV1AgentsByAgentIdPendingApprovals = <
-  ThrowOnError extends boolean = false,
->(
-  options: Options<GetApiV1AgentsByAgentIdPendingApprovalsData, ThrowOnError>,
-): RequestResult<
-  GetApiV1AgentsByAgentIdPendingApprovalsResponses,
-  unknown,
-  ThrowOnError
-> =>
-  (options.client ?? client).get<
-    GetApiV1AgentsByAgentIdPendingApprovalsResponses,
-    unknown,
-    ThrowOnError
-  >({ url: "/api/v1/agents/{agentId}/pending-approvals", ...options });
 
 /**
  * GET /connect/claim

@@ -226,62 +226,59 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
   });
 
   for (const source of ["direct-api", "automation_run"] as const) {
-    for (const configuredTools of [["/mcp/test-memory/tools/*"], []]) {
-      test(`${source} forwards only the workspace agent's configured tool grants (${configuredTools.length})`, async () => {
-        const enqueued: Array<Record<string, unknown>> = [];
-        const reads: Array<unknown> = [];
-        setAuthProvider(() => sessionFor(MEMBER_ID));
-        const { app, sessions } = makeApp(
-          userAgentsStore,
-          agentMetadataStore,
-          CALLER_DEFAULT_ORG,
-          makeSessionManager(),
-          {
-            enqueueMessage: async (payload: Record<string, unknown>) => {
-              enqueued.push(payload);
-              return "tool-grants-job";
-            },
-          } as never,
-          {
-            getSettings: async (agentId: string, options: unknown) => {
-              reads.push({ agentId, options });
-              return { models: ["test-provider/test-model"], preApprovedTools: configuredTools };
-            },
-          } as never,
-        );
-        const created = await postCreate(app, { thread: "tool-grants" }, {
-          "x-lobu-org": AGENT_ORG,
-        });
-        expect(created.status).toBe(201);
-        const session = sessions.getStored();
-        if (!session) throw new Error("Missing tool grants session");
-        // Session creation separately verifies Automation intent. Exercise the
-        // message route with the resulting persisted intent here.
-        if (source === "automation_run") {
-          session.intent = { kind: "automation_run", runId: 123, automationId: 456 };
-        }
-        const sent = await app.request(
-          `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json", "x-lobu-org": AGENT_ORG },
-            // A client-supplied grant is passthrough body noise: only the
-            // agent's configured grants may reach the worker.
-            body: JSON.stringify({
-              content: "Use the configured tools",
-              ephemeralContext: "Test context",
-              preApprovedTools: ["*"],
-            }),
+    test(`${source} preserves org-scoped settings without forwarding MCP grants`, async () => {
+      const enqueued: Array<Record<string, unknown>> = [];
+      const reads: Array<unknown> = [];
+      setAuthProvider(() => sessionFor(MEMBER_ID));
+      const { app, sessions } = makeApp(
+        userAgentsStore,
+        agentMetadataStore,
+        CALLER_DEFAULT_ORG,
+        makeSessionManager(),
+        {
+          enqueueMessage: async (payload: Record<string, unknown>) => {
+            enqueued.push(payload);
+            return "tool-grants-job";
           },
-        );
-        expect(sent.status).toBe(200);
-        expect(reads).toContainEqual({ agentId: AGENT_ID, options: { organizationId: AGENT_ORG } });
-        expect(enqueued).toHaveLength(1);
-        expect(enqueued[0]?.preApprovedTools).toEqual(configuredTools.length ? configuredTools : undefined);
-        expect(enqueued[0]?.agentOptions).not.toHaveProperty("preApprovedTools");
-        expect(enqueued[0]?.organizationId).toBe(AGENT_ORG);
+        } as never,
+        {
+          getSettings: async (agentId: string, options: unknown) => {
+            reads.push({ agentId, options });
+            return { models: ["test-provider/test-model"] };
+          },
+        } as never,
+      );
+      const created = await postCreate(app, { thread: "tool-grants" }, {
+        "x-lobu-org": AGENT_ORG,
       });
-    }
+      expect(created.status).toBe(201);
+      const session = sessions.getStored();
+      if (!session) throw new Error("Missing tool grants session");
+      // Session creation separately verifies Automation intent. Exercise the
+      // message route with the resulting persisted intent here.
+      if (source === "automation_run") {
+        session.intent = { kind: "automation_run", runId: 123, automationId: 456 };
+      }
+      const sent = await app.request(
+        `/api/v1/agents/${encodeURIComponent(session.conversationId)}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-lobu-org": AGENT_ORG },
+          // Removed grant fields cannot authorize a worker through request input.
+          body: JSON.stringify({
+            content: "Use the configured tools",
+            ephemeralContext: "Test context",
+            preApprovedTools: ["*"],
+          }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      expect(reads).toContainEqual({ agentId: AGENT_ID, options: { organizationId: AGENT_ORG } });
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]).not.toHaveProperty("preApprovedTools");
+      expect(enqueued[0]?.agentOptions).not.toHaveProperty("preApprovedTools");
+      expect(enqueued[0]?.organizationId).toBe(AGENT_ORG);
+    });
   }
 
   test("device placement is owner-scoped, capability-checked, and retained on resume", async () => {

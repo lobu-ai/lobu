@@ -593,7 +593,6 @@ const SETTINGS_FIELDS: Array<keyof AgentSettings> = [
   "skillsConfig",
   "toolsConfig",
   "guardrails",
-  "preApprovedTools",
   "models",
   "soulMd",
   "userMd",

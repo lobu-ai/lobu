@@ -1807,14 +1807,11 @@ export class ChatInstanceManager {
         cleanup,
       });
 
-      const mcpProxy = this.services.getMcpProxy();
       const interactionCleanup = registerInteractionBridge(
         this.services.getInteractionService(),
         this,
         connection,
         chat,
-        this.services.getGrantStore(),
-				mcpProxy?.executeToolDirect.bind(mcpProxy),
       );
       this.instances.get(connection.id)!.interactionCleanup =
         interactionCleanup;
@@ -2710,7 +2707,7 @@ export class ChatInstanceManager {
       agentSettingsStore,
       organizationId,
     );
-    const { nixConfig, preApprovedTools, ...remainingAgentOptions } = agentOptions;
+    const { nixConfig, ...remainingAgentOptions } = agentOptions;
 
     await sessionManager.setSession({
       conversationId: sessionId,
@@ -2756,7 +2753,6 @@ export class ChatInstanceManager {
       },
       agentOptions: remainingAgentOptions,
       nixConfig,
-      preApprovedTools,
     });
 
     logger.info(

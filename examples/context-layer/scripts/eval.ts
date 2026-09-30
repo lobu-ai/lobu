@@ -166,7 +166,6 @@ function runAgentTurn(
       "--org",
       gw.org,
       "--json",
-      "--auto-approve",
       "--new",
       prompt,
     ],

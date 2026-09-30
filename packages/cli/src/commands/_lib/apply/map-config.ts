@@ -58,7 +58,6 @@ const AGENT_SETTINGS_FIELD_POLICY = {
   sandboxId: "unsupported",
   verboseLogging: "unsupported",
   showToolCalls: "unsupported",
-  preApprovedTools: "mapped",
 } as const satisfies Record<
   Exclude<keyof AgentSettingsStored, "updatedAt" | "authProfiles">,
   "mapped" | "post-load" | "unsupported"
@@ -343,9 +342,6 @@ function mapAgent(
   }
 
   if (agent.tools) {
-    if (agent.tools.preApproved?.length) {
-      settings.preApprovedTools = [...new Set(agent.tools.preApproved)];
-    }
     const toolsConfig: NonNullable<AgentSettings["toolsConfig"]> = {};
     if (agent.tools.allowed?.length) {
       toolsConfig.allowedTools = [...new Set(agent.tools.allowed)];
@@ -416,7 +412,6 @@ function mapAgent(
     sandboxId: settings.sandboxId,
     verboseLogging: settings.verboseLogging,
     showToolCalls: settings.showToolCalls,
-    preApprovedTools: settings.preApprovedTools,
   };
   void _exhaustive;
 

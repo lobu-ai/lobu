@@ -182,8 +182,7 @@ describe('native capture over HTTP and Postgres', () => {
     delivered.mockClear();
   });
 
-  it('captures external MCP REST and RPC before approvals, discovery or forwarding', async () => {
-    const approval = vi.spyOn(proxy, 'evaluateToolApproval');
+  it('captures external MCP REST and RPC before discovery or forwarding', async () => {
     const dispatch = vi.spyOn(proxy.upstream, 'sendUpstreamRequest');
     const rest = await request('/lobu/mcp/external/tools/mutate', { dry_run: false, executionMode: 'live' });
     expect(rest.status).toBe(200);
@@ -193,9 +192,9 @@ describe('native capture over HTTP and Postgres', () => {
     for (const body of [[], [{ jsonrpc: '2.0', method: 'tools/call' }], { jsonrpc: '2.0', method: 'resources/subscribe' }, { jsonrpc: '2.0', method: 'tools/call' }, null]) {
       expect(await (await request('/lobu/mcp/external', body)).json()).toHaveProperty('error');
     }
-    expect(approval).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
     expect((await records()).filter((entry: { action: string }) => entry.action === 'mcp.external.mutate')).toHaveLength(2);
-    approval.mockRestore(); dispatch.mockRestore();
+    dispatch.mockRestore();
   });
 
   it('keeps direct memory and SDK mutations captured across real embedded MCP sessions', async () => {

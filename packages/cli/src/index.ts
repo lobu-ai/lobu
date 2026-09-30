@@ -251,10 +251,6 @@ Memory:
       "-C, --continue",
       "Resume the last thread for this (context, agent)"
     )
-    .option(
-      "--auto-approve",
-      "Auto-approve every tool call (use only in trusted environments)"
-    )
     .option("--json", "Emit raw SSE events as JSON lines instead of text")
     .option("-c, --context <name>", "Use a named context")
     .option(
@@ -274,7 +270,6 @@ Memory:
           continue?: boolean;
           context?: string;
           org?: string;
-          autoApprove?: boolean;
           json?: boolean;
         }
       ) => {

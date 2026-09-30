@@ -13,7 +13,6 @@ import { __setChatInstanceManagerForTests } from "../../lobu/gateway.js";
 import { proposeEntityFieldChange } from "../../tools/admin/entity-field-approval.js";
 import type { ToolContext } from "../../tools/registry.js";
 import { initWorkspaceProvider } from "../../workspace/index.js";
-import { storePendingTool, type PendingToolInvocation } from "../auth/mcp/pending-tool-store.js";
 import { registerActionHandlers } from "../connections/interaction-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
 import { ensureDbForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
@@ -27,14 +26,7 @@ const SIGNING_SECRET = "test-signing-secret-0123456789ab";
 const BOT_TOKEN = "xoxb-test-token";
 const BOT_USER_ID = "U_BOT";
 
-function createHarness(options: {
-  executeToolResult?: {
-    content: Array<{ type: string; text: string }>;
-    isError: boolean;
-  };
-}) {
-  const { executeToolResult } = options;
-
+function createHarness() {
   const adapter = createSlackAdapter({
     signingSecret: SIGNING_SECRET,
     botToken: BOT_TOKEN,
@@ -54,28 +46,15 @@ function createHarness(options: {
     state,
   });
 
-  const grantStore = { grant: mock(async () => undefined) };
-  const executeToolDirect = mock(
-    async () =>
-      executeToolResult ?? {
-        content: [{ type: "text", text: "ok" }],
-        isError: false,
-      }
-  );
-
   registerActionHandlers(
     chat as any,
     { id: "conn-1", platform: "slack", organizationId: "org-1" } as PlatformConnection,
-    grantStore as any,
-    executeToolDirect as any
   );
 
   return {
     adapter,
     chat,
     state,
-    grantStore,
-    executeToolDirect,
     postMessage,
     editMessage,
   };
@@ -113,89 +92,8 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
 		__setChatInstanceManagerForTests(null);
 	});
 
-  test("signed tool-approval button triggers grant, executes tool, deletes pending", async () => {
-    const pending: PendingToolInvocation = {
-      mcpId: "github",
-      toolName: "create_issue",
-      args: { title: "from slack" },
-      agentId: "agent-1",
-      userId: "U_SLACK",
-      organizationId: "org-1",
-      conversationId: "slack:dm:123",
-      channelId: "slack:D123",
-      teamId: "T123",
-      connectionId: "432",
-      platform: "slack",
-      source: "chat",
-      adminTools: ["run_sdk"],
-      adminActorUserId: "auth-user-1",
-      deploymentName: "lobu-builder",
-    };
-    await storePendingTool("req-slack-1", pending, 24 * 60 * 60);
-
-    const h = createHarness({
-      executeToolResult: {
-        content: [{ type: "text", text: "issue created: #7" }],
-        isError: false,
-      },
-    });
-
-    const request = buildSignedBlockActionsRequest(
-      SIGNING_SECRET,
-      blockActionsPayload({
-        teamId: "T123",
-        userId: "U_SLACK",
-        channelId: "C_CHAN",
-        messageTs: "1700000000.000100",
-        actionId: "tool:req-slack-1:1h",
-        value: "1h",
-      })
-    );
-
-    const response = await h.chat.webhooks.slack(request);
-    expect(response.status).toBe(200);
-
-    // Wait on the tail of the handler (executeToolDirect) so earlier steps
-    // (claim, grant) have all completed by the time we assert on them.
-    await waitFor(() => expect(h.executeToolDirect).toHaveBeenCalled());
-
-    // The pending row was deleted by the take-on-claim path.
-    const sql = getDb();
-    const remaining = await sql`
-      SELECT 1 FROM oauth_states WHERE id = 'req-slack-1' AND scope = 'pending-tool'
-    `;
-    expect(remaining.length).toBe(0);
-
-    expect(h.grantStore.grant).toHaveBeenCalledTimes(1);
-    const [agentId, pattern] = h.grantStore.grant.mock.calls[0];
-    expect(agentId).toBe("agent-1");
-    expect(pattern).toBe("/mcp/github/tools/create_issue");
-    expect(h.executeToolDirect).toHaveBeenCalledTimes(1);
-    expect(h.executeToolDirect.mock.calls[0]).toEqual([
-      "agent-1",
-      "U_SLACK",
-      "github",
-      "create_issue",
-      { title: "from slack" },
-      {
-        organizationId: "org-1",
-        conversationId: "slack:dm:123",
-        channelId: "slack:D123",
-        teamId: "T123",
-        connectionId: "432",
-        platform: "slack",
-        source: "chat",
-        adminTools: ["run_sdk"],
-        adminActorUserId: "auth-user-1",
-        deploymentName: "lobu-builder",
-      },
-    ]);
-    expect(h.editMessage).toHaveBeenCalledTimes(1);
-    expect(h.postMessage).toHaveBeenCalled();
-  });
-
   test("signed question button invokes onAction with button value", async () => {
-    const h = createHarness({});
+    const h = createHarness();
 
     const request = buildSignedBlockActionsRequest(
       SIGNING_SECRET,
@@ -220,31 +118,18 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
       typeof postedArg === "string" ? postedArg : postedArg?.markdown;
     expect(postedText).toBe("Option Two");
 
-    // No grant for questions; executeToolDirect never called.
-    expect(h.grantStore.grant).not.toHaveBeenCalled();
-    expect(h.executeToolDirect).not.toHaveBeenCalled();
   });
 
   test("tampered signature is rejected before handler runs", async () => {
-    const pending: PendingToolInvocation = {
-      mcpId: "github",
-      toolName: "create_issue",
-      args: {},
-      agentId: "a",
-      userId: "u",
-			organizationId: "org-1",
-    };
-    await storePendingTool("req-bad", pending, 24 * 60 * 60);
-
-    const h = createHarness({});
+    const h = createHarness();
 
     const payload = blockActionsPayload({
       teamId: "T123",
       userId: "U_ACTOR",
       channelId: "C_CHAN",
       messageTs: "1700000000.000300",
-      actionId: "tool:req-bad:1h",
-      value: "1h",
+      actionId: "question:req-bad:0",
+      value: "Option One",
     });
     const request = buildSignedBlockActionsRequest(SIGNING_SECRET, payload);
     const tampered = new Request(request.url, {
@@ -263,22 +148,13 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
     // Give any stray async work a tick — nothing downstream should have run.
     await new Promise((r) => setTimeout(r, 20));
 
-    // Pending row still present because no claim happened.
-    const sql = getDb();
-    const remaining = await sql`
-      SELECT 1 FROM oauth_states WHERE id = 'req-bad' AND scope = 'pending-tool'
-    `;
-    expect(remaining.length).toBe(1);
-
-    expect(h.grantStore.grant).not.toHaveBeenCalled();
-    expect(h.executeToolDirect).not.toHaveBeenCalled();
     expect(h.postMessage).not.toHaveBeenCalled();
   });
 });
 
 /**
  * Durable entity_field_change approvals ride the same Slack block_actions
- * webhook as tool grants / ask_user, but take a different branch
+ * webhook as ask_user, through the run-backed branch
  * (`run-approval:{runId}:approve|reject` → manage_operations). Agents built
  * the card + direct-handler path first; this seals the signed-webhook → apply
  * seam so a Preview/tenant bot click actually mutates the entity.

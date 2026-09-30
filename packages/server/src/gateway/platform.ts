@@ -132,11 +132,9 @@ export interface PlatformAdapter {
    * @param options.conversationId - Platform-specific conversation (or agentId for API)
    * @param options.teamId - Platform-specific team/workspace
    * @param options.callerUserId - The AUTHENTICATED caller's identity, as the
-   *   route's auth context resolved it. This is the value a blocked tool call
-   *   stores as the pending approval's claimant, and the same value the
-   *   approver later presents on `POST /api/v1/agents/approve` — so it MUST be
-   *   the real subject id. Deriving one from the token bytes instead bound
-   *   approvals to an identity no caller could ever present.
+   *   route's auth context resolved it. The worker token and session carry it
+   *   as the turn's requester, so it MUST be the real subject id — never one
+   *   derived from the token bytes.
    * @param options.files - Files to upload with the message (up to 10)
    * @returns Message metadata
    */

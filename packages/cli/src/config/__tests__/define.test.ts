@@ -32,6 +32,15 @@ describe("secret", () => {
 });
 
 describe("authoring producers", () => {
+  test("rejects removed tool pre-approvals with the policy migration path", () => {
+    expect(() =>
+      defineAgent({
+        id: "worker",
+        tools: { preApproved: ["/mcp/lobu-memory/tools/*"] },
+      } as unknown as Omit<Agent, "kind">)
+    ).toThrow("Settings → Policies");
+  });
+
   test("define* brand their output and preserve config", () => {
     const person = defineEntityType({ key: "person", name: "Person" });
     expect(person.kind).toBe("entityType");

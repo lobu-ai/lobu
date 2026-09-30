@@ -382,14 +382,13 @@ export async function applyCreate(
   const rows = await sql`
     INSERT INTO agents (
       id, organization_id, name, description, identity_md,
-      owner_platform, owner_user_id, models, pre_approved_tools,
+      owner_platform, owner_user_id, models,
       created_at, updated_at
     )
     VALUES (
       ${args.agent_id}, ${ctx.organizationId}, ${args.name}, ${args.description ?? null},
       ${args.identity_md ?? ''}, 'external', ${ownerUserId},
       ${seedModels === null ? null : sql.json(seedModels)},
-      ${sql.json(provisioning.preApprovedTools)},
       NOW(), NOW()
     )
     ON CONFLICT (organization_id, id) DO NOTHING

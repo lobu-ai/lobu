@@ -21,21 +21,12 @@ import {
 	settleActionCard,
 } from "../../notifications/action-card-state.js";
 import { resolveInteractionActionOrigin } from "../../notifications/action-origin.js";
-import {
-	claimPendingTool,
-	pairAdminGrant,
-  type PendingToolClaim,
-	type PendingToolClaimant,
-} from "../auth/mcp/pending-tool-store.js";
-import type { DirectToolExecutionOptions } from "../auth/mcp/proxy.js";
 import type {
   InteractionService,
   PostedLinkButton,
   PostedQuestion,
   PostedSuggestion,
-  PostedToolApproval,
 } from "../interactions.js";
-import type { GrantStore } from "../permissions/grant-store.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
 import {
   claimPendingQuestion,
@@ -92,19 +83,6 @@ export function interactionDeliveryId(event: any): string {
 	return `interaction-${digest}`;
 }
 
-/** Signature for the direct tool execution function injected from the MCP proxy. */
-type ExecuteToolDirectFn = (
-  agentId: string,
-  userId: string,
-  mcpId: string,
-  toolName: string,
-	args: Record<string, unknown>,
-	options: DirectToolExecutionOptions,
-) => Promise<{
-  content: Array<{ type: string; text: string }>;
-  isError: boolean;
-}>;
-
 /**
  * SentMessage returned by thread.post — we care about .edit() for updating cards
  * after a button click to remove the now-stale action buttons. Typed as `any`
@@ -131,32 +109,6 @@ async function postWithFallback(
       return null;
     }
   }
-}
-
-function resolveGrantExpiresAt(duration: string): number | null {
-  switch (duration) {
-    case "1h":
-      return Date.now() + 3_600_000;
-    case "24h":
-      return Date.now() + 86_400_000;
-    case "always":
-      return null;
-    default:
-      return null;
-  }
-}
-
-/**
- * Atomically claim the pending invocation. The PG-backed `pending-tool` row is
- * consumed in a single statement so the first click wins and subsequent webhook
- * retries report `missing` and no-op. A click by someone other than the
- * requester reports `forbidden`, leaving the row live for the real requester.
- */
-async function takePendingToolInvocation(
-	requestId: string,
-	claimant: PendingToolClaimant,
-): Promise<PendingToolClaim> {
-  return claimPendingTool(requestId, claimant);
 }
 
 function actionEventTeamId(
@@ -283,15 +235,6 @@ export async function resolveEntityApprovalRun(
 	return { state, ownerUserId: rows[0].owner_user_id ?? null };
 }
 
-function formatToolArgs(args: Record<string, unknown>): string {
-  return Object.entries(args)
-    .map(([k, v]) => {
-      const val = typeof v === "string" ? v : JSON.stringify(v);
-      return `  ${k}: ${val}`;
-    })
-    .join("\n");
-}
-
 function questionCard(
 	question: string,
 	options: string[],
@@ -311,51 +254,6 @@ function questionCard(
 					}),
 				),
 			),
-		],
-	});
-}
-
-function toolApprovalCard(
-	pending: {
-		mcpId: string;
-		toolName: string;
-		args: Record<string, unknown>;
-	},
-	id: string,
-	origin: ActionOrigin,
-) {
-	return Card({
-		subtitle: actionOriginSubtitle(origin),
-		children: [
-			CardText(
-				`*Tool Approval*\n${pending.mcpId} → ${pending.toolName}\n${formatToolArgs(pending.args)}`,
-			),
-			Actions([
-				Button({
-					id: `tool:${id}:1h`,
-					label: "Allow 1h",
-					style: "primary",
-					value: "1h",
-				}),
-				Button({
-					id: `tool:${id}:24h`,
-					label: "Allow 24h",
-					style: "primary",
-					value: "24h",
-				}),
-				Button({
-					id: `tool:${id}:always`,
-					label: "Allow always",
-					style: "primary",
-					value: "always",
-				}),
-				Button({
-					id: `tool:${id}:deny`,
-					label: "Deny always",
-					style: "danger",
-					value: "deny",
-				}),
-			]),
 		],
 	});
 }
@@ -394,8 +292,6 @@ export function registerInteractionBridge(
   manager: ChatInstanceManager,
   connection: PlatformConnection,
   chat: any,
-  grantStore?: GrantStore,
-	executeToolDirect?: ExecuteToolDirectFn,
 ): () => void {
   const { id: connectionId, platform } = connection;
 
@@ -413,32 +309,6 @@ export function registerInteractionBridge(
       activeTimers.delete(timer);
     }, HANDLED_EVENT_TTL_MS);
     activeTimers.add(timer);
-  }
-
-  // Tracks posted tool-approval cards so we can edit them on click to strip
-  // the buttons. Keyed by requestId (== PostedToolApproval.id == pending-tool
-  // store key). Auto-expire window matches the pending-tool TTL (24h) so a
-  // late click can still find the card to strip.
-  const APPROVAL_CARD_TTL_MS = 24 * 60 * 60 * 1000;
-  const pendingApprovalCards = new Map<string, SentMessage>();
-  const pendingApprovalTimers = new Map<string, NodeJS.Timeout>();
-  function trackApprovalCard(requestId: string, sent: SentMessage): void {
-    pendingApprovalCards.set(requestId, sent);
-    const timer = setTimeout(() => {
-      pendingApprovalCards.delete(requestId);
-      pendingApprovalTimers.delete(requestId);
-    }, APPROVAL_CARD_TTL_MS);
-    pendingApprovalTimers.set(requestId, timer);
-  }
-  function claimApprovalCard(requestId: string): SentMessage | undefined {
-    const sent = pendingApprovalCards.get(requestId);
-    pendingApprovalCards.delete(requestId);
-    const timer = pendingApprovalTimers.get(requestId);
-    if (timer) {
-      clearTimeout(timer);
-      pendingApprovalTimers.delete(requestId);
-    }
-    return sent;
   }
 
   // Pending questions are persisted in `public.pending_interactions` so a
@@ -640,32 +510,6 @@ export function registerInteractionBridge(
     },
   );
 
-  const onToolApprovalNeeded = withResolvedThread<PostedToolApproval>(
-    "tool:approval-needed",
-    async (event, thread) => {
-			const text = `Tool Approval\n${event.mcpId} → ${event.toolName}\n${formatToolArgs(event.args)}`;
-      const tid = event.id;
-
-			const actionOrigin = await resolveInteractionActionOrigin({
-				organizationId: connection.organizationId,
-				platform: event.platform,
-				conversationId: event.conversationId,
-				agentId: event.agentId,
-				source: event.source,
-			});
-			const card = toolApprovalCard(event, tid, actionOrigin);
-      const sent = await postWithFallback(
-        thread,
-        { card, fallbackText: text },
-        connectionId,
-				"tool approval interaction",
-      );
-      if (sent) {
-        trackApprovalCard(tid, sent);
-      }
-    },
-  );
-
   const onLinkButtonCreated = withResolvedThread<PostedLinkButton>(
     "link-button:created",
     async (event, thread) => {
@@ -749,15 +593,11 @@ export function registerInteractionBridge(
 
   interactionService.on("question:created", onQuestionCreated);
   interactionService.on("suggestion:created", onSuggestionCreated);
-  interactionService.on("tool:approval-needed", onToolApprovalNeeded);
   interactionService.on("link-button:created", onLinkButtonCreated);
 
   registerActionHandlers(
     chat,
     connection,
-    grantStore,
-    executeToolDirect,
-    claimApprovalCard,
     async (questionId, value, thread, author, actionEvent) => {
       // Fast path — Slack's block_actions webhook requires a <3s response.
       // The claim is a single `UPDATE … RETURNING` on a PK and stays well
@@ -880,8 +720,6 @@ export function registerInteractionBridge(
         );
       });
     },
-    async (channelId, conversationId) =>
-			resolveThread(manager, connectionId, channelId, conversationId),
     async (suggestionId, promptIndex, thread, author, actionEvent) => {
       // A suggestion click is just a new user message — no claim, no receipt,
       // no card edit. The chips intentionally stay clickable: nothing is
@@ -988,18 +826,12 @@ export function registerInteractionBridge(
   return () => {
     interactionService.off("question:created", onQuestionCreated);
     interactionService.off("suggestion:created", onSuggestionCreated);
-    interactionService.off("tool:approval-needed", onToolApprovalNeeded);
     interactionService.off("link-button:created", onLinkButtonCreated);
     for (const timer of activeTimers) {
       clearTimeout(timer);
     }
     activeTimers.clear();
     handledEvents.clear();
-    for (const timer of pendingApprovalTimers.values()) {
-      clearTimeout(timer);
-    }
-    pendingApprovalTimers.clear();
-    pendingApprovalCards.clear();
     clearInterval(pendingSentSweepTimer);
     pendingSentMessages.clear();
     logger.info({ connectionId, platform }, "Interaction bridge unregistered");
@@ -1041,31 +873,10 @@ type OnTemplateEventActionFn = (
 	actionEvent: any,
 ) => Promise<unknown>;
 
-/**
- * Exported for testing. Wires chat.onAction to tool-approval and question flows.
- *
- * `claimApprovalCard` (optional) returns the SentMessage for a given
- * requestId if one was tracked by this bridge, and atomically removes it
- * from tracking. Used to edit the card after a click so the buttons go
- * away. Absent in tests.
- *
- * `onQuestionClick` (optional) handles the `question:*` click path. Absent
- * in tests that only exercise tool-approval flows.
- *
- * `onSuggestionClick` (optional) handles the `suggestion:*` click path. Absent
- * in tests that only exercise tool-approval flows.
- */
 export function registerActionHandlers(
   chat: any,
   connection: PlatformConnection,
-  grantStore: GrantStore | undefined,
-  executeToolDirect?: ExecuteToolDirectFn,
-  claimApprovalCard?: (requestId: string) => SentMessage | undefined,
   onQuestionClick?: OnQuestionClickFn,
-  resolveApprovalTarget?: (
-    channelId: string,
-		conversationId: string,
-	) => Promise<any | null>,
   onSuggestionClick?: OnSuggestionClickFn,
 	onTemplateEventAction?: OnTemplateEventActionFn,
 ): void {
@@ -1216,263 +1027,6 @@ export function registerActionHandlers(
 			}
 			return;
 		}
-
-		// Handle tool approval — store grant, execute tool, post result
-		if (actionId.startsWith("tool:")) {
-			const parts = actionId.split(":");
-			const requestId = parts[1];
-			const decision = parts[2] ?? "deny";
-
-			if (!requestId) return;
-
-			// The claim atomically consumes the pending invocation. On Slack retries
-			// of the same block_actions webhook the second claim reports `missing`
-			// and we silently no-op (the first click already won). But if the card
-			// was never claimed before — i.e. the in-memory approval card is still
-			// tracked — this is a real first click landing on an expired/missing
-			// pending key, and we MUST surface that to the user. Otherwise the
-			// click looks like it did nothing. A `forbidden` claim is different
-			// again: the row is live for someone else, so it is handled below
-			// without touching the card.
-			const clickerUserId = event.user?.userId;
-			const organizationId = connection.organizationId;
-			if (!clickerUserId || !organizationId) return;
-			const claim = await takePendingToolInvocation(requestId, {
-				userId: clickerUserId,
-				organizationId,
-			}).catch((): PendingToolClaim => ({ status: "missing" }));
-			// A bystander click: the row is still live for the requester, so we must
-			// NOT claim or settle the card — the buttons stay actionable for them.
-			// Only the clicker gets a receipt explaining why nothing happened.
-			if (claim.status === "forbidden") {
-				logger.info(
-					{ requestId, decision, clickerUserId },
-					"Tool approval click by a non-requester — leaving the approval live",
-				);
-				try {
-					await thread.post("Only the requester can act on this approval.");
-				} catch {
-					// best effort
-				}
-				return;
-			}
-			const pending = claim.status === "taken" ? claim.invocation : null;
-      if (!pending) {
-        const sent = claimApprovalCard?.(requestId);
-        if (sent) {
-          logger.info(
-            { requestId, decision },
-						"Tool approval click with no pending invocation — likely expired",
-          );
-					const expiredResolution = {
-						status: "expired" as const,
-						detail:
-							"Re-send your last message to create a new approval request.",
-					};
-					const expiredCard = settleActionCard(
-						Card({ children: [CardText("*Tool Approval*")] }),
-						expiredResolution,
-					);
-					const edited = await editClickedCard(event, expiredCard);
-					try {
-						if (!edited) {
-							await sent.edit({
-								card: expiredCard,
-								fallbackText: actionResolutionText(expiredResolution),
-							});
-						}
-					} catch {
-						// best effort
-					}
-          try {
-            await thread.post(
-							"This tool approval request expired before it could be acted on. Re-send your last message to retry.",
-            );
-          } catch {
-            // best effort
-          }
-        } else {
-          logger.debug(
-            { requestId, decision },
-						"Tool approval click with no pending invocation and no tracked card — ignoring (already handled)",
-          );
-        }
-        return;
-      }
-
-      const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
-
-			const resolution = {
-				status:
-					decision === "deny" ? ("denied" as const) : ("approved" as const),
-				actorName: event.user?.fullName ?? event.user?.userName ?? null,
-				resolvedAt: new Date(),
-				detail:
-					decision === "deny"
-						? "Tool access denied."
-						: `Tool access allowed ${decision === "always" ? "until revoked" : `for ${decision}`}.`,
-			};
-			const actionOrigin = await resolveInteractionActionOrigin({
-				organizationId: pending.organizationId ?? connection.organizationId,
-				platform: pending.platform,
-				conversationId: pending.conversationId,
-				agentId: pending.agentId,
-				source: pending.source,
-			});
-			const settledCard = settleActionCard(
-				toolApprovalCard(pending, requestId, actionOrigin),
-				resolution,
-			);
-			const sent = claimApprovalCard?.(requestId);
-			const edited = await editClickedCard(event, settledCard);
-			if (!edited && sent) {
-				try {
-					await sent.edit({
-						card: settledCard,
-						fallbackText: actionResolutionText(resolution),
-					});
-				} catch {
-					// Best effort: durable grant/deny state remains authoritative.
-				}
-			}
-
-      // Resolve the post target. Prefer the original conversation captured at
-      // the time the tool call was blocked (saved alongside the pending
-      // record) so the result lands in the same Slack/Telegram thread the
-      // user originally pinged the bot in. Fall back to the click event's
-      // thread (the card the user just clicked) only if we don't have the
-      // original context — that fallback can be wrong on Slack when the card
-      // ended up posted at channel level.
-      let postTarget: any = thread;
-      if (
-        resolveApprovalTarget &&
-        (pending.conversationId || pending.channelId)
-      ) {
-        const resolved = await resolveApprovalTarget(
-          pending.channelId ?? "",
-					pending.conversationId ?? "",
-        ).catch(() => null);
-        if (resolved) postTarget = resolved;
-      }
-
-      if (decision === "deny") {
-        if (grantStore) {
-          await grantStore
-            .grant(
-              pending.agentId,
-              pattern,
-              null,
-              true,
-							pending.organizationId ?? connection.organizationId,
-            )
-            .catch(() => undefined);
-        }
-        try {
-          await postTarget.post(
-						"Tool call denied. Let me know if you'd like me to try a different approach.",
-          );
-        } catch {
-          // best effort
-        }
-        return;
-      }
-
-      // Approved — store grant, execute, post result
-      const expiresAt = resolveGrantExpiresAt(decision);
-
-      if (grantStore) {
-        try {
-          await grantStore.grant(
-            pending.agentId,
-            pattern,
-            expiresAt,
-            undefined,
-						pending.organizationId ?? connection.organizationId,
-          );
-          logger.info(
-            {
-              requestId,
-              agentId: pending.agentId,
-              pattern,
-              decision,
-              expiresAt,
-            },
-						"Grant stored via tool approval",
-          );
-        } catch (error) {
-          logger.error(
-            { requestId, error: String(error) },
-						"Failed to store grant",
-          );
-        }
-      }
-
-      // Execute the pending tool call
-      if (executeToolDirect) {
-        try {
-					const organizationId = pending.organizationId;
-					if (!organizationId) {
-						logger.error(
-							{ requestId, mcpId: pending.mcpId, toolName: pending.toolName },
-							"Refusing to execute approved MCP tool without organizationId",
-						);
-						await postTarget.post(
-							"This tool approval is missing organization context. Re-send your request to retry.",
-						);
-						return;
-					}
-          const result = await executeToolDirect(
-            pending.agentId,
-            pending.userId,
-            pending.mcpId,
-            pending.toolName,
-						pending.args,
-						{
-							organizationId,
-							conversationId: pending.conversationId,
-							channelId: pending.channelId,
-							teamId: pending.teamId,
-							connectionId: pending.connectionId,
-							platform: pending.platform,
-							source: pending.source,
-							...pairAdminGrant(pending.adminTools, pending.adminActorUserId),
-							deploymentName: pending.deploymentName,
-						},
-          );
-
-          const resultText = result.content.map((c) => c.text).join("\n");
-          await postTarget.post(
-						result.isError ? `Tool error: ${resultText}` : resultText,
-          );
-          logger.info(
-            {
-              requestId,
-              mcpId: pending.mcpId,
-              toolName: pending.toolName,
-              isError: result.isError,
-            },
-						"Tool executed after approval",
-          );
-        } catch (error) {
-          logger.error(
-            { requestId, error: String(error) },
-						"Failed to execute tool after approval",
-          );
-          try {
-            await postTarget.post(`Failed to execute tool: ${String(error)}`);
-          } catch {
-            // best effort
-          }
-        }
-      } else {
-        try {
-          await postTarget.post("approve");
-        } catch {
-          // best effort
-        }
-      }
-      return;
-    }
 
     if (actionId.startsWith("suggestion:")) {
       // The button carries only `suggestion:<id>:<i>` — no value. The prompt

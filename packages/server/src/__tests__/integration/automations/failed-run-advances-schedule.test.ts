@@ -938,89 +938,7 @@ describe("a terminally failed Automation run advances next_run_at", () => {
 });
 
 describe("finalize-miss diagnostics", () => {
-  it("names the pending tool approval instead of blaming the agent", async () => {
-    const { sql, organizationId, automationId, runId } =
-      await createDueAutomationWithDispatchedRun({
-        slug: "finalize-miss-names-approval",
-        messageId: "msg-gated-approval",
-        nudgeCount: 99,
-      });
-    await sql`
-      INSERT INTO oauth_states (id, scope, payload, expires_at)
-      VALUES (
-        ${`ta_test_${runId}`},
-        'pending-tool',
-        ${sql.json({
-          mcpId: "lobu-memory",
-          toolName: "run_sdk",
-          agentId: "advance-agent-finalize-miss-names-approval",
-          userId: "u1",
-          organizationId,
-          args: {},
-          conversationId: `personal-agent_automation_${automationId}_run_${runId}`,
-        })},
-        NOW() + INTERVAL '1 hour'
-      )
-    `;
-
-    await resolveAutomationRunsByMessageIds(["msg-gated-approval"], { ok: true });
-
-    const [run] =
-      await sql`SELECT status, error_message FROM runs WHERE id = ${runId}`;
-    expect(run.status).toBe("failed");
-    expect(run.error_message).toMatch(/blocked on tool approval/);
-    expect(run.error_message).toMatch(/lobu-memory\/run_sdk/);
-    expect(run.error_message).not.toMatch(/finished without calling/);
-  });
-
-  it("ignores approvals outside the run's tenant and conversation", async () => {
-    const { sql, organizationId, automationId, runId } =
-      await createDueAutomationWithDispatchedRun({
-        slug: "finalize-miss-scopes-approval",
-        messageId: "msg-scoped-approval",
-        nudgeCount: 99,
-      });
-    const pending = (
-      id: string,
-      toolName: string,
-      org: string,
-      automationId: number
-    ) => sql`
-        INSERT INTO oauth_states (id, scope, payload, expires_at)
-        VALUES (
-          ${id},
-          'pending-tool',
-          ${sql.json({
-            mcpId: "lobu-memory",
-            toolName,
-            agentId: "advance-agent-finalize-miss-scopes-approval",
-            userId: "u1",
-            organizationId: org,
-            args: {},
-            conversationId:
-              `personal-agent_automation_${automationId}_run_${runId}`,
-          })},
-          NOW() + INTERVAL '1 hour'
-        )
-      `;
-    await pending(`ta_wrong_org_${runId}`, "wrong_org", "other-org", automationId);
-    await pending(
-      `ta_wrong_automation_${runId}`,
-      "wrong_automation",
-      organizationId,
-      automationId + 1
-    );
-
-    await resolveAutomationRunsByMessageIds(["msg-scoped-approval"], { ok: true });
-
-    const [run] =
-      await sql`SELECT status, error_message FROM runs WHERE id = ${runId}`;
-    expect(run.status).toBe("failed");
-    expect(run.error_message).toMatch(/No active tool approval was found/);
-    expect(run.error_message).not.toMatch(/wrong_org|wrong_automation/);
-  });
-
-  it("falls back to the agent-miss message when nothing is pending", async () => {
+  it("reports missing completion without suggesting obsolete MCP grants", async () => {
     const { sql, runId } = await createDueAutomationWithDispatchedRun({
       slug: "finalize-miss-no-approval",
       messageId: "msg-no-approval",
@@ -1033,6 +951,7 @@ describe("finalize-miss diagnostics", () => {
       await sql`SELECT status, error_message FROM runs WHERE id = ${runId}`;
     expect(run.status).toBe("failed");
     expect(run.error_message).toMatch(/finished without calling/);
-    expect(run.error_message).toMatch(/No active tool approval was found/);
+    expect(run.error_message).toMatch(/query_sdk \/ run_sdk/);
+    expect(run.error_message).not.toMatch(/grant|approval/);
   });
 });

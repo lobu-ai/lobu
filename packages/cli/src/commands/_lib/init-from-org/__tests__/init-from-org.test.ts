@@ -96,7 +96,6 @@ function fullOrgRoutes(): Record<
         deniedDomains: ["evil.com"],
       },
       toolsConfig: { allowedTools: ["Read"], strictMode: true },
-      preApprovedTools: ["/mcp/gmail/tools/send_email"],
       guardrails: ["secret-scan"],
       nixConfig: { packages: ["jq", "ffmpeg"] },
       skillsConfig: {
@@ -356,9 +355,6 @@ describe("lobu init --from-org", () => {
       allowedTools: ["Read"],
       strictMode: true,
     });
-    expect(agent?.settings.preApprovedTools).toEqual([
-      "/mcp/gmail/tools/send_email",
-    ]);
     expect(
       state.connectors.connections.find((c) => c.slug === "team-slack")
     ).toMatchObject({

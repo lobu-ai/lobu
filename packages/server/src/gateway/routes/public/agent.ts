@@ -26,11 +26,6 @@ import {
   getOrgBySlug,
 } from "../../../workspace/multi-tenant.js";
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
-import {
-  listPendingToolsForConversation,
-  peekPendingTool,
-  type PendingToolClaimant,
-} from "../../auth/mcp/pending-tool-store.js";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
 import { AUTOMATION_RUN_SOURCE } from "../../automation-run-session.js";
 import {
@@ -66,7 +61,6 @@ import {
   authorizeOrgAgentMemberInProvenOrg,
   isRestrictedOrgAgentMember,
 } from "../shared/org-agent-access.js";
-import { errorResponse } from "../shared/helpers.js";
 import { errorResponses } from "../shared/openapi-responses.js";
 import { verifySettingsSessionOrToken } from "./settings-auth.js";
 import {
@@ -467,11 +461,6 @@ interface AgentApiConfig {
   userAgentsStore?: UserAgentsStore;
   agentMetadataStore?: Pick<AgentMetadataStore, "getMetadata">;
   platformRegistry?: PlatformRegistry;
-  approveToolCall?: (
-    requestId: string,
-    decision: string,
-    claimant: PendingToolClaimant
-  ) => Promise<{ success: boolean; error?: string }>;
 }
 
 export function createAgentApi(config: AgentApiConfig): Hono {
@@ -1787,7 +1776,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         networkConfig: settingsNetwork,
         guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
-        preApprovedTools,
         ...remainingOptions
       } = agentOptions;
 
@@ -1905,7 +1893,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         networkConfig: session.networkConfig || settingsNetwork,
         guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
-        preApprovedTools,
       });
 
       rootSpan?.end();
@@ -1921,96 +1908,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       rootSpan?.end();
       throw error;
     }
-  });
-
-  // POST /api/v1/agents/approve - Approve a pending tool call (CLI/web)
-  if (config.approveToolCall) {
-    const approveHandler = config.approveToolCall;
-    app.post("/api/v1/agents/approve", async (c) => {
-      const { requestId, decision } = await c.req.json();
-      if (!requestId || !decision) {
-        return errorResponse(c, "Missing requestId or decision", 400);
-      }
-      const validDecisions = ["1h", "24h", "always", "deny"];
-      if (!validDecisions.includes(decision)) {
-        return errorResponse(
-          c,
-          `Invalid decision. Must be one of: ${validDecisions.join(", ")}`,
-          400
-        );
-      }
-      const auth = c.get("authContext");
-      if (!auth?.userId) return errorResponse(c, "Unauthorized", 401);
-      // The org predicate on the claim MUST be the org the pending row was
-      // written under, and `authContext.organizationId` is only populated by
-      // token auth — the settings-session COOKIE path (the SPA, which renders
-      // these approval cards) carries none. Passing that undefined through
-      // would silently drop the org predicate and leave the claim scoped by
-      // userId alone. Resolve the pending row's own conversation to its agent
-      // and AUTHORIZE the caller against it, exactly as the sibling
-      // pending-approvals route does: the grant names the agent's real tenant
-      // for cookie and token callers alike, so the predicate is always applied.
-      const peeked = await peekPendingTool(requestId);
-      if (!peeked) {
-        return errorResponse(c, "Request not found or expired", 400);
-      }
-      const approveSession = peeked.conversationId
-        ? await sessMgr.getSession(peeked.conversationId)
-        : null;
-      const approveAccess = await authorizeAgentAccess(
-        c,
-        approveSession?.agentId || peeked.agentId,
-        approveSession
-      );
-      if (approveAccess instanceof Response) return approveAccess;
-      if (!approveAccess.organizationId) {
-        return errorResponse(c, "Forbidden", 403);
-      }
-      const result = await approveHandler(requestId, decision, {
-        userId: auth.userId,
-        organizationId: approveAccess.organizationId,
-      });
-      if (!result.success) {
-        return errorResponse(c, result.error || "Approval failed", 400);
-      }
-      return c.json({ success: true });
-    });
-  }
-
-  // GET /api/v1/agents/{agentId}/pending-approvals - Replay open tool approvals
-  // for a conversation so the web SPA can re-render approval cards on reload
-  // (the live `tool-approval` SSE card is one-shot). The path param IS the
-  // conversationId (messagesUrl is /api/v1/agents/{conversationId}/messages),
-  // which is what pending tools are keyed by.
-  app.get("/api/v1/agents/:agentId/pending-approvals", async (c) => {
-    const conversationId = c.req.param("agentId");
-    // The path param is the conversationId (sessionKey). Resolve the session to
-    // the real agentId + org and AUTHORIZE the caller BEFORE returning anything:
-    // these rows carry tool requestIds + arguments, so an
-    // unauthorized-for-this-conversation read is an IDOR. Mirror the messages
-    // route's pre-gate exactly.
-    const preSession = await sessMgr.getSession(conversationId);
-    const resolvedAgentId = preSession?.agentId || conversationId;
-    const access = await authorizeAgentAccess(c, resolvedAgentId, preSession);
-    if (access instanceof Response) return access;
-    // The read MUST be org-scoped. authorizeAgentAccess resolves the org for
-    // every legitimate caller; refuse rather than issue an unscoped read if it
-    // somehow didn't.
-    if (!access.organizationId) {
-      return c.json({ success: false, error: "Forbidden" }, 403);
-    }
-    const pending = await listPendingToolsForConversation(
-      conversationId,
-      access.organizationId
-    );
-    return c.json({
-      approvals: pending.map((p) => ({
-        requestId: p.requestId,
-        mcpId: p.mcpId,
-        toolName: p.toolName,
-        args: p.args,
-      })),
-    });
   });
 
   logger.debug("Hono Agent API routes registered");

@@ -116,7 +116,7 @@ async function handleCallToolAuthenticated(
 	}
 	const scopeKey = computeScopeKey(requesterUserId, auth.tokenData);
 
-	// Parse body early so tool arguments are available for the approval message.
+	// Parse the body before guardrail evaluation.
 	let toolArguments: Record<string, unknown> = {};
 	try {
 		const body = await getRequestBodyAsText(c);
@@ -135,8 +135,7 @@ async function handleCallToolAuthenticated(
 	}
 
 	// Pre-tool guardrails — same enforcement as the JSON-RPC path so this REST
-	// entrypoint can't bypass the stage. Runs before approval and independently
-	// of grantStore.
+	// entrypoint can't bypass the stage. Operation handlers own authorization.
 	if (
 		await proxy.runPreToolGuardrails(
 			agentId,
@@ -150,45 +149,6 @@ async function handleCallToolAuthenticated(
 			isError: true,
 		});
 	}
-
-	// Check tool approval based on annotations and grants.
-	const approval = auth.tokenData.executionMode === "capture" ? "allow" : await proxy.evaluateToolApproval(
-		mcpId,
-		toolName,
-		toolArguments,
-		agentId,
-		auth.tokenData,
-		auth.token,
-	);
-	if (approval === "blocked-notified") {
-		return c.json(
-			{
-				content: [
-					{
-						type: "text",
-						text: "Tool call requires approval. The user has been asked to approve. Your session will end. The result will arrive as your next message.",
-					},
-				],
-				isError: true,
-			},
-			403,
-		);
-	}
-	if (approval === "blocked-no-channel") {
-		return c.json(
-			{
-				content: [
-					{
-						type: "text",
-						text: `Tool call requires approval. Request access approval in chat for: ${mcpId} → ${toolName}`,
-					},
-				],
-				isError: true,
-			},
-			403,
-		);
-	}
-
 	try {
 		const sessionKey = buildSessionKey(agentId, mcpId, scopeKey);
 		if (!proxy.upstream.getSession(sessionKey)) {

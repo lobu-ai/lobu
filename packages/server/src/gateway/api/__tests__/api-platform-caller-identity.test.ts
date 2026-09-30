@@ -1,11 +1,9 @@
 /**
  * The API platform adapter must bind a turn to the AUTHENTICATED caller.
  *
- * The enqueued `userId` is carried by the worker token, and a blocked tool call
- * stores it as the pending approval's claimant. `POST /api/v1/agents/approve`
- * claims with `authContext.userId`, so any identity the adapter *derives*
- * (previously `api-${token.slice(0, 8)}`) is one no approver can ever present —
- * every approval raised from an API-platform turn was permanently unclaimable.
+ * The enqueued `userId` is carried by the worker token as the turn's requester,
+ * so any identity the adapter *derives* (previously `api-${token.slice(0, 8)}`)
+ * is one no real caller can ever present.
  */
 
 import { expect, mock, test } from "bun:test";
@@ -52,15 +50,15 @@ test("sendMessage enqueues the authenticated caller, not a token digest", async 
   expect(enqueued).toHaveLength(1);
   expect(enqueued[0]!.userId).toBe("user-real");
   // RED before the fix: this was `api-token-ab`, an identity derived from the
-  // token bytes that no caller could present on the approve route.
+  // token bytes that no caller could present.
   expect(enqueued[0]!.userId).not.toBe("api-token-ab");
   expect(enqueued[0]!.userId).not.toStartWith("api-");
 });
 
 test("the created session records the same caller identity it enqueues", async () => {
-  // The claimant predicate matches on the enqueued userId, but the session is
-  // what later routes authorize against. If the two disagree the approval is
-  // bound to an identity the session never had.
+  // The worker token carries the enqueued userId, but the session is what
+  // later routes authorize against. If the two disagree the turn's requester
+  // is an identity the session never had.
   const enqueued: MessagePayload[] = [];
   const sessions: Array<{ userId: string; threadCreator?: string }> = [];
   const platform = Object.create(ApiPlatform.prototype) as ApiPlatform;

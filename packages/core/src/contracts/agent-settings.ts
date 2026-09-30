@@ -162,7 +162,6 @@ export const AgentSettingsStoredSchema = Type.Object({
   sandboxId: Type.Optional(Type.String()),
   verboseLogging: Type.Optional(Type.Boolean()),
   showToolCalls: Type.Optional(Type.Boolean()),
-  preApprovedTools: Type.Optional(Type.Array(Type.String())),
   updatedAt: Type.Number(),
 });
 export type AgentSettingsStored = Static<typeof AgentSettingsStoredSchema>;

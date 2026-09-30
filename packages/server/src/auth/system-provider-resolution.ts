@@ -188,18 +188,6 @@ export async function resolveSystemKeyProvidersAndModel(): Promise<ResolvedSyste
 }
 
 /**
- * The `pre_approved_tools` every freshly created agent starts with. An Automation
- * reaches `complete_window` through `run_sdk` (and reads through `query_sdk`) on
- * the internal `lobu-memory` MCP server; without this pre-approval those calls
- * need an interactive approval no automation run can satisfy, so the turn ends
- * without completing the window.
- *
- * The `lobu-memory` server itself is NOT stored per-agent — it is derived at
- * worker startup by `McpConfigService`. Only the approval pattern is persisted.
- */
-export const DEFAULT_PRE_APPROVED_TOOLS = ["/mcp/lobu-memory/tools/*"];
-
-/**
  * The provisioning defaults a brand-new agent row must carry to be runnable on
  * THIS deployment. Every create path — the web `POST /agents` route, the
  * `manage_agents` create tool, and the shared `saveMetadata` UPSERT — resolves
@@ -231,7 +219,6 @@ export async function resolveNewAgentProvisioningDefaults(
 	organizationId: string,
 ): Promise<{
 	models: string[];
-	preApprovedTools: string[];
 }> {
 	// An org-level default already makes the agent runnable through the
 	// documented fallback, so seed nothing and let it inherit.
@@ -241,6 +228,5 @@ export async function resolveNewAgentProvisioningDefaults(
 		: await resolveSystemKeyProvidersAndModel();
 	return {
 		models: resolved.models,
-		preApprovedTools: [...DEFAULT_PRE_APPROVED_TOOLS],
 	};
 }

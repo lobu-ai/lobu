@@ -1010,7 +1010,7 @@ export async function enqueueAgentTurn(
     if (automationContext?.requiresWindowCompletion) {
       const excluded = AUTOMATION_REQUIRED_TOOLS.filter((name) => !isToolAllowedByPolicy(name, policy));
       if (excluded.length > 0) {
-        return { error: `Automation tool policy excludes ${excluded.join(", ")}. Allow these tools in the agent's tool policy; pre-approval does not grant tool eligibility.` };
+        return { error: `Automation tool policy excludes ${excluded.join(", ")}. Allow these tools in the agent's tool policy.` };
       }
     }
     let failedServers: string[] = [];

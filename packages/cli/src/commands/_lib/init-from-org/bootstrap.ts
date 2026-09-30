@@ -347,19 +347,14 @@ function emitAgent(
     }
   }
 
-  // tools ← toolsConfig + preApprovedTools.
+  // tools ← toolsConfig.
   const tools = settings?.toolsConfig;
-  const preApproved = settings?.preApprovedTools;
   if (
-    preApproved?.length ||
     tools?.allowedTools?.length ||
     tools?.deniedTools?.length ||
     tools?.strictMode !== undefined
   ) {
     const toolFields: string[] = [];
-    if (preApproved?.length) {
-      toolFields.push(`preApproved: ${emitValue(preApproved, 2)}`);
-    }
     if (tools?.allowedTools?.length) {
       toolFields.push(`allowed: ${emitValue(tools.allowedTools, 2)}`);
     }

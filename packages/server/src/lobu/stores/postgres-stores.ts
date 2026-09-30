@@ -90,7 +90,6 @@ function rowToSettings(row: Record<string, any>): AgentSettings {
 		toolsConfig: row.tools_config ?? undefined,
 		verboseLogging: row.verbose_logging ?? undefined,
 		showToolCalls: row.show_tool_calls ?? undefined,
-		preApprovedTools: row.pre_approved_tools ?? undefined,
 		guardrails: row.guardrails ?? undefined,
 		guardrailsInline: row.guardrails_inline ?? undefined,
 		sandboxId: row.sandbox_id ?? undefined,
@@ -150,7 +149,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
                  soul_md, user_md, identity_md,
                  skills_config, tools_config,
                  verbose_logging, show_tool_calls,
-                 pre_approved_tools, guardrails, guardrails_inline,
+                 guardrails, guardrails_inline,
                  sandbox_id, updated_at
           FROM agents
           WHERE id = ${agentId} AND organization_id = ${orgId}
@@ -174,7 +173,6 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           tools_config = ${sql.json(settings.toolsConfig ?? {})},
           verbose_logging = ${settings.verboseLogging ?? false},
           show_tool_calls = ${settings.showToolCalls ?? false},
-          pre_approved_tools = ${sql.json(settings.preApprovedTools ?? [])},
           guardrails = ${sql.json(settings.guardrails ?? [])},
           guardrails_inline = ${sql.json(settings.guardrailsInline ?? [])},
           sandbox_id = ${settings.sandboxId ?? null},
@@ -202,7 +200,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           skills_config = '{"skills": []}', tools_config = '{}',
           verbose_logging = false,
           show_tool_calls = false,
-          pre_approved_tools = '[]', guardrails = '[]', guardrails_inline = '[]',
+          guardrails = '[]', guardrails_inline = '[]',
           sandbox_id = NULL,
           updated_at = now()
         WHERE id = ${agentId} AND organization_id = ${orgId}
@@ -244,12 +242,11 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			// `POST /api/v1/agents` route, so seeding here is what keeps an agent
 			// created through that route runnable.
 			//
-			// These two columns are deliberately ABSENT from the DO UPDATE SET
+			// The models column is deliberately ABSENT from the DO UPDATE SET
 			// clause below. `saveMetadata` is an UPSERT, so any caller re-saving an
 			// existing agent (a re-`createAgent` on an id that already exists, a
 			// replayed apply) must never clobber an admin's curated `models`
-			// allow-list or an agent's pre-approvals. INSERT seeds them; CONFLICT
-			// leaves them untouched.
+			// allow-list. INSERT seeds it; CONFLICT leaves it untouched.
 			const provisioning = await resolveNewAgentProvisioningDefaults(orgId);
 			// The PK is (organization_id, id) — UPSERT on the composite key. Two
 			// orgs can independently own an agent with the same id; the conflict
@@ -258,12 +255,11 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			// a CONFLICT UPDATE so we can emit the right lifecycle event.
 			const rows = await sql`
         INSERT INTO agents (id, organization_id, name, description, owner_platform, owner_user_id,
-                            models, pre_approved_tools, created_at)
+                            models, created_at)
         VALUES (
           ${agentId}, ${orgId}, ${metadata.name}, ${metadata.description ?? null},
           ${metadata.owner.platform}, ${metadata.owner.userId},
           ${sql.json(provisioning.models)},
-          ${sql.json(provisioning.preApprovedTools)},
           ${metadata.createdAt ? new Date(metadata.createdAt) : now}
         )
         ON CONFLICT (organization_id, id) DO UPDATE SET

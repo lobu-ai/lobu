@@ -544,35 +544,21 @@ routes.post("/", async (c) => {
 
 	const orgId = c.get("organizationId") as string;
 
-	// Atomic create + auto-inject. Two concurrent `lobu apply` runs from the
-	// same operator can both reach this endpoint with the same agentId. The
-	// previous version did INSERT-then-saveSettings as two separate writes:
-	// a "loser" returning 200 in the idempotent branch could see the row
-	// before the winner's saveSettings landed, then immediately PATCH it with
-	// operator config — only for the winner's deferred saveSettings to clobber
-	// it moments later. Folding `pre_approved_tools` into the same INSERT
-	// statement closes that gap: the row + auto-injected pre-approvals land
-	// atomically and the loser's idempotent 200 already reflects
-	// fully-initialized state. The `lobu-memory` MCP server itself is no longer
-	// stored per-agent — it's derived at worker startup by McpConfigService.
 	const sql = getDb();
 	const now = new Date();
-	// Fresh-agent provisioning defaults from the shared helper — the SAME source
-	// the boot provisioning paths and the manage_agents create tool use. `models`
-	// is baked in here because the run path's org-default tail reads an
-	// `inference_providers` row that environment API keys never create; an agent
-	// left model-less on an env-key-only deployment resolves no model at all.
+	// Seed provisioning defaults in the INSERT so concurrent idempotent creates
+	// cannot observe a partially initialized row or overwrite operator settings.
 	const provisioning = await resolveNewAgentProvisioningDefaults(orgId);
 	const inserted = await sql`
     INSERT INTO agents (
       id, organization_id, name, description, owner_platform, owner_user_id,
-      models, pre_approved_tools, created_at, updated_at
+      models, created_at, updated_at
     )
     VALUES (
       ${agentId}, ${orgId}, ${name}, ${description ?? null},
       'lobu', ${user.id},
       ${sql.json(provisioning.models)},
-      ${sql.json(provisioning.preApprovedTools)}, ${now}, ${now}
+      ${now}, ${now}
     )
     ON CONFLICT (organization_id, id) DO NOTHING
     RETURNING id

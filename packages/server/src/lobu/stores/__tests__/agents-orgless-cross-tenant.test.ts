@@ -43,7 +43,6 @@ describe("org-less agent config reads must not cross tenants", () => {
 				await config.saveSettings(SHARED_AGENT_ID, {
 					models: [`provider-${label}/model-${label}`],
 					soulMd: `secret soul for ${label}`,
-					preApprovedTools: [`tool_${label}`],
 				});
 			});
 		}

@@ -127,10 +127,6 @@ async function createGoogleChatHarness(organizationId: string) {
 		} as PlatformConnection,
 		undefined,
 		undefined,
-		undefined,
-		undefined,
-		undefined,
-		undefined,
 		async (sourceEventId, action, value, actionEvent) =>
 			invokeTemplateEventAction({
 				organizationId,

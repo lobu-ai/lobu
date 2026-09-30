@@ -109,11 +109,8 @@ async function handleProxyRequestAuthenticated(
 		}
 	}
 
-	// Pre-tool guardrails + tool approval for tools/call JSON-RPC requests.
-	// The bounded body is read once and shared with forwarding. NOTE: this runs
-	// on any POST, NOT gated on grantStore —
-	// guardrail enforcement must not depend on the approval subsystem being
-	// configured (the approval check below is what's gated on grantStore).
+	// Guard every tools/call before forwarding to the operation's authorization.
+	// Read the bounded body once and share it with forwarding.
 	if (c.req.method === "POST") {
 		try {
 			if (requestBodyText) {
@@ -144,8 +141,8 @@ async function handleProxyRequestAuthenticated(
 					const toolName = jsonRpc.params.name;
 					const toolArgs = jsonRpc.params.arguments || {};
 
-					// Pre-tool guardrails run before approval so a blocked tool never
-					// enters the approval funnel, and independently of grantStore.
+					// Pre-tool guardrails run before dispatch. The upstream operation
+					// handler owns authorization and any durable approval.
 					if (
 						await proxy.runPreToolGuardrails(
 							agentId,
@@ -164,33 +161,6 @@ async function handleProxyRequestAuthenticated(
 								isError: true,
 							},
 						});
-					}
-
-					// Tool approval is gated on the approval subsystem (grantStore).
-					if (proxy.grantStore && tokenData.executionMode !== "capture") {
-						const approval = await proxy.evaluateToolApproval(
-							mcpId,
-							toolName,
-							toolArgs,
-							agentId,
-							tokenData,
-							sessionToken,
-						);
-						if (approval !== "allow") {
-							return c.json({
-								jsonrpc: "2.0",
-								id: jsonRpc.id,
-								result: {
-									content: [
-										{
-											type: "text",
-											text: "Tool call requires approval. The user has been asked to approve. Your session will end. The result will arrive as your next message.",
-										},
-									],
-									isError: true,
-								},
-							});
-						}
 					}
 				}
 			}

@@ -1,6 +1,5 @@
 import type { DbClient } from "../db/client";
 import { getDb, pgTextArray } from "../db/client";
-import { listPendingToolsForRun } from "../gateway/auth/mcp/pending-tool-store";
 import { classifyRunOutcome } from "../runs/run-outcome";
 import logger from "../utils/logger";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "../utils/run-statuses";
@@ -304,7 +303,7 @@ export async function resolveAutomationRunsByMessageIds(
 			await markAutomationRunFailed(
 				sql,
 				runId,
-				await describeFinalizeMiss(sql, runId, budget)
+				describeFinalizeMiss(budget)
 			)
 		) {
 			resolved++;
@@ -314,46 +313,11 @@ export async function resolveAutomationRunsByMessageIds(
 	return { resolved };
 }
 
-async function describeFinalizeMiss(
-	sql: DbClient,
-	runId: number,
-	budget: number
-): Promise<string> {
+function describeFinalizeMiss(budget: number): string {
 	const attempts = budget > 0 ? ` after ${budget + 1} attempt(s)` : "";
-	const agentMiss =
-		"Agent reply finished without calling run_sdk (client.automations.completeWindow)" +
-		attempts;
-	let pending: Array<{ mcpId: string; toolName: string }>;
-	try {
-		pending = await listPendingToolsForRun(runId, sql);
-	} catch (error) {
-		logger.warn(
-			{ error, run_id: runId },
-			"[automations] Could not check pending tool approvals for a finalize miss"
-		);
-		return (
-			agentMiss +
-			". Tool approval status could not be checked; inspect the warning log " +
-			"before attributing the miss to the agent."
-		);
-	}
-
-	if (pending.length > 0) {
-		const tools = pending.map((p) => `${p.mcpId}/${p.toolName}`).join(", ");
-		const grants = pending
-			.map((p) => `/mcp/${p.mcpId}/tools/${p.toolName}`)
-			.join(", ");
-		return (
-			`Automation run blocked on tool approval${attempts}: ${tools} queued for ` +
-			"human approval, so complete_window never ran. Headless Automation runs " +
-			`cannot answer approval cards; grant standing access (${grants}) and ` +
-			"retry the Automation."
-		);
-	}
-
 	return (
-		agentMiss +
-		". No active tool approval was found, so check that the assigned agent has the " +
-		"lobu-memory MCP attached and that query_sdk / run_sdk are available to it."
+		"Agent reply finished without calling run_sdk (client.automations.completeWindow)" +
+		attempts +
+		". Check that query_sdk / run_sdk are available to the assigned agent."
 	);
 }

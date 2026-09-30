@@ -106,21 +106,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     expect(await hasGrant(".github.com")).toBe(true);
   });
 
-  test("syncs preApprovedTools as MCP tool grants", async () => {
-    await manager.syncNetworkConfigGrants(
-      buildPayload({
-        preApprovedTools: [
-          "/mcp/gmail/tools/list_messages",
-          "/mcp/linear/tools/*",
-        ],
-      })
-    );
-
-    expect(await hasGrant("/mcp/gmail/tools/list_messages")).toBe(true);
-    // Wildcard pattern should match a specific tool under it.
-    expect(await hasGrant("/mcp/linear/tools/create_issue")).toBe(true);
-  });
-
   test("syncs networkConfig.deniedDomains as deny grants", async () => {
     await manager.syncNetworkConfigGrants(
       buildPayload({
@@ -207,27 +192,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     );
 
     expect(await hasGrant("a.example.com")).toBe(false);
-  });
-
-  test("cold-cache sync does not revoke user-approved MCP tool grants", async () => {
-    // Simulates a Slack "always" tool approval — same store, mcp_tool kind,
-    // no expiry. Config sync must never treat it as config-owned.
-    await grantStore.grant(
-      "agent-1",
-      "/mcp/gmail/tools/send_email",
-      null,
-      undefined,
-      "test-org"
-    );
-
-    const freshManager = new TestDeploymentManager(TEST_CONFIG);
-    freshManager.setGrantStore(grantStore);
-    freshManager.setPolicyStore(policyStore);
-    await freshManager.syncNetworkConfigGrants(
-      buildPayload({ networkConfig: { allowedDomains: ["x.example.com"] } })
-    );
-
-    expect(await hasGrant("/mcp/gmail/tools/send_email")).toBe(true);
   });
 
   test("grants nix cache domains while nix is configured, revokes on removal", async () => {
@@ -328,24 +292,12 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     expect(await hasGrant("x.example.com")).toBe(true);
   });
 
-  test("syncs both network and pre-approved tools in one call", async () => {
-    await manager.syncNetworkConfigGrants(
-      buildPayload({
-        networkConfig: { allowedDomains: ["api.example.com"] },
-        preApprovedTools: ["/mcp/gmail/tools/send_email"],
-      })
-    );
-
-    expect(await hasGrant("api.example.com")).toBe(true);
-    expect(await hasGrant("/mcp/gmail/tools/send_email")).toBe(true);
-  });
-
   test("no-op when grantStore is not set", async () => {
     const barebones = new TestDeploymentManager(TEST_CONFIG);
     // Does not throw, nothing to assert against.
     await barebones.syncNetworkConfigGrants(
       buildPayload({
-        preApprovedTools: ["/mcp/gmail/tools/send_email"],
+        networkConfig: { allowedDomains: ["api.example.com"] },
       })
     );
   });
@@ -397,43 +349,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     expect(policyStore.resolve("test-org", "agent-1", "api.example.com")).toBeUndefined();
   });
 
-  test("skips redundant writes when the pattern set has not changed", async () => {
-    const grantSpy = spyOn(grantStore, "grant");
-    const payload = buildPayload({
-      networkConfig: { allowedDomains: ["api.example.com"] },
-      preApprovedTools: ["/mcp/gmail/tools/send_email"],
-    });
-
-    await manager.syncNetworkConfigGrants(payload);
-    const callsAfterFirst = grantSpy.mock.calls.length;
-    expect(callsAfterFirst).toBe(2);
-
-    // Second call with identical patterns — should be a no-op.
-    await manager.syncNetworkConfigGrants(payload);
-    expect(grantSpy.mock.calls.length).toBe(callsAfterFirst);
-
-    // Same patterns in a different order — still a no-op.
-    await manager.syncNetworkConfigGrants(
-      buildPayload({
-        networkConfig: { allowedDomains: ["api.example.com"] },
-        preApprovedTools: ["/mcp/gmail/tools/send_email"],
-      })
-    );
-    expect(grantSpy.mock.calls.length).toBe(callsAfterFirst);
-
-    // Adding a new pattern only grants the new one, leaves old alone.
-    await manager.syncNetworkConfigGrants(
-      buildPayload({
-        networkConfig: { allowedDomains: ["api.example.com"] },
-        preApprovedTools: [
-          "/mcp/gmail/tools/send_email",
-          "/mcp/gmail/tools/list_messages",
-        ],
-      })
-    );
-    expect(grantSpy.mock.calls.length).toBe(callsAfterFirst + 1);
-  });
-
   test("revokes patterns removed from the agent's config", async () => {
     const revokeSpy = spyOn(grantStore, "revoke");
 
@@ -442,25 +357,22 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
         networkConfig: {
           allowedDomains: ["api.example.com", ".github.com"],
         },
-        preApprovedTools: ["/mcp/gmail/tools/send_email"],
       })
     );
 
     expect(await hasGrant("api.example.com")).toBe(true);
     expect(await hasGrant(".github.com")).toBe(true);
-    expect(await hasGrant("/mcp/gmail/tools/send_email")).toBe(true);
 
-    // Shrink the set: drop the second domain and the MCP tool grant.
+    // Shrink the set: drop the second domain.
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["api.example.com"] },
       })
     );
 
-    expect(revokeSpy).toHaveBeenCalledTimes(2);
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
     expect(await hasGrant("api.example.com")).toBe(true);
     expect(await hasGrant(".github.com")).toBe(false);
-    expect(await hasGrant("/mcp/gmail/tools/send_email")).toBe(false);
   });
 
   test("domain sync writes only on drift, and repairs drift without invalidation", async () => {
@@ -488,22 +400,19 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     expect(await hasGrant("api.example.com")).toBe(true);
   });
 
-  test("revokes all grants when the config is cleared entirely", async () => {
+  test("revokes domain grants when the config is cleared entirely", async () => {
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["api.example.com"] },
-        preApprovedTools: ["/mcp/gmail/tools/send_email"],
       })
     );
 
     expect(await hasGrant("api.example.com")).toBe(true);
-    expect(await hasGrant("/mcp/gmail/tools/send_email")).toBe(true);
 
-    // Operator clears both lists.
+    // Operator clears the domain list.
     await manager.syncNetworkConfigGrants(buildPayload({}));
 
     expect(await hasGrant("api.example.com")).toBe(false);
-    expect(await hasGrant("/mcp/gmail/tools/send_email")).toBe(false);
   });
 });
 

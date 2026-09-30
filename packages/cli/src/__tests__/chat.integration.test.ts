@@ -1,16 +1,6 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { join } from "node:path";
 
-const createInterfaceMock = mock(() => ({
-  question: (_prompt: string, callback: (answer: string) => void) =>
-    callback("1"),
-  close: () => undefined,
-}));
-
-mock.module("node:readline", () => ({
-  createInterface: createInterfaceMock,
-}));
-
 let chatCommand: typeof import("../commands/chat").chatCommand;
 
 const originalFetch = globalThis.fetch;
@@ -90,13 +80,12 @@ afterEach(() => {
 });
 
 describe("chatCommand example integration", () => {
-  test("uses the hr example agent and completes approval plus login interaction flow", async () => {
+  test("uses the hr example agent and prints approval and login interactions", async () => {
     process.env.LOBU_API_TOKEN = "test-token";
 
     const stdout: string[] = [];
     const stderr: string[] = [];
     const createBodies: Array<Record<string, unknown>> = [];
-    const approvalBodies: Array<Record<string, unknown>> = [];
 
     captureTerminal({ stdout, stderr });
 
@@ -128,10 +117,9 @@ describe("chatCommand example integration", () => {
             {
               event: "tool-approval",
               data: {
-                requestId: "approval-1",
-                mcpId: "github",
-                toolName: "delete_issue",
-                args: { issue_number: 42 },
+                type: "tool-approval",
+                runId: 42,
+                action: "update",
               },
             },
             {
@@ -169,19 +157,6 @@ describe("chatCommand example integration", () => {
           return Response.json({ success: true });
         }
 
-        if (
-          url === "http://gateway.test/lobu/api/v1/agents/approve" &&
-          init?.method === "POST"
-        ) {
-          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-          approvalBodies.push(body);
-          return Response.json({
-            result: {
-              content: [{ text: "Approved tool result." }],
-            },
-          });
-        }
-
         throw new Error(`Unexpected fetch: ${url}`);
       }
     ) as unknown as typeof fetch;
@@ -197,25 +172,17 @@ describe("chatCommand example integration", () => {
         forceNew: true,
       },
     ]);
-    expect(approvalBodies).toEqual([
-      {
-        requestId: "approval-1",
-        decision: "1h",
-      },
-    ]);
 
     const stdoutText = stdout.join("");
     const stderrText = stderr.join("");
 
     expect(stdoutText).toContain("Starting request.");
-    expect(stdoutText).toContain("Approved tool result.");
-    expect(stderrText).toContain("Tool Approval Required");
-    expect(stderrText).toContain("github");
+    expect(stderrText).toContain('"event":"tool-approval"');
+    expect(stderrText).toContain('"runId":42');
     expect(stderrText).toContain('"event":"link-button"');
     expect(stderrText).toContain("Connect GitHub");
     expect(stderrText).toContain('"event":"question"');
     expect(stderrText).toContain('"event":"suggestion"');
-    expect(createInterfaceMock).toHaveBeenCalledTimes(1);
   });
 
   test("prints structured file-uploaded events in platform mode", async () => {
