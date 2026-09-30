@@ -10,6 +10,7 @@ import { deviceManifestHash } from '@lobu/connector-sdk/device-manifest-hash';
 import type { DeviceConnectorManifest } from '@lobu/connector-sdk/device-manifest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { generateSecureToken } from '../../auth/oauth/utils';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { post } from '../setup/test-helpers';
 
@@ -102,6 +103,9 @@ describe('mac computer_use action poll', () => {
 
   itWithManifest('claims a pinned action run and returns operation_key alongside action_key', async () => {
     const { orgId, workerId, deviceWorkerId } = await seedDeviceOwner();
+    await upsertEntityApprovalPolicy(orgId, {
+      resourceClass: 'connector_action', connectorKey: CONNECTOR_KEY, effects: { execute: 'auto' },
+    });
     const manifest = loadComputerUseManifest();
     const connectorManifests = [manifest];
 
@@ -120,11 +124,11 @@ describe('mac computer_use action poll', () => {
     const inserted = (await sql`
       INSERT INTO runs (
         organization_id, run_type, connection_id, connector_key, connector_version,
-        connector_artifact_hash, action_key, action_input, approval_status, status, created_at
+        connector_artifact_hash, action_key, action_input, approval_status, status, created_at, policy_principal_kind
       ) VALUES (
         ${orgId}, 'action', ${connRows[0].id}, ${CONNECTOR_KEY}, '0.1.0',
         ${deviceManifestHash(manifest as unknown as DeviceConnectorManifest)},
-        ${OPERATION_KEY}, ${sql.json({})}, 'auto', 'pending', current_timestamp
+        ${OPERATION_KEY}, ${sql.json({})}, 'auto', 'pending', current_timestamp, 'user'
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;

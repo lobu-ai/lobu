@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../index';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { createConnectorOperationRun, createSyncRun } from '../../runs/queue-service';
 import { manageOperations } from '../../tools/admin/manage_operations';
 import type { ToolContext } from '../../tools/registry';
@@ -65,6 +66,9 @@ async function seedDevice(userId: string, orgId: string, advertised: DeviceConne
 
 async function seedFixture(advertised = manifest(), selected = manifest()) {
   const { org, user, ctx } = await seedOwnerContext();
+  await upsertEntityApprovalPolicy(org.id, {
+    resourceClass: 'connector_action', connectorKey: selected.key, effects: { execute: 'auto' },
+  });
   ctx.baseUrl = 'https://gateway.test/lobu';
   const sql = getTestDb();
   await sql`
@@ -115,6 +119,7 @@ function queueOperation(fixture: Fixture, idempotencyKey?: string) {
     operationInput: {},
     approvalMode: 'device',
     createdByUserId: fixture.user.id,
+    policyPrincipalKind: 'user',
     idempotencyKey,
   });
 }

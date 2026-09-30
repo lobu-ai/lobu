@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateSecureToken } from '../../auth/oauth/utils';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { parsePgTextArray } from '../../db/client';
 import { isChromeNamespaceConnectorKey } from '../../utils/connector-execution-placement';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
@@ -184,6 +185,9 @@ async function readChromeConnectorRows(orgId: string) {
 
 /** Queue an approved os.shell action run against the device's auto-wired connection. */
 async function seedHeadlessShellRun(orgId: string, version = HEADLESS_OS_SHELL_VERSION) {
+  await upsertEntityApprovalPolicy(orgId, {
+    resourceClass: 'connector_action', connectorKey: 'os.shell', effects: { execute: 'auto' },
+  });
   const sql = getTestDb();
   const [connection] = (await sql`
     SELECT id FROM connections
@@ -196,10 +200,10 @@ async function seedHeadlessShellRun(orgId: string, version = HEADLESS_OS_SHELL_V
     INSERT INTO runs (
       organization_id, run_type, connection_id, connector_key,
       connector_version, connector_artifact_hash, action_key, action_input, approval_status, status,
-      created_at
+      created_at, policy_principal_kind
     ) VALUES (
       ${orgId}, 'action', ${connection.id}, 'os.shell', ${version}, ${deviceManifestHash(HEADLESS_OS_SHELL_MANIFEST as unknown as DeviceConnectorManifest)}, 'run',
-      ${sql.json({ command: 'hostname' })}, 'auto', 'pending', NOW()
+      ${sql.json({ command: 'hostname' })}, 'auto', 'pending', NOW(), 'user'
     )
     RETURNING id
   `) as unknown as Array<{ id: number }>;
@@ -1321,6 +1325,9 @@ describe('device connector manifests', () => {
     // device is the only correct executor here regardless.
     const sql = getTestDb();
     const { userId, orgId, workerId } = await seedDeviceOwner('macos');
+    await upsertEntityApprovalPolicy(orgId, {
+      resourceClass: 'connector_action', connectorKey: 'os.shell', effects: { execute: 'auto' },
+    });
     await sql`
       UPDATE device_workers SET capabilities = ${sql.json(['os.shell'])}
       WHERE worker_id = ${workerId}
@@ -1360,10 +1367,10 @@ describe('device connector manifests', () => {
     const [run] = (await sql`
       INSERT INTO runs (
         organization_id, run_type, connection_id, connector_key,
-        connector_version, action_key, action_input, approval_status, status, created_at
+        connector_version, action_key, action_input, approval_status, status, created_at, policy_principal_kind
       ) VALUES (
         ${orgId}, 'action', ${connection.id}, 'os.shell', '0.2.0', 'run',
-        ${sql.json({ command: 'hostname' })}, 'auto', 'pending', NOW()
+        ${sql.json({ command: 'hostname' })}, 'auto', 'pending', NOW(), 'user'
       )
       RETURNING id
     `) as unknown as Array<{ id: number }>;

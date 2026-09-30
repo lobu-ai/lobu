@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type BrowserContext } from "playwright-vanilla";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { generateSecureToken, hashToken } from "../../auth/oauth/utils";
+import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { createConnectorOperationRun } from "../../runs/queue-service";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import { createTestConnection, seedOwnerContext } from "../setup/test-fixtures";
@@ -30,6 +31,9 @@ afterEach(cleanupTestDatabase);
 it("persists a pinned browser flow end to end and rejects sibling ownership", async () => {
 	const sql = getTestDb();
 	const { org, user } = await seedOwnerContext();
+	await upsertEntityApprovalPolicy(org.id, {
+		resourceClass: "connector_action", connectorKey: "chrome", effects: { execute: "auto" },
+	});
 	// Device connections auto-wire only in their owner's personal org, which is
 	// where a real paired browser lands.
 	await sql`UPDATE organization SET metadata = ${sql.json({ personal_org_for_user_id: user.id })} WHERE id = ${org.id}`;
@@ -168,6 +172,7 @@ it("persists a pinned browser flow end to end and rejects sibling ownership", as
 				operationInput,
 				approvalMode: "device",
 				createdByUserId: user.id,
+				policyPrincipalKind: "user",
 				sdkBrowserContext: { ...context, flow_id: flowId },
 			});
 			return until(async () => {

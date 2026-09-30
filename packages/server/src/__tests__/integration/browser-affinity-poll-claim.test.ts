@@ -14,6 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { generateSecureToken } from '../../auth/oauth/utils';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestConnectorDefinition } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -113,11 +114,30 @@ async function seedPendingAction(opts: {
   parentRunId?: number | null;
 }): Promise<number> {
   const sql = getTestDb();
+  const [definition] = await sql`
+    SELECT key FROM connector_definitions
+    WHERE organization_id = ${opts.orgId} AND key = ${opts.connectorKey}
+  `;
+  if (!definition) {
+    await createTestConnectorDefinition({
+      key: opts.connectorKey, name: 'Browser action fixture', organization_id: opts.orgId,
+    });
+  }
+  await sql`
+    UPDATE connector_definitions
+    SET actions_schema = COALESCE(actions_schema, '{}'::jsonb) || ${sql.json({
+      open_tab: { name: 'Open tab', kind: 'write' },
+    })}
+    WHERE organization_id = ${opts.orgId} AND key = ${opts.connectorKey}
+  `;
+  await upsertEntityApprovalPolicy(opts.orgId, {
+    resourceClass: 'connector_action', connectorKey: opts.connectorKey, effects: { execute: 'auto' },
+  });
   const [row] = (await sql`
     INSERT INTO runs (
       organization_id, run_type, connection_id, connector_key, connector_version,
       action_key, action_input, approved_input, run_metadata,
-      approval_status, status, created_at, expires_at, parent_run_id
+      approval_status, status, created_at, expires_at, parent_run_id, policy_principal_kind
     ) VALUES (
       ${opts.orgId}, 'action', ${opts.connectionId}, ${opts.connectorKey},
       ${opts.connectorVersion ?? null},
@@ -128,7 +148,7 @@ async function seedPendingAction(opts: {
       ${opts.expiresAtAgoSeconds == null
         ? null
         : sql`current_timestamp - make_interval(secs => ${opts.expiresAtAgoSeconds})`},
-      ${opts.parentRunId ?? null}
+      ${opts.parentRunId ?? null}, 'user'
     )
     RETURNING id
   `) as unknown as Array<{ id: number }>;

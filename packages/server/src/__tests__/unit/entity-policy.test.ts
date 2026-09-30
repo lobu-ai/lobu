@@ -13,8 +13,6 @@ type PolicyRowSeed = {
 	resource_class?: string;
 	principal_kind?: string | null;
 	principal_id?: string | null;
-	/** connector_action per-operation scope; null = the blanket execute row. */
-	operation_key?: string | null;
 	/** agent_config exception target; null = any target. */
 	target_agent_id?: string | null;
 	entity_type_slug?: string | null;
@@ -23,22 +21,15 @@ type PolicyRowSeed = {
 	create_mode?: string;
 	update_mode?: string;
 	delete_mode?: string;
-	/** Explicit action→effect child rows; if omitted they're derived from the
-	 * create/update/delete modes (entity/agent_config) or from create_mode as the
-	 * single `execute` effect (connector_action) — mirroring the migration backfill. */
+	/** Explicit action→effect child rows; otherwise derive entity/agent_config effects. */
 	effects?: Array<{ action: string; effect: string }>;
 };
 
 const ORG = "org-1";
 
-/** Derive the child action-effect rows a seed implies, matching the migration
- * backfill: connector_action → one `execute` from create_mode; other classes →
- * create/update/delete from their mode fields. */
+/** Derive entity/agent_config child action-effect rows from the fixture modes. */
 function seedEffectRows(seed: PolicyRowSeed): Array<{ action: string; effect: string }> {
 	if (seed.effects) return seed.effects;
-	if (seed.resource_class === "connector_action") {
-		return [{ action: "execute", effect: seed.create_mode ?? "auto" }];
-	}
 	return [
 		{ action: "create", effect: seed.create_mode ?? "auto" },
 		{ action: "update", effect: seed.update_mode ?? "auto" },
@@ -60,7 +51,10 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 		resource_class: seed.resource_class ?? "entity",
 		principal_kind: seed.principal_kind ?? null,
 		principal_id: seed.principal_id ?? null,
-		operation_key: seed.operation_key ?? null,
+		operation_key: null,
+		connector_key: null,
+		connection_id: null,
+		operation_category: null,
 		target_agent_id: seed.target_agent_id ?? null,
 		entity_type_slug: seed.entity_type_slug ?? null,
 		field_path: seed.field_path ?? null,
@@ -90,7 +84,7 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 			return Promise.resolve(childRows.filter((r) => ids.has(Number(r.policy_id))));
 		}
 		// Param order mirrors loadCandidatePolicies' WHERE: org, resourceClass,
-		// principalKind, principalId, ownerAgentId×2, operationKey, targetAgentId,
+		// principalKind, principalId, ownerAgentId×2, targetAgentId,
 		// entityTypeSlug, entityId.
 		const [
 			org,
@@ -99,14 +93,12 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 			principalId,
 			ownerAgentId,
 			,
-			operationKey,
 			targetAgentId,
 			entityTypeSlug,
 			entityId,
 		] = params as [
 			string,
 			string,
-			string | null,
 			string | null,
 			string | null,
 			string | null,
@@ -128,8 +120,6 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 							row.principal_kind === "agent" &&
 							(row.principal_id === null ||
 								row.principal_id === ownerAgentId))) &&
-					(row.operation_key === null ||
-						row.operation_key === operationKey) &&
 					(row.target_agent_id === null ||
 						row.target_agent_id === targetAgentId) &&
 					(row.entity_type_slug === null ||
@@ -496,65 +486,6 @@ describe("resolveWritePolicyDecision (agent_config)", () => {
 				sql: stubSql([{ resource_class: "entity", update_mode: "auto" }]),
 			}),
 		).toBe("require_approval");
-	});
-});
-
-describe("resolveWritePolicyDecision (connector_action)", () => {
-	test("no policy row → auto, so the connection mode alone governs", async () => {
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: ORG,
-				resourceClass: "connector_action",
-				principalKind: "agent",
-				action: "execute",
-				sql: stubSql([]),
-			}),
-		).toBe("allow");
-	});
-
-	test("an org policy can force connector-action approval or deny", async () => {
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: ORG,
-				resourceClass: "connector_action",
-				principalKind: "agent",
-				action: "execute",
-				sql: stubSql([
-					{ resource_class: "connector_action", create_mode: "approval" },
-				]),
-			}),
-		).toBe("require_approval");
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: ORG,
-				resourceClass: "connector_action",
-				principalKind: "automation",
-				principalId: "automation:9",
-				action: "execute",
-				sql: stubSql([
-					{
-						resource_class: "connector_action",
-						principal_kind: "automation",
-						principal_id: "automation:9",
-						create_mode: "deny",
-					},
-				]),
-			}),
-		).toBe("deny");
-	});
-
-	test("a human applies connector actions immediately regardless of policy", async () => {
-		expect(
-			await resolveWritePolicyDecision({
-				organizationId: ORG,
-				resourceClass: "connector_action",
-				principalKind: "user",
-				action: "execute",
-				sql: stubSql([
-					{ resource_class: "connector_action", create_mode: "deny" },
-				]),
-			}),
-		).toBe("allow");
 	});
 });
 

@@ -12,6 +12,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { generateSecureToken } from '../../auth/oauth/utils';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { createConnectorOperationRun } from '../../runs/queue-service';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { post } from '../setup/test-helpers';
@@ -97,7 +98,10 @@ async function shellConnection(orgId: string) {
   return rows[0];
 }
 
-function queueShellRun(orgId: string, connectionId: number) {
+async function queueShellRun(orgId: string, connectionId: number) {
+  await upsertEntityApprovalPolicy(orgId, {
+    resourceClass: 'connector_action', connectorKey: 'os.shell', effects: { execute: 'auto' },
+  });
   return createConnectorOperationRun({
     organizationId: orgId,
     connectionId,
@@ -105,6 +109,7 @@ function queueShellRun(orgId: string, connectionId: number) {
     operationKey: 'run',
     operationInput: { command: 'hostname' },
     approvalMode: 'device',
+    policyPrincipalKind: 'user',
     requireCompiledCode: true,
   });
 }
@@ -174,7 +179,7 @@ describe('device-pinned artifact selection', () => {
     const queued = await createConnectorOperationRun({
       organizationId: orgId, connectionId: Number(connection.id),
       connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
-      approvalMode: 'queued', createdByUserId: userId,
+      approvalMode: 'queued', createdByUserId: userId, policyPrincipalKind: 'user',
     });
     expect((await runRow(queued.runId)).connector_artifact_hash).toBe(
       deviceManifestHash(OS_SHELL_MANIFEST as unknown as DeviceConnectorManifest),
@@ -193,7 +198,7 @@ describe('device-pinned artifact selection', () => {
     const queued = await createConnectorOperationRun({
       organizationId: orgId, connectionId: Number(connection.id),
       connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
-      approvalMode: 'queued', createdByUserId: userId,
+      approvalMode: 'queued', createdByUserId: userId, policyPrincipalKind: 'user',
     });
     await insertEvent({
       entityIds: [], organizationId: orgId, originId: `run_${queued.runId}_pending`,
@@ -304,7 +309,7 @@ describe('device-pinned artifact selection', () => {
     const queued = await createConnectorOperationRun({
       organizationId: orgId, connectionId: Number(connection.id),
       connectorKey: 'os.shell', operationKey: 'run', operationInput: { command: 'hostname' },
-      approvalMode: 'queued', createdByUserId: userId,
+      approvalMode: 'queued', createdByUserId: userId, policyPrincipalKind: 'user',
     });
     await insertEvent({
       entityIds: [], organizationId: orgId, originId: `run_${queued.runId}_pending`,
