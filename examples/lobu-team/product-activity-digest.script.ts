@@ -3,6 +3,7 @@ import type {
   ReactionClient,
   AutomationScriptContext,
 } from "@lobu/connector-sdk";
+import type { LokiActivityResult } from "./loki-activity.connector.ts";
 
 const PRODUCT_ACTIVITY_CONNECTION = "lobu-product-activity-db";
 const LOG_ACTIVITY_CONNECTION = "lobu-production-logs";
@@ -109,23 +110,12 @@ interface ActivityRow {
   _id?: number | null;
 }
 
-interface LogActivity {
-  errors?: number;
-  warnings?: number;
-  error_samples?: string[];
-  warning_samples?: string[];
-}
-
-export interface ProductActivityDigest {
+export interface ProductActivityDigest extends LokiActivityResult {
   signups: string[];
   logins: string[];
   connections: string[];
   mcp_conversations: string[];
   tool_failures: string[];
-  errors: number;
-  warnings: number;
-  error_samples: string[];
-  warning_samples: string[];
   logs_url: string | null;
 }
 
@@ -141,6 +131,9 @@ export function collectProductActivityDigest(
     tool_failures: [],
     errors: 0,
     warnings: 0,
+    http_client_errors: 0,
+    http_server_errors: 0,
+    http_samples: [],
     error_samples: [],
     warning_samples: [],
     logs_url: null,
@@ -169,9 +162,12 @@ export function collectProductActivityDigest(
     }
 
     if (row.connection_slug === LOG_ACTIVITY_CONNECTION) {
-      const activity = record(row.metadata) as unknown as LogActivity;
+      const activity = record(row.metadata) as Partial<LokiActivityResult>;
       digest.errors += finiteCount(activity.errors);
       digest.warnings += finiteCount(activity.warnings);
+      digest.http_client_errors += finiteCount(activity.http_client_errors);
+      digest.http_server_errors += finiteCount(activity.http_server_errors);
+      digest.http_samples.push(...stringArray(activity.http_samples));
       digest.error_samples.push(...stringArray(activity.error_samples));
       digest.warning_samples.push(...stringArray(activity.warning_samples));
       if (row.source_url) digest.logs_url = row.source_url;
@@ -180,6 +176,7 @@ export function collectProductActivityDigest(
 
   digest.error_samples = [...new Set(digest.error_samples)];
   digest.warning_samples = [...new Set(digest.warning_samples)];
+  digest.http_samples = [...new Set(digest.http_samples)];
   return digest;
 }
 
@@ -191,7 +188,9 @@ export function hasProductActivity(digest: ProductActivityDigest): boolean {
     digest.mcp_conversations.length > 0 ||
     digest.tool_failures.length > 0 ||
     digest.errors > 0 ||
-    digest.warnings > 0
+    digest.warnings > 0 ||
+    digest.http_client_errors > 0 ||
+    digest.http_server_errors > 0
   );
 }
 
@@ -216,6 +215,12 @@ export function buildProductActivityCard(
           productCount(digest.mcp_conversations.length)
         ),
         field("Errors / warnings", logCounts(digest, coverage)),
+        field(
+          "HTTP 4xx / 5xx",
+          coverage.logs
+            ? `${digest.http_client_errors} / ${digest.http_server_errors}`
+            : `${digest.http_client_errors} / ${digest.http_server_errors} observed — coverage incomplete`
+        ),
         field("Failed tool calls", productCount(digest.tool_failures.length)),
       ],
     },
@@ -238,6 +243,11 @@ export function buildProductActivityCard(
     digest.tool_failures.slice(-10).map(safe)
   );
   appendSection(children, "Recent warnings", digest.warning_samples.map(safe));
+  appendSection(
+    children,
+    "Recent HTTP failures",
+    digest.http_samples.slice(-10).map(safe)
+  );
   if (digest.logs_url) {
     children.push({
       type: "actions",
@@ -349,7 +359,8 @@ function summaryBody(
     `${digest.tool_failures.length} failed tool calls · ` +
     (coverage.logs
       ? `${digest.errors} errors · ${digest.warnings} warnings`
-      : `Errors / warnings: ${logCounts(digest, coverage)}`)
+      : `Errors / warnings: ${logCounts(digest, coverage)}`) +
+    ` · ${digest.http_client_errors} HTTP 4xx · ${digest.http_server_errors} HTTP 5xx${coverage.logs ? "" : " observed — coverage incomplete"}`
   );
 }
 

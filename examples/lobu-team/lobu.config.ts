@@ -372,7 +372,7 @@ const productActivityDb = defineConnection({
               'MCP activity'::text,
               concat_ws(
                 ' · ',
-                coalesce(m.client_software_id, 'Unknown client'),
+                coalesce(nullif(m.client_software_id, ''), nullif(client.client_name, ''), 'Unknown client'),
                 coalesce(nullif(u.name, ''), 'Unknown user'),
                 u.email,
                 coalesce(o.name, 'Account activity'),
@@ -380,6 +380,7 @@ const productActivityDb = defineConnection({
                 m.call_count || ' total calls'
               )
             FROM mcp_client_conversations m
+            LEFT JOIN oauth_clients client ON client.id = m.client_id
             LEFT JOIN organization o ON o.id = m.organization_id
             JOIN "user" u ON u.id = m.user_id
             WHERE m.call_count > 0

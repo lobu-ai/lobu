@@ -436,7 +436,7 @@ function buildAvailableOperation(args: {
 	hideBlocked: boolean;
 }): AvailableOperation & Record<string, unknown> {
 	const { operation, internalTargets, includeInputSchema, viewUrl, callerMax, callerLacksMembership } = args;
-	const { backend_config: _privateBackendConfig, ...publicOperation } =
+	const { backend_config: _privateBackendConfig, discovery_connection_ids: _discoveryConnections, ...publicOperation } =
 		operation;
 	const requiredScopes = operation.required_scopes ?? [];
 	const targets = internalTargets.filter((target) => !args.hideBlocked || args.policyFor(operation, target.connection_id).effect !== "deny").map((target): ExecutionTarget => {
@@ -557,12 +557,9 @@ function buildAvailableOperation(args: {
 async function loadVisibleOperationTargets(
 	args: Static<typeof ListAvailableAction>,
 	ctx: ToolContext,
+	visibilityUserId: string | null,
 ): Promise<OperationTargetRow[]> {
 	const sql = getDb();
-	const visibilityUserId = await resolveAutomationConnectionVisibilityUserId(
-		ctx,
-		sql,
-	);
 	const visibility = compileConnectionRowVisibility(
 		{
 			...authzScopeFromToolContext(ctx),
@@ -643,7 +640,8 @@ export async function handleListAvailable(
 	args: Static<typeof ListAvailableAction>,
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
-	const targetRows = await loadVisibleOperationTargets(args, ctx);
+	const visibilityUserId = await resolveAutomationConnectionVisibilityUserId(ctx, getDb());
+	const targetRows = await loadVisibleOperationTargets(args, ctx, visibilityUserId);
 
 	// An explicit connection filter is also an authorization lookup. Fail with
 	// execute's exact not-found error instead of a silent empty list: `[]` is
@@ -662,6 +660,7 @@ export async function handleListAvailable(
 				: await loadVisibleOperationTargets(
 						{ ...args, connector_key: undefined, entity_id: undefined },
 						ctx,
+						visibilityUserId,
 					);
 		if (bareRows.length === 0) {
 			return { error: "Connection not found or not visible." };
@@ -704,6 +703,7 @@ export async function handleListAvailable(
 			: args.connector_key;
   const full = await listOperations({
     organizationId: ctx.organizationId,
+		discoveryUserId: visibilityUserId,
 		connectorKey: catalogConnectorKey,
 		connectionId: args.connection_id,
     entityId: args.entity_id,
@@ -719,10 +719,14 @@ export async function handleListAvailable(
 	const policies = await listEntityApprovalPolicies(ctx.organizationId, "connector_action");
 	const policyFor = (operation: OperationDescriptor, connectionId: number | null) =>
 		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies });
+	const operationTargets = (operation: OperationDescriptor) =>
+		(targetsByConnector.get(operation.connector_key) ?? []).filter((target) =>
+			operation.discovery_connection_ids === undefined || operation.discovery_connection_ids.includes(target.connection_id),
+		);
 	const hideBlocked = actor.kind !== "user";
 	const policyVisible = full.operations.filter((operation) => {
 		if (!hideBlocked) return true;
-		const targets = targetsByConnector.get(operation.connector_key) ?? [];
+		const targets = operationTargets(operation);
 		return targets.length
 			? targets.some((target) => policyFor(operation, target.connection_id).effect !== "deny")
 			: policyFor(operation, null).effect !== "deny";
@@ -754,7 +758,7 @@ export async function handleListAvailable(
 		.map((operation) =>
 			buildAvailableOperation({
 				operation,
-				internalTargets: targetsByConnector.get(operation.connector_key) ?? [],
+				internalTargets: operationTargets(operation),
 				includeInputSchema: args.include_input_schema !== false,
 				viewUrl: connectorViewUrl(operation.connector_key),
 				connectionAuthUrl: (id) => ownerSlug && baseUrl

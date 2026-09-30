@@ -1017,7 +1017,7 @@ export type ManageEntityData = {
          */
         slug?: string;
         /**
-         * [create/update/list] Parent entity ID (for hierarchical entities). On list, only that parent's children.
+         * [create/update] Parent entity ID (for hierarchical entities).
          */
         parent_id?: number;
         /**
@@ -1086,7 +1086,7 @@ export type ManageEntityData = {
          */
         slug?: string;
         /**
-         * [create/update/list] Parent entity ID (for hierarchical entities). On list, only that parent's children.
+         * [create/update] Parent entity ID (for hierarchical entities).
          */
         parent_id?: number;
         /**
@@ -1151,9 +1151,9 @@ export type ManageEntityData = {
          */
         entity_type?: string;
         /**
-         * [create/update/list] Parent entity ID (for hierarchical entities). On list, only that parent's children.
+         * [list] Parent filter: omit for all entities, null for roots, or an ID for that parent's children.
          */
-        parent_id?: number;
+        parent_id?: number | null;
         /**
          * [list] Search by name
          */

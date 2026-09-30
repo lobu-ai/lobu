@@ -60,7 +60,7 @@ function createConsoleLogger(serviceName: string): Logger {
   const currentLevel = levels[level] ?? 2;
 
   const formatMessage = (lvl: string, message: any, ...args: any[]): string => {
-    const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const timestamp = new Date().toISOString();
     let msgStr: string;
 
     // Handle pino-style format: logger.info({ key: value }, "message")
@@ -84,12 +84,24 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr = String(message);
     }
 
+    if (USE_JSON_FORMAT) {
+      return safeStringify({
+        timestamp,
+        level: lvl,
+        service: serviceName,
+        message: msgStr,
+        ...(args.length > 0
+          ? { data: args.length === 1 ? args[0] : args }
+          : {}),
+      });
+    }
+
     // Append remaining args
     if (args.length > 0) {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp}] [${lvl}] [${serviceName}] ${msgStr}`;
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}`;
   };
 
   return {

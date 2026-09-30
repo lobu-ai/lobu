@@ -271,17 +271,10 @@ export async function handleListConnectorGroups(
 
   const rows = await query;
   const connectorKeys = [...new Set(rows.map((r) => String(r.connector_key)))];
-  const connectionIdByKey = new Map<string, number>();
-  for (const row of rows) {
-    const connectorKey = String(row.connector_key);
-    if (connectionIdByKey.has(connectorKey)) continue;
-    const firstConnection = mapConnectorGroupSummaries(row.connections)[0];
-    if (firstConnection) connectionIdByKey.set(connectorKey, firstConnection.id);
-  }
 	const opsSummaries = await getOperationsSummaryBatch(
 		organizationId,
 		connectorKeys,
-		connectionIdByKey,
+		ctx.userId,
 	);
 
   const groups = rows.map((row) => {

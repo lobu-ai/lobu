@@ -3,8 +3,10 @@ import type { Env } from '../index';
 import { getDb, pgBigintArray } from '../db/client';
 import { AUTOMATION_SCRIPT_TASK } from '../scheduled/task-definitions';
 import { classifyRunOutcome } from '../runs/run-outcome';
+import logger from '../utils/logger';
 import { advanceAutomationArrivalMark } from '../utils/window-utils';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from './schedule-cursor';
+import { startDueAutomationWindow } from './automation';
 import { executeAutomationScript } from './reaction-executor';
 import { reactionErrorIsNonTransient } from './reaction-task';
 import { markAutomationRunFailed } from './run-completion';
@@ -109,7 +111,7 @@ export async function runAutomationScriptTask(
     }
     throw new Error(error ?? 'Automation script failed');
   }
-  await sql.begin(async (tx) => {
+  const backlogDue = await sql.begin(async (tx) => {
     // Match completeWindow's Automation-before-run lock order and pin the
     // optional reaction decision to the same transaction as completion.
     const [automation] = await tx`
@@ -128,7 +130,8 @@ export async function runAutomationScriptTask(
         AND run_metadata->>'executor_task_run_id' = ${String(taskRunId)}
       RETURNING id
     `;
-    if (!completed) return;
+    if (!completed) return false;
+    let expedited = false;
     if (input.dispatch_source !== 'event') {
       const markMoved = await advanceAutomationArrivalMark(
         tx,
@@ -143,10 +146,12 @@ export async function runAutomationScriptTask(
       // Resume actual backlog progress promptly, but preserve a later retry
       // boundary and leave historical replays on the normal cadence.
       if (markMoved && input.window_truncated === true && nextTick) {
-        await tx`
+        const due = await tx`
           UPDATE automations SET next_run_at = current_timestamp
           WHERE id = ${payload.automationId} AND next_run_at <= ${nextTick}::timestamptz
+          RETURNING id
         `;
+        expedited = due.length > 0;
       }
     }
     if (automation?.reaction_script_compiled) {
@@ -156,5 +161,19 @@ export async function runAutomationScriptTask(
         String(automation.reaction_script_compiled)
       );
     }
+    return expedited;
   });
+  // A backlog drains one window per scheduler tick otherwise, so start the
+  // next window now. The window is committed; a failure here only leaves it
+  // to the next tick.
+  if (backlogDue) {
+    try {
+      await startDueAutomationWindow(env, payload.automationId, sql);
+    } catch (error) {
+      logger.warn(
+        { error, automationId: payload.automationId },
+        '[automation] Next backlog window left to the scheduler tick'
+      );
+    }
+  }
 }

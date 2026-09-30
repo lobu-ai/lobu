@@ -206,6 +206,9 @@ describe("Lobu Team Loki activity connector", () => {
     expect(result).toEqual({
       errors: 2,
       warnings: 1,
+      http_client_errors: 0,
+      http_server_errors: 0,
+      http_samples: [],
       error_samples: ["[lobu-server-1] DB pool failed"],
       warning_samples: ["[lobu-worker-1] retrying run"],
     });
@@ -234,9 +237,160 @@ describe("Lobu Team Loki activity connector", () => {
     expect(result).toEqual({
       errors: 0,
       warnings: 0,
+      http_client_errors: 0,
+      http_server_errors: 0,
+      http_samples: [],
       error_samples: [],
       warning_samples: [],
     });
     expect(calls).toBe(1);
+  });
+  it("reports info-level HTTP failures separately and keeps severity samples", async () => {
+    const urls: URL[] = [];
+    const responses = [
+      {
+        status: "success",
+        data: {
+          resultType: "vector",
+          result: [
+            { metric: { level: "error" }, value: [0, "2"] },
+            { metric: { level: "info", res_status: "400" }, value: [0, "60"] },
+            { metric: { level: "info", res_status: "500" }, value: [0, "1"] },
+          ],
+        },
+      },
+      {
+        status: "success",
+        data: {
+          resultType: "streams",
+          result: [
+            {
+              stream: { pod: "server" },
+              values: [
+                [
+                  "1",
+                  JSON.stringify({
+                    level: "error",
+                    msg: "Database unavailable",
+                  }),
+                ],
+              ],
+            },
+          ],
+        },
+      },
+      {
+        status: "success",
+        data: {
+          resultType: "streams",
+          result: [
+            {
+              stream: { pod: "server" },
+              values: [
+                [
+                  "2",
+                  JSON.stringify({
+                    level: "info",
+                    msg: "Request completed",
+                    req: {
+                      method: "POST",
+                      url: "/api/synthetic/entities?token=secret-query",
+                      headers: { authorization: "secret-header" },
+                    },
+                    res: { status: 400 },
+                  }),
+                ],
+                [
+                  "3",
+                  JSON.stringify({
+                    level: "info",
+                    msg: "Request completed",
+                    req: { method: "GET", url: "/health" },
+                    res: { status: 500 },
+                  }),
+                ],
+              ],
+            },
+          ],
+        },
+      },
+    ];
+    const result = await queryLokiActivity(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      {
+        start: new Date("2026-08-13T12:00:00.000Z"),
+        end: new Date("2026-08-13T12:20:00.000Z"),
+      },
+      async (input) => {
+        urls.push(new URL(String(input)));
+        return Response.json(responses.shift());
+      }
+    );
+    expect(result).toMatchObject({
+      errors: 2,
+      warnings: 0,
+      http_client_errors: 60,
+      http_server_errors: 1,
+      error_samples: ["[server] Database unavailable"],
+      http_samples: [
+        "[server] HTTP 400 POST /api/synthetic/entities",
+        "[server] HTTP 500 GET /health",
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(urls).toHaveLength(3);
+    const query = urls[0]!.searchParams.get("query")!;
+    expect(query).toContain('res_status=~"[45][0-9][0-9]"');
+    expect(query).toContain(
+      'res_status!~"401|404" or req_headers_authorization!="" or req_headers_cookie!=""'
+    );
+  });
+  it("keeps a warning-level anonymous auth probe out of HTTP samples", async () => {
+    const responses = [
+      {
+        status: "success",
+        data: {
+          resultType: "vector",
+          result: [{ metric: { level: "warn" }, value: [0, "1"] }],
+        },
+      },
+      {
+        status: "success",
+        data: {
+          resultType: "streams",
+          result: [
+            {
+              stream: { pod: "server" },
+              values: [
+                [
+                  "1",
+                  JSON.stringify({
+                    level: "warn",
+                    req: { method: "POST", url: "/mcp?token=secret" },
+                    res: { status: 401 },
+                  }),
+                ],
+              ],
+            },
+          ],
+        },
+      },
+    ];
+    const result = await queryLokiActivity(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      {
+        start: new Date("2026-08-13T12:00:00.000Z"),
+        end: new Date("2026-08-13T12:20:00.000Z"),
+      },
+      async () => Response.json(responses.shift())
+    );
+    expect(result).toMatchObject({
+      warnings: 1,
+      http_client_errors: 0,
+      http_server_errors: 0,
+      warning_samples: ["[server] HTTP 401 POST /mcp"],
+      http_samples: [],
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
   });
 });

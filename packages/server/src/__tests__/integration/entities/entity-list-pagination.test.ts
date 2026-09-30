@@ -16,10 +16,12 @@ import {
   createTestEntity,
   createTestEvent,
   createTestOrganization,
+  createTestSession,
   createTestUser,
 } from '../../setup/test-fixtures';
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase } from '../../setup/test-db';
+import { post } from '../../setup/test-helpers';
 
 interface ListedEntity {
   id: number;
@@ -190,5 +192,74 @@ describe('stored entity list pagination + sort (two-stage page fetch)', () => {
     expect(res.metadata?.total_count).toBe(1);
     expect(res.metadata?.has_more).toBe(false);
     expect(res.entities?.map((e) => e.name)).toEqual(['alpha']);
+  });
+});
+
+describe('entity list parent filter over HTTP', () => {
+  let orgSlug: string;
+  let cookie: string;
+  let parentId: number;
+  let foreignParentId: number;
+
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    const org = await createTestOrganization();
+    orgSlug = org.slug;
+    const user = await createTestUser();
+    await addUserToOrganization(user.id, org.id, 'owner');
+    cookie = (await createTestSession(user.id)).cookieHeader;
+    const create = (name: string, parent_id?: number) => createTestEntity({
+      name, parent_id, organization_id: org.id, entity_type: 'synthetic-task',
+    });
+    parentId = (await create('root-a')).id;
+    await create('root-b');
+    await create('child-a', parentId);
+    await create('child-b', parentId);
+    const foreign = await createTestOrganization();
+    foreignParentId = (await createTestEntity({
+      name: 'foreign-root', organization_id: foreign.id, entity_type: 'synthetic-task',
+    })).id;
+    await createTestEntity({
+      name: 'foreign-child', parent_id: foreignParentId,
+      organization_id: foreign.id, entity_type: 'synthetic-task',
+    });
+  });
+
+  afterAll(cleanupTestDatabase);
+
+  async function list(filter: Record<string, unknown> = {}): Promise<ListResult> {
+    const response = await post(`/api/${orgSlug}/manage_entity`, {
+      cookie,
+      body: { action: 'list', entity_type: 'synthetic-task', sort_by: 'name', sort_order: 'asc', ...filter },
+    });
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+
+  it('omits the parent filter to include roots and children', async () => {
+    const result = await list();
+    expect(result.metadata?.total_count).toBe(4);
+    expect(result.entities?.map((entity) => entity.name)).toEqual(['child-a', 'child-b', 'root-a', 'root-b']);
+  });
+
+  it('accepts the UI root-count query and paginates only roots', async () => {
+    const first = await list({ parent_id: null, limit: 1, offset: 0 });
+    expect(first.metadata).toMatchObject({ total_count: 2, has_more: true });
+    expect(first.entities?.map((entity) => entity.name)).toEqual(['root-a']);
+    const second = await list({ parent_id: null, limit: 1, offset: 1 });
+    expect(second.metadata).toMatchObject({ total_count: 2, has_more: false });
+    expect(second.entities?.map((entity) => entity.name)).toEqual(['root-b']);
+    const computedSort = await list({ parent_id: null, sort_by: 'total_content' });
+    expect(computedSort.metadata?.total_count).toBe(2);
+    expect(new Set(computedSort.entities?.map((entity) => entity.name))).toEqual(new Set(['root-a', 'root-b']));
+  });
+
+  it('returns only the requested parent children and never another tenant', async () => {
+    const children = await list({ parent_id: parentId });
+    expect(children.metadata?.total_count).toBe(2);
+    expect(children.entities?.map((entity) => entity.name)).toEqual(['child-a', 'child-b']);
+    const foreign = await list({ parent_id: foreignParentId });
+    expect(foreign.metadata?.total_count).toBe(0);
+    expect(foreign.entities).toEqual([]);
   });
 });

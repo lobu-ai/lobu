@@ -1263,7 +1263,7 @@ app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
     ) t
     ORDER BY name ASC
   `;
-	const catalog = await permissionPolicyCatalog(organizationId);
+	const catalog = await permissionPolicyCatalog(organizationId, c.get("user")?.id ?? null);
 	// Agents in this org (for agent_config target exceptions). Exclude the agent
 	// whose envelope we're editing so self-target rows aren't offered by default.
 	const agentRows = await getDb()<{ id: string; name: string }>`
@@ -1324,7 +1324,7 @@ app.get("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
     ) t
     ORDER BY name ASC
   `;
-	const catalog = await permissionPolicyCatalog(organizationId);
+	const catalog = await permissionPolicyCatalog(organizationId, c.get("user")?.id ?? null);
 	const agentRows = await getDb()<{ id: string; name: string }>`
     SELECT id, name FROM agents
     WHERE organization_id = ${organizationId}

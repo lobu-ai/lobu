@@ -1,4 +1,6 @@
 import type { GuardrailStage } from "@lobu/core";
+import { resolveAutomationConnectionVisibilityUserId } from "../authz/automation-connection-visibility";
+import { getDb } from "../db/client";
 import { resolveAutomationEventCatalog } from "../automations/connector-derived";
 import { withPlatformAutomationEvents } from "../automations/platform-event-catalog";
 import { getModelProviderModules } from "../gateway/modules/module-system";
@@ -97,7 +99,7 @@ export async function listOrgInstalled(
 	kinds: OrgInstalledKind[],
 	ctx: Pick<
 		ToolContext,
-		"organizationId" | "userId" | "memberRole" | "isAuthenticated"
+		"organizationId" | "userId" | "memberRole" | "isAuthenticated" | "actingAutomationId"
 	>,
 	options: ListInstalledOptions = {}
 ): Promise<InstalledListResponse["installed"]> {
@@ -108,7 +110,8 @@ export async function listOrgInstalled(
 		const rows = await listScopedConnectorDefinitions({ organizationId });
 		const summaries = await getOperationsSummaryBatch(
 			organizationId,
-			rows.map((row) => row.key)
+			rows.map((row) => row.key),
+			await resolveAutomationConnectionVisibilityUserId(ctx, getDb()),
 		);
 		// Bundled immutable catalog, for the persisted > bundled > derived
 		// automation-event precedence shared with trigger validation. Loaded once

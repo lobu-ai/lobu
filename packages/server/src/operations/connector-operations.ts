@@ -1,4 +1,6 @@
-import { type DbClient, getDb } from "../db/client";
+import { isDeepStrictEqual } from "node:util";
+import { type DbClient, getDb, pgTextArray } from "../db/client";
+import { compileConnectionRowVisibility } from "../authz/connection-visibility";
 import { fetchPublicUrl } from "@lobu/connector-worker/egress";
 import { discoverTools } from "../mcp-proxy/client";
 import type { DiscoveredTool, McpProxyConfig } from "../mcp-proxy/types";
@@ -9,6 +11,7 @@ import {
 	readResponseTextWithLimit,
 } from "../utils/bounded-response";
 import logger from "../utils/logger";
+import { normalizeConnectorAuthSchema } from "../utils/connector-auth";
 import type {
 	AvailableOperation,
 	OperationAnnotations,
@@ -20,6 +23,7 @@ type ConnectorRow = {
 	name: string;
 	actions_schema: Record<string, any> | null;
 	mcp_config: Record<string, unknown> | null;
+	auth_schema?: Record<string, unknown> | null;
 	openapi_config: Record<string, unknown> | null;
 	// #2033 item 2: NULL (legacy) is treated as supported; only an explicit
 	// `false` marks local_action ops unsupported.
@@ -434,6 +438,7 @@ async function getMcpOperations(
 		connectionId,
 	);
 	return tools.map((tool) => ({
+		...(connectionId === undefined ? {} : { discovery_connection_ids: [connectionId] }),
 		connector_key: connectorKey,
 		connector_name: connectorName,
 		operation_key: tool.originalName,
@@ -501,28 +506,50 @@ function dedupeOperations(
 		mcp_tool: 1,
 		http_operation: 2,
 	};
-	const byKey = new Map<string, OperationDescriptor>();
+	const byKey = new Map<string, OperationDescriptor[]>();
 	for (const operation of operations) {
 		const existing = byKey.get(operation.operation_key);
-		if (!existing || priority[operation.backend] < priority[existing.backend]) {
-			byKey.set(operation.operation_key, operation);
+		if (!existing || priority[operation.backend] < priority[existing[0].backend]) {
+			byKey.set(operation.operation_key, [operation]);
+		} else if (operation.backend === "mcp_tool" && existing[0].backend === "mcp_tool") {
+			// A tool name is account-scoped. Merge identical descriptions/schemas,
+			// but never advertise one account's schema for another account's target.
+			const { discovery_connection_ids, ...descriptor } = operation;
+			const matching = existing.find(({ discovery_connection_ids: _ids, ...candidate }) =>
+				isDeepStrictEqual(candidate, descriptor),
+			);
+			if (matching) {
+				matching.discovery_connection_ids = [
+					...new Set([...(matching.discovery_connection_ids ?? []), ...(discovery_connection_ids ?? [])]),
+				];
+			} else {
+				existing.push(operation);
+			}
 		}
 	}
-	return [...byKey.values()];
+	return [...byKey.values()].flat();
 }
 
 async function buildConnectorOperations(
 	connector: ConnectorRow,
 	organizationId: string,
-	options: { connectionId?: number; tolerateMcpFailure?: boolean } = {},
+	options: {
+		connectionIds: Array<number | undefined>;
+		tolerateMcpFailure?: boolean;
+	},
 ): Promise<OperationDescriptor[]> {
-	const mcpOperations = getMcpOperations(
-		connector.key,
-		connector.name,
-		connector.mcp_config,
-		organizationId,
-		options.connectionId,
-	);
+	const mcpOperations = Promise.all(options.connectionIds.map(async (connectionId) => {
+		try {
+			return await getMcpOperations(connector.key, connector.name, connector.mcp_config, organizationId, connectionId);
+		} catch (error) {
+			if (!options.tolerateMcpFailure) throw error;
+			logger.warn(
+				{ connectorKey: connector.key, connectionId, error: errorMessage(error) },
+				"Skipping unavailable MCP operations in broad connector catalog",
+			);
+			return [];
+		}
+	})).then((operations) => operations.flat());
 	const [localActions, mcpTools, openApiOps] = await Promise.all([
 		Promise.resolve(
 			getLocalActionOperations(
@@ -532,18 +559,7 @@ async function buildConnectorOperations(
 				connector.supports_execute,
 			),
 		),
-		options.tolerateMcpFailure
-			? mcpOperations.catch((error) => {
-					logger.warn(
-						{
-							connectorKey: connector.key,
-							error: errorMessage(error),
-						},
-						"Skipping unavailable MCP operations in broad connector catalog",
-					);
-					return [];
-				})
-			: mcpOperations,
+		mcpOperations,
 		getOpenApiOperations(
 			connector.key,
 			connector.name,
@@ -563,7 +579,7 @@ async function getConnectorsForListing(params: {
 
 	if (params.connectionId) {
 		const rows = await sql`
-      SELECT cd.key, cd.name, cd.actions_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
+      SELECT cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
       FROM connections c
       JOIN connector_definitions cd
         ON cd.key = c.connector_key
@@ -581,7 +597,7 @@ async function getConnectorsForListing(params: {
 	if (params.entityId) {
 		const rows = await sql`
       SELECT DISTINCT ON (cd.key)
-        cd.key, cd.name, cd.actions_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
+        cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
       FROM connections c
       JOIN feeds f ON f.connection_id = c.id
       JOIN connector_definitions cd
@@ -600,7 +616,7 @@ async function getConnectorsForListing(params: {
 
 	let query = sql`
     SELECT DISTINCT ON (cd.key)
-      cd.key, cd.name, cd.actions_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
+      cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
     FROM connector_definitions cd
     WHERE cd.status = 'active'
       AND cd.organization_id = ${params.organizationId}
@@ -615,8 +631,57 @@ async function getConnectorsForListing(params: {
 	return rows as unknown as ConnectorRow[];
 }
 
+async function buildCatalogOperations(
+	connectors: ConnectorRow[],
+	params: {
+		organizationId: string;
+		connectionId?: number;
+		entityId?: number;
+		discoveryUserId?: string | null;
+		tolerateMcpFailure?: boolean;
+	},
+): Promise<OperationDescriptor[]> {
+	const connectionsByKey = new Map<string, number[]>();
+	const remoteKeys = connectors.filter((connector) => connector.mcp_config).map((connector) => connector.key);
+	if (params.connectionId === undefined && remoteKeys.length > 0) {
+		const sql = getDb();
+		const visibility = compileConnectionRowVisibility({
+			organizationId: params.organizationId,
+			principal: params.discoveryUserId ?? null,
+		}, "c");
+		const rows = await sql<{ id: number; connector_key: string }>`
+			SELECT c.id, c.connector_key FROM connections c
+			WHERE c.organization_id = ${params.organizationId}
+			  AND c.deleted_at IS NULL AND c.status = 'active'
+			  AND c.connector_key = ANY(${pgTextArray(remoteKeys)}::text[])
+			  ${sql.unsafe(visibility)}
+			  AND (${params.entityId ?? null}::bigint IS NULL OR EXISTS (
+			    SELECT 1 FROM feeds f WHERE f.connection_id = c.id
+			      AND f.deleted_at IS NULL AND ${params.entityId ?? null}::bigint = ANY(f.entity_ids)
+			  ))
+			ORDER BY c.id
+		`;
+		for (const row of rows) {
+			const ids = connectionsByKey.get(row.connector_key) ?? [];
+			ids.push(Number(row.id));
+			connectionsByKey.set(row.connector_key, ids);
+		}
+	}
+	return (await Promise.all(connectors.map((connector) =>
+		buildConnectorOperations(connector, params.organizationId, {
+			connectionIds: params.connectionId !== undefined
+				? [params.connectionId]
+				: connectionsByKey.get(connector.key) ??
+					(normalizeConnectorAuthSchema(connector.auth_schema).methods.some((method) => method.type === "none") ? [undefined] : []),
+			tolerateMcpFailure: params.tolerateMcpFailure ?? params.connectionId === undefined,
+		}),
+	))).flat();
+}
+
 export async function listOperations(params: {
 	organizationId: string;
+	/** Requesting user for remote discovery; null/headless sees org-shared connections only. */
+	discoveryUserId?: string | null;
 	connectorKey?: string;
 	connectionId?: number;
 	entityId?: number;
@@ -633,16 +698,7 @@ export async function listOperations(params: {
 	offset: number;
 }> {
 	const connectors = await getConnectorsForListing(params);
-	const operations = (
-		await Promise.all(
-			connectors.map((connector) =>
-				buildConnectorOperations(connector, params.organizationId, {
-					connectionId: params.connectionId,
-					tolerateMcpFailure: params.connectionId === undefined,
-				}),
-			),
-		)
-	).flat();
+	const operations = await buildCatalogOperations(connectors, params);
 
 	const filtered = operations.filter((operation) => {
 		if (params.kind && operation.kind !== params.kind) return false;
@@ -761,7 +817,7 @@ export async function getOperationForConnection(
 			openapi_config: row.openapi_config,
 		},
 		organizationId,
-		{ connectionId },
+		{ connectionIds: [connectionId] },
 	);
 	const operation = operations.find(
 		(entry) => entry.operation_key === operationKey,
@@ -833,53 +889,33 @@ export async function getOperationsSummary(
 		connectionId,
 	});
 	if (connectors.length === 0) return { ...EMPTY_SUMMARY };
-	const operations = await buildConnectorOperations(
-		connectors[0],
-		organizationId,
-		{ connectionId, tolerateMcpFailure: true },
-	);
+	const operations = await buildCatalogOperations(connectors, {
+		organizationId, connectionId, tolerateMcpFailure: true,
+	});
 	return summarizeOperations(operations);
 }
 
 /**
- * Connector-keyed summaries for catalog/group views. Fetches the org's
- * definitions once, then builds summaries in parallel.
- *
- * OAuth-protected MCP tools are connection-scoped. Pass `connectionIdByKey`
- * whenever the caller already has a connection so discovery uses that
- * account's credentials instead of an unauthenticated probe. Per-row
- * connection lists should use `getOperationsSummariesByConnection`.
+ * Builds one authorized catalog and counts its rows per connector, matching
+ * list_available for the same principal. Identical account descriptors merge;
+ * different schemas or read/write annotations remain separate rows, so
+ * reads + writes and the backend counts each sum to total.
+ * Per-row connection lists use `getOperationsSummariesByConnection`.
  */
 export async function getOperationsSummaryBatch(
 	organizationId: string,
 	connectorKeys: string[],
-	connectionIdByKey?: ReadonlyMap<string, number>,
+	discoveryUserId?: string | null,
 ): Promise<Map<string, OperationsSummary>> {
 	if (connectorKeys.length === 0) return new Map();
 
 	const connectors = await getConnectorsForListing({ organizationId });
 	const relevant = connectors.filter((c) => connectorKeys.includes(c.key));
 
-	const entries = await Promise.all(
-		relevant.map(async (connector) => {
-			const operations = await buildConnectorOperations(
-				connector,
-				organizationId,
-				{
-					connectionId: connectionIdByKey?.get(connector.key),
-					tolerateMcpFailure: true,
-				},
-			);
-			return [connector.key, summarizeOperations(operations)] as const;
-		}),
-	);
-
-	const result = new Map<string, OperationsSummary>(entries);
-	// Fill in missing keys with empty summaries
-	for (const key of connectorKeys) {
-		if (!result.has(key)) result.set(key, { ...EMPTY_SUMMARY });
-	}
-	return result;
+	const operations = await buildCatalogOperations(relevant, { organizationId, discoveryUserId });
+	return new Map(connectorKeys.map((key) => [
+		key, summarizeOperations(operations.filter((operation) => operation.connector_key === key)),
+	]));
 }
 
 /**
@@ -903,7 +939,7 @@ export async function getOperationsSummariesByConnection(
 				connector,
 				organizationId,
 				{
-					connectionId: connection.id,
+					connectionIds: [connection.id],
 					tolerateMcpFailure: true,
 				},
 			);

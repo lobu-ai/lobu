@@ -235,6 +235,7 @@ export async function writePermissionPolicy(c: Context) {
 		if (policy.operationKey) {
 			const catalog = await listOperations({
 				organizationId,
+				discoveryUserId: c.get("user")?.id ?? null,
 				connectorKey: policy.connectorKey ?? undefined,
 				connectionId: policy.connectionId ?? undefined,
 				includeInputSchema: false,
@@ -272,10 +273,10 @@ export async function writePermissionPolicy(c: Context) {
 }
 
 /** Metadata stays inspectable even when policy blocks execution. */
-export async function permissionPolicyCatalog(organizationId: string) {
+export async function permissionPolicyCatalog(organizationId: string, discoveryUserId: string | null) {
 	const sql = getDb();
 	const [catalog, connectors, connections] = await Promise.all([
-		listOperations({ organizationId, includeInputSchema: false, includeOutputSchema: false, limit: Number.MAX_SAFE_INTEGER }),
+		listOperations({ organizationId, discoveryUserId, includeInputSchema: false, includeOutputSchema: false, limit: Number.MAX_SAFE_INTEGER }),
 		sql<{ key: string; name: string }>`SELECT key, name FROM connector_definitions
       WHERE organization_id = ${organizationId} AND status = 'active' ORDER BY name, key`,
 		sql<{ id: number; connector_key: string; display_name: string | null }>`SELECT id, connector_key, display_name FROM connections

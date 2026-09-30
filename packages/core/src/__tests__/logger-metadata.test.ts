@@ -10,8 +10,8 @@
  * bare sentence with no cause attached.
  *
  * `packages/connector-sdk/src/logger.ts` is a deliberate standalone copy of
- * this formatter (it must load inside a V8 isolate); it carries the same
- * shape, so keep the two in step.
+ * this formatter (it must load inside a V8 isolate). Keep metadata handling,
+ * level gating and redaction in step; JSON output is a core host feature.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -94,5 +94,60 @@ describe("console logger pino-style metadata", () => {
 
     expect(line).toContain("only");
     expect(line).toContain("object");
+  });
+});
+
+describe("console logger structured output", () => {
+  test("honors LOG_FORMAT=json with levels, metadata, and redaction", () => {
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        `import { createLogger } from ${JSON.stringify(new URL("../logger.ts", import.meta.url).pathname)};
+        const log = createLogger("synthetic-service");
+        log.warn({ run_id: 42, authorization: "synthetic-secret", err: new Error("socket closed") }, "catalog failed");
+        log.error("query failed", { status: 500 });
+        log.info("request completed", { status: 200 });
+        log.debug("hidden");`,
+      ],
+      {
+        env: {
+          ...process.env,
+          USE_WINSTON_LOGGER: "false",
+          LOG_FORMAT: "json",
+          LOG_LEVEL: "info",
+        },
+      }
+    );
+    expect(result.exitCode).toBe(0);
+    const output = result.stderr.toString() + result.stdout.toString();
+    const records = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(records).toHaveLength(3);
+    expect(records[0]).toMatchObject({
+      level: "warn",
+      service: "synthetic-service",
+      message: "catalog failed",
+      data: {
+        run_id: 42,
+        authorization: "[REDACTED]",
+        err: { name: "Error", message: "socket closed" },
+      },
+    });
+    expect(Number.isNaN(Date.parse(records[0].timestamp))).toBe(false);
+    expect(records[1]).toMatchObject({
+      level: "error",
+      message: "query failed",
+      data: { status: 500 },
+    });
+    expect(records[2]).toMatchObject({
+      level: "info",
+      message: "request completed",
+      data: { status: 200 },
+    });
+    expect(output).not.toContain("synthetic-secret");
+    expect(output).not.toContain("hidden");
   });
 });

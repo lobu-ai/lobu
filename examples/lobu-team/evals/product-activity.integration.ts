@@ -5,6 +5,7 @@ import {
 } from "../../../packages/server/src/__tests__/setup/test-db";
 import {
   createTestUser,
+  createTestOAuthClient,
   seedOwnerContext,
 } from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import { recordMcpConversationActivity } from "../../../packages/server/src/lobu/stores/mcp-client-conversations";
@@ -107,4 +108,30 @@ it("includes failed SDK outcomes even when transport succeeded, without successf
   expect(rows[0]?.payload_text).toContain(user.email);
   expect(rows[0]?.payload_text).toContain("run_sdk");
   expect(rows[0]?.payload_text).toContain("TimeoutError");
+});
+
+it("resolves missing and empty MCP software names from the OAuth client without losing account activity", async () => {
+  const { ctx, user } = await seedOwnerContext();
+  const { client_id } = await createTestOAuthClient({
+    client_name: "Synthetic MCP client",
+  });
+  await recordMcpConversationActivity({
+    ctx: {
+      ...ctx,
+      clientId: client_id,
+      mcpConversationId: "synthetic-named-client",
+      organizationId: null,
+    },
+    toolName: "query_sdk",
+    failed: false,
+  });
+  const sql = getTestDb();
+  for (const software of [null, "", "Synthetic software"]) {
+    await sql`UPDATE mcp_client_conversations SET client_software_id = ${software} WHERE user_id = ${user.id}`;
+    const rows = await activity("MCP activity");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload_text).toContain(software || "Synthetic MCP client");
+    expect(rows[0]?.payload_text).toContain("Account activity");
+    expect(rows[0]?.payload_text).not.toContain("Unknown client");
+  }
 });

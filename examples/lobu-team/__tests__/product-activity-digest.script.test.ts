@@ -520,4 +520,40 @@ describe("Lobu Team product activity digest script", () => {
     ).rejects.toThrow("requires a durable run id");
     expect(query).not.toHaveBeenCalled();
   });
+  it("notifies on HTTP failures without counting them as failed tools or log errors", async () => {
+    const send = mock();
+    await productActivityDigest(
+      context,
+      {
+        query: mock()
+          .mockResolvedValue(healthyFeeds)
+          .mockResolvedValueOnce([
+            {
+              connection_slug: "lobu-production-logs",
+              metadata: {
+                errors: 0,
+                warnings: 0,
+                http_client_errors: 60,
+                http_server_errors: 1,
+                http_samples: [
+                  "[server] HTTP 400 POST /api/synthetic/entities",
+                ],
+              },
+            },
+          ]),
+        notifications: { send },
+        log: mock(),
+      } as unknown as ReactionClient,
+      params
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    const message = send.mock.calls[0]![0];
+    expect(message.body).toContain("60 HTTP 4xx · 1 HTTP 5xx");
+    expect(message.body).toContain("0 failed tool calls");
+    expect(message.body).toContain("0 errors · 0 warnings");
+    expect(JSON.stringify(message.card)).toContain(
+      "HTTP 400 POST /api/synthetic/entities"
+    );
+    expect(JSON.stringify(message.card)).not.toContain("customer incident");
+  });
 });
