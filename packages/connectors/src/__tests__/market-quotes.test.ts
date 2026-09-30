@@ -121,10 +121,10 @@ describe("market quote action", () => {
     expect(rows[1]).not.toHaveProperty("price");
   });
 
-  test("exposes a read-only, approval-free action and declares no feeds", () => {
+  test("exposes a read-only action and declares no feeds", () => {
     const connector = new MarketQuotesConnector();
     const action = connector.definition.actions?.quote;
-    expect(action?.requiresApproval).toBe(false);
+    expect(action?.kind).toBe("read");
     expect(action?.annotations).toMatchObject({
       readOnlyHint: true,
       idempotentHint: true,

@@ -156,7 +156,6 @@ describe('GoogleDriveConnector authorization and operation policy', () => {
     for (const actionKey of Object.keys(definition.actions)) {
       expect(definition.actions[actionKey]).toMatchObject({
         kind: 'read',
-        requiresApproval: false,
       });
     }
   });

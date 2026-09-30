@@ -307,7 +307,6 @@ export default class MarketQuotesConnector extends ConnectorRuntime {
         name: "Quote symbols",
         description:
           "Return a quoted or quote_unavailable result for every requested symbol.",
-        requiresApproval: false,
         annotations: {
           readOnlyHint: true,
           idempotentHint: true,

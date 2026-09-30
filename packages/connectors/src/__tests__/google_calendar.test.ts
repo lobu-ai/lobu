@@ -13,7 +13,7 @@ beforeAll(async () => {
 });
 
 describe('GoogleCalendarConnector authorization and operation policy', () => {
-  test('starts with read-only consent and keeps mutations approval-gated', () => {
+  test('starts with read-only consent and requires write scopes for mutations', () => {
     const definition = new GoogleCalendarConnector().definition;
     const oauth = definition.authSchema.methods[0];
 
@@ -25,13 +25,11 @@ describe('GoogleCalendarConnector authorization and operation policy', () => {
     ]);
     for (const actionKey of ['create_event', 'update_event', 'delete_event']) {
       expect(definition.actions[actionKey]).toMatchObject({
-        requiresApproval: true,
         requiredScopes: ['https://www.googleapis.com/auth/calendar.events'],
       });
     }
     expect(definition.actions.get_event).toMatchObject({
       kind: 'read',
-      requiresApproval: false,
     });
   });
 });

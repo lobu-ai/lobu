@@ -2049,15 +2049,8 @@ describe("prepare_reply action contract", () => {
 		expect(new XConnector().definition.version).toBe("3.13.7");
 	});
 
-	// This is a deliberate design decision, not an oversight. Publishing is
-	// guarded by X's own Reply button, which a human must click and this action
-	// cannot. A Lobu approval gate would only guard "fills the open page",
-	// while forcing the user to approve a draft before seeing it in context —
-	// which defeats the whole review-and-iterate workflow. Do not flip this back
-	// without re-reading the comment at the definition site.
-	test("does not require Lobu approval — the user-opened page is the approval", () => {
+	test("classifies staging a reply as a write for org policy", () => {
 		const action = new XConnector().definition.actions.prepare_reply;
-		expect(action.requiresApproval).toBe(false);
 		expect(action.kind).toBe("write");
 	});
 

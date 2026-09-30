@@ -668,7 +668,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Check permissions",
         description:
           "Return Screen Recording, Accessibility, and Event Synthesizing permission status for this Mac.",
-        requiresApproval: false,
         annotations: {
           destructiveHint: false,
           idempotentHint: true,
@@ -690,7 +689,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "List running apps",
         description:
           "List running macOS applications visible to the automation layer.",
-        requiresApproval: false,
         annotations: {
           destructiveHint: false,
           idempotentHint: true,
@@ -712,7 +710,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "List windows",
         description:
           "List windows for an app, or the frontmost app when app is omitted.",
-        requiresApproval: false,
         annotations: {
           destructiveHint: false,
           idempotentHint: true,
@@ -744,7 +741,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Take screenshot",
         description:
           "Capture a screen/window/frontmost app and return PNG bytes as base64 plus metadata.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: false,
           idempotentHint: true,
@@ -785,7 +781,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Observe UI",
         description:
           "Capture the target and inspect its accessibility tree. Returns screenshot metadata, optional PNG base64, UI elements, and a snapshot_id for later element-targeted actions.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: false,
           idempotentHint: true,
@@ -844,7 +839,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Click",
         description:
           "Click an element id, query, or coordinates. Events are delivered to whatever owns the point, so a target that is visible but not frontmost can absorb the click; set foreground:true to raise the target app/window first.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
           idempotentHint: false,
@@ -912,7 +906,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Type text",
         description:
           "Type text into the current focus or a target element. Prefer paste_text for long text.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
           idempotentHint: false,
@@ -970,7 +963,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Paste text",
         description:
           "Set clipboard, paste text, then restore the previous clipboard contents. More reliable than synthetic typing.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
           idempotentHint: false,
@@ -1010,7 +1002,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         key: "hotkey",
         name: "Press hotkey",
         description: "Press a keyboard shortcut such as cmd,l or cmd,shift,t.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
           idempotentHint: false,
@@ -1051,7 +1042,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         key: "move_mouse",
         name: "Move mouse",
         description: "Move the mouse cursor to screen coordinates.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: false,
           idempotentHint: false,
@@ -1086,7 +1076,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         name: "Scroll",
         description:
           "Scroll up/down/left/right at the current pointer or target element.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
           idempotentHint: false,
@@ -1125,7 +1114,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         key: "focus_window",
         name: "Focus window",
         description: "Bring a window/application to the foreground.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: false,
           idempotentHint: false,
@@ -1163,7 +1151,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
         key: "launch_app",
         name: "Launch app",
         description: "Launch an application by name or bundle id.",
-        requiresApproval: true,
         annotations: {
           destructiveHint: false,
           idempotentHint: false,

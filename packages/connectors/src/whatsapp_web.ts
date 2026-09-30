@@ -5,8 +5,8 @@
  * Successful sync checkpoints acknowledge exact buffered revisions. Ordinary
  * collection still supplies history and reconciles the page's current state.
  *
- * Auth stays in the user's signed-in WhatsApp Web tab. Message writes retain
- * their existing approval requirements and have no connector-side action ledger.
+ * Auth stays in the user's signed-in WhatsApp Web tab. Org policy governs
+ * message writes; there is no connector-side action ledger.
  */
 
 import {
@@ -754,7 +754,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         description:
           "Search WhatsApp's local full-text index globally or within one exact chat. Results are bounded; loaded-model matching is used only when the private search capability is unavailable.",
         kind: "read",
-        requiresApproval: false,
         annotations: { readOnlyHint: true, openWorldHint: true },
         inputSchema: {
           type: "object",
@@ -801,7 +800,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         kind: "write",
         // A draft is the handoff surface, not the send: it fills the chat's
         // composer and stops. The human presses send.
-        requiresApproval: false,
         annotations: { destructiveHint: false, idempotentHint: true },
         inputSchema: {
           type: "object",
@@ -833,7 +831,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         name: "Send message",
         description: "Send a text message to an exact WhatsApp chat.",
         kind: "write",
-        requiresApproval: true,
         annotations: { destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -864,7 +861,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         name: "Edit message",
         description: "Edit a loaded outgoing WhatsApp message.",
         kind: "write",
-        requiresApproval: true,
         annotations: { destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -890,7 +886,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         name: "React to message",
         description: "Add or remove a reaction on a loaded WhatsApp message.",
         kind: "write",
-        requiresApproval: true,
         annotations: { destructiveHint: false, idempotentHint: true },
         inputSchema: {
           type: "object",
@@ -917,7 +912,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         description:
           "Delete a loaded outgoing WhatsApp message for everyone where WhatsApp permits it.",
         kind: "write",
-        requiresApproval: true,
         annotations: { destructiveHint: true, idempotentHint: true },
         inputSchema: {
           type: "object",

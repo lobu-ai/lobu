@@ -277,7 +277,6 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
         key: 'create_event',
         name: 'Create Event',
         description: 'Create a new event on Google Calendar.',
-        requiresApproval: true,
         requiredScopes: ['https://www.googleapis.com/auth/calendar.events'],
         inputSchema: {
           type: 'object',
@@ -303,7 +302,6 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
         key: 'update_event',
         name: 'Update Event',
         description: 'Update an existing calendar event.',
-        requiresApproval: true,
         requiredScopes: ['https://www.googleapis.com/auth/calendar.events'],
         inputSchema: {
           type: 'object',
@@ -326,7 +324,6 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
         key: 'delete_event',
         name: 'Delete Event',
         description: 'Delete/cancel an event.',
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
         },
@@ -346,7 +343,6 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
       get_event: {
         key: 'get_event',
         kind: 'read',
-        requiresApproval: false,
         name: 'Get Event',
         description: 'Get full event details.',
         inputSchema: {

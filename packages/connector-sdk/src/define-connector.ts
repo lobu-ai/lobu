@@ -69,12 +69,9 @@ export type ConnectorFeedSpec<
       }
   );
 
-/** An action's metadata (minus `key`; `requiresApproval` defaults false) plus its `execute` handler. */
-export interface ConnectorActionSpec
-  extends Omit<ActionDefinition, "key" | "requiresApproval"> {
-  /** Whether the action needs human approval before execution. Defaults to `false`. */
-  requiresApproval?: boolean;
-  /** Effect handler for this action. Called inline (low-risk) or by the worker. */
+/** An action's metadata (minus `key`) plus its `execute` handler. */
+export interface ConnectorActionSpec extends Omit<ActionDefinition, "key"> {
+  /** Effect handler for this action. The host authorizes execution through org policy. */
   execute(ctx: ActionContext): Promise<ActionResult>;
 }
 
@@ -166,7 +163,6 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
             key,
             name: action.name,
             description: action.description,
-            requiresApproval: action.requiresApproval ?? false,
             // `kind` and `requiredScopes` are semantic policy inputs (read/write
             // classification and the per-action scope gate). Dropping them here
             // would silently publish scoped/observational actions with neither,

@@ -48,7 +48,6 @@ export interface DeviceActionDefinition extends DeviceManifestSchema {
   key: string;
   name: string;
   description?: string;
-  requiresApproval?: boolean;
   kind?: 'read' | 'write';
   annotations?: DeviceManifestSchema;
   inputSchema?: DeviceManifestSchema;

@@ -1115,7 +1115,7 @@ describe("checkpoint fields clear when their cause is gone", () => {
 // ── the action table ───────────────────────────────────────────────────
 
 describe("actions", () => {
-  it("declares the exact action table with the same approval posture", () => {
+  it("declares action categories and destructive metadata", () => {
     const actions = connector.definition.actions ?? {};
     expect(Object.keys(actions).sort()).toEqual([
       "draft_message",
@@ -1125,17 +1125,15 @@ describe("actions", () => {
       "search_messages",
       "send_message",
     ]);
-    expect(actions.search_messages?.requiresApproval).toBe(false);
     expect(actions.search_messages?.kind).toBe("read");
     // A draft only fills the composer; the human still presses send.
-    expect(actions.draft_message?.requiresApproval).toBe(false);
+    expect(actions.draft_message?.kind).toBe("write");
     for (const key of [
       "send_message",
       "edit_message",
       "react_message",
       "revoke_message",
     ]) {
-      expect(actions[key]?.requiresApproval).toBe(true);
       expect(actions[key]?.kind).toBe("write");
     }
     expect(actions.revoke_message?.annotations?.destructiveHint).toBe(true);

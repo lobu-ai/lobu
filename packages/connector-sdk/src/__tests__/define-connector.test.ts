@@ -39,6 +39,7 @@ const Github = defineConnector({
 			name: "Star repo",
 			kind: "write",
 			requiredScopes: ["public_repo"],
+			annotations: { destructiveHint: false },
 			execute: async (ctx) => ({
 				success: true,
 				output: { repo: ctx.input.repo },
@@ -60,14 +61,16 @@ describe("defineConnector", () => {
 		expect(definition.feeds?.stars?.key).toBe("stars");
 		expect(definition.feeds?.stars?.name).toBe("Stars");
 		expect(definition.actions?.star_repo?.key).toBe("star_repo");
-		// requiresApproval defaults to false
-		expect(definition.actions?.star_repo?.requiresApproval).toBe(false);
+		expect(definition.actions?.star_repo).not.toHaveProperty("requiresApproval");
 		// Semantic policy inputs must survive lowering, else a defineConnector()
 		// action bypasses the read/write classification and the scope gate.
 		expect(definition.actions?.star_repo?.kind).toBe("write");
 		expect(definition.actions?.star_repo?.requiredScopes).toEqual([
 			"public_repo",
 		]);
+		expect(definition.actions?.star_repo?.annotations).toEqual({
+			destructiveHint: false,
+		});
 		// Runtime feed definitions retain handlers; metadata extraction owns the
 		// serialization boundary and derives operations from them.
 		expect(typeof definition.feeds?.stars?.sync).toBe("function");

@@ -9,11 +9,11 @@ import {
   macDeviceConnectorRegistry,
 } from "../mac.js";
 
-const expectedOriginHashes: Record<string, string> = {
+const expectedManifestHashes: Record<string, string> = {
   "apple.calendar":
     "934f8866eae6b13db330ec784e9f731ac57684726fa9c8d1f57f4de07aa09adc",
   "apple.computer_use":
-    "965fe77a4c08c06d6903a2f62540e19fb9f25c2b90c0db7b0de3c7cc973f0de5",
+    "55808965e90a73210c69b1f91af7cbc15a989f1cb629f843b93125c9e3ed8791",
   "apple.health":
     "95d01cbd942d6af5f201656e2b6ed320e3e6559723ad3f9de619b524451f70e4",
   "apple.photos":
@@ -27,7 +27,7 @@ const expectedOriginHashes: Record<string, string> = {
   "local.directory":
     "6846173d4a56d58677375f654cb10f04844b275280ec1cfb18d4d24b0fca89ee",
   "os.shell":
-    "6b099c370806197f55f1c69776b3e2fff84f6522e4172aa1cd0445911e46e2df",
+    "bf32689f95dba6dc9355d6626a1d39abd5ca116cbb97809bdd52349015764634",
 };
 
 describe("Mac device connector registry", () => {
@@ -36,19 +36,22 @@ describe("Mac device connector registry", () => {
     expect(keys).toEqual([...keys].sort());
     expect(new Set(keys).size).toBe(keys.length);
     expect(macDeviceConnectorRegistry["whatsapp.local"]).toBeUndefined();
-    expect(keys).toEqual(Object.keys(expectedOriginHashes).sort());
+    expect(keys).toEqual(Object.keys(expectedManifestHashes).sort());
   });
 
-  test("matches the merged Owletto Mac manifests semantically", () => {
+  test("pins the manifest identities and preserves semantic metadata", () => {
     for (const manifest of macDeviceConnectorManifests) {
       expect(deviceManifestHash(manifest)).toBe(
-        expectedOriginHashes[manifest.key]
+        expectedManifestHashes[manifest.key]
       );
       expect(manifest.runtime.platforms).toContain("macos");
       // Nothing about HOW an endpoint implements the contract may enter the
       // manifest: it is hashed, so it would fork the identity per platform.
       expect(manifest.runtime).not.toHaveProperty("execution");
       expect(manifest.auth_schema).toEqual({ methods: [{ type: "none" }] });
+      for (const action of Object.values(manifest.actions_schema ?? {})) {
+        expect(action).not.toHaveProperty("requiresApproval");
+      }
     }
     expect(
       macDeviceConnectorManifests.find((m) => m.key === "local.directory")

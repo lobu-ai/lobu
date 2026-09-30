@@ -789,7 +789,6 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'create_issue',
         name: 'Create Issue',
         description: 'Create a new issue in the configured repository.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['title'],
@@ -807,7 +806,6 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'add_issue_comment',
         name: 'Add Issue Comment',
         description: 'Add a comment to an issue or pull request.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['issue_number', 'body'],
@@ -823,7 +821,6 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'close_issue',
         name: 'Close Issue',
         description: 'Close an issue by number.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['issue_number'],
@@ -838,7 +835,6 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'reopen_issue',
         name: 'Reopen Issue',
         description: 'Reopen an issue by number.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['issue_number'],
@@ -853,7 +849,6 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'create_pull_request',
         name: 'Create Pull Request',
         description: 'Create a pull request from head to base branch.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['title', 'head', 'base'],
@@ -891,7 +886,6 @@ export default class GitHubConnector extends ConnectorRuntime {
         key: 'merge_pull_request',
         name: 'Merge Pull Request',
         description: 'Merge a pull request by number.',
-        requiresApproval: true,
         annotations: {
           destructiveHint: true,
         },

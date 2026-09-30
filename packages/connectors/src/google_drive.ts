@@ -408,7 +408,6 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       download_file: {
         key: 'download_file',
         kind: 'read',
-        requiresApproval: false,
         name: 'Download File',
         description:
           'Download one Drive file. Google Docs/Sheets/Slides are exported (text/plain, CSV); everything else is downloaded as-is, binary included. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content` so they can be read without a second call.',
@@ -428,7 +427,6 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       get_file: {
         key: 'get_file',
         kind: 'read',
-        requiresApproval: false,
         name: 'Get File Metadata',
         description: 'Get one Drive file\'s metadata without fetching its content.',
         requiredScopes: ['https://www.googleapis.com/auth/drive.readonly'],

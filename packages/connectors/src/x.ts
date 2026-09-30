@@ -3301,15 +3301,9 @@ export default class XConnector extends ConnectorRuntime {
 						reason_preview: { type: "string" },
 					},
 				},
-				// NOT gated on Lobu approval, deliberately. The irreversible step is
-				// publishing, and X's own Reply button already guards it — a human
-				// must click it, and this action structurally cannot (safeDispatch
-				// rejects every click_ref except focusing the composer). A Lobu gate
-				// here would only guard "fills an already-open X page", while forcing
-				// the user to approve a draft BEFORE they can see it in context. The
-				// user-opened page is the approval. `linkedin.prepare_comment` is ungated for
-				// the same reason.
-				requiresApproval: false,
+				// Org policy governs staging. Publishing still requires the human
+				// to click X's Reply button: safeDispatch rejects every click_ref
+				// except focusing the composer.
 			},
 		},
 	};

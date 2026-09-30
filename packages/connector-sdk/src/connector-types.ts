@@ -711,8 +711,6 @@ export interface ActionDefinition {
   name: string;
   /** Description */
   description?: string;
-  /** Whether this action requires human approval before execution */
-  requiresApproval: boolean;
 	/** Semantic effect used by operation discovery and policy. Defaults to write. */
 	kind?: 'read' | 'write';
 	/**

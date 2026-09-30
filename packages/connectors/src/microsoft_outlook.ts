@@ -263,7 +263,6 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
         name: 'List Attachments',
         description:
           "List a message's attachments with their IDs, names, types and sizes. The feed only reports `has_attachments`, so this is how an agent learns what to download.",
-        requiresApproval: false,
         requiredScopes: ['Mail.Read'],
         inputSchema: {
           type: 'object',
@@ -282,7 +281,6 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
         name: 'Download Attachment',
         description:
           'Download one attachment from an Outlook message. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content`. Get `attachment_id` from `list_attachments`.',
-        requiresApproval: false,
         requiredScopes: ['Mail.Read'],
         inputSchema: {
           type: 'object',

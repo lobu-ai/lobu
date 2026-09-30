@@ -96,7 +96,7 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
   /**
    * Execute an action on the connected service.
    *
-   * Called either inline (low-risk) or by the worker (high-risk with approval).
+   * Called by the host after org policy authorizes execution.
    * Default implementation rejects with "Actions not supported" — connectors
    * that don't declare any `actions` in their definition need not override.
    * The `ctx` parameter is part of the public contract (subclasses overriding

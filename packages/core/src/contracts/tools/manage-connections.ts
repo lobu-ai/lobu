@@ -623,7 +623,7 @@ export const UpdateConnectorDefaultConfigAction = Type.Object({
   }),
   connector_key: Type.String({ description: "Connector key" }),
   default_connection_config: Type.Record(Type.String(), Type.Any(), {
-    description: "Default connection config (action_modes, etc.)",
+    description: "Default connection config",
   }),
 });
 
@@ -961,14 +961,13 @@ export const ManageConnectionsResultSchema = Type.Union([
     installed: Type.Boolean(),
     active_version: Type.Union([Type.String(), Type.Null()]),
     version_exists: Type.Boolean(),
-    // Extracted per-action semantic-policy summary (kind / requires_approval /
-    // required_scopes), keyed by action key, so an author can confirm those
+    // Extracted per-action semantic-policy summary (kind / required_scopes),
+    // keyed by action key, so an author can confirm those
     // fields survived extraction before persisting. Plus the extracted feed keys.
     actions: Type.Record(
       Type.String(),
       Type.Object({
         kind: Type.Union([Type.Literal("read"), Type.Literal("write")]),
-        requires_approval: Type.Boolean(),
         required_scopes: Type.Array(Type.String()),
       })
     ),

@@ -7,7 +7,7 @@ type ConnectorDefinition = {
 	actions?: Record<
 		string,
 		{
-			requiresApproval?: boolean;
+			kind?: "read" | "write";
 			annotations?: { destructiveHint?: boolean };
 		}
 	>;
@@ -28,26 +28,26 @@ beforeAll(async () => {
 	googleGmail = new gmailModule.default().definition;
 });
 
-function expectApprovalImpact(
+function expectWriteImpact(
 	definition: ConnectorDefinition,
 	expected: Record<string, "normal" | "high">,
 ) {
-	const approvalActions = Object.entries(definition.actions ?? {}).filter(
-		([, action]) => action.requiresApproval === true,
+	const writeActions = Object.entries(definition.actions ?? {}).filter(
+		([, action]) => action.kind !== "read",
 	);
 	expect(Object.keys(expected).sort()).toEqual(
-		approvalActions.map(([key]) => key).sort(),
+		writeActions.map(([key]) => key).sort(),
 	);
-	for (const [key, action] of approvalActions) {
+	for (const [key, action] of writeActions) {
 		expect(action.annotations?.destructiveHint === true, key).toBe(
 			expected[key] === "high",
 		);
 	}
 }
 
-describe("built-in connector approval impact annotations", () => {
-	test("classifies every shipped approval-gated action explicitly", () => {
-		expectApprovalImpact(github, {
+describe("built-in connector operation impact annotations", () => {
+	test("preserves destructive classification independently of org approval policy", () => {
+		expectWriteImpact(github, {
 			create_issue: "normal",
 			add_issue_comment: "normal",
 			close_issue: "normal",
@@ -55,13 +55,14 @@ describe("built-in connector approval impact annotations", () => {
 			create_pull_request: "normal",
 			merge_pull_request: "high",
 		});
-		expectApprovalImpact(googleCalendar, {
+		expectWriteImpact(googleCalendar, {
 			create_event: "normal",
 			update_event: "normal",
 			delete_event: "high",
 		});
-		expectApprovalImpact(googleGmail, {
+		expectWriteImpact(googleGmail, {
 			send_email: "normal",
+			create_draft: "normal",
 			reply: "normal",
 		});
 	});

@@ -46,7 +46,6 @@ export const osShellDeviceConnector: DeviceConnectorSpec = {
       name: "Run command",
       description:
         "Run a shell command on the device and return stdout, stderr, and exit_code. Pipes, redirects, and && chains work. A Mac endpoint executes through the signed-in user's login shell (`zsh -l -c`), so host-installed CLIs (gh, git, bun, brew, …) resolve via PATH; a headless endpoint executes through `bash --noprofile --norc -c`, which loads no profile or rc file, so prefer absolute paths over aliases there. Prefer one focused command per call over a long script. Destructive/open-world by nature — gate with approval in production.",
-      requiresApproval: true,
       annotations: {
         destructiveHint: true,
         idempotentHint: false,

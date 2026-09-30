@@ -327,7 +327,6 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         key: 'send_email',
         name: 'Send Email',
         description: 'Send an email via Gmail.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['to', 'subject', 'body'],
@@ -344,7 +343,6 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         key: 'create_draft',
         name: 'Create Draft',
         description: 'Create a draft email in Gmail.',
-        requiresApproval: false,
         inputSchema: {
           type: 'object',
           required: ['to', 'subject', 'body'],
@@ -365,7 +363,6 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         key: 'reply',
         name: 'Reply to Thread',
         description: 'Send a reply to an existing email thread.',
-        requiresApproval: true,
         inputSchema: {
           type: 'object',
           required: ['thread_id', 'body'],
@@ -385,7 +382,6 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
 		kind: 'read',
         name: 'Search Emails',
         description: 'Search emails by query.',
-        requiresApproval: false,
         inputSchema: {
           type: 'object',
           required: ['query'],
@@ -406,7 +402,6 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
 		kind: 'read',
         name: 'Get Thread',
         description: 'Read full thread content.',
-        requiresApproval: false,
         inputSchema: {
           type: 'object',
           required: ['thread_id'],
@@ -421,7 +416,6 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         name: 'Download Attachment',
         description:
           'Download one attachment from a Gmail message. The bytes are published as an attachment with a `download_url` a device can fetch, and small text files are ALSO returned inline as `content`. Get `attachment_id` from `get_thread`, which lists each message\'s attachments.',
-        requiresApproval: false,
         requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
         inputSchema: {
           type: 'object',
