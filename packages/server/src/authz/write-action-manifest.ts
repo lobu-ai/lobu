@@ -20,7 +20,7 @@ import type { WriteResourceClass } from "./entity-policy";
  * The verbs a write policy can govern. `read`/`create`/`update`/`delete` are
  * shared by entity and agent_config (`read` scopes which entity types / peer
  * agents a principal may see); `execute` is the connector_action verb (running
- * a write connector operation). `install` is intentionally NOT declared until a
+ * any connector operation). `install` is intentionally NOT declared until a
  * class actually uses it — an undeclared action is illegal, not a reserved no-op.
  */
 export type WriteAction =
@@ -38,10 +38,9 @@ export type WriteAction =
 
 /**
  * The decision a policy attaches to an action. `auto` applies inline; `approval`
- * queues a durable approval; `deny` is a hard floor (never applies, nothing
- * queued); `disabled` turns the action off entirely (connector_action only).
+ * queues a durable approval; `deny` blocks execution without queuing approval.
  */
-export type WriteEffect = "auto" | "approval" | "deny" | "disabled";
+export type WriteEffect = "auto" | "approval" | "deny";
 
 interface ClassManifest {
 	/** The actions this class governs. An action outside this set is illegal for the class. */
@@ -95,15 +94,11 @@ export const WRITE_ACTION_MANIFEST: Readonly<
 		},
 	},
 	connector_action: {
-		// `execute` covers WRITE ops only. Reads stay on connection action_modes
-		// (MCP readOnlyHint → kind=read → default auto). Destructive writes map
-		// via requires_approval / destructiveHint on the connection layer.
+		// All operations use org policy; category rules can grant reads Auto.
 		actions: ["execute"],
-		effects: ["auto", "approval", "deny", "disabled"],
-		// No org connector-action policy → auto, so the per-connection action_modes
-		// alone decide (today's semantics). A row only ever tightens.
+		effects: ["auto", "approval", "deny"],
 		defaultEffect: {
-			execute: "auto",
+			execute: "approval",
 		},
 	},
 	entity_schema: {

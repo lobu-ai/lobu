@@ -27,9 +27,9 @@ import {
 	type EntityApprovalPolicy,
 	listEntityApprovalPolicies,
 } from "./authz/entity-policy";
-import { listOperations } from "./operations/connector-operations";
-import { qualifiedOperationKey } from "./tools/admin/manage_operations";
 import {
+	explainPermissionPolicy,
+	permissionPolicyCatalog,
 	requireOrganizationSettingsAdmin,
 	serializeEntityApprovalPolicy,
 	writePermissionPolicy,
@@ -1263,40 +1263,7 @@ app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
     ) t
     ORDER BY name ASC
   `;
-	// Write ops for the connector exception picker (opt-in rows, not always expanded).
-	// Only write ops — reads are not gated by agent connector_action policy
-	// (MCP readOnlyHint / kind=read stay on connection action_modes alone).
-	const opList = await listOperations({
-		organizationId,
-		kind: "write",
-		includeInputSchema: false,
-		includeOutputSchema: false,
-		limit: Number.MAX_SAFE_INTEGER,
-	});
-	const seenOps = new Set<string>();
-	const operations: Array<{
-		operation_key: string;
-		name: string;
-		connector_key: string;
-		connector_name: string;
-		kind: "read" | "write";
-		requires_approval: boolean;
-		destructive: boolean;
-	}> = [];
-	for (const op of opList.operations) {
-		const key = qualifiedOperationKey(op.connector_key, op.operation_key);
-		if (seenOps.has(key)) continue;
-		seenOps.add(key);
-		operations.push({
-			operation_key: key,
-			name: op.name,
-			connector_key: op.connector_key,
-			connector_name: op.connector_name,
-			kind: op.kind === "read" ? "read" : "write",
-			requires_approval: op.requires_approval === true,
-			destructive: op.annotations?.destructiveHint === true,
-		});
-	}
+	const catalog = await permissionPolicyCatalog(organizationId);
 	// Agents in this org (for agent_config target exceptions). Exclude the agent
 	// whose envelope we're editing so self-target rows aren't offered by default.
 	const agentRows = await getDb()<{ id: string; name: string }>`
@@ -1312,7 +1279,7 @@ app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 			name: r.name,
 			icon: r.icon,
 		})),
-		connector_operations: operations,
+		...catalog,
 		agents: agentRows.map((a) => ({ id: a.id, name: a.name })),
 	});
 });
@@ -1357,37 +1324,7 @@ app.get("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
     ) t
     ORDER BY name ASC
   `;
-	const opList = await listOperations({
-		organizationId,
-		kind: "write",
-		includeInputSchema: false,
-		includeOutputSchema: false,
-		limit: Number.MAX_SAFE_INTEGER,
-	});
-	const seenOps = new Set<string>();
-	const operations: Array<{
-		operation_key: string;
-		name: string;
-		connector_key: string;
-		connector_name: string;
-		kind: "read" | "write";
-		requires_approval: boolean;
-		destructive: boolean;
-	}> = [];
-	for (const op of opList.operations) {
-		const key = qualifiedOperationKey(op.connector_key, op.operation_key);
-		if (seenOps.has(key)) continue;
-		seenOps.add(key);
-		operations.push({
-			operation_key: key,
-			name: op.name,
-			connector_key: op.connector_key,
-			connector_name: op.connector_name,
-			kind: op.kind === "read" ? "read" : "write",
-			requires_approval: op.requires_approval === true,
-			destructive: op.annotations?.destructiveHint === true,
-		});
-	}
+	const catalog = await permissionPolicyCatalog(organizationId);
 	const agentRows = await getDb()<{ id: string; name: string }>`
     SELECT id, name FROM agents
     WHERE organization_id = ${organizationId}
@@ -1404,10 +1341,12 @@ app.get("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 			name: r.name,
 			icon: r.icon,
 		})),
-		connector_operations: operations,
+		...catalog,
 		agents: agentRows.map((a) => ({ id: a.id, name: a.name })),
 	});
 });
+
+app.get("/api/:orgSlug/write-permissions/explain", mcpAuth, explainPermissionPolicy);
 
 app.on(
 	["PUT", "DELETE"],

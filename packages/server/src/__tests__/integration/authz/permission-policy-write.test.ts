@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mcpAuth } from "../../../auth/middleware";
 import {
+	deleteEntityApprovalPolicy,
 	listEntityApprovalPolicies,
-	resolveWriteEffect,
+	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
-import { writePermissionPolicy } from "../../../http/permission-policy-write";
+import { explainPermissionPolicy, permissionPolicyCatalog, writePermissionPolicy } from "../../../http/permission-policy-write";
 import type { Env } from "../../../index";
 import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
 import { initWorkspaceProvider } from "../../../workspace";
@@ -41,6 +42,7 @@ app.on(
 	mcpAuth,
 	writePermissionPolicy,
 );
+app.get("/api/:orgSlug/write-permissions/explain", mcpAuth, explainPermissionPolicy);
 const connectorPolicy = {
 	resource_class: "connector_action",
 	effects: { execute: "approval" },
@@ -58,10 +60,12 @@ function request(
 		agent?: string;
 		headers?: Record<string, string>;
 		raw?: string;
+		explain?: boolean;
 	} = {},
 ) {
 	let path = `/api/${org.slug}/${options.agent ? `agent/${options.agent}/permissions` : "write-permissions"}`;
-	if (method === "DELETE")
+	if (options.explain) path += "/explain";
+	if (method === "DELETE" || method === "GET")
 		path += `?${new URLSearchParams(input as Record<string, string>)}`;
 	return app.fetch(
 		new Request(`http://localhost${path}`, {
@@ -87,6 +91,7 @@ afterAll(async () => {
 });
 beforeEach(async () => {
 	org = await createTestOrganization();
+	await deleteEntityApprovalPolicy({ organizationId: org.id, resourceClass: "connector_action", operationCategory: "read" });
 	const user = await createTestUser();
 	await addUserToOrganization(user.id, org.id, "owner");
 	cookie = (await createTestSession(user.id)).cookieHeader;
@@ -208,14 +213,12 @@ describe("permission policy HTTP writes", () => {
 				)
 			).status,
 		).toBe(200);
-		const resolve = () =>
-			resolveWriteEffect({
-				organizationId: org.id,
-				resourceClass: "connector_action",
-				principalKind: "agent",
-				principalId: agentId,
-				action: "execute",
-			});
+		const resolve = async () => (await resolveConnectorPolicy({
+			organizationId: org.id,
+			connectionId: 1,
+			operation: { connector_key: "policy-fixture", operation_key: "classify", kind: "write" },
+			actor: { kind: "agent", id: agentId, ownerAgentId: null, ownerResolved: true },
+		})).effect;
 		expect(await resolve()).toBe("deny");
 		expect(
 			await (
@@ -352,7 +355,7 @@ describe("permission policy HTTP writes", () => {
 		).toEqual({ deleted: true });
 	});
 
-	it("validates qualified write operations and can remove policies after the catalog changes", async () => {
+	it("validates qualified operations and can remove policies after the catalog changes", async () => {
 		const sql = getTestDb();
 		for (const key of ["policy-fixture-a", "policy-fixture-b"]) {
 			await createTestConnectorDefinition({
@@ -369,7 +372,6 @@ describe("permission policy HTTP writes", () => {
 		const key = qualifiedOperationKey("policy-fixture-a", "classify");
 		for (const invalid of [
 			"classify",
-			qualifiedOperationKey("policy-fixture-a", "read"),
 			qualifiedOperationKey("missing-connector", "classify"),
 		]) {
 			expect(
@@ -382,23 +384,23 @@ describe("permission policy HTTP writes", () => {
 				await request("PUT", {
 					...connectorPolicy,
 					operation_key: key,
-					effects: { execute: "disabled" },
+					effects: { execute: "deny" },
 				})
 			).status,
 		).toBe(200);
-		const resolve = (operationKey: string) =>
-			resolveWriteEffect({
-				organizationId: org.id,
-				resourceClass: "connector_action",
-				principalKind: "agent",
-				principalId: agentId,
-				action: "execute",
-				operationKey,
-			});
-		expect(await resolve(key)).toBe("disabled");
-		expect(
-			await resolve(qualifiedOperationKey("policy-fixture-b", "classify")),
-		).toBe("auto");
+		const resolve = async (connectorKey: string) => (await resolveConnectorPolicy({
+			organizationId: org.id,
+			connectionId: 1,
+			operation: { connector_key: connectorKey, operation_key: "classify", kind: "write" },
+			actor: { kind: "agent", id: agentId, ownerAgentId: null, ownerResolved: true },
+		})).effect;
+		expect(await resolve("policy-fixture-a")).toBe("deny");
+		expect(await resolve("policy-fixture-b")).toBe("approval");
+		expect((await request("PUT", {
+			...connectorPolicy,
+			operation_key: qualifiedOperationKey("policy-fixture-a", "read"),
+			effects: { execute: "auto" },
+		})).status).toBe(200);
 		await sql`UPDATE connector_definitions SET actions_schema = '{}'::jsonb WHERE organization_id = ${org.id}`;
 		expect(
 			await (
@@ -408,5 +410,83 @@ describe("permission policy HTTP writes", () => {
 				})
 			).json(),
 		).toEqual({ deleted: true });
+	});
+
+	it("saves scoped rules and explains the same result through authenticated HTTP", async () => {
+		await createTestConnectorDefinition({ key: "policy-http", name: "Policy HTTP", organization_id: org.id });
+		const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-http" });
+		await getTestDb()`UPDATE connector_definitions SET actions_schema = '{"classify":{"name":"Classify","kind":"write"}}'::jsonb WHERE organization_id = ${org.id} AND key = 'policy-http'`;
+		const scope = { resource_class: "connector_action", connection_id: connection.id, operation_category: "write" };
+		const saved = await request("PUT", { ...scope, effects: { execute: "auto" } });
+		expect(saved.status).toBe(200);
+		const { policy } = await saved.json();
+		expect(policy).toMatchObject({ ...scope, connector_key: null, operation_key: null });
+		const input = { connection_id: String(connection.id), operation_key: "classify", agent_id: agentId };
+		const inspect = () => request("GET", input, { explain: true });
+		expect(await (await inspect()).json()).toEqual({ effect: "auto", rule_ids: [policy.id], reason: "matched_rule" });
+		expect((await request("PUT", { ...scope, effects: { execute: "deny" } }, { agent: agentId })).status).toBe(200);
+		expect(await (await inspect()).json()).toMatchObject({ effect: "deny", reason: "matched_rule" });
+		expect(await (await request("DELETE", scope, { agent: agentId })).json()).toEqual({ deleted: true });
+		expect(await (await request("DELETE", scope)).json()).toEqual({ deleted: true });
+		expect(await (await inspect()).json()).toEqual({ effect: "approval", rule_ids: [], reason: "default_approval" });
+	});
+
+	it("rejects foreign connections, invalid scope combinations, and mismatched operation targets", async () => {
+		const otherOrg = await createTestOrganization();
+		await createTestConnectorDefinition({ organization_id: otherOrg.id, key: "policy-foreign", name: "Foreign policy fixture" });
+		const foreign = await createTestConnection({ organization_id: otherOrg.id, connector_key: "policy-foreign" });
+		for (const key of ["policy-scope-a", "policy-scope-b"]) {
+			await createTestConnectorDefinition({ key, name: key, organization_id: org.id });
+			await getTestDb()`UPDATE connector_definitions SET actions_schema = '{"read":{"name":"Read","kind":"read"}}'::jsonb WHERE organization_id = ${org.id} AND key = ${key}`;
+		}
+		const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-scope-a" });
+		for (const scope of [
+			{ connection_id: foreign.id },
+			{ connector_key: "missing-policy-connector" },
+			{ connection_id: connection.id, operation_key: "policy-scope-b::read" },
+			{ connector_key: "policy-scope-a", operation_key: "policy-scope-b::read" },
+			{ connector_key: "policy-scope-a", connection_id: connection.id },
+			{ operation_key: "policy-scope-a::read", operation_category: "read" },
+			{ connection_id: true },
+			{ connection_id: "1.5" },
+			{ connection_id: "0x10" },
+			{ connection_id: Number.MAX_SAFE_INTEGER + 1 },
+			{ operation_category: "invalid" },
+			{ effects: { execute: "disabled" } },
+		]) expect((await request("PUT", { ...connectorPolicy, ...scope })).status).toBe(400);
+		for (const resource_class of ["entity", "entity_schema", "agent_config"]) {
+			for (const scope of [{ connection_id: connection.id }, { connector_key: "policy-scope-a" }, { operation_category: "read" }]) {
+				expect((await request("PUT", { resource_class, ...scope, effects: {} })).status).toBe(400);
+			}
+		}
+		const scope = { resource_class: "connector_action", connection_id: connection.id, operation_category: "read" };
+		expect((await request("PUT", { ...scope, effects: { execute: "deny" } })).status).toBe(200);
+		await getTestDb()`UPDATE connections SET deleted_at = NOW() WHERE organization_id = ${org.id} AND id = ${connection.id}`;
+		expect(await (await request("DELETE", scope)).json()).toEqual({ deleted: true });
+	});
+
+	it("lets admins inspect Blocked operations without trusting caller-supplied classification", async () => {
+		await createTestConnectorDefinition({ key: "policy-inspect", name: "Inspect", organization_id: org.id });
+		const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-inspect" });
+		await getTestDb()`UPDATE connector_definitions SET actions_schema = '{"classify":{"name":"Classify","kind":"write"},"read":{"name":"Read","kind":"read","annotations":{"destructiveHint":false}}}'::jsonb WHERE organization_id = ${org.id} AND key = 'policy-inspect'`;
+		await request("PUT", { ...connectorPolicy, effects: { execute: "deny" } });
+		await request("PUT", { ...connectorPolicy, operation_category: "read", effects: { execute: "auto" } });
+		const query = { connection_id: String(connection.id), operation_key: "classify", kind: "read", destructive: "false" };
+		expect(await (await request("GET", query, { explain: true })).json()).toMatchObject({ effect: "deny" });
+		const catalog = await permissionPolicyCatalog(org.id);
+		expect(catalog.connector_operations).toEqual(expect.arrayContaining([
+			expect.objectContaining({ operation_key: "policy-inspect::classify", kind: "write", destructive: null }),
+			expect.objectContaining({ operation_key: "policy-inspect::read", kind: "read", destructive: false }),
+		]));
+		expect(catalog.connections).toEqual(expect.arrayContaining([expect.objectContaining({ id: connection.id, connector_key: "policy-inspect" })]));
+		expect(catalog.connectors).toContainEqual({ key: "policy-inspect", name: "Inspect" });
+		expect(catalog.operation_categories).toEqual(["read", "write", "destructive", "non_destructive", "unknown"]);
+		expect(catalog.connector_operations[0]).not.toHaveProperty("requires_approval");
+		const otherOrg = await createTestOrganization();
+		await createTestConnectorDefinition({ organization_id: otherOrg.id, key: "policy-foreign", name: "Foreign policy fixture" });
+		const foreign = await createTestConnection({ organization_id: otherOrg.id, connector_key: "policy-foreign" });
+		expect((await request("GET", { ...query, connection_id: String(foreign.id) }, { explain: true })).status).toBe(404);
+		expect((await request("GET", { ...query, agent_id: agentId, automation_id: "1" }, { explain: true })).status).toBe(400);
+		expect(await (await request("GET", { ...query, agent_id: "missing-agent" }, { explain: true })).json()).toMatchObject({ effect: "deny", reason: "unresolved_principal" });
 	});
 });
