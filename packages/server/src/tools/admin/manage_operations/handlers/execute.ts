@@ -1,11 +1,6 @@
 import { connectorRunEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
-import {
-	deepRedactSecrets,
-	getErrorMessage,
-	isSecretKey,
-	REDACTED_SENTINEL,
-} from "@lobu/core";
+import { getErrorMessage } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
@@ -22,7 +17,7 @@ import {
 import { currentMcpActivityAttribution, currentMcpActivityEventMetadata } from "../../../../lobu/stores/mcp-client-conversations";
 import { callTool as callProxyTool } from "../../../../mcp-proxy/client";
 import { resolveActionOrigin } from "../../../../notifications/action-origin";
-import { notifyActionApprovalNeeded } from "../../../../notifications/triggers";
+import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } from "../../../../notifications/triggers";
 import { resolveApprovalChatOrigin } from "../../approval-delivery";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
 import {
@@ -32,6 +27,7 @@ import {
 import {
 	AUTO_APPROVED_CARD_STATUS,
 	autoOperationCardOriginId,
+	connectorApprovalMetadata,
 	terminalizeInlineOperationRun,
 } from "../../../../operations/operation-run-card";
 import { executeHttpOperation } from "../../../../operations/execute-http-operation";
@@ -50,12 +46,6 @@ import { findBundledConnectorFile } from "../../../../utils/connector-catalog";
 import { resolveConnectorCodeForKey } from "../../../../utils/ensure-connector-installed";
 import { ToolUserError } from "../../../../utils/errors";
 import { resolveExecutionAuth } from "../../../../utils/execution-context";
-import {
-	ApprovalKind,
-	approvalContext,
-	highApprovalImpact,
-	normalApprovalImpact,
-} from "../../../../utils/approval-context";
 import {
 	deleteMaterializedArtifacts,
 	materializeActionOutputAttachments,
@@ -165,31 +155,6 @@ export function buildActionConfig(
 		...connectionCredentials,
 		...(connectionConfig ?? {}),
 	};
-}
-
-/**
- * Review rows for a connector approval card: what is being run and where,
- * ahead of the operation input. Prefix every user argument with `input_` so
- * trusted routing context and arbitrary input keys stay in separate namespaces.
- */
-function connectorApprovalReviewFields(
-	connectionName: string,
-	operationName: string,
-	input: Record<string, unknown>,
-): Array<{ key: string; value: unknown }> {
-	const inputFields = Object.entries(input).map(([key, value]) => ({
-		key: `input_${key}`,
-		value:
-			value != null && isSecretKey(key)
-				? REDACTED_SENTINEL
-				: deepRedactSecrets(value),
-	}));
-	return [
-		{ key: "resource", value: "Connector operation" },
-		{ key: "connection", value: connectionName },
-		{ key: "operation", value: operationName },
-		...inputFields,
-	];
 }
 
 async function executeLocalActionInline(
@@ -739,6 +704,13 @@ export async function handleExecute(
 		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
 		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
 	}
+	const notificationContext: ActionApprovalNotificationContext = {
+		...await resolveApprovalChatOrigin(ctx),
+		requesterUserId: visibilityUserId ?? ctx.userId ?? null,
+		mcpActivity: currentMcpActivityAttribution(ctx),
+		actionOrigin: await resolveActionOrigin(ctx),
+	};
+	runMetadata = { ...runMetadata, approval_notification: notificationContext };
 	const shouldQueue = policy.effect === "approval";
 	const activation = args.activation
 		? {
@@ -876,18 +848,9 @@ export async function handleExecute(
 					operation_input: input,
 					action_input: input,
 					input_schema: operation.input_schema ?? null,
-					...approvalContext(
-						ApprovalKind.Connector,
-						operation.annotations?.destructiveHint === true
-							? highApprovalImpact(
-									"This action can remove or irreversibly change data in the connected service.",
-									["Lobu may not be able to undo the external change."],
-								)
-							: normalApprovalImpact(),
-					),
-					review_fields: connectorApprovalReviewFields(
+					...connectorApprovalMetadata(
 						connection.display_name ?? connection.connector_key,
-						operation.name,
+						operation,
 						input,
 					),
 					status: "pending_approval",
@@ -933,8 +896,6 @@ export async function handleExecute(
 
 		// One destination, never the org-wide fan-out: the conversation that asked
 		// when there is one, else the requesting human's DM, else the inbox alone.
-		const chatOrigin = await resolveApprovalChatOrigin(ctx);
-		const actionOrigin = await resolveActionOrigin(ctx);
 		notifyActionApprovalNeeded({
 			orgId: ctx.organizationId,
 			runId,
@@ -945,12 +906,7 @@ export async function handleExecute(
 			operation: { name: operation.name, input },
 			eventId,
 			approvalUrl,
-			connectionId: chatOrigin.connectionId,
-			channelId: chatOrigin.channelId,
-			teamId: chatOrigin.teamId,
-			requesterUserId: visibilityUserId ?? ctx.userId ?? null,
-			mcpActivity: currentMcpActivityAttribution(ctx),
-			actionOrigin,
+			...notificationContext,
 		}).catch((error) =>
 			logger.error(error, "Failed to send operation approval notification"),
 		);

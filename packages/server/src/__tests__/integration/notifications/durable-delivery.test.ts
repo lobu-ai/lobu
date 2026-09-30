@@ -320,6 +320,25 @@ describe("durable notification delivery", () => {
     expect(rows[0].action_input.payload.eventId).toBe(results[0].eventId);
   });
 
+  it("a transactional producer snapshots its own routing writes and rolls back its entire notification", async () => {
+    const h = await setup();
+    const sql = getTestDb();
+    await expect(sql.begin(async (tx) => {
+      await tx`UPDATE connections SET status = 'paused' WHERE organization_id = ${h.org.id}`;
+      const created = await createNotificationForUsers([h.user.id], h.params, tx);
+      const [notification] = await tx`SELECT metadata FROM events WHERE id = ${created.eventId}`;
+      // A second pool connection would see the old active bindings here.
+      expect(notification.metadata.delivery_request.targets).toEqual([]);
+      throw new Error('synthetic enclosing transaction failure');
+    })).rejects.toThrow('synthetic enclosing transaction failure');
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${h.org.id}
+      AND metadata->>'_lobu_idempotency_key' = ${h.params.idempotencyKey}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${h.org.id}
+      AND action_key = ${NOTIFICATION_DELIVERY_TASK}`).toHaveLength(0);
+    expect(h.post).not.toHaveBeenCalled();
+    expect(await createNotificationForUsers([h.user.id], h.params)).toMatchObject({ created: true });
+  });
+
   it("commits successful receipts and retries only the failed destination", async () => {
     const h = await setup();
     const event = await createNotificationForUsers([h.user.id], h.params);

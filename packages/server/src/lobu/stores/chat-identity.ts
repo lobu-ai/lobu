@@ -1,4 +1,4 @@
-import { getDb } from "../../db/client.js";
+import { type DbClient, getDb } from "../../db/client.js";
 import { chatUserIdentityFor } from "./chat-identity-sources.js";
 
 /**
@@ -104,6 +104,7 @@ export async function resolveChatUserIdForUser(
 	userId: string,
 	platform: string,
 	teamId: string | null | undefined,
+	sql: DbClient = getDb(),
 ): Promise<string | null> {
 	const identity = chatUserIdentityFor(platform);
 	if (!identity) return null;
@@ -115,7 +116,7 @@ export async function resolveChatUserIdForUser(
 	// a user id from the wrong workspace. Escape all LIKE metacharacters so the
 	// prefix matches literally. A `global` scope needs no pattern at all.
 	const likePrefix = prefix.replace(/([\\%_])/g, "\\$1");
-	const rows = await getDb()<{ identifier: string }>`
+	const rows = await sql<{ identifier: string }>`
     SELECT DISTINCT chat_ei.identifier
     FROM entity_identities auth_ei
     JOIN entities e

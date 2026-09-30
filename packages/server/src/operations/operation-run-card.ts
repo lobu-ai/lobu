@@ -4,9 +4,40 @@
  * execution, then follows the shared completion and failure transitions.
  */
 
+import { deepRedactSecrets, isSecretKey, REDACTED_SENTINEL } from "@lobu/core";
 import { getDb } from "../db/client";
+import { ApprovalKind, approvalContext, highApprovalImpact, normalApprovalImpact } from "../utils/approval-context";
+import type { OperationDescriptor } from "./types";
 import { runLeaseFence } from "../runs/run-lease";
 import { supersedeActionEvent } from "../tools/admin/approval-events";
+
+/** The same review details apply whether Ask is decided at admission or dispatch. */
+export function connectorApprovalMetadata(
+	connectionName: string,
+	operation: Pick<OperationDescriptor, "name" | "annotations">,
+	input: Record<string, unknown>,
+) {
+	return {
+		...approvalContext(
+			ApprovalKind.Connector,
+			operation.annotations?.destructiveHint === true
+				? highApprovalImpact(
+					"This action can remove or irreversibly change data in the connected service.",
+					["Lobu may not be able to undo the external change."],
+				)
+				: normalApprovalImpact(),
+		),
+		review_fields: [
+			{ key: "resource", value: "Connector operation" },
+			{ key: "connection", value: connectionName },
+			{ key: "operation", value: operation.name },
+			...Object.entries(input).map(([key, value]) => ({
+				key: `input_${key}`,
+				value: value != null && isSecretKey(key) ? REDACTED_SENTINEL : deepRedactSecrets(value),
+			})),
+		],
+	};
+}
 
 /**
  * Origin id of the dispatch card a non-queued operation run writes. Source

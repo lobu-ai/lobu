@@ -1,28 +1,44 @@
 import { Hono } from 'hono';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyRunConnectorPolicyAtClaim,
   CONNECTOR_PARENT_RUN_METADATA_KEY,
   resolveRunConnectorPolicy,
 } from '../../../authz/operation-run-policy';
 import type { Env } from '../../../index';
+import { getOperationForConnection } from '../../../operations/connector-operations';
 import { DEVICE_FEED_READ_ACTION_KEY } from '../../../lib/device-feed-read-protocol';
+import { __setChatInstanceManagerForTests } from '../../../lobu/gateway';
+import { deliverNotificationTask } from '../../../notifications/service';
 import { createConnectorOperationRun } from '../../../runs/queue-service';
+import { NOTIFICATION_DELIVERY_TASK } from '../../../scheduled/task-definitions';
 import { waitForDeviceActionRunWithOptions } from '../../../tools/admin/device-action-wait';
+import { executeOperationInline, handleExecute } from '../../../tools/admin/manage_operations/handlers/execute';
 import { qualifiedOperationKey } from '../../../tools/admin/manage_operations/handlers/shared';
+import type { ToolContext } from '../../../tools/registry';
 import { insertEvent } from '../../../utils/insert-event';
 import { activatePageRun } from '../../../worker-api/page-activation';
 import { pollWorkerJob } from '../../../worker-api/poll';
+import { initWorkspaceProvider } from '../../../workspace';
+import { createTestAutomationSubscription } from '../../setup/automation-subscriptions';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
-  createTestAgent, createTestConnection, createTestConnectorDefinition,
-  createTestOrganization, createTestUser,
+  addUserToOrganization, createTestAgent, createTestConnection, createTestConnectorDefinition,
+  createTestOrganization, createTestUser, insertChatConnectionRow,
 } from '../../setup/test-fixtures';
 
 const sql = getTestDb();
 const connectorKey = 'policy-dispatch-fixture';
 let organizationId: string;
 let connectionId: number;
+let ownerId: string;
+
+async function approvalNotifications() {
+  return sql`SELECT e.id, e.metadata, e.payload_data FROM events e
+    JOIN notification_targets t ON t.event_id = e.id
+    WHERE e.organization_id = ${organizationId} AND t.user_id = ${ownerId}
+      AND e.metadata->>'notification_type' = 'action_approval_needed'`;
+}
 
 async function rule(effect: 'auto' | 'approval' | 'deny', operationKey = 'perform', principalId: string | null = null) {
   const [policy] = await sql<{ id: number }>`
@@ -62,9 +78,12 @@ async function state(runId: number) {
 }
 
 describe('operation policy at durable dispatch', () => {
+  beforeAll(initWorkspaceProvider);
   beforeEach(async () => {
     await cleanupTestDatabase();
     organizationId = (await createTestOrganization()).id;
+    ownerId = (await createTestUser()).id;
+    await addUserToOrganization(ownerId, organizationId, 'owner');
     await createTestConnectorDefinition({ key: connectorKey, name: 'Policy dispatch fixture', organization_id: organizationId });
     await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({
       perform: { name: 'Perform', kind: 'write' },
@@ -73,6 +92,7 @@ describe('operation policy at durable dispatch', () => {
     connectionId = (await createTestConnection({ organization_id: organizationId, connector_key: connectorKey, createDefaultFeed: false })).id;
   });
   afterAll(cleanupTestDatabase);
+  afterEach(() => __setChatInstanceManagerForTests(null));
 
   it('parks a queued Auto after policy tightens, superseding its ledger card without deleting history', async () => {
     const id = await run();
@@ -89,6 +109,108 @@ describe('operation policy at durable dispatch', () => {
     expect(current.interaction_status).toBe('pending');
     expect(current.metadata.approval_context.kind).toBe('connector');
     expect(await sql`SELECT id FROM events WHERE id = ${original.id}`).toHaveLength(1);
+    const notifications = await approvalNotifications();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].metadata).toMatchObject({
+      resource_id: String(current.id),
+      delivery_request: { context: { decisionRunId: id, deliveryScope: 'targeted' } },
+    });
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${organizationId}
+      AND action_key = ${NOTIFICATION_DELIVERY_TASK}
+      AND action_input->'payload'->>'eventId' = ${String(notifications[0].id)}`).toHaveLength(1);
+  });
+
+  it('concurrent and repeated claims create only one late approval notification', async () => {
+    const id = await run();
+    expect(await Promise.all([admit(id), admit(id)])).toEqual([false, false]);
+    expect(await admit(id)).toBe(false);
+    expect(await approvalNotifications()).toHaveLength(1);
+  });
+
+  it('rolls back the parked run and its card if notification persistence fails', async () => {
+    const id = await run();
+    await sql.unsafe(`CREATE FUNCTION fail_late_approval_notification() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic late approval notification failure'; END $$;
+      CREATE TRIGGER fail_late_approval_notification BEFORE INSERT ON notification_targets
+      FOR EACH ROW EXECUTE FUNCTION fail_late_approval_notification();`);
+    try {
+      await expect(admit(id)).rejects.toThrow('synthetic late approval notification failure');
+      expect(await state(id)).toMatchObject({ status: 'pending', approval_status: 'auto' });
+      expect(await sql`SELECT id FROM events WHERE run_id = ${id}`).toHaveLength(0);
+      expect(await approvalNotifications()).toHaveLength(0);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER fail_late_approval_notification ON notification_targets;
+        DROP FUNCTION fail_late_approval_notification();`);
+    }
+    expect(await admit(id)).toBe(false);
+    expect(await approvalNotifications()).toHaveLength(1);
+  });
+
+  it('preserves the verified conversation and destructive review details when an Auto becomes Ask', async () => {
+    const agent = await createTestAgent({ organizationId, agentId: 'late-approval-agent', ownerUserId: ownerId });
+    await insertChatConnectionRow({
+      id: 'late-approval-chat', organizationId, agentId: agent.agentId,
+      platform: 'slack', status: 'active', settings: {},
+    });
+    await createTestAutomationSubscription({
+      organizationId, agentId: agent.agentId, connectionSlug: 'agentconn-late-approval-chat',
+      platform: 'slack', channelId: 'slack:C_LATE', teamId: 'T_LATE', configuredBy: ownerId,
+    });
+    await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({
+      perform: { name: 'Perform', kind: 'write', annotations: { destructiveHint: true } },
+    })} WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
+    const policyId = await rule('auto');
+    const queued = await handleExecute({
+      action: 'execute', connection_id: connectionId, operation_key: 'perform',
+      input: { text: 'Synthetic draft', api_key: 'synthetic-secret' },
+      activation: { kind: 'page_visit', urls: ['https://example.test/draft'], expires_in_seconds: 300 },
+    }, {
+      organizationId, userId: ownerId, agentId: agent.agentId, memberRole: 'owner',
+      isAuthenticated: true, tokenType: 'session', scopedToOrg: true,
+      baseUrl: 'https://gateway.example.test/lobu',
+      sourceContext: {
+        platform: 'slack', connectionId: 'late-approval-chat', channelId: 'slack:C_LATE',
+        conversationId: 'slack:C_LATE', teamId: 'T_LATE', userId: 'U_LATE',
+      },
+    } as ToolContext, {} as Env) as { run_id: number; status: string };
+    expect(queued.status).toBe('in_progress');
+    expect(await approvalNotifications()).toHaveLength(0);
+    await sql`UPDATE write_policy_action_effects SET effect = 'approval' WHERE policy_id = ${policyId}`;
+    expect(await admit(queued.run_id)).toBe(false);
+    const [notification] = await approvalNotifications();
+    expect(notification.metadata.delivery_request).toMatchObject({
+      context: {
+        connectionId: 'late-approval-chat', channelId: 'slack:C_LATE', teamId: 'T_LATE',
+        ownerUserId: null, actionOrigin: { kind: 'conversation' },
+      },
+      targets: [{ connectionId: 'late-approval-chat', channelKey: 'slack:C_LATE', platform: 'slack' }],
+    });
+    const [card] = await sql`SELECT metadata FROM current_event_records
+      WHERE run_id = ${queued.run_id} AND semantic_type = 'operation'`;
+    expect(card.metadata.approval_context.impact.level).toBe('high');
+    expect(card.metadata.review_fields).toEqual(expect.arrayContaining([
+      { key: 'operation', value: 'Perform' },
+      { key: 'input_text', value: 'Synthetic draft' },
+    ]));
+    expect(JSON.stringify(card.metadata.review_fields)).not.toContain('synthetic-secret');
+    const post = vi.fn(async () => ({ messageId: 'late-approval-message', threadId: 'slack:C_LATE' }));
+    __setChatInstanceManagerForTests({ postMessageToChannel: post });
+    await deliverNotificationTask({ organizationId, eventId: Number(notification.id) });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]?.slice(0, 2)).toEqual(['late-approval-chat', 'slack:C_LATE']);
+    const [delivered] = await sql`SELECT metadata FROM events WHERE id = ${notification.id}`;
+    expect(delivered.metadata.delivery[0].attempts.at(-1).status).toBe('provider_accepted');
+  });
+
+  it('the inline executor parks and notifies before invoking its backend', async () => {
+    const id = await run({ status: 'running', claimedBy: 'inline-policy-owner' });
+    const resolved = await getOperationForConnection(organizationId, connectionId, 'perform');
+    expect(resolved).not.toBeNull();
+    expect(await executeOperationInline(id, organizationId, resolved!.connection, resolved!.operation,
+      {}, ownerId, undefined, { runMetadata: undefined, claimedBy: 'inline-policy-owner' }))
+      .toEqual({ status: 'pending_approval' });
+    expect(await state(id)).toMatchObject({ approval_status: 'pending', claimed_by: null });
+    expect(await approvalNotifications()).toHaveLength(1);
   });
 
   it('human approval satisfies Ask but a later Block cancels before worker dispatch', async () => {
@@ -202,6 +324,7 @@ describe('operation policy at durable dispatch', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).not.toHaveProperty('run_id');
     expect(await state(id)).toMatchObject({ status: 'pending', approval_status: 'pending' });
+    expect(await approvalNotifications()).toHaveLength(1);
     await sql`UPDATE runs SET approval_status = 'approved' WHERE id = ${id}`;
     const approved = await poll();
     expect(approved.status).toBe(200);

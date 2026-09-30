@@ -589,7 +589,11 @@ describe("operations.execute backend lifecycle", () => {
 		`;
 		expect(Number(run.automation_id)).toBe(automationId);
 		expect(Number(run.parent_run_id)).toBe(sourceRunId);
-		expect(run.run_metadata).toEqual({
+		expect(run.run_metadata).toMatchObject({
+			approval_notification: {
+				requesterUserId: userId,
+				actionOrigin: { kind: "automation", label: "Operation provenance automation" },
+			},
 			browser_context: {
 				id: `automation:${sourceRunId}`,
 				title: `${BROWSER_GROUP_TITLE_PREFIX} · Automation ${automationId} · Run ${sourceRunId}`,

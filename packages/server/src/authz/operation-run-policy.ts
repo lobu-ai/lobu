@@ -2,7 +2,8 @@ import { type DbClient, getDb } from '../db/client';
 import { DEVICE_FEED_READ_ACTION_KEY } from '../lib/device-feed-read-protocol';
 import { getOperationForConnection } from '../operations/connector-operations';
 import { supersedeActionEvent } from '../tools/admin/approval-events';
-import { ApprovalKind, approvalContext } from '../utils/approval-context';
+import { connectorApprovalMetadata } from '../operations/operation-run-card';
+import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } from '../notifications/triggers';
 import { insertEvent } from '../utils/insert-event';
 import type { ConnectorPolicyResult } from './connector-policy';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
@@ -130,17 +131,22 @@ export async function applyRunConnectorPolicyAtClaim(params: {
     RETURNING id
   `;
   if (!changed) return false;
+  const resolved = !blocked && run.connection_id !== null && run.action_key
+    ? await getOperationForConnection(organizationId, Number(run.connection_id), run.action_key, sql)
+    : null;
+  if (!blocked && !resolved) throw new Error('Approval operation became unavailable during policy recheck');
+  const connectionName = resolved?.connection.display_name ?? run.connector_key ?? 'Connection';
   const status = blocked ? 'rejected' : 'pending_approval';
   const title = `${run.action_key ?? 'Operation'} — ${blocked ? 'blocked by policy' : 'pending approval'}`;
   const metadata = {
     policy_reason: policy.reason, policy_rule_ids: policy.ruleIds,
-    ...(!blocked ? approvalContext(ApprovalKind.Connector) : {}),
+    ...(resolved ? connectorApprovalMetadata(connectionName, resolved.operation, run.action_input ?? {}) : {}),
   };
-  const cardId = await supersedeActionEvent(runId, organizationId, status, title, message, metadata, null, sql);
+  let cardId = await supersedeActionEvent(runId, organizationId, status, title, message, metadata, null, sql);
   if (cardId === undefined) {
     // Delegated browser steps normally have no separate ledger card. A policy
     // veto still needs a durable explanation alongside its terminal run.
-    await insertEvent({
+    const event = await insertEvent({
       entityIds: [], organizationId, originId: `run_${runId}_${status}`,
       title, content: message, semanticType: 'operation', runId,
       connectorKey: run.connector_key, connectionId: run.connection_id,
@@ -148,6 +154,20 @@ export async function applyRunConnectorPolicyAtClaim(params: {
       interactionInput: run.action_input,
       metadata: { ...metadata, status, run_id: runId, action_key: run.action_key, operation_key: run.action_key },
     }, { sql });
+    cardId = Number(event.id);
+  }
+  if (resolved) {
+    // The run lock admits this transition once. Persist inbox + delivery work
+    // on this transaction too, so a crash cannot leave a silent pending Ask.
+    const context = run.run_metadata?.approval_notification as ActionApprovalNotificationContext | undefined;
+    await notifyActionApprovalNeeded({
+      ...context,
+      orgId: organizationId, runId, eventId: cardId,
+      actionKey: resolved.operation.operation_key,
+      connectionName,
+      requesterUserId: context?.requesterUserId ?? run.created_by_user_id,
+      operation: { name: resolved.operation.name, input: run.action_input ?? {} },
+    }, sql);
   }
   return false;
 }

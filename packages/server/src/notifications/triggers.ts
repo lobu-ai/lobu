@@ -1,5 +1,5 @@
 import { Actions, Button, Card, CardText, LinkButton } from "chat";
-import { getDb } from "../db/client";
+import { type DbClient, getDb } from "../db/client";
 import { emit } from "../events/emitter";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
 import {
@@ -385,8 +385,7 @@ export function buildActionApprovalCard(params: {
 	});
 }
 
-async function getOrgAdminUserIds(organizationId: string): Promise<string[]> {
-	const sql = getDb();
+async function getOrgAdminUserIds(organizationId: string, sql: DbClient = getDb()): Promise<string[]> {
 	const rows = await sql<{ userId: string }>`
     SELECT "userId"
     FROM "member"
@@ -406,12 +405,13 @@ async function sendNotification(
 	orgId: string,
 	userIds: string[],
 	notification: OrgNotification,
+	transaction?: DbClient,
 ): Promise<void> {
 	await createNotificationForUsers(userIds, {
 		organizationId: orgId,
 		...notification,
-	});
-	emit(orgId, { keys: ["notifications", "notifications-unread-count"] });
+	}, transaction);
+	if (!transaction) emit(orgId, { keys: ["notifications", "notifications-unread-count"] });
 }
 
 /**
@@ -422,12 +422,13 @@ async function sendNotification(
 async function notifyOrgAdmins(
 	orgId: string,
 	build: (orgSlug: string | null) => OrgNotification,
+	transaction?: DbClient,
 ): Promise<void> {
-	const adminIds = await getOrgAdminUserIds(orgId);
+	const adminIds = await getOrgAdminUserIds(orgId, transaction);
 	if (adminIds.length === 0) return;
 
-	const orgSlug = await getOrgSlug(orgId);
-	await sendNotification(orgId, adminIds, build(orgSlug));
+	const orgSlug = await getOrgSlug(orgId, transaction);
+	await sendNotification(orgId, adminIds, build(orgSlug), transaction);
 }
 
 /**
@@ -453,6 +454,10 @@ export function resolveApprovalDmTarget(params: {
 	if (params.connectionId || params.channelId) return null;
 	return params.requesterUserId ?? null;
 }
+
+/** Server-verified routing preserved on an operation before a later policy recheck. */
+export type ActionApprovalNotificationContext = Pick<Parameters<typeof notifyActionApprovalNeeded>[0],
+	"connectionId" | "channelId" | "teamId" | "requesterUserId" | "mcpActivity" | "actionOrigin">;
 
 export async function notifyActionApprovalNeeded(params: {
 	orgId: string;
@@ -489,7 +494,7 @@ export async function notifyActionApprovalNeeded(params: {
 		/** The operation's input, rendered so the decision can be made from chat. */
 		input: Record<string, unknown>;
 	} | null;
-}): Promise<void> {
+}, transaction?: DbClient): Promise<void> {
 	const operation = params.operation ?? null;
 	// The render model is already the shape a template wants — a couple of
 	// scalars plus `diffs` / `proposal` lists — so the kind's `each` walks it
@@ -545,7 +550,7 @@ export async function notifyActionApprovalNeeded(params: {
 			mcpActivity: params.mcpActivity,
 			actionOrigin: params.actionOrigin,
 		};
-	});
+	}, transaction);
 }
 
 /** Deep-link into a single connection (settings / re-auth), not the connectors list. */

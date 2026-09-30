@@ -22,6 +22,7 @@ import {
 } from "../db/client";
 import { resolveBoundChannelRows } from "../gateway/channels/bound-channels";
 import { getChatInstanceManager } from "../lobu/gateway";
+import { emit } from "../events/emitter";
 import { NOTIFICATION_DELIVERY_TASK } from "../scheduled/task-definitions";
 import { enqueueTasksInTransaction } from "../scheduled/task-scheduler";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
@@ -212,6 +213,7 @@ export async function resolveBotDeliveryTargets(
 				channelId?: string | null;
 				teamId?: string | null;
 		  },
+	sql: DbClient = getDb(),
 ): Promise<BotDeliveryTarget[]> {
 	const connectionId =
 		typeof opts === "string" || opts === null ? opts : opts?.connectionId;
@@ -221,7 +223,7 @@ export async function resolveBotDeliveryTargets(
 	// Org-wide (no agentId): every channel any of the org's agents is bound to,
 	// resolved through the right connection. Shared resolver = one home for the
 	// cross-org preview invariant (see bound-channels.ts).
-	const rows = await resolveBoundChannelRows(getDb(), {
+	const rows = await resolveBoundChannelRows(sql, {
 		organizationId,
 		connectionId,
 	});
@@ -265,12 +267,12 @@ export async function resolveNotificationDeliveryPlan(params: {
 	teamId?: string | null;
 	/** See `CreateNotificationParams.deliveryScope`. Defaults to `"org"`. */
 	deliveryScope?: "targeted" | "org";
-}): Promise<{ strictAutomationTarget: boolean; targets: BotDeliveryTarget[] }> {
+}, sql: DbClient = getDb()): Promise<{ strictAutomationTarget: boolean; targets: BotDeliveryTarget[] }> {
 	const configuredAutomationTarget =
 		params.automationId == null
 			? { configured: false, target: null }
 			: await loadConfiguredAutomationDeliveryTarget(
-					getDb(),
+					sql,
 					params.organizationId,
 					params.automationId,
 				);
@@ -284,7 +286,7 @@ export async function resolveNotificationDeliveryPlan(params: {
 				connectionId: configuredAutomationTarget.target.connectionId,
 				channelId: configuredAutomationTarget.target.channelId,
 				teamId: configuredAutomationTarget.target.teamId,
-			}),
+			}, sql),
 		};
 	}
 
@@ -303,7 +305,7 @@ export async function resolveNotificationDeliveryPlan(params: {
 		connectionId: params.connectionId,
 		channelId: params.channelId,
 		teamId: params.teamId,
-	});
+	}, sql);
 	if (targets.length === 0 && hasExplicitTarget) {
 		if (targeted) {
 			// A stale/unbound target on a targeted notification means "nobody",
@@ -329,7 +331,7 @@ export async function resolveNotificationDeliveryPlan(params: {
 			},
 			"[Notifications] Configured delivery target resolved to no bound channels — falling back to org-wide delivery",
 		);
-		targets = await resolveBotDeliveryTargets(params.organizationId, null);
+		targets = await resolveBotDeliveryTargets(params.organizationId, null, sql);
 	}
 	return { strictAutomationTarget: false, targets };
 }
@@ -349,6 +351,7 @@ export async function resolveNotificationDeliveryPlan(params: {
 async function connectionCanOpenDm(
 	connectionId: string,
 	platform: string,
+	sql: DbClient,
 ): Promise<boolean> {
 	const descriptor = getPlatformDescriptor(platform);
 	if (!descriptor?.canOpenDirectMessage) return true;
@@ -359,7 +362,7 @@ async function connectionCanOpenDm(
 	// soft-deleted connection may carry the same slug — and without these, a
 	// `LIMIT 1` with no ORDER BY could read the dead row's config and decide DM
 	// reachability from a connection that no longer exists.
-	const rows = await getDb()<{ config: Record<string, unknown> | null }>`
+	const rows = await sql<{ config: Record<string, unknown> | null }>`
     SELECT config FROM connections
     WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
       AND credential_mode IS NOT NULL
@@ -388,6 +391,7 @@ export async function resolveOwnerDmTarget(
 	organizationId: string,
 	ownerUserId: string,
 	connectionId?: string | null,
+	sql: DbClient = getDb(),
 ): Promise<{
 	connectionId: string;
 	platform: string;
@@ -396,6 +400,7 @@ export async function resolveOwnerDmTarget(
 	const targets = await resolveBotDeliveryTargets(
 		organizationId,
 		connectionId ?? null,
+		sql,
 	);
 	const seen = new Set<string>();
 	for (const target of targets) {
@@ -410,6 +415,7 @@ export async function resolveOwnerDmTarget(
 			ownerUserId,
 			target.platform,
 			target.teamId,
+			sql,
 		);
 		if (!platformUserId) continue;
 		// Resolving an identity is not the same as being able to REACH it. A
@@ -419,7 +425,7 @@ export async function resolveOwnerDmTarget(
 		// pinning; a connection that says no simply isn't an owner-DM candidate
 		// and delivery falls through to the bound channel, as it did before this
 		// tier understood any platform but Slack.
-		if (!(await connectionCanOpenDm(target.connectionId, target.platform))) {
+		if (!(await connectionCanOpenDm(target.connectionId, target.platform, sql))) {
 			continue;
 		}
 		return {
@@ -439,8 +445,8 @@ export async function resolveOwnerDmTarget(
  */
 export async function getOrgSlug(
 	organizationId: string,
+	sql: DbClient = getDb(),
 ): Promise<string | null> {
-	const sql = getDb();
 	const rows = await sql<{ slug: string }>`
     SELECT slug FROM "organization" WHERE id = ${organizationId} LIMIT 1
   `;
@@ -458,8 +464,8 @@ export async function getOrgSlug(
 export async function findNotificationByIdempotencyKey(
 	organizationId: string,
 	idempotencyKey: string,
+	sql: DbClient = getDb(),
 ): Promise<number | null> {
-	const sql = getDb();
 	const rows = (await sql`
     SELECT id
     FROM events
@@ -1105,8 +1111,9 @@ export interface NotificationDeliveryTaskPayload {
 async function ownerIsMember(
 	organizationId: string,
 	userId: string,
+	sql: DbClient,
 ): Promise<boolean> {
-	const [member] = await getDb()`
+	const [member] = await sql`
 		SELECT 1 FROM member
 		WHERE "organizationId" = ${organizationId} AND "userId" = ${userId}
 		LIMIT 1
@@ -1116,6 +1123,7 @@ async function ownerIsMember(
 
 async function snapshotNotificationDelivery(
 	params: Omit<CreateNotificationParams, "userId">,
+	sql: DbClient,
 ): Promise<NotificationDeliveryRequest> {
 	const context: NotificationDeliveryContext = {
 		connectionId: params.connectionId,
@@ -1127,15 +1135,16 @@ async function snapshotNotificationDelivery(
 		actionOrigin: params.actionOrigin,
 		automationId: params.automationId,
 	};
-	const plan = await resolveNotificationDeliveryPlan(params);
+	const plan = await resolveNotificationDeliveryPlan(params, sql);
 	const ownerDm =
 		params.ownerUserId &&
 		!plan.strictAutomationTarget &&
-		(await ownerIsMember(params.organizationId, params.ownerUserId))
+		(await ownerIsMember(params.organizationId, params.ownerUserId, sql))
 			? await resolveOwnerDmTarget(
 					params.organizationId,
 					params.ownerUserId,
 					params.connectionId,
+					sql,
 				)
 			: null;
 	return { context, ...plan, ownerDm };
@@ -1222,6 +1231,8 @@ export async function deliverNotificationTask(
 	if (!request || !Array.isArray(request.targets)) {
 		throw new Error("Notification delivery request is missing");
 	}
+	// Transactional producers cannot invalidate before their domain write commits.
+	emit(input.organizationId, { keys: ["notifications", "notifications-unread-count"] });
 	if (request.strictAutomationTarget && request.targets.length === 0) {
 		throw new Error("Automation notification target is unavailable");
 	}
@@ -1368,14 +1379,14 @@ export async function deliverNotificationTask(
 					const current = await resolveNotificationDeliveryPlan({
 						...context,
 						organizationId: input.organizationId,
-					});
+					}, tx);
 					if (request.strictAutomationTarget && !current.strictAutomationTarget) {
 						throw new NotificationDeliveryError("binding_changed", "Automation notification target changed");
 					}
 					if (request.ownerDm) {
 						if (
 							!context.ownerUserId ||
-							!(await ownerIsMember(input.organizationId, context.ownerUserId))
+							!(await ownerIsMember(input.organizationId, context.ownerUserId, tx))
 						) {
 							throw new NotificationDeliveryError("owner_unavailable", "Notification owner is no longer a workspace member");
 						}
@@ -1383,6 +1394,7 @@ export async function deliverNotificationTask(
 							input.organizationId,
 							context.ownerUserId,
 							context.connectionId,
+							tx,
 						);
 						if (
 							!dm ||
@@ -1511,9 +1523,11 @@ export async function deliverNotificationTask(
 export async function createNotificationForUsers(
 	userIds: string[],
 	params: Omit<CreateNotificationParams, "userId">,
+	/** Commit the inbox and delivery task with the caller's domain transition. */
+	transaction?: DbClient,
 ): Promise<{ created: boolean; eventId: number | null }> {
 	if (userIds.length === 0) return { created: false, eventId: null };
-	const sql = getDb();
+	const sql = transaction ?? getDb();
 
 	const metadata: Record<string, unknown> = {
 		notification_type: params.type,
@@ -1545,15 +1559,16 @@ export async function createNotificationForUsers(
 		const prior = await findNotificationByIdempotencyKey(
 			params.organizationId,
 			params.idempotencyKey,
+			sql,
 		);
 		if (prior !== null) return { created: false, eventId: prior };
 	}
 
-	metadata.delivery_request = await snapshotNotificationDelivery(params);
+	metadata.delivery_request = await snapshotNotificationDelivery(params, sql);
 
 	let eventId: number;
 	try {
-		eventId = (await sql.begin(async (tx) => {
+		const persist = async (tx: DbClient) => {
 			const event = await insertEvent(
 				{
 					entityIds: params.entityIds ?? [],
@@ -1605,7 +1620,8 @@ export async function createNotificationForUsers(
         },
       }]);
 			return event.id;
-		})) as number;
+		};
+		eventId = transaction ? await transaction.savepoint(persist) : await sql.begin(persist);
 	} catch (error) {
 		// Two replicas may race past the preflight read. The unique index is the
 		// lock; the loser resolves and returns the winner's durable event.
@@ -1616,6 +1632,7 @@ export async function createNotificationForUsers(
 			const winner = await findNotificationByIdempotencyKey(
 				params.organizationId,
 				params.idempotencyKey,
+				sql,
 			);
 			if (winner === null) throw error;
 			return { created: false, eventId: winner };
