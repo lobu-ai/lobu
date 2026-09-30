@@ -1071,12 +1071,12 @@ export default async (_ctx, client) => {
 	},
 	"classifiers.classify": {
 		summary:
-			"Write labels on one or many content records (single or batch); the only way labels are written. An Automation labels events by reading them and calling this with `source: 'llm'`; only `source: 'user'` labels are manual and they win at read time. `confidence` is 0..1; omitted or null leaves an 'llm' label unscored and defaults a 'user' label to 1. `value: null` removes your label. The classifier is addressed by `classifier_slug` (a string — NOT the numeric `classifier_id` other CRUD methods use).",
+			"Write labels on one or many content records (single or batch); the only way labels are written. An Automation labels events by reading them and calling this. When omitted, `source` defaults to 'user' for a person and 'llm' for an Automation or agent; Automations and agents cannot write 'user' labels. Only 'user' labels are manual, and they win at read time. `confidence` is 0..1; omitted or null leaves an 'llm' label unscored and defaults a 'user' label to 1. `value: null` removes your label. The classifier is addressed by `classifier_slug` (a string — NOT the numeric `classifier_id` other CRUD methods use).",
 		access: "admin",
 		signature:
 			"classifiers.classify(input: { classifier_slug: string; content_id?: number; value?: string | null; confidence?: number | null; reasoning?: string; classifications?: Array<{ content_id: number; value: string | null; confidence?: number | null; reasoning?: string }>; source?: 'llm' | 'user' }): Promise<unknown>",
 		example:
-			"await client.classifiers.classify({ classifier_slug: 'sentiment', source: 'llm', classifications: [{ content_id: 101, value: 'positive', confidence: 0.9 }] });",
+			"await client.classifiers.classify({ classifier_slug: 'sentiment', classifications: [{ content_id: 101, value: 'positive', confidence: 0.9 }] });",
 	},
 
 	// views
