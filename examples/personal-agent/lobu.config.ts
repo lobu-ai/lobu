@@ -1216,8 +1216,13 @@ const linkedinConnection = defineConnection({
           "media",
         ].map((feed) => ({ feed, config: { takeout_dir: linkedinTakeoutDir } }))
       : []),
-    // Live Chrome-extension feed (no company_url needed).
-    { feed: "home_feed", config: { min_scrolls: 6, max_scrolls: 10 } },
+    // Live Chrome-extension feed (no company_url needed). Every 3 hours; a run
+    // while the paired browser is offline re-arms without a source-health failure.
+    {
+      feed: "home_feed",
+      schedule: "0 */3 * * *",
+      config: { min_scrolls: 6, max_scrolls: 10 },
+    },
   ],
 });
 

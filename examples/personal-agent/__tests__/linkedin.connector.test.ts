@@ -2480,6 +2480,69 @@ describe("LinkedInConnector home_feed", () => {
     ).rejects.toThrow(/no post rows/i);
   });
 
+  test.each([
+    "activity",
+    "share",
+    "ugcPost",
+  ])("accepts native comments with an unprefixed %s parent URN", async (namespace) => {
+    const postId = "1111111111111111111";
+    const commentId = "2222222222222222222";
+    const replyId = "3333333333333333333";
+    const dispatcher = {
+      dispatch: async () => ({
+        result: {
+          loggedIn: true,
+          rows: [
+            {
+              id: "opaque-component-key",
+              body: "Feed post Fixture Author • 1st An organic post with enough text",
+              post_identity: `urn:li:${namespace}:${postId}`,
+            },
+            {
+              id: `replaceableComment_urn:li:comment:(${namespace}:${postId},${commentId})`,
+              body: "Fixture Commenter Author A comment on the organic post",
+            },
+            {
+              id: `replaceableComment_urn:li:comment:(urn:li:${namespace}:${postId},${commentId})`,
+              body: "Fixture Commenter Author A comment on the organic post",
+            },
+            {
+              id: `replaceableComment_urn:li:comment:(${namespace}:${postId},${replyId})`,
+              parent_comment_identity: `replaceableComment_urn:li:comment:(${namespace}:${postId},${commentId})`,
+              body: "Fixture Replier Author A reply to the comment",
+            },
+          ],
+        },
+      }),
+    };
+    const res = await runSync(new LinkedInConnector(), {
+      feedKey: "home_feed",
+      config: {},
+      checkpoint: {},
+      sessionState: { chrome_dispatcher: dispatcher },
+    });
+    expect(res.events).toHaveLength(3);
+    expect(res.events[1]).toMatchObject({
+      origin_type: "comment",
+      origin_id: `li_comment_${commentId}`,
+      origin_parent_id: `li_home_${namespace}_${postId}`,
+      metadata: {
+        comment_urn: `urn:li:comment:(urn:li:${namespace}:${postId},${commentId})`,
+        parent_activity_namespace: namespace,
+      },
+    });
+    expect(res.events[2]).toMatchObject({
+      origin_type: "comment",
+      origin_id: `li_comment_${replyId}`,
+      origin_parent_id: `li_comment_${commentId}`,
+      metadata: {
+        parent_post_origin_id: `li_home_${namespace}_${postId}`,
+        parent_comment_id: commentId,
+        is_reply: true,
+      },
+    });
+  });
+
   test("fails the whole batch when an organic post has no durable identity", async () => {
     const dispatcher = {
       dispatch: async () => ({
@@ -2503,7 +2566,9 @@ describe("LinkedInConnector home_feed", () => {
         checkpoint: {},
         sessionState: { chrome_dispatcher: dispatcher },
       })
-    ).rejects.toThrow(/No partial home-feed batch was persisted/i);
+    ).rejects.toThrow(
+      "LinkedIn scraped 1 post row without a durable activity/share/ugcPost identity (first row id: opaque-component-key). No partial home-feed batch was persisted."
+    );
   });
 
   test("ignores current feed modules without weakening organic-post identity checks", async () => {
@@ -3235,7 +3300,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.12.0");
+    expect(c.definition.version).toBe("3.12.1");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

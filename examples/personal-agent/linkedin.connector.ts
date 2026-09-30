@@ -1026,18 +1026,17 @@ function parseHomeFeedCommentIdentity(
   raw: string | undefined
 ): HomeFeedCommentIdentity | undefined {
   if (!raw) return undefined;
+  // Normalize both parent forms so the same comment has one canonical URN.
   const match = raw.match(
-    /(urn:li:comment:\(urn:li:(activity|share|ugcPost):(\d+),(\d+)\))/i
+    /urn:li:comment:\((?:urn:li:)?(activity|share|ugcPost):(\d+),(\d+)\)/i
   );
   if (!match) return undefined;
+  const parentNamespace = linkedInUrnNamespace(match[1]);
   return {
-    urn: match[1],
-    parentNamespace: linkedInUrnNamespace(match[2]) as
-      | "activity"
-      | "share"
-      | "ugcPost",
-    parentId: match[3],
-    commentId: match[4],
+    urn: `urn:li:comment:(urn:li:${parentNamespace}:${match[2]},${match[3]})`,
+    parentNamespace,
+    parentId: match[2],
+    commentId: match[3],
   };
 }
 
@@ -1643,20 +1642,18 @@ export async function resolveHomeFeedPostUrls(
   );
 }
 
-function unresolvedHomeFeedPostCount(rows: HomeFeedRow[]): number {
-  let count = 0;
-  for (const row of rows) {
-    if (!row?.id || !row.body) continue;
+function unresolvedHomeFeedPostRows(rows: HomeFeedRow[]): HomeFeedRow[] {
+  return rows.filter((row) => {
+    if (!row?.id || !row.body) return false;
     const context = buildHomeFeedRowContext(row);
     if (
       parseHomeFeedCommentIdentity(row.id) ||
       isHomeFeedRowNoise(row, context)
     ) {
-      continue;
+      return false;
     }
-    if (!homeFeedPostIdentityKey(row, context)) count += 1;
-  }
-  return count;
+    return !homeFeedPostIdentityKey(row, context);
+  });
 }
 
 function unresolvedHomeFeedShortUrlCount(rows: HomeFeedRow[]): number {
@@ -3001,7 +2998,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.12.0",
+    version: "3.12.1",
     faviconDomain: "linkedin.com",
     // Auth is `none`: every live feed authenticates implicitly through the
     // paired Owletto Chrome extension (the user's own signed-in linkedin.com
@@ -3602,10 +3599,12 @@ export default class LinkedInConnector extends ConnectorRuntime<
         `LinkedIn could not resolve ${unresolvedShortUrlCount} copied post short URL${unresolvedShortUrlCount === 1 ? "" : "s"} to a durable identity. No home-feed events were persisted.`
       );
     }
-    const unresolvedPostCount = unresolvedHomeFeedPostCount(resolvedRows);
-    if (unresolvedPostCount > 0) {
+    const unresolvedPosts = unresolvedHomeFeedPostRows(resolvedRows);
+    if (unresolvedPosts.length > 0) {
+      const count = unresolvedPosts.length;
+      // The row id alone (no post text) is enough to spot a LinkedIn markup change.
       throw new Error(
-        `LinkedIn scraped ${unresolvedPostCount} post row${unresolvedPostCount === 1 ? "" : "s"} without a durable activity/share/ugcPost identity. No partial home-feed batch was persisted.`
+        `LinkedIn scraped ${count} post row${count === 1 ? "" : "s"} without a durable activity/share/ugcPost identity (first row id: ${String(unresolvedPosts[0].id).slice(0, 120)}). No partial home-feed batch was persisted.`
       );
     }
 
