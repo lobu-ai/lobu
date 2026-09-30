@@ -736,6 +736,12 @@ async function createAutomationRunWithClient(
       ? Number(versionRows[0].current_version_id)
       : null;
 
+  const executor = versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
+  const windowEnd =
+    executor?.kind === 'script' && params.dispatchSource !== 'event'
+      ? await boundScriptArrivalWindowEnd(sql, params.organizationId, params.windowStart, params.windowEnd)
+      : params.windowEnd;
+
   // device_worker_id + agent_kind get persisted into approved_input so the
   // server-side dispatcher (#802) can skip device-pinned rows from the SQL
   // side, and so /api/workers/poll can claim them with a parallel CTE
@@ -754,13 +760,14 @@ async function createAutomationRunWithClient(
     automation_id: params.automationId,
     agent_id: params.agentId ?? undefined,
     window_start: params.windowStart,
-    window_end: params.windowEnd,
+    window_end: windowEnd,
     dispatch_source: params.dispatchSource,
     version_id: snapshotVersionId,
-    ...(versionRows[0]?.executor ? { executor: versionRows[0].executor as AutomationRunPayload['executor'] } : {}),
+    ...(executor ? { executor } : {}),
     device_worker_id: normalizedDeviceWorkerId,
     agent_kind: normalizedAgentKind,
-    source_fingerprint: params.sourceFingerprint,
+    // A fingerprint of the full backlog cannot prove the remainder was processed.
+    source_fingerprint: windowEnd === params.windowEnd ? params.sourceFingerprint : undefined,
   };
   const idempotencyKey = [
     'automation',
@@ -890,6 +897,43 @@ async function createAutomationRunInternal(
     logger.error({ error, automationId: params.automationId }, '[queue] Failed to create automation run');
     throw error;
   }
+}
+
+/**
+ * Target live events per script-executor window. A script handles its whole
+ * window inside one sandbox run with a fixed wall-clock budget, and the arrival
+ * mark only advances on success. An unbounded window after an outage or a busy
+ * burst would time out on every retry and never recover, so the window stops
+ * short and the next run continues from where this one ends.
+ */
+const SCRIPT_WINDOW_TARGET_EVENTS = 200;
+
+/**
+ * Bound stored arrivals across the org. A timestamp-only mark cannot split a
+ * millisecond: when the cutoff rounds to the start, consume that millisecond
+ * (possibly more than the target) rather than reopening the entire backlog.
+ * This does not bound live feed reads or arbitrary work performed by a script.
+ */
+async function boundScriptArrivalWindowEnd(
+  sql: DbClient,
+  organizationId: string,
+  windowStart: string,
+  windowEnd: string
+): Promise<string> {
+  const [cutoff] = await sql<{ created_at: string | Date }>`
+    SELECT created_at FROM events
+    WHERE organization_id = ${organizationId}
+      AND superseded_by IS NULL
+      AND created_at >= ${windowStart}::timestamptz
+      AND created_at < ${windowEnd}::timestamptz
+    ORDER BY created_at
+    OFFSET ${SCRIPT_WINDOW_TARGET_EVENTS}
+    LIMIT 1
+  `;
+  if (!cutoff) return windowEnd;
+  const bounded = new Date(cutoff.created_at);
+  if (bounded > new Date(windowStart)) return bounded.toISOString();
+  return new Date(Math.min(new Date(windowStart).getTime() + 1, new Date(windowEnd).getTime())).toISOString();
 }
 
 export async function createAutomationRun(

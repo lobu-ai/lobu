@@ -313,7 +313,18 @@ async function enqueueAutomationRunForRecord(
 		? await createAutomationRunInTransaction(runParams, tx)
 		: await createAutomationRun(runParams, sql);
 
-	return { ...queued, windowStart, windowEnd };
+	if (queued.runId === 0) return { ...queued, windowStart, windowEnd };
+	// Script windows can be shortened at insertion; skips must book that same range.
+	const [recorded] = await (tx ?? sql)<{ window_start: string; window_end: string }>`
+		SELECT approved_input->>'window_start' AS window_start,
+		       approved_input->>'window_end' AS window_end
+		FROM runs WHERE id = ${queued.runId}
+	`;
+	return {
+		...queued,
+		windowStart: new Date(recorded.window_start),
+		windowEnd: new Date(recorded.window_end),
+	};
 }
 
 async function completeSkippedAutomationRun(
@@ -926,7 +937,7 @@ export async function materializeDueAutomationRuns(
 					// concurrent replica materialized for real work. Completing that
 					// row as "skipped" would silently kill a live dispatch.
 					if (skippedRun.created) {
-						// The run and fingerprint share exactly the same inspected range.
+						// Book only the range recorded by the queue, which may be shortened.
 						await completeSkippedAutomationRun(
 							sql,
 							automation.id,
