@@ -140,4 +140,68 @@ describe('#2214 classification_filters', () => {
     expect(result.content).toEqual([]);
     expect(result.total).toBe(0);
   });
+
+  describe.each(['date', 'score'] as const)('%s-sorted text search', (sort_by) => {
+    it('applies classification filters across every organization-scope path', async () => {
+      const result = await getContent(
+        { query: 'row', sort_by, classification_filters: { 'repro-kind': ['alpha'] }, limit: 100 },
+        {} as never,
+        ctx
+      );
+      const ids = result.content.map((item) => Number(item.id)).sort((a, b) => a - b);
+      expect(ids).toEqual([...expectedEventIds].sort((a, b) => a - b));
+      expect(result.total).toBe(expectedEventIds.length);
+    });
+
+    it.each([
+      { slug: 'repro-kind', value: 'beta' },
+      { slug: 'missing-kind', value: 'alpha' },
+    ])('returns nothing for $slug=$value', async ({ slug, value }) => {
+      const result = await getContent(
+        { query: 'row', sort_by, classification_filters: { [slug]: [value] }, limit: 100 },
+        {} as never,
+        ctx
+      );
+      expect(result.content).toEqual([]);
+      expect(result.total).toBe(0);
+    });
+
+    it.each([undefined, { 'repro-kind': ['alpha'] }])(
+      'applies classification_source with label filters %j',
+      async (classification_filters) => {
+        const manual = await getContent(
+          { query: 'row', sort_by, classification_filters, classification_source: 'user', limit: 100 },
+          {} as never,
+          ctx
+        );
+        const ids = manual.content.map((item) => Number(item.id)).sort((a, b) => a - b);
+        expect(ids).toEqual([...expectedEventIds].sort((a, b) => a - b));
+        expect(manual.total).toBe(expectedEventIds.length);
+
+        const model = await getContent(
+          { query: 'row', sort_by, classification_filters, classification_source: 'llm', limit: 100 },
+          {} as never,
+          ctx
+        );
+        expect(model.content).toEqual([]);
+        expect(model.total).toBe(0);
+      }
+    );
+  });
+
+  it('preserves the filtered total past the last score-sorted search page', async () => {
+    const result = await getContent(
+      {
+        query: 'row',
+        sort_by: 'score',
+        classification_filters: { 'repro-kind': ['alpha'] },
+        offset: 100,
+        limit: 1,
+      },
+      {} as never,
+      ctx
+    );
+    expect(result.content).toEqual([]);
+    expect(result.total).toBe(expectedEventIds.length);
+  });
 });

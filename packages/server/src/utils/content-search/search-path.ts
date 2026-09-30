@@ -4,12 +4,23 @@
 
 import type { Env } from '../../index';
 import { type DbClient, pgTextArray } from '../../db/client';
-import { buildConnectionFilter, buildFeedFilter, buildOrderByClause, buildRunFilter } from '../content-query-filters';
+import {
+  buildConnectionFilter,
+  buildFeedFilter,
+  buildOrderByClause,
+  buildRunFilter,
+  groupClassificationFilters,
+} from '../content-query-filters';
 import { parseDateAlias, toEndOfDay } from '../date-aliases';
 import { embeddingModelSqlLiteral, generateEmbeddings, resolveEmbeddingModel } from '../embeddings';
 import { toVectorLiteral } from '../entity-management';
 import logger from '../logger';
 import { validateNumericId } from '../sql-validation';
+import {
+  buildClassificationExistsClauses,
+  buildSourceOnlyExistsClause,
+  resolveClassifierIds,
+} from './classification';
 import { buildLatestClassificationsCteSql, buildThreadMetaCteSql } from './ctes';
 import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from './entity-link';
 import {
@@ -29,6 +40,7 @@ import {
   buildDateCandidateOrderBy,
   buildDateCursorClause,
   buildPageInfo,
+  emptyListResponse,
   isDateFeedMode,
   resolveDateCursor,
   type ContentSearchOptions,
@@ -183,7 +195,34 @@ export async function searchContentBySingleQuery(
     // short-circuits when entity_id is absent.
     searchEntityLinkSql = entityLinkMatchSql('$2::bigint');
   }
-  const baseParamIdx = entityLinkParamIdx + searchEntityLinkParams.length;
+  const classificationParamIdx = entityLinkParamIdx + searchEntityLinkParams.length;
+  let classificationClause: { sql: string; params: unknown[] } = { sql: '', params: [] };
+  const classificationFilters = options.classification_filters ?? [];
+  if (classificationFilters.length > 0) {
+    const filtersBySlug = groupClassificationFilters(classificationFilters);
+    const classifierIds = await resolveClassifierIds(sql, filtersBySlug, {
+      organizationId: options.organization_id,
+      entityId,
+    });
+    const exists = buildClassificationExistsClauses(
+      filtersBySlug,
+      classifierIds,
+      options.classification_source,
+      classificationParamIdx
+    );
+    if (!exists) return emptyListResponse({ limit, effectiveOffset, useDateFeed, cursor });
+    classificationClause = {
+      sql: exists.clauses.map((clause) => `AND ${clause}`).join('\n          '),
+      params: exists.params,
+    };
+  } else if (options.classification_source) {
+    const sourceOnly = buildSourceOnlyExistsClause(
+      options.classification_source,
+      classificationParamIdx
+    );
+    classificationClause = { sql: `AND ${sourceOnly.clause}`, params: sourceOnly.params };
+  }
+  const baseParamIdx = classificationParamIdx + classificationClause.params.length;
   const vectorParamIdx = hasEmbedding ? baseParamIdx : null;
   // Bind min_similarity as a numeric parameter after the vector slot (when
   // present) so a hostile float can't break out of the comparison expression.
@@ -217,6 +256,7 @@ export async function searchContentBySingleQuery(
               ? `AND ${INTERNAL_OPS_EXCLUSION_SQL}`
               : ''
           }
+          ${classificationClause.sql}
           ${orgScope.sql}${entityTypesClause.sql}`;
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
@@ -536,6 +576,7 @@ export async function searchContentBySingleQuery(
     ...visibilityClause.params,
     ...entityTypesClause.params,
     ...searchEntityLinkParams,
+    ...classificationClause.params,
     ...(hasEmbedding ? [toVectorLiteral(queryEmbedding!), minSimilarity] : []),
     ...cursorClause.params,
     ...(useDateFeed ? [fetchLimit] : [limit, effectiveOffset]),
