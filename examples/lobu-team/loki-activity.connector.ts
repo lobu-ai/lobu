@@ -111,39 +111,24 @@ export async function queryLokiActivity(
   );
   sampleUrl.searchParams.set("direction", "backward");
   sampleUrl.searchParams.set("limit", String(SAMPLE_LIMIT));
-  const samples: Pick<
-    LokiActivityResult,
-    "error_samples" | "warning_samples" | "http_samples"
-  > = {
-    error_samples: [],
-    warning_samples: [],
-    http_samples: [],
+  const sample = async (filter: string) => {
+    sampleUrl.searchParams.set("query", `${selector} | ${filter}`);
+    return parseLogStreams(await getLokiJson(sampleUrl, fetchImpl));
   };
+  const none = { error_samples: [], warning_samples: [], http_samples: [] };
   // Separate bounded samples keep HTTP polling failures from displacing the
   // existing warning/error details. Counts still come from one query.
-  for (const [count, filter, categories] of [
-    [
-      counts.errors + counts.warnings,
-      severityFilter,
-      ["error_samples", "warning_samples"],
-    ],
-    [
-      counts.http_client_errors + counts.http_server_errors,
-      httpFilter,
-      ["http_samples"],
-    ],
-  ] as const) {
-    if (count === 0) continue;
-    sampleUrl.searchParams.set("query", `${selector} | ${filter}`);
-    const batch = parseLogStreams(await getLokiJson(sampleUrl, fetchImpl));
-    for (const category of categories)
-      samples[category].push(...batch[category]);
-  }
+  const severity =
+    counts.errors + counts.warnings > 0 ? await sample(severityFilter) : none;
+  const http =
+    counts.http_client_errors + counts.http_server_errors > 0
+      ? await sample(httpFilter)
+      : none;
   return {
     ...counts,
-    error_samples: [...new Set(samples.error_samples)].slice(0, 10),
-    warning_samples: [...new Set(samples.warning_samples)].slice(0, 10),
-    http_samples: [...new Set(samples.http_samples)].slice(0, 10),
+    error_samples: severity.error_samples,
+    warning_samples: severity.warning_samples,
+    http_samples: http.http_samples,
   };
 }
 

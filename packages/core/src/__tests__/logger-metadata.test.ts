@@ -10,8 +10,8 @@
  * bare sentence with no cause attached.
  *
  * `packages/connector-sdk/src/logger.ts` is a deliberate standalone copy of
- * this formatter (it must load inside a V8 isolate); it carries the same
- * shape, so keep the two in step.
+ * this formatter (it must load inside a V8 isolate). Keep metadata handling,
+ * level gating and redaction in step; JSON output is a core host feature.
  */
 
 import { describe, expect, test } from "bun:test";

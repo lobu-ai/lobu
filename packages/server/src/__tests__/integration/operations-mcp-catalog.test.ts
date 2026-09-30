@@ -2,7 +2,7 @@ import { MCP_PROTOCOL_VERSION } from "@lobu/core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { app, type Env } from "../../index";
 import { listOrgInstalled } from "../../catalog/installed";
-import { getOperationsSummary, listOperations } from "../../operations/connector-operations";
+import { getOperationsSummary, getOperationsSummaryBatch, listOperations } from "../../operations/connector-operations";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import { createAuthProfile } from "../../utils/auth-profiles";
 import { initWorkspaceProvider } from "../../workspace";
@@ -19,7 +19,7 @@ import {
 const KEY = "demo.mcp.catalog";
 const URL = "https://catalog.example.test/mcp";
 const originalFetch = globalThis.fetch;
-type Tool = { name: string; inputSchema: Record<string, unknown> };
+type Tool = { name: string; inputSchema: Record<string, unknown>; annotations?: { readOnlyHint?: boolean } };
 const tool = (name: string, property = "value"): Tool => ({
 	name,
 	inputSchema: { type: "object", properties: { [property]: { type: "string" } } },
@@ -116,12 +116,26 @@ describe("connection-scoped MCP catalog", () => {
 
 		const installed = await listOrgInstalled(owner.org.id, ["connectors"], owner.ctx);
 		expect(installed.connectors?.items.find((item) => item.id === KEY)?.detail).toMatchObject({
-			has_operations: true, operations_summary: { total: 5 },
+			has_operations: true, operations_summary: { total: broad.total },
 		});
 		const policyCatalog = await listOperations({
 			organizationId: owner.org.id, discoveryUserId: owner.user.id, kind: "write",
 		});
 		expect(policyCatalog.operations.map((op) => op.operation_key)).toEqual(broad.operations.map((op) => op.operation_key));
+	});
+
+	it("counts account-specific read/write annotations as separate catalog rows", async () => {
+		const reader = await account([{ ...tool("annotated"), annotations: { readOnlyHint: true } }]);
+		const writer = await account([tool("annotated")]);
+		const broad = await list();
+		expect(broad.total).toBe(2);
+		expect(broad.operations).toMatchObject([
+			{ operation_key: "annotated", kind: "read", execution_targets: [{ connection_id: reader.id }] },
+			{ operation_key: "annotated", kind: "write", execution_targets: [{ connection_id: writer.id }] },
+		]);
+		for (const operation of broad.operations) expect(operation.execution_targets).toHaveLength(1);
+		const summaries = await getOperationsSummaryBatch(owner.org.id, [KEY], owner.user.id);
+		expect(summaries.get(KEY)).toEqual({ total: broad.total, reads: 1, writes: 1, mcp_tool: 2, local_action: 0, http_operation: 0 });
 	});
 
 	it("paginates after merging shared tools and applying action readiness", async () => {

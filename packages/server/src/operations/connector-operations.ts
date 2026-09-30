@@ -544,19 +544,11 @@ async function buildConnectorOperations(
 	connector: ConnectorRow,
 	organizationId: string,
 	options: {
-		connectionId?: number;
-		connectionIds?: number[];
+		connectionIds: Array<number | undefined>;
 		tolerateMcpFailure?: boolean;
-	} = {},
+	},
 ): Promise<OperationDescriptor[]> {
-	const connectionIds: Array<number | undefined> = options.connectionId !== undefined
-		? [options.connectionId]
-		: [...(options.connectionIds ?? [])];
-	if (connectionIds.length === 0 &&
-		normalizeConnectorAuthSchema(connector.auth_schema).methods.some((method) => method.type === "none")) {
-		connectionIds.push(undefined);
-	}
-	const mcpOperations = Promise.all(connectionIds.map(async (connectionId) => {
+	const mcpOperations = Promise.all(options.connectionIds.map(async (connectionId) => {
 		try {
 			return await getMcpOperations(connector.key, connector.name, connector.mcp_config, organizationId, connectionId);
 		} catch (error) {
@@ -687,8 +679,10 @@ async function buildCatalogOperations(
 	}
 	return (await Promise.all(connectors.map((connector) =>
 		buildConnectorOperations(connector, params.organizationId, {
-			connectionId: params.connectionId,
-			connectionIds: connectionsByKey.get(connector.key) ?? [],
+			connectionIds: params.connectionId !== undefined
+				? [params.connectionId]
+				: connectionsByKey.get(connector.key) ??
+					(normalizeConnectorAuthSchema(connector.auth_schema).methods.some((method) => method.type === "none") ? [undefined] : []),
 			tolerateMcpFailure: params.tolerateMcpFailure ?? params.connectionId === undefined,
 		}),
 	))).flat();
@@ -855,7 +849,7 @@ export async function getOperationForConnection(
 			openapi_config: row.openapi_config,
 		},
 		organizationId,
-		{ connectionId },
+		{ connectionIds: [connectionId] },
 	);
 	const operation = operations.find(
 		(entry) => entry.operation_key === operationKey,
@@ -934,10 +928,10 @@ export async function getOperationsSummary(
 }
 
 /**
- * Connector-keyed summaries for catalog/group views. Fetches the org's
- * definitions once, then builds summaries in parallel.
- *
- * Uses the same authorized, account-scoped catalog as operation discovery.
+ * Builds one authorized catalog and counts its rows per connector, matching
+ * list_available for the same principal. Identical account descriptors merge;
+ * different schemas or read/write annotations remain separate rows, so
+ * reads + writes and the backend counts each sum to total.
  * Per-row connection lists use `getOperationsSummariesByConnection`.
  */
 export async function getOperationsSummaryBatch(
@@ -977,7 +971,7 @@ export async function getOperationsSummariesByConnection(
 				connector,
 				organizationId,
 				{
-					connectionId: connection.id,
+					connectionIds: [connection.id],
 					tolerateMcpFailure: true,
 				},
 			);

@@ -96,7 +96,7 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
 			"List entities in the current organization with optional filters. Returns `{ action, entities, metadata }` where `entities` is the page and `metadata` carries `total_count`, `has_more`, `limit`, `offset`.",
 		access: "read",
 		signature:
-			"entities.list(input?: { entity_type?: string; parent_id?: number; search?: string; category?: string; main_market?: string; market?: string; limit?: number; offset?: number; sort_by?: string; sort_order?: 'asc' | 'desc' }): Promise<unknown>",
+			"entities.list(input?: { entity_type?: string; parent_id?: number | null; search?: string; category?: string; main_market?: string; market?: string; limit?: number; offset?: number; sort_by?: string; sort_order?: 'asc' | 'desc' }): Promise<unknown>",
 		example:
 			"const { entities } = await client.entities.list({ entity_type: 'company' });",
 		usageExample: `// All companies in the workspace, newest first.
