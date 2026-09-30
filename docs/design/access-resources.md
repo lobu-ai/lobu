@@ -557,7 +557,6 @@ Proposed action binding:
 ```ts
 post_invoice: {
   kind: "write",
-  requiresApproval: true,
 
   authorization: {
     entityInput: "invoice_id",

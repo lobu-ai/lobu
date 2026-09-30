@@ -51,7 +51,6 @@ import {
 	materializeActionOutputAttachments,
 } from "../../../../utils/inline-attachments";
 import { insertEvent } from "../../../../utils/insert-event";
-import logger from "../../../../utils/logger";
 import { stripNul, stripNulDeep } from "../../../../utils/strip-nul";
 import { buildResourcePermalink } from "../../../../utils/url-builder";
 import { trackAutomationReaction } from "../../../../utils/automation-reactions";
@@ -769,11 +768,12 @@ export async function handleExecute(
 		args.connection_id,
 	);
 	if (shouldQueue) {
-		// Atomic: run + approval event commit together or not at all. Both writes
+		const { ownerSlug: orgSlug, baseUrl } = await getOrgUrlContext(ctx);
+		// The run, approval card, inbox and delivery task commit together. All writes
 		// run on `tx`; insertEvent threads it via options.sql, and
 		// createConnectorOperationRun via its db param (which also carries its
 		// connector-version read into the same tx — safe, it is a read).
-		const { claim, eventId } = await sql.begin(async (tx) => {
+		const { claim, eventId, approvalUrl } = await sql.begin(async (tx) => {
 			// Serialize approval queueing against connection deletion: take a SHARE
 			// lock on the connection row and re-verify it is still live. A delete's
 			// tombstone+expiry tx holds FOR UPDATE on the same row, so an in-flight
@@ -819,7 +819,7 @@ export async function handleExecute(
 				db: tx,
 			});
 			if (!createdRun.created) {
-				return { claim: createdRun, eventId: null };
+				return { claim: createdRun, eventId: null, approvalUrl: null };
 			}
 			const createdRunId = createdRun.runId;
 			const initiator = resolveRunInitiator(ctx);
@@ -868,7 +868,26 @@ export async function handleExecute(
 			},
 				{ sql: tx },
 			);
-			return { claim: createdRun, eventId: Number(event.id) };
+			// Run-scoped, not event-scoped: the pending event is superseded on
+			// approve→complete and drops out of the live view, but a run_ids permalink
+			// reads the whole chain and stays valid across the lifecycle. (The read-side
+			// content_ids resolver also covers already-minted event-scoped links.)
+			const approvalUrl = buildResourcePermalink(
+				orgSlug,
+				{ kind: "run", runId: createdRunId },
+				baseUrl,
+			);
+			await notifyActionApprovalNeeded({
+				...notificationContext,
+				orgId: ctx.organizationId,
+				runId: createdRunId,
+				actionKey: operation.operation_key,
+				connectionName: connection.display_name ?? connection.connector_key,
+				operation: { name: operation.name, input },
+				eventId: Number(event.id),
+				approvalUrl,
+			}, tx);
+			return { claim: createdRun, eventId: Number(event.id), approvalUrl };
 		});
 		if (!claim.created) {
 			await trackOperationReaction(claim.runId);
@@ -879,37 +898,8 @@ export async function handleExecute(
 		}
 		const runId = claim.runId;
 
-		// Telemetry + notification run AFTER the run+event are durably committed,
-		// so they never reference a rolled-back run and stay off the hot path.
+		// Track only the committed run; notification delivery is already queued.
 		await trackOperationReaction(runId);
-
-		const { ownerSlug: orgSlug, baseUrl } = await getOrgUrlContext(ctx);
-		// Run-scoped, not event-scoped: the pending event is superseded on
-		// approve→complete and drops out of the live view, but a run_ids permalink
-		// reads the whole chain and stays valid across the lifecycle. (The read-side
-		// content_ids resolver also covers already-minted event-scoped links.)
-		const approvalUrl = buildResourcePermalink(
-			orgSlug,
-			{ kind: "run", runId },
-			baseUrl,
-		);
-
-		// One destination, never the org-wide fan-out: the conversation that asked
-		// when there is one, else the requesting human's DM, else the inbox alone.
-		notifyActionApprovalNeeded({
-			orgId: ctx.organizationId,
-			runId,
-			actionKey: operation.operation_key,
-			connectionName: connection.display_name ?? connection.connector_key,
-			// The decision needs the arguments, not just the verb: "run" says
-			// nothing, "run · rm -rf /" says everything.
-			operation: { name: operation.name, input },
-			eventId,
-			approvalUrl,
-			...notificationContext,
-		}).catch((error) =>
-			logger.error(error, "Failed to send operation approval notification"),
-		);
 
 		return {
 			action: "execute",

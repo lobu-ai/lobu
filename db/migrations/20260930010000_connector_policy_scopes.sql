@@ -1,4 +1,9 @@
 -- migrate:up
+-- Breaking cutover: operators hold rollout and stop old app/workers, then apply
+-- this schema and convert existing connection/default metadata to explicit
+-- policies before releasing the new runtime. Existing connector sources are
+-- updated through the versioned install lifecycle; there is no legacy reader
+-- or automatic data backfill. Only newly created orgs are seeded below.
 -- Connector targets and action filters are independent: a connection can have
 -- one rule for all destructive operations without enumerating today's catalog.
 ALTER TABLE write_approval_policies
