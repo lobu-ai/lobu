@@ -44,7 +44,7 @@ const EntityFields = {
   }),
   parent_id: Type.Number({
     description:
-      "[create/update/list] Parent entity ID (for hierarchical entities). On list, only that parent's children.",
+      "[create/update] Parent entity ID (for hierarchical entities).",
   }),
   domain: Type.String({
     description: "[create/update] Primary domain (e.g., spotify.com)",
@@ -200,7 +200,12 @@ export const ListEntitiesAction = Type.Object({
     description: "Paginated entity list with filters.",
   }),
   entity_type: Type.Optional(EntityType),
-  parent_id: Type.Optional(EntityFields.parent_id),
+  parent_id: Type.Optional(
+    Type.Union([Type.Number(), Type.Null()], {
+      description:
+        "[list] Parent filter: omit for all entities, null for roots, or an ID for that parent's children.",
+    })
+  ),
   search: Type.Optional(Type.String({ description: "[list] Search by name" })),
   category: Type.Optional(EntityFields.category),
   main_market: Type.Optional(EntityFields.main_market),

@@ -30,6 +30,16 @@ function messageOf(fn: () => unknown): string {
 }
 
 describe("manage_entity union contract", () => {
+	it("accepts all three list parent filters without changing write contracts", () => {
+		for (const filter of [{}, { parent_id: null }, { parent_id: 7 }]) {
+			const input = { action: "list", entity_type: "synthetic-task", ...filter };
+			expect(validate(input)).toEqual(input);
+		}
+		expect(messageOf(() => validate({ action: "list", parent_id: "bad-parent" }))).toMatch(/parent_id/);
+		expect(messageOf(() => validate({ action: "create", entity_type: "synthetic-task", name: "Task", parent_id: null }))).toMatch(/parent_id/);
+		expect(messageOf(() => validate({ action: "update", entity_id: 7, parent_id: null }))).toMatch(/parent_id/);
+	});
+
 	it("requires each action's identifying fields at the schema", () => {
 		expect(messageOf(() => validate({ action: "create", name: "Acme" }))).toMatch(
 			/entity_type/,

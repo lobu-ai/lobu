@@ -241,6 +241,7 @@ COPY scripts/migrate-up.mjs ./scripts/migrate-up.mjs
 ARG APP_GIT_SHA=unknown
 ARG APP_BUILD_TIME=unknown
 ENV NODE_ENV=production
+ENV LOG_FORMAT=json
 ENV APP_GIT_SHA=${APP_GIT_SHA}
 ENV APP_BUILD_TIME=${APP_BUILD_TIME}
 

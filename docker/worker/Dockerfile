@@ -137,6 +137,7 @@ RUN node scripts/image-browser-tooling.mjs --check /app
 USER 1001
 
 ENV NODE_ENV=production
+ENV LOG_FORMAT=json
 ENV TRANSFORMERS_CACHE=/app/.cache/transformers
 
 WORKDIR /app/packages/connector-worker

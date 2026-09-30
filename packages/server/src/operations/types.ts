@@ -55,4 +55,6 @@ export type OperationBackendConfig =
 
 export interface OperationDescriptor extends AvailableOperation {
   backend_config: OperationBackendConfig;
+  /** Internal MCP catalog provenance; only these accounts advertised this schema. */
+  discovery_connection_ids?: number[];
 }

@@ -458,7 +458,7 @@ function buildAvailableOperation(args: {
 	callerLacksMembership: boolean;
 }): AvailableOperation & Record<string, unknown> {
 	const { operation, internalTargets, includeInputSchema, viewUrl, callerMax, callerLacksMembership } = args;
-	const { backend_config: _privateBackendConfig, ...publicOperation } =
+	const { backend_config: _privateBackendConfig, discovery_connection_ids: _discoveryConnections, ...publicOperation } =
 		operation;
 	const requiredScopes = operation.required_scopes ?? [];
 	const targets = internalTargets.map((target): ExecutionTarget => {
@@ -584,12 +584,9 @@ function buildAvailableOperation(args: {
 async function loadVisibleOperationTargets(
 	args: Static<typeof ListAvailableAction>,
 	ctx: ToolContext,
+	visibilityUserId: string | null,
 ): Promise<OperationTargetRow[]> {
 	const sql = getDb();
-	const visibilityUserId = await resolveAutomationConnectionVisibilityUserId(
-		ctx,
-		sql,
-	);
 	const visibility = compileConnectionRowVisibility(
 		{
 			...authzScopeFromToolContext(ctx),
@@ -670,7 +667,8 @@ export async function handleListAvailable(
 	args: Static<typeof ListAvailableAction>,
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
-	const targetRows = await loadVisibleOperationTargets(args, ctx);
+	const visibilityUserId = await resolveAutomationConnectionVisibilityUserId(ctx, getDb());
+	const targetRows = await loadVisibleOperationTargets(args, ctx, visibilityUserId);
 
 	// An explicit connection filter is also an authorization lookup. Fail with
 	// execute's exact not-found error instead of a silent empty list: `[]` is
@@ -689,6 +687,7 @@ export async function handleListAvailable(
 				: await loadVisibleOperationTargets(
 						{ ...args, connector_key: undefined, entity_id: undefined },
 						ctx,
+						visibilityUserId,
 					);
 		if (bareRows.length === 0) {
 			return { error: "Connection not found or not visible." };
@@ -746,6 +745,7 @@ export async function handleListAvailable(
 			: args.connector_key;
   const full = await listOperations({
     organizationId: ctx.organizationId,
+		discoveryUserId: visibilityUserId,
 		connectorKey: catalogConnectorKey,
 		connectionId: args.connection_id,
     entityId: args.entity_id,
@@ -821,7 +821,9 @@ export async function handleListAvailable(
 		.map((operation) =>
 			buildAvailableOperation({
 				operation,
-				internalTargets: targetsByConnector.get(operation.connector_key) ?? [],
+				internalTargets: (targetsByConnector.get(operation.connector_key) ?? []).filter((target) =>
+					operation.discovery_connection_ids === undefined || operation.discovery_connection_ids.includes(target.connection_id),
+				),
 				includeInputSchema: args.include_input_schema !== false,
 				viewUrl: connectorViewUrl(operation.connector_key),
 				connectionAuthUrl: (id) => ownerSlug && baseUrl

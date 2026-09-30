@@ -844,14 +844,9 @@ export async function publicRestGetConnector(c: Context<{ Bindings: Env }>) {
       ORDER BY COALESCE(f.updated_at, f.created_at) DESC
     `;
 
-		const firstConnectionId = (feeds as Array<{ connection_id?: unknown }>)
-			.map((feed) => Number(feed.connection_id))
-			.find((id) => Number.isFinite(id) && id > 0);
-
 		const operationsSummary = await getOperationsSummary(
 			organizationId,
 			connector.key,
-			firstConnectionId,
 		);
 
 		return {

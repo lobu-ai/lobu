@@ -345,6 +345,22 @@ describe('OAuth-protected MCP connector installation', () => {
       ])
     );
 
+    const broad = await manageOperations(
+      { action: 'list_available', connector_key: 'mcp.mcp-example-com' },
+      TEST_ENV,
+      ctx
+    );
+    expect(broad.operations).toEqual(available.operations);
+
+    const authenticatedCatalog = await manageCatalog(
+      { action: 'list_installed', kinds: ['connectors'] },
+      TEST_ENV,
+      ctx
+    );
+    expect((authenticatedCatalog as any).installed.connectors.items.find(
+      (item: { id: string }) => item.id === 'mcp.mcp-example-com'
+    ).detail.operations_summary.total).toBe(2);
+
     const expectedSummary = {
       total: 2,
       reads: 1,

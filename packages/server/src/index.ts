@@ -1340,6 +1340,7 @@ app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 	// (MCP readOnlyHint / kind=read stay on connection action_modes alone).
 	const opList = await listOperations({
 		organizationId,
+		discoveryUserId: c.get("user")?.id ?? null,
 		kind: "write",
 		includeInputSchema: false,
 		includeOutputSchema: false,
@@ -1548,6 +1549,7 @@ app.put("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
 	if (operationKey) {
 		const known = await listOperations({
 			organizationId,
+			discoveryUserId: c.get("user")?.id ?? null,
 			kind: "write",
 			includeInputSchema: false,
 			includeOutputSchema: false,
@@ -1802,6 +1804,7 @@ app.get("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
   `;
 	const opList = await listOperations({
 		organizationId,
+		discoveryUserId: c.get("user")?.id ?? null,
 		kind: "write",
 		includeInputSchema: false,
 		includeOutputSchema: false,
@@ -1983,6 +1986,7 @@ app.put("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 	if (operationKey) {
 		const known = await listOperations({
 			organizationId,
+			discoveryUserId: c.get("user")?.id ?? null,
 			kind: "write",
 			includeInputSchema: false,
 			includeOutputSchema: false,
