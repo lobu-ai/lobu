@@ -232,21 +232,72 @@ describe('manage_classifiers classify contract', () => {
     const byId = new Map(
       read.content.map((item) => [Number(item.id), item as { classifications: Record<string, any> }])
     );
-    // The filter matches a value held by ANY source (the existing filter
-    // contract), while the displayed label follows read-time precedence.
+    // The filter matches the label the reader shows: a person's `negative` on
+    // `overridden` outranks the Automation's `positive`, so a `positive` filter
+    // must not return it.
     expect([...byId.keys()].sort((x, y) => x - y)).toEqual(
-      [Number(labelled.id), Number(overridden.id), Number(shared.id)].sort((x, y) => x - y)
+      [Number(labelled.id), Number(shared.id)].sort((x, y) => x - y)
     );
     expect(byId.get(Number(labelled.id))?.classifications.sentiment).toMatchObject({
       values: ['positive'],
       source: 'llm',
       is_manual: false,
     });
-    expect(byId.get(Number(overridden.id))?.classifications.sentiment).toMatchObject({
+    const negativeRead = await getContent(
+      { classification_filters: { sentiment: ['negative'] }, limit: 50 } as never,
+      {} as never,
+      ctx
+    );
+    const negativeById = new Map(
+      negativeRead.content.map((item) => [Number(item.id), item as { classifications: Record<string, any> }])
+    );
+    expect([...negativeById.keys()]).toEqual([Number(overridden.id)]);
+    expect(negativeById.get(Number(overridden.id))?.classifications.sentiment).toMatchObject({
       values: ['negative'],
       source: 'user',
       is_manual: true,
     });
+    // Asking what a specific source said still matches that source's row.
+    const llmRead = await getContent(
+      { classification_filters: { sentiment: ['positive'] }, classification_source: 'llm', limit: 50 } as never,
+      {} as never,
+      ctx
+    );
+    expect(llmRead.content.map((item) => Number(item.id))).toContain(Number(overridden.id));
+
+    // Same-source labels may tie, or carry a legacy null timestamp. Filtering
+    // must still select exactly the label displayed by the read path.
+    for (const timestamp of ['2026-01-01T00:00:00Z', null]) {
+      await sql`
+        UPDATE event_classifications SET created_at = '2026-01-01T00:00:00Z'::timestamptz
+        WHERE event_id = ${shared.id}
+      `;
+      await sql`
+        UPDATE event_classifications SET created_at = ${timestamp}::timestamptz
+        WHERE event_id = ${shared.id} AND automation_id = ${automation.id}
+      `;
+      const positive = await getContent(
+        { classification_filters: { sentiment: ['positive'] }, include_classification: 'summary', limit: 50 } as never,
+        {} as never,
+        ctx
+      );
+      expect(positive.content.find((item) => Number(item.id) === Number(shared.id)))
+        .toMatchObject({ classifications: { sentiment: { values: ['positive'], source: 'llm' } } });
+      expect(positive.classification_stats?.sentiment).toEqual({ positive: 2, negative: 1 });
+      const exact = await getContent(
+        { content_ids: [Number(shared.id)] } as never,
+        {} as never,
+        ctx
+      );
+      expect(exact.content[0])
+        .toMatchObject({ classifications: { sentiment: { values: ['positive'], source: 'llm' } } });
+      const negative = await getContent(
+        { classification_filters: { sentiment: ['negative'] }, limit: 50 } as never,
+        {} as never,
+        ctx
+      );
+      expect(negative.content.map((item) => Number(item.id))).toEqual([Number(overridden.id)]);
+    }
 
     // Unset from the same Automation removes only that Automation's row.
     const unset = await executeReaction({

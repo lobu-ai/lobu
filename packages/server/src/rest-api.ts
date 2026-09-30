@@ -47,6 +47,7 @@ import {
 	ToolNotRegisteredError,
 	ToolUserError,
 } from "./utils/errors";
+import { buildClassificationOrderSql } from "./utils/content-search/classification";
 import logger from "./utils/logger";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "./utils/run-statuses";
 import { getRuntimeInfo } from "./utils/runtime-info";
@@ -1016,9 +1017,7 @@ export async function restUpdateContentClassification(
       WHERE cc.event_id = ${contentId}
         AND fc.slug = ${classifierSlug}
         AND fc.organization_id = ${ctx.organizationId}
-      ORDER BY
-        CASE cc.source WHEN 'user' THEN 1 WHEN 'llm' THEN 2 ELSE 3 END,
-        cc.created_at DESC
+      ORDER BY ${sql.unsafe(buildClassificationOrderSql("cc"))}
       LIMIT 1
     `;
 

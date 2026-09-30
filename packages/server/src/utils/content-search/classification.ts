@@ -78,6 +78,12 @@ export function buildSourceOnlyExistsClause(
   };
 }
 
+/** Keep filters and displayed labels identical, including timestamp ties. */
+export function buildClassificationOrderSql(alias: string): string {
+  return `CASE ${alias}.source WHEN 'user' THEN 1 WHEN 'llm' THEN 2 ELSE 3 END,
+          ${alias}.created_at DESC NULLS FIRST, ${alias}.id DESC`;
+}
+
 export function buildClassificationExistsClauses(
   filtersBySlug: Map<string, string[]>,
   classifierIdsBySlug: Map<string, number[]>,
@@ -125,6 +131,17 @@ export function buildClassificationExistsClauses(
     const classifierFilterSql = `cc.classifier_id = ANY($${paramIndex}::bigint[])`;
     paramIndex++;
 
+    // An explicit source asks what that source said; otherwise match only
+    // the label the reader shows, even when other sources disagree.
+    const winningRowSql = classificationSource
+      ? ''
+      : `AND cc.id = (
+            SELECT hi.id FROM event_classifications hi
+            WHERE hi.event_id = cc.event_id
+              AND hi.classifier_id = cc.classifier_id
+            ORDER BY ${buildClassificationOrderSql('hi')}
+            LIMIT 1
+          )`;
     clauses.push(
       `
       EXISTS (
@@ -133,6 +150,7 @@ export function buildClassificationExistsClauses(
           AND ${classifierFilterSql}
           AND cc."values" && ${valuesParamSQL}
           ${sourceCondition}
+          ${winningRowSql}
       )
     `.trim()
     );

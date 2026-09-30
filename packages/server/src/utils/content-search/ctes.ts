@@ -3,6 +3,7 @@
  * buildThreadMetaCteSql, buildLatestClassificationsCteSql.
  */
 
+import { buildClassificationOrderSql } from './classification';
 import { entityLinkMatchSql } from './entity-link';
 
 export function buildThreadMetaCteSql(
@@ -84,9 +85,7 @@ export function buildLatestClassificationsCteSql(resultSetAlias = 'result_set'):
           cc.is_manual,
           ROW_NUMBER() OVER (
             PARTITION BY cc.event_id, cc.classifier_id
-            ORDER BY
-              CASE cc.source WHEN 'user' THEN 1 WHEN 'llm' THEN 2 ELSE 3 END,
-              cc.created_at DESC
+            ORDER BY ${buildClassificationOrderSql('cc')}
           ) as rn
         FROM event_classifications cc
         JOIN ${resultSetAlias} rs ON rs.id = cc.event_id

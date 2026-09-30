@@ -12,6 +12,7 @@ import {
   buildFutureOccurredAtClause,
   fetchEntityIdentityScopes,
 } from '../../utils/content-search';
+import { buildClassificationOrderSql } from '../../utils/content-search/classification';
 import { buildSemanticTypeFilterSql } from '../../utils/content-search/params';
 import logger from '../../utils/logger';
 import { validateNumericId } from '../../utils/sql-validation';
@@ -163,9 +164,7 @@ function buildContentQuery(opts: {
               cc.is_manual,
               ROW_NUMBER() OVER (
                 PARTITION BY cc.event_id, cc.classifier_id
-                ORDER BY
-                  CASE cc.source WHEN 'user' THEN 1 WHEN 'llm' THEN 2 ELSE 3 END,
-                  cc.created_at DESC
+                ORDER BY ${buildClassificationOrderSql('cc')}
               ) AS rn
             FROM event_classifications cc
             JOIN classify_facet fcl ON fcl.id = cc.classifier_id
@@ -761,9 +760,7 @@ export async function fetchClassificationStats(opts: {
         cc."values",
         ROW_NUMBER() OVER (
           PARTITION BY cc.event_id, cc.classifier_id
-          ORDER BY
-            CASE cc.source WHEN 'user' THEN 1 WHEN 'llm' THEN 2 ELSE 3 END,
-            cc.created_at DESC
+          ORDER BY ${buildClassificationOrderSql('cc')}
         ) as rn
       FROM event_classifications cc
       JOIN matching_content mc ON mc.id = cc.event_id
