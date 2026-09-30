@@ -828,7 +828,10 @@ async function readMyLinkedInActivity(
     };
   }
   const slug = linkedInProfileSlugFromUrl(profile.landedUrl);
-  if (!slug) {
+  // Author slugs are stored in normalizeLinkedInSlug's canonical form (still
+  // percent-encoded), so ownership compares against that form, not `slug`.
+  const memberSlug = normalizeLinkedInSlug(profile.landedUrl);
+  if (!slug || !memberSlug) {
     return {
       success: false,
       error: `Could not resolve the signed-in LinkedIn profile from ${JSON.stringify(profile.landedUrl ?? null)}.`,
@@ -870,9 +873,7 @@ async function readMyLinkedInActivity(
         ...(event.origin_parent_id
           ? { parent_id: event.origin_parent_id }
           : {}),
-        is_mine:
-          typeof authorSlug === "string" &&
-          authorSlug.toLowerCase() === slug.toLowerCase(),
+        is_mine: authorSlug === memberSlug,
         author: event.author_name ?? null,
         text: event.payload_text ?? "",
         url: event.source_url ?? null,

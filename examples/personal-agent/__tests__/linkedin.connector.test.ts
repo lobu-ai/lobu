@@ -3822,6 +3822,83 @@ describe("prepare_comment helpers", () => {
     ]);
   });
 
+  test("read_my_activity recognizes the member behind a percent-encoded slug", async () => {
+    const member = {
+      href: "https://www.linkedin.com/in/jos%C3%A9-fixture/",
+      name: "View José Fixture’s profile",
+    };
+    const visited: string[] = [];
+    const result = await new LinkedInConnector().execute({
+      actionKey: "read_my_activity",
+      input: {},
+      credentials: null,
+      config: {},
+      sessionState: {
+        chrome_dispatcher: {
+          dispatch: async (key: string, input: Record<string, unknown>) => {
+            if (key !== "navigate") return {};
+            const url = String(input.url);
+            visited.push(url);
+            if (url === "https://www.linkedin.com/in/me/") {
+              return {
+                result: {
+                  loggedIn: true,
+                  landedUrl: "https://www.linkedin.com/in/jos%C3%A9-fixture/",
+                  rows: [],
+                },
+              };
+            }
+            if (url.endsWith("/recent-activity/all/")) {
+              return {
+                result: {
+                  loggedIn: true,
+                  rows: [
+                    {
+                      id: "post_token",
+                      body: "Feed post José Fixture • You Founder 1d • A post the member wrote with enough text",
+                      post_identity: "urn:li:activity:1111111111111111111",
+                      links: [member],
+                    },
+                  ],
+                },
+              };
+            }
+            return {
+              result: {
+                loggedIn: true,
+                rows: [
+                  {
+                    id: "replaceableComment_urn:li:comment:(activity:3333333333333333333,4444444444444444444)",
+                    body: "A comment the member wrote",
+                    author: "José Fixture",
+                    links: [member],
+                  },
+                ],
+              },
+            };
+          },
+        },
+      },
+    } as never);
+
+    expect(result.success).toBe(true);
+    expect(visited.slice(1)).toEqual([
+      "https://www.linkedin.com/in/jos%C3%A9-fixture/recent-activity/all/",
+      "https://www.linkedin.com/in/jos%C3%A9-fixture/recent-activity/comments/",
+    ]);
+    const output = result.output as {
+      profile_slug: string;
+      items: Array<{ type: string; is_mine: boolean }>;
+    };
+    expect(output.profile_slug).toBe("josé-fixture");
+    expect(
+      output.items.map(({ type, is_mine }) => ({ type, is_mine }))
+    ).toEqual([
+      { type: "post", is_mine: true },
+      { type: "comment", is_mine: true },
+    ]);
+  });
+
   test.each([
     1, 2, 3,
   ])("read_my_activity fails on an auth wall at scrape %i", async (authWallAt) => {
