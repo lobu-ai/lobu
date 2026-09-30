@@ -362,15 +362,15 @@ async function connectionCanOpenDm(
 	// soft-deleted connection may carry the same slug — and without these, a
 	// `LIMIT 1` with no ORDER BY could read the dead row's config and decide DM
 	// reachability from a connection that no longer exists.
-	const rows = await sql<{ config: Record<string, unknown> | null }>`
-    SELECT config FROM connections
+	const rows = await sql<{ config: Record<string, unknown> | null; credential_mode: string | null }>`
+    SELECT config, credential_mode FROM connections
     WHERE slug = ${runtimeConnectionIdToSlug(connectionId)}
       AND credential_mode IS NOT NULL
       AND deleted_at IS NULL
     LIMIT 1
   `;
 	if (rows.length === 0) return true;
-	return descriptor.canOpenDirectMessage(rows[0].config ?? {});
+	return descriptor.canOpenDirectMessage(rows[0].config ?? {}, { credentialMode: rows[0].credential_mode });
 }
 
 /**

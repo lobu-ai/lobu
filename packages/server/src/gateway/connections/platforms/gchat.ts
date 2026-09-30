@@ -14,6 +14,13 @@ import type {
 } from "@chat-adapter/gchat";
 import type { WebhookOptions } from "chat";
 import { extractWhatsAppStyleRoutingInfo } from "./shared.js";
+import { scopeGoogleChatAdapter } from "./gchat-scope.js";
+import {
+  acceptGoogleChatWebhook,
+  resolveGoogleChatRuntime,
+  revokeGoogleChatSpace,
+  routeGoogleChatWebhook,
+} from "./gchat-installation.js";
 import type {
   AdapterCreationContext,
   ChatPlatformDescriptor,
@@ -530,7 +537,7 @@ function parseGoogleChatCredentials(
   return parsed as ServiceAccountCredentials;
 }
 
-async function createAdapter(
+async function createUnscopedAdapter(
   config: JsonObject,
   context?: AdapterCreationContext
 ): Promise<GoogleChatAdapter> {
@@ -621,7 +628,16 @@ export const gchatPlatform: ChatPlatformDescriptor = {
     }
   },
 
-  createAdapter,
+  createAdapter: async (config, context) => {
+    const adapter = await createUnscopedAdapter(config, context);
+    if (!context?.runtime) return adapter;
+    return scopeGoogleChatAdapter(adapter, context.runtime, (runtime) =>
+      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl }));
+  },
+  resolveRuntimeConfig: resolveGoogleChatRuntime,
+  routeWebhook: routeGoogleChatWebhook,
+  onWebhookAccepted: acceptGoogleChatWebhook,
+  revokeManagedConnection: revokeGoogleChatSpace,
 
   extractRoutingInfo: extractWhatsAppStyleRoutingInfo,
 
@@ -638,8 +654,8 @@ export const gchatPlatform: ChatPlatformDescriptor = {
   // exactly as the adapter resolves it — `config.impersonateUser` then the env
   // fallback — so this answer cannot disagree with what `openDM` will actually
   // be able to do.
-  canOpenDirectMessage: (config) =>
-    hasImpersonationSubject(
+  canOpenDirectMessage: (config, context) =>
+    context?.credentialMode !== "managed" && hasImpersonationSubject(
       typeof config.impersonateUser === "string"
         ? config.impersonateUser
         : process.env.GOOGLE_CHAT_IMPERSONATE_USER,

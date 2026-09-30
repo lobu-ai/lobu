@@ -20,7 +20,7 @@ import { verifyAtlassianWebhookAuthorization } from "../../connect/atlassian-web
 import { resolveConnectionWebhookConfig } from "../../connect/webhook-registration.js";
 import { getDb } from "../../db/client.js";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
-import { deleteSlackInstall } from "../../lobu/stores/slack-installations.js";
+import { slugToRuntimeConnectionId } from "../../lobu/stores/connections-projection.js";
 import { CommandDispatcher } from "../commands/command-dispatcher.js";
 import type { IFileHandler } from "../platform/file-handler.js";
 import type { CoreServices, PlatformAdapter } from "../platform.js";
@@ -40,6 +40,7 @@ import {
   registerMessageHandlers,
 } from "./message-handler-bridge.js";
 import { getPlatformDescriptor, PLATFORM_REGISTRY } from "./platforms/index.js";
+import type { ChatRuntimeConfig, ChatRuntimeDeps } from "./platforms/types.js";
 import {
   disableSdkMessageHistory,
   resolveChatTarget,
@@ -326,6 +327,7 @@ interface ManagedInstance {
    * so replicas converge without cross-pod restart fan-out.
    */
   rowVersion: number;
+  runtimeRevision?: string;
   cleanup?: () => Promise<void>;
   interactionCleanup?: () => void;
 }
@@ -590,11 +592,10 @@ export class ChatInstanceManager {
    * Revoke a MANAGED connection (a Lobu-hosted OAuth install, e.g. an "Add to
    * Slack" workspace). Unlike `removeConnection` (which drops a BYO
    * `connections` chat row), a managed install originates in `app_installations`
-   * with its bot token in the secret store — so revoke purges the install + its
-   * token via the provider store, then soft-deletes the unified `connections`
-   * projection so it disappears from the UI. The connection id from the UI is
-   * the `connections` bigint id; its `slug` is the provider external id
-   * (`slackinst-…`) the install store keys on.
+   * — so the platform revokes its authority and handles credential cleanup,
+   * then this method soft-deletes the unified `connections` projection so it
+   * disappears from the UI. The connection id from the UI is the `connections`
+   * bigint id; its slug maps back to the runtime id used by the platform.
    */
   async revokeManagedConnection(
 		connectionId: number,
@@ -618,18 +619,13 @@ export class ChatInstanceManager {
       throw new Error("Only managed installs can be revoked");
     }
 
-    if (row.connector_key === "slack") {
-      await deleteSlackInstall(
-        this.services.getAppInstallationStore(),
-        this.services.getSecretStore(),
-				row.slug,
-        { skipConnectionTombstone: opts?.skipTombstone },
-      );
-    } else {
+    const revoke = getPlatformDescriptor(row.connector_key)?.revokeManagedConnection;
+    if (!revoke) {
       throw new Error(
 				`Revoke not supported for connector "${row.connector_key}"`,
       );
     }
+    await revoke({ id: slugToRuntimeConnectionId(row.slug), organizationId: row.organization_id }, this.runtimeDeps(), opts);
 
     // Soft-delete the unified projection so the UI stops listing it. Past
     // events stay (append-only); only the connection record is tombstoned.
@@ -1522,6 +1518,14 @@ export class ChatInstanceManager {
     connectionId: string,
 		request: Request,
   ): Promise<Response> {
+    const stored = await this.resolveStored(connectionId);
+    if (stored && stored.status !== "stopped") {
+      const routed = await getPlatformDescriptor(stored.platform)?.routeWebhook?.(
+        stored, request, this.runtimeDeps(),
+      );
+      if (routed instanceof Response) return routed;
+      if (routed && routed !== connectionId) return orgContext.exit(() => this.handleWebhook(routed, request));
+    }
     // Multi-replica: hydration is per-request and row-versioned. Any replica
     // can receive any connection's webhook (the LB sprays platform deliveries
     // across pods), so the instance is treated as a memo of the
@@ -1559,7 +1563,12 @@ export class ChatInstanceManager {
     }
 
     try {
-      return await webhookHandler(request);
+      const accepted = request.clone();
+      const response = await webhookHandler(request);
+      if (response.ok && stored) {
+        await getPlatformDescriptor(platform)?.onWebhookAccepted?.(stored, accepted, this.runtimeDeps());
+      }
+      return response;
     } catch (error) {
       logger.error(
         { connectionId, platform, error: String(error) },
@@ -1662,12 +1671,15 @@ export class ChatInstanceManager {
 		connection: PlatformConnection,
   ): Promise<void> {
     try {
+      const runtime = await getPlatformDescriptor(connection.platform)?.resolveRuntimeConfig?.(
+        connection as StoredConnection, this.runtimeDeps(),
+      );
       // Resolve any `secret://` refs in the connection config to plaintext
       // values for the Chat SDK adapter. This is idempotent — addConnection
       // calls us with plaintext (the caller-supplied values), and reload /
       // restart paths call us with refs read from connections; the
       // resolver leaves non-ref values alone.
-      connection.config = await this.resolveConfigForRuntime(
+      connection.config = runtime?.config ?? await this.resolveConfigForRuntime(
         connection.id,
 				connection.config,
       );
@@ -1683,7 +1695,7 @@ export class ChatInstanceManager {
       // converge on a single token.
       await this.ensurePlatformWebhookSecret(connection);
 
-      const adapter = await this.createAdapter(connection);
+      const adapter = await this.createAdapter(connection, runtime);
       const stateAdapter = await this.createStateAdapter();
       const conversationState = new ConversationStateStore(stateAdapter);
 
@@ -1794,6 +1806,7 @@ export class ChatInstanceManager {
         // Callers that hydrate from a stored row (hydrateFromRow) overwrite
         // this with the row's updated_at; this default covers direct starts.
         rowVersion: connection.updatedAt,
+        runtimeRevision: runtime?.revision,
         cleanup,
       });
 
@@ -1832,7 +1845,7 @@ export class ChatInstanceManager {
     }
   }
 
-  private async createAdapter(connection: PlatformConnection): Promise<any> {
+  private async createAdapter(connection: PlatformConnection, runtime?: ChatRuntimeConfig): Promise<any> {
     const descriptor = getPlatformDescriptor(connection.platform);
     if (!descriptor) {
       throw new Error(`No adapter factory for: ${connection.platform}`);
@@ -1841,7 +1854,19 @@ export class ChatInstanceManager {
       ? `${this.publicGatewayUrl}/api/v1/webhooks/${connection.id}`
       : undefined;
     const adapter = await descriptor.createAdapter(connection.config, {
-      webhookUrl,
+      webhookUrl: runtime?.webhookUrl ?? webhookUrl,
+      runtime: runtime ? {
+        ...runtime,
+        refresh: async () => {
+          const stored = await this.runtimeDeps().getConnection(connection.id);
+          if (!stored || stored.status === "stopped" || stored.organizationId !== connection.organizationId) {
+            throw new Error("Chat connection is unavailable");
+          }
+          const next = await descriptor.resolveRuntimeConfig?.(stored, this.runtimeDeps());
+          if (!next) throw new Error("Chat installation is unavailable");
+          return next;
+        },
+      } : undefined,
     });
     return disableSdkMessageHistory(adapter);
   }
@@ -1962,7 +1987,16 @@ export class ChatInstanceManager {
     if (isAdapterlessPlatform(stored.platform)) return false;
 
     const existing = this.instances.get(id);
-    if (existing && existing.rowVersion === stored.updatedAt) return true;
+    let runtime: ChatRuntimeConfig | undefined;
+    try {
+      runtime = await getPlatformDescriptor(stored.platform)?.resolveRuntimeConfig?.(stored, this.runtimeDeps());
+    } catch (error) {
+      if (existing) await this.stopInstance(id);
+      logger.warn({ id, error: String(error) }, "Chat installation is unavailable");
+      return false;
+    }
+    if (existing && existing.rowVersion === stored.updatedAt &&
+      existing.runtimeRevision === runtime?.revision) return true;
 
     // Exclusive transports (long-polling) belong to the connection_claims
     // lease holder; a request path on a non-owner replica must not start a
@@ -2438,6 +2472,34 @@ export class ChatInstanceManager {
   private async resolveConfigForRuntime(
     connectionId: string,
 		config: PlatformAdapterConfig,
+  ): Promise<PlatformAdapterConfig> {
+    const descriptor = getPlatformDescriptor(config.platform);
+    if (descriptor?.resolveRuntimeConfig) {
+      const stored = await this.resolveStored(connectionId);
+      if (stored) {
+        const runtime = await descriptor.resolveRuntimeConfig(stored, this.runtimeDeps());
+        if (runtime) return runtime.config;
+      }
+    }
+    return this.resolveSecretsForRuntime(connectionId, config);
+  }
+
+  private runtimeDeps(): ChatRuntimeDeps {
+    return {
+      publicGatewayUrl: this.publicGatewayUrl,
+      getConnection: (id) => orgContext.exit(() => this.resolveStored(id)),
+      getAppInstallationStore: () => this.services.getAppInstallationStore(),
+      getSecretStore: () => this.services.getSecretStore(),
+      resolveSecrets: async (connection) => orgContext.run(
+        { organizationId: connection.organizationId! },
+        () => this.resolveSecretsForRuntime(connection.id, connection.config as PlatformAdapterConfig),
+      ),
+    };
+  }
+
+  private async resolveSecretsForRuntime(
+    connectionId: string,
+    config: PlatformAdapterConfig,
   ): Promise<PlatformAdapterConfig> {
     const resolved = { ...config } as Record<string, unknown>;
     const secretStore = this.services.getSecretStore();

@@ -56,6 +56,27 @@ export interface WebhookSecretDeps {
 export interface AdapterCreationContext {
   /** Canonical public URL that receives this connection's webhooks. */
   webhookUrl?: string;
+  runtime?: ChatRuntimeConfig & {
+    /** Re-read durable ownership and credentials, including for retained handles. */
+    refresh(): Promise<ChatRuntimeConfig>;
+  };
+}
+
+/** Gateway-only configuration; never written into a tenant's connection. */
+export interface ChatRuntimeConfig {
+  config: PlatformAdapterConfig;
+  revision: string;
+  webhookUrl?: string;
+  scope: string;
+  stateKey: string;
+}
+
+export interface ChatRuntimeDeps {
+  publicGatewayUrl: string;
+  getConnection(id: string): Promise<StoredConnection | null>;
+  getAppInstallationStore(): AppInstallationStore;
+  getSecretStore(): WritableSecretStore;
+  resolveSecrets(connection: StoredConnection): Promise<PlatformAdapterConfig>;
 }
 
 /** What a descriptor may add to an unlinked-chat notice's deep link. */
@@ -98,6 +119,27 @@ export interface NoticeChannelContext {
 export interface ChatPlatformDescriptor {
   /** Lazily construct the `@chat-adapter/*` adapter for a resolved config. */
   createAdapter(config: any, context?: AdapterCreationContext): Promise<any>;
+  /** Resolve provider-owned installed scopes without copying their credentials. */
+  resolveRuntimeConfig?(
+    connection: StoredConnection,
+    deps: ChatRuntimeDeps,
+  ): Promise<ChatRuntimeConfig | undefined>;
+  /** Select an installed scope before SDK verification; the SDK still authenticates. */
+  routeWebhook?(
+    connection: StoredConnection,
+    request: Request,
+    deps: ChatRuntimeDeps,
+  ): Promise<string | Response | undefined>;
+  onWebhookAccepted?(
+    connection: StoredConnection,
+    request: Request,
+    deps: ChatRuntimeDeps,
+  ): Promise<void>;
+  revokeManagedConnection?(
+    connection: { id: string; organizationId: string },
+    deps: ChatRuntimeDeps,
+    opts?: { skipTombstone?: boolean },
+  ): Promise<void>;
 
   /**
    * Parse platform-specific routing fields out of a messaging-API request
@@ -242,7 +284,10 @@ export interface ChatPlatformDescriptor {
    * "don't pin", so the notification still reaches the bound channel instead of
    * failing to a destination that can never accept it.
    */
-  canOpenDirectMessage?(config: Record<string, unknown>): boolean;
+  canOpenDirectMessage?(
+    config: Record<string, unknown>,
+    context?: { credentialMode: string | null },
+  ): boolean;
 
   /**
    * Config keys this platform cannot run without, checked before the row is

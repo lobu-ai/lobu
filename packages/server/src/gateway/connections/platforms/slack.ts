@@ -7,6 +7,7 @@
  */
 
 import { createLogger } from "@lobu/core";
+import { deleteSlackInstall } from "../../../lobu/stores/slack-installations.js";
 import { stripPlatformPrefix } from "../../channels/bound-channels.js";
 import type { IFileHandler } from "../../platform/file-handler.js";
 import { SlackInstructionProvider } from "../slack-instruction-provider.js";
@@ -152,6 +153,10 @@ async function resolveSlackNoticeChannelScope(
 }
 
 export const slackPlatform: ChatPlatformDescriptor = {
+  revokeManagedConnection: (connection, deps, opts) => deleteSlackInstall(
+    deps.getAppInstallationStore(), deps.getSecretStore(), connection.id,
+    { skipConnectionTombstone: opts?.skipTombstone },
+  ),
   requiredConfigKeys: ["botToken", "signingSecret"],
 
   // Pre-existing lazy adapter factory, moved verbatim from the manager's
