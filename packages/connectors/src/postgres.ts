@@ -537,20 +537,33 @@ export default class PostgresConnector extends ConnectorRuntime {
           const projected = projection.columns as Array<{ name: string; type: number; parser?: { array?: boolean } }>;
           const candidates = columns.flatMap((name) => projected.filter((column) => column.name === name));
           if (!candidates.length) return { data: projection, total: 0 };
-          const isScalar = (column: (typeof projected)[number]) => !column.parser?.array && ![17, 114, 3802].includes(column.type);
+          const isScalar = (column: (typeof projected)[number]) => !column.parser?.array && column.type !== 17;
           if (!candidates.some(isScalar)) {
             throw Object.assign(new Error('Exact-match identity must be a scalar; project a text key in the source query'), { status: 400 });
           }
+          const textMatch = (ref: string) => `btrim(${ref}, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
+          const numberMatch = (ref: string, cast: string) => Number.isFinite(Number(value)) && String(Number(value)) === value
+            ? `${ref} = ${bind(value)}::${cast}` : 'FALSE';
           const cases = candidates.map((column) => {
             const ref = `q.${quoteIdent(column.name)}`;
+            const jsonType = [114, 3802].includes(column.type) ? `${column.type === 114 ? 'json' : 'jsonb'}_typeof(${ref})` : undefined;
+            let present = `${ref} IS NOT NULL`;
             let match: string;
             if (!isScalar(column)) {
               // Null falls through; a non-null complex key cannot use a later scalar.
               match = 'FALSE';
+            } else if (jsonType) {
+              // JSON decoding yields JS scalars; objects/arrays are not routing keys.
+              const decoded = `(${ref} #>> '{}')`;
+              // PG12+ soft conversion guards the raw cast without losing precision.
+              // JS underflow is zero; overflow becomes null in isolate serialization.
+              const number = `(CASE WHEN jsonb_path_query_first(to_jsonb(${decoded}), '$.double()', '{}', true) IS NOT NULL THEN ${decoded} WHEN abs(${decoded}::numeric) < 1 THEN '0' ELSE NULL END)::float8`;
+              match = `CASE WHEN ${jsonType} IN ('string', 'boolean') THEN (${textMatch(decoded)}) WHEN ${jsonType} = 'number' THEN (${numberMatch(`(${number})`, 'float8')}) ELSE FALSE END`;
+              present = `CASE WHEN ${jsonType} = 'number' THEN (${number}) IS NOT NULL ELSE ${jsonType} <> 'null' END`;
             } else if ([700, 701].includes(column.type)) {
               // The driver parses floats as JS numbers: 0.0000001 routes as 1e-7.
-              match = Number.isFinite(Number(value)) && String(Number(value)) === value
-                ? `${ref} = ${bind(value)}::${PG_OID[column.type].cast}` : 'FALSE';
+              match = numberMatch(ref, PG_OID[column.type].cast);
+              present = `abs(${ref}) < 'Infinity'::float8`;
             } else if ([1082, 1114, 1184].includes(column.type)) {
               // The driver returns Date values; the isolate serializes them as ISO.
               const date = new Date(value);
@@ -568,10 +581,8 @@ export default class PostgresConnector extends ConnectorRuntime {
                 match = `${ref} >= ${bound} AND ${ref} < ${bound} + INTERVAL '1 millisecond'`;
               }
             } else {
-              match = `btrim(${ref}::text, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
+              match = textMatch(`${ref}::text`);
             }
-            // JSON null also becomes JS null in the driver and must fall through.
-            const present = [114, 3802].includes(column.type) ? `${ref}::jsonb <> 'null'::jsonb` : `${ref} IS NOT NULL`;
             return `WHEN ${present} THEN (${match})`;
           });
           where = `WHERE CASE ${cases.join(' ')} ELSE FALSE END`;

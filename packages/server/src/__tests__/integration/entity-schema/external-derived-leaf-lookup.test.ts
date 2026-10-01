@@ -80,6 +80,9 @@ describe('external derived record lookup', () => {
     ["SELECT NULL::jsonb AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
     ["SELECT 'null'::jsonb AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
     ["SELECT ' null '::json AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
+    ["SELECT '\"preferred\"'::jsonb AS slug, 42 AS id", 'preferred', [{ slug: 'preferred', id: 42 }]],
+    ["SELECT '\"preferred\"'::jsonb AS slug, 42 AS id", '42', []],
+    ["SELECT '\"\"'::jsonb AS slug, 42 AS id", '42', []],
     ["SELECT NULL::integer[] AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
     ["SELECT 'routable' AS slug, '{\"n\":1}'::jsonb AS id", 'missing', []],
     ["SELECT '{\"n\":1}'::jsonb AS slug, 42 AS id", '42', []],
@@ -104,6 +107,7 @@ describe('external derived record lookup', () => {
     "'2026-01-02T03:04:05Z'::timestamptz",
     "'2026-07-02 03:04:05.123456'::timestamp",
     "'2026-07-02T03:04:05.123456+05'::timestamptz",
+    ...['json', 'jsonb'].flatMap((type) => ['\"route\"', '42', 'true', '\" route　\"', '1e-7', '9007199254740993', '1e-400'].map((value) => `'${value}'::${type}`)),
   ])('resolves the listed routing key for %s', async (expression) => {
     const sql = `SELECT ${expression} AS id`;
     const listed = await queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId));
@@ -111,10 +115,34 @@ describe('external derived record lookup', () => {
     expect(result.rows).toEqual(listed.rows);
   });
 
-  it.each(['ARRAY[1, 2]', "'{\"n\":1}'::jsonb"])(
+  it.each(['ARRAY[1, 2]', "decode('00', 'hex')"])(
     'explicitly rejects a nonscalar identity %s', async (expression) => {
       await expect(lookup(`SELECT ${expression} AS id`, 'not-a-scalar'))
         .rejects.toMatchObject({ code: 'VALIDATION', message: expect.stringContaining('must be a scalar') });
+    }
+  );
+
+  it.each(['json', 'jsonb'])('uses driver null fallback for overflowing %s numbers', async (type) => {
+    const sql = `SELECT '1e400'::${type} AS slug, 42 AS id`;
+    const listed = await queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId));
+    expect(listed.rows).toEqual([{ slug: null, id: 42 }]);
+    expect((await lookup(sql, derivedRowSlug(listed.rows[0]))).rows).toEqual(listed.rows);
+  });
+
+  it.each(['float4', 'float8'].flatMap((type) => ['NaN', 'Infinity', '-Infinity'].map((value) => `'${value}'::${type}`)))(
+    'uses driver null fallback for nonfinite %s', async (expression) => {
+      const sql = `SELECT ${expression} AS slug, 42 AS id`;
+      const listed = await queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId));
+      expect(listed.rows).toEqual([{ slug: null, id: 42 }]);
+      expect((await lookup(sql, derivedRowSlug(listed.rows[0]))).rows).toEqual(listed.rows);
+    }
+  );
+
+  it.each(['json', 'jsonb'].flatMap((type) => ['{\"n\":1}', '[1,2]'].map((value) => `'${value}'::${type}`)))(
+    'does not route a JSON object or array identity %s', async (expression) => {
+      const sql = `SELECT ${expression} AS id`;
+      const listed = await queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId));
+      expect((await lookup(sql, derivedRowSlug(listed.rows[0]))).rows).toEqual([]);
     }
   );
 
