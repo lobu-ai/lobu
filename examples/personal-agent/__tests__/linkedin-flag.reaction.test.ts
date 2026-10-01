@@ -187,5 +187,10 @@ describe("LinkedIn flag reaction", () => {
     expect(profile?.agentKind).toBe("claude-code");
     expect(flagger?.deviceWorkerId).toBe(profile?.deviceWorkerId);
     expect(profile?.prompt).toContain('"linkedin-buremba"');
+    // Its only source is intentionally empty, so a scheduled run must not be
+    // skipped as unchanged.
+    expect(profile?.triggers).toEqual([
+      expect.objectContaining({ kind: "schedule", skip_if_unchanged: false }),
+    ]);
   });
 });

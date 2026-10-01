@@ -1519,8 +1519,14 @@ const linkedInInterestProfile = defineAutomation({
   slug: "linkedin-interest-profile-weekly",
   name: "LinkedIn interest profile",
   ...linkedInAssistantDevice,
-  triggers: [every("0 7 * * 1", { timezone: "Europe/London" })],
-  // The profile comes from the live read_my_activity action, not stored events.
+  // The profile comes from the live read_my_activity action, not stored events,
+  // so its source is always empty: an unchanged-source skip would never run it.
+  triggers: [
+    every("0 7 * * 1", {
+      timezone: "Europe/London",
+      skip_if_unchanged: false,
+    }),
+  ],
   sources: { none: "SELECT id FROM events WHERE false" },
   prompt: linkedInInterestProfilePrompt,
 });
