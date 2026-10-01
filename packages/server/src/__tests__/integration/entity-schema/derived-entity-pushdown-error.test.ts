@@ -9,10 +9,9 @@
  *   - `manage_entity` list  → `listDerivedEntities`
  *   - `resolve_path`        → `resolveDerivedLeaf`
  *
- * `hackernews` is a bundled connector with no `query` handler, so
- * `ConnectorRuntime.query`'s default throws `"<key> does not support live
- * queries"` — the first production report, reproduced without a fixture
- * connector.
+ * `hackernews` is a bundled connector with no query capabilities. Lists reach
+ * the default query handler; detail reads reject the missing exact-match
+ * capability before execution. Both errors must remain readable.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -88,13 +87,14 @@ describe('derived entity view over a failing connector query', () => {
     expect(res.parsed?.code).toBeTruthy();
   }, 180_000);
 
-  it('surfaces the connector reason on the derived DETAIL seam', async () => {
+  it('surfaces the unsupported exact-match capability on the derived DETAIL seam', async () => {
     const res = await callTool('resolve_path', {
       path: `/${orgSlug}/external-view/anything`,
     });
     expect(CDN_SUBSTITUTED_STATUSES).not.toContain(res.status);
     expect(res.parsed?.error).toEqual(
-      expect.stringContaining('hackernews does not support live queries')
+      expect.stringContaining('Connector does not support exact-match queries')
     );
+    expect(res.parsed?.code).toBe('VALIDATION');
   }, 180_000);
 });
