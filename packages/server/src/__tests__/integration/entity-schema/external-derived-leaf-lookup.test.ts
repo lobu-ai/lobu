@@ -1,0 +1,158 @@
+import { beforeAll, describe, expect, it } from 'vitest';
+import { derivedRowSlug, queryDerivedEntityView } from '../../../utils/entity-management';
+import { createAuthProfile } from '../../../utils/auth-profiles';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
+import {
+  addUserToOrganization,
+  createTestOrganization,
+  createTestUser,
+  ownerToolContext,
+} from '../../setup/test-fixtures';
+import { resolvePath } from '../../../tools/resolve_path';
+import { TestApiClient } from '../../setup/test-mcp-client';
+import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
+import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
+
+const SOURCE_SQL = `SELECT n AS id, 'source-' || n AS slug, 'Row ' || n AS name
+  FROM generate_series(1, 20001) n`;
+
+describe('external derived record lookup', () => {
+  let orgId: string;
+  let orgSlug: string;
+  let userId: string;
+
+  beforeAll(async () => {
+    await cleanupTestDatabase();
+    const org = await createTestOrganization({ name: 'External Record Lookup' });
+    orgId = org.id;
+    orgSlug = org.slug;
+    const user = await createTestUser({ email: 'source-lookup@example.test' });
+    userId = user.id;
+    await addUserToOrganization(userId, orgId, 'owner');
+    const db = getTestDb();
+    const profile = await createAuthProfile({
+      organizationId: orgId,
+      connectorKey: 'postgres',
+      displayName: 'Source database',
+      profileKind: 'env',
+      authData: { DATABASE_URL: process.env.DATABASE_URL as string },
+    });
+    await db`INSERT INTO connections
+      (organization_id, connector_key, slug, display_name, status, auth_profile_id, visibility, created_by)
+      VALUES (${orgId}, 'postgres', 'record-source', 'Record source', 'active', ${profile.id}, 'private', ${userId})`;
+    const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
+    await api.entity_schema.createType({
+      slug: 'source-record', name: 'Source record',
+      backing: { sql: SOURCE_SQL, connection: 'record-source' },
+    });
+  }, 120_000);
+
+  function lookup(sql: string, slug: string) {
+    return queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId), {
+      preservePageRows: true, exactSlug: slug,
+    });
+  }
+
+  it('pushes an exact filter through the real connector, beyond the former 20,000-row cap', async () => {
+    const result = await lookup(SOURCE_SQL, 'source-20001');
+    expect(result.error).toBeUndefined();
+    expect(result.rows).toEqual([{ id: 20001, slug: 'source-20001', name: 'Row 20001' }]);
+  });
+
+  it('resolves the native record URL without materializing an entity', async () => {
+    const result = await resolvePath({ path: `/${orgSlug}/source-record/source-20001` }, {}, ownerToolContext(orgId, userId));
+    expect(result.entity).toMatchObject({ slug: 'source-20001', name: 'Row 20001', is_derived: true });
+    const rows = await getTestDb()`SELECT id FROM entities WHERE organization_id = ${orgId} AND slug = 'source-20001'`;
+    expect(rows).toHaveLength(0);
+  });
+
+  it.each([
+    ['SELECT 42 AS id', '42', [{ id: 42 }]],
+    ["SELECT 42 AS id, NULL::text AS slug", '42', [{ id: 42, slug: null }]],
+    ["SELECT 42 AS id, 'preferred' AS slug", '42', []],
+    ["SELECT 42 AS id, '' AS slug", '42', []],
+    ["SELECT 42 AS id, E'\\t padded \\n' AS slug", 'padded', [{ id: 42, slug: '\t padded \n' }]],
+    ["SELECT 42 AS id, ' padded　' AS slug", 'padded', [{ id: 42, slug: ' padded　' }]],
+    ["SELECT 42 AS id", 'missing', []],
+    ["SELECT 'safe' AS slug", "' OR true --\\", []],
+  ])('honors canonical identity for %s / %s', async (sql, slug, rows) => {
+    expect((await lookup(sql, slug)).rows).toEqual(rows);
+  });
+
+  it('preserves a denied source failure instead of reporting an empty result', async () => {
+    const ctx = { ...ownerToolContext(orgId, 'another-member'), memberRole: 'member' as const };
+    await expect(queryDerivedEntityView(SOURCE_SQL, 'record-source', { limit: 1, offset: 0 }, ctx, { exactSlug: 'source-1' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it.each([
+    '1e-7::float8',
+    '1.2::float4',
+    '1.2300::numeric',
+    'true::boolean',
+    "'2026-01-02'::date",
+    "'2026-01-02T03:04:05Z'::timestamptz",
+    "'2026-07-02 03:04:05.123456'::timestamp",
+    "'2026-07-02T03:04:05.123456+05'::timestamptz",
+  ])('resolves the listed routing key for %s', async (expression) => {
+    const sql = `SELECT ${expression} AS id`;
+    const listed = await queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId));
+    const result = await lookup(sql, derivedRowSlug(listed.rows[0]));
+    expect(result.rows).toEqual(listed.rows);
+  });
+
+  it.each(['ARRAY[1, 2]', "'{\"n\":1}'::jsonb"])(
+    'explicitly rejects a nonscalar identity %s', async (expression) => {
+      await expect(lookup(`SELECT ${expression} AS id`, 'not-a-scalar'))
+        .rejects.toMatchObject({ code: 'VALIDATION', message: expect.stringContaining('must be a scalar') });
+    }
+  );
+
+  it('preserves a failed source query instead of reporting a missing record', async () => {
+    await expect(lookup('SELECT id FROM missing_source_table', '1')).rejects.toThrow(/missing_source_table/);
+  });
+
+  it('keeps source failures visible on the native record route', async () => {
+    const db = getTestDb();
+    await db`UPDATE entity_types SET backing_sql = 'SELECT id FROM missing_source_table'
+      WHERE organization_id = ${orgId} AND slug = 'source-record'`;
+    try {
+      await expect(resolvePath({ path: `/${orgSlug}/source-record/source-20001` }, {}, ownerToolContext(orgId, userId)))
+        .rejects.toThrow(/missing_source_table/);
+    } finally {
+      await db`UPDATE entity_types SET backing_sql = ${SOURCE_SQL}
+        WHERE organization_id = ${orgId} AND slug = 'source-record'`;
+    }
+  });
+
+  it('rejects unsupported filters before calling an old connector query handler', async () => {
+    const compiledCode = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({
+        key: 'unsupported_exact', name: 'Unsupported exact', version: '0.0.1',
+        query: async () => { throw new Error('query handler must not run'); }
+      });
+    `);
+    await expect(executeCompiledConnector({ compiledCode, job: {
+      mode: 'query', query: 'SELECT 1', exactMatch: { columns: ['id'], value: '1' },
+      config: {}, credentials: null, sessionState: null, env: {}, limit: 1,
+    } })).rejects.toMatchObject({ httpStatus: 400, message: 'Connector does not support exact-match queries' });
+  });
+
+  it('functional connectors retain capability metadata and receive the exact filter', async () => {
+    const compiledCode = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({
+        key: 'supported_exact', name: 'Supported exact', version: '0.0.1',
+        queryCapabilities: { exactMatch: true },
+        query: async (ctx) => ({ rows: [{ filter: ctx.exactMatch, limit: ctx.limit, offset: ctx.offset }] })
+      });
+    `);
+    const exactMatch = { columns: ['slug', 'id'], value: 'source-id' };
+    const result = await executeCompiledConnector({ compiledCode, job: {
+      mode: 'query', query: 'SELECT 1', exactMatch,
+      config: {}, credentials: null, sessionState: null, env: {}, limit: 1, offset: 0,
+    } });
+    expect(result).toMatchObject({ mode: 'query', rows: [{ filter: exactMatch, limit: 1, offset: 0 }] });
+  });
+});

@@ -9,7 +9,7 @@
  */
 
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
-import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadWindow, type FeedReadWindowCoverage } from '@lobu/connector-sdk';
+import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadWindow, type FeedReadWindowCoverage, type QueryContext } from '@lobu/connector-sdk';
 import { createHash } from 'node:crypto';
 import { stableJson } from '../utils/insert-event';
 import {
@@ -36,6 +36,7 @@ interface ConnectorQueryParams {
   connectionSlug: string;
   /** Read-only SQL to push down (a derived entity's backing_sql, or a feed query). */
   query: string;
+  exactMatch?: QueryContext['exactMatch'];
   /** Owner/admin callers see every connection; members only org-visible or their
    * own. A full management-tier bypass. */
   isAdmin: boolean;
@@ -142,6 +143,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     job: {
       mode: 'query',
       query: p.query,
+      exactMatch: p.exactMatch,
       // Same merge as feed-sync / worker poll: connection.config under
       // credentials + caller overrides (any connector-level config).
       // ONLY the connection's own credentials reach ctx.config — deliberately NOT

@@ -123,6 +123,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
     description: spec.description,
     authSchema: spec.authSchema,
     optionsSchema: spec.optionsSchema,
+    queryCapabilities: spec.queryCapabilities,
     faviconDomain: spec.faviconDomain,
     mcpConfig: spec.mcpConfig,
     openapiConfig: spec.openapiConfig,

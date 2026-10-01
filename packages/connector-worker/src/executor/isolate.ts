@@ -304,9 +304,12 @@ const GUEST_RUNNER = String.raw`
     }
 
     if (job.mode === 'query') {
+      if (job.exactMatch && !(instance.definition.queryCapabilities && instance.definition.queryCapabilities.exactMatch === true)) {
+        throw Object.assign(new Error('Connector does not support exact-match queries'), { status: 400 });
+      }
       var queryResult = await instance.query({
         query: job.query, config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState,
-        limit: job.limit, offset: job.offset, sort: job.sort
+        limit: job.limit, offset: job.offset, sort: job.sort, exactMatch: job.exactMatch
       });
       return { mode: 'query', rows: (queryResult && queryResult.rows) || [], columns: queryResult && queryResult.columns, total: queryResult && queryResult.total };
     }

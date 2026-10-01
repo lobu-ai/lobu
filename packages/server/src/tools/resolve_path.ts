@@ -14,7 +14,7 @@ import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
 import { entityLinkMatchSql } from '../utils/content-search';
-import { ToolUserError } from '../utils/errors';
+import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import {
   derivedRowName,
@@ -881,9 +881,8 @@ async function resolveMergedEntityRedirect(
  * Derived rows aren't stored in `entities`; the type's `backing_sql` produces
  * them with stable `id`/`slug` columns. We run that SQL through
  * {@link queryDerivedEntityView} (same executor as list + type counts). An
- * internal view gets the slug pushed down as a bound SQL parameter; a
- * connection-backed view is paged and matched in memory. Neither path ever
- * interpolates the slug into the view SQL.
+ * exact-match filter is pushed down once; external connectors own its SQL
+ * dialect. The gateway never interpolates the slug into the backing SQL.
  */
 async function resolveDerivedLeaf(
   sql: DbClient,
@@ -907,54 +906,20 @@ async function resolveDerivedLeaf(
   // `get_type`), so the detail view can right-align/badge aggregate columns.
   const measures = inferMeasureColumns(backingSql);
 
-  // Internal views push the slug match into SQL as a bound parameter, so the
-  // lookup costs ONE execution of the backing SQL no matter how many rows the
-  // view produces. That matters most on a MISS, which has no early exit: paging
-  // for it re-ran the backing SQL once per page, and derived views are usually
-  // aggregates over `events`, so a 404 on a large view aggregated history once
-  // per page on a request path. The returned row is still confirmed with
-  // `derivedRowSlug` below, so any SQL/JS disagreement 404s rather than
-  // resolving the wrong row.
-  if (!backingSource) {
-    const exact = await queryDerivedEntityView(
-      backingSql,
-      undefined,
-      { limit: 1, offset: 0 },
-      ctx,
-      { preservePageRows: true, exactSlug: segment.slug }
-    );
-    if (exact.error) return null;
-    const row = exact.rows.find((r) => derivedRowSlug(r) === segment.slug);
-    if (!row) return null;
-    return buildDerivedLeaf(row, measures, segment);
+  const exact = await queryDerivedEntityView(
+    backingSql,
+    backingSource,
+    { limit: 1, offset: 0 },
+    ctx,
+    { preservePageRows: true, exactSlug: segment.slug }
+  );
+  if (exact.error) {
+    const code = exact.error_code ?? 'VALIDATION';
+    throw new ToolUserError(exact.error, toolErrorHttpStatus(code), code);
   }
-
-  // External (connection-backed) views keep the bounded scan: pushdown hands raw
-  // SQL to the connector and we can't assume its dialect supports the predicate.
-  const PAGE = 500;
-  const MAX_PAGES = 40;
-  let match: Record<string, unknown> | undefined;
-  let offset = 0;
-  for (let pageNum = 0; pageNum < MAX_PAGES; pageNum += 1) {
-    const result = await queryDerivedEntityView(
-      backingSql,
-      backingSource,
-      { limit: PAGE, offset },
-      ctx,
-      // This is an internal exact-slug scan, not an agent response. Retain the
-      // database page cardinality so MAX_PAGES remains a source-row guard even
-      // when wide rows would produce tiny serialized response chunks.
-      { preservePageRows: true }
-    );
-    if (result.error) return null;
-    match = result.rows.find((r) => derivedRowSlug(r) === segment.slug);
-    if (match) break;
-    if (!result.has_more || result.rows.length === 0) break;
-    offset += result.rows.length;
-  }
-  if (!match) return null;
-
-  return buildDerivedLeaf(match, measures, segment);
+  // Confirm canonical identity even when a connector implements the filter.
+  const row = exact.rows.find((r) => derivedRowSlug(r) === segment.slug);
+  return row ? buildDerivedLeaf(row, measures, segment) : null;
 }
 
 /** Shape one derived row into the read-only entity both lookup paths return. */

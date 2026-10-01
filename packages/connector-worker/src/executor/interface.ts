@@ -10,6 +10,7 @@ import type {
   AuthResult,
   ConnectorWebhookSchema,
   EventEnvelope,
+  QueryContext,
   SyncCredentials,
   WebhookRegistration,
 } from '@lobu/connector-sdk';
@@ -54,6 +55,7 @@ export type ExecutorJob = {
   | {
       mode: 'query';
       query: string;
+      exactMatch?: QueryContext['exactMatch'];
       config: Record<string, unknown>;
       credentials: SyncCredentials | null;
       sessionState: Record<string, unknown> | null;

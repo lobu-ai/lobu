@@ -121,10 +121,7 @@ export async function queryDerivedEntityView(
 			...(options?.preservePageRows
 				? { maxSerializedResultBytes: Number.POSITIVE_INFINITY }
 				: {}),
-			// Exact slug lookup pushes into SQL only on the internal path; the
-			// connection path rejects it (see querySqlImpl) and its caller falls
-			// back to paging, so an external view keeps working unchanged.
-			...(options?.exactSlug !== undefined && !backingSource
+			...(options?.exactSlug !== undefined
 				? { exactMatch: { columns: [...DERIVED_SLUG_COLUMNS], value: options.exactSlug } }
 				: {}),
 		},

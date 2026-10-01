@@ -44,6 +44,8 @@ export interface ConnectorDefinition {
   feeds?: Record<string, FeedDefinition>;
   /** Available action definitions (keyed by action_key) */
   actions?: Record<string, ActionDefinition>;
+  /** Query filters implemented by this connector. Unsupported filters fail before query(). */
+  queryCapabilities?: { exactMatch?: boolean };
   /** Connector-normalized events that can activate Automations. */
   automationEvents?: ConnectorAutomationEvent[];
   /**
@@ -1088,6 +1090,13 @@ export interface QueryContext<F = Record<string, unknown>> {
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
+  /**
+   * Filter before pagination by the trimmed string of the first non-null
+   * projected column, in order. Missing columns count as null; an empty string
+   * does not fall through. Values must be bound or safely encoded by the
+   * connector, which owns its source dialect. Requires queryCapabilities.exactMatch.
+   */
+  exactMatch?: { columns: string[]; value: string };
 }
 
 /** Result from ConnectorRuntime.query(). Rows are returned to the caller, never persisted. */

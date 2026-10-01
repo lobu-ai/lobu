@@ -353,7 +353,8 @@ export default class PostgresConnector extends ConnectorRuntime {
     name: 'PostgreSQL',
     description:
       'Bring your own PostgreSQL database as memory, read a configured feed directly, or run governed connection-level SQL.',
-    version: '1.0.1',
+    version: '1.1.0',
+    queryCapabilities: { exactMatch: true },
     faviconDomain: 'postgresql.org',
     authSchema: {
       methods: [
@@ -516,7 +517,6 @@ export default class PostgresConnector extends ConnectorRuntime {
       const col = assertIdentifier(ctx.sort.column, 'sort.column');
       orderBy = `ORDER BY q."${col}" ${ctx.sort.order === 'desc' ? 'DESC' : 'ASC'}`;
     }
-    const wrapped = `SELECT * FROM (\n${baseSql}\n) q\n${orderBy}\nLIMIT ${limit} OFFSET ${offset}`;
     // Real total over the whole (un-paginated) result, so the aggregator reports
     // an accurate total_count / has_more — parity with the internal query_sql
     // path. baseSql has no top-level LIMIT (rejected above), so this is exact.
@@ -526,7 +526,53 @@ export default class PostgresConnector extends ConnectorRuntime {
     try {
       const { data, total } = (await sql.begin(async (tx) => {
         await setReadOnly(tx, 30000);
-        const rows = await tx.unsafe(wrapped);
+        const params: string[] = [];
+        const bind = (value: string) => { params.push(value); return `$${params.length}::text`; };
+        let where = '';
+        if (ctx.exactMatch) {
+          const { columns, value } = ctx.exactMatch;
+          if (!columns.length) throw new Error('exactMatch.columns must not be empty');
+          for (const column of columns) assertIdentifier(column, 'exactMatch.column');
+          const projection = await tx.unsafe(`SELECT * FROM (\n${baseSql}\n) q LIMIT 0`);
+          const projected = projection.columns as Array<{ name: string; type: number; parser?: { array?: boolean } }>;
+          const candidates = columns.flatMap((name) => projected.filter((column) => column.name === name));
+          if (!candidates.length) return { data: projection, total: 0 };
+          const cases = candidates.map((column) => {
+            const ref = `q.${quoteIdent(column.name)}`;
+            let match: string;
+            if (column.parser?.array || [17, 114, 3802].includes(column.type)) {
+              throw Object.assign(new Error(`Exact-match identity column '${column.name}' must be a scalar; project a text key in the source query`), { status: 400 });
+            } else if ([700, 701].includes(column.type)) {
+              // The driver parses floats as JS numbers: 0.0000001 routes as 1e-7.
+              match = Number.isFinite(Number(value)) && String(Number(value)) === value
+                ? `${ref} = ${bind(value)}::${PG_OID[column.type].cast}` : 'FALSE';
+            } else if ([1082, 1114, 1184].includes(column.type)) {
+              // The driver returns Date values; the isolate serializes them as ISO.
+              const date = new Date(value);
+              if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) {
+                match = 'FALSE';
+              } else if (column.type === 1082) {
+                match = value.endsWith('T00:00:00.000Z') ? `${ref} = ${bind(value.slice(0, 10))}::date` : 'FALSE';
+              } else {
+                // Timestamp without zone is parsed in the worker's local zone.
+                const key = column.type === 1114
+                  ? new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, -1)
+                  : value;
+                const bound = `${bind(key)}::${PG_OID[column.type].cast}`;
+                // Date drops source microseconds, so retain its full millisecond.
+                match = `${ref} >= ${bound} AND ${ref} < ${bound} + INTERVAL '1 millisecond'`;
+              }
+            } else {
+              match = `btrim(${ref}::text, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
+            }
+            return `WHEN ${ref} IS NOT NULL THEN (${match})`;
+          });
+          where = `WHERE CASE ${cases.join(' ')} ELSE FALSE END`;
+        }
+        const wrapped = `SELECT * FROM (\n${baseSql}\n) q\n${where}\n${orderBy}\nLIMIT ${limit} OFFSET ${offset}`;
+        const rows = await tx.unsafe(wrapped, params);
+        // Record lookup needs only its bounded result, never a full-source count.
+        if (ctx.exactMatch) return { data: rows, total: undefined };
         const counted = (await tx.unsafe(countSql)) as unknown as Array<{ n: number }>;
         return { data: rows, total: counted[0]?.n };
       })) as unknown as {

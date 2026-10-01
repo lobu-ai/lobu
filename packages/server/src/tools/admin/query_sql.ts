@@ -7,6 +7,7 @@
  */
 
 import { type Static, Type } from '@sinclair/typebox';
+import type { QueryContext } from '@lobu/connector-sdk';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { getDb } from '../../db/client';
 import type { Env } from '../../index';
@@ -336,11 +337,10 @@ export async function querySqlImpl(
      * the first non-null of `columns` on each row, trimmed, and compares it to
      * `value` as a bound parameter. Read via `to_jsonb(...)->>` so a column the
      * query doesn't project yields NULL and falls through instead of raising
-     * `undefined column` — that mirrors the caller's `a ?? b` semantics without
-     * needing to know the projection. Internal path only: pushdown hands raw
-     * SQL to the connector, whose dialect we can't assume.
+     * `undefined column`. External sources receive the structured filter so
+     * their connector can implement these semantics in its own dialect.
      */
-    exactMatch?: { columns: string[]; value: string };
+    exactMatch?: QueryContext['exactMatch'];
   }
 ): Promise<QuerySqlResult> {
   const startTime = Date.now();
@@ -373,6 +373,12 @@ export async function querySqlImpl(
       'search_columns has no effect without search_term — set search_term to filter, or drop search_columns.'
     );
   }
+  if (options?.exactMatch) {
+    if (!options.exactMatch.columns.length) return fail('exactMatch.columns must not be empty.');
+    for (const col of options.exactMatch.columns) {
+      if (!COLUMN_NAME_RE.test(col)) return fail(`Invalid exact-match column name: ${col}`);
+    }
+  }
 
   // Dispatch resolves explicit targets before this workspace handler runs.
   const targetOrgId = ctx.organizationId;
@@ -391,11 +397,6 @@ export async function querySqlImpl(
         'search_term is not supported with an external connection — use search_memory.'
       );
     }
-    if (options?.exactMatch) {
-      return fail(
-        'exactMatch is not supported with an external connection — the connector owns its dialect.'
-      );
-    }
     const bounds = coercePageBounds(args);
     if ('error' in bounds) return fail(bounds.error);
     const { limit, offset } = bounds;
@@ -405,6 +406,7 @@ export async function querySqlImpl(
         isAdmin: callerIsAdmin,
         connectionSlug: args.connection,
         query: baseSql,
+        exactMatch: options?.exactMatch,
         limit,
         offset,
         sort: args.sort_by
@@ -494,14 +496,6 @@ export async function querySqlImpl(
   }
   if (options?.exactMatch) {
     const { columns, value } = options.exactMatch;
-    if (!columns.length) {
-      return fail('exactMatch.columns must not be empty.');
-    }
-    for (const col of columns) {
-      if (!COLUMN_NAME_RE.test(col)) {
-        return fail(`Invalid exact-match column name: ${col}`);
-      }
-    }
     const matchParamRef = `$${params.length + 1}`;
     params.push(value);
     const coalesced = columns.map((col) => `to_jsonb(_t)->>'${col}'`).join(', ');
