@@ -537,11 +537,16 @@ export default class PostgresConnector extends ConnectorRuntime {
           const projected = projection.columns as Array<{ name: string; type: number; parser?: { array?: boolean } }>;
           const candidates = columns.flatMap((name) => projected.filter((column) => column.name === name));
           if (!candidates.length) return { data: projection, total: 0 };
+          const isScalar = (column: (typeof projected)[number]) => !column.parser?.array && ![17, 114, 3802].includes(column.type);
+          if (!candidates.some(isScalar)) {
+            throw Object.assign(new Error('Exact-match identity must be a scalar; project a text key in the source query'), { status: 400 });
+          }
           const cases = candidates.map((column) => {
             const ref = `q.${quoteIdent(column.name)}`;
             let match: string;
-            if (column.parser?.array || [17, 114, 3802].includes(column.type)) {
-              throw Object.assign(new Error(`Exact-match identity column '${column.name}' must be a scalar; project a text key in the source query`), { status: 400 });
+            if (!isScalar(column)) {
+              // Null falls through; a non-null complex key cannot use a later scalar.
+              match = 'FALSE';
             } else if ([700, 701].includes(column.type)) {
               // The driver parses floats as JS numbers: 0.0000001 routes as 1e-7.
               match = Number.isFinite(Number(value)) && String(Number(value)) === value
@@ -565,7 +570,9 @@ export default class PostgresConnector extends ConnectorRuntime {
             } else {
               match = `btrim(${ref}::text, ${bind('\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff')}) = ${bind(value)}`;
             }
-            return `WHEN ${ref} IS NOT NULL THEN (${match})`;
+            // JSON null also becomes JS null in the driver and must fall through.
+            const present = [114, 3802].includes(column.type) ? `${ref}::jsonb <> 'null'::jsonb` : `${ref} IS NOT NULL`;
+            return `WHEN ${present} THEN (${match})`;
           });
           where = `WHERE CASE ${cases.join(' ')} ELSE FALSE END`;
         }

@@ -75,6 +75,16 @@ describe('external derived record lookup', () => {
     ["SELECT 42 AS id, ' padded　' AS slug", 'padded', [{ id: 42, slug: ' padded　' }]],
     ["SELECT 42 AS id", 'missing', []],
     ["SELECT 'safe' AS slug", "' OR true --\\", []],
+    ["SELECT 'routable' AS slug, '{\"n\":1}'::jsonb AS id", 'routable', [{ slug: 'routable', id: { n: 1 } }]],
+    ["SELECT 'routable' AS slug, ARRAY[1, 2] AS id", 'routable', [{ slug: 'routable', id: [1, 2] }]],
+    ["SELECT NULL::jsonb AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
+    ["SELECT 'null'::jsonb AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
+    ["SELECT ' null '::json AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
+    ["SELECT NULL::integer[] AS slug, 42 AS id", '42', [{ slug: null, id: 42 }]],
+    ["SELECT 'routable' AS slug, '{\"n\":1}'::jsonb AS id", 'missing', []],
+    ["SELECT '{\"n\":1}'::jsonb AS slug, 42 AS id", '42', []],
+    ["SELECT NULL::jsonb AS slug, 42 AS id UNION ALL SELECT '{\"n\":1}'::jsonb, 43", '42', [{ slug: null, id: 42 }]],
+    ["SELECT NULL::jsonb AS slug, 42 AS id UNION ALL SELECT '{\"n\":1}'::jsonb, 43", '43', []],
   ])('honors canonical identity for %s / %s', async (sql, slug, rows) => {
     expect((await lookup(sql, slug)).rows).toEqual(rows);
   });
