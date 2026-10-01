@@ -138,6 +138,15 @@ describe('external derived record lookup', () => {
     }
   );
 
+  it.each(['date', 'timestamp', 'timestamptz'].flatMap((type) => ['infinity', '-infinity'].map((value) => `'${value}'::${type}`)))(
+    'uses driver null fallback for nonfinite %s', async (expression) => {
+      const sql = `SELECT ${expression} AS slug, 42 AS id`;
+      const listed = await queryDerivedEntityView(sql, 'record-source', { limit: 1, offset: 0 }, ownerToolContext(orgId, userId));
+      expect(listed.rows).toEqual([{ slug: null, id: 42 }]);
+      expect((await lookup(sql, derivedRowSlug(listed.rows[0]))).rows).toEqual(listed.rows);
+    }
+  );
+
   it.each(['json', 'jsonb'].flatMap((type) => ['{\"n\":1}', '[1,2]'].map((value) => `'${value}'::${type}`)))(
     'does not route a JSON object or array identity %s', async (expression) => {
       const sql = `SELECT ${expression} AS id`;

@@ -566,6 +566,7 @@ export default class PostgresConnector extends ConnectorRuntime {
               present = `abs(${ref}) < 'Infinity'::float8`;
             } else if ([1082, 1114, 1184].includes(column.type)) {
               // The driver returns Date values; the isolate serializes them as ISO.
+              present = `isfinite(${ref})`;
               const date = new Date(value);
               if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) {
                 match = 'FALSE';
