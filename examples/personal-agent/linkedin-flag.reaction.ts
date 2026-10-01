@@ -2,6 +2,7 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 
 const LINKEDIN_CONNECTION_SLUG = "linkedin-buremba";
 const MAX_FLAGS = 5;
+const RUN_PAGE = 100;
 const POST_URL =
   /^https:\/\/www\.linkedin\.com\/feed\/update\/urn:li:(activity|ugcPost|share):\d+\/?$/;
 
@@ -46,6 +47,37 @@ function connectionId(value: unknown): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+// Posts this Automation already staged a draft for in an earlier window. A
+// resynced post can land in a later window, and a draft held for approval
+// sends no notification, so the operation runs are the record. Runs of this
+// window are left to replay through their idempotency keys; failed and
+// timed-out drafts may be staged again.
+async function stagedPosts(
+  client: ReactionClient,
+  connectionId: number,
+  source: { automation_id: number; run_id: number }
+): Promise<Set<string>> {
+  const posts = new Set<string>();
+  for (let offset = 0; ; offset += RUN_PAGE) {
+    const page = await client.operations.listRuns({
+      connection_id: connectionId,
+      operation_key: "prepare_comment",
+      limit: RUN_PAGE,
+      offset,
+    });
+    for (const run of page.runs) {
+      if (Number(run.automation_id) !== source.automation_id) continue;
+      if (Number(run.parent_run_id) === source.run_id) continue;
+      if (run.status === "failed" || run.status === "timeout") continue;
+      const input = run.input as { post_url?: unknown } | null;
+      if (typeof input?.post_url === "string") {
+        posts.add(input.post_url.trim().replace(/\/$/, ""));
+      }
+    }
+    if (!page.has_more) return posts;
+  }
+}
+
 // Stages each flagged post's draft as a page-activated prepare_comment run and
 // links it to the notification. Nothing runs until the user opens the post in
 // their own tab, and the human always clicks Post.
@@ -67,18 +99,14 @@ export default async function stageLinkedInFlags(
     automation_id: Number(ctx.window.automation_id),
     run_id: Number(ctx.window.run_id),
   };
+  const alreadyStaged = await stagedPosts(client, linkedin, source);
   for (const flag of flagged) {
     // prepare_comment drives the page LinkedIn settles on: the trailing-slash
     // form of /feed/update/<urn>. Activate on that exact URL, not the one the
     // user clicked, so the tab is already there when the draft run starts.
     const bareUrl = flag.post_url.replace(/\/$/, "");
     const pageUrl = `${bareUrl}/`;
-    // A resynced post can land in a later window; flag each post once. Both
-    // URL forms are POST_URL-validated, so they carry no quote characters.
-    const prior = await client.query(
-      `SELECT id FROM events WHERE semantic_type = 'notification' AND automation_id = ${source.automation_id} AND metadata->>'browser_url' IN ('${bareUrl}', '${pageUrl}') LIMIT 1`
-    );
-    if (prior.length > 0) continue;
+    if (alreadyStaged.has(bareUrl)) continue;
     // The queue binds an operation key to its parent run, so a key reused by a
     // later window would be rejected; scope retries to this run.
     const key = `linkedin-flag:${source.run_id}:${pageUrl}`;

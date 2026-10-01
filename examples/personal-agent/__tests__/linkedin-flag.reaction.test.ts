@@ -22,22 +22,41 @@ const context = (flags: unknown, runId = 901): ReactionContext =>
 function harness({
   connections = [{ id: 7, slug: "linkedin-buremba" }] as unknown[],
   status = "in_progress",
-  flaggedUrls = [] as string[],
+  priorRuns = [] as Array<Record<string, unknown>>,
 } = {}) {
   const executed: Array<Record<string, unknown>> = [];
   const sent: Array<Record<string, unknown>> = [];
-  const queries: string[] = [];
+  const runs = [...priorRuns];
   const client = {
     connections: { list: async () => ({ connections }) },
-    query: async (sql: string) => {
-      queries.push(sql);
-      return flaggedUrls.some((url) => sql.includes(`'${url}'`))
-        ? [{ id: 1 }]
-        : [];
-    },
     operations: {
+      listRuns: async ({
+        limit,
+        offset,
+      }: {
+        limit: number;
+        offset: number;
+      }) => ({
+        runs: runs.slice(offset, offset + limit),
+        total: runs.length,
+        limit,
+        offset,
+        has_more: offset + limit < runs.length,
+      }),
       execute: async (input: Record<string, unknown>) => {
         executed.push(input);
+        // Record the staged run the way the queue does, under the window's run.
+        const source = input.automation_source as {
+          automation_id: number;
+          run_id: number;
+        };
+        runs.unshift({
+          automation_id: source.automation_id,
+          parent_run_id: source.run_id,
+          status: status === "in_progress" ? "pending" : "pending",
+          approval_status: status === "pending_approval" ? "pending" : "auto",
+          input: input.input,
+        });
         return { status, run_id: 500 + executed.length };
       },
     },
@@ -48,7 +67,7 @@ function harness({
       },
     },
   } as unknown as ReactionClient;
-  return { client, executed, sent, queries };
+  return { client, executed, sent };
 }
 
 describe("LinkedIn flag reaction", () => {
@@ -126,33 +145,102 @@ describe("LinkedIn flag reaction", () => {
     expect(empty.sent).toEqual([]);
   });
 
-  test("scopes retry keys to the run so a later window can stage the same post", async () => {
-    const h = harness();
-    await stageLinkedInFlags(
-      context([{ post_url: POST, draft: "a" }], 901),
-      h.client
-    );
+  test("scopes retry keys to the run so a later window can restage a failed draft", async () => {
+    const h = harness({
+      priorRuns: [
+        {
+          automation_id: 71,
+          parent_run_id: 901,
+          status: "failed",
+          input: { post_url: POST },
+        },
+      ],
+    });
     await stageLinkedInFlags(
       context([{ post_url: POST, draft: "a" }], 902),
       h.client
     );
     expect(h.executed.map((run) => run.idempotency_key)).toEqual([
-      `linkedin-flag:901:${POST}/`,
       `linkedin-flag:902:${POST}/`,
     ]);
   });
 
-  test("skips a post this Automation already flagged in either URL form", async () => {
-    for (const flaggedUrl of [POST, `${POST}/`]) {
-      const h = harness({ flaggedUrls: [flaggedUrl] });
+  test("skips a post this Automation staged in an earlier window, in either URL form", async () => {
+    for (const postUrl of [POST, `${POST}/`]) {
+      const h = harness({
+        priorRuns: [
+          {
+            automation_id: 71,
+            parent_run_id: 800,
+            status: "completed",
+            input: { post_url: postUrl },
+          },
+        ],
+      });
       await stageLinkedInFlags(
         context([{ post_url: POST, draft: "a" }]),
         h.client
       );
       expect(h.executed).toEqual([]);
       expect(h.sent).toEqual([]);
-      expect(h.queries[0]).toContain("automation_id = 71");
     }
+  });
+
+  test("restages failed drafts, replays this window's own runs, and ignores other Automations", async () => {
+    const h = harness({
+      priorRuns: [
+        {
+          automation_id: 71,
+          parent_run_id: 800,
+          status: "failed",
+          input: { post_url: POST },
+        },
+        {
+          automation_id: 71,
+          parent_run_id: 901,
+          status: "pending",
+          input: { post_url: POST },
+        },
+        {
+          automation_id: 99,
+          parent_run_id: 700,
+          status: "completed",
+          input: { post_url: POST },
+        },
+      ],
+    });
+    await stageLinkedInFlags(
+      context([{ post_url: POST, draft: "a" }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("pages through earlier runs before deciding", async () => {
+    const filler = Array.from({ length: 150 }, (_, n) => ({
+      automation_id: 71,
+      parent_run_id: 800,
+      status: "completed",
+      input: {
+        post_url: `https://www.linkedin.com/feed/update/urn:li:activity:${3000000000000000000 + n}`,
+      },
+    }));
+    const h = harness({
+      priorRuns: [
+        ...filler,
+        {
+          automation_id: 71,
+          parent_run_id: 800,
+          status: "completed",
+          input: { post_url: POST },
+        },
+      ],
+    });
+    await stageLinkedInFlags(
+      context([{ post_url: POST, draft: "a" }]),
+      h.client
+    );
+    expect(h.executed).toEqual([]);
   });
 
   test("leaves an approval-held draft to its approval notice and keeps going", async () => {
@@ -169,6 +257,20 @@ describe("LinkedIn flag reaction", () => {
       h.client
     );
     expect(h.executed).toHaveLength(2);
+    expect(h.sent).toEqual([]);
+  });
+
+  test("does not ask twice for an approval-held draft across windows", async () => {
+    const h = harness({ status: "pending_approval" });
+    await stageLinkedInFlags(
+      context([{ post_url: POST, draft: "a" }], 901),
+      h.client
+    );
+    await stageLinkedInFlags(
+      context([{ post_url: POST, draft: "a" }], 902),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
     expect(h.sent).toEqual([]);
   });
 
