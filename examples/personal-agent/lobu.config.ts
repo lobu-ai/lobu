@@ -20,6 +20,11 @@ import type GoogleTakeoutConnector from "./google-takeout.connector.ts";
 import type HackerNewsConnector from "./hackernews.connector.ts";
 import type InstagramTakeoutConnector from "./instagram-takeout.connector.ts";
 import type LinkedInConnector from "./linkedin.connector.ts";
+import type LinkedInFlagReaction from "./linkedin-flag.reaction.ts";
+import {
+  linkedInFeedFlaggerPrompt,
+  linkedInInterestProfilePrompt,
+} from "./linkedin.prompts.ts";
 import type MidasConnector from "./midas.connector.ts";
 import type NetWorthReaction from "./net-worth.reaction.ts";
 import type PollVoteReaction from "./poll-vote.reaction.ts";
@@ -1502,6 +1507,38 @@ const duplicateEntityResolution = defineAutomation({
   skills: ["duplicate-entity-resolution-real-v3-final"],
 });
 
+// The LinkedIn assistant runs on the same device and CLI as the hourly task
+// collaborator; the paired Chrome reads LinkedIn through the extension.
+const linkedInAssistantDevice = {
+  deviceWorkerId: "66af4f1d-13c5-4d2d-b848-5b6b5dde7b63",
+  agentKind: "claude-code",
+};
+
+const linkedInInterestProfile = defineAutomation({
+  agent: personalAgent,
+  slug: "linkedin-interest-profile-weekly",
+  name: "LinkedIn interest profile",
+  ...linkedInAssistantDevice,
+  triggers: [every("0 7 * * 1", { timezone: "Europe/London" })],
+  // The profile comes from the live read_my_activity action, not stored events.
+  sources: { none: "SELECT id FROM events WHERE false" },
+  prompt: linkedInInterestProfilePrompt,
+});
+
+const linkedInFeedFlagger = defineAutomation({
+  agent: personalAgent,
+  slug: "linkedin-feed-flagger",
+  name: "LinkedIn feed flagger",
+  ...linkedInAssistantDevice,
+  // Half an hour after each 3-hourly home_feed sync.
+  triggers: [every("30 */3 * * *", { timezone: "Europe/London" })],
+  sources: { posts: "@feed:home_feed" },
+  prompt: linkedInFeedFlaggerPrompt,
+  reaction: reactionFromFile<typeof LinkedInFlagReaction>(
+    "./linkedin-flag.reaction.ts"
+  ),
+});
+
 const pollVoteReducer = defineAutomation({
   agent: personalAgent,
   slug: "poll-vote-reducer",
@@ -1582,6 +1619,8 @@ export default defineConfig({
     duplicateEntityResolution,
     midasNetWorth,
     pollVoteReducer,
+    linkedInInterestProfile,
+    linkedInFeedFlagger,
   ],
   authProfiles: [gmailAccountAuth, gmailAppAuth],
   connections: [
