@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { Chat } from "chat";
 import { InMemoryStateAdapter } from "../../../__tests__/fixtures/in-memory-state-adapter.js";
 import { parseConfig } from "../../chat-connection-service.js";
@@ -82,6 +83,49 @@ async function dispatchAndWait(chat: Chat, request: Request) {
 }
 
 describe("Google Chat platform compatibility", () => {
+  test.each(["active", "error"])("manager accepts repeated deliveries after %s startup and metadata writes", async (status) => {
+    let row: any = {
+      id: "test-google-lifecycle", organizationId: "test-owner-org", platform: "gchat", status,
+      createdAt: 1, updatedAt: 1000, metadata: {}, settings: {},
+      config: { platform: "gchat", disableSignatureVerification: true, credentials: JSON.parse(credentials) },
+    };
+    const manager = new ChatInstanceManager() as any;
+    manager.connectionStore = {
+      getConnection: async () => structuredClone(row),
+      saveConnection: async (next: any) => { row = { ...structuredClone(next), updatedAt: row.updatedAt + 1000 }; },
+      updateConnection: async (_id: string, patch: any) => { row = { ...row, ...patch, updatedAt: row.updatedAt + 1000 }; },
+    };
+    manager.services = {
+      getSecretStore: () => ({}), getCommandRegistry: () => ({ getAll: () => [] }),
+      getAutomationSubscriptionService: () => ({}), getArtifactStore: () => ({}),
+      getPublicGatewayUrl: () => "", getMcpProxy: () => null,
+      getInteractionService: () => new EventEmitter(), getGrantStore: () => ({}),
+    };
+    manager.createStateAdapter = async () => new InMemoryStateAdapter();
+    const deliver = () => manager.handleWebhook(row.id, webhook({
+      type: "ADDED_TO_SPACE", space: { name: "spaces/test-lifecycle", type: "ROOM" }, user: { name: "users/123" },
+    }));
+    try {
+      expect((await deliver()).status).toBe(200);
+      expect(row.status).toBe("active");
+      expect(row.metadata.botUsername).toBeDefined();
+      const instance = manager.getInstance(row.id);
+      const adapter = instance.chat.getAdapter("gchat");
+      expect((await deliver()).status).toBe(200);
+      expect(manager.getInstance(row.id).chat.getAdapter("gchat")).toBe(adapter);
+      await manager.updateConnection(row.id, { settings: { allowGroups: true } });
+      expect((await deliver()).status).toBe(200);
+      expect(manager.getInstance(row.id).chat.getAdapter("gchat")).toBe(adapter);
+      // A retained adapter must still reject a row changed on another replica.
+      row = { ...row, updatedAt: row.updatedAt + 1000 };
+      expect((await adapter.handleWebhook(webhook({
+        type: "ADDED_TO_SPACE", space: { name: "spaces/test-lifecycle", type: "ROOM" }, user: { name: "users/123" },
+      }))).status).toBe(403);
+      expect((await deliver()).status).toBe(200);
+    } finally {
+      await manager.shutdown();
+    }
+  });
   test("endpoint-only removals need no installation database", async () => {
     const source = { id: "test-endpoint-only", config: { platform: "gchat" } };
     await expect(acceptGoogleChatWebhook(source as any, webhook({

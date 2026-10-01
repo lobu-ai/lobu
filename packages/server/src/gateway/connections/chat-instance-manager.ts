@@ -788,6 +788,7 @@ export class ChatInstanceManager {
     await this.persistConnection(connection);
     const reread = await this.connectionStore.getConnection(id);
     if (!reread) throw new Error(`Connection ${id} disappeared during update`);
+    connection.updatedAt = reread.updatedAt;
 
     if (
       needsRestart &&
@@ -1785,9 +1786,10 @@ export class ChatInstanceManager {
         }
         if (Object.keys(metadataUpdate).length > 0) {
           Object.assign(connection.metadata, metadataUpdate);
-          await this.updateConnection(connection.id, {
+          const updated = await this.updateConnection(connection.id, {
             metadata: metadataUpdate,
           });
+          connection.updatedAt = updated.updatedAt;
         }
       } catch {
         // non-critical
@@ -2068,10 +2070,16 @@ export class ChatInstanceManager {
     // instance down and re-hydrates (re-running setWebhook/setMyCommands).
     const afterStart = await this.resolveStored(stored.id);
     instance.rowVersion = afterStart?.updatedAt ?? stored.updatedAt;
+    instance.connection.updatedAt = instance.rowVersion;
     if (stored.status === "error") {
       await this.writeConnectionStatus(stored, "active", undefined);
       const reread = await this.resolveStored(stored.id);
-      if (reread) instance.rowVersion = reread.updatedAt;
+      if (reread) {
+        instance.rowVersion = reread.updatedAt;
+        instance.connection.updatedAt = reread.updatedAt;
+        instance.connection.status = reread.status as PlatformConnection["status"];
+        instance.connection.errorMessage = reread.errorMessage;
+      }
       logger.info({ id: stored.id }, "Recovered previously-errored connection");
     }
   }

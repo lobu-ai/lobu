@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import type { StoredConnection } from "@lobu/core";
 import { Chat } from "chat";
 import { InMemoryStateAdapter } from "../../../gateway/__tests__/fixtures/in-memory-state-adapter.js";
 import { gchatPlatform } from "../../../gateway/connections/platforms/gchat.js";
+import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager.js";
+import { orgContext } from "../../../lobu/stores/org-context.js";
 import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service.js";
 import { resolveAgentId } from "../../../gateway/services/platform-helpers.js";
 import { getDb } from "../../../db/client.js";
@@ -53,6 +56,47 @@ async function fixture() {
 }
 
 describe("Google Chat shared claim flow", () => {
+  it.each(["active", "error"])("the real manager accepts verified setup after %s startup and durable updates", async (status) => {
+    const f = await fixture();
+    await orgContext.run({ organizationId: f.owner.id }, () => f.connections.saveConnection({
+      ...f.source, status: status as StoredConnection["status"],
+      config: { ...f.source.config, credentials: { client_email: "test-bot@example.test", private_key: "test-inbound-only-key" } },
+    }));
+    const manager = new ChatInstanceManager() as any;
+    manager.connectionStore = f.connections;
+    manager.publicGatewayUrl = "https://gateway.test/lobu";
+    manager.services = {
+      getConnectionStore: () => f.connections, getAppInstallationStore: () => f.store,
+      getSecretStore: () => ({}), getCommandRegistry: () => ({ getAll: () => [] }),
+      getAutomationSubscriptionService: () => new AutomationSubscriptionService(),
+      getArtifactStore: () => ({}), getPublicGatewayUrl: () => manager.publicGatewayUrl,
+      getMcpProxy: () => null, getInteractionService: () => new EventEmitter(), getGrantStore: () => ({}),
+    };
+    manager.createStateAdapter = async () => new InMemoryStateAdapter();
+    try {
+      expect(await manager.warmConnection(f.source.id)).toBe(true);
+      const adapter = manager.getInstance(f.source.id).chat.getAdapter("gchat");
+      adapter.verifyProjectNumberToken = async () => false;
+      adapter.oauth2Client.verifyIdToken = async () => ({ getPayload: () => ({
+        iss: "https://accounts.google.com", aud: "https://gateway.test/lobu/api/v1/webhooks/test-google-source",
+        email: "service-123456789@gcp-sa-gsuiteaddons.iam.gserviceaccount.com", email_verified: true,
+      }) });
+      const deliver = () => manager.handleWebhook(f.source.id, new Request("https://gateway.test/lobu/api/v1/webhooks/test-google-source", {
+        method: "POST", headers: { authorization: "Bearer test-provider-jwt" },
+        body: JSON.stringify({ type: "ADDED_TO_SPACE", space: { name: f.space, type: "ROOM" }, user: { name: "users/123456" } }),
+      }));
+      const first = await deliver();
+      expect(first.status).toBe(200);
+      expect((await first.json()).text).toContain(f.ref);
+      expect((await deliver()).status).toBe(200);
+      await orgContext.run({ organizationId: f.owner.id }, () => manager.updateConnection(f.source.id, { settings: { allowGroups: true } }));
+      expect((await deliver()).status).toBe(200);
+      expect(manager.getInstance(f.source.id).chat.getAdapter("gchat")).toBe(adapter);
+      expect((await f.connections.getConnection(f.source.id))?.status).toBe("active");
+    } finally {
+      await manager.shutdown();
+    }
+  });
   it("verifies a Google delivery, claims the team, and dispatches its normal Automation reply", async () => {
     const f = await fixture();
     const received: string[] = [];
