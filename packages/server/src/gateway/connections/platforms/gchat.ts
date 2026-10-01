@@ -7,6 +7,7 @@
  * pipeline remain platform-neutral.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   GoogleChatAdapter,
   GoogleChatAdapterConfig,
@@ -27,13 +28,6 @@ import type {
 } from "./types.js";
 
 type JsonObject = Record<string, any>;
-
-export const GOOGLE_CHAT_WELCOME_TEXT = [
-  "Welcome 👋",
-  "",
-  "In a direct message, just ask. In a space, mention this app when you want a response.",
-  "Use `/lobu help` at any time to see commands and setup options.",
-].join("\n");
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -471,31 +465,16 @@ async function normalizeWebhookRequest(
   helpCommandId?: string,
 ): Promise<{
   request: Request;
-  addedToSpaceEnvelope: "standalone" | "workspaceAddOn" | null;
 }> {
   const rawBody = await request.text();
   let body: unknown;
-  let addedToSpaceEnvelope: "standalone" | "workspaceAddOn" | null = null;
   try {
     const originalBody: unknown = JSON.parse(rawBody);
-    const workspaceAddOnAddedToSpace =
-      isObject(originalBody) &&
-      isObject(originalBody.chat) &&
-      isObject(originalBody.chat.addedToSpacePayload);
     body = normalizeGoogleChatInteractionEvent(
       originalBody,
       botUserName,
       helpCommandId,
     );
-    const addedToSpace =
-      isObject(body) &&
-      isObject(body.chat) &&
-      isObject(body.chat.addedToSpacePayload);
-    if (addedToSpace) {
-      addedToSpaceEnvelope = workspaceAddOnAddedToSpace
-        ? "workspaceAddOn"
-        : "standalone";
-    }
   } catch {
     body = rawBody;
   }
@@ -508,7 +487,6 @@ async function normalizeWebhookRequest(
       body: typeof body === "string" ? body : JSON.stringify(body),
       signal: request.signal,
     }),
-    addedToSpaceEnvelope,
   };
 }
 
@@ -580,35 +558,55 @@ async function createUnscopedAdapter(
   const adapter = createGoogleChatAdapter(
     normalizedConfig as GoogleChatAdapterConfig
   );
+  // The SDK owns verification. Its dispatch methods run only after it accepts
+  // the JWT; gate those methods so an unclaimed space never reaches an agent.
+  // Request-local state keeps concurrent deliveries on retained adapters apart.
+  const deliveries = new AsyncLocalStorage<{
+    request: Request;
+    accepted?: Promise<Response | void>;
+    dispatched: Promise<unknown>[];
+  }>();
+  const initialize = adapter.initialize.bind(adapter);
+  adapter.initialize = async (chat) => initialize(new Proxy(chat, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target);
+      if (key !== "processMessage" && key !== "processAction" && key !== "processReaction") {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (...args: unknown[]) => {
+        const delivery = deliveries.getStore();
+        if (!delivery || !context?.onWebhookAccepted) return value.apply(target, args);
+        delivery.accepted ??= context.onWebhookAccepted(delivery.request.clone());
+        const dispatch = delivery.accepted.then((response) => {
+          // SDK dispatch registers its own waitUntil task. Wait only for setup
+          // authorization here, never for an entire agent turn on Google's HTTP request.
+          if (!response) value.apply(target, args);
+        }, () => {
+          // handleWebhook awaits the same authorization promise and propagates
+          // its error. Suppress only this duplicate rejection; never dispatch.
+        });
+        delivery.dispatched.push(dispatch);
+      };
+    },
+  }));
   const handleWebhook = adapter.handleWebhook.bind(adapter);
   adapter.handleWebhook = async (
     request: Request,
     options?: WebhookOptions
   ): Promise<Response> => {
+    const acceptedRequest = request.clone();
     const normalized = await normalizeWebhookRequest(
       request,
       adapter.userName || "lobu",
       helpCommandId,
     );
-    const response = await handleWebhook(normalized.request, options);
-    if (normalized.addedToSpaceEnvelope && response.ok) {
-      // Marketplace review requires an unprompted welcome when a DM starts or
-      // the app is added to a space. Keep the adapter's subscription side
-      // effect above, then replace its empty success body with the synchronous
-      // Google Chat response so the welcome cannot depend on agent/model
-      // availability.
-      if (normalized.addedToSpaceEnvelope === "workspaceAddOn") {
-        return Response.json({
-          hostAppDataAction: {
-            chatDataAction: {
-              createMessageAction: {
-                message: { text: GOOGLE_CHAT_WELCOME_TEXT },
-              },
-            },
-          },
-        });
-      }
-      return Response.json({ text: GOOGLE_CHAT_WELCOME_TEXT });
+    const delivery = { request: acceptedRequest, dispatched: [] as Promise<unknown>[], accepted: undefined as Promise<Response | void> | undefined };
+    const response = await deliveries.run(delivery, () => handleWebhook(normalized.request, options));
+    if (response.ok && context?.onWebhookAccepted) {
+      delivery.accepted ??= context.onWebhookAccepted(delivery.request);
+      const accepted = await delivery.accepted;
+      await Promise.all(delivery.dispatched);
+      if (accepted) return accepted;
     }
     return response;
   };
@@ -632,7 +630,7 @@ export const gchatPlatform: ChatPlatformDescriptor = {
     const adapter = await createUnscopedAdapter(config, context);
     if (!context?.runtime) return adapter;
     return scopeGoogleChatAdapter(adapter, context.runtime, (runtime) =>
-      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl }));
+      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl, onWebhookAccepted: context.onWebhookAccepted }));
   },
   resolveRuntimeConfig: resolveGoogleChatRuntime,
   routeWebhook: routeGoogleChatWebhook,

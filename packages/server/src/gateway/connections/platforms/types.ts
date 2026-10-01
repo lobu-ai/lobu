@@ -56,6 +56,8 @@ export interface WebhookSecretDeps {
 export interface AdapterCreationContext {
   /** Canonical public URL that receives this connection's webhooks. */
   webhookUrl?: string;
+  /** Called by the adapter after provider verification, before dispatching chat events. */
+  onWebhookAccepted?(request: Request): Promise<Response | void>;
   runtime?: ChatRuntimeConfig & {
     /** Re-read durable ownership and credentials, including for retained handles. */
     refresh(): Promise<ChatRuntimeConfig>;
@@ -134,7 +136,7 @@ export interface ChatPlatformDescriptor {
     connection: StoredConnection,
     request: Request,
     deps: ChatRuntimeDeps,
-  ): Promise<void>;
+  ): Promise<Response | void>;
   revokeManagedConnection?(
     connection: { id: string; organizationId: string },
     deps: ChatRuntimeDeps,

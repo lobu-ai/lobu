@@ -6,8 +6,8 @@
  * passes and the user confirms the destination org.
  *
  * The engine owns the org-resolution half — two-phase confirm-before-bind,
- * idempotent already-connected success, explicit-org membership check, default-
- * org fallback, and the terminal error taxonomy. The PROVIDER owns the authority
+ * idempotent already-connected success, explicit-org membership checks,
+ * and the terminal error taxonomy. The PROVIDER owns the authority
  * half: what a pending install is, how idempotency is decided, who is allowed to
  * claim (the `authorize` verdict), and how the bind is persisted. Every
  * dependency is injected so routes wire real stores and tests use a stub
@@ -16,7 +16,7 @@
 
 /** Shared authorization error statuses (each maps to an HTTP code in the route). */
 export type ClaimError =
-  | { status: "unauthenticated" }
+  | { status: "unauthenticated"; signinProvider?: string }
   | { status: "invalid_request" }
   | { status: "no_pending" }
   /** The claimer must sign in with `signinProvider` before authority can be checked. */
@@ -68,6 +68,7 @@ export type ClaimResult =
       status: "ok";
       orgSlug: string | null;
       bindingId: string;
+      nextUrl?: string;
       /** True when the subject was already connected (idempotent no-op). */
       alreadyConnected?: boolean;
     }
@@ -126,6 +127,7 @@ export type ClaimContext =
       // a scary "not found" error for a re-visited/spent link.
       status: "already_connected";
       orgSlug: string | null;
+      nextUrl?: string;
     }
   | ClaimError;
 
@@ -134,9 +136,28 @@ export type ClaimContext =
  * Everything here is provider policy: resolving the pending row, deciding
  * idempotency, the authority verdict, and persisting the bind.
  */
+export interface ClaimContinuation {
+  platform: string;
+  connection: string;
+  channelId: string;
+  label?: string;
+  teamId?: string;
+}
+
+export function claimContinuation(orgSlug: string | null, continuation?: ClaimContinuation): { nextUrl?: string } {
+  if (!orgSlug || !continuation) return {};
+  const query = new URLSearchParams({
+    platform: continuation.platform, connection: continuation.connection, listen: continuation.channelId,
+  });
+  if (continuation.label) query.set("label", continuation.label);
+  if (continuation.teamId) query.set("team", continuation.teamId);
+  return { nextUrl: `/${encodeURIComponent(orgSlug)}/automations/new?${query}` };
+}
+
 export interface ClaimProvider<P = unknown> {
   /** The connector/provider key (e.g. `"slack"`). */
   provider: string;
+  signinProvider?: string;
   /** The kind of subject being claimed (e.g. `"workspace"`, `"account"`). */
   subjectKind: string;
   /** The parked pending install for `ref`, or null if none. */
@@ -146,7 +167,7 @@ export interface ClaimProvider<P = unknown> {
    * Idempotency is provider policy: a non-null result becomes an
    * `already_connected` success rather than an error.
    */
-  resolveExistingBinding(ref: string): Promise<{ orgSlug: string | null } | null>;
+  resolveExistingBinding(ref: string, userId: string): Promise<{ orgSlug: string | null; continuation?: ClaimContinuation } | null>;
   /**
    * The identity of an org OTHER than `targetOrganizationId` that already holds
    * an active binding for this subject, or null when the only (or no) active
@@ -176,7 +197,7 @@ export interface ClaimProvider<P = unknown> {
     organizationId: string,
     userId: string,
     confirmMove: boolean,
-  ): Promise<{ bindingId: string }>;
+  ): Promise<{ bindingId: string; continuation?: ClaimContinuation }>;
 }
 
 /**
@@ -206,10 +227,10 @@ async function resolveClaimTarget<P>(
   input: { userId: string | null; ref: string },
 ): Promise<
   | { status: "ready"; pending: P; subjectName: string | null }
-  | { status: "already_connected"; orgSlug: string | null }
+  | { status: "already_connected"; orgSlug: string | null; nextUrl?: string }
   | ClaimError
 > {
-  if (!input.userId) return { status: "unauthenticated" };
+  if (!input.userId) return { status: "unauthenticated", ...(provider.signinProvider ? { signinProvider: provider.signinProvider } : {}) };
   if (!input.ref) return { status: "invalid_request" };
 
   const pending = await provider.resolvePending(input.ref);
@@ -229,9 +250,9 @@ async function resolveClaimTarget<P>(
 
   // No pending install: either it's already connected (a re-visited/spent link),
   // or the app was never installed for this subject.
-  const existing = await provider.resolveExistingBinding(input.ref);
+  const existing = await provider.resolveExistingBinding(input.ref, input.userId);
   if (existing) {
-    return { status: "already_connected", orgSlug: existing.orgSlug };
+    return { status: "already_connected", orgSlug: existing.orgSlug, ...claimContinuation(existing.orgSlug, existing.continuation) };
   }
   return { status: "no_pending" };
 }
@@ -263,8 +284,7 @@ export async function resolveClaimContext<P>(
 
 /**
  * Bind the pending subject into the org the user CONFIRMED. `organizationId`
- * (slug or id) is required from the confirm step; it is membership-verified. When
- * omitted (programmatic callers), falls back to the user's default org. An
+ * (slug or id) is required from the confirm step; it is membership-verified. An
  * already-connected subject resolves to an idempotent success pointing at its
  * existing org.
  */
@@ -292,6 +312,7 @@ export async function claimPendingConnection<P>(
         orgSlug: target.orgSlug,
         bindingId: "",
         alreadyConnected: true,
+        ...(target.nextUrl ? { nextUrl: target.nextUrl } : {}),
       };
     }
     if (target.status !== "ready") return target;
@@ -332,14 +353,14 @@ export async function claimPendingConnection<P>(
       }
     }
 
-    const { bindingId } = await provider.bind(
+    const { bindingId, continuation } = await provider.bind(
       target.pending,
       organizationId,
       input.userId as string,
       input.confirmMove ?? false,
     );
     const orgSlug = await deps.resolveOrgSlug(organizationId);
-    return { status: "ok", orgSlug, bindingId };
+    return { status: "ok", orgSlug, bindingId, ...claimContinuation(orgSlug, continuation) };
   } catch (err) {
     // The atomic (under-lock) fence in the provider's bind tripped on the raced
     // path — surface the SAME typed outcome as the pre-check (by matchKind), not a

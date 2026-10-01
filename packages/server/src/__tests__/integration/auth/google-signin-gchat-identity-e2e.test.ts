@@ -1,37 +1,13 @@
 /**
- * Google sign-in → Google Chat sender recognition — END TO END through the REAL
- * BetterAuth handler.
- *
- * The whole point of the chat-identity registry is this loop: a person signs
- * into Lobu with Google, then messages the hosted Google Chat bot, and the bot
- * knows who they are — which is what lets `/lobu <agent>` bind the chat to
- * their own agent, with no claim code.
- *
- * This does NOT call `persistLoginChatIdentity` directly. It drives a full
- * sign-in through `auth.handler(...)` — POST /sign-in/oauth2, the provider
- * authorize redirect, and the /oauth2/callback/google exchange — against a mock
- * Google OIDC server, then asks `resolveChatUserIdentity` the question the
- * gchat adapter asks.
- *
- * Proof chain:
- *   1. Pre-provision Alice's `$member` with ONLY auth_user_id + email — NO
- *      google_user_id, exactly the state before this change.
- *   2. Real OAuth sign-in: the mock /token returns an id_token whose `sub` is a
- *      Google account id. BetterAuth links the google account to Alice
- *      (account-linking by verified email), firing account.create.after.
- *   3. Assert `entity_identities` now has (google_user_id, <sub>, auth:signup)
- *      on Alice's `$member` — BARE, not tenant-prefixed.
- *   4. THE LOOP CLOSES: `resolveChatUserIdentity("gchat", undefined,
- *      "users/<sub>")` — the exact `message.sender.name` the gchat adapter
- *      hands over — returns Alice's user id.
- *
- * Red→green: before the registry change, step 3 finds no row (the writer
- * no-opped for `providerId: "google"`) and step 4 returned null unconditionally
- * (`if (platform !== "slack") return null`).
+ * Google sign-in and account linking through the real Better Auth handler and
+ * a mock OIDC server. The OAuth callback must persist the Google identity used
+ * to resolve a Chat sender, preserve the linking user's session, and refuse an
+ * account already owned by another user.
  */
 
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { serializeSigned } from "hono/utils/cookie";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { clearLoginProviderCachesForTests } from "../../../auth/config";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
@@ -45,6 +21,7 @@ import {
 	addUserToOrganization,
 	createTestOrganization,
 	createTestUser,
+	createTestSession,
 } from "../../setup/test-fixtures";
 
 /**
@@ -187,7 +164,7 @@ describe("google sign-in → gchat sender identity e2e (real BetterAuth handler)
 		await new Promise<void>((resolve) => mock.server.close(() => resolve()));
 	});
 
-	it("writes the bare google_user_id on sign-in, and a Google Chat `users/{id}` sender then resolves to that user", async () => {
+	it.each(["signin", "link", "owned-elsewhere"] as const)("Google identity proof: %s through the real OAuth callback", async (scenario) => {
 		const sql = getTestDb();
 
 		const org = await createTestOrganization({
@@ -195,13 +172,13 @@ describe("google sign-in → gchat sender identity e2e (real BetterAuth handler)
 			slug: ORG_SLUG,
 			visibility: "private",
 		});
-		const alice = await createTestUser({ name: "Alice", email: ALICE_EMAIL });
+		const alice = await createTestUser({ name: "Alice", email: scenario === "signin" ? ALICE_EMAIL : "alice@personal.test" });
 		await addUserToOrganization(alice.id, org.id, "owner");
 
 		// Pre-sign-in state: $member with auth_user_id + email, NO google_user_id.
 		const { memberEntityId } = await provisionMemberAndCoreIdentities(org.id, {
 			userId: alice.id,
-			email: ALICE_EMAIL,
+			email: alice.email,
 			name: "Alice",
 		});
 		const before = await sql<{ n: number }>`
@@ -240,15 +217,29 @@ describe("google sign-in → gchat sender identity e2e (real BetterAuth handler)
 			)
 		`;
 
-		const callbackURL = `${ORIGIN}/${ORG_SLUG}`;
-		const signInRequest = new Request(`${ORIGIN}/api/auth/sign-in/oauth2`, {
+		let sessionCookie = "";
+		if (scenario !== "signin") {
+			const session = await createTestSession(alice.id);
+			sessionCookie = (await serializeSigned("better-auth.session_token", session.token, process.env.BETTER_AUTH_SECRET!)).split(";")[0];
+		}
+		let foreignUserId: string | undefined;
+		if (scenario === "owned-elsewhere") {
+			foreignUserId = (await createTestUser()).id;
+			await sql`INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt") VALUES ('test-foreign-google-account', ${GOOGLE_SUB}, 'google', ${foreignUserId}, now(), now())`;
+		}
+		const callbackURL = scenario === "signin" ? `${ORIGIN}/${ORG_SLUG}` : `${ORIGIN}/connector/gchat/connection?ref=test-setup-ref`;
+		const signInRequest = new Request(`${ORIGIN}/api/auth/${scenario === "signin" ? "sign-in/social" : "link-social"}`, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ providerId: "google", callbackURL }),
+			headers: { "content-type": "application/json", origin: ORIGIN, referer: `${ORIGIN}/${ORG_SLUG}`, ...(sessionCookie ? { cookie: sessionCookie } : {}) },
+			body: JSON.stringify({ provider: "google", callbackURL }),
 		});
 		const auth = await createAuth(getEnvFromProcess(), signInRequest.clone());
+		if (scenario !== "signin") {
+			const anonymous = new Request(signInRequest.url, { method: "POST", headers: { "content-type": "application/json", origin: ORIGIN }, body: JSON.stringify({ provider: "google", callbackURL }) });
+			expect((await auth.handler(anonymous)).status).toBe(401);
+		}
 
-		// 1) POST /sign-in/oauth2 → { url } + signed state cookie.
+		// 1) Start sign-in or account linking → { url } + signed state cookie.
 		const startRes = await auth.handler(signInRequest);
 		expect(startRes.status).toBe(200);
 		const startBody = (await startRes.json()) as { url?: string };
@@ -274,10 +265,21 @@ describe("google sign-in → gchat sender identity e2e (real BetterAuth handler)
 		const callbackRes = await auth.handler(
 			new Request(callbackLocation as string, {
 				method: "GET",
-				headers: { cookie: stateCookie, referer: callbackURL },
+				headers: { cookie: [stateCookie, sessionCookie].filter(Boolean).join("; "), referer: callbackURL },
 			}),
 		);
 		expect(callbackRes.status).toBe(302);
+		if (scenario === "owned-elsewhere") {
+			expect(callbackRes.headers.get("location")).toContain("account_already_linked_to_different_user");
+			const [account] = await sql`SELECT "userId" FROM account WHERE "providerId" = 'google' AND "accountId" = ${GOOGLE_SUB}`;
+			expect(account.userId).toBe(foreignUserId);
+			return;
+		}
+		expect(callbackRes.headers.get("location")).toBe(callbackURL);
+		if (scenario === "link") {
+			const session = await auth.api.getSession({ headers: new Headers({ cookie: sessionCookie }) });
+			expect(session?.user.id).toBe(alice.id);
+		}
 		expect(
 			callbackRes.headers.get("location") ?? "",
 			"callback must not land on the auth error page",

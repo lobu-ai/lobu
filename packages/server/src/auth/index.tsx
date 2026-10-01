@@ -269,6 +269,10 @@ export async function createAuth(
 		account: {
 			accountLinking: {
 				enabled: true,
+				// A signed-in human can prove a separate work identity without losing
+				// their Lobu memberships. Better Auth's explicit link flow verifies
+				// provider ownership and refuses accounts owned by another user.
+				allowDifferentEmails: true,
 				// Trust only the social providers that are actually configured for this org.
 				// Keep core auth connector-agnostic: provider trust should be data-driven from
 				// enabled login providers, not hardcoded per connector/provider in app code.

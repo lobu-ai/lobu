@@ -1,9 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { Chat } from "chat";
 import { InMemoryStateAdapter } from "../../../__tests__/fixtures/in-memory-state-adapter.js";
 import { parseConfig } from "../../chat-connection-service.js";
 import { ChatInstanceManager } from "../../chat-instance-manager.js";
-import { GOOGLE_CHAT_WELCOME_TEXT, gchatPlatform } from "../gchat.js";
+import { gchatPlatform } from "../gchat.js";
+import { acceptGoogleChatWebhook } from "../gchat-installation.js";
+import type { AdapterCreationContext } from "../types.js";
 
 const credentials = JSON.stringify({
   client_email: "lobu-chat@example.iam.gserviceaccount.com",
@@ -38,13 +40,13 @@ function standardDirectMessage(text = "hello Lobu"): any {
   };
 }
 
-async function createTestChat(config: { helpCommandId?: string } = {}) {
+async function createTestChat(config: { helpCommandId?: string } = {}, context?: AdapterCreationContext) {
   const adapter = await gchatPlatform.createAdapter({
     credentials,
     disableSignatureVerification: true,
     userName: "lobu",
     ...config,
-  });
+  }, context);
   const chat = new Chat({
     userName: "lobu",
     adapters: { gchat: adapter },
@@ -80,17 +82,96 @@ async function dispatchAndWait(chat: Chat, request: Request) {
 }
 
 describe("Google Chat platform compatibility", () => {
-  test("welcome points users to the registered /lobu wrapper", () => {
-    expect(GOOGLE_CHAT_WELCOME_TEXT).toContain("/lobu help");
+  test("endpoint-only removals need no installation database", async () => {
+    const source = { id: "test-endpoint-only", config: { platform: "gchat" } };
+    await expect(acceptGoogleChatWebhook(source as any, webhook({
+      type: "REMOVED_FROM_SPACE", space: { name: "spaces/AAAA-test" },
+    }), {} as any)).resolves.toBeUndefined();
+  });
+  test("verified setup blocks personal-agent dispatch before the message pipeline", async () => {
+    const accepted = mock(async () => Response.json({ text: "Choose your organization: https://workspace.test/setup" }));
+    const chat = await createTestChat({}, { onWebhookAccepted: accepted });
+    const delivered = mock(async () => {});
+    chat.onNewMessage(/.*/, delivered);
+    const response = await dispatchAndWait(chat, webhook(standardDirectMessage()));
+    expect(await response.json()).toEqual({ text: "Choose your organization: https://workspace.test/setup" });
+    expect(accepted).toHaveBeenCalledTimes(1);
+    expect(delivered).not.toHaveBeenCalled();
   });
 
+  test("a failed Google verification cannot persist setup authority", async () => {
+    const accepted = mock(async () => Response.json({ text: "setup" }));
+    const adapter = await gchatPlatform.createAdapter({ credentials, googleChatProjectNumber: "123456789" }, { onWebhookAccepted: accepted });
+    (adapter as any).verifyProjectNumberToken = async () => false;
+    const chat = new Chat({ userName: "lobu", adapters: { gchat: adapter }, state: new InMemoryStateAdapter() });
+    const response = await dispatchAndWait(chat, webhook(standardDirectMessage()));
+    expect(response.status).toBe(401);
+    expect(accepted).not.toHaveBeenCalled();
+  });
+
+  test("setup lookup errors reject the webhook without orphaning dispatch promises", async () => {
+    const chat = await createTestChat({}, { onWebhookAccepted: async () => { throw new Error("setup unavailable"); } });
+    const delivered = mock(async () => {});
+    chat.onDirectMessage(delivered);
+    await expect(dispatchAndWait(chat, webhook(standardDirectMessage()))).rejects.toThrow("setup unavailable");
+    await Bun.sleep(0);
+    expect(delivered).not.toHaveBeenCalled();
+  });
+
+  test("setup also gates asynchronously dispatched Pub/Sub reactions", async () => {
+    const accepted = mock(async () => Response.json({ text: "setup" }));
+    const adapter = await gchatPlatform.createAdapter({ credentials, disableSignatureVerification: true }, { onWebhookAccepted: accepted });
+    const fetched = Promise.withResolvers<any>();
+    (adapter as any).chatApi.spaces.messages.get = () => fetched.promise;
+    const chat = new Chat({ userName: "lobu", adapters: { gchat: adapter }, state: new InMemoryStateAdapter() });
+    const delivered = mock(async () => {});
+    chat.onReaction(["thumbs_up"], delivered);
+    const tasks: Promise<unknown>[] = [];
+    const response = await chat.webhooks.gchat(webhook({
+      subscription: "projects/test-project/subscriptions/test-subscription",
+      message: {
+        attributes: { "ce-type": "google.workspace.chat.reaction.v1.created", "ce-subject": "//chat.googleapis.com/spaces/AAAA-test" },
+        data: Buffer.from(JSON.stringify({ reaction: {
+          name: "spaces/AAAA-test/messages/test-message/reactions/test-reaction",
+          user: { name: "users/123", type: "HUMAN" }, emoji: { unicode: "👍" },
+        } })).toString("base64"),
+      },
+    }), { waitUntil: (task) => tasks.push(task) });
+    expect(await response.json()).toEqual({ text: "setup" });
+    fetched.resolve({ data: {} });
+    for (const task of tasks) await task;
+    expect(accepted).toHaveBeenCalledTimes(1);
+    expect(delivered).not.toHaveBeenCalled();
+  });
+
+  test("accepted messages acknowledge before a long agent turn finishes", async () => {
+    const chat = await createTestChat({}, { onWebhookAccepted: async () => {} });
+    const finish = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const tasks: Promise<unknown>[] = [];
+    chat.onDirectMessage(async () => { started.resolve(); await finish.promise; });
+    try {
+      const response = chat.webhooks.gchat(webhook(standardDirectMessage()), { waitUntil: (task) => tasks.push(task) });
+      await started.promise;
+      expect((await Promise.race([response, Bun.sleep(1_000).then(() => { throw new Error("Webhook waited for an agent turn"); })])).status).toBe(200);
+    } finally {
+      finish.resolve();
+      await Promise.all(tasks);
+    }
+  });
   test("accepts only this project's Workspace Add-on token at the canonical connection webhook", async () => {
     const endpointUrl =
       "https://gateway.test/api/v1/webhooks/gchat-addon-test";
     const manager = new ChatInstanceManager() as any;
     manager.publicGatewayUrl = "https://gateway.test";
+    manager.runtimeDeps = () => ({ getConnection: async () => ({
+      id: "gchat-addon-test", platform: "gchat", status: "active", agentId: "test-agent",
+      updatedAt: 1,
+      config: { googleChatProjectNumber: "123456789" },
+    }) });
     const adapter = (await manager.createAdapter({
       id: "gchat-addon-test",
+      updatedAt: 1,
       platform: "gchat",
       config: {
         platform: "gchat",
@@ -227,8 +308,8 @@ describe("Google Chat platform compatibility", () => {
     expect(delivered).toEqual(["/help"]);
   });
 
-  test("returns the Marketplace welcome when added to a DM or space", async () => {
-    const chat = await createTestChat();
+  test("standalone additions invoke the verified installation callback", async () => {
+    const chat = await createTestChat({}, { onWebhookAccepted: async () => Response.json({ text: "Installation-specific setup link" }) });
     const messageEvent = standardDirectMessage();
 
     const response = await chat.webhooks.gchat(
@@ -241,11 +322,12 @@ describe("Google Chat platform compatibility", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ text: GOOGLE_CHAT_WELCOME_TEXT });
+    expect(await response.json()).toEqual({ text: "Installation-specific setup link" });
   });
 
-  test("wraps the Marketplace welcome for a Workspace Add-on event", async () => {
-    const chat = await createTestChat();
+  test("Workspace Add-on additions use the verified installation response", async () => {
+    const expected = { hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: "Installation-specific setup link" } } } } };
+    const chat = await createTestChat({}, { onWebhookAccepted: async () => Response.json(expected) });
     const messageEvent = standardDirectMessage();
 
     const response = await chat.webhooks.gchat(
@@ -259,15 +341,7 @@ describe("Google Chat platform compatibility", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      hostAppDataAction: {
-        chatDataAction: {
-          createMessageAction: {
-            message: { text: GOOGLE_CHAT_WELCOME_TEXT },
-          },
-        },
-      },
-    });
+    expect(await response.json()).toEqual(expected);
   });
 
   test("dispatches the registered Workspace Add-on /help command", async () => {

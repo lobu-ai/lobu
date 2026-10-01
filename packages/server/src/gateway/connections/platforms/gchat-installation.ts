@@ -1,6 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { StoredConnection } from "@lobu/core";
 import { getDb } from "../../../db/client.js";
+import { AutomationSubscriptionService } from "../../channels/automation-subscription-service.js";
+import { claimContinuation } from "../connection-claim.js";
+import type { ConnectionSettings } from "../types.js";
 import {
   chatTenantAdvisoryLockKey,
   managedTenantAdvisoryLockKey,
@@ -15,6 +18,41 @@ import type { ChatRuntimeConfig, ChatRuntimeDeps } from "./types.js";
 const PREFIX = "gchatinst-";
 const PROVIDER = "gchat";
 
+/** Only called after the Chat SDK has authenticated this provider delivery. */
+export async function parkGoogleChatSpace(source: StoredConnection, space: string, installer: string, label: string, added: boolean): Promise<string> {
+  if (!source.organizationId || !/^users\/\d+$/.test(installer)) throw new Error("Google Chat installer identity is missing");
+  const sql = getDb();
+  return sql.begin(async (tx) => {
+    // Reuse the owner's row as a durable serialization point for pending refs.
+    await tx`SELECT id FROM organization WHERE id = ${source.organizationId!} FOR UPDATE`;
+    const [pending] = await tx`
+      SELECT metadata FROM app_installations WHERE provider = 'gchat' AND provider_instance = 'cloud'
+        AND provider_app_id = ${source.config.googleChatProjectNumber} AND external_tenant_id = ${space}
+        AND status = 'pending' AND metadata->>'source_connection_id' = ${source.id}
+        AND metadata->>'installer_id' = ${installer}
+        AND metadata->>'claimed' IS DISTINCT FROM 'true' AND metadata->>'removed' IS DISTINCT FROM 'true'
+        AND updated_at > now() - interval '24 hours' LIMIT 1
+    `;
+    if (pending) {
+      if (added && !pending.metadata.verified_added) {
+        await tx`UPDATE app_installations SET metadata = metadata || '{"verified_added":true}'::jsonb, updated_at = now()
+          WHERE provider = 'gchat' AND metadata->>'external_id' = ${pending.metadata.external_id}`;
+      }
+      return pending.metadata.external_id;
+    }
+    const ref = `gchatclaim-${randomUUID()}`;
+    await tx`
+      INSERT INTO app_installations (provider, provider_instance, provider_app_id, external_tenant_id, status, metadata)
+      VALUES ('gchat', 'cloud', ${source.config.googleChatProjectNumber}, ${space}, 'pending', ${sql.json({
+        external_id: ref, source_connection_id: source.id, source_organization_id: source.organizationId,
+        installer_id: installer, space_name: label, verified_added: added,
+      })})
+    `;
+    return ref;
+  });
+}
+
+
 /** Both projection and lookup use the same server-owned namespace. */
 export function googleChatInstallationId(org: string, project: string, space: string): string {
   return PREFIX + createHash("sha256").update(JSON.stringify([org, project, space])).digest("hex");
@@ -26,6 +64,7 @@ export async function activateGoogleChatSpace(
   source: StoredConnection,
   organizationId: string,
   spaceName: string,
+  confirmMove = false,
 ): Promise<string> {
   const project = (source.config as any).googleChatProjectNumber;
   if (source.platform !== PROVIDER || source.status !== "active" || !source.organizationId ||
@@ -35,12 +74,13 @@ export async function activateGoogleChatSpace(
   const id = googleChatInstallationId(organizationId, project, spaceName);
   const installation = await store.upsert({
     provider: PROVIDER, providerInstance: "cloud", providerAppId: project,
-    externalTenantId: spaceName, organizationId, blockCrossOrgTransfer: true,
+    externalTenantId: spaceName, organizationId, blockCrossOrgTransfer: !confirmMove,
+    revokeConnectionsOnTransfer: { errorMessage: "Google Chat space moved to another organization" },
     metadata: { external_id: id, source_connection_id: source.id, source_organization_id: source.organizationId },
   });
   const projection: StoredConnection = {
     id, organizationId, platform: PROVIDER, status: "active",
-    config: { platform: PROVIDER }, settings: { allowGroups: true },
+    config: { platform: PROVIDER, installation_ref: String(installation.id) }, settings: { allowGroups: true },
     metadata: { teamId: spaceName, teamName: spaceName },
     createdAt: installation.createdAt, updatedAt: installation.updatedAt,
   };
@@ -120,6 +160,11 @@ export async function routeGoogleChatWebhook(
   `;
   const row = rows[0];
   if (!row) return undefined;
+  const body = await request.clone().json() as any;
+  // Pending setup remains on the source's verified adapter, where dispatch is
+  // gated. Reinstall lifecycle deliveries must also reach that verifier.
+  const added = body.type === "ADDED_TO_SPACE" || body.eventType === "ADDED_TO_SPACE" || body.chat?.addedToSpacePayload;
+  if (row.status === "pending" && !row.metadata.removed || row.status !== "active" && added) return undefined;
   if (row.status !== "active" || row.metadata.source_connection_id !== connection.id) {
     return new Response("Google Chat installation is unavailable", { status: 403 });
   }
@@ -147,18 +192,64 @@ export async function acceptGoogleChatWebhook(
   connection: StoredConnection,
   request: Request,
   deps: ChatRuntimeDeps,
-): Promise<void> {
-  if (!connection.id.startsWith(PREFIX)) return;
+): Promise<Response | void> {
+  const scoped = connection.id.startsWith(PREFIX);
+  // Endpoint-authenticated transports do not own project-scoped installations.
+  if (!scoped && !/^\d+$/.test(String(connection.config.googleChatProjectNumber))) return;
   const body = await request.json() as any;
   const eventType = typeof body.type === "string" ? body.type : body.eventType;
-  if (eventType !== "REMOVED_FROM_SPACE" && !body.chat?.removedFromSpacePayload) return;
-  await resolveGoogleChatRuntime(connection, deps);
-  await revokeGoogleChatSpace({ id: connection.id, organizationId: connection.organizationId! }, deps);
-  const sql = getDb();
-  const slug = runtimeConnectionIdToSlug(connection.id);
-  await sql`
-    UPDATE connections SET status = 'paused', updated_at = now()
-    WHERE organization_id = ${connection.organizationId!} AND slug = ${slug}
-      AND deleted_at IS NULL AND credential_mode = 'managed'
-  `;
+  const removed = eventType === "REMOVED_FROM_SPACE" || !!body.chat?.removedFromSpacePayload;
+  const added = eventType === "ADDED_TO_SPACE" || !!body.chat?.addedToSpacePayload;
+  const space = googleChatEventSpace(body);
+  if (removed) {
+    const sql = getDb();
+    let project = connection.config.googleChatProjectNumber;
+    let sourceId = connection.id;
+    if (connection.id.startsWith(PREFIX)) {
+      await resolveGoogleChatRuntime(connection, deps);
+      const install = await deps.getAppInstallationStore().resolveByExternalId(PROVIDER, connection.id);
+      if (!install) throw new GoogleChatScopeError();
+      project = install.providerAppId;
+      sourceId = install.metadata.source_connection_id;
+    }
+    // Invalidate setup refs under the claim's row lock before finding the
+    // current active owner. A claim/move that wins first is revoked afterwards.
+    await sql`UPDATE app_installations SET metadata = metadata || '{"removed":true}'::jsonb, updated_at = now()
+      WHERE provider = 'gchat' AND provider_app_id = ${project} AND external_tenant_id = ${space}
+        AND metadata->>'source_connection_id' = ${sourceId} AND status = 'pending'`;
+    const [active] = await sql`SELECT organization_id, metadata FROM app_installations
+      WHERE provider = 'gchat' AND provider_instance = 'cloud' AND provider_app_id = ${project}
+        AND external_tenant_id = ${space} AND status = 'active'
+        AND metadata->>'source_connection_id' = ${sourceId} LIMIT 1`;
+    if (active) {
+      const id = googleChatInstallationId(active.organization_id, project, space);
+      await revokeGoogleChatSpace({ id, organizationId: active.organization_id }, deps);
+      await sql`UPDATE connections SET status = 'paused', updated_at = now()
+        WHERE organization_id = ${active.organization_id} AND slug = ${runtimeConnectionIdToSlug(id)}
+          AND deleted_at IS NULL AND credential_mode = 'managed'`;
+    }
+    return;
+  }
+  if (!added && connection.agentId) return;
+  const linked = !added && await new AutomationSubscriptionService().channelHasMessageSubscription(
+    connection.id, `gchat:${space}`, connection.organizationId!, { crossOrganization: (connection.settings as ConnectionSettings).previewMode === true, teamId: space },
+  );
+  if (linked) return;
+  const spaceData = body.space ?? body.chat?.addedToSpacePayload?.space ?? body.chat?.messagePayload?.space;
+  let url: string;
+  if (scoped) {
+    const [org] = await getDb()`SELECT slug FROM organization WHERE id = ${connection.organizationId!}`;
+    if (!org) throw new GoogleChatScopeError();
+    const next = claimContinuation(org.slug, { platform: PROVIDER, connection: runtimeConnectionIdToSlug(connection.id), channelId: `gchat:${space}`, teamId: space, label: spaceData?.displayName || space });
+    url = new URL(next.nextUrl!, deps.publicGatewayUrl).toString();
+  } else {
+    const installer = body.user?.name ?? body.chat?.user?.name ?? body.message?.sender?.name ?? body.chat?.messagePayload?.message?.sender?.name;
+    if (typeof installer !== "string" || !/^users\/\d+$/.test(installer)) return new Response("Google Chat installer identity is missing", { status: 400 });
+    const ref = await parkGoogleChatSpace(connection, space, installer, spaceData?.displayName || space, added);
+    url = new URL(`/connector/gchat/connection?${new URLSearchParams({ ref })}`, deps.publicGatewayUrl).toString();
+  }
+  const message = { text: `Welcome! Choose the organization and agent for this conversation: ${url}\nUse /lobu help for commands.` };
+  return body.chat
+    ? Response.json({ hostAppDataAction: { chatDataAction: { createMessageAction: { message } } } })
+    : Response.json(message);
 }

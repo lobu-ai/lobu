@@ -68,6 +68,31 @@ function makeDeps(overrides: Partial<ClaimEngineDeps> = {}): ClaimEngineDeps {
 // the engine rejects an org-less claim (never routes to a default org).
 const input = { userId: "user-1", ref: REF, organizationId: "acme" };
 
+test("continues a claimed space in the selected org's normal Automation editor", async () => {
+  const { provider } = makeProvider({
+    bind: async () => ({ bindingId: "bound", continuation: {
+      platform: "test-chat", connection: "test-connection", channelId: "test-chat:rooms/test-room", label: "Test room",
+    } }),
+  });
+  const result = await claimPendingConnection(provider, makeDeps(), input);
+  expect(result.status).toBe("ok");
+  const next = new URL((result as any).nextUrl, "https://workspace.test");
+  expect(next.pathname).toBe("/acme/automations/new");
+  expect(next.searchParams.get("connection")).toBe("test-connection");
+  expect(next.searchParams.get("listen")).toBe("test-chat:rooms/test-room");
+});
+
+test("revisited claims authorize the user before returning their continuation", async () => {
+  const existing = mock(async (_ref: string, userId: string) => userId === "user-1" ? {
+    orgSlug: "acme", continuation: { platform: "test-chat", connection: "test-connection", channelId: "test-chat:rooms/test-room" },
+  } : null);
+  const { provider } = makeProvider({ resolvePending: async () => null, resolveExistingBinding: existing });
+  const result = await resolveClaimContext(provider, makeDeps(), input);
+  expect(result.status).toBe("already_connected");
+  expect((result as any).nextUrl).toContain("/acme/automations/new?");
+  expect(existing).toHaveBeenCalledWith(REF, "user-1");
+});
+
 describe("claimPendingConnection", () => {
   test("binds the subject on the happy path (authorized)", async () => {
     const { provider, bind } = makeProvider();

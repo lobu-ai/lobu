@@ -51,6 +51,7 @@ import {
 	resolveClaimContext,
 } from "./gateway/connections/connection-claim";
 import { slackClaimProvider } from "./gateway/connections/slack-claim";
+import { googleChatClaimProvider } from "./gateway/connections/gchat-claim";
 import { resolveClaimingUserSlackIdentities } from "./gateway/connections/slack-claim-identities";
 import { createSlackWebApi } from "./gateway/connections/slack-web";
 import {
@@ -1649,6 +1650,12 @@ function buildSlackClaimProvider(): ClaimProvider {
 // entry here — the two routes below dispatch through it; unknown → 404.
 const claimProviders = new Map<string, () => ClaimProvider>([
 	["slack", buildSlackClaimProvider],
+	["gchat", () => {
+		const core = getLobuCoreServices();
+		const connections = core?.getConnectionStore();
+		if (!core || !connections) throw new Error("Lobu core services unavailable");
+		return googleChatClaimProvider({ store: core.getAppInstallationStore(), getConnection: (id) => connections.getConnection(id) }) as ClaimProvider;
+	}],
 ]);
 
 // GET /api/connector/:connector/connection/claim-context?ref=… — the confirm
@@ -1676,9 +1683,9 @@ app.get("/api/connector/:connector/connection/claim-context", async (c) => {
 		});
 	}
 	if (ctx.status === "already_connected") {
-		return c.json({ ok: true, alreadyConnected: true, orgSlug: ctx.orgSlug });
+		return c.json({ ok: true, alreadyConnected: true, orgSlug: ctx.orgSlug, ...(ctx.nextUrl ? { nextUrl: ctx.nextUrl } : {}) });
 	}
-	if (ctx.status === "signin_required") {
+	if (ctx.status === "signin_required" || (ctx.status === "unauthenticated" && ctx.signinProvider)) {
 		return c.json(
 			{ error: ctx.status, signinProvider: ctx.signinProvider },
 			claimHttpStatus(ctx.status),
@@ -1738,6 +1745,7 @@ app.post("/api/connector/:connector/connection/claim", async (c) => {
 			orgSlug: result.orgSlug,
 			provider: provider.provider,
 			alreadyConnected: result.alreadyConnected ?? false,
+			...(result.nextUrl ? { nextUrl: result.nextUrl } : {}),
 		});
 	}
 	if (
@@ -1767,7 +1775,7 @@ app.post("/api/connector/:connector/connection/claim", async (c) => {
 		);
 		return c.json({ error: "claim_failed", message: result.message }, 500);
 	}
-	if (result.status === "signin_required") {
+	if (result.status === "signin_required" || (result.status === "unauthenticated" && result.signinProvider)) {
 		return c.json(
 			{ error: result.status, signinProvider: result.signinProvider },
 			claimHttpStatus(result.status),

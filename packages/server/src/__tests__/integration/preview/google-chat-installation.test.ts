@@ -50,7 +50,8 @@ describe("Google Chat installation ownership and dispatch", () => {
     const f = await fixture();
     expect(f.id).toBe(googleChatInstallationId(f.target.id, "123456789", f.space));
     expect(f.connection.organizationId).toBe(f.target.id);
-    expect(f.connection.config).toEqual({ platform: "gchat" });
+    expect(f.connection.config).toMatchObject({ platform: "gchat", installation_ref: expect.any(String) });
+    expect(f.connection.config.credentials).toBeUndefined();
     expect((f.connection.settings as any).previewMode).not.toBe(true);
     const runtime = await orgContext.run({ organizationId: f.target.id }, () => resolveGoogleChatRuntime(f.connection, f.deps));
     expect((runtime!.config as any).credentials).toContain("test-key");

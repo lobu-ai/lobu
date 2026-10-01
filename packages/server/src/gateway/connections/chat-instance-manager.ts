@@ -1563,12 +1563,7 @@ export class ChatInstanceManager {
     }
 
     try {
-      const accepted = request.clone();
-      const response = await webhookHandler(request);
-      if (response.ok && stored) {
-        await getPlatformDescriptor(platform)?.onWebhookAccepted?.(stored, accepted, this.runtimeDeps());
-      }
-      return response;
+      return await webhookHandler(request);
     } catch (error) {
       logger.error(
         { connectionId, platform, error: String(error) },
@@ -1855,6 +1850,13 @@ export class ChatInstanceManager {
       : undefined;
     const adapter = await descriptor.createAdapter(connection.config, {
       webhookUrl: runtime?.webhookUrl ?? webhookUrl,
+      onWebhookAccepted: descriptor.onWebhookAccepted ? async (request) => {
+        const stored = await this.runtimeDeps().getConnection(connection.id);
+        if (!stored || stored.status !== "active" || stored.organizationId !== connection.organizationId || stored.updatedAt !== connection.updatedAt) {
+          return new Response("Chat connection is unavailable", { status: 403 });
+        }
+        return descriptor.onWebhookAccepted!(stored, request, this.runtimeDeps());
+      } : undefined,
       runtime: runtime ? {
         ...runtime,
         refresh: async () => {
