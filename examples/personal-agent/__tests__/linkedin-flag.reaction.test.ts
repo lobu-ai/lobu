@@ -6,12 +6,12 @@ import stageLinkedInFlags from "../linkedin-flag.reaction";
 const POST =
   "https://www.linkedin.com/feed/update/urn:li:activity:1111111111111111111";
 
-const context = (flags: unknown): ReactionContext =>
+const context = (flags: unknown, runId = 901): ReactionContext =>
   ({
     extracted_data: { flags },
     entities: [],
     window: {
-      run_id: 901,
+      run_id: runId,
       automation_id: 71,
       window_start: "2026-09-10T10:00:00Z",
       window_end: "2026-09-10T13:00:00Z",
@@ -19,17 +19,26 @@ const context = (flags: unknown): ReactionContext =>
     },
   }) as unknown as ReactionContext;
 
-function harness(
-  connections: unknown[] = [{ id: 7, slug: "linkedin-buremba" }]
-) {
+function harness({
+  connections = [{ id: 7, slug: "linkedin-buremba" }] as unknown[],
+  status = "in_progress",
+  flaggedUrls = [] as string[],
+} = {}) {
   const executed: Array<Record<string, unknown>> = [];
   const sent: Array<Record<string, unknown>> = [];
+  const queries: string[] = [];
   const client = {
     connections: { list: async () => ({ connections }) },
+    query: async (sql: string) => {
+      queries.push(sql);
+      return flaggedUrls.some((url) => sql.includes(`'${url}'`))
+        ? [{ id: 1 }]
+        : [];
+    },
     operations: {
       execute: async (input: Record<string, unknown>) => {
         executed.push(input);
-        return { status: "in_progress", run_id: 500 + executed.length };
+        return { status, run_id: 500 + executed.length };
       },
     },
     notifications: {
@@ -39,7 +48,7 @@ function harness(
       },
     },
   } as unknown as ReactionClient;
-  return { client, executed, sent };
+  return { client, executed, sent, queries };
 }
 
 describe("LinkedIn flag reaction", () => {
@@ -68,7 +77,7 @@ describe("LinkedIn flag reaction", () => {
           reason: "Matches the warehouse topic.",
         },
         activation: { kind: "page_visit", urls: [`${POST}/`] },
-        idempotency_key: `linkedin-flag:${POST}/`,
+        idempotency_key: `linkedin-flag:901:${POST}/`,
         automation_source: { automation_id: 71, run_id: 901 },
       },
     ]);
@@ -77,7 +86,7 @@ describe("LinkedIn flag reaction", () => {
       title: "LinkedIn: Fixture Author · Warehouse market",
       browser_url: `${POST}/`,
       browser_handoff_run_id: 501,
-      idempotency_key: `linkedin-flag:${POST}/`,
+      idempotency_key: `linkedin-flag:901:${POST}/`,
     });
   });
 
@@ -104,7 +113,7 @@ describe("LinkedIn flag reaction", () => {
   });
 
   test("does nothing without flags and fails closed without the LinkedIn connection", async () => {
-    const empty = harness([]);
+    const empty = harness({ connections: [] });
     await stageLinkedInFlags(context([]), empty.client);
     expect(empty.executed).toEqual([]);
 
@@ -115,6 +124,52 @@ describe("LinkedIn flag reaction", () => {
       )
     ).rejects.toThrow("linkedin-buremba");
     expect(empty.sent).toEqual([]);
+  });
+
+  test("scopes retry keys to the run so a later window can stage the same post", async () => {
+    const h = harness();
+    await stageLinkedInFlags(
+      context([{ post_url: POST, draft: "a" }], 901),
+      h.client
+    );
+    await stageLinkedInFlags(
+      context([{ post_url: POST, draft: "a" }], 902),
+      h.client
+    );
+    expect(h.executed.map((run) => run.idempotency_key)).toEqual([
+      `linkedin-flag:901:${POST}/`,
+      `linkedin-flag:902:${POST}/`,
+    ]);
+  });
+
+  test("skips a post this Automation already flagged in either URL form", async () => {
+    for (const flaggedUrl of [POST, `${POST}/`]) {
+      const h = harness({ flaggedUrls: [flaggedUrl] });
+      await stageLinkedInFlags(
+        context([{ post_url: POST, draft: "a" }]),
+        h.client
+      );
+      expect(h.executed).toEqual([]);
+      expect(h.sent).toEqual([]);
+      expect(h.queries[0]).toContain("automation_id = 71");
+    }
+  });
+
+  test("leaves an approval-held draft to its approval notice and keeps going", async () => {
+    const h = harness({ status: "pending_approval" });
+    await stageLinkedInFlags(
+      context([
+        { post_url: POST, draft: "a" },
+        {
+          post_url:
+            "https://www.linkedin.com/feed/update/urn:li:activity:2222222222222222222",
+          draft: "b",
+        },
+      ]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(2);
+    expect(h.sent).toEqual([]);
   });
 
   test("config wires both LinkedIn Automations to the assistant device", () => {

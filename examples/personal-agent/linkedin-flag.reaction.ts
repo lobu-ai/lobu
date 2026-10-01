@@ -71,15 +71,22 @@ export default async function stageLinkedInFlags(
     // prepare_comment drives the page LinkedIn settles on: the trailing-slash
     // form of /feed/update/<urn>. Activate on that exact URL, not the one the
     // user clicked, so the tab is already there when the draft run starts.
-    const pageUrl = flag.post_url.endsWith("/")
-      ? flag.post_url
-      : `${flag.post_url}/`;
-    const key = `linkedin-flag:${pageUrl}`;
+    const bareUrl = flag.post_url.replace(/\/$/, "");
+    const pageUrl = `${bareUrl}/`;
+    // A resynced post can land in a later window; flag each post once. Both
+    // URL forms are POST_URL-validated, so they carry no quote characters.
+    const prior = await client.query(
+      `SELECT id FROM events WHERE semantic_type = 'notification' AND automation_id = ${source.automation_id} AND metadata->>'browser_url' IN ('${bareUrl}', '${pageUrl}') LIMIT 1`
+    );
+    if (prior.length > 0) continue;
+    // The queue binds an operation key to its parent run, so a key reused by a
+    // later window would be rejected; scope retries to this run.
+    const key = `linkedin-flag:${source.run_id}:${pageUrl}`;
     const staged = await client.operations.execute({
       connection_id: linkedin,
       operation_key: "prepare_comment",
       input: {
-        post_url: flag.post_url,
+        post_url: bareUrl,
         body: flag.draft.slice(0, 3000),
         reason: flag.why.slice(0, 500),
       },
@@ -87,6 +94,11 @@ export default async function stageLinkedInFlags(
       idempotency_key: key,
       automation_source: source,
     });
+    // Under an Ask policy the run waits for approval and its approval notice is
+    // the user's prompt; only an admitted page-activation run is a handoff.
+    if (staged.status !== "in_progress" || typeof staged.run_id !== "number") {
+      continue;
+    }
     await client.notifications.send({
       title: `LinkedIn: ${flag.author} · ${flag.gist}`.slice(0, 200),
       body: `${flag.why}\n\nDraft, ready in the comment box when you open the post:\n${flag.draft}`.slice(
@@ -95,9 +107,7 @@ export default async function stageLinkedInFlags(
       ),
       recipients: "admins",
       browser_url: pageUrl,
-      ...(typeof staged.run_id === "number"
-        ? { browser_handoff_run_id: staged.run_id }
-        : {}),
+      browser_handoff_run_id: staged.run_id,
       idempotency_key: key,
       automation_source: source,
     });
