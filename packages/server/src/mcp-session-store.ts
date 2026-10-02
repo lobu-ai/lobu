@@ -114,15 +114,30 @@ export class McpSessionStore {
     return rows.length > 0;
   }
 
-  /** Transport activity must neither overwrite newer auth nor recreate revoked rows. */
+  /**
+   * Transport activity must neither overwrite newer auth nor recreate revoked rows.
+   *
+   * Every MCP message renews activity and each rewrite leaves a dead row
+   * behind, so the row is rewritten only once its expiry has fallen a minute
+   * behind a full renewal. FOR KEY SHARE still waits on a concurrent revoke,
+   * so a row deleted mid-refresh reports false just as a bare UPDATE would.
+   */
   async refreshActivity(sessionId: string): Promise<boolean> {
     const sql = getDb();
     const rows = await sql`
-      UPDATE mcp_sessions SET
-        last_accessed_at = GREATEST(last_accessed_at, NOW()),
-        expires_at = GREATEST(expires_at, NOW() + ${MCP_SESSION_MAX_AGE_MS} * interval '1 millisecond')
-      WHERE session_id = ${sessionId}
-      RETURNING session_id
+      WITH live AS (
+        SELECT session_id FROM mcp_sessions
+        WHERE session_id = ${sessionId}
+        FOR KEY SHARE
+      ), renewed AS (
+        UPDATE mcp_sessions m SET
+          last_accessed_at = GREATEST(m.last_accessed_at, NOW()),
+          expires_at = GREATEST(m.expires_at, NOW() + ${MCP_SESSION_MAX_AGE_MS} * interval '1 millisecond')
+        FROM live
+        WHERE m.session_id = live.session_id
+          AND m.expires_at < NOW() + ${MCP_SESSION_MAX_AGE_MS - 60_000} * interval '1 millisecond'
+      )
+      SELECT session_id FROM live
     `;
     return rows.length > 0;
   }

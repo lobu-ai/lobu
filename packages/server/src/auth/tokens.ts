@@ -125,13 +125,15 @@ export class PersonalAccessTokenService {
   }
 
   /**
-   * Update last_used_at timestamp
+   * Update last_used_at timestamp, at most once per five minutes: verify runs
+   * on every authenticated request and each rewrite leaves a dead row behind.
    */
   private async updateLastUsed(id: number): Promise<void> {
     await this.sql`
       UPDATE personal_access_tokens
       SET last_used_at = NOW()
       WHERE id = ${id}
+        AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '5 minutes')
     `;
   }
 

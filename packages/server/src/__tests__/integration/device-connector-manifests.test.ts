@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1031,6 +1032,39 @@ describe('device connector manifests', () => {
     const third = await poll(workerId, [manifest({ actions_schema: actionsV2 })]);
     expect(third.status).toBe(200);
     expect(await readUpdatedAt()).toEqual(afterResync);
+  });
+
+  it('keeps the stored manifest inventory in place when a poll re-advertises it unchanged', async () => {
+    const { workerId } = await seedDeviceOwner();
+    const sql = getTestDb();
+    // Random padding keeps the inventory too large to store inline, which is
+    // where rewriting an unchanged value costs a fresh out-of-line copy on
+    // every heartbeat. The chunk id moves exactly when that copy is rewritten.
+    const advertised = [manifest({ description: randomBytes(6000).toString('hex') })];
+    const readStored = async () => {
+      const rows = (await sql`
+        SELECT pg_column_toast_chunk_id(connector_manifests)::text AS chunk_id, last_seen_at
+        FROM device_workers WHERE worker_id = ${workerId}
+      `) as unknown as Array<{ chunk_id: string | null; last_seen_at: Date }>;
+      return rows[0];
+    };
+
+    expect((await poll(workerId, advertised)).status).toBe(200);
+    const first = await readStored();
+    expect(first.chunk_id).not.toBeNull();
+
+    await sql`
+      UPDATE device_workers SET last_seen_at = NOW() - INTERVAL '1 minute'
+      WHERE worker_id = ${workerId}
+    `;
+    expect((await poll(workerId, advertised)).status).toBe(200);
+    const repeated = await readStored();
+    expect(repeated.chunk_id).toBe(first.chunk_id);
+    expect(new Date(repeated.last_seen_at).getTime()).toBeGreaterThan(Date.now() - 30_000);
+
+    const changed = [manifest({ description: randomBytes(6000).toString('hex') })];
+    expect((await poll(workerId, changed)).status).toBe(200);
+    expect((await readStored()).chunk_id).not.toBe(first.chunk_id);
   });
 
   it('archives an unreferenced manifest definition the fleet no longer advertises', async () => {

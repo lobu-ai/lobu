@@ -115,6 +115,56 @@ describe('MCP expiry maintenance', () => {
     expect(await store.getSession('delete-race')).toBeNull();
   });
 
+  it('refreshActivity leaves a freshly extended row unwritten and renews a stale one', async () => {
+    // Each call uses a separate transaction, so a changed xmin identifies a rewrite.
+    const db = getTestDb();
+    const xmin = async () =>
+      (await db`SELECT xmin::text AS xmin FROM mcp_sessions WHERE session_id = 'fresh'`)[0].xmin;
+    await store.upsertSession(session('fresh'));
+    const written = await xmin();
+    expect(await store.refreshActivity('fresh')).toBe(true);
+    expect(await xmin()).toBe(written);
+
+    await db`UPDATE mcp_sessions SET expires_at = now() + interval '30 minutes' WHERE session_id = 'fresh'`;
+    const stale = await xmin();
+    expect(await store.refreshActivity('fresh')).toBe(true);
+    expect(await xmin()).not.toBe(stale);
+    const [row] = await db`
+      SELECT expires_at > now() + interval '59 minutes' AS renewed FROM mcp_sessions WHERE session_id = 'fresh'
+    `;
+    expect(row.renewed).toBe(true);
+  });
+
+  it('does not rewrite activity renewed by another replica while waiting for its update', async () => {
+    const db = getTestDb();
+    await store.upsertSession({ ...session('renew-race'), expiresAt: Date.now() + HOUR / 2 });
+    let refresh!: Promise<boolean>;
+    let renewedXmin!: string;
+    try {
+      await db.begin(async tx => {
+        const [row] = await tx`
+          UPDATE mcp_sessions SET expires_at = now() + interval '1 hour'
+          WHERE session_id = 'renew-race' RETURNING xmin::text AS xmin, pg_backend_pid() AS pid
+        `;
+        renewedXmin = row.xmin;
+        refresh = store.refreshActivity('renew-race');
+        await vi.waitFor(async () => {
+          const [blocked] = await db`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_stat_activity WHERE ${row.pid} = ANY(pg_blocking_pids(pid))
+            ) AS waiting
+          `;
+          expect(blocked.waiting).toBe(true);
+        });
+      });
+    } finally {
+      if (refresh) await refresh;
+    }
+    expect(await refresh).toBe(true);
+    const [row] = await db`SELECT xmin::text AS xmin FROM mcp_sessions WHERE session_id = 'renew-race'`;
+    expect(row.xmin).toBe(renewedXmin);
+  });
+
   it('retains a refreshed row and never recreates one that cleanup won first', async () => {
     const db = getTestDb();
     await db`INSERT INTO mcp_sessions (session_id, expires_at) VALUES ('refresh-first', now()), ('delete-first', now())`;
