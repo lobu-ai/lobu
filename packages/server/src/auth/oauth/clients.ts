@@ -56,22 +56,37 @@ export class OAuthClientsStore {
     clientInfo?: Record<string, unknown> | null;
     capabilities?: Record<string, unknown> | null;
   }): Promise<void> {
-    const patch: Record<string, unknown> = {
-      last_seen_at: Date.now(),
-    };
+    const now = Date.now();
+    const organizationId = params.organizationId ?? null;
+    const userId = params.userId ?? null;
+    const details: Record<string, unknown> = {};
 
-    if (params.userAgent) patch.last_user_agent = params.userAgent;
-    if (params.clientInfo) patch.last_client_info = params.clientInfo;
-    if (params.capabilities) patch.last_capabilities = params.capabilities;
+    if (params.userAgent) details.last_user_agent = params.userAgent;
+    if (params.clientInfo) details.last_client_info = params.clientInfo;
+    if (params.capabilities) details.last_capabilities = params.capabilities;
 
+    // This runs on every MCP request and each rewrite leaves a dead row behind,
+    // so write only when a recorded detail changes or last_seen_at is more than
+    // five minutes old.
     await this.sql`
       UPDATE oauth_clients
       SET
-        organization_id = COALESCE(organization_id, ${params.organizationId ?? null}),
-        user_id = COALESCE(user_id, ${params.userId ?? null}),
-        metadata = COALESCE(metadata, '{}'::jsonb) || ${this.sql.json(patch)}::jsonb,
+        organization_id = COALESCE(organization_id, ${organizationId}),
+        user_id = COALESCE(user_id, ${userId}),
+        metadata = COALESCE(metadata, '{}'::jsonb) || ${this.sql.json({ ...details, last_seen_at: now })}::jsonb,
         updated_at = NOW()
       WHERE id = ${params.clientId}
+        AND (
+          (organization_id IS NULL AND ${organizationId}::text IS NOT NULL)
+          OR (user_id IS NULL AND ${userId}::text IS NOT NULL)
+          OR COALESCE(metadata, '{}'::jsonb) IS DISTINCT FROM
+            (COALESCE(metadata, '{}'::jsonb) || ${this.sql.json(details)}::jsonb)
+          OR CASE
+            WHEN jsonb_typeof(metadata->'last_seen_at') = 'number'
+              THEN (metadata->>'last_seen_at')::numeric < ${now - 5 * 60_000}
+            ELSE true
+          END
+        )
     `;
   }
 

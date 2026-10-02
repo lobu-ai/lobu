@@ -560,6 +560,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       const connectorManifestMap = connectorManifestsAccepted
         ? storedManifestMap(manifestValidation.manifests)
         : null;
+      // Each entry is stamped with a fresh received_at, so the inventory is
+      // compared by manifest hash alone.
+      const advertisedManifestHashes = Object.fromEntries(
+        Object.entries(connectorManifestMap ?? {}).map(([key, entry]) => [key, entry.manifest_hash])
+      );
 
       // `xmax = 0` on the RETURNING row distinguishes a brand-new device
       // registration from a routine poll-update so we only emit the
@@ -590,8 +595,21 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           -- wrote it back would clobber a Devices-page rename on the next poll,
           -- since a headless daemon self-reports its hostname every time.
           organization_id = COALESCE(device_workers.organization_id, EXCLUDED.organization_id),
+          -- Large inventories are stored out of line, so writing
+          -- an unchanged copy back costs a fresh out-of-line copy per heartbeat.
+          -- Keep the stored value unless an advertised manifest hash differs.
           connector_manifests = CASE
-            WHEN ${connectorManifestsAccepted} THEN EXCLUDED.connector_manifests
+            WHEN ${connectorManifestsAccepted}
+              AND ${sql.json(advertisedManifestHashes)}::jsonb IS DISTINCT FROM (
+                SELECT COALESCE(jsonb_object_agg(stored.key, stored.value->'manifest_hash'), '{}'::jsonb)
+                FROM jsonb_each(
+                  CASE WHEN jsonb_typeof(device_workers.connector_manifests) = 'object'
+                    THEN device_workers.connector_manifests
+                    ELSE '{}'::jsonb
+                  END
+                ) AS stored
+              )
+              THEN EXCLUDED.connector_manifests
             ELSE device_workers.connector_manifests
           END,
           -- Only overwrite when the device actually advertised. A client that
