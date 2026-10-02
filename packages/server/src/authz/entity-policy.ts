@@ -24,6 +24,7 @@ import { type DbClient, getDb, pgBigintArray } from "../db/client";
 import {
 	type ConnectorPolicyCategory,
 	type ConnectorPolicyScope,
+	canonicalConnectorPolicyScope,
 	evaluateConnectorPolicy,
 } from "./connector-policy";
 import { resolveEntityCreator } from "../utils/resolve-entity-creator";
@@ -1118,8 +1119,9 @@ export async function upsertEntityApprovalPolicy(
 		resourceClass === "connector_action"
 			? input.operationKey?.trim() || null
 			: null;
-	const { connectorKey = null, connectionId = null, operationCategory = null } =
-		resourceClass === "connector_action" ? input : {};
+	const { connectorKey, connectionId, operationCategory } = canonicalConnectorPolicyScope(
+		resourceClass === "connector_action" ? { ...input, operationKey } : {},
+	);
 	const targetAgentId =
 		resourceClass === "agent_config"
 			? input.targetAgentId?.trim() || null
@@ -1241,8 +1243,9 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 		resourceClass === "connector_action"
 			? args.operationKey?.trim() || null
 			: null;
-	const { connectorKey = null, connectionId = null, operationCategory = null } =
-		resourceClass === "connector_action" ? args : {};
+	const { connectorKey, connectionId, operationCategory } = canonicalConnectorPolicyScope(
+		resourceClass === "connector_action" ? { ...args, operationKey } : {},
+	);
 	const targetAgentId =
 		resourceClass === "agent_config"
 			? args.targetAgentId?.trim() || null

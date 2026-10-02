@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { CONNECTOR_POLICY_CATEGORIES, type ConnectorPolicyCategory } from "../authz/connector-policy";
+import { canonicalConnectorPolicyScope, CONNECTOR_POLICY_CATEGORIES, type ConnectorPolicyCategory } from "../authz/connector-policy";
 import {
 	deleteEntityApprovalPolicy,
 	type EntityApprovalPolicy,
@@ -151,6 +151,7 @@ function parsePolicy(input: Record<string, unknown>, deleting: boolean): EntityA
 		throw new Error("Specify connector_key or connection_id, not both.");
 	if (policy.operationKey && policy.operationCategory)
 		throw new Error("Specify operation_key or operation_category, not both.");
+	if (resourceClass === "connector_action") Object.assign(policy, canonicalConnectorPolicyScope(policy));
 	if (deleting) return policy;
 	const effects = input.effects;
 	if (!effects || typeof effects !== "object" || Array.isArray(effects))

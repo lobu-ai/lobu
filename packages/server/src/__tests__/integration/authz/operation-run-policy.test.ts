@@ -6,6 +6,7 @@ import {
   resolveRunConnectorPolicy,
 } from '../../../authz/operation-run-policy';
 import type { Env } from '../../../index';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { getOperationForConnection } from '../../../operations/connector-operations';
 import { DEVICE_FEED_READ_ACTION_KEY } from '../../../lib/device-feed-read-protocol';
 import { __setChatInstanceManagerForTests } from '../../../lobu/gateway';
@@ -42,9 +43,9 @@ async function approvalNotifications() {
 
 async function rule(effect: 'auto' | 'approval' | 'deny', operationKey = 'perform', principalId: string | null = null) {
   const [policy] = await sql<{ id: number }>`
-    INSERT INTO write_approval_policies (organization_id, resource_class, principal_kind, principal_id, operation_key)
+    INSERT INTO write_approval_policies (organization_id, resource_class, principal_kind, principal_id, operation_key, connector_key)
     VALUES (${organizationId}, 'connector_action', ${principalId ? 'agent' : null}, ${principalId},
-      ${qualifiedOperationKey(connectorKey, operationKey)}) RETURNING id
+      ${qualifiedOperationKey(connectorKey, operationKey)}, ${connectorKey}) RETURNING id
   `;
   await sql`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${policy.id}, 'execute', ${effect})`;
   return Number(policy.id);
@@ -222,6 +223,22 @@ describe('operation policy at durable dispatch', () => {
     expect(await state(id)).toMatchObject({ status: 'cancelled', approval_status: 'rejected' });
     const [card] = await sql`SELECT interaction_status FROM current_event_records WHERE run_id = ${id}`;
     expect(card.interaction_status).toBe('rejected');
+  });
+
+  it('rechecks destructive Block despite broad connection Auto, including already-approved runs', async () => {
+    await sql`UPDATE connector_definitions SET actions_schema = actions_schema || ${sql.json({
+      perform: { name: 'Perform', kind: 'write', annotations: { destructiveHint: true } },
+    })}::jsonb WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
+    await upsertEntityApprovalPolicy(organizationId, { resourceClass: 'connector_action', connectionId, effects: { execute: 'auto' } });
+    const queued = await run();
+    const approved = await run({ approval: 'approved' });
+    await upsertEntityApprovalPolicy(organizationId, { resourceClass: 'connector_action', operationCategory: 'destructive', effects: { execute: 'deny' } });
+    for (const id of [queued, approved]) {
+      expect(await admit(id)).toBe(false);
+      expect(await state(id)).toMatchObject({ status: 'cancelled', approval_status: 'rejected' });
+    }
+    await upsertEntityApprovalPolicy(organizationId, { resourceClass: 'connector_action', connectionId, operationCategory: 'destructive', effects: { execute: 'auto' } });
+    expect(await admit(await run())).toBe(true);
   });
 
   it('only the current inline owner may park a run, clearing its lease before approval', async () => {

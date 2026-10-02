@@ -18,6 +18,24 @@ export interface ConnectorPolicyScope {
 	operationCategory?: ConnectorPolicyCategory | null;
 }
 
+/** An exact action names its connector even when the caller omits the target. */
+export function canonicalConnectorPolicyScope(
+	scope: ConnectorPolicyScope & { operationKey?: string | null },
+): Required<ConnectorPolicyScope> {
+	let { connectorKey = null } = scope;
+	const { connectionId = null, operationCategory = null, operationKey } = scope;
+	if (operationKey) {
+		const separator = operationKey.indexOf("::");
+		if (separator <= 0 || separator + 2 === operationKey.length)
+			throw new Error("operation_key must name a connector and action (connector::action).");
+		const operationConnector = operationKey.slice(0, separator);
+		if (connectorKey !== null && connectorKey !== operationConnector)
+			throw new Error("operation_key must belong to connector_key.");
+		if (connectionId === null) connectorKey = operationConnector;
+	}
+	return { connectorKey, connectionId, operationCategory };
+}
+
 export interface ConnectorPolicyResult {
 	effect: "auto" | "approval" | "deny";
 	ruleIds: number[];
@@ -42,21 +60,31 @@ function matchesCategory(
 	if (category === null) return true;
 	if (category === "read" || category === "write")
 		return operation.kind === category;
+	if (operation.kind !== "write") return false;
 	const destructive = operation.annotations?.destructiveHint;
 	if (category === "destructive") return destructive === true;
 	if (category === "non_destructive") return destructive === false;
 	return destructive === undefined;
 }
 
-function specificity(rule: EntityApprovalPolicy): number {
+function specificity(rule: EntityApprovalPolicy): [number, number] {
 	const target =
 		rule.connectionId !== null ? 2 : rule.connectorKey !== null ? 1 : 0;
 	const action =
 		rule.operationKey !== null ? 2 : rule.operationCategory !== null ? 1 : 0;
-	return target * 3 + action;
+	return [target, action];
 }
 
-/** One connector rule fold: org target specificity, then principal restrictions. */
+/** Narrowing a target cannot erase a restriction on a different action category. */
+function moreSpecific(a: EntityApprovalPolicy, b: EntityApprovalPolicy): boolean {
+	const [targetA, actionA] = specificity(a);
+	const [targetB, actionB] = specificity(b);
+	if (actionA === 1 && actionB === 1 && a.operationCategory !== b.operationCategory)
+		return false;
+	return targetA >= targetB && actionA >= actionB && (targetA > targetB || actionA > actionB);
+}
+
+/** Keep the narrowest matching scopes, then apply principal restrictions. */
 export function evaluateConnectorPolicy(args: {
 	organizationId: string;
 	connectionId: number | null;
@@ -83,8 +111,7 @@ export function evaluateConnectorPolicy(args: {
 			matchesCategory(rule.operationCategory, args.operation),
 	);
 	const orgRules = matches.filter((rule) => rule.principalKind === null);
-	const highest = Math.max(-1, ...orgRules.map(specificity));
-	const decisive = orgRules.filter((rule) => specificity(rule) === highest);
+	const decisive = orgRules.filter((rule) => !orgRules.some((other) => moreSpecific(other, rule)));
 	let effect: ConnectorPolicyResult["effect"] = decisive.length
 		? "auto"
 		: "approval";
