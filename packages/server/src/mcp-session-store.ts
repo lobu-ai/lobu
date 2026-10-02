@@ -1,6 +1,8 @@
 import { getDb } from './db/client';
 
 export const MCP_SESSION_MAX_AGE_MS = 60 * 60 * 1000;
+/** A renewal that moves the expiry by less than this is not written back. */
+const MCP_RENEWAL_WRITE_INTERVAL_MS = 60 * 1000;
 
 export interface PersistedMcpSession {
   sessionId: string;
@@ -94,22 +96,45 @@ export class McpSessionStore {
    * creating the row is the intent.
    */
   async refreshSession(session: PersistedMcpSession): Promise<boolean> {
+    // Every MCP request refreshes its session and each rewrite leaves a dead row
+    // behind, so the row is rewritten only when a recorded field changes or the
+    // expiry moves by more than the renewal interval. FOR KEY SHARE still waits
+    // on a concurrent revoke, so a deleted row reports false.
     const sql = getDb();
+    const lastAccessedAt = new Date(session.lastAccessedAt);
+    const expiresAt = new Date(session.expiresAt);
     const rows = await sql`
-      UPDATE mcp_sessions SET
-        user_id = ${session.userId},
-        client_id = ${session.clientId},
-        organization_id = ${session.organizationId},
-        member_role = ${session.memberRole},
-        requested_agent_id = ${session.requestedAgentId},
-        is_authenticated = ${session.isAuthenticated},
-        scoped_to_org = ${session.scopedToOrg},
-        supports_mcp_apps = ${session.supportsMcpApps},
-        supports_app_sandbox_domain = ${session.supportsAppSandboxDomain},
-        last_accessed_at = GREATEST(last_accessed_at, ${new Date(session.lastAccessedAt)}),
-        expires_at = GREATEST(expires_at, ${new Date(session.expiresAt)})
-      WHERE session_id = ${session.sessionId}
-      RETURNING session_id
+      WITH live AS (
+        SELECT session_id FROM mcp_sessions
+        WHERE session_id = ${session.sessionId}
+        FOR KEY SHARE
+      ), refreshed AS (
+        UPDATE mcp_sessions m SET
+          user_id = ${session.userId},
+          client_id = ${session.clientId},
+          organization_id = ${session.organizationId},
+          member_role = ${session.memberRole},
+          requested_agent_id = ${session.requestedAgentId},
+          is_authenticated = ${session.isAuthenticated},
+          scoped_to_org = ${session.scopedToOrg},
+          supports_mcp_apps = ${session.supportsMcpApps},
+          supports_app_sandbox_domain = ${session.supportsAppSandboxDomain},
+          last_accessed_at = GREATEST(m.last_accessed_at, ${lastAccessedAt}),
+          expires_at = GREATEST(m.expires_at, ${expiresAt})
+        FROM live
+        WHERE m.session_id = live.session_id
+          AND (
+            (m.user_id, m.client_id, m.organization_id, m.member_role, m.requested_agent_id,
+              m.is_authenticated, m.scoped_to_org, m.supports_mcp_apps, m.supports_app_sandbox_domain)
+            IS DISTINCT FROM
+            (${session.userId}::text, ${session.clientId}::text, ${session.organizationId}::text,
+              ${session.memberRole}::text, ${session.requestedAgentId}::text,
+              ${session.isAuthenticated}::boolean, ${session.scopedToOrg}::boolean,
+              ${session.supportsMcpApps}::boolean, ${session.supportsAppSandboxDomain}::boolean)
+            OR m.expires_at < ${expiresAt}::timestamptz - ${MCP_RENEWAL_WRITE_INTERVAL_MS} * interval '1 millisecond'
+          )
+      )
+      SELECT session_id FROM live
     `;
     return rows.length > 0;
   }
@@ -135,7 +160,7 @@ export class McpSessionStore {
           expires_at = GREATEST(m.expires_at, NOW() + ${MCP_SESSION_MAX_AGE_MS} * interval '1 millisecond')
         FROM live
         WHERE m.session_id = live.session_id
-          AND m.expires_at < NOW() + ${MCP_SESSION_MAX_AGE_MS - 60_000} * interval '1 millisecond'
+          AND m.expires_at < NOW() + ${MCP_SESSION_MAX_AGE_MS - MCP_RENEWAL_WRITE_INTERVAL_MS} * interval '1 millisecond'
       )
       SELECT session_id FROM live
     `;

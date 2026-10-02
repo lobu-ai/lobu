@@ -101,6 +101,31 @@ describe('mcp session refresh is update-only', () => {
     expect(row?.supportsAppSandboxDomain).toBe(true);
   });
 
+  it('leaves the row unwritten when a refresh changes nothing it records', async () => {
+    // Every MCP request refreshes its session, and each rewrite leaves a dead
+    // row behind. A changed xmin identifies a rewrite.
+    const db = getTestDb();
+    const xmin = async () =>
+      (await db`SELECT xmin::text AS xmin FROM mcp_sessions WHERE session_id = ${session.sessionId}`)[0].xmin;
+    await store.upsertSession(session);
+    const written = await xmin();
+
+    const sameAuth = { ...session, lastAccessedAt: session.lastAccessedAt + 5_000, expiresAt: session.expiresAt + 5_000 };
+    expect(await store.refreshSession(sameAuth)).toBe(true);
+    expect(await xmin()).toBe(written);
+
+    const promoted = { ...sameAuth, memberRole: 'admin' };
+    expect(await store.refreshSession(promoted)).toBe(true);
+    const roleChanged = await xmin();
+    expect(roleChanged).not.toBe(written);
+    expect((await store.getSession(session.sessionId))?.memberRole).toBe('admin');
+
+    const later = { ...promoted, lastAccessedAt: promoted.lastAccessedAt + 120_000, expiresAt: promoted.expiresAt + 120_000 };
+    expect(await store.refreshSession(later)).toBe(true);
+    expect(await xmin()).not.toBe(roleChanged);
+    expect((await store.getSession(session.sessionId))?.expiresAt).toBe(later.expiresAt);
+  });
+
   it('does NOT resurrect a row deleted by a concurrent revoke', async () => {
     await store.upsertSession(session);
 
