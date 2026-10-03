@@ -11,9 +11,8 @@ ALTER TABLE public.entity_types ADD COLUMN IF NOT EXISTS backing_identity text;
 
 ALTER TABLE public.entity_types
   DROP CONSTRAINT IF EXISTS entity_types_backing_identity_requires_source;
-ALTER TABLE public.entity_types
-  -- squawk-ignore prefer-robust-stmts -- the migration runner owns the transaction
-  ADD CONSTRAINT entity_types_backing_identity_requires_source CHECK (
+-- squawk-ignore prefer-robust-stmts,constraint-missing-not-valid -- config-scale table and a column added NULL above; the runner owns the transaction
+ALTER TABLE public.entity_types ADD CONSTRAINT entity_types_backing_identity_requires_source CHECK (
     backing_identity IS NULL
     OR (backing_source IS NOT NULL AND backing_sql IS NOT NULL AND btrim(backing_identity) <> '')
   );

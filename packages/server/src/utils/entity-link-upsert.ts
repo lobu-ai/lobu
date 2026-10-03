@@ -803,6 +803,8 @@ async function createEntityWithIdentities(
   if (entityId === null && sourceIdentity) {
     // A slug collision is reusable only when the full scoped source identity
     // belongs to that row. Equal source keys in different tenants aren't a match.
+    // Lock the row before touching identities, the same order the match path
+    // uses; racing losers otherwise deadlock on identity versus entity locks.
     const existing = await sql<{ id: number }>`
       SELECT id FROM entities
       WHERE organization_id = ${params.orgId}
@@ -811,6 +813,7 @@ async function createEntityWithIdentities(
         AND parent_id IS NULL
         AND deleted_at IS NULL
       LIMIT 1
+      FOR UPDATE
     `;
     if (existing.length > 0) {
       const existingId = Number(existing[0].id);

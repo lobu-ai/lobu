@@ -122,12 +122,14 @@ describe('source-backed entity identity', () => {
   });
 
   it('attributes concurrent observations to the same stored identity', async () => {
-    const results = await Promise.all(
-      Array.from({ length: 4 }, () => attribute({ person_key: 'person-12', person_name: 'Person 12' })),
-    );
-    const rows = await storedRows('person-12');
-    expect(rows).toHaveLength(1);
-    for (const ids of results) expect(ids).toEqual([Number(rows[0].id)]);
+    for (const key of ['person-12', 'person-14', 'person-15', 'person-16', 'person-17']) {
+      const results = await Promise.all(
+        Array.from({ length: 16 }, () => attribute({ person_key: key, person_name: key })),
+      );
+      const rows = await storedRows(key);
+      expect(rows).toHaveLength(1);
+      for (const ids of results) expect(ids).toEqual([Number(rows[0].id)]);
+    }
   });
 
   it('does not reuse a source slug owned by a different identity scope', async () => {
