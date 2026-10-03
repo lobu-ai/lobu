@@ -132,21 +132,25 @@ describe("org connector policy scopes", () => {
 		).toBe("approval");
 	});
 
-	it("target specificity outranks action specificity; deleting an exception reveals the broader Block", async () => {
-		await save({
+	it("canonicalizes exact actions and requires exceptions to narrow both target and action", async () => {
+		const exact = await save({
 			operationKey: qualifiedOperationKey(
 				operation.connector_key,
 				operation.operation_key,
 			),
 			effects: { execute: "deny" },
 		});
+		expect(exact.connectorKey).toBe(operation.connector_key);
 		await save({
 			connectorKey: operation.connector_key,
 			effects: { execute: "approval" },
 		});
-		expect((await decide()).effect).toBe("approval");
+		expect((await decide()).effect).toBe("deny");
 		await save({ connectionId, effects: { execute: "auto" } });
+		expect((await decide()).effect).toBe("deny");
+		await save({ connectionId, operationKey: exact.operationKey, effects: { execute: "auto" } });
 		expect((await decide()).effect).toBe("auto");
+		await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", connectionId, operationKey: exact.operationKey });
 		await deleteEntityApprovalPolicy({
 			organizationId: orgId,
 			resourceClass: "connector_action",
@@ -157,6 +161,44 @@ describe("org connector policy scopes", () => {
 			resourceClass: "connector_action",
 			connectorKey: operation.connector_key,
 		});
+		expect((await decide()).effect).toBe("deny");
+	});
+
+	it("keeps destructive restrictions under a broad connection Auto until the same category is excepted", async () => {
+		const op = { ...operation, annotations: { destructiveHint: true } };
+		const inspect = () => resolveConnectorPolicy({ organizationId: orgId, connectionId, operation: op, actor: agent });
+		await save({ effects: { execute: "auto" } });
+		const block = await save({ operationCategory: "destructive", effects: { execute: "deny" } });
+		await save({ connectionId, effects: { execute: "auto" } });
+		expect(await inspect()).toMatchObject({ effect: "deny", ruleIds: [block.id] });
+		// Writes and destructive are different categories, not interchangeable exceptions.
+		await save({ connectionId, operationCategory: "write", effects: { execute: "auto" } });
+		expect((await inspect()).effect).toBe("deny");
+		const exception = await save({ connectionId, operationCategory: "destructive", effects: { execute: "auto" } });
+		expect(await inspect()).toMatchObject({ effect: "auto", ruleIds: expect.arrayContaining([exception.id]) });
+	});
+
+	it("keeps an org category Ask under connection Auto while allowing exact action exceptions", async () => {
+		await save({ operationCategory: "write", effects: { execute: "approval" } });
+		await save({ connectionId, effects: { execute: "auto" } });
+		expect((await decide()).effect).toBe("approval");
+		await save({ connectionId, operationKey: qualifiedOperationKey(operation.connector_key, operation.operation_key), effects: { execute: "auto" } });
+		expect((await decide()).effect).toBe("auto");
+	});
+
+	it("uses defaults as fallbacks and keeps impact categories off reads", async () => {
+		await save({ effects: { execute: "deny" } });
+		await save({ connectorKey: operation.connector_key, effects: { execute: "auto" } });
+		expect((await decide()).effect).toBe("auto");
+		for (const operationCategory of ["unknown", "destructive", "non_destructive"] as const) {
+			await save({ connectorKey: operation.connector_key, operationCategory, effects: { execute: "deny" } });
+		}
+		for (const destructiveHint of [undefined, true, false]) {
+			expect((await resolveConnectorPolicy({
+				organizationId: orgId, connectionId, actor: agent,
+				operation: { ...operation, kind: "read", annotations: { destructiveHint } },
+			})).effect).toBe("auto");
+		}
 		expect((await decide()).effect).toBe("deny");
 	});
 

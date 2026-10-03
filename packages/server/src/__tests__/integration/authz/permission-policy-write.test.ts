@@ -394,6 +394,8 @@ describe("permission policy HTTP writes", () => {
 			operation: { connector_key: connectorKey, operation_key: "classify", kind: "write" },
 			actor: { kind: "agent", id: agentId, ownerAgentId: null, ownerResolved: true },
 		})).effect;
+		expect((await listEntityApprovalPolicies(org.id, "connector_action")).find((row) => row.operationKey === key))
+			.toMatchObject({ connectorKey: "policy-fixture-a", connectionId: null });
 		expect(await resolve("policy-fixture-a")).toBe("deny");
 		expect(await resolve("policy-fixture-b")).toBe("approval");
 		expect((await request("PUT", {
@@ -401,6 +403,7 @@ describe("permission policy HTTP writes", () => {
 			operation_key: qualifiedOperationKey("policy-fixture-a", "read"),
 			effects: { execute: "auto" },
 		})).status).toBe(200);
+		expect((await request("DELETE", { resource_class: "connector_action", operation_key: "unqualified" })).status).toBe(400);
 		await sql`UPDATE connector_definitions SET actions_schema = '{}'::jsonb WHERE organization_id = ${org.id}`;
 		expect(
 			await (
