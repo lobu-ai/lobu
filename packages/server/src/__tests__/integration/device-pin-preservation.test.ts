@@ -125,18 +125,6 @@ async function autoWiredConnections(
   return rows.map((r) => ({ id: Number(r.id), device_worker_id: r.device_worker_id }));
 }
 
-/** Only the SLOW path re-runs `upsertConnectorDefinitionRecords`, and that
- * upsert always stamps `updated_at = NOW()`. So a definition whose stamp did not
- * move is proof the fast path was taken — the one externally visible difference
- * between the two branches. */
-async function definitionUpdatedAt(orgId: string): Promise<string> {
-  const [row] = (await sql`
-    SELECT updated_at FROM connector_definitions
-    WHERE organization_id = ${orgId} AND key = ${CONNECTOR} AND status = 'active'
-  `) as unknown as Array<{ updated_at: string | Date }>;
-  return new Date(row.updated_at).toISOString();
-}
-
 /**
  * Block until `reconcileDeviceCapabilities` has parked on the per-(user,
  * connector) autowire advisory lock. Two-int advisory locks surface in
@@ -403,22 +391,13 @@ describe('device pin preservation', () => {
       SET app_auth_profile_id = ${profileId}, device_worker_id = ${dead}::uuid
       WHERE id = ${appAuthBacked}
     `;
-    // Read the stamp back rather than comparing against the literal: whether the
-    // column is tz-aware decides how it round-trips, and a comparison that never
-    // matches would pass this test for free.
-    await sql`
-      UPDATE connector_definitions SET updated_at = '2000-01-01T00:00:00Z'
-      WHERE organization_id = ${orgId} AND key = ${CONNECTOR} AND status = 'active'
-    `;
-    const stamp = await definitionUpdatedAt(orgId);
-
     await reconcileDeviceCapabilities(userId);
 
     // The fast path found no connection it owns, so the wire pass fell through
-    // to the slow path — which re-upserts the definition (moving the stamp) and
-    // creates its OWN credential-free connection. Adopting the app-auth row
-    // instead would have fast-pathed out: stamp frozen, no connection made.
-    expect(await definitionUpdatedAt(orgId)).not.toBe(stamp);
+    // to the slow path, which creates its OWN credential-free connection.
+    // Adopting the app-auth row instead would have fast-pathed out with no new
+    // connection. (The re-upsert itself no longer proves the slow path ran: an
+    // unchanged definition is not rewritten.)
     const autoWired = await autoWiredConnections(orgId);
     expect(autoWired).toHaveLength(1);
     expect(autoWired[0].id).not.toBe(appAuthBacked);

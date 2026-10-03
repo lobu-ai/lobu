@@ -105,6 +105,7 @@ describe("refreshConnectorDefinitions", () => {
 		).toBe(0);
 
 		const result = await refreshConnectorDefinitions();
+		expect(result.errored).toBe(0);
 		expect(result.refreshed).toBeGreaterThanOrEqual(1);
 
 		const after = await loadGithubDef(ORG);
@@ -126,10 +127,10 @@ describe("refreshConnectorDefinitions", () => {
 		await seedAgentRow("agent-refresh", { organizationId: ORG });
 		await seedStaleGithubDef(ORG);
 
-		await refreshConnectorDefinitions();
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
 		const first = await loadGithubDef(ORG);
 
-		await refreshConnectorDefinitions();
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
 		const second = await loadGithubDef(ORG);
 
 		expect(second?.version).toBe(first?.version);
@@ -144,13 +145,41 @@ describe("refreshConnectorDefinitions", () => {
 		);
 	});
 
+	test("a second refresh rewrites no definition or version row", async () => {
+		// The job runs hourly over every bundled definition; rewriting unchanged
+		// rows left a dead copy of each large schema per run. A changed xmin
+		// identifies a rewrite.
+		await seedAgentRow("agent-refresh", { organizationId: ORG });
+		await seedStaleGithubDef(ORG);
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
+
+		const sql = getDb();
+		const readXmins = async () => {
+			const [definition] = await sql`
+        SELECT xmin::text AS xmin, version FROM connector_definitions
+        WHERE organization_id = ${ORG} AND key = ${GITHUB_KEY} AND status = 'active'
+      `;
+			const [shared] = await sql`
+        SELECT xmin::text AS xmin FROM connector_versions
+        WHERE connector_key = ${GITHUB_KEY} AND version = ${definition.version}
+          AND organization_id IS NULL
+      `;
+			return { definition: definition.xmin, version: shared?.xmin };
+		};
+		const first = await readXmins();
+		expect(first.version).toBeDefined();
+
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
+		expect(await readXmins()).toEqual(first);
+	});
+
 	test("does not install a connector into an org that didn't have it", async () => {
 		await seedAgentRow("agent-refresh", { organizationId: ORG });
 		await seedAgentRow("agent-other", { organizationId: OTHER_ORG });
 		// Only ORG has github; OTHER_ORG has none.
 		await seedStaleGithubDef(ORG);
 
-		await refreshConnectorDefinitions();
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
 
 		const other = await loadGithubDef(OTHER_ORG);
 		expect(other).toBeUndefined();
@@ -167,6 +196,7 @@ describe("refreshConnectorDefinitions", () => {
 		expect(before?.feeds_schema).toBeNull();
 
 		const result = await refreshConnectorDefinitions();
+		expect(result.errored).toBe(0);
 		expect(result.refreshed).toBeGreaterThanOrEqual(1);
 
 		const [after] = await getDb()`
@@ -177,5 +207,23 @@ describe("refreshConnectorDefinitions", () => {
 			key: "issues",
 			operations: ["read"],
 		});
+	});
+
+	test("a second refresh leaves a backfilled Atlassian MCP definition unwritten", async () => {
+		await seedAgentRow("agent-refresh", { organizationId: ORG });
+		await seedStaleAtlassianMcpDef(ORG);
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
+
+		const xmin = async () =>
+			(
+				await getDb()`
+          SELECT xmin::text AS xmin FROM connector_definitions
+          WHERE organization_id = ${ORG} AND key = 'mcp.mcp-atlassian-com'
+        `
+			)[0].xmin;
+		const first = await xmin();
+
+		expect((await refreshConnectorDefinitions()).errored).toBe(0);
+		expect(await xmin()).toBe(first);
 	});
 });

@@ -400,26 +400,56 @@ async function upsertConnectorDefinitionRecordsInTransaction(
   let wasActive = existingRow?.status === 'active';
 
   if (existingRow?.status === 'active') {
+    // The hourly refresh re-upserts every bundled definition, so skip the write
+    // when nothing changed: each rewrite leaves a dead copy of the large schemas.
     await sql`
-      UPDATE connector_definitions
-      SET name = ${metadata.name},
-          description = ${metadata.description ?? null},
-          version = ${metadata.version},
-          auth_schema = ${authSchemaJson},
-          feeds_schema = ${feedsSchemaJson},
-          actions_schema = ${actionsSchemaJson},
-          automation_events = ${automationEventsJson},
-          options_schema = ${optionsSchemaJson},
-          mcp_config = ${mcpConfigJson},
-          openapi_config = ${openapiConfigJson},
-          favicon_domain = ${metadata.faviconDomain ?? null},
-          required_capability = ${metadata.requiredCapability ?? null},
-          runtime = ${runtimeJson},
-          agent_tooling = ${agentToolingJson},
-          supports_execute = ${supportsExecute},
-          login_enabled = ${preservedLoginEnabled},
+      UPDATE connector_definitions cd
+      SET name = v.name,
+          description = v.description,
+          version = v.version,
+          auth_schema = v.auth_schema,
+          feeds_schema = v.feeds_schema,
+          actions_schema = v.actions_schema,
+          automation_events = v.automation_events,
+          options_schema = v.options_schema,
+          mcp_config = v.mcp_config,
+          openapi_config = v.openapi_config,
+          favicon_domain = v.favicon_domain,
+          required_capability = v.required_capability,
+          runtime = v.runtime,
+          agent_tooling = v.agent_tooling,
+          supports_execute = v.supports_execute,
+          login_enabled = v.login_enabled,
           updated_at = NOW()
-      WHERE id = ${existingRow.id}
+      FROM (
+        SELECT
+          ${metadata.name}::text AS name,
+          ${metadata.description ?? null}::text AS description,
+          ${metadata.version}::text AS version,
+          ${authSchemaJson}::jsonb AS auth_schema,
+          ${feedsSchemaJson}::jsonb AS feeds_schema,
+          ${actionsSchemaJson}::jsonb AS actions_schema,
+          ${automationEventsJson}::jsonb AS automation_events,
+          ${optionsSchemaJson}::jsonb AS options_schema,
+          ${mcpConfigJson}::jsonb AS mcp_config,
+          ${openapiConfigJson}::jsonb AS openapi_config,
+          ${metadata.faviconDomain ?? null}::text AS favicon_domain,
+          ${metadata.requiredCapability ?? null}::text AS required_capability,
+          ${runtimeJson}::jsonb AS runtime,
+          ${agentToolingJson}::jsonb AS agent_tooling,
+          ${supportsExecute}::boolean AS supports_execute,
+          ${preservedLoginEnabled}::boolean AS login_enabled
+      ) v
+      WHERE cd.id = ${existingRow.id}
+        AND (cd.name, cd.description, cd.version, cd.auth_schema, cd.feeds_schema,
+          cd.actions_schema, cd.automation_events, cd.options_schema, cd.mcp_config,
+          cd.openapi_config, cd.favicon_domain, cd.required_capability, cd.runtime,
+          cd.agent_tooling, cd.supports_execute, cd.login_enabled)
+        IS DISTINCT FROM
+          (v.name, v.description, v.version, v.auth_schema, v.feeds_schema,
+          v.actions_schema, v.automation_events, v.options_schema, v.mcp_config,
+          v.openapi_config, v.favicon_domain, v.required_capability, v.runtime,
+          v.agent_tooling, v.supports_execute, v.login_enabled)
     `;
     // Fall through to the shared connector_versions upsert below.
   } else {
@@ -495,6 +525,19 @@ async function upsertConnectorDefinitionRecordsInTransaction(
   // device-manifest:// identity).
   const incomingIsDeviceManifest = record.sourcePath?.startsWith('device-manifest://') === true;
   const replaceVersionArtifact = incomingIsDeviceManifest || params.replaceVersionArtifact === true;
+  // A bare source pointer equal to the stored one (the hourly bundled refresh)
+  // leaves every column below at its stored value, so skip the rewrite.
+  const versionWriteChangesRow = sql`
+    NOT (
+      NOT ${replaceVersionArtifact}::boolean
+      AND connector_versions.source_path NOT LIKE 'device-manifest://%'
+      AND EXCLUDED.compiled_code IS NULL
+      AND EXCLUDED.compiled_code_hash IS NULL
+      AND EXCLUDED.compile_config_hash IS NULL
+      AND EXCLUDED.source_code IS NULL
+      AND EXCLUDED.source_path IS NOT DISTINCT FROM connector_versions.source_path
+    )
+  `;
   if (params.versionScope === 'shared') {
     // Bundled catalog pointer: identical for every org, deduped on the one
     // shared organization_id-IS-NULL row.
@@ -566,6 +609,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
               THEN EXCLUDED.source_path
             ELSE COALESCE(EXCLUDED.source_path, connector_versions.source_path)
           END
+      WHERE ${versionWriteChangesRow}
     `;
     return { updated: wasActive };
   }
@@ -643,6 +687,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
               THEN EXCLUDED.source_path
             ELSE COALESCE(EXCLUDED.source_path, connector_versions.source_path)
           END
+      WHERE ${versionWriteChangesRow}
     `;
   } else {
     // Content-empty preserve record (rollback shape). A rollback target always
