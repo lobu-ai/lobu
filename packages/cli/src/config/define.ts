@@ -360,7 +360,40 @@ function deriveRequired(
   return derived.length > 0 ? derived : undefined;
 }
 
+/**
+ * Config files are evaluated without typechecking, so a wrongly-typed or empty
+ * field would flow through `lobu validate` as valid and only surface (or not)
+ * at apply time. Refuse it where the declaration is built, with the field name.
+ */
+function assertEntityTypeShape(config: unknown): void {
+  const c = config as Record<string, unknown> | null;
+  const key = c?.key;
+  if (typeof key !== "string" || key.trim() === "") {
+    throw new Error(
+      `defineEntityType: 'key' must be a non-empty string (got ${JSON.stringify(key)}).`
+    );
+  }
+  for (const field of ["name", "description"] as const) {
+    const value = c?.[field];
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(
+        `Entity type '${key}': '${field}' must be a string (got ${typeof value}).`
+      );
+    }
+  }
+  const required = c?.required;
+  if (
+    required !== undefined &&
+    (!Array.isArray(required) || required.some((r) => typeof r !== "string"))
+  ) {
+    throw new Error(
+      `Entity type '${key}': 'required' must be an array of property names (got ${Array.isArray(required) ? "a non-string entry" : typeof required}).`
+    );
+  }
+}
+
 export function defineEntityType(config: Omit<EntityType, "kind">): EntityType {
+  assertEntityTypeShape(config);
   const { required, properties, ...rest } = config;
   // View templates were retired with the server tool: a stale config must fail
   // loudly here, not silently drop the declaration or die later on a removed
