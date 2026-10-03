@@ -77,22 +77,17 @@ function clearRegistry(): void {
  * but matches an org row is synthesized into an ApiKeyProviderModule, routed to
  * the row's own custom upstream when it has one and otherwise to the upstream
  * its `kind` resolves to. The org KEY is never read here — it is injected at
- * egress by resolveUrlInvariant; the synthetic module only makes the slug appear
- * in the worker provider config and the proxy slug maps. Registration happens
- * per-pod, hydrated from the row (multi-replica safe: no shared in-memory map
- * another replica must read).
+ * egress by authenticated org-row resolution; the synthetic module only
+ * supplies the worker provider config. Tenant destinations are never registered
+ * in process-global proxy maps.
  *
- * These tests inject the store reader + registerUpstream callback and a fake
+ * These tests inject the store reader and a fake
  * settings store, so no DB/proxy wiring is required.
  */
 
 function makeCatalog(opts: {
   models: string[] | undefined;
   orgRows?: InferenceProviderListItem[];
-  registerUpstream?: (
-    upstream: { slug: string; upstreamBaseUrl: string },
-    providerId: string
-  ) => void;
   withOrgReader?: boolean;
 }): ProviderCatalogService {
   const agentSettingsStore = {
@@ -108,8 +103,7 @@ function makeCatalog(opts: {
   return new ProviderCatalogService(
     agentSettingsStore,
     authProfilesManager,
-    listOrgInferenceProviders as never,
-    opts.registerUpstream as never
+    listOrgInferenceProviders as never
   );
 }
 
@@ -135,18 +129,10 @@ function customUpstreamRow(
 describe("ProviderCatalogService.getInstalledModules — org inference providers", () => {
   afterEach(() => clearRegistry());
 
-  test("synthesizes a routable module for a custom-upstream org slug + registers its upstream", async () => {
-    const registered: Array<{ slug: string; providerId: string; url: string }> =
-      [];
+  test("synthesizes worker configuration for a custom-upstream org slug", async () => {
     const catalog = makeCatalog({
       models: ["myzai/glm-4.6"],
       orgRows: [customUpstreamRow("myzai")],
-      registerUpstream: (upstream, providerId) =>
-        registered.push({
-          slug: upstream.slug,
-          providerId,
-          url: upstream.upstreamBaseUrl,
-        }),
     });
 
     const modules = await catalog.getInstalledModules("agent-1", "org-1");
@@ -165,15 +151,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     expect(mod.sdkCompat).toBe("openai");
     expect(mod.defaultModel).toBe("glm-4.6");
 
-    // The slug was registered on the proxy so it becomes routable.
-    expect(registered).toEqual([
-      {
-        slug: "myzai",
-        providerId: "myzai",
-        url: "https://myzai.example.com/v1",
-      },
-    ]);
-
     // Never surfaced in the "Add Provider" catalog.
     expect(mod.catalogVisible).toBe(false);
   });
@@ -184,7 +161,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     const catalog = makeCatalog({
       models: ["my-claude/claude-x"],
       orgRows: [customUpstreamRow("my-claude", { kind: "claude" })],
-      registerUpstream: () => {},
     });
 
     const modules = await catalog.getInstalledModules("agent-1", "org-1");
@@ -193,8 +169,7 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
 
     // Protocol resolved from the row's kind → anthropic, not the default openai.
     expect(mod.sdkCompat).toBe("anthropic");
-    // Anthropic keys must present as x-api-key, not Bearer — the proxy reads
-    // this off the upstream config at egress.
+    // Anthropic keys must present as x-api-key, not Bearer.
     expect(mod.getUpstreamConfig()?.apiKeyHeader).toBe("x-api-key");
   });
 
@@ -208,15 +183,13 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     // listed as configured, and silently never routed.
     //
     // The kind's own catalog upstream is a safe fallback: it is a trusted
-    // providers.json URL, not a tenant-defined one, so resolveUrlInvariant
-    // answers `org-credential` and sends the row's own key — never the
-    // exfiltration path a tenant URL would open.
+    // providers.json URL, not a tenant-defined one, and egress sends only the
+    // row's own key there — never a profile or deployment key.
     registerCatalogModule(
       "gemini",
       "openai",
       "https://generativelanguage.googleapis.com/v1beta/openai"
     );
-    const registered: Array<{ slug: string; url: string }> = [];
     const catalog = makeCatalog({
       models: ["my-gemini/gemini-3-pro"],
       orgRows: [
@@ -226,8 +199,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
           hasCustomUpstream: false,
         }),
       ],
-      registerUpstream: (u) =>
-        registered.push({ slug: u.slug, url: u.upstreamBaseUrl }),
     });
 
     const modules = await catalog.getInstalledModules("agent-1", "org-1");
@@ -237,14 +208,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     expect(mod.getUpstreamConfig()?.upstreamBaseUrl).toBe(
       "https://generativelanguage.googleapis.com/v1beta/openai"
     );
-    // Registered under the ALIAS slug — that is the name the worker's model ref
-    // carries, so that is what the proxy must answer to.
-    expect(registered).toEqual([
-      {
-        slug: "my-gemini",
-        url: "https://generativelanguage.googleapis.com/v1beta/openai",
-      },
-    ]);
   });
 
   test("an official OpenAI alias uses Responses, not Chat Completions", async () => {
@@ -262,7 +225,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
           hasCustomUpstream: false,
         }),
       ],
-      registerUpstream: () => {},
     });
 
     const modules = await catalog.getInstalledModules("agent-1", "org-1");
@@ -289,7 +251,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
           hasCustomUpstream: false,
         }),
       ],
-      registerUpstream: () => {},
     });
 
     expect(await catalog.getInstalledModules("agent-1", "org-1")).toHaveLength(
@@ -321,7 +282,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
           hasCustomUpstream: false,
         }),
       ],
-      registerUpstream: () => {},
     });
 
     expect(await catalog.getInstalledModules("agent-1", "org-1")).toHaveLength(
@@ -336,7 +296,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     const catalog = makeCatalog({
       models: ["my-gemini/gemini-3-pro"],
       orgRows: [customUpstreamRow("my-gemini", { kind: "gemini" })],
-      registerUpstream: () => {},
     });
 
     const modules = await catalog.getInstalledModules("agent-1", "org-1");
@@ -349,7 +308,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
   test("does NOT synthesize when neither the row NOR its kind has an upstream", async () => {
     // No module registered for kind "openai", so the catalog contributes no
     // fallback URL either — there is genuinely nowhere to route.
-    const registered: string[] = [];
     const catalog = makeCatalog({
       models: ["myzai/glm-4.6"],
       orgRows: [
@@ -358,12 +316,10 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
           hasCustomUpstream: false,
         }),
       ],
-      registerUpstream: (u) => registered.push(u.slug),
     });
 
     const modules = await catalog.getInstalledModules("agent-1", "org-1");
     expect(modules).toHaveLength(0);
-    expect(registered).toEqual([]);
   });
 
   test("does NOT synthesize when organizationId is absent (slug dropped as before)", async () => {
@@ -580,8 +536,7 @@ describe("ProviderCatalogService.getModelPolicy — not-found / orgless are DENY
     return new ProviderCatalogService(
       settings as never,
       { getBestProfile: async () => null } as never,
-      (async () => []) as never,
-      (() => {}) as never
+      (async () => []) as never
     );
   }
 

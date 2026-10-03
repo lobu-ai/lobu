@@ -353,7 +353,14 @@ echo "✓ all definitions created; \$member not pruned"
 # 4) A real agent turn through the worker.
 ( cd "$PROJ" && timeout 90 $LOBU chat "say the safe word" -c local > "$CHAT_OUT" 2>&1 ) || fail "lobu chat exited non-zero"
 grep -qF "$MOCK_REPLY" "$CHAT_OUT" || fail "agent turn did not return the mock reply '$MOCK_REPLY' (got: $(tr -d '\n' < "$CHAT_OUT" | tail -c 200))"
-grep -qiE "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" || fail "worker never called the mock provider upstream"
+node - "$MOCK_REQLOG" <<'JS' || fail "worker never sent the chat prompt to the mock provider"
+const { readFileSync } = require("node:fs");
+const requests = readFileSync(process.argv[2], "utf8").trim().split("\n")
+  .map(line => JSON.parse(JSON.parse(line).body));
+if (!requests.some(request => request.model === "mock-model" && request.messages?.some(
+  message => message.role === "user" && JSON.stringify(message.content).includes("say the safe word")
+))) process.exit(1);
+JS
 echo "✓ agent completed a real turn through the worker (reply: $MOCK_REPLY)"
 
 # ── API setup for the connector/automation assertions ────────────────────────────
