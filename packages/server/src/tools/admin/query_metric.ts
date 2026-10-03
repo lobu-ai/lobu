@@ -6,8 +6,7 @@
  * aggregation; derived measures execute their reusable, precomputed SQL grain.
  * Discover both with `list_metrics`.
  *
- * Thin wrapper over runMetric (compile → org-scope → read-only execute) — the
- * same path a federated warehouse metric flows through.
+ * Thin wrapper over runMetric, which selects the local or backing connection.
  */
 
 import { type Static, Type } from '@sinclair/typebox';
@@ -59,6 +58,9 @@ async function queryMetricImpl(
     // $member entity rows carry PII reserved by the manage_entity read
     // policy; ordinary members must not bypass it via a declared measure.
     excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
+    // A connection-backed type pushes down to its backing connection under the
+    // same owner/admin bypass query_sql grants a derived record read.
+    isAdmin: isAdminOrOwnerRole(ctx.memberRole),
   });
   return { rows, row_count: rows.length };
 }
