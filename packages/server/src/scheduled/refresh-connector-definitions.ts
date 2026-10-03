@@ -62,6 +62,7 @@ export async function refreshConnectorDefinitions(): Promise<RefreshResult> {
     // snapshots here instead of requiring every user to reinstall.
     if (isAtlassianMcpConfig(row.mcp_config)) {
       try {
+        // Hourly: write only when the merge would change the stored feeds.
         await sql`
           UPDATE connector_definitions
           SET feeds_schema = COALESCE(feeds_schema, '{}'::jsonb)
@@ -70,6 +71,8 @@ export async function refreshConnectorDefinitions(): Promise<RefreshResult> {
           WHERE organization_id = ${row.organization_id}
             AND key = ${row.key}
             AND status = 'active'
+            AND feeds_schema IS DISTINCT FROM
+              COALESCE(feeds_schema, '{}'::jsonb) || ${sql.json(ATLASSIAN_MCP_FEEDS)}::jsonb
         `;
         result.refreshed += 1;
       } catch (err) {
