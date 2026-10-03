@@ -1989,9 +1989,16 @@ export function validateSkillsConfig(value: unknown): string | null {
  * Each key the stored-settings schema knows is checked against its own property
  * schema, so this cannot drift from the type the readers rely on. Unknown keys
  * (`authProfiles`, legacy model fields, which have their own handling below) and
- * `null` (an explicit clear) keep their existing behavior. `models` is skipped
- * here: it has a stricter, org-aware validation of its own.
+ * `null` (an explicit clear) keep their existing handling. `models` is skipped
+ * here, as are `guardrailsInline` and `skillsConfig`: each has a stricter validator
+ * of its own with its own error code.
  */
+const OWN_VALIDATED_SETTINGS_KEYS = new Set([
+	"models",
+	"guardrailsInline",
+	"skillsConfig",
+]);
+
 export function validateSettingsPatch(updates: unknown): string | null {
 	if (updates === null || typeof updates !== "object" || Array.isArray(updates)) {
 		return "request body must be a JSON object";
@@ -2001,7 +2008,7 @@ export function validateSettingsPatch(updates: unknown): string | null {
 		Parameters<typeof Value.Check>[0]
 	>;
 	for (const [key, value] of Object.entries(updates)) {
-		if (key === "models" || key === "updatedAt") continue;
+		if (key === "updatedAt" || OWN_VALIDATED_SETTINGS_KEYS.has(key)) continue;
 		const schema = properties[key];
 		if (!schema || value === null) continue;
 		if (Value.Check(schema, value)) continue;
