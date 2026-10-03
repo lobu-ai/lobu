@@ -6,6 +6,7 @@ import {
 } from "../../../automations/connector-derived";
 import { activateAutomationSignal } from "../../../automations/activation";
 import type { Env } from "../../../index";
+import { MAX_ORIGIN_ID_BYTES } from "../../../worker-api/run-lifecycle";
 import { manageAutomations } from "../../../tools/admin/manage_automations";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
@@ -407,11 +408,9 @@ describe("platform-derived connector activation", () => {
 		expect(runs).toHaveLength(0);
 	});
 
-	it("ingests an overlong origin_id without blowing the idempotency btree", async () => {
-		// A user-controlled origin_id (e.g. a postgres text PK) can exceed the
-		// btree row-size limit. The derived delivery_id must key on the bounded
-		// persisted event id, not the origin_id, or the run INSERT fails inside
-		// the event transaction and permanently blocks ingestion.
+	it("derives a bounded delivery_id from an origin_id at the ingest limit", async () => {
+		// The stream bounds origin_id, but derived delivery identity must still
+		// use the persisted event id rather than copying the source key.
 		const { org, user, ctx } = await seedOwnerContext();
 		const agent = await createTestAgent({
 			organizationId: org.id,
@@ -485,7 +484,7 @@ describe("platform-derived connector activation", () => {
 				run_id: runId,
 				items: [
 					{
-						id: "k".repeat(3_000),
+						id: "k".repeat(MAX_ORIGIN_ID_BYTES),
 						origin_type: "tweet",
 						title: "someone: hello",
 						payload_text: "hello",
