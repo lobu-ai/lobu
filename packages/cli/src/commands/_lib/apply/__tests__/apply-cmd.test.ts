@@ -19,7 +19,6 @@ import {
   normalizeConnectionConfigScope,
   validateConnectionAgainstConnector,
 } from "../desired-state.js";
-import { ApplyClient } from "../client.js";
 import { computeDiff, type DiffPlan, type RemoteSnapshot } from "../diff.js";
 
 // Minimal DesiredState with just the connectors slice populated.
