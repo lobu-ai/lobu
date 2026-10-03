@@ -306,6 +306,32 @@ describe("ApplyClient — prune", () => {
     });
   });
 
+  test("upsertEntityType sends a source-backed identity with its connection", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch
+    );
+
+    await client.upsertEntityType({
+      slug: "person",
+      backing: {
+        sql: "SELECT 'p-1' AS slug",
+        connection: "warehouse",
+        identity: "example_person_id",
+      },
+    });
+
+    expect(JSON.parse(String(calls[0]?.init?.body)).backing).toEqual({
+      sql: "SELECT 'p-1' AS slug",
+      connection: "warehouse",
+      identity: "example_person_id",
+    });
+  });
+
   test("listEntityTypes hoists backing_sql to a { sql } backing (derived type)", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new ApplyClient(

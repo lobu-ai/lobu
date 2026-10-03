@@ -950,6 +950,7 @@ export class ApplyClient {
         ? {
             sql: backing.sql,
             ...(backing.connection ? { connection: backing.connection } : {}),
+            ...(backing.identity ? { identity: backing.identity } : {}),
           }
         : null;
     }
