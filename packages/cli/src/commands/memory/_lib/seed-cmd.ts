@@ -7,7 +7,7 @@ import type {
 } from "../../_lib/apply/desired-state.js";
 import { loadDesiredStateFromConfig } from "../../_lib/apply/desired-state.js";
 import { isPlatformOwnedRelationshipSlug } from "../../_lib/platform-owned-types.js";
-import { ApiError, ValidationError } from "./errors.js";
+import { ApiError, ValidationError, wrongHostHint } from "./errors.js";
 import {
   getSessionForOrg,
   getUsableToken,
@@ -147,7 +147,7 @@ function deriveApiBaseUrl(mcpUrl: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
-async function callTool(
+export async function callTool(
   ctx: SeedContext,
   toolName: string,
   args: Record<string, unknown>
@@ -167,7 +167,18 @@ async function callTool(
   try {
     parsed = JSON.parse(body) as Record<string, unknown>;
   } catch {
-    throw new ApiError(`Invalid JSON from ${toolName}: ${body}`, res.status);
+    // An empty or non-JSON body is most often a wrong-host answer (405/404 from
+    // a host that does not serve the tool API). Name the URL and status so the
+    // failure is diagnosable instead of a bare "Invalid JSON".
+    const detail = body.trim()
+      ? body.slice(0, 500)
+      : `HTTP ${res.status} ${res.statusText}`.trim();
+    throw new ApiError(
+      res.ok
+        ? `Invalid JSON from ${toolName} via ${url}: ${detail}`
+        : `${toolName} failed via ${url}: ${detail}${wrongHostHint(res.status)}`,
+      res.status
+    );
   }
 
   if (!res.ok) {
