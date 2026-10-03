@@ -1720,7 +1720,11 @@ describe("executePlan — entity-type properties on a no-baseline diff (rollback
       name: { type: "string" },
       note: { type: "string" },
     };
-    const state = stateWith({ definitions: [], authProfiles: [], connections: [] });
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [],
+    });
     state.memorySchema.entityTypes = [
       { slug: "qa-item", name: "QA Item", properties: declared } as any,
     ];
