@@ -33,6 +33,11 @@
     "node": ">=22 <25 || >=26"
   },
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lobu-ai/lobu.git",
+    "directory": "packages/plugin-api"
+  },
   "publishConfig": {
     "access": "public"
   }
