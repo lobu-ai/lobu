@@ -9,7 +9,10 @@ import {
 	type AuthProfile,
 	isSdkCompat,
 } from "@lobu/core";
-import { SkillsConfigSchema } from "@lobu/core/contracts/agent-settings";
+import {
+	AgentSettingsStoredSchema,
+	SkillsConfigSchema,
+} from "@lobu/core/contracts/agent-settings";
 import {
 	type ManageAutomationsArgs,
 	normalizeAutomationUpdatePatch,
@@ -1977,6 +1980,37 @@ export function validateSkillsConfig(value: unknown): string | null {
 	return `skillsConfig${first.path}: ${first.message}`;
 }
 
+/**
+ * Write-boundary type check for the settings fields a PATCH may carry.
+ *
+ * Without it a wrongly-typed value (`{"verboseLogging":"not-a-boolean"}`) was
+ * handed to the store, which coerced or ignored it, and the route still answered
+ * `{ success: true }` - the caller could not tell the write had not applied.
+ * Each key the stored-settings schema knows is checked against its own property
+ * schema, so this cannot drift from the type the readers rely on. Unknown keys
+ * (`authProfiles`, legacy model fields, which have their own handling below) and
+ * `null` (an explicit clear) keep their existing behavior. `models` is skipped
+ * here: it has a stricter, org-aware validation of its own.
+ */
+export function validateSettingsPatch(updates: unknown): string | null {
+	if (updates === null || typeof updates !== "object" || Array.isArray(updates)) {
+		return "request body must be a JSON object";
+	}
+	const properties = AgentSettingsStoredSchema.properties as Record<
+		string,
+		Parameters<typeof Value.Check>[0]
+	>;
+	for (const [key, value] of Object.entries(updates)) {
+		if (key === "models" || key === "updatedAt") continue;
+		const schema = properties[key];
+		if (!schema || value === null) continue;
+		if (Value.Check(schema, value)) continue;
+		const first = Value.Errors(schema, value).First();
+		return `${key}${first?.path ?? ""}: ${first?.message ?? "invalid value"}`;
+	}
+	return null;
+}
+
 routes.patch("/:agentId/config", async (c) => {
 	const denied = requireManageAgentAccess(c);
 	if (denied) return denied;
@@ -1985,6 +2019,19 @@ routes.patch("/:agentId/config", async (c) => {
 
 	if (!(await configStore.hasAgent(agentId))) {
 		return c.json({ error: "Agent not found" }, 404);
+	}
+
+	// Type-check every known settings field before anything is persisted, so a
+	// wrongly-typed value is refused atomically instead of reported as success.
+	const settingsPatchError = validateSettingsPatch(updates);
+	if (settingsPatchError) {
+		return c.json(
+			{
+				error: "invalid_settings",
+				error_description: settingsPatchError,
+			},
+			400
+		);
 	}
 
 	// Validate inline guardrail shape before it is persisted. An invalid `stage`
