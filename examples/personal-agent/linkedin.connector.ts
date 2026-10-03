@@ -516,6 +516,15 @@ function decodeHomeFeedPostIdentity(
   return `urn:li:${tag === 10 ? "activity" : "ugcPost"}:${encoded >> 1n}`;
 }
 
+// A fenced dispatch discards every row it collected, so an oversized scrape
+// repeats forever (prod hit `run timed out after 90000ms` on this feed).
+// Target a 60s dispatch within Owletto's 90s run fence: reserve 23s for
+// navigation (20s load wait + up to 3s settle in tools.js) and 12s for
+// deadline overrun and harvesting. This is a cooperative expansion deadline,
+// not a hard scrape timeout: the engine stops scrolling after observing it,
+// then finishes harvesting. DOM work and anchor-lock waits can still overrun.
+const HOME_FEED_SCRAPE_DEADLINE_MS = 25_000;
+
 /**
  * Selectors for the virtualized linkedin.com/feed/ DOM. Home-feed posts are
  * componentkey divs with no activity urn, so the row id is the componentkey
@@ -583,10 +592,7 @@ const HOME_FEED_SCRAPE_CONFIG = {
       textRegexFlags: "i",
     },
     maxPasses: 40,
-    // Return explicit incomplete coverage before the extension's 90-second
-    // watchdog. This leaves time for row harvesting and guarantees that a
-    // large thread cannot strand a content script in the user's tab.
-    maxDurationMs: 55_000,
+    maxDurationMs: HOME_FEED_SCRAPE_DEADLINE_MS,
     // LinkedIn removes its controls before the requested comments finish
     // rendering. Allow a short control-free settling window; the shared
     // maxDurationMs budget still caps the whole expansion pass.
