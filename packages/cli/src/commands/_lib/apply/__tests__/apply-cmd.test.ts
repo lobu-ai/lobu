@@ -8,7 +8,7 @@ import {
   readBoundedBody,
   validateConnectorState,
 } from "../apply-cmd.js";
-import type { ApplyClient, RemoteConnectorDefinition } from "../client.js";
+import { ApplyClient, type RemoteConnectorDefinition } from "../client.js";
 import type {
   DesiredAgent,
   DesiredConnection,
