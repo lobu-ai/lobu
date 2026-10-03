@@ -40,6 +40,7 @@ import {
   updateScheduledJob,
   validateDeliveryAuthorization,
 } from '../../scheduled/scheduled-jobs-service';
+import { getDb, pgTextArray } from '../../db/client';
 import type { ToolContext } from '../registry';
 import { sourceToDeliveryContext } from './approval-delivery';
 import logger from '../../utils/logger';
@@ -111,6 +112,25 @@ async function handleCreate(
 
   const delivery = await resolveTrustedDeliveryContext(args.payload, ctx);
   if (delivery.error) return { error: delivery.error };
+
+  // A send_notification whose explicit recipients are not org member user ids
+  // would "fire" forever and deliver nothing. Refuse at create time.
+  if (args.payload.type === 'send_notification' && Array.isArray(args.payload.recipients)) {
+    const requested = args.payload.recipients;
+    const sql = getDb();
+    const found = await sql<{ userId: string }>`
+      SELECT "userId" FROM "member"
+      WHERE "organizationId" = ${ctx.organizationId}
+        AND "userId" = ANY(${pgTextArray(requested)}::text[])
+    `;
+    const known = new Set(found.map((r) => r.userId));
+    const unresolved = requested.filter((r) => !known.has(r));
+    if (requested.length === 0 || unresolved.length > 0) {
+      return {
+        error: `invalid_recipients: recipients must be user ids of members of this organization (or "admins" / "all"). Unresolved: ${JSON.stringify(unresolved.length ? unresolved : requested)}`,
+      };
+    }
+  }
 
   const job = await createScheduledJob({
     organizationId: ctx.organizationId,
