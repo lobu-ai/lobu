@@ -1075,6 +1075,22 @@ export async function updateEntity(
 	// Validate write access (uses PG for auth tables)
 	await requireWriteAccess(sql, entityId, ctx);
 
+	// A source-backed record's row is its identity (slug = source key); its
+	// fields live in the source. Editing either would desynchronize the two.
+	const [sourceBacked] = await sql<{ slug: string }>`
+    SELECT et.slug
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    WHERE e.id = ${entityId} AND et.backing_sql IS NOT NULL
+    LIMIT 1
+  `;
+	if (sourceBacked) {
+		throw new ToolUserError(
+			`Entity type '${sourceBacked.slug}' is source-backed: its records are read from the source and cannot be edited here.`,
+			400,
+		);
+	}
+
 	// Validate parent hierarchy (replaces prevent_entity_cycles trigger)
 	if (data.parent_id !== undefined && data.parent_id !== null) {
 		await preventEntityCycles(entityId, data.parent_id, sql);

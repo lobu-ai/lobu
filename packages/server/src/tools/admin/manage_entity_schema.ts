@@ -875,10 +875,10 @@ async function compileRulesOrThrow(source: string | null): Promise<string | null
 }
 
 const ENTITY_TYPE_COLUMNS =
-  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, backing_source, metrics_config, rules_source, created_by, organization_id, created_at, updated_at';
+  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, backing_source, backing_identity, metrics_config, rules_source, created_by, organization_id, created_at, updated_at';
 
 const ENTITY_TYPE_COLUMNS_WITH_ORG = `et.id, et.slug, et.name, et.description, et.icon, et.color,
-  et.metadata_schema, et.event_kinds, et.backing_sql, et.backing_source, et.metrics_config,
+  et.metadata_schema, et.event_kinds, et.backing_sql, et.backing_source, et.backing_identity, et.metrics_config,
   et.rules_source,
   et.created_by, et.organization_id,
   et.created_at, et.updated_at,
@@ -1070,6 +1070,11 @@ function assertValidBacking(backing: ManageEntitySchemaArgs['backing']): void {
   // slug that resolves to no connection, failing only at read time.
   if (backing && typeof backing.connection === 'string' && backing.connection.trim() === '') {
     throw invalidSchema('backing.connection cannot be empty');
+  }
+  // An identity names the namespace of a SOURCE key, so it needs a source.
+  if (backing && typeof backing.identity === 'string') {
+    if (backing.identity.trim() === '') throw invalidSchema('backing.identity cannot be empty');
+    if (!backing.connection) throw invalidSchema('backing.identity requires backing.connection');
   }
 }
 
@@ -1315,7 +1320,7 @@ async function etHandleCreate(
     INSERT INTO entity_types (
       slug, name, description, icon, color,
       metadata_schema, event_kinds,
-      backing_sql, backing_source, metrics_config,
+      backing_sql, backing_source, backing_identity, metrics_config,
       rules_source, rules_compiled,
       organization_id, created_by,
       created_at, updated_at
@@ -1329,6 +1334,7 @@ async function etHandleCreate(
       ${eventKinds},
       ${args.backing?.sql ?? null},
       ${args.backing?.connection ?? null},
+      ${args.backing?.identity ?? null},
       ${metricsConfig},
       ${args.rules_source ?? null},
       ${rulesCompiled},
@@ -1422,7 +1428,14 @@ async function etHandleUpdate(
   assertValidEventKindInteractions(args.event_kinds);
   // Converting a populated stored type to a derived (view-backed) type would
   // orphan its existing rows (the view ignores them). Reject it.
-  if (args.backing?.sql) {
+  // An identity-backed type keeps its identity rows across SQL edits as long
+  // as the identity namespace is unchanged (their slugs are its source keys).
+  const keepsIdentity =
+    Boolean(current.backing_sql) &&
+    Boolean(current.backing_identity) &&
+    Boolean(args.backing?.connection) &&
+    args.backing?.identity === current.backing_identity;
+  if (args.backing?.sql && !keepsIdentity) {
     const existingCount = await countStoredEntitiesOfType(
       Number(current.id),
       ctx.organizationId,
@@ -1486,6 +1499,10 @@ async function etHandleUpdate(
       backing_source = CASE
         WHEN ${hasBacking} THEN ${args.backing?.connection ?? null}::text
         ELSE backing_source
+      END,
+      backing_identity = CASE
+        WHEN ${hasBacking} THEN ${args.backing?.identity ?? null}::text
+        ELSE backing_identity
       END,
       metrics_config = CASE
         WHEN ${hasMetricsConfig} THEN ${metricsConfigJson}

@@ -709,8 +709,8 @@ async function createEntityWithIdentities(
   // Resolve entity_type slug → entity_types(id). Same schema search path as
   // createEntity: try the entity's own org first, then any visibility='public'
   // catalog. First match wins. See createEntity for the slug-poisoning caveat.
-  let typeRow = await sql<{ id: number; backing_sql: string | null }>`
-    SELECT et.id, et.backing_sql
+  let typeRow = await sql<{ id: number; backing_sql: string | null; backing_identity: string | null }>`
+    SELECT et.id, et.backing_sql, et.backing_identity
     FROM entity_types et
     LEFT JOIN organization o ON o.id = et.organization_id
     WHERE et.slug = ${params.entityType}
@@ -727,8 +727,8 @@ async function createEntityWithIdentities(
     // ahead of the first ACL sync without failing closed on a missing type.
     if (params.entityType === ACL_RESOURCE_TYPE_SLUG) {
       await ensureResourceEntityType(sql, params.orgId);
-      typeRow = await sql<{ id: number; backing_sql: string | null }>`
-        SELECT et.id, et.backing_sql
+      typeRow = await sql<{ id: number; backing_sql: string | null; backing_identity: string | null }>`
+        SELECT et.id, et.backing_sql, et.backing_identity
         FROM entity_types et
         WHERE et.slug = ${params.entityType}
           AND et.deleted_at IS NULL
@@ -750,13 +750,26 @@ async function createEntityWithIdentities(
       return null;
     }
   }
-  // Derived (view-backed) types have no stored rows — skip auto-create (the
-  // view ignores any row this would insert). Mirrors createEntity's guard for
-  // this separate connector/link insert path.
-  if (typeRow[0].backing_sql) {
+  // A pure view (derived, no identity) has no stored rows — skip auto-create.
+  // A source-backed type with a declared identity stores only an identity row:
+  // its slug IS the source key carried in that namespace, and its attributes
+  // stay live in the source, so traits are not copied.
+  const backingIdentity = typeRow[0].backing_identity;
+  if (typeRow[0].backing_sql && !backingIdentity) {
     logger.warn(
       { entityType: params.entityType, orgId: params.orgId },
       'entity auto-create skipped: entity type is derived (a SQL view)'
+    );
+    return null;
+  }
+  const sourceIdentity = backingIdentity
+    ? persisted.find((identity) => identity.namespace === backingIdentity)
+    : undefined;
+  const sourceKey = sourceIdentity?.identifier;
+  if (backingIdentity && !sourceKey) {
+    logger.warn(
+      { entityType: params.entityType, orgId: params.orgId, namespace: backingIdentity },
+      'entity auto-create skipped: event carries no source key for a source-backed type'
     );
     return null;
   }
@@ -764,8 +777,8 @@ async function createEntityWithIdentities(
 
   // Try a few slug variants to defuse improbable random collisions.
   let entityId: number | null = null;
-  for (let attempt = 0; attempt < 3 && entityId === null; attempt++) {
-    const slug = randomSlug(params.entityType);
+  for (let attempt = 0; attempt < (sourceKey ? 1 : 3) && entityId === null; attempt++) {
+    const slug = sourceKey ?? randomSlug(params.entityType);
     // Auto-created from a connector link, but a tenant row on a tenant type all
     // the same — so it is subject to the type's rules. Validating inside the
     // retry loop costs one extra evaluation per slug collision, which the
@@ -779,12 +792,47 @@ async function createEntityWithIdentities(
           entityTypeId,
           name,
           slug,
-          metadata,
+          metadata: sourceKey ? {} : metadata,
           createdBy: params.creatorUserId,
         },
       }),
     });
     if (inserted) entityId = Number(inserted.id);
+  }
+  const alreadyAttached: AttachedIdentity[] = [];
+  if (entityId === null && sourceIdentity) {
+    // A slug collision is reusable only when the full scoped source identity
+    // belongs to that row. Equal source keys in different tenants aren't a match.
+    // Lock the row before touching identities, the same order the match path
+    // uses; racing losers otherwise deadlock on identity versus entity locks.
+    const existing = await sql<{ id: number }>`
+      SELECT id FROM entities
+      WHERE organization_id = ${params.orgId}
+        AND entity_type_id = ${entityTypeId}
+        AND slug = ${sourceKey}
+        AND parent_id IS NULL
+        AND deleted_at IS NULL
+      LIMIT 1
+      FOR UPDATE
+    `;
+    if (existing.length > 0) {
+      const existingId = Number(existing[0].id);
+      const matches = await lookupMatches(sql, {
+        orgId: params.orgId,
+        identities: [persisted],
+      });
+      if (matches.get(identityKey(sourceIdentity)) !== existingId) return null;
+      entityId = existingId;
+      for (const identity of persisted) {
+        if (matches.get(identityKey(identity)) === entityId) {
+          alreadyAttached.push({
+            namespace: identity.namespace,
+            identifier: identity.identifier,
+            scopeKey: identity.scopeKey ?? null,
+          });
+        }
+      }
+    }
   }
   if (entityId === null) return null;
 
@@ -795,6 +843,9 @@ async function createEntityWithIdentities(
     connectionId: params.connectionId,
     identities: persisted,
   });
+  // ON CONFLICT returns no row for an unchanged identity. Preserve verified
+  // ownership so a racing observer neither drops attribution nor deletes it.
+  for (const identity of alreadyAttached) appendIdentityIfMissing(attached, identity);
   // Only organization-scoped identities enter the legacy flat alias surface.
   await ensureAliases(sql, {
     orgId: params.orgId,
@@ -893,15 +944,17 @@ async function applyTraits(
 
   // Serialize the metadata read-modify-write with aliases and traits
   // from concurrent connector transactions.
-  const rows = await sql<{ metadata: Record<string, unknown> | null }>`
-    SELECT metadata
-    FROM entities
-    WHERE id = ${params.entityId}
-      AND organization_id = ${params.orgId}
-      AND deleted_at IS NULL
-    FOR UPDATE
+  const rows = await sql<{ metadata: Record<string, unknown> | null; backing_sql: string | null }>`
+    SELECT e.metadata, et.backing_sql
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    WHERE e.id = ${params.entityId}
+      AND e.organization_id = ${params.orgId}
+      AND e.deleted_at IS NULL
+    FOR UPDATE OF e
   `;
-  if (rows.length === 0) return;
+  // This also covers matches on existing identities, which skip the create guard.
+  if (rows.length === 0 || rows[0].backing_sql) return;
   const current = rows[0].metadata ?? {};
 
   const next: Record<string, unknown> = { ...current, ...overwrite };

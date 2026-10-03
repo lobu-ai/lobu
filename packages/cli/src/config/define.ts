@@ -65,6 +65,13 @@ export interface EntityBacking {
    * tables that exist in the bound connection's database.
    */
   connection?: string;
+  /**
+   * Identity namespace whose identifier IS each row's slug/id (the source
+   * canonical key). Requires `connection`. Records that attributed events
+   * reference keep a stored identity row (slug = source key, name), so Activity,
+   * Relationships, views and permissions work on them; attributes stay live.
+   */
+  identity?: string;
 }
 
 // ---------------------------------------------------------------------------
