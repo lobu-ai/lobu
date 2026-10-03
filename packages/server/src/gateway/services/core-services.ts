@@ -714,17 +714,12 @@ export class CoreServices {
 			);
 		}
 
-		// Initialize provider catalog service. The inference-provider reader +
-		// registerUpstream callback let it synthesize routable modules for
-		// org-defined provider slugs (custom upstreams) on demand. Registration is
-		// per-pod, hydrated from the row each call — multi-replica safe (no shared
-		// in-memory map another replica must read).
+		// Org modules configure workers; the proxy resolves their authenticated
+		// organization rows at egress without registering tenant destinations.
 		this.providerCatalogService = new ProviderCatalogService(
 			this.agentSettingsStore,
 			this.authProfilesManager,
 			(organizationId) => listInferenceProviders(organizationId),
-			(upstream, providerId) =>
-				this.secretProxy?.registerUpstream(upstream, providerId),
 		);
 		logger.debug("Provider catalog service initialized");
 

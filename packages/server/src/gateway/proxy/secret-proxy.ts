@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { AgentTurnInput } from "@lobu/connector-worker/agent-turn";
 import { CREDENTIAL_PLACEHOLDER_PREFIX } from "@lobu/connector-worker/egress";
-import { createLogger, type SecretRef, verifyWorkerToken } from "@lobu/core";
+import {
+  createLogger,
+  isSdkCompat,
+  SDK_COMPAT_PROTOCOLS,
+  type SecretRef,
+  verifyWorkerToken,
+} from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
@@ -9,12 +15,16 @@ import { resolveUrlInvariant } from "../auth/inference-invariant.js";
 import { extractJwtAccountId } from "../auth/oauth/client.js";
 import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import type { ProviderCredentialContext } from "../embedded.js";
-import type { ProviderUpstreamConfig } from "../modules/module-system.js";
+import {
+  getModelProviderModules,
+  type ProviderUpstreamConfig,
+} from "../modules/module-system.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import {
   clearInferenceProviderError,
   markInferenceProviderUnhealthy,
   readOrgSharedProviderApiKey,
+  resolveInferenceProviderCredential,
 } from "../../lobu/stores/provider-secrets.js";
 import { turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
 import {
@@ -37,6 +47,20 @@ import { classifyProviderHealthStatus } from "./provider-health-status.js";
 type AgentOrgResolver = (agentId: string) => Promise<string | null>;
 
 const logger = createLogger("secret-proxy");
+
+function noProviderCredentials(c: Context): Response {
+  return c.json(
+    {
+      error: {
+        message:
+          "No provider credentials configured. End-user provider setup is not available in chat yet. Ask an admin to connect a provider for the base agent.",
+        type: "authentication_error",
+        code: "no_credentials",
+      },
+    },
+    401
+  );
+}
 
 function captureInferencePath(api: AgentTurnInput["provider"]["api"]): string {
   switch (api) {
@@ -468,15 +492,17 @@ export class SecretProxy {
    * credentials. The `kind` is determined at resolution time (auth-profile type,
    * org-shared key, or the system-key resolver), never sniffed from the
    * credential string. Exactly one of the two headers is set so the upstream
-   * never sees a conflicting pair.
+   * never sees a conflicting pair. An org alias has no static registration, so
+   * it passes its kind's header explicitly.
    */
   private applyCredentialHeader(
     headers: Record<string, string>,
     slug: string,
     credential: string,
-    kind: CredentialKind
+    kind: CredentialKind,
+    apiKeyHeader = this.slugToApiKeyHeader.get(slug)
   ): void {
-    if (this.slugToApiKeyHeader.get(slug) === "x-api-key" && kind !== "oauth") {
+    if (apiKeyHeader === "x-api-key" && kind !== "oauth") {
       delete headers.authorization;
       headers["x-api-key"] = credential;
     } else {
@@ -616,19 +642,6 @@ export class SecretProxy {
   }
 
   /**
-   * The `organizationId` bound into the SIGNED worker token. Returns undefined
-   * when no verifiable token carries one — the caller then relies on
-   * `agentOrgResolver` (DB lookup keyed by URL agentId) to fill in the
-   * expected org.
-   */
-  private extractWorkerTokenOrg(c: Context): string | undefined {
-    for (const data of this.verifiedWorkerClaims(c)) {
-      if (data.organizationId) return data.organizationId;
-    }
-    return undefined;
-  }
-
-  /**
    * The deployment name this caller's turn-liveness marker is stored under,
    * derived from the SIGNED worker token's routing claims.
    *
@@ -748,21 +761,24 @@ export class SecretProxy {
     let resolvedSlug: string | undefined;
     let urlAgentId: string | undefined;
     let providerContext: ProviderCredentialContext | undefined;
+    let orgAlias = false;
     const slugMatch = rawPath.match(/^\/([^/]+)(\/.*)?$/);
     if (slugMatch) {
       const candidateSlug = slugMatch[1]!;
       const resolved = this.slugMap.get(candidateSlug);
-      if (resolved) {
-        upstreamBaseUrl = resolved;
-        forwardPath = slugMatch[2] || "";
+      const suffix = slugMatch[2] || "";
+      const agentMatch = suffix.match(
+        /^\/a\/([^/]+)(?:\/o\/([^/]+))?(?:\/u\/([^/]+))?(\/.*)?$/
+      );
+      if (resolved || agentMatch) {
+        upstreamBaseUrl = resolved || upstreamBaseUrl;
+        forwardPath = suffix;
         resolvedSlug = candidateSlug;
+        orgAlias = !resolved;
 
         // Extract agent/org/user scope from the provider proxy path if present.
         // URL format: /api/proxy/{slug}/a/{agentId}/o/{organizationId}/u/{userId}/v1/chat/completions
         // Legacy callers may omit /o/{organizationId} and/or /u/{userId}.
-        const agentMatch = forwardPath.match(
-          /^\/a\/([^/]+)(?:\/o\/([^/]+))?(?:\/u\/([^/]+))?(\/.*)?$/
-        );
         if (agentMatch) {
           urlAgentId = safeDecodePathSegment(agentMatch[1]);
           const organizationId = safeDecodePathSegment(agentMatch[2]);
@@ -781,6 +797,7 @@ export class SecretProxy {
     // the org-only credential from a single row read so the URL the key is
     // consented for and the URL we POST to cannot diverge.
     let resolvedUpstreamBaseUrl = upstreamBaseUrl;
+    let tenantUpstream = false;
 
     // Copy request body for non-GET/HEAD
     const method = c.req.method;
@@ -795,7 +812,13 @@ export class SecretProxy {
     // we hand to placeholder + secret lookups so a worker bearing org A's
     // placeholder cannot resolve it under org B's URL.
     const callerToken = this.extractCallerToken(c);
-    const workerTokenOrganizationId = this.extractWorkerTokenOrg(c);
+    const claims = this.verifiedWorkerClaims(c);
+    const signedBinding = claims.find(
+      (claim) => claim.agentId && claim.organizationId
+    );
+    const workerTokenOrganizationId =
+      signedBinding?.organizationId ||
+      claims.find((claim) => claim.organizationId)?.organizationId;
     // Trust the URL-carried org only for placeholder-authenticated workers: the
     // placeholder mapping is itself org-tagged and is checked against this value
     // immediately below. Legacy non-placeholder callers keep using the signed
@@ -806,6 +829,48 @@ export class SecretProxy {
       : undefined;
     let expectedOrganizationId: string | undefined =
       workerTokenOrganizationId || pathOrganizationId;
+    let credentialBinding:
+      | { agentId?: string; organizationId?: string }
+      | undefined = signedBinding;
+
+    if (orgAlias) {
+      // A new alias has no trusted static route or legacy credential fallback.
+      // Its agent and org must come from ONE authenticated binding.
+      const hasPlaceholder = callerToken?.includes(
+        CREDENTIAL_PLACEHOLDER_PREFIX
+      );
+      const placeholder =
+        callerToken && hasPlaceholder
+          ? this.lookupPlaceholderMapping(
+              callerToken,
+              signedBinding?.organizationId || pathOrganizationId
+            )
+          : undefined;
+      credentialBinding = placeholder || signedBinding;
+      if (
+        !credentialBinding?.organizationId ||
+        !credentialBinding.agentId ||
+        (hasPlaceholder && !placeholder)
+      ) {
+        return c.json({ error: "Forbidden" }, 403);
+      }
+      expectedOrganizationId = credentialBinding.organizationId;
+    }
+
+    const binding = credentialBinding;
+    if (
+      urlAgentId &&
+      binding &&
+      (binding.agentId !== urlAgentId ||
+        claims.some(
+          (claim) =>
+            (claim.organizationId &&
+              claim.organizationId !== binding.organizationId) ||
+            (claim.agentId && claim.agentId !== binding.agentId)
+        ))
+    ) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
     if (!expectedOrganizationId && urlAgentId && this.agentOrgResolver) {
       try {
         const orgId = await this.agentOrgResolver(urlAgentId);
@@ -827,6 +892,14 @@ export class SecretProxy {
           503
         );
       }
+    }
+
+    if (
+      providerContext?.organizationId &&
+      expectedOrganizationId &&
+      providerContext.organizationId !== expectedOrganizationId
+    ) {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
     // Bind the calling worker (identified by its placeholder credential) to
@@ -949,7 +1022,47 @@ export class SecretProxy {
 
     // Resolve credentials: prefer URL-based agentId (no header parsing needed),
     // fall back to marker/placeholder swap for backward compatibility.
-    if (urlAgentId && resolvedSlug && this.authProfilesManager) {
+    if (urlAgentId && resolvedSlug && orgAlias) {
+      const row = await resolveInferenceProviderCredential(
+        // Set from the authenticated binding above; the alias branch 403s
+        // without one.
+        expectedOrganizationId!,
+        resolvedSlug,
+        "text"
+      );
+      const module =
+        row &&
+        getModelProviderModules().find(
+          (provider) =>
+            provider.providerId === row.kind &&
+            provider.catalogVisible !== false
+        );
+      const sdkCompat = isSdkCompat(module?.sdkCompat)
+        ? module.sdkCompat
+        : undefined;
+      const upstreamConfig = module?.getUpstreamConfig?.();
+      const acceptsApiKey = (
+        module?.supportedAuthTypes || [module?.authType]
+      ).includes("api-key");
+      const upstreamBase =
+        row?.baseUrl ||
+        (sdkCompat && acceptsApiKey
+          ? upstreamConfig?.upstreamBaseUrl
+          : undefined);
+      if (!row?.apiKey || !upstreamBase) return noProviderCredentials(c);
+      resolvedUpstreamBaseUrl = upstreamBase;
+      tenantUpstream = Boolean(row.baseUrl);
+      this.applyCredentialHeader(
+        headers,
+        resolvedSlug,
+        row.apiKey,
+        "api-key",
+        sdkCompat
+          ? upstreamConfig?.apiKeyHeader ||
+              SDK_COMPAT_PROTOCOLS[sdkCompat].apiKeyHeader
+          : undefined
+      );
+    } else if (urlAgentId && resolvedSlug && this.authProfilesManager) {
       const providerId = this.slugToProviderId.get(resolvedSlug);
       if (providerId) {
         // Run the credential lookup under the caller's expected org context
@@ -980,6 +1093,7 @@ export class SecretProxy {
           resolvedCredential = { value: invariant.credential, kind: "api-key" };
           // Route to the tenant-defined URL from the SAME row read as the key.
           resolvedUpstreamBaseUrl = invariant.baseUrl;
+          tenantUpstream = true;
         } else if (invariant.kind === "org-credential") {
           // The org row owns the credential but keeps the trusted catalog URL.
           resolvedCredential = { value: invariant.credential, kind: "api-key" };
@@ -1051,17 +1165,7 @@ export class SecretProxy {
           logger.warn(
             `No auth profile, org-shared key, or system key for agent ${urlAgentId}, provider ${providerId}`
           );
-          return c.json(
-            {
-              error: {
-                message:
-                  "No provider credentials configured. End-user provider setup is not available in chat yet. Ask an admin to connect a provider for the base agent.",
-                type: "authentication_error",
-                code: "no_credentials",
-              },
-            },
-            401
-          );
+          return noProviderCredentials(c);
         }
       } else {
         logger.warn(`No providerId mapping for slug "${resolvedSlug}"`);
@@ -1133,16 +1237,29 @@ export class SecretProxy {
     }
     const upstream = `${resolvedUpstreamBaseUrl}${forwardPath}${url.search}`;
 
-    logger.info(`Forwarding to upstream: ${method} ${upstream}`);
+    logger.info({ method, provider: resolvedSlug }, "Forwarding to provider");
 
-    const response = await fetch(upstream, { method, headers, body });
+    let response: Response;
+    try {
+      response = await fetch(upstream, { method, headers, body });
+    } catch (error) {
+      if (!tenantUpstream) throw error;
+      // Network exceptions can contain the custom URL or key; neither leaves
+      // the credential boundary in logs or the response.
+      logger.error(
+        { method, provider: resolvedSlug },
+        "Custom provider request failed"
+      );
+      return c.json({ error: "Internal proxy error" }, 500);
+    }
 
     if (!response.ok) {
       // Log upstream failure without echoing the body — error responses from
       // some providers include the (rejected) credential or other sensitive
       // values that we don't want in our logs.
       logger.warn(
-        `Upstream returned ${response.status} for ${method} ${upstream}`
+        { status: response.status, method, provider: resolvedSlug },
+        "Provider returned an error"
       );
     }
 

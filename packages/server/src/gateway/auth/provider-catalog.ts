@@ -9,7 +9,6 @@ import type { InferenceProviderListItem } from "../../lobu/stores/provider-secre
 import {
   getModelProviderModules,
   type ModelProviderModule,
-  type ProviderUpstreamConfig,
 } from "../modules/module-system.js";
 import { ApiKeyProviderModule } from "./api-key-provider-module.js";
 import { isUnresolvedModelRef } from "./model-sentinel.js";
@@ -167,18 +166,8 @@ export type OrgInferenceProviderReader = (
 ) => Promise<InferenceProviderListItem[]>;
 
 /**
- * Registers a synthesized org provider's upstream on the secret proxy so the
- * slug becomes routable (populates slugMap + slugToProviderId). Injected from
- * core-services, which owns the SecretProxy instance.
- */
-export type RegisterUpstreamFn = (
-  upstream: ProviderUpstreamConfig,
-  providerId: string
-) => void;
-
-/**
  * Build the synthetic env var name for an org provider slug. The value is never
- * read (the org key is supplied at egress by resolveUrlInvariant), but
+ * read (the org key is supplied at authenticated proxy egress), but
  * BaseProviderModule needs a stable, collision-free credential env var name.
  */
 function orgProviderKeyEnvVarName(slug: string): string {
@@ -261,21 +250,14 @@ export class ProviderCatalogService {
      * matching row — routed to the row's own upstream when it has one, else to
      * the one its `kind` resolves to (see getInstalledModules).
      */
-    private listOrgInferenceProviders?: OrgInferenceProviderReader,
-    /**
-     * Registers a synthesized org module's upstream on the secret proxy so the
-     * slug routes. Called just-in-time from getInstalledModules — per-pod,
-     * hydrated from the row, so it stays correct under N>1 replicas (no shared
-     * in-memory state another pod must read).
-     */
-    private registerUpstream?: RegisterUpstreamFn
+    private listOrgInferenceProviders?: OrgInferenceProviderReader
   ) {}
 
   /**
    * Synthesize a routable provider module for an org-defined inference-provider
    * slug. Reuses ApiKeyProviderModule — the org key itself is NOT read here; it
-   * is injected at egress by resolveUrlInvariant. This module only makes the
-   * slug appear in the worker's provider config + the proxy's slug maps.
+   * is injected at egress by the proxy's authenticated org-row resolution.
+   * This module only supplies the worker's provider configuration.
    *
    * The upstream is the row's own `capabilities.text.base_url` when it has one,
    * else `catalogBaseUrl` — the URL the row's `kind` already resolves to in the
@@ -286,11 +268,9 @@ export class ProviderCatalogService {
    * lives. Without it the row persisted and listed as configured but silently
    * never routed.
    *
-   * The fallback does not widen the credential surface: a catalog URL is a
-   * trusted providers.json destination, not a tenant-defined one, so
-   * resolveUrlInvariant answers `org-credential` (send the row's own key) and
-   * never the `org-only` tenant-URL path. Returns null only when neither the
-   * row nor its kind names an upstream — genuinely nowhere to route.
+   * Egress independently resolves the authenticated row and its trusted kind;
+   * no tenant destination or header is written to the proxy's static maps.
+   * Returns null when neither the row nor its kind names an upstream.
    */
   private synthesizeOrgProviderModule(
     row: InferenceProviderListItem,
@@ -321,13 +301,6 @@ export class ProviderCatalogService {
       authProfilesManager: this.authProfilesManager,
     });
 
-    // Make the slug routable on THIS pod's proxy. registerUpstream is
-    // idempotent (map sets), and every replica reaches this path on demand from
-    // the same row, so there is no cross-pod state to fan out.
-    const upstream = module.getUpstreamConfig();
-    if (upstream && this.registerUpstream) {
-      this.registerUpstream(upstream, module.providerId);
-    }
     return module;
   }
 
