@@ -48,7 +48,7 @@ async function listMetricsImpl(
   }
   const sql = getDb();
   const rows = (await sql`
-    SELECT slug, name, metrics_config, backing_sql
+    SELECT slug, name, metrics_config, backing_sql, backing_source
     FROM entity_types
     WHERE organization_id = ${ctx.organizationId}
       AND deleted_at IS NULL
@@ -60,6 +60,7 @@ async function listMetricsImpl(
     name: string | null;
     metrics_config: unknown;
     backing_sql: string | null;
+    backing_source: string | null;
   }>;
 
   const searchable = (value: string) => value.toLowerCase().replace(/[_-]+/g, ' ');
@@ -69,7 +70,11 @@ async function listMetricsImpl(
 
   const entity_types: MetricCatalogEntry[] = [];
   for (const row of rows) {
-    const m = (row.metrics_config ?? {}) as EntityMetrics;
+    // A connection-backed type's metrics push down to its source, where only
+    // the backing SQL's own columns exist; runMetric refuses declared event
+    // measures there, so the catalog does not advertise them.
+    const configured = (row.metrics_config ?? {}) as EntityMetrics;
+    const m = row.backing_source ? {} : configured;
     const declaredMeasures = Object.entries(m.measures ?? {})
       .filter(([name, def]) => matches(name, def.description))
       .map(([name, def]) => ({
@@ -84,7 +89,7 @@ async function listMetricsImpl(
       .filter(([name, def]) => matches(name, def.description))
       .map(([name, def]) => ({ name, description: def.description }));
     const inferred = row.backing_sql ? inferColumns(row.backing_sql) : [];
-    const declaredMeasureNames = new Set(declaredMeasures.map((measure) => measure.name));
+    const declaredMeasureNames = new Set(Object.keys(configured.measures ?? {}));
     const measures = [
       ...declaredMeasures,
       ...inferred
