@@ -15,6 +15,7 @@ import { post } from "../setup/test-helpers";
 declare const chrome: {
 	storage: { local: { set(settings: Record<string, string>): Promise<void> } };
 	tabs: {
+		create(options: { url: string; active: boolean }): Promise<{ id: number }>;
 		query(
 			query: Record<string, unknown>,
 		): Promise<Array<{ id: number; url?: string }>>;
@@ -28,7 +29,7 @@ afterEach(cleanupTestDatabase);
 // Real Chromium -> HTTP -> production gateway handlers -> test Postgres.
 // Only the target website is a fixture. Worker registration, authentication,
 // manifest ingestion, routing, ownership injection and completion are real.
-it("persists a pinned browser flow end to end and rejects sibling ownership", async () => {
+it("persists pinned browser actions, shares agent tabs, and protects user tabs", async () => {
 	const sql = getTestDb();
 	const { org, user } = await seedOwnerContext();
 	await upsertEntityApprovalPolicy(org.id, {
@@ -193,7 +194,6 @@ it("persists a pinned browser flow end to end and rejects sibling ownership", as
 		}
 		const unpinned = await action("navigate", {
 			url: `${origin}/fixture/page`,
-			open_in_new_tab: true,
 		});
 		expect(unpinned.status).toBe("failed");
 		expect(unpinned.error_message).toMatch(/not paired to a specific device/);
@@ -208,7 +208,6 @@ it("persists a pinned browser flow end to end and rejects sibling ownership", as
 		connectionId = Number(paired.id);
 		const opened = await action("navigate", {
 			url: `${origin}/fixture/page`,
-			open_in_new_tab: true,
 			wait_for_load: true,
 		});
 		expect(opened.status, opened.error_message ?? "navigate failed").toBe(
@@ -225,23 +224,29 @@ it("persists a pinned browser flow end to end and rejects sibling ownership", as
 			"completed",
 		);
 		expect(evaluated.action_output.value).toBe(1);
-		const denied = await action(
+		// Agent tabs are shared: another session may act in this one.
+		const shared = await action(
 			"evaluate",
-			{
-				tab_id: tabId,
-				expression: "window.clicks=999",
-				browser_context_id: context.id,
-				browser_flow_id: context.flow_id,
-			},
+			{ tab_id: tabId, expression: "window.clicks" },
 			"synthetic-flow-b",
 		);
-		expect(denied.status).toBe("failed");
-		expect(denied.error_message).toMatch(/not owned/);
-		const unchanged = await action("evaluate", {
-			tab_id: tabId,
-			expression: "window.clicks",
+		expect(shared.status, shared.error_message ?? "evaluate failed").toBe(
+			"completed",
+		);
+		expect(shared.action_output.value).toBe(1);
+		// A tab the user opened is readable but not mutable without the grant,
+		// and a caller cannot launder it through an activation id of its own.
+		const userTab = await selected.control.evaluate(
+			(url) => chrome.tabs.create({ url, active: false }).then((tab) => tab.id),
+			`${origin}/fixture/page`,
+		);
+		const denied = await action("evaluate", {
+			tab_id: userTab,
+			expression: "window.clicks=999",
+			activation_tab_id: userTab,
 		});
-		expect(unchanged.action_output.value).toBe(1);
+		expect(denied.status).toBe("failed");
+		expect(denied.error_message).toMatch(/user's tab/);
 		expect(
 			await other.control.evaluate(() =>
 				chrome.tabs

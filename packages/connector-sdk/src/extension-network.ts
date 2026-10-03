@@ -168,7 +168,7 @@ export async function extensionNetworkSync<TItem>(opts: {
   // completes before our start() listener attaches and we miss them.
   const blankNavObs = await opts.dispatcher.dispatch<NavigateObservation>('navigate', {
     url: 'about:blank',
-    open_in_new_tab: true,
+    new_tab: true,
     wait_for_load: true,
     ...allowedOriginsInput,
   });
@@ -207,7 +207,6 @@ export async function extensionNetworkSync<TItem>(opts: {
     const navObs = await opts.dispatcher.dispatch<NavigateObservation>('navigate', {
       tab_id: tabId,
       url: opts.url,
-      open_in_new_tab: false,
       wait_for_load: true,
       ...allowedOriginsInput,
     });
