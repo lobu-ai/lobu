@@ -2009,6 +2009,10 @@ export function validateSettingsPatch(updates: unknown): string | null {
 	>;
 	for (const [key, value] of Object.entries(updates)) {
 		if (key === "updatedAt" || OWN_VALIDATED_SETTINGS_KEYS.has(key)) continue;
+		// Own keys only: a body key such as "constructor" or "toString" would
+		// otherwise resolve to an inherited Object.prototype member and make
+		// Value.Check throw instead of being treated as an unknown key.
+		if (!Object.hasOwn(properties, key)) continue;
 		const schema = properties[key];
 		if (!schema || value === null) continue;
 		if (Value.Check(schema, value)) continue;

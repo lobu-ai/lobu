@@ -58,4 +58,20 @@ describe("validateSettingsPatch", () => {
     expect(validateSettingsPatch([])).toMatch(/JSON object/);
     expect(validateSettingsPatch("x")).toMatch(/JSON object/);
   });
+
+  test("treats inherited Object.prototype names as unknown keys, not schemas", () => {
+    for (const body of [
+      '{"constructor":1}',
+      '{"__proto__":{"x":1}}',
+      '{"toString":"x"}',
+      '{"hasOwnProperty":true,"verboseLogging":true}',
+    ]) {
+      expect(validateSettingsPatch(JSON.parse(body))).toBeNull();
+    }
+    expect(
+      validateSettingsPatch(
+        JSON.parse('{"constructor":1,"verboseLogging":"nope"}')
+      )
+    ).toContain("verboseLogging");
+  });
 });
