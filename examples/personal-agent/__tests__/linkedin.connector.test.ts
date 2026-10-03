@@ -1868,7 +1868,7 @@ describe("LinkedInConnector home_feed", () => {
       optionTextRegex: "^Most recent\\b",
     });
     expect(cfg.expandRows.more.textRegex).toContain("replies");
-    expect(cfg.expandRows.maxDurationMs).toBe(55_000);
+    expect(cfg.expandRows.maxDurationMs).toBe(25_000);
     expect(cfg.expandRows.stall).toBe(12);
     expect(cfg.expandRows.outputField).toBe("comment_coverage");
     expect(cfg.id.name).toEqual(["componentkey", "id"]);
@@ -2178,6 +2178,63 @@ describe("LinkedInConnector home_feed", () => {
       comments_expected: 4,
       comments_collected: 4,
     });
+  });
+
+  test("bounds expansion waits while returning collected posts and comments", async () => {
+    // Simulate threads that advertise more comments than ever render, forcing
+    // repeated control-free settling until the shared deadline is reached.
+    // The virtual clock measures scheduled waits, not DOM cost.
+    const posts = [
+      "8511111111111111111",
+      "8522222222222222222",
+      "8533333333333333333",
+      "8544444444444444444",
+    ];
+    let clock = 0;
+    const realSetTimeout = globalThis.setTimeout;
+    const realNow = Date.now;
+    let res: any;
+    try {
+      res = await syncHomeFeedDom(
+        posts
+          .map(
+            (activityId, index) => `
+      <div componentkey="expandedslow_thread_${index}FeedType_MAIN_FEED_RELEVANCE">
+        <button aria-label="Open control menu for post by Slow Thread Author ${index}"></button>
+        <span id="translatable-commentary-urn:li:activity:${activityId}"></span>
+        <p>A slow-thread home-feed post with enough useful text to pass the filter</p>
+        <div role="button" class="comment-count">10 comments</div>
+        <div id="replaceableComment_urn:li:comment:(urn:li:activity:${activityId},${activityId.slice(0, -1)}9)"><p>Commenter • The only comment LinkedIn renders</p></div>
+      </div>`
+          )
+          .join(""),
+        () => {
+          Date.now = () => clock;
+          globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+            clock += ms ?? 0;
+            queueMicrotask(fn);
+            return 0;
+          }) as unknown as typeof setTimeout;
+        },
+        undefined,
+        { max: 10, stall: 3, waitMs: 1500 }
+      );
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      Date.now = realNow;
+    }
+
+    // Include the navigation allowance without exercising extension dispatch.
+    // Actual DOM cost and anchor-lock waits need a live-browser check.
+    const extensionNavigationOverheadMs = 23_000;
+    expect(clock + extensionNavigationOverheadMs).toBeLessThanOrEqual(60_000);
+    expect(
+      res.events.filter((event: any) => event.origin_type === "post")
+    ).toHaveLength(posts.length);
+    expect(
+      res.events.filter((event: any) => event.origin_type === "comment")
+    ).toHaveLength(posts.length);
+    expect(res.metadata.comment_threads_timed_out).toBeGreaterThan(0);
   });
 
   test("persists durable posts when advertised comment coverage remains incomplete", async () => {
