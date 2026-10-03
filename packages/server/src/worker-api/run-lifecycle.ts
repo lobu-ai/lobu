@@ -424,6 +424,15 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 }
 
 /**
+ * Byte bound on a connector-supplied origin_id. events indexes origin_id in
+ * btrees ((connection_id, origin_id, created_at), (organization_id,
+ * origin_id), the webhook dedupe key), whose row limit is 2704 bytes; a longer
+ * incompressible key makes the INSERT throw mid-page. 2048 leaves room for the
+ * other key columns and tuple header.
+ */
+export const MAX_ORIGIN_ID_BYTES = 2048;
+
+/**
  * POST /api/workers/stream
  *
  * Worker streams content batch for a sync run.
@@ -554,6 +563,16 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			errors: string[];
 		}> = [];
 		for (const item of batch.items) {
+			const originIdBytes = Buffer.byteLength(item.id, "utf8");
+			if (originIdBytes > MAX_ORIGIN_ID_BYTES) {
+				rejectedItems.push({
+					id: item.id,
+					errors: [
+						`origin_id is ${originIdBytes} bytes, which exceeds ${MAX_ORIGIN_ID_BYTES} bytes; the connector must emit a bounded source id (e.g. a digest of a long URL).`,
+					],
+				});
+				continue;
+			}
 			const itemOriginType = item.origin_type ?? null;
 			const itemSemanticType = item.semantic_type ?? itemOriginType ?? "content";
 			const validationType = itemOriginType ?? itemSemanticType;
@@ -591,8 +610,8 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		// page as consumed, so the rejected items are never offered again
 		// even after the connector is fixed. A failed batch advances nothing;
 		// the run fails loudly with rejected_items on the response, the
-		// author fixes their eventKinds, and the next sync re-collects the
-		// page in full.
+		// author fixes the reported validation errors, and the next sync
+		// re-collects the page in full.
 		if (rejectedItems.length > 0) {
 			// Workers truncate HTTP bodies (Chrome at 200 characters), before the
 			// rejected_items details. Keep the diagnosis where it is still complete;
@@ -627,7 +646,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 				{
 					error: "batch_rejected",
 					error_description:
-						"One or more offered items failed validation; the whole batch was rejected, nothing was ingested and no checkpoint was advanced. Fix the connector's declared eventKinds and re-sync.",
+						"One or more offered items failed validation; the whole batch was rejected, nothing was ingested and no checkpoint was advanced. Fix the reported item validation errors in the connector and re-sync.",
 					rejected_items: rejectedItems,
 				},
 				422
