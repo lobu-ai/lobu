@@ -1952,6 +1952,40 @@ export function validateGuardrailsInline(value: unknown): string | null {
 }
 
 /**
+ * Write-boundary check for `networkConfig` domain lists. Agent network settings
+ * are deliberately looser than connector declarations (an operator may list
+ * hosts a third party could not), so this does NOT apply the strict domain
+ * grammar. It refuses only entries that can never name a host under any
+ * grammar: non-strings, empty or whitespace-only strings, and strings containing
+ * whitespace. They were previously persisted verbatim and then silently matched
+ * nothing.
+ */
+export function validateNetworkConfig(updates: unknown): string | null {
+	const config = (updates as { networkConfig?: unknown } | null)?.networkConfig;
+	if (config === undefined || config === null) return null;
+	if (typeof config !== "object" || Array.isArray(config)) {
+		return "networkConfig must be an object";
+	}
+	for (const key of ["allowedDomains", "deniedDomains"] as const) {
+		const list = (config as Record<string, unknown>)[key];
+		if (list === undefined || list === null) continue;
+		if (!Array.isArray(list)) return `networkConfig.${key} must be an array`;
+		for (const [i, entry] of list.entries()) {
+			if (typeof entry !== "string") {
+				return `networkConfig.${key}/${i} must be a string`;
+			}
+			if (entry.trim() === "") {
+				return `networkConfig.${key}/${i} must not be empty`;
+			}
+			if (/\s/.test(entry)) {
+				return `networkConfig.${key}/${i} must not contain whitespace`;
+			}
+		}
+	}
+	return null;
+}
+
+/**
  * Write-boundary validation for `skillsConfig`, the sibling of
  * {@link validateGuardrailsInline}.
  *
@@ -2054,6 +2088,17 @@ routes.patch("/:agentId/config", async (c) => {
 	if (guardrailError) {
 		return c.json(
 			{ error: "invalid_guardrail", error_description: guardrailError },
+			400
+		);
+	}
+
+	const networkConfigError = validateNetworkConfig(updates);
+	if (networkConfigError) {
+		return c.json(
+			{
+				error: "invalid_network_config",
+				error_description: networkConfigError,
+			},
 			400
 		);
 	}
