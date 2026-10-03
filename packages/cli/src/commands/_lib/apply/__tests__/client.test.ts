@@ -331,6 +331,34 @@ describe("ApplyClient — prune", () => {
     expect(types[0]?.backing).toEqual({ sql: "SELECT 1 AS x" });
   });
 
+  test("listEntityTypes hoists a source-backed identity into backing", async () => {
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async () =>
+        new Response(
+          JSON.stringify({
+            entity_types: [
+              {
+                slug: "person",
+                metadata_schema: { type: "object", properties: {} },
+                backing_sql: "SELECT 'p-1' AS slug",
+                backing_source: "warehouse",
+                backing_identity: "example_person_id",
+              },
+            ],
+          }),
+          { status: 200 }
+        )) as typeof fetch
+    );
+
+    const types = await client.listEntityTypes();
+    expect(types[0]?.backing).toEqual({
+      sql: "SELECT 'p-1' AS slug",
+      connection: "warehouse",
+      identity: "example_person_id",
+    });
+  });
+
   test("upsertEntityType sends backing:null only when the diff flagged the revert", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new ApplyClient(
