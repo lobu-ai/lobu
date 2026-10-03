@@ -2578,7 +2578,7 @@ export async function verifyLinkedInStagedComment(
     current_url?: string;
   }>("navigate", {
     url: postUrl,
-    open_in_new_tab: true,
+    new_tab: true,
     wait_for_load: true,
     ...chromeOriginsInput(),
   });

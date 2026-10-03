@@ -437,7 +437,7 @@ describe("page-activated operation runs", () => {
 			actionInput: {
 				url: "https://x.com/ada/status/123",
 				require_page_activation: true,
-				open_in_new_tab: true,
+				new_tab: true,
 			},
 		});
 		expect(result).toEqual({

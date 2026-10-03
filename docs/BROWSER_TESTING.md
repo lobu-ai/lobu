@@ -68,7 +68,7 @@ export default async (ctx, client) => {
   // 1. Open the app origin in a fresh background tab.
   const nav = await client.operations.execute({
     connection_id: CHROME, operation_key: "navigate",
-    input: { url: "https://app.lobu.ai/", open_in_new_tab: true, wait_for_load: true },
+    input: { url: "https://app.lobu.ai/", new_tab: true, wait_for_load: true },
   });
   const tab = nav.output.tab_id;
   // 2. Plant the signed session cookie.
@@ -130,10 +130,10 @@ For one-off actions, `lobu call manage_operations` is quicker:
 ```bash
 lobu call manage_operations --org <org-slug> --arg action=execute \
   --arg connection_id=<chrome-connection-id> --arg operation_key=navigate \
-  --arg input:='{"url":"https://app.lobu.ai/<path>","wait_for_load":true,"open_in_new_tab":true}' --raw
+  --arg input:='{"url":"https://app.lobu.ai/<path>","wait_for_load":true,"new_tab":true}' --raw
 ```
 
-Chrome ops: `navigate` (new tab, existing `tab_id`, or `persistent` agent window), `evaluate`, `get_accessibility_tree` (`filter: interactive|visible|all`), `wait_for_selector`, `click_ref`, `type_ref`, `screenshot`, `show_notification`, `network_intercept_*`, `close_tab`.
+Chrome ops: `navigate` (reuses an agent tab on the same site, `new_tab`, an existing `tab_id`, or the site's `persistent` warm tab; optional `group`), `list_tabs`, `evaluate`, `get_accessibility_tree` (`filter: interactive|visible|all`), `wait_for_selector`, `click_ref`, `type_ref`, `screenshot`, `show_notification`, `network_intercept_*`, `close_tab`.
 
 ## Driving the paired Owletto extension (connector debugging)
 

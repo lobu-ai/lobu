@@ -680,11 +680,12 @@ jobs:
 
       - name: Chrome extension smoke (real Chromium, --load-extension)
         # Loads apps/chrome into headed Chromium against a loopback gateway
-        # fixture: action dispatch, flow isolation, worker eviction/recovery, and
-        # tab-presence reaping. Alongside gateway integration, this exercises
-        # the extension in a real browser and catches cases that the unit
-        # suites cannot simulate. Xvfb + Openbox
-        # give Chromium real window focus, so no reaper branch is skipped.
+        # fixture: action dispatch, tab labels and reuse, user-tab grants,
+        # groups, page activation, warm-tab adoption after a restart, and
+        # worker eviction/recovery. Alongside gateway integration, this
+        # exercises the extension in a real browser and catches cases that the
+        # unit suites cannot simulate. Xvfb + Openbox give Chromium real
+        # window focus.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
         run: |
           xvfb-run -a sh -eu -c '
