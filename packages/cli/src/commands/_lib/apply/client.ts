@@ -349,7 +349,6 @@ function hoistEntityTypeSchema(
     event_kinds?: unknown;
     backing_sql?: string | null;
     backing_source?: string | null;
-    backing_identity?: string | null;
     metrics_config?: unknown;
     rules_source?: string | null;
   }
@@ -388,9 +387,6 @@ function hoistEntityTypeSchema(
       sql: row.backing_sql,
       ...(typeof row.backing_source === "string" && row.backing_source
         ? { connection: row.backing_source }
-        : {}),
-      ...(typeof row.backing_identity === "string" && row.backing_identity
-        ? { identity: row.backing_identity }
         : {}),
     };
   }
@@ -954,7 +950,6 @@ export class ApplyClient {
         ? {
             sql: backing.sql,
             ...(backing.connection ? { connection: backing.connection } : {}),
-            ...(backing.identity ? { identity: backing.identity } : {}),
           }
         : null;
     }

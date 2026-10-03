@@ -164,6 +164,38 @@ test("read-only preconditions reject attempted writes without scaling", async (t
   );
 });
 
+test("source-backed identity prerequisite handles fresh installs and rejects live stored rows", async (t) => {
+  const f = await fixture(t);
+  const prerequisite = readFileSync(
+    join(
+      root,
+      "db/migrations/preconditions/20261003200000_drop_source_backed_entity_identity.sql"
+    ),
+    "utf8"
+  );
+  const check = () => f.sql.begin("read only", (tx) => tx.unsafe(prerequisite));
+
+  await check();
+  await f.sql.unsafe(`
+    CREATE TABLE entity_types (id bigint PRIMARY KEY);
+    CREATE TABLE entities (entity_type_id bigint, deleted_at timestamptz);
+  `);
+  await check();
+  await f.sql.unsafe(`
+    ALTER TABLE entity_types ADD COLUMN backing_sql text;
+    INSERT INTO entity_types VALUES (1, 'SELECT 1 AS id'), (2, NULL);
+    INSERT INTO entities VALUES (1, now()), (2, NULL);
+  `);
+  await check();
+  await f.sql`INSERT INTO entities VALUES (1, NULL)`;
+  await assert.rejects(check(), {
+    code: "P0001",
+    message:
+      "stored entities exist on source-backed entity types; delete them before deploying",
+  });
+  assert.equal((await f.sql`SELECT * FROM entities`).length, 3);
+});
+
 test("a broken precondition still blocks a no-quiesce migration", async (t) => {
   const f = await contractFixture(t);
   writeFileSync(

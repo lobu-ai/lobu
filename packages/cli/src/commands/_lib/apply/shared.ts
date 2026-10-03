@@ -17,7 +17,6 @@
 export interface EntityBacking {
   sql: string;
   connection?: string;
-  identity?: string;
 }
 
 /** One relationship-type rule (source/target entity-type slugs). */

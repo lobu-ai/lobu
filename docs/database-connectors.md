@@ -32,17 +32,6 @@ gateway never opens an external pool.
 - **Derived entity** — `defineEntityType({ backing: { sql, connection? } })`. With
   `connection`, the read is `get_type → query_sql({ sql: backing_sql, connection })`
   → pushdown. Without, it's the shipped internal view over `events`/`entities`.
-- **Source-backed identity** — add `backing.identity: '<namespace>'` (requires
-  `connection`) when the view's slug/id is a source canonical key carried in
-  that identity namespace. A feed attribution with `autoCreate` that targets the
-  type then stores only an identity row (slug = source key, name) instead of
-  skipping it, so Activity, Relationships, views and permissions work on the
-  record. Attributes are never copied: the record page reads them live by exact
-  key, and identity rows cannot be edited. Unreferenced source rows stay
-  unstored and resolve live as before.
-  Limits: entity slugs are unique per org and parent across types, so two
-  source-backed types in one org need disjoint keys; and a soft-deleted
-  identity row keeps its slug, so that key is not re-created.
 
 Single-database only: every query targets one database; no cross-source joins
 (that's a later DuckDB-class engine).

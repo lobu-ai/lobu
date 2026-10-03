@@ -515,9 +515,6 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
             ...(entity.backing.connection
               ? { connection: entity.backing.connection }
               : {}),
-            ...(entity.backing.identity
-              ? { identity: entity.backing.identity }
-              : {}),
           },
         }
       : {}),

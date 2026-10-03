@@ -116,9 +116,9 @@ export const ResolvedEntityDetailsSchema = Type.Intersect([
     total_content: Type.Integer(),
     active_connections: Type.Integer(),
     automations_count: Type.Integer(),
-    // Read-only fields from `backing_sql`, filtered to this slug. `id` is the
-    // stored identity id when present, otherwise 0. `metadata` holds the live
-    // view row; `measure_columns` are its aggregate columns.
+    // Derived ("view") entity: synthesized from the type's `backing_sql` filtered
+    // to this slug, not a stored `entities` row. `metadata` holds the full view
+    // row; `measure_columns` are its aggregate columns. Stored entities omit both.
     is_derived: Type.Optional(Type.Boolean()),
     measure_columns: Type.Optional(Type.Array(Type.String())),
     /** Tombstoned source rows currently forwarded to this canonical entity. */
@@ -537,8 +537,7 @@ async function _resolvePath(
           e.created_at,
           NULL as json_template,
           NULL as json_template_version,
-          et.metadata_schema as entity_type_metadata_schema,
-          et.backing_sql IS NOT NULL AS source_backed
+          et.metadata_schema as entity_type_metadata_schema
         FROM entities e
         JOIN entity_types et ON et.id = e.entity_type_id
         LEFT JOIN organization eo ON eo.id = e.organization_id
@@ -590,7 +589,6 @@ async function _resolvePath(
       json_template: Record<string, any> | null;
       json_template_version: number | null;
       entity_type_metadata_schema: Record<string, any> | null;
-      source_backed: boolean;
     };
     resolvedPath.push({
       id: entityRow.id,
@@ -690,21 +688,6 @@ async function _resolvePath(
       active_connections: Number(connectionsCount?.cnt) || 0,
       automations_count: Number(automationsCount?.cnt) || 0,
     };
-    if (entityRow.source_backed) {
-      // A stored identity row of a source-backed type: the row carries identity
-      // only, so attributes are read live from the source by the same exact
-      // lookup an unstored source record uses. A source key that no longer
-      // resolves keeps its identity (events still point at it) with no fields.
-      const live = await resolveDerivedLeaf(sql, workspaceCtx, workspace, segment);
-      resolvedEntity = {
-        ...resolvedEntity,
-        name: live?.name ?? resolvedEntity.name,
-        metadata: live?.metadata ?? {},
-        field_controls: {},
-        is_derived: true,
-        measure_columns: live?.measure_columns ?? [],
-      };
-    }
   }
 
   let children: ChildEntity[] = [];
