@@ -361,8 +361,9 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
         }
         const tickIso = row.next_run_at;
         const idempotencyKey = `scheduled_job:${row.id}:${tickIso}`;
+        let spawnedRunId: number | null = null;
         try {
-          await scheduler.spawn(row.action_type, {
+          const spawnedId = await scheduler.spawn(row.action_type, {
             ...row.action_args,
             __scheduled_job_id: row.id,
             __delivery_context: row.delivery_context,
@@ -371,6 +372,9 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
             __created_by_user: row.created_by_user,
             __created_by_agent: row.created_by_agent,
           }, { idempotencyKey });
+          // Record the enqueued run so last_fired_run_id points at the task run
+          // (a deduped spawn returns no id; keep the previous value then).
+          spawnedRunId = /^\d+$/.test(String(spawnedId ?? '')) ? Number(spawnedId) : null;
         } catch (err) {
           logger.warn(
             { scheduled_job_id: row.id, err: errorMessage(err) },
@@ -404,7 +408,8 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
         if (withinBound) {
           await sql`
             UPDATE scheduled_jobs
-            SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
+            SET last_fired_at = now(), last_fired_run_id = COALESCE(${spawnedRunId}::bigint, last_fired_run_id),
+                next_run_at = ${nextAt}, updated_at = now()
             WHERE id = ${row.id} AND next_run_at <= now()
           `;
         } else {
@@ -412,7 +417,8 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
           // paused so the index ignores it. Re-pausing is idempotent.
           await sql`
             UPDATE scheduled_jobs
-            SET last_fired_at = now(), paused = true, updated_at = now()
+            SET last_fired_at = now(), last_fired_run_id = COALESCE(${spawnedRunId}::bigint, last_fired_run_id),
+                paused = true, updated_at = now()
             WHERE id = ${row.id} AND next_run_at <= now()
           `;
         }
