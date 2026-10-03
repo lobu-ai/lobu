@@ -910,7 +910,11 @@ export class ApplyClient {
       //     unrelated field never silently clears the server's schema.
       // When the config declares a partial properties object and prune is off,
       // merge remote-only keys so UI-authored properties survive.
-      const pruneClearProperties = clearFacets?.has("properties");
+      // A clear only applies when the config omits the facet. A plain diff
+      // (`lobu rollback` has no baseline) names a CHANGED properties field
+      // "properties", which is not a removal: declared properties always win.
+      const pruneClearProperties =
+        clearFacets?.has("properties") && properties === undefined;
       const pruneClearRequired = clearFacets?.has("required");
       const effectiveProperties = (() => {
         if (pruneClearProperties) return {};

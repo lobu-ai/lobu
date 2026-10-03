@@ -19,7 +19,8 @@ import {
   normalizeConnectionConfigScope,
   validateConnectionAgainstConnector,
 } from "../desired-state.js";
-import type { DiffPlan, RemoteSnapshot } from "../diff.js";
+import { ApplyClient } from "../client.js";
+import { computeDiff, type DiffPlan, type RemoteSnapshot } from "../diff.js";
 
 // Minimal DesiredState with just the connectors slice populated.
 function stateWith(connectors: DesiredState["connectors"]): DesiredState {
@@ -1707,5 +1708,57 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
     expect(Object.keys(payload)).toEqual(["name"]);
     // A name change must not clear settings owned by the connection UI.
     expect("config" in payload).toBe(false);
+  });
+});
+
+describe("executePlan — entity-type properties on a no-baseline diff (rollback path)", () => {
+  test("a changed properties object is written as declared, never cleared", async () => {
+    // `lobu rollback` diffs the snapshot with NO baseline, so changedFields
+    // carries the plain field name "properties". That name must not be read as
+    // a prune-clear: the snapshot's declared properties are the schema.
+    const declared = {
+      name: { type: "string" },
+      note: { type: "string" },
+    };
+    const state = stateWith({ definitions: [], authProfiles: [], connections: [] });
+    state.memorySchema.entityTypes = [
+      { slug: "qa-item", name: "QA Item", properties: declared } as any,
+    ];
+    const remote: RemoteSnapshot = {
+      agents: [],
+      agentSettings: new Map(),
+      entityTypes: [
+        {
+          slug: "qa-item",
+          name: "QA Item",
+          organization_id: "org_acme",
+          properties: {},
+        } as any,
+      ],
+      relationshipTypes: [],
+      automations: [],
+      connectorDefinitions: [],
+      authProfiles: [],
+      connections: [],
+      feedsByConnectionId: new Map(),
+      inferenceProviders: [],
+    };
+    const plan = computeDiff(state, remote, {});
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("update");
+
+    const bodies: any[] = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (_url: unknown, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch
+    );
+
+    await executePlan({ client, state, plan, remote }, []);
+
+    const write = bodies.find((b) => b.slug === "qa-item");
+    expect(write?.metadata_schema?.properties).toEqual(declared);
   });
 });
