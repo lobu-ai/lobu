@@ -330,3 +330,30 @@ describe("authoring producers", () => {
     );
   });
 });
+
+describe("defineEntityType shape validation", () => {
+  test("rejects an empty key", () => {
+    expect(() => defineEntityType({ key: "" })).toThrow(
+      /'key' must be a non-empty string/
+    );
+  });
+
+  test("rejects a non-string name", () => {
+    expect(() =>
+      defineEntityType({ key: "qa-item", name: 5 as unknown as string })
+    ).toThrow(/'name' must be a string/);
+  });
+
+  test("rejects a non-array required", () => {
+    expect(() =>
+      defineEntityType({ key: "qa-item", required: "x" as unknown as string[] })
+    ).toThrow(/'required' must be an array/);
+  });
+
+  test("accepts a well-formed entity type", () => {
+    expect(
+      defineEntityType({ key: "qa-item", name: "QA Item", required: ["name"] })
+        .key
+    ).toBe("qa-item");
+  });
+});
