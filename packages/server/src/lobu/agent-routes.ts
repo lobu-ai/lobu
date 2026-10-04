@@ -2179,23 +2179,25 @@ routes.patch("/:agentId/config", async (c) => {
 		} | null)?.guardrailsInline;
 		if (Array.isArray(storedInline)) {
 			for (const g of storedInline) {
-				if (g?.name && typeof g.model === "string") {
-					storedModels.set(g.name, g.model.trim());
-				}
+				if (g?.name) storedModels.set(g.name, (g.model ?? "").trim());
 			}
 		}
 
 		for (const g of inline) {
 			if (g?.kind === "require-tool") continue;
-			const model = g?.model?.trim();
+			const ownModel = g?.model?.trim();
+			// A model-less guardrail runs on the org default, so that default must
+			// be runnable by the judge too (a deployment system key, OpenAI-compatible
+			// protocol). Otherwise it would save and then deny every covered request.
+			const model = ownModel || judgeDefault;
 			if (!model) continue;
-			if (g?.name && storedModels.get(g.name) === model) continue;
+			if (g?.name && storedModels.get(g.name) === (ownModel ?? "")) continue;
 			const resolved = await resolveSystemJudgeTarget(model);
 			if (!resolved.ok) {
 				return c.json(
 					{
 						error: "guardrail_model_unresolvable",
-						error_description: `Custom guardrail "${g?.name ?? "(unnamed)"}" names judge model "${model}", which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
+						error_description: `Custom guardrail "${g?.name ?? "(unnamed)"}" ${ownModel ? `names judge model "${model}"` : `has no model, so it uses this organization's default model "${model}"`}, which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
 					},
 					400
 				);

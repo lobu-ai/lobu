@@ -18,6 +18,7 @@ import {
   beforeEach,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
 import {
@@ -376,6 +377,32 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
         }),
       });
       expect(changed.status).toBe(400);
+    });
+
+    test('rejects a model-less guardrail when the org default model cannot run the judge', async () => {
+      // A model-less guardrail runs on the org default. A Claude (Anthropic
+      // protocol) default is not judge-eligible, so saving it would only deny
+      // every covered request at runtime.
+      const providerSecrets = await import('../stores/provider-secrets.js');
+      const spy = spyOn(providerSecrets, 'getOrgDefaultModel').mockResolvedValue(
+        'claude/claude-haiku-4-5-20251001'
+      );
+      try {
+        const app = await importAgentRoutes();
+        const res = await app.request(`/${AGENT}/config`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            guardrailsInline: [
+              { name: 'no-model', enabled: true, stage: 'output', policy: 'deny' },
+            ],
+          }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe('guardrail_model_unresolvable');
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('accepts a judge model backed by an operator system key', async () => {
