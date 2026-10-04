@@ -6,7 +6,7 @@
 
 import type { ContentItem } from '@lobu/connector-sdk';
 import { parseJsonObject } from '@lobu/core';
-import { type DbClient, parsePgNumberArray, pgBigintArray, pgTextArray } from '../../db/client';
+import { type DbClient, parsePgNumberArray, parsePgTextArray, pgBigintArray, pgTextArray } from '../../db/client';
 import {
   type ArtifactStore,
   eventArtifactBinding,
@@ -390,16 +390,32 @@ export async function buildContentItems(opts: {
   // is left untouched. Resolution rides the cached event_kinds registry, so the
   // per-event lookups are cheap and bounded to the metadata-only minority. Kind
   // notifications keep routing metadata separate and bind their payload_data.
+  const needsKind = (item: ContentItem) =>
+    organizationId !== null && !item.payload_template && item.payload_type === 'empty';
+  // Kinds may also come from the types of remote records the event points at
+  // (`entity_refs`). The list queries do not project refs, so read them for the
+  // metadata-only minority in one bounded lookup.
+  const refCandidates = contentItems.filter(needsKind).map((item) => Number(item.id));
+  const refsById = new Map<number, string[]>();
+  if (refCandidates.length > 0) {
+    const refRows = await sql<{ id: number; entity_refs: string | string[] | null }>`
+      SELECT id, entity_refs FROM events
+      WHERE id = ANY(${pgBigintArray(refCandidates)}::bigint[])
+        AND entity_refs IS NOT NULL
+    `;
+    for (const row of refRows) refsById.set(Number(row.id), parsePgTextArray(row.entity_refs));
+  }
   await Promise.all(
     contentItems.map(async (item) => {
-      if (organizationId === null || item.payload_template || item.payload_type !== 'empty') return;
+      if (!needsKind(item)) return;
       const isNotification = typeof item.metadata?.notification_type === 'string';
       const renderData = isNotification ? (item.payload_data ?? {}) : item.metadata;
       if (!isNotification && (!renderData || Object.keys(renderData).length === 0)) return;
       const kind = await resolveEventKindDefinition(
         item.semantic_type,
-        organizationId,
-        item.entity_ids
+        organizationId as string,
+        item.entity_ids,
+        refsById.get(Number(item.id))
       );
       if (!kind) return;
       const root = resolveEntityRender(kind.jsonTemplate, kind.metadataSchema);

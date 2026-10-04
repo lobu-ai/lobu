@@ -196,6 +196,37 @@ describe('remote-native records', () => {
     expect(row.entity_refs).toBe('{account:k:3}');
   });
 
+  it("renders a metadata-only Lobu event from its remote type's kind", async () => {
+    const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
+    await api.entity_schema.updateType({
+      slug: 'contact',
+      event_kinds: {
+        'contact-score': {
+          description: 'A synthetic score',
+          metadataSchema: { type: 'object', properties: { score: { type: 'number' } } },
+        },
+      },
+    });
+    const saved = await saveContent(
+      {
+        semantic_type: 'contact-score',
+        payload_type: 'empty',
+        metadata: { score: 7 },
+        entity_refs: ['contact:c-1'],
+        occurred_at: '2026-01-04T00:00:00.000Z',
+      },
+      env,
+      ctx()
+    );
+    const activity = await getContent({ entity: 'contact:c-1' }, env, ctx());
+    const fromActivity = (activity.content as Array<Record<string, unknown>>).find((i) => i.id === saved.id);
+    const exact = await getContent({ content_ids: [saved.id] }, env, ctx());
+    for (const item of [fromActivity, exact.content[0] as Record<string, unknown>]) {
+      expect(item).toMatchObject({ payload_type: 'json_template', payload_data: { score: 7 } });
+      expect(item?.payload_template).toBeTruthy();
+    }
+  });
+
   it('rejects a cursor replayed against another ref', async () => {
     const page = await getContent({ entity: 'account:k:1', limit: 2 }, env, ctx());
     expect(page.next_cursor).toBeTruthy();
