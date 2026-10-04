@@ -189,7 +189,14 @@ export abstract class JudgeRunner<TResult> {
     if (own) return own;
     if (!input.orgId) return undefined;
     try {
-      return (await this.resolveOrgDefaultModel(input.orgId)) ?? undefined;
+      // Inside the judge's own time budget: a stalled lookup must fail closed,
+      // not hang the request.
+      return (
+        (await withTimeout(
+          this.resolveOrgDefaultModel(input.orgId),
+          this.judgeTimeoutMs
+        )) ?? undefined
+      );
     } catch (err) {
       this.logger.error("org default judge model lookup failed", {
         orgId: input.orgId,

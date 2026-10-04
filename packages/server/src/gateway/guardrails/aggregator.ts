@@ -22,6 +22,11 @@ interface AgentGuardrailExtras {
    */
   inline?: AgentInlineGuardrail[];
   /**
+   * Authenticated org of the caller. Judge guardrails with no model of their
+   * own run on this org's default provider model; absent = they fail closed.
+   */
+  organizationId?: string;
+  /**
    * Operator's exclude list — names matched against the resolved guardrails'
    * `.name` (including synthesized inline names). Applied last.
    */
@@ -158,6 +163,7 @@ export function resolveAgentGuardrails(
       name: entry.name,
       model: entry.model,
       tools: entry.tools,
+      orgId: extras.organizationId,
     });
     if (!seen[entry.stage].has(g.name)) {
       seen[entry.stage].set(g.name, g);

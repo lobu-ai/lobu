@@ -4,7 +4,6 @@ import type {
   GuardrailStage,
   PreToolGuardrailContext,
 } from "@lobu/core";
-import { getDb } from "../../db/client.js";
 import { TextJudge } from "../proxy/egress-judge/text-judge.js";
 import { extractStageText } from "./stage-text.js";
 
@@ -19,19 +18,6 @@ function getSharedJudge(): TextJudge {
   return sharedJudge;
 }
 
-
-/**
- * The guardrail contexts carry the agent id but not the org id (changing that
- * would change the public `@lobu/core` context types), so the org whose default
- * judge model applies is read from `agents` by primary key. A failed lookup
- * means "no org": a guardrail with no model of its own then fails closed.
- */
-async function orgIdForAgent(agentId: string): Promise<string | null> {
-  const rows = (await getDb()`
-    SELECT organization_id FROM agents WHERE id = ${agentId} LIMIT 1
-  `) as Array<{ organization_id?: string }>;
-  return rows[0]?.organization_id ?? null;
-}
 
 /**
  * Short stable id for an inline judge — first 8 chars of
@@ -69,8 +55,12 @@ interface JudgeGuardrailOptions {
   name?: string;
   /** Override the shared TextJudge — primarily for tests. */
   judge?: TextJudge;
-  /** Override the agent-to-org lookup — primarily for tests. */
-  resolveOrgId?: (agentId: string) => Promise<string | null>;
+  /**
+   * Organization whose default provider model applies when `model` is unset.
+   * Callers pass the org they already authenticated; agent ids are only unique
+   * per org, so it is never derived from the agent id. Unset = fail closed.
+   */
+  orgId?: string;
   /** Optional judge model override (per-call). */
   model?: string;
   /**
@@ -124,19 +114,9 @@ export function createJudgeGuardrail<S extends GuardrailStage>(
         includeToolName: true,
         throwOnUnknown: true,
       });
-      let orgId: string | undefined;
-      if (!options.model?.trim()) {
-        try {
-          orgId =
-            (await (options.resolveOrgId ?? orgIdForAgent)(ctx.agentId)) ??
-            undefined;
-        } catch {
-          orgId = undefined;
-        }
-      }
       const verdict = await judge.decide(policy, text, {
         model: options.model,
-        orgId,
+        orgId: options.orgId,
       });
       if (verdict.allow) {
         return { tripped: false };

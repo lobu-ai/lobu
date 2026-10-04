@@ -163,6 +163,23 @@ describe("EgressJudge.decide", () => {
 });
 
 describe("EgressJudge org default model", () => {
+  test("a resolver that never settles fails closed within the judge timeout", async () => {
+    const client = new StubClient(async () => ({ verdict: "allow", reason: "ok" }));
+    const judge = new EgressJudge({
+      client,
+      judgeTimeoutMs: 20,
+      resolveOrgDefaultModel: () => new Promise<string | null>(() => {}),
+    });
+    const t0 = Date.now();
+    const d = await judge.decide(
+      { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" },
+      rule()
+    );
+    expect(d.verdict).toBe("deny");
+    expect(client.calls).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
   const req = { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" };
   const ok = async (): Promise<JudgeVerdict> => ({ verdict: "allow", reason: "ok" });
 

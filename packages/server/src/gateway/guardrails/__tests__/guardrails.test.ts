@@ -446,7 +446,7 @@ describe("createJudgeGuardrail", () => {
       reason: "competitor mention",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("output", "no competitors", { judge, resolveOrgId: async () => "org-a" });
+    const g = createJudgeGuardrail("output", "no competitors", { judge, orgId: "org-a" });
     const r = await g.run({
       agentId: "a",
       userId: "u",
@@ -464,7 +464,7 @@ describe("createJudgeGuardrail", () => {
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
     const g = createJudgeGuardrail("pre-tool", "no destructive ops", {
-      resolveOrgId: async () => "org-a", judge,
+      orgId: "org-a", judge,
       tools: ["github.delete_repo"],
     });
     // Tool not in list -> noop, judge never called.
@@ -493,7 +493,7 @@ describe("createJudgeGuardrail", () => {
       reason: "",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge, resolveOrgId: async () => "org-a" });
+    const g = createJudgeGuardrail("pre-tool", "policy", { judge, orgId: "org-a" });
     const r = await g.run({
       agentId: "a",
       userId: "u",
@@ -512,7 +512,7 @@ describe("createJudgeGuardrail", () => {
       reason: "",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge, resolveOrgId: async () => "org-a" });
+    const g = createJudgeGuardrail("pre-tool", "policy", { judge, orgId: "org-a" });
     const node: { name: string; self?: unknown } = { name: "root" };
     node.self = node;
     const r = await g.run({
@@ -742,5 +742,35 @@ describe("secret-scan builtin", () => {
   test("does not flag ordinary prose", async () => {
     const res = await run("the quick brown fox jumps over the lazy dog");
     expect(res.tripped).toBe(false);
+  });
+});
+
+describe("createJudgeGuardrail org scoping", () => {
+  const defaults: Record<string, string> = { "org-a": "acme/model-a", "org-b": "acme/model-b" };
+  function build(orgId: string | undefined) {
+    const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "" }));
+    const judge = new TextJudge({
+      client: fake,
+      resolveOrgDefaultModel: async (o) => defaults[o] ?? null,
+    });
+    const g = createJudgeGuardrail("output", "policy", { judge, orgId });
+    return { fake, g };
+  }
+  const ctx = { agentId: "shared-agent", userId: "u", platform: "x", text: "hello" } as never;
+
+  test("two orgs sharing an agent id each use their own default model", async () => {
+    const a = build("org-a");
+    const b = build("org-b");
+    await a.g.run(ctx);
+    await b.g.run(ctx);
+    expect(a.fake.calls[0]?.model).toBe("acme/model-a");
+    expect(b.fake.calls[0]?.model).toBe("acme/model-b");
+  });
+
+  test("no org in hand fails closed without calling the judge", async () => {
+    const { fake, g } = build(undefined);
+    const r = await g.run(ctx);
+    expect(r.tripped).toBe(true);
+    expect(fake.calls.length).toBe(0);
   });
 });
