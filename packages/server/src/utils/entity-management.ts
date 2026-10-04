@@ -57,6 +57,7 @@ import {
 	lockOrgForAclInvalidation,
 } from "../authz/acl-generation";
 import { withAclPrivilege } from "./relationship-validation";
+import { getRecordProvider, loadOwnEntityType } from "../entities/providers";
 
 /** Minimal type shape needed to count stored vs derived entity rows. */
 export type EntityTypeCountInput = {
@@ -2202,20 +2203,13 @@ export async function listEntities(
 	// from `backing_sql`. Return them in the standard list shape so the frontend
 	// renders them with the normal table (no derived-specific UI path).
 	if (filters.entity_type) {
-		const etRows = await sql`
-      SELECT backing_sql, backing_source
-      FROM entity_types
-      WHERE slug = ${filters.entity_type}
-        AND organization_id = ${ctx.organizationId}
-        AND deleted_at IS NULL
-      LIMIT 1
-    `;
-		const backingSql = etRows[0]?.backing_sql as string | null | undefined;
-		if (backingSql) {
+		const type = await loadOwnEntityType(ctx.organizationId, filters.entity_type, sql);
+		const provider = type ? getRecordProvider(type) : null;
+		if (provider?.kind === "remote") {
 			return listDerivedEntities(
 				filters.entity_type,
-				backingSql,
-				(etRows[0]?.backing_source as string | null | undefined) ?? undefined,
+				provider.type.backing_sql as string,
+				provider.type.backing_source ?? undefined,
 				{ limit, offset, search: filters.search },
 				ctx,
 			);

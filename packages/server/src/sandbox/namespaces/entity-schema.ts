@@ -31,7 +31,11 @@ type EntityTypeFields =
 	| "backing"
 	| "metrics_config"
 	| "rules_source";
-type RelationshipTypeFields = TypeFields | "inverse_type_slug" | "status";
+type RelationshipTypeFields =
+	| TypeFields
+	| "inverse_type_slug"
+	| "status"
+	| "backing";
 
 export interface EntitySchemaNamespace {
 	manage(input: Record<string, unknown>): Promise<unknown>;

@@ -47,7 +47,7 @@ interface ListPageResult {
  * Build the common SELECT columns, JOINs, and classification subquery
  * used by both the content_ids and include_superseded query branches.
  */
-function buildContentQuery(opts: {
+export function buildContentQuery(opts: {
   table: string;
   alias: string;
   /** Extra JOIN clause(s) spliced in before the fixed connection/oauth joins. */

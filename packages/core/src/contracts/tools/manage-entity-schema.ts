@@ -18,8 +18,24 @@ export const BackingInputSchema = Type.Object(
           "Optional connection slug. When set, the view runs LIVE against that connection’s external database (read-only, no copy) instead of internal tables. Stored verbatim; resolved to the connection at read time.",
       })
     ),
+    activity: Type.Optional(
+      Type.Object(
+        {
+          sql: Type.String({
+            minLength: 1,
+            description:
+              "SELECT over the same connection projecting `key` (the record key a row belongs to), `origin_id`, `occurred_at`, `title` and `sort_key` (a string giving a total order, newest greatest, e.g. ISO time plus origin_id). Optional: `url`, `kind`, `summary`, `actor`; other columns are returned as metadata.",
+          }),
+        },
+        { additionalProperties: false }
+      )
+    ),
   },
-  { additionalProperties: false }
+  {
+    additionalProperties: false,
+    description:
+      "Entity types: `{ sql, connection?, activity? }`; `activity` requires `connection`. Relationship types: `{ sql, connection }` (both required), where `sql` projects `from_key` and `to_key`, optional `from_name`/`to_name`, and other columns as edge attributes.",
+  }
 );
 
 export const ManageEntitySchemaSchema = Type.Object({
@@ -134,7 +150,7 @@ export const ManageEntitySchemaSchema = Type.Object({
   backing: Type.Optional(
     Type.Union([Type.Null(), BackingInputSchema], {
       description:
-        "[entity_type: create/update] Makes the type DERIVED — a read-only SQL view. `{ sql }` runs over your org's internal tables; `{ sql, connection: <slug> }` runs LIVE against that connection's external database (read-only, no copy). `null` clears it (revert to a stored type); omit to leave unchanged. Read a derived type's rows by running its `backing_sql` (returned by `get`) through `query_sql` — and when `get` also returns a `backing_source`, pass it as `query_sql`'s `connection` so the view runs against the external DB instead of your internal tables. `get` also returns `measure_columns` (the view's aggregate columns, classified on read).",
+        "[entity_type/relationship_type: create/update] Relationship type: `{ sql, connection }` reads its edges LIVE from that connection (projecting `from_key`, `to_key`; never stored), `null` clears it. Entity type: makes the type DERIVED — a read-only SQL view. `{ sql }` runs over your org's internal tables; `{ sql, connection: <slug> }` runs LIVE against that connection's external database (read-only, no copy). `null` clears it (revert to a stored type); omit to leave unchanged. Read a derived type's rows by running its `backing_sql` (returned by `get`) through `query_sql` — and when `get` also returns a `backing_source`, pass it as `query_sql`'s `connection` so the view runs against the external DB instead of your internal tables. `get` also returns `measure_columns` (the view's aggregate columns, classified on read). A connection-backed type may add `activity: { sql }`, the record's live activity read by exact `key`.",
     })
   ),
   metrics_config: Type.Optional(
@@ -231,6 +247,8 @@ export const EntityTypeRowSchema = Type.Object({
   backing_sql: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   /** Connection slug an external-backed derived view runs against; null ⇒ internal. */
   backing_source: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  /** Activity SQL of a connection-backed type, read by exact `key`; null ⇒ no activity. */
+  backing_activity_sql: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   /** Declared metric contract (eventSets/measures/dimensions/segments), stored verbatim; null ⇒ none. */
   metrics_config: Type.Optional(
     Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()])
@@ -299,6 +317,10 @@ export const RelationshipTypeRowSchema = Type.Object({
   is_symmetric: Type.Boolean(),
   inverse_type_id: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
   inverse_type_slug: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  /** Edge SQL of a connection-backed relationship type; null ⇒ stored edges. */
+  backing_sql: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  /** Connection slug the edge SQL runs against; set together with backing_sql. */
+  backing_source: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   status: Type.String(),
   created_at: Type.String(),
   updated_at: Type.String(),

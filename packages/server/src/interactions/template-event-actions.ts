@@ -5,7 +5,7 @@ import {
 	type TemplateInteractionDefinition,
 	type TemplateInteractionRegistry,
 } from "@lobu/core/json-template";
-import { getDb, parsePgNumberArray } from "../db/client";
+import { getDb, parsePgNumberArray, parsePgTextArray } from "../db/client";
 import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 import { resolveEntityRender } from "../utils/default-entity-template";
 import { ToolUserError } from "../utils/errors";
@@ -391,11 +391,12 @@ async function appendTemplateEventAction(
 		origin_id: string;
 		title: string | null;
 		entity_ids: Array<number | string> | null;
+		entity_refs: string | string[] | null;
 		semantic_type: string;
 		payload_data: unknown;
 		metadata: unknown;
 	}>`
-    SELECT id, origin_id, title, entity_ids, semantic_type, payload_data, metadata
+    SELECT id, origin_id, title, entity_ids, entity_refs, semantic_type, payload_data, metadata
     FROM events
     WHERE id = ${params.sourceEventId}
       AND organization_id = ${params.organizationId}
@@ -458,6 +459,7 @@ async function appendTemplateEventAction(
 		sourceEvent.semantic_type,
 		params.organizationId,
 		entityIds,
+		parsePgTextArray(sourceEvent.entity_refs),
 	);
 	const interaction = resolveTemplateInteraction(
 		kind?.interactions,

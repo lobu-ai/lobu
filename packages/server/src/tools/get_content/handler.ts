@@ -58,6 +58,9 @@ import type { ContentRow, GetContentResult, IdRow } from './types';
 import { handleAutomationMode } from './automation-mode';
 import { resolveMcpActivitySessionIds } from './mcp-activity-filter';
 import { withValidatedArgs } from '../validate-args';
+import { parseEntityRef } from '@lobu/core/contracts/entity-ref';
+import { resolveRemoteRef } from '../../entities/providers';
+import { remoteActivity } from '../../entities/providers/activity';
 
 const MAX_EXACT_CONTENT_IDS = 2000;
 
@@ -259,6 +262,20 @@ async function getContentImpl(
       400
     );
   }
+  if (args.cursor !== undefined && !args.entity) {
+    throw new ToolUserError('cursor pages an entity read; pass it with entity.', 400);
+  }
+  if (args.entity) {
+    const conflicting = Object.entries(args)
+      .filter(([key, value]) => value !== undefined && !['entity', 'cursor', 'limit'].includes(key))
+      .map(([key]) => key);
+    if (conflicting.length > 0) {
+      throw new ToolUserError(
+        `entity reads a remote record's activity and cannot be combined with ${conflicting.join(', ')}.`,
+        400
+      );
+    }
+  }
   if ((args.content_ids?.length ?? 0) > MAX_EXACT_CONTENT_IDS) {
     throw new ToolUserError(
       `read_knowledge accepts at most ${MAX_EXACT_CONTENT_IDS} content_ids per request.`,
@@ -282,6 +299,8 @@ async function getContentImpl(
           if (typeof t === 'string' && t.trim()) typeSlugs.add(t.trim());
         }
       }
+      const refType = args.entity ? parseEntityRef(args.entity)?.type : undefined;
+      if (refType) typeSlugs.add(refType);
       if (args.entity_id) {
         const typeRows = await sql`
           SELECT et.slug AS entity_type
@@ -346,6 +365,30 @@ async function getContentImpl(
         }
       }
     }
+  }
+
+  // A remote record's activity: its source stream merged with Lobu events that
+  // carry its ref. Nothing about the record is stored, so none of the
+  // entity_id strategies below apply.
+  if (args.entity) {
+    const resolved = await resolveRemoteRef(args.entity, ctx);
+    const page = await remoteActivity(
+      resolved,
+      {
+        cursor: args.cursor,
+        limit: args.limit ?? 50,
+        excludeWorkspaceAudit,
+        baseUrl,
+      },
+      ctx
+    );
+    return {
+      content: page.items,
+      total: page.items.length,
+      page: { limit: Math.max(1, Math.min(100, Math.trunc(args.limit ?? 50))), offset: 0, has_more: Boolean(page.next_cursor) },
+      streams: page.streams,
+      ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}),
+    };
   }
 
   // Resolve the existing composite identity after every caller-specific read

@@ -742,6 +742,10 @@ function diffRelationshipType(
         name: "rules",
         changed: (d, r) => !deepEqual(d.rules ?? [], r.rules ?? []),
       },
+      {
+        name: "backing",
+        changed: (d, r) => !deepEqual(d.backing, r.backing),
+      },
     ],
   }) as RelationshipTypeDiffRow;
 }
@@ -952,6 +956,12 @@ function compareRelationshipTypeThreeWay(
       desired: desired.rules ?? [],
       remote: remote.rules ?? [],
       attribution: attribution?.rules ?? [],
+    },
+    {
+      field: "backing",
+      desired: desired.backing ?? null,
+      remote: remote.backing ?? null,
+      attribution: attribution?.backing ?? null,
     },
   ];
   return classifyThreeWay(
@@ -1257,6 +1267,7 @@ export interface RelationshipTypeFacets {
   name: string | undefined;
   description: string | undefined;
   rules: unknown[];
+  backing: unknown;
 }
 
 /** The live remote relationship type, in the comparable facet shape. */
@@ -1266,6 +1277,7 @@ const remoteRelationshipTypeFacets = (
   name: r.name,
   description: r.description,
   rules: r.rules ?? [],
+  backing: r.backing ?? null,
 });
 
 /**
@@ -1280,6 +1292,7 @@ export const effectiveRelationshipTypeAfterApply = (
   name: d.name !== undefined ? d.name : r?.name,
   description: d.description !== undefined ? d.description : r?.description,
   rules: d.rules ?? [],
+  backing: d.backing ?? null,
 });
 
 /**

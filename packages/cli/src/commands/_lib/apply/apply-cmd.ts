@@ -813,7 +813,10 @@ export async function executePlan(
   for (const row of rowsByKind("relationship-type")) {
     if (row.kind !== "relationship-type") continue;
     if (!row.desired) continue;
-    await ctx.client.upsertRelationshipType(row.desired);
+    await ctx.client.upsertRelationshipType(
+      row.desired,
+      row.remote?.backing !== undefined
+    );
     printText(renderProgress(row.verb, "relationship-type", row.id));
   }
 

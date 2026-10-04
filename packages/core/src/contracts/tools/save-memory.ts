@@ -20,6 +20,13 @@ export const SaveContentSchema = Type.Object({
         "Entity IDs to associate content with. Omit for org-scoped content.",
     })
   ),
+  entity_refs: Type.Optional(
+    Type.Array(Type.String({ minLength: 3, maxLength: 1024 }), {
+      maxItems: 50,
+      description:
+        "Records of connection-backed (remote) entity types this content is about, as `<type>:<key>` refs (resolve_path returns `ref`). The content then appears in each record's activity. Stored records use entity_ids.",
+    })
+  ),
   content: Type.Optional(
     Type.String({
       description:

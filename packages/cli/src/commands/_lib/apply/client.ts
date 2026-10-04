@@ -22,6 +22,7 @@ import {
   type AutomationSource,
   type EntityBacking,
   isRecord,
+  type RelationshipBacking,
   type RelationshipRule,
 } from "./shared.js";
 
@@ -121,6 +122,8 @@ export interface RemoteRelationshipType {
   rules?: RelationshipRule[];
   /** Owning org id — see RemoteEntityType.organization_id (public-type guard). */
   organization_id?: string;
+  /** Hoisted from `backing_sql`/`backing_source`; absent ⇒ stored edges. */
+  backing?: RelationshipBacking;
 }
 
 interface RemoteOrg {
@@ -349,6 +352,7 @@ function hoistEntityTypeSchema(
     event_kinds?: unknown;
     backing_sql?: string | null;
     backing_source?: string | null;
+    backing_activity_sql?: string | null;
     metrics_config?: unknown;
     rules_source?: string | null;
   }
@@ -387,6 +391,10 @@ function hoistEntityTypeSchema(
       sql: row.backing_sql,
       ...(typeof row.backing_source === "string" && row.backing_source
         ? { connection: row.backing_source }
+        : {}),
+      ...(typeof row.backing_activity_sql === "string" &&
+      row.backing_activity_sql
+        ? { activity: { sql: row.backing_activity_sql } }
         : {}),
     };
   }
@@ -950,6 +958,9 @@ export class ApplyClient {
         ? {
             sql: backing.sql,
             ...(backing.connection ? { connection: backing.connection } : {}),
+            ...(backing.activity
+              ? { activity: { sql: backing.activity.sql } }
+              : {}),
           }
         : null;
     }
@@ -966,14 +977,31 @@ export class ApplyClient {
   }
 
   async listRelationshipTypes(): Promise<RemoteRelationshipType[]> {
+    type RawRelationshipTypeRow = RemoteRelationshipType & {
+      backing_sql?: string | null;
+      backing_source?: string | null;
+    };
     const { body } = await this.request<{
-      relationship_types?: RemoteRelationshipType[];
-      relationshipTypes?: RemoteRelationshipType[];
+      relationship_types?: RawRelationshipTypeRow[];
+      relationshipTypes?: RawRelationshipTypeRow[];
     }>("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
       schema_type: "relationship_type",
       action: "list",
     });
-    return pickArray(body, "relationship_types", "relationshipTypes");
+    // Hoist the typed backing columns into `backing`, present only for a
+    // connection-backed type so a stored type never churns the diff.
+    return pickArray<RawRelationshipTypeRow>(
+      body,
+      "relationship_types",
+      "relationshipTypes"
+    ).map(({ backing_sql, backing_source, ...row }) =>
+      typeof backing_sql === "string" &&
+      backing_sql &&
+      typeof backing_source === "string" &&
+      backing_source
+        ? { ...row, backing: { sql: backing_sql, connection: backing_source } }
+        : row
+    );
   }
 
   /**
@@ -1010,13 +1038,21 @@ export class ApplyClient {
 
   async upsertRelationshipType(
     // `metadata` is authoring-only — never sent (see DesiredRelationshipType).
-    rel: Omit<DesiredRelationshipType, "metadata">
+    rel: Omit<DesiredRelationshipType, "metadata">,
+    /** The remote type is backed: an undeclared backing then reverts it. */
+    remoteBacked = false
   ): Promise<UpsertEntityTypeResult> {
-    const { rules, ...payload } = rel;
-    const result = await this.upsertSchemaResource(
-      "relationship_type",
-      payload
-    );
+    const { rules, backing, ...rest } = rel;
+    // Declarative like `rules`: dropping a backing from config reverts the
+    // type to stored edges. A type that was never backed sends nothing.
+    const result = await this.upsertSchemaResource("relationship_type", {
+      ...rest,
+      ...(backing
+        ? { backing: { sql: backing.sql, connection: backing.connection } }
+        : remoteBacked
+          ? { backing: null }
+          : {}),
+    });
 
     // Reconcile rules to exactly the desired set so config is the source of
     // truth (declarative). Without removing extras, dropping a rule from config

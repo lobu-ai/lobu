@@ -17,6 +17,7 @@ import {
 	type DbClient,
 	getDb,
 	parsePgNumberArray,
+	parsePgTextArray,
 	pgBigintArray,
 	pgTextArray,
 } from "../db/client";
@@ -595,6 +596,7 @@ async function presentStoredEventToConversationLocked(
 	const [row] = await sql<{
 		title: string | null;
 		entity_ids: unknown;
+		entity_refs: string | string[] | null;
 		semantic_type: string;
 		payload_text: string | null;
 		payload_data: unknown;
@@ -602,7 +604,7 @@ async function presentStoredEventToConversationLocked(
 		source_url: string | null;
 		superseded_by: number | null;
 	}>`
-    SELECT title, entity_ids, semantic_type, payload_text, payload_data,
+    SELECT title, entity_ids, entity_refs, semantic_type, payload_text, payload_data,
            metadata, source_url, superseded_by
     FROM events
     WHERE id = ${params.eventId}
@@ -640,6 +642,7 @@ async function presentStoredEventToConversationLocked(
 		row.semantic_type,
 		params.organizationId,
 		parsePgNumberArray(row.entity_ids),
+		parsePgTextArray(row.entity_refs),
 	);
 	// `present_event` is deliberately narrower than the ordinary Activity view:
 	// only an explicitly authored portable template may become an unsolicited
@@ -923,6 +926,7 @@ export async function refreshInteractiveEventCardTask(
 			id: number;
 			title: string | null;
 			entity_ids: unknown;
+			entity_refs: string | string[] | null;
 			semantic_type: string;
 			payload_text: string | null;
 			payload_data: unknown;
@@ -930,21 +934,21 @@ export async function refreshInteractiveEventCardTask(
 			supersedes_event_id: number | null;
 		}>`
       WITH RECURSIVE event_chain AS (
-        SELECT id, supersedes_event_id, title, entity_ids,
+        SELECT id, supersedes_event_id, title, entity_ids, entity_refs,
                semantic_type, payload_text, payload_data, metadata, 0 AS depth
         FROM events
         WHERE id = ${root.id}
           AND organization_id = ${payload.organizationId}
         UNION ALL
         SELECT successor.id, successor.supersedes_event_id, successor.title,
-               successor.entity_ids, successor.semantic_type,
+               successor.entity_ids, successor.entity_refs, successor.semantic_type,
                successor.payload_text, successor.payload_data,
                successor.metadata, event_chain.depth + 1
         FROM events successor
         JOIN event_chain ON successor.supersedes_event_id = event_chain.id
         WHERE successor.organization_id = ${payload.organizationId}
       )
-      SELECT id, supersedes_event_id, title, entity_ids,
+      SELECT id, supersedes_event_id, title, entity_ids, entity_refs,
              semantic_type, payload_text, payload_data, metadata
       FROM event_chain
       ORDER BY depth
@@ -971,6 +975,7 @@ export async function refreshInteractiveEventCardTask(
 			deliveredSource.semantic_type,
 			payload.organizationId,
 			parsePgNumberArray(deliveredSource.entity_ids),
+			parsePgTextArray(deliveredSource.entity_refs),
 		);
 		if (
 			!sourceKind?.interactions ||

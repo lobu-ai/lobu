@@ -20,6 +20,7 @@ import { INTERACTIVE_EVENT_CARD_REFRESH_TASK } from '../scheduled/task-definitio
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
 import { autoLinkEvent } from '../utils/auto-linker';
 import { ToolUserError } from '../utils/errors';
+import { resolveRemoteRef } from '../entities/providers';
 import { validateSaveContentSemanticType } from '../utils/event-kind-validation';
 import { getConfiguredEmbeddingModel, needsEmbeddingSql } from '../utils/embeddings';
 import { eventArtifactBinding } from '../gateway/files/artifact-store';
@@ -275,6 +276,13 @@ async function saveContentImpl(
   for (const eid of entityIds) {
     await requireWriteAccess(sql, eid, ctx);
   }
+  // Remote records are pointed at by ref; each must name an org-owned,
+  // connection-backed type. The ref is stored on this Lobu event only.
+  const entityRefs = [...new Set(args.entity_refs ?? [])];
+  const refTypeSlugs = new Set<string>();
+  for (const ref of entityRefs) {
+    refTypeSlugs.add((await resolveRemoteRef(ref, ctx, 'entity_refs')).parsed.type);
+  }
 
   // 2. Validate semantic_type against $member.event_kinds + entity type event_kinds.
   //    `guidance` is a built-in org-wide kind registered in the $member
@@ -286,7 +294,8 @@ async function saveContentImpl(
     semanticType,
     args.metadata,
     ctx.organizationId,
-    entityIds.length > 0 ? entityIds : undefined
+    entityIds.length > 0 ? entityIds : undefined,
+    [...refTypeSlugs]
   );
   if (!kindValidation.valid) {
     throw new ToolUserError(kindValidation.errors.join('\n'), 422);
@@ -594,6 +603,7 @@ async function saveContentImpl(
     try {
       row = await insertEvent({
         entityIds: finalEntityIds,
+        entityRefs,
         organizationId: ctx.organizationId,
         originId: externalId,
         title: args.title,

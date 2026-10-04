@@ -6,7 +6,7 @@
  */
 
 import { retryWithBackoff } from '@lobu/core';
-import { type DbClient, getDb, parsePgNumberArray } from '../db/client';
+import { type DbClient, getDb, parsePgNumberArray, pgTextArray } from '../db/client';
 import { stripIdentityScopeProjectionMetadata } from '../identity/scope-projection';
 import { getActingAutomationScope } from './acting-automation-context';
 import {
@@ -112,6 +112,11 @@ export async function lockEventDedupIdentities(
 
 export interface InsertEventParams {
   entityIds: number[];
+  /**
+   * `<type>:<key>` refs to remote (connection-backed) records this Lobu-authored
+   * event is about. Callers validate them; connector ingest never sets them.
+   */
+  entityRefs?: string[] | null;
   organizationId: string | null;
   originId: string;
 
@@ -870,6 +875,7 @@ export async function insertEvent(
       interaction_type, interaction_status, interaction_input_schema, interaction_input,
       interaction_output, interaction_error, supersedes_event_id,
       identity_ns, identity_key,
+      entity_refs,
       linked_org_ids
     ) VALUES (
       ${entityIdsValue}::bigint[],
@@ -907,6 +913,7 @@ export async function insertEvent(
       ${supersedesEventId},
       ${lineage.identityNs},
       ${lineage.identityKey},
+      ${params.entityRefs?.length ? pgTextArray(params.entityRefs) : null}::text[],
       (
         SELECT COALESCE(array_agg(DISTINCT x.o), '{}'::text[])
         FROM (

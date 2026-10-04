@@ -243,6 +243,12 @@
       "import": "./dist/agent-tooling.js",
       "require": "./dist/agent-tooling.js"
     },
+    "./contracts/entity-ref": {
+      "types": "./dist/contracts/entity-ref.d.ts",
+      "bun": "./src/contracts/entity-ref.ts",
+      "import": "./dist/contracts/entity-ref.js",
+      "require": "./dist/contracts/entity-ref.js"
+    },
     "./contracts/tools/view-attach": {
       "types": "./dist/contracts/tools/view-attach.d.ts",
       "bun": "./src/contracts/tools/view-attach.ts",

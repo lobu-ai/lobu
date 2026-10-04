@@ -17,6 +17,13 @@
 export interface EntityBacking {
   sql: string;
   connection?: string;
+  activity?: { sql: string };
+}
+
+/** Live edge source of a connection-backed relationship type. */
+export interface RelationshipBacking {
+  sql: string;
+  connection: string;
 }
 
 /** One relationship-type rule (source/target entity-type slugs). */

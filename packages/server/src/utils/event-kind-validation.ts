@@ -9,6 +9,7 @@
  * Returns human-readable errors with valid kinds, expected schema, and fuzzy suggestions.
  */
 
+import { parseEntityRef } from '@lobu/core/contracts/entity-ref';
 import { getDb } from '../db/client';
 import { formatAjvError, getAjv } from './ajv-singleton';
 import { exceedsValidationLimits, isEmptyObject } from './metadata-limits';
@@ -183,6 +184,38 @@ async function getEntityTypeEventKinds(
   });
 }
 
+/** Distinct entity-type slugs named by `<type>:<key>` refs, in order. */
+function refTypeSlugs(entityRefs: readonly string[] | null | undefined): string[] {
+  const slugs = new Set<string>();
+  for (const ref of entityRefs ?? []) {
+    const parsed = parseEntityRef(ref);
+    if (parsed) slugs.add(parsed.type);
+  }
+  return [...slugs];
+}
+
+/** event_kinds of an org-owned entity type by slug (a remote record's type). */
+async function getEntityTypeSlugEventKinds(
+  orgId: string,
+  typeSlug: string
+): Promise<Record<string, EventKindDefinition> | null> {
+  return eventKindsCache.getOrSet(`${orgId}:type:${typeSlug}`, async () => {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT event_kinds
+      FROM entity_types
+      WHERE organization_id = ${orgId}
+        AND slug = ${typeSlug}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const eventKinds = rows[0]?.event_kinds;
+    return eventKinds && typeof eventKinds === 'object'
+      ? (eventKinds as Record<string, EventKindDefinition>)
+      : null;
+  });
+}
+
 /**
  * Fetch event_kinds from connector_definitions for a specific feed.
  * Returns null if connector or feed not found, or eventKinds not defined.
@@ -301,9 +334,18 @@ export async function validateSaveContentSemanticType(
   semanticType: string,
   metadata: Record<string, unknown> | undefined | null,
   orgId: string,
-  entityIds?: number[]
+  entityIds?: number[],
+  /** Types of the remote records the event points at by ref. */
+  refTypeSlugs?: string[]
 ): Promise<KindValidationResult> {
   const memberKinds = await getMemberEventKinds(orgId);
+
+  for (const typeSlug of refTypeSlugs ?? []) {
+    const typeKinds = await getEntityTypeSlugEventKinds(orgId, typeSlug);
+    if (!typeKinds) continue;
+    const result = validateKindAgainstDefinitions(semanticType, metadata, typeKinds);
+    if (result.valid) return result;
+  }
 
   // An event can be linked to several entity types. Accept a custom kind when
   // any linked type declares it; array order must not change authorability.
@@ -330,7 +372,9 @@ export async function validateSaveContentSemanticType(
 export async function resolveEventKindDefinition(
   semanticType: string,
   orgId: string,
-  entityIds?: number[]
+  entityIds?: number[],
+  /** `events.entity_refs`: kinds declared by the remote records' types. */
+  entityRefs?: readonly string[] | null
 ): Promise<EventKindDefinition | null> {
   if (entityIds && entityIds.length > 0) {
     for (const entityId of entityIds) {
@@ -338,6 +382,10 @@ export async function resolveEventKindDefinition(
       const entityDef = entityTypeKinds?.[semanticType];
       if (entityDef) return entityDef;
     }
+  }
+  for (const typeSlug of refTypeSlugs(entityRefs)) {
+    const typeDef = (await getEntityTypeSlugEventKinds(orgId, typeSlug))?.[semanticType];
+    if (typeDef) return typeDef;
   }
   const memberKinds = await getMemberEventKinds(orgId);
   // Platform kinds are the LAST resort, so an org that declares the same slug

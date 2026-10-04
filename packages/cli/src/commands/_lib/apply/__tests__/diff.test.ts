@@ -254,6 +254,35 @@ describe("apply diff — memory schema", () => {
     expect(renderPlan(plan)).toMatchSnapshot();
   });
 
+  test("a relationship backing diffs, and an equal one is a noop", () => {
+    const backing = {
+      sql: "SELECT 1 AS from_key, 2 AS to_key",
+      connection: "warehouse",
+    };
+    const desired = (b?: typeof backing): DesiredState => ({
+      agents: [],
+      memorySchema: {
+        entityTypes: [],
+        relationshipTypes: [
+          { slug: "has_contact", ...(b ? { backing: b } : {}) },
+        ],
+      },
+      automations: [],
+      requiredSecrets: [],
+    });
+    const remote = (b?: typeof backing): RemoteSnapshot => ({
+      ...emptyRemote(),
+      relationshipTypes: [
+        { slug: "has_contact", ...(b ? { backing: b } : {}) },
+      ],
+    });
+    expect(computeDiff(desired(backing), remote(backing)).counts.update).toBe(
+      0
+    );
+    expect(computeDiff(desired(backing), remote()).counts.update).toBe(1);
+    expect(computeDiff(desired(), remote(backing)).counts.update).toBe(1);
+  });
+
   test("noop when remote matches", () => {
     const desired: DesiredState = {
       agents: [],

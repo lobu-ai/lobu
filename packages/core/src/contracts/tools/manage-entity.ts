@@ -280,9 +280,18 @@ export const UpdateLinkAction = Type.Object({
 
 export const ListLinksAction = Type.Object({
   action: Type.Literal("list_links", {
-    description: "List relationships for an entity with filters + counts.",
+    description:
+      "List relationships for an entity with filters + counts. Pass entity_id for a stored record, or entity (a `<type>:<key>` ref) for a connection-backed record, whose edges come live from its backed relationship types.",
   }),
-  entity_id: EntityId,
+  entity_id: Type.Optional(EntityId),
+  entity: Type.Optional(
+    Type.String({
+      minLength: 3,
+      maxLength: 1024,
+      description:
+        "[list_links] Record ref `<type>:<key>` of a connection-backed record (resolve_path returns it as `ref`). Edges are read live from each backed relationship type whose rules name this type; limit/offset page each type. Returned in `edges`, with per-type status in `streams`.",
+    })
+  ),
   direction: Type.Optional(
     Type.Union(
       [Type.Literal("outbound"), Type.Literal("inbound"), Type.Literal("both")],
@@ -446,6 +455,34 @@ export const RelationshipRowSchema = Type.Object({
   deleted_at: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 export type RelationshipRow = Static<typeof RelationshipRowSchema>;
+
+/**
+ * An edge of a connection-backed relationship type, read live from its source.
+ * Endpoints are `<type>:<key>` refs; columns beyond the projected keys and
+ * names are the edge's attributes. Never stored, so it has no id.
+ */
+export const RemoteEdgeSchema = Type.Object({
+  type: Type.String(),
+  from: Type.String(),
+  to: Type.String(),
+  from_name: Type.Optional(Type.String()),
+  to_name: Type.Optional(Type.String()),
+  attributes: Type.Record(Type.String(), Type.Unknown()),
+  source: Type.Literal("remote"),
+});
+export type RemoteEdge = Static<typeof RemoteEdgeSchema>;
+
+export const RemoteEdgeStreamSchema = Type.Object({
+  stream: Type.String(),
+  direction: Type.Union([Type.Literal("outbound"), Type.Literal("inbound")]),
+  ok: Type.Boolean(),
+  returned: Type.Integer(),
+  has_more: Type.Boolean(),
+  error: Type.Optional(Type.String()),
+  error_code: Type.Optional(Type.String()),
+  retryable: Type.Optional(Type.Boolean()),
+});
+export type RemoteEdgeStream = Static<typeof RemoteEdgeStreamSchema>;
 
 export const RelationshipCountByTypeSchema = Type.Object({
   relationship_type_slug: Type.String(),
@@ -618,6 +655,10 @@ export const ManageEntityResultSchema = Type.Union([
       offset: Type.Integer(),
       has_more: Type.Boolean(),
     }),
+    /** `entity` (remote record) reads only: live edges of backed relationship types. */
+    edges: Type.Optional(Type.Array(RemoteEdgeSchema)),
+    /** `entity` reads only: one status per backed relationship type and direction read. */
+    streams: Type.Optional(Type.Array(RemoteEdgeStreamSchema)),
   }),
   Type.Union([
     Type.Object({

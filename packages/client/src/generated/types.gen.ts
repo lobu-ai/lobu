@@ -289,6 +289,10 @@ export type SaveMemoryData = {
      */
     entity_ids?: Array<number>;
     /**
+     * Records of connection-backed (remote) entity types this content is about, as `<type>:<key>` refs (resolve_path returns `ref`). The content then appears in each record's activity. Stored records use entity_ids.
+     */
+    entity_refs?: Array<string>;
+    /**
      * The text content to save. Required for text/markdown payload types.
      */
     content?: string;
@@ -922,9 +926,9 @@ export type OpenViewData = {
        */
       type?: string;
       /**
-       * Entity id the view opens for.
+       * Entity id the view opens for, or, for a record of a connection-backed type, its key (with scope.type naming the type).
        */
-      entity?: number;
+      entity?: number | string;
       /**
        * Event id the view opens for. It names the event's supersede lineage, so the view shows the current version, and it opens at /events/<id>/-/views/<key>.
        */
@@ -972,7 +976,7 @@ export type OpenViewResponses = {
     view: string;
     scope: {
       type?: string;
-      entity?: number;
+      entity?: number | string;
       event?: number;
     };
     params: {
@@ -1348,13 +1352,17 @@ export type ManageEntityData = {
       }
     | {
         /**
-         * List relationships for an entity with filters + counts.
+         * List relationships for an entity with filters + counts. Pass entity_id for a stored record, or entity (a `<type>:<key>` ref) for a connection-backed record, whose edges come live from its backed relationship types.
          */
         action: "list_links";
         /**
          * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
          */
-        entity_id: number;
+        entity_id?: number;
+        /**
+         * [list_links] Record ref `<type>:<key>` of a connection-backed record (resolve_path returns it as `ref`). Edges are read live from each backed relationship type whose rules name this type; limit/offset page each type. Returned in `edges`, with per-type status in `streams`.
+         */
+        entity?: string;
         /**
          * [list_links] Direction filter. Default both.
          */
@@ -1762,6 +1770,27 @@ export type ManageEntityResponses = {
           offset: number;
           has_more: boolean;
         };
+        edges?: Array<{
+          type: string;
+          from: string;
+          to: string;
+          from_name?: string;
+          to_name?: string;
+          attributes: {
+            [key: string]: unknown;
+          };
+          source: "remote";
+        }>;
+        streams?: Array<{
+          stream: string;
+          direction: "outbound" | "inbound";
+          ok: boolean;
+          returned: number;
+          has_more: boolean;
+          error?: string;
+          error_code?: string;
+          retryable?: boolean;
+        }>;
       }
     | {
         action: "merge";
@@ -1916,7 +1945,7 @@ export type ManageEntitySchemaData = {
           };
     };
     /**
-     * [entity_type: create/update] Makes the type DERIVED — a read-only SQL view. `{ sql }` runs over your org's internal tables; `{ sql, connection: <slug> }` runs LIVE against that connection's external database (read-only, no copy). `null` clears it (revert to a stored type); omit to leave unchanged. Read a derived type's rows by running its `backing_sql` (returned by `get`) through `query_sql` — and when `get` also returns a `backing_source`, pass it as `query_sql`'s `connection` so the view runs against the external DB instead of your internal tables. `get` also returns `measure_columns` (the view's aggregate columns, classified on read).
+     * [entity_type/relationship_type: create/update] Relationship type: `{ sql, connection }` reads its edges LIVE from that connection (projecting `from_key`, `to_key`; never stored), `null` clears it. Entity type: makes the type DERIVED — a read-only SQL view. `{ sql }` runs over your org's internal tables; `{ sql, connection: <slug> }` runs LIVE against that connection's external database (read-only, no copy). `null` clears it (revert to a stored type); omit to leave unchanged. Read a derived type's rows by running its `backing_sql` (returned by `get`) through `query_sql` — and when `get` also returns a `backing_source`, pass it as `query_sql`'s `connection` so the view runs against the external DB instead of your internal tables. `get` also returns `measure_columns` (the view's aggregate columns, classified on read). A connection-backed type may add `activity: { sql }`, the record's live activity read by exact `key`.
      */
     backing?: null | {
       /**
@@ -1927,6 +1956,12 @@ export type ManageEntitySchemaData = {
        * Optional connection slug. When set, the view runs LIVE against that connection’s external database (read-only, no copy) instead of internal tables. Stored verbatim; resolved to the connection at read time.
        */
       connection?: string;
+      activity?: {
+        /**
+         * SELECT over the same connection projecting `key` (the record key a row belongs to), `origin_id`, `occurred_at`, `title` and `sort_key` (a string giving a total order, newest greatest, e.g. ISO time plus origin_id). Optional: `url`, `kind`, `summary`, `actor`; other columns are returned as metadata.
+         */
+        sql: string;
+      };
     };
     /**
      * [entity_type: create/update] Declared metric contract (eventSets/measures/dimensions/segments — see @lobu/connector-sdk) stored verbatim. The metric compiler lowers it into backing SQL. `null` clears it; omit to leave unchanged.
@@ -2018,6 +2053,7 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
+          backing_activity_sql?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2071,6 +2107,7 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
+          backing_activity_sql?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2116,6 +2153,7 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
+          backing_activity_sql?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2218,6 +2256,7 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
+          backing_activity_sql?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2288,6 +2327,8 @@ export type ManageEntitySchemaResponses = {
           is_symmetric: boolean;
           inverse_type_id?: number | null;
           inverse_type_slug?: string | null;
+          backing_sql?: string | null;
+          backing_source?: string | null;
           status: string;
           created_at: string;
           updated_at: string;
@@ -2318,6 +2359,8 @@ export type ManageEntitySchemaResponses = {
           is_symmetric: boolean;
           inverse_type_id?: number | null;
           inverse_type_slug?: string | null;
+          backing_sql?: string | null;
+          backing_source?: string | null;
           status: string;
           created_at: string;
           updated_at: string;
@@ -2347,6 +2390,8 @@ export type ManageEntitySchemaResponses = {
           is_symmetric: boolean;
           inverse_type_id?: number | null;
           inverse_type_slug?: string | null;
+          backing_sql?: string | null;
+          backing_source?: string | null;
           status: string;
           created_at: string;
           updated_at: string;
@@ -2376,6 +2421,8 @@ export type ManageEntitySchemaResponses = {
           is_symmetric: boolean;
           inverse_type_id?: number | null;
           inverse_type_slug?: string | null;
+          backing_sql?: string | null;
+          backing_source?: string | null;
           status: string;
           created_at: string;
           updated_at: string;
@@ -6017,6 +6064,14 @@ export type ReadKnowledgeData = {
      */
     entity_id?: number;
     /**
+     * Record ref `<type>:<key>` of a connection-backed (remote) entity type, as resolve_path returns in `ref`. Reads that record's activity: its source rows merged with Lobu events saved with this ref in `entity_refs`, newest first. Page with `cursor`; `streams` reports each stream's status. Stored records use entity_id.
+     */
+    entity?: string;
+    /**
+     * [entity] Opaque `next_cursor` from the previous page of the same `entity` read.
+     */
+    cursor?: string;
+    /**
      * Persisted Automation ID (`automation_id`) to fetch content for. With run_id, uses that run's queued version/window; otherwise computes the Automation's pending window. Returns window_token for complete_window action.
      */
     automation_id?: number;
@@ -6272,6 +6327,14 @@ export type ReadKnowledgeResponses = {
       result_count: number;
     }>;
     hints?: Array<string>;
+    streams?: Array<{
+      stream: "source" | "lobu";
+      ok: boolean;
+      error?: string;
+      error_code?: string;
+      retryable?: boolean;
+    }>;
+    next_cursor?: string;
   };
 };
 
@@ -7253,6 +7316,11 @@ export type ResolvePathResponses = {
           automations_count: number;
           is_derived?: boolean;
           measure_columns?: Array<string>;
+          ref?: string;
+          capabilities?: {
+            activity: boolean;
+            relationships: boolean;
+          };
           merged_records?: Array<{
             id: number;
             name: string;

@@ -249,7 +249,14 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
     // predicate, but the raw array is not a user query surface — scoping is
     // enforced by the typed tools, not by callers probing which other orgs an
     // event bridges to.
-    events: new Set(['superseded_by', 'linked_org_ids']),
+    // entity_refs: remote-record pointers on Lobu-authored events. The
+    // current_event_records view does not project them; a record's activity is
+    // read through read_knowledge `entity`, which applies the ref's org scoping.
+    events: new Set(['superseded_by', 'linked_org_ids', 'entity_refs']),
+    // backing_sql/backing_source: a backed relationship type's source SQL and
+    // connection. The table includes public-catalog rows from other orgs, so
+    // their SQL is read through manage_entity_schema, never raw query_sql.
+    entity_relationship_types: new Set(['backing_sql', 'backing_source']),
     connections: new Set(['credentials']),
     // Large per-connector JSONB blobs — too big and structure-dependent to expose
     // via raw SQL. Callers should hit the typed connector handler instead.
