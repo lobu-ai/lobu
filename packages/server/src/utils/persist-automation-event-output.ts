@@ -1,9 +1,11 @@
 import type { DbClient } from '../db/client';
+import type { ToolContext } from '../tools/registry';
 import type { EventOutput } from '../types/automations';
 import { errorMessage, ToolUserError } from './errors';
 import { insertEvent, type InsertedEvent } from './insert-event';
 import { isUniqueViolation } from './pg-errors';
 import { validateSaveContentSemanticType } from './event-kind-validation';
+import { requireWriteAccess } from './organization-access';
 import {
   AUTOMATION_EVENT_IDENTITY_NS,
   computeStableKey,
@@ -20,10 +22,14 @@ interface EventDraft {
   parent_event_id?: number;
   payload_type?: 'text' | 'markdown';
   idempotency_key?: string;
+  /** Replaces the Automation's bound entities for this row (see the contract). */
+  entity_ids?: number[];
 }
 
 export interface PersistAutomationEventOutputParams {
   tx: DbClient;
+  /** The completing run identity; row `entity_ids` are authorized against it. */
+  ctx: ToolContext;
   rows: unknown;
   outputName: string;
   output: EventOutput;
@@ -208,11 +214,31 @@ export async function persistAutomationEventOutput(
       );
     }
 
+    // A row's own `entity_ids` REPLACE the bound entities for that row, the
+    // way `save_memory`'s `entity_ids` name an event's whole linkage. Each id
+    // passes the same write gate `save_memory` applies, and a bad id fails the
+    // completion rather than being dropped.
+    const entityIds = draft.entity_ids ?? params.boundEntityIds;
+    if (draft.entity_ids) {
+      for (const entityId of draft.entity_ids) {
+        try {
+          await requireWriteAccess(params.tx, entityId, params.ctx);
+        } catch (error) {
+          if (!(error instanceof ToolUserError)) throw error;
+          throw new ToolUserError(
+            `outputs.${params.outputName}[${index}].entity_ids: ${error.message}`,
+            error.httpStatus,
+            error.code
+          );
+        }
+      }
+    }
+
     const kindValidation = await validateSaveContentSemanticType(
       params.output.event,
       metadata,
       params.organizationId,
-      params.boundEntityIds.length > 0 ? params.boundEntityIds : undefined
+      entityIds.length > 0 ? entityIds : undefined
     );
     if (!kindValidation.valid) {
       throw new ToolUserError(
@@ -294,7 +320,7 @@ export async function persistAutomationEventOutput(
       params.tx.savepoint((sp) =>
         insertEvent(
           {
-            entityIds: params.boundEntityIds,
+            entityIds,
             organizationId: params.organizationId,
             originId,
             title: draft.title ?? null,

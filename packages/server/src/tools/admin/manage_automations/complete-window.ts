@@ -765,6 +765,7 @@ export async function handleCompleteWindow(
       } else {
         const persistedEvents = await persistAutomationEventOutput({
           tx,
+          ctx,
           rows: extractedData[outputName],
           outputName,
           output,

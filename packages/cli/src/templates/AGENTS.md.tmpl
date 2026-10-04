@@ -359,9 +359,13 @@ boolean. Field order, the Automation, and the output name are part of identity, 
 do not key on editable display labels.
 Event output rows use the standard draft fields: required `content`,
 plus optional `title`, `metadata`, `author`, `source_url`, `occurred_at`,
-`parent_event_id`, `payload_type`, and `idempotency_key`. Use
+`parent_event_id`, `payload_type`, `idempotency_key`, and `entity_ids`. Use
 `idempotency_key` when the same real-world source must emit at most once across
-runs. Omit `triggers` for a manual-only Automation.
+runs. A row's `entity_ids` replace the Automation's bound entities for that
+row, so one run can link each event to its own record; omit it to keep the
+bound linkage. Every id must be an entity in the same workspace, or the run
+fails. `entity_ids` are not part of an event output `key`, so key on the
+record's id when each record keeps its own current event. Omit `triggers` for a manual-only Automation.
 
 ### Wire it together
 

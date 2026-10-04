@@ -255,7 +255,14 @@ export type AutomationEntityOutput = Static<
  * "exactly one current per key" is a unique-index guarantee rather than a
  * convention two concurrent runs can silently break. Rows carrying no identity
  * are inert — never a supersede target — so a keyed output cannot capture an
- * unrelated event that happens to share metadata.
+ * unrelated event that happens to share metadata. *
+ * A row may carry `entity_ids` to link that event to its own records instead
+ * of the Automation's bound entities (replace, not add — the same full-linkage
+ * meaning as `save_memory`'s `entity_ids`). Linkage is not part of the key:
+ * the identity is the key values alone, so a later version of a key carries
+ * its own row's `entity_ids`, and one run cannot emit the same key twice even
+ * for different entities. Put the record's id in a key field when each record
+ * needs its own current event.
  */
 export const AutomationEventOutputSchema = Type.Object(
   {
@@ -271,7 +278,7 @@ export const AutomationEventOutputSchema = Type.Object(
         maxItems: 4,
         uniqueItems: true,
         description:
-          "One to four metadata fields whose exact values compose each draft's stable identity across Automation runs (e.g. channel + mode for per-channel voice profiles). Every key field must be present in every draft's `metadata` and be a non-blank string, safe integer, or boolean — the type is part of the identity, so 3 and \"3\" are different keys. Changing the fields, their order, or the semantic type changes identity and starts a new chain. When set, each run supersedes the current event carrying the same key values.",
+          "One to four metadata fields whose exact values compose each draft's stable identity across Automation runs (e.g. channel + mode for per-channel voice profiles). Every key field must be present in every draft's `metadata` and be a non-blank string, safe integer, or boolean — the type is part of the identity, so 3 and \"3\" are different keys. Changing the fields, their order, or the semantic type changes identity and starts a new chain. When set, each run supersedes the current event carrying the same key values. Row `entity_ids` are not part of the identity: include a record id in the key when each record needs its own current event.",
       })
     ),
   },
@@ -292,7 +299,7 @@ export const AutomationOutputsSchema = Type.Object(
     minProperties: 1,
     maxProperties: 20,
     description:
-      "Named top-level arrays persisted after a completed window. Entity outputs are validated against their entity type; event rows require content and may include title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, and idempotency_key.",
+      "Named top-level arrays persisted after a completed window. Entity outputs are validated against their entity type; event rows require content and may include title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, idempotency_key, and entity_ids. entity_ids on a row replace the bound entities of the Automation for that row (omit to keep them); each id must be an entity in the same workspace the run may write, or the completion fails.",
   }
 );
 // TypeBox deliberately types an open `Type.Object` as unknown-valued. Keep the
@@ -642,7 +649,7 @@ export const ManageAutomationsSchema = Type.Object(
         ],
         {
           description:
-            '[create/create_version] Named durable outputs for window execution. `{ entity, key, name? }` validates and upserts entities; `{ event }` appends standard event drafts. The object key is the top-level extracted_data array name. Event rows require content and may include title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, and idempotency_key. Event triggers on an Automation with outputs must use execution="window". Pass null on create_version to remove all declared outputs.',
+            '[create/create_version] Named durable outputs for window execution. `{ entity, key, name? }` validates and upserts entities; `{ event }` appends standard event drafts. The object key is the top-level extracted_data array name. Event rows require content and may include title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, idempotency_key, and entity_ids. entity_ids on a row replace the bound entities of the Automation for that row (omit to keep them); each id must be an entity in the same workspace the run may write, or the completion fails. Event triggers on an Automation with outputs must use execution="window". Pass null on create_version to remove all declared outputs.',
         }
       )
     ),
