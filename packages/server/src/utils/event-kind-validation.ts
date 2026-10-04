@@ -185,7 +185,7 @@ async function getEntityTypeEventKinds(
 }
 
 /** Distinct entity-type slugs named by `<type>:<key>` refs, in order. */
-function refTypeSlugs(entityRefs: readonly string[] | null | undefined): string[] {
+export function refTypeSlugs(entityRefs: readonly string[] | null | undefined): string[] {
   const slugs = new Set<string>();
   for (const ref of entityRefs ?? []) {
     const parsed = parseEntityRef(ref);

@@ -989,6 +989,7 @@ export async function refreshInteractiveEventCardTask(
 			row.semantic_type,
 			payload.organizationId,
 			entityIds,
+			parsePgTextArray(row.entity_refs),
 		);
 		if (!kind) {
 			throw new Error(`Event kind ${row.semantic_type} is unavailable`);

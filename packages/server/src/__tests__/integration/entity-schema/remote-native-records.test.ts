@@ -1,6 +1,13 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { executeTool, type AuthContext } from '../../../tools/execute';
+import { invokeTemplateEventAction } from '../../../interactions/template-event-actions';
+import {
+  assertTemplateActionCapability,
+  TEMPLATE_ACTION_CAPABILITY_META_KEY,
+} from '../../../interactions/template-action-capability';
+import { getMcpResultMeta } from '../../../tools/mcp-result-meta';
+import type { ToolContext } from '../../../tools/registry';
 import { manageEntity } from '../../../tools/admin/manage_entity';
 import { getContent } from '../../../tools/get_content/handler';
 import { resolvePath } from '../../../tools/resolve_path';
@@ -225,6 +232,61 @@ describe('remote-native records', () => {
       expect(item).toMatchObject({ payload_type: 'json_template', payload_data: { score: 7 } });
       expect(item?.payload_template).toBeTruthy();
     }
+  });
+
+  it("makes an interactive event about a remote record actionable through its type's kinds", async () => {
+    const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
+    // A fresh type: event kinds are cached per type for a short TTL.
+    await api.entity_schema.createType({
+      slug: 'renewal',
+      name: 'Renewal',
+      backing: { sql: ACCOUNT_SQL, connection: 'warehouse' },
+      event_kinds: {
+        'account-poll': {
+          description: 'A synthetic poll',
+          jsonTemplate: {
+            type: 'card',
+            children: [{ type: 'button', props: { label: 'Yes', onClick: '@vote', value: 'yes' } }],
+          },
+          interactions: { vote: { emits: 'account-vote' } },
+        },
+        'account-vote': { description: 'A synthetic vote' },
+      },
+    });
+    const poll = await saveContent(
+      {
+        semantic_type: 'account-poll',
+        payload_type: 'empty',
+        metadata: { question: 'Renew?' },
+        entity_refs: ['renewal:k:3'],
+        occurred_at: '2026-01-05T00:00:00.000Z',
+      },
+      env,
+      ctx()
+    );
+    const appCtx = {
+      ...ctx(),
+      clientId: 'remote-records-app',
+      mcpSessionId: 'remote-records-session',
+      mcpConversationId: 'remote-records-conversation',
+    } as ToolContext & { userId: string; clientId: string; mcpSessionId: string };
+    const page = await getContent({ entity: 'renewal:k:3' }, env, appCtx);
+    const capability = getMcpResultMeta(page)?.[TEMPLATE_ACTION_CAPABILITY_META_KEY];
+    expect(typeof capability).toBe('string');
+    expect(() => assertTemplateActionCapability(capability as string, poll.id, appCtx)).not.toThrow();
+
+    const voted = await invokeTemplateEventAction({
+      organizationId: orgId,
+      sourceEventId: poll.id,
+      action: 'vote',
+      value: 'yes',
+      interactionId: 'remote-vote-1',
+      surface: 'web',
+      actor: { platform: 'web', platformUserId: userId, userId },
+    } as never);
+    expect(voted).toMatchObject({ created: true, eventType: 'account-vote' });
+    const [row] = await getTestDb()`SELECT entity_refs FROM events WHERE id = ${voted.eventId}`;
+    expect(row.entity_refs).toBe('{renewal:k:3}');
   });
 
   it('rejects a cursor replayed against another ref', async () => {

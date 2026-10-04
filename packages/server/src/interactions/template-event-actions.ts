@@ -10,6 +10,7 @@ import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js
 import { resolveEntityRender } from "../utils/default-entity-template";
 import { ToolUserError } from "../utils/errors";
 import {
+	refTypeSlugs,
 	resolveEventKindDefinition,
 	validateSaveContentSemanticType,
 } from "../utils/event-kind-validation";
@@ -455,11 +456,13 @@ async function appendTemplateEventAction(
 	}
 
 	const entityIds = parsePgNumberArray(sourceEvent.entity_ids);
+	// The emitted event stays about the same remote records as its source.
+	const entityRefs = parsePgTextArray(sourceEvent.entity_refs);
 	const kind = await resolveEventKindDefinition(
 		sourceEvent.semantic_type,
 		params.organizationId,
 		entityIds,
-		parsePgTextArray(sourceEvent.entity_refs),
+		entityRefs,
 	);
 	const interaction = resolveTemplateInteraction(
 		kind?.interactions,
@@ -520,6 +523,7 @@ async function appendTemplateEventAction(
 		eventData,
 		params.organizationId,
 		entityIds,
+		refTypeSlugs(entityRefs),
 	);
 	if (!kindValidation.valid) {
 		throw new ToolUserError(kindValidation.errors.join("\n"), 422);
@@ -528,6 +532,7 @@ async function appendTemplateEventAction(
 	const inserted = await insertConnectionlessWorkspaceEvent(
 		{
 			entityIds,
+			entityRefs,
 			organizationId: params.organizationId,
 			originId: idempotencyKey,
 			title: sourceEvent.title

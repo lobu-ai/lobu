@@ -75,6 +75,37 @@ function interactiveEventIds(items: ContentItem[]): number[] {
   });
 }
 
+/**
+ * Enable MCP App actions for the interactive events on this page. Every read
+ * path that returns Lobu events finishes through here, so an interactive
+ * event is actionable however it was read.
+ */
+function withTemplateActionCapability(
+  result: GetContentResult,
+  contentItems: ContentItem[],
+  ctx: ToolContext
+): GetContentResult {
+  const eventIds = interactiveEventIds(contentItems);
+  if (eventIds.length === 0 || !canIssueTemplateActionCapability(ctx)) return result;
+  const issued = issueTemplateActionCapabilityWindow(eventIds, ctx);
+  if (!issued) {
+    result.hints = [
+      ...(result.hints ?? []),
+      'Interactive actions could not be enabled for this page: this host\'s session identifiers leave no room for the capability token.',
+    ];
+    return result;
+  }
+  if (issued.sourceEventIds.length < eventIds.length) {
+    result.hints = [
+      ...(result.hints ?? []),
+      `Interactive actions are enabled for the first ${issued.sourceEventIds.length} interactive results. Paginate or narrow the result set to act on later items.`,
+    ];
+  }
+  return attachMcpResultMeta(result, {
+    [TEMPLATE_ACTION_CAPABILITY_META_KEY]: issued.token,
+  });
+}
+
 async function loadClaimedAutomationWindow(
   sql: DbClient,
   runId: number,
@@ -382,13 +413,16 @@ async function getContentImpl(
       },
       ctx
     );
-    return {
+    const result: GetContentResult = {
       content: page.items,
       total: page.items.length,
       page: { limit: Math.max(1, Math.min(100, Math.trunc(args.limit ?? 50))), offset: 0, has_more: Boolean(page.next_cursor) },
       streams: page.streams,
       ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}),
     };
+    // Lobu events in the merge may be interactive; source rows never are.
+    const lobuItems = page.items.filter((item) => item.stream === 'lobu') as unknown as ContentItem[];
+    return withTemplateActionCapability(result, lobuItems, ctx);
   }
 
   // Resolve the existing composite identity after every caller-specific read
@@ -928,27 +962,7 @@ async function getContentImpl(
     }
     if (hints.length > 0) result.hints = hints;
 
-    const eventIds = interactiveEventIds(contentItems);
-    if (eventIds.length > 0 && canIssueTemplateActionCapability(ctx)) {
-      const issued = issueTemplateActionCapabilityWindow(eventIds, ctx);
-      if (!issued) {
-        result.hints = [
-          ...(result.hints ?? []),
-          'Interactive actions could not be enabled for this page: this host\'s session identifiers leave no room for the capability token.',
-        ];
-        return result;
-      }
-      if (issued.sourceEventIds.length < eventIds.length) {
-        result.hints = [
-          ...(result.hints ?? []),
-          `Interactive actions are enabled for the first ${issued.sourceEventIds.length} interactive results. Paginate or narrow the result set to act on later items.`,
-        ];
-      }
-      return attachMcpResultMeta(result, {
-        [TEMPLATE_ACTION_CAPABILITY_META_KEY]: issued.token,
-      });
-    }
-    return result;
+    return withTemplateActionCapability(result, contentItems, ctx);
   } catch (error) {
     logger.error({ err: error }, 'get_content error:');
     throw error;
