@@ -9,7 +9,7 @@
  */
 
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
-import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadWindow, type FeedReadWindowCoverage, type QueryContext } from '@lobu/connector-sdk';
+import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadMatch, type FeedReadWindow, type FeedReadWindowCoverage, type QueryContext } from '@lobu/connector-sdk';
 import { createHash } from 'node:crypto';
 import { stableJson } from '../utils/insert-event';
 import {
@@ -197,6 +197,8 @@ export interface ReadSourceFeedParams {
   /** Source-native continuation token recovered from the public cursor envelope. */
   cursor?: string;
   window?: FeedReadWindow;
+  /** Exact-value filter on a path the feed declares in `matchPaths`. */
+  match?: FeedReadMatch;
   /** A continuation may not silently read a changed feed configuration/version. */
   sourceRevision?: string;
   /** Row cap pushed down to the source (connector clamps it). */
@@ -267,7 +269,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
             c.device_worker_id,
             COALESCE(pinned_dw.user_id, (o.metadata::jsonb)->>'personal_org_for_user_id') AS device_owner_user_id,
             COALESCE(c.config, '{}'::jsonb) AS connection_config,
-            cd.version AS definition_version, cd.feed_operations, cd.read_window_axis,
+            cd.version AS definition_version, cd.feed_operations, cd.read_window_axis, cd.match_paths,
             cd.mcp_config, cd.runtime, cd.required_capability,
             cd.has_compiled_code, cd.selected_artifact_hash
      FROM feeds f
@@ -279,6 +281,8 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
               COALESCE(cd0.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb)
                 AS feed_operations,
               cd0.feeds_schema -> f.feed_key ->> 'readWindowAxis' AS read_window_axis,
+              COALESCE(cd0.feeds_schema -> f.feed_key -> 'matchPaths', '[]'::jsonb)
+                AS match_paths,
               (
                 SELECT cv.compiled_code_hash
                 FROM connector_versions cv
@@ -356,6 +360,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     definition_version: string | null;
     feed_operations: unknown;
     read_window_axis: string | null;
+    match_paths: unknown;
     connection_id: number;
     connector_key: string;
     auth_profile_id: number | null;
@@ -400,6 +405,15 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
       `feed '${p.feedId}' does not support source reads`,
     );
   }
+  if (p.match) {
+    const matchPaths = Array.isArray(feed.match_paths) ? feed.match_paths : [];
+    if (!matchPaths.includes(p.match.path)) {
+      throw new ToolError('VALIDATION', `feed '${p.feedId}' cannot filter on '${p.match.path}'`);
+    }
+    if (p.match.values.length === 0) {
+      throw new ToolError('VALIDATION', 'A feed match needs at least one value.');
+    }
+  }
   if (p.window && !readWindowAxis) {
     throw new ToolError(
       'VALIDATION',
@@ -428,6 +442,10 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   // dispatch while paused.
   if (feed.feed_status !== 'active' && !metadataOnlyDeviceConnector) {
     throw new ToolError('NOT_FOUND', `feed '${p.feedId}' not found or not accessible`);
+  }
+
+  if (p.match && (metadataOnlyDeviceConnector || !hasConnectorCode)) {
+    throw new ToolError('VALIDATION', 'Only compiled connector feeds can filter source reads by match.');
   }
 
   if (metadataOnlyDeviceConnector) {
@@ -531,6 +549,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
         limit: p.limit,
         offset: p.offset,
         sort: p.sort,
+        match: p.match,
       },
       hooks: {
         onHttpFetch, signal: controller.signal,

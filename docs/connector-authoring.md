@@ -322,3 +322,16 @@ still have a cursor. Propagate missing metadata, provider failures and capacity
 limits; they must never certify an exhausted window. A reader that cannot honor
 these bounds must reject the request. Time-based reads cover the declared source
 timestamp, not all possible edits, deletions or late imports.
+
+### Record activity and relationships from read feeds
+
+Records of a source-backed entity type (`backing.sql`) are never stored, so
+their Activity and Relationships are read live. A read feed takes part by
+declaring `matchPaths`, the event paths it can filter by exact value. Lobu then
+reads every such feed whose `eventKinds` attribute to the record's type, passing
+`FeedReadContext.match = { path, values }` on the attribution's identity
+`eventPath`. Return EventEnvelope-shaped rows (`origin_id`, `origin_type`,
+`title`, `occurred_at`, `source_url`, `metadata`), newest first, with the native
+`nextCursor`. Relationships come from the event kind's `relationships`: the
+other attribution's identity is the peer's key and its `titlePath` the peer's
+name. A path not in `matchPaths` is rejected, never filtered after the read.

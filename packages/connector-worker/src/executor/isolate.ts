@@ -324,7 +324,7 @@ const GUEST_RUNNER = String.raw`
         feedId: job.feedId === null ? undefined : job.feedId, feedKey: job.feedKey, query: job.query, cursor: job.cursor,
         window: job.window,
         config: mergedConfig, credentials: job.credentials, sessionState: withDispatcher(job.sessionState),
-        limit: job.limit, offset: job.offset, sort: job.sort
+        limit: job.limit, offset: job.offset, sort: job.sort, match: job.match
       });
       return {
         mode: 'read', rows: (readResult && readResult.rows) || [], columns: readResult && readResult.columns,

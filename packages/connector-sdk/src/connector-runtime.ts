@@ -88,6 +88,11 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
         `${this.definition.key} feed '${ctx.feedKey}' does not support source reads`
       );
     }
+    if (ctx.match && !feed.matchPaths?.includes(ctx.match.path)) {
+      throw new Error(
+        `${this.definition.key} feed '${ctx.feedKey}' cannot filter on '${ctx.match.path}'`
+      );
+    }
     const result = await handler(ctx);
     assertFeedReadWindow(result, ctx.window, feed.readWindowAxis);
     return result;

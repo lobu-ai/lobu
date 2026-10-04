@@ -513,6 +513,13 @@ export interface FeedDefinition {
   /** Declares that live reads can honor fixed windows on this source timestamp. */
   readWindowAxis?: string;
   /**
+   * Event paths a live read can filter by exact value (`FeedReadContext.match`).
+   * A feed that declares them returns EventEnvelope-shaped rows, newest first,
+   * so its event-kind attributions and relationships resolve against read rows
+   * exactly as they do against synced events.
+   */
+  matchPaths?: string[];
+  /**
    * Routes inbound app-webhook deliveries to this feed. Lives on the feed (not
    * the connector's webhook schema) because feeds_schema is the persisted,
    * server-readable surface — the app-webhook router reads this to dispatch a
@@ -1031,6 +1038,13 @@ export interface FeedReadContext<F = Record<string, unknown>> {
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
+  /** Exact-value filter on one of the feed's declared `matchPaths`. */
+  match?: FeedReadMatch;
+}
+
+export interface FeedReadMatch {
+  path: string;
+  values: string[];
 }
 
 export interface FeedReadResult {

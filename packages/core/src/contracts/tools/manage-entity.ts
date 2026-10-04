@@ -22,7 +22,8 @@ const EntityType = Type.String({
   description: "Entity type as defined in your workspace",
 });
 
-const EntityId = Type.Number({
+const EntityId = Type.Integer({
+  minimum: 1,
   description:
     "[get/update/delete/list_links/merge/unmerge] Entity ID to operate on",
 });
@@ -290,7 +291,19 @@ export const ListLinksAction = Type.Object({
   action: Type.Literal("list_links", {
     description: "List relationships for an entity with filters + counts.",
   }),
-  entity_id: EntityId,
+  entity_id: Type.Optional(EntityId),
+  record: Type.Optional(
+    Type.Object(
+      {
+        type: Type.String({ minLength: 1 }),
+        key: Type.String({ minLength: 1 }),
+      },
+      {
+        description:
+          "[list_links] A record of a source-backed entity type, instead of entity_id. Its relationships are read live from the event kinds that declare them; stores nothing.",
+      }
+    )
+  ),
   direction: Type.Optional(
     Type.Union(
       [Type.Literal("outbound"), Type.Literal("inbound"), Type.Literal("both")],
@@ -615,6 +628,26 @@ export const ManageEntityResultSchema = Type.Union([
     action: Type.Literal("unlink"),
     success: Type.Boolean(),
     message: Type.String(),
+  }),
+  Type.Object({
+    action: Type.Literal("list_links"),
+    record_links: Type.Array(
+      Type.Object({
+        relationship_type: Type.String(),
+        direction: Type.Union([
+          Type.Literal("outgoing"),
+          Type.Literal("incoming"),
+        ]),
+        entity_type: Type.String(),
+        key: Type.String(),
+        name: Type.String(),
+        occurred_at: Type.String(),
+        source_url: Type.Union([Type.String(), Type.Null()]),
+      })
+    ),
+    record_failures: Type.Array(
+      Type.Object({ feed_id: Type.Integer(), error: Type.String() })
+    ),
   }),
   Type.Object({
     action: Type.Literal("list_links"),

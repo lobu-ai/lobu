@@ -24,7 +24,9 @@ import {
   TEMPLATE_ACTION_CAPABILITY_META_KEY,
 } from '../../interactions/template-action-capability';
 import { getLobuCoreServices } from '../../lobu/gateway';
+import { authzScopeFromToolContext } from '../../authz/scope';
 import { ToolUserError } from '../../utils/errors';
+import { readSourceRecordActivity } from '../../utils/source-record-reads';
 import {
   getNormalizedScoreContent,
   getNormalizedScoreContentCount,
@@ -237,6 +239,13 @@ async function getContentImpl(
   const pgSql = createDbClientFromEnv(env);
   const sql = getDb();
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
+
+  if (args.record) {
+    return readRecordContent(args, ctx);
+  }
+  if (args.record_cursor) {
+    throw new ToolUserError('record_cursor requires record.', 400);
+  }
 
   // Validate entity access if entity_id provided (auth query stays on PG)
   if (args.entity_id) {
@@ -913,4 +922,32 @@ async function getContentImpl(
     logger.error({ err: error }, 'get_content error:');
     throw error;
   }
+}
+
+/**
+ * A source-backed record's events, read live. The record has no stored row,
+ * so no other read_knowledge filter applies to it.
+ */
+async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promise<GetContentResult> {
+  const { record, record_cursor, limit, ...rest } = args;
+  // Schema defaults arrive filled in; anything else the caller set is a filter
+  // this read cannot honor, and is refused rather than silently ignored.
+  const defaulted = new Set(['offset', 'min_similarity', 'sort_by', 'sort_order', 'include_superseded']);
+  const extra = Object.entries(rest).filter(([key, value]) => value !== undefined && !defaulted.has(key));
+  if (extra.length > 0) {
+    throw new ToolUserError(`record cannot be combined with ${extra.map(([key]) => key).join(', ')}.`, 400);
+  }
+  const pageLimit = Math.max(1, Math.min(100, Math.trunc(limit ?? 50)));
+  const result = await readSourceRecordActivity(authzScopeFromToolContext(ctx), record!, {
+    limit: pageLimit,
+    cursor: record_cursor,
+    signal: ctx.abortSignal,
+  });
+  return {
+    content: result.events,
+    total: result.events.length,
+    page: { limit: pageLimit, offset: 0, has_more: Boolean(result.next_cursor) },
+    ...(result.next_cursor ? { record_cursor: result.next_cursor } : {}),
+    ...(result.failures.length ? { record_failures: result.failures } : {}),
+  };
 }

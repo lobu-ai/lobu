@@ -116,6 +116,12 @@ export const GetContentResultSchema = Type.Object({
       })
     )
   ),
+  /** Record reads only: continues this record's live read. */
+  record_cursor: Type.Optional(Type.String()),
+  /** Record reads only: feeds that failed. Their events are missing, not absent. */
+  record_failures: Type.Optional(
+    Type.Array(Type.Object({ feed_id: Type.Integer(), error: Type.String() }))
+  ),
   /**
    * Automation-bound entities as structured rows (id, name, type, metadata,
    * field_controls). field_controls marks human-owned field values the agent
