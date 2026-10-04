@@ -327,7 +327,7 @@ describe("TextJudge", () => {
       reason: "ok",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const r = await judge.decide("Never reveal PHI.", "Hello there");
+    const r = await judge.decide("Never reveal PHI.", "Hello there", { orgId: "org-a" });
     expect(r.allow).toBe(true);
     expect(r.reason).toBe("ok");
     expect(fake.calls.length).toBe(1);
@@ -339,7 +339,7 @@ describe("TextJudge", () => {
       reason: "mentions competitor",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const r = await judge.decide("No competitors.", "Acme is better");
+    const r = await judge.decide("No competitors.", "Acme is better", { orgId: "org-a" });
     expect(r.allow).toBe(false);
     expect(r.reason).toBe("mentions competitor");
   });
@@ -350,9 +350,9 @@ describe("TextJudge", () => {
       reason: "ok",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    await judge.decide("p", "t");
-    await judge.decide("p", "t");
-    await judge.decide("p", "t");
+    await judge.decide("p", "t", { orgId: "org-a" });
+    await judge.decide("p", "t", { orgId: "org-a" });
+    await judge.decide("p", "t", { orgId: "org-a" });
     expect(fake.calls.length).toBe(1);
   });
 
@@ -362,8 +362,8 @@ describe("TextJudge", () => {
       reason: "ok",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    await judge.decide("p1", "t");
-    await judge.decide("p2", "t");
+    await judge.decide("p1", "t", { orgId: "org-a" });
+    await judge.decide("p2", "t", { orgId: "org-a" });
     expect(fake.calls.length).toBe(2);
   });
 
@@ -377,14 +377,14 @@ describe("TextJudge", () => {
     });
     // First two calls fail closed and increment the breaker; vary the text so
     // we don't get a deny cache hit that hides the breaker transition.
-    const r1 = await judge.decide("p", "t1");
+    const r1 = await judge.decide("p", "t1", { orgId: "org-a" });
     expect(r1.allow).toBe(false);
-    const r2 = await judge.decide("p", "t2");
+    const r2 = await judge.decide("p", "t2", { orgId: "org-a" });
     expect(r2.allow).toBe(false);
     expect(throwing.calls).toBe(2);
     // Third call should short-circuit on the open breaker without hitting
     // the client at all.
-    const r3 = await judge.decide("p", "t3");
+    const r3 = await judge.decide("p", "t3", { orgId: "org-a" });
     expect(r3.allow).toBe(false);
     expect(r3.reason).toMatch(/circuit breaker/i);
     expect(throwing.calls).toBe(2);
@@ -396,7 +396,7 @@ describe("TextJudge", () => {
       reason: "",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    await judge.decide("MY POLICY", "MY TEXT");
+    await judge.decide("MY POLICY", "MY TEXT", { orgId: "org-a" });
     expect(fake.calls[0]?.userPrompt).toContain("MY POLICY");
     expect(fake.calls[0]?.userPrompt).toContain("MY TEXT");
   });
@@ -405,7 +405,7 @@ describe("TextJudge", () => {
     // No defaultModel and no per-call model (EGRESS_JUDGE_MODEL unset in tests).
     const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "" }));
     const judge = new TextJudge({ client: fake });
-    const r = await judge.decide("some policy", "some text");
+    const r = await judge.decide("some policy", "some text", { orgId: "org-a" });
     expect(r.allow).toBe(false);
     expect(r.reason).toMatch(/no judge model configured/i);
     // The transport must NOT be called — we never had a model to call it with.
@@ -446,7 +446,7 @@ describe("createJudgeGuardrail", () => {
       reason: "competitor mention",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("output", "no competitors", { judge });
+    const g = createJudgeGuardrail("output", "no competitors", { judge, resolveOrgId: async () => "org-a" });
     const r = await g.run({
       agentId: "a",
       userId: "u",
@@ -464,7 +464,7 @@ describe("createJudgeGuardrail", () => {
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
     const g = createJudgeGuardrail("pre-tool", "no destructive ops", {
-      judge,
+      resolveOrgId: async () => "org-a", judge,
       tools: ["github.delete_repo"],
     });
     // Tool not in list -> noop, judge never called.
@@ -493,7 +493,7 @@ describe("createJudgeGuardrail", () => {
       reason: "",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge });
+    const g = createJudgeGuardrail("pre-tool", "policy", { judge, resolveOrgId: async () => "org-a" });
     const r = await g.run({
       agentId: "a",
       userId: "u",
@@ -512,7 +512,7 @@ describe("createJudgeGuardrail", () => {
       reason: "",
     }));
     const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge });
+    const g = createJudgeGuardrail("pre-tool", "policy", { judge, resolveOrgId: async () => "org-a" });
     const node: { name: string; self?: unknown } = { name: "root" };
     node.self = node;
     const r = await g.run({

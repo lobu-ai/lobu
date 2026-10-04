@@ -156,9 +156,9 @@ export abstract class JudgeRunner<TResult> {
     // The verdict depends on the model, so the cache + in-flight keys must
     // include the effective model — otherwise two calls with the same
     // policy/text but different models (or the same guardrail after a model
-    // edit) would reuse a verdict computed by the OTHER model. All default-model
-    // calls share a bucket; explicit models each get their own.
-    const model = input.model ?? this.defaultModel;
+    // edit) would reuse a verdict computed by the OTHER model. The org default
+    // is resolved first, so changing it changes the key.
+    const model = await this.effectiveModel(input);
     const key = `${input.cacheKey}model:${model ?? ""}`;
 
     const cached = this.cache.get(key);

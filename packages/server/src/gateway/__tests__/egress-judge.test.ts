@@ -35,7 +35,7 @@ describe("EgressJudge.decide", () => {
     }));
     const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const decision = await judge.decide(
-      { agentId: "agent-a", hostname: "api.github.com" },
+      { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" },
       rule()
     );
     expect(decision.verdict).toBe("allow");
@@ -51,7 +51,7 @@ describe("EgressJudge.decide", () => {
     }));
     const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const decision = await judge.decide(
-      { agentId: "agent-a", hostname: "api.github.com" },
+      { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" },
       rule()
     );
     expect(decision.verdict).toBe("deny");
@@ -64,7 +64,7 @@ describe("EgressJudge.decide", () => {
       reason: "ok",
     }));
     const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const req = { agentId: "agent-a", hostname: "api.github.com" };
+    const req = { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" };
     const r = rule();
     await judge.decide(req, r);
     const second = await judge.decide(req, r);
@@ -78,7 +78,7 @@ describe("EgressJudge.decide", () => {
       reason: "ok",
     }));
     const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const req = { agentId: "agent-a", hostname: "api.github.com" };
+    const req = { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" };
     await judge.decide(req, rule({ policyHash: "h1" }));
     await judge.decide(req, rule({ policyHash: "h2" }));
     expect(client.calls).toBe(2);
@@ -95,10 +95,12 @@ describe("EgressJudge.decide", () => {
         })
     );
     const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const req = { agentId: "agent-a", hostname: "api.github.com" };
+    const req = { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" };
     const r = rule();
     const a = judge.decide(req, r);
     const b = judge.decide(req, r);
+    // The model is resolved before the client call, so let it start first.
+    await new Promise((r) => setTimeout(r, 0));
     resolveOne({ verdict: "allow", reason: "ok" });
     const [dA, dB] = await Promise.all([a, b]);
     expect(client.calls).toBe(1);
@@ -112,7 +114,7 @@ describe("EgressJudge.decide", () => {
     });
     const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const decision = await judge.decide(
-      { agentId: "agent-a", hostname: "api.github.com" },
+      { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" },
       rule()
     );
     expect(decision.verdict).toBe("deny");
@@ -135,7 +137,7 @@ describe("EgressJudge.decide", () => {
     // doesn't short-circuit the failure path).
     for (let i = 0; i < 5; i++) {
       await judge.decide(
-        { agentId: "agent-a", hostname: `h${i}.example.com` },
+        { agentId: "agent-a", organizationId: "org-a", hostname: `h${i}.example.com` },
         rule()
       );
     }
@@ -153,9 +155,62 @@ describe("EgressJudge.decide", () => {
       resolveOrgDefaultModel: async () => "default-model",
     });
     await judge.decide(
-      { agentId: "agent-a", hostname: "x.com" },
+      { agentId: "agent-a", organizationId: "org-a", hostname: "x.com" },
       rule({ judgeModel: "override-model" })
     );
     expect(client.lastModel).toBe("override-model");
+  });
+});
+
+describe("EgressJudge org default model", () => {
+  const req = { agentId: "agent-a", organizationId: "org-a", hostname: "api.github.com" };
+  const ok = async (): Promise<JudgeVerdict> => ({ verdict: "allow", reason: "ok" });
+
+  test("a rule with no model runs on the org default provider model", async () => {
+    const client = new StubClient(ok);
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "acme/org-model" });
+    await judge.decide(req, rule());
+    expect(client.lastModel).toBe("acme/org-model");
+  });
+
+  test("a rule's own model wins over the org default", async () => {
+    const client = new StubClient(ok);
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "acme/org-model" });
+    await judge.decide(req, rule({ judgeModel: "acme/own-model" }));
+    expect(client.lastModel).toBe("acme/own-model");
+  });
+
+  test("changing the org default is not served the previous model's cached verdict", async () => {
+    const client = new StubClient(ok);
+    let current = "acme/model-1";
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => current });
+    await judge.decide(req, rule());
+    await judge.decide(req, rule());
+    expect(client.calls).toBe(1);
+    current = "acme/model-2";
+    await judge.decide(req, rule());
+    expect(client.calls).toBe(2);
+    expect(client.lastModel).toBe("acme/model-2");
+  });
+
+  test("no rule model and no org default fails closed without calling the client", async () => {
+    const client = new StubClient(ok);
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => null });
+    const d = await judge.decide(req, rule());
+    expect(d.verdict).toBe("deny");
+    expect(client.calls).toBe(0);
+  });
+
+  test("a failing org default lookup fails closed", async () => {
+    const client = new StubClient(ok);
+    const judge = new EgressJudge({
+      client,
+      resolveOrgDefaultModel: async () => {
+        throw new Error("db down");
+      },
+    });
+    const d = await judge.decide(req, rule());
+    expect(d.verdict).toBe("deny");
+    expect(client.calls).toBe(0);
   });
 });

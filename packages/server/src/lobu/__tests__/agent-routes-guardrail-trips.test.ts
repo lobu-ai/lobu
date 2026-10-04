@@ -163,7 +163,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
         enabled: false,
         stage: 'input',
         policy: 'Deny hostile messages.',
-        // A model is required (no EGRESS_JUDGE_MODEL in tests).
+        // A model is required (the test org has no default provider model).
         model: 'openai/gpt-4o-mini',
       },
     ];
@@ -255,8 +255,8 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     expect(body.skillsConfig).toEqual(skillsConfig);
   });
 
-  test('rejects a custom guardrail with no model when no gateway default is set', async () => {
-    // EGRESS_JUDGE_MODEL is unset in tests, so a model is required.
+  test('rejects a custom guardrail with no model when the org has no default model', async () => {
+    // The test org has no default provider model, so a model is required.
     const app = await importAgentRoutes();
     const res = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
@@ -403,7 +403,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     });
   });
 
-  test('guardrail-judge-default reports null when EGRESS_JUDGE_MODEL is unset', async () => {
+  test('guardrail-judge-default reports null when the org has no default model', async () => {
     const app = await importAgentRoutes();
     const res = await app.request(`/${AGENT}/guardrail-judge-default`);
     expect(res.status).toBe(200);
