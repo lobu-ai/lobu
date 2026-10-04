@@ -112,7 +112,7 @@ describe("connector_action per-operation scope", () => {
 		const policies = await listEntityApprovalPolicies(orgId, "connector_action", counting);
 		const effects = [operation("demo.first", "send"), operation("demo.first", "inspect"), operation("demo.second", "send")]
 			.map((operation) => evaluateConnectorPolicy({ organizationId: orgId, connectionId: null, operation, actor, policies }).effect);
-		expect(queryCount).toBe(2);
+		expect(queryCount).toBe(1);
 		expect(effects).toEqual(["deny", "auto", "auto"]);
 	});
 });

@@ -41,7 +41,7 @@ function serializeRule(policy: EntityApprovalPolicy) {
   };
 }
 
-async function readSnapshot(org: string, tx: DbClient) {
+async function readSnapshot(org: string, tx?: DbClient) {
   const policies = (await listEntityApprovalPolicies(org, "connector_action", tx))
     .filter(p => p.principalKind === null && p.effects.execute !== undefined)
     .sort((a, b) => scopeKey(a).localeCompare(scopeKey(b)));
@@ -54,10 +54,8 @@ async function readSnapshot(org: string, tx: DbClient) {
 export async function readConnectorPolicyCollection(c: Context) {
   const denied = authorize(c);
   if (denied) return denied;
-  return withConnectorPolicyTransaction(c.get("organizationId")!, async tx => {
-    const { revision, rules } = await readSnapshot(c.get("organizationId")!, tx);
-    return c.json({ revision, rules });
-  });
+  const { revision, rules } = await readSnapshot(c.get("organizationId")!);
+  return c.json({ revision, rules });
 }
 
 /** Replace the org's connector rules as one compare-and-swap, preserving every other policy class/principal. */

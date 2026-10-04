@@ -1,10 +1,11 @@
 import { serve } from "@hono/node-server";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getOperationForConnection } from "../../../operations/connector-operations";
 import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
-import { listEntityApprovalPolicies, upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
+import { listEntityApprovalPolicies, resolveActingPrincipal, resolveConnectorPolicy, upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { addUserToOrganization, createTestAccessToken, createTestAgent, createTestConnection, createTestConnectorDefinition, createTestOAuthClient, createTestOrganization, createTestPAT, createTestSession, createTestUser } from "../../setup/test-fixtures";
 
@@ -109,6 +110,41 @@ describe("connector policy collection", () => {
       expect(await snapshot()).toEqual(before);
     }
     expect((await request("PUT", path(), { rules: [] })).status).toBe(400);
+  });
+
+  it("runtime reads cannot mix policy headers and effects across a replacement", async () => {
+    await createTestConnectorDefinition({ organization_id: org.id, key: "policy-race", name: "Policy race fixture" });
+    const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-race" });
+    await getTestDb()`UPDATE connector_definitions SET supports_execute = true,
+      actions_schema = '{"inspect":{"name":"Inspect","kind":"read"}}'::jsonb
+      WHERE organization_id = ${org.id} AND key = 'policy-race'`;
+    const before = await snapshot();
+    const initial = await request("PUT", path(), { revision: before.revision, rules: [{ effect: "auto" }, { operation_category: "read", effect: "deny" }] });
+    expect(initial.status).toBe(200);
+    const current = await initial.json();
+    const sql = dbClient.getDb();
+    const operation = await getOperationForConnection(org.id, connection.id, "inspect");
+    expect(operation).not.toBeNull();
+    const actor = await resolveActingPrincipal(sql, { organizationId: org.id, userId: owner.id });
+    let replaced = false;
+    const racingSql = new Proxy(sql, {
+      apply(target, thisArg, args) {
+        const query = Reflect.apply(target, thisArg, args);
+        if (!replaced && Array.isArray(args[0]) && args[0].join("").includes("FROM write_approval_policies")) {
+          replaced = true;
+          return Promise.resolve(query).then(async rows => {
+            const changed = await request("PUT", path(), { revision: current.revision, rules: [{ effect: "auto" }, { operation_key: "policy-race::inspect", effect: "deny" }] });
+            expect(changed.status).toBe(200);
+            return rows;
+          });
+        }
+        return query;
+      },
+    });
+    const decision = await resolveConnectorPolicy({ organizationId: org.id, connectionId: connection.id, operation: operation!.operation, actor, sql: racingSql });
+    expect(replaced).toBe(true);
+    // Both complete versions block this action. A mixed read must never grant Auto.
+    expect(decision.effect).toBe("deny");
   });
 
   it("rolls back the entire set on a database failure", async () => {
