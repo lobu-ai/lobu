@@ -1,5 +1,54 @@
 # Changelog
 
+## [21.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v21.1.0...lobu-v21.2.0) (2026-10-04)
+
+
+### Features
+
+* **chrome:** adopt labelled agent tabs from owletto ([#3787](https://github.com/lobu-ai/lobu/issues/3787)) ([4a91fc2](https://github.com/lobu-ai/lobu/commit/4a91fc271a38633118a5fd4530a21732779a4cbb))
+* **entities:** keep stored identity rows for source-backed records ([#3786](https://github.com/lobu-ai/lobu/issues/3786)) ([7bd9354](https://github.com/lobu-ai/lobu/commit/7bd9354b5d6fc6b9d269b14c4425f0ac35a30b63))
+* **personal-agent:** declare the LinkedIn interest-profile and feed-flagger Automations ([#3773](https://github.com/lobu-ai/lobu/issues/3773)) ([6259aa0](https://github.com/lobu-ai/lobu/commit/6259aa0afaf28d1c592a7883e8b729f348ebe86e))
+* **personal-agent:** read the member's own LinkedIn posts and comments on demand ([#3770](https://github.com/lobu-ai/lobu/issues/3770)) ([976fa41](https://github.com/lobu-ai/lobu/commit/976fa412499fc52c0ca8918d6d362d353d65567c))
+* **server:** consolidate connector approvals under org policy ([#3763](https://github.com/lobu-ai/lobu/issues/3763)) ([0866ba6](https://github.com/lobu-ai/lobu/commit/0866ba662f350b15e7de696d2b96844a60f25766))
+
+
+### Bug Fixes
+
+* **authz:** preserve connector policy restrictions across scopes ([#3780](https://github.com/lobu-ai/lobu/issues/3780)) ([75a2906](https://github.com/lobu-ai/lobu/commit/75a2906dc4f364b2631ba27b9178164ebca158b5))
+* **chat:** onboard verified spaces through shared claims ([#3775](https://github.com/lobu-ai/lobu/issues/3775)) ([1d0a87e](https://github.com/lobu-ai/lobu/commit/1d0a87e45ac4cad7ff178a81228808533b8b5d72))
+* **cli:** reject malformed entity types in defineEntityType ([#3791](https://github.com/lobu-ai/lobu/issues/3791)) ([730c2b4](https://github.com/lobu-ai/lobu/commit/730c2b444c3d1f78f2bf2578af1b94acbd201ee1))
+* **cli:** rollback no longer wipes entity-type properties ([#3797](https://github.com/lobu-ai/lobu/issues/3797)) ([973c4cf](https://github.com/lobu-ai/lobu/commit/973c4cf9adab32db27a239bdd7488ad4931e5833))
+* **entities:** resolve source records with connector exact lookup ([#3776](https://github.com/lobu-ai/lobu/issues/3776)) ([f11f75b](https://github.com/lobu-ai/lobu/commit/f11f75b9033fbb83b884e12a2dc2997d09ca883f))
+* **personal-agent:** accept LinkedIn's new comment ids and schedule the home feed ([#3769](https://github.com/lobu-ai/lobu/issues/3769)) ([ef57578](https://github.com/lobu-ai/lobu/commit/ef575781d2095bd0ac97c3f6ac4b141c754477dc))
+* **personal-agent:** budget LinkedIn home_feed scrape inside the extension run fence ([#3782](https://github.com/lobu-ai/lobu/issues/3782)) ([9cbb840](https://github.com/lobu-ai/lobu/commit/9cbb840b797ade4c1895d24b7c719d119c14bb4e))
+* **personal-agent:** stage LinkedIn drafts on the page URL LinkedIn settles on ([#3772](https://github.com/lobu-ai/lobu/issues/3772)) ([ba9b110](https://github.com/lobu-ai/lobu/commit/ba9b1102797cd03e3efc923e2b577a7981913663))
+* **proxy:** isolate organization provider alias routing ([#3801](https://github.com/lobu-ai/lobu/issues/3801)) ([33d6951](https://github.com/lobu-ai/lobu/commit/33d69517f2fe9f92ca4c5f91b7f1e1f5f9cc3e2a))
+* **release:** declare repository for views and plugin packages ([#3789](https://github.com/lobu-ai/lobu/issues/3789)) ([f5365b3](https://github.com/lobu-ai/lobu/commit/f5365b3cfc98b1f79cbcbbac5eb2c76f8c96d800))
+* repair entity filters, MCP discovery, and monitoring ([#3762](https://github.com/lobu-ai/lobu/issues/3762)) ([f64cc65](https://github.com/lobu-ai/lobu/commit/f64cc65f871505cf352599dc9373fbe82ca7cbdc))
+* **server:** apply classification filters on the signed-in knowledge search route ([#3765](https://github.com/lobu-ai/lobu/issues/3765)) ([b32b9f5](https://github.com/lobu-ai/lobu/commit/b32b9f56200e684d05596f0097df651c55bf047b))
+* **server:** apply classification filters to text searches ([#3767](https://github.com/lobu-ai/lobu/issues/3767)) ([77fdf88](https://github.com/lobu-ai/lobu/commit/77fdf8872e64e0690e531d4f31f258219216310a))
+* **server:** bound script-executor windows so a backlog cannot stall them ([#3758](https://github.com/lobu-ai/lobu/issues/3758)) ([727fa23](https://github.com/lobu-ai/lobu/commit/727fa23f1bf126d6ef7681e2d8a5841fe6e1b826))
+* **server:** derive classify label source from the acting principal ([#3754](https://github.com/lobu-ai/lobu/issues/3754)) ([7f2e2de](https://github.com/lobu-ai/lobu/commit/7f2e2de359dcacdf9c8f40b7adc4455221c58b76))
+* **server:** drain truncated script windows on the next tick ([#3761](https://github.com/lobu-ai/lobu/issues/3761)) ([c848bc2](https://github.com/lobu-ai/lobu/commit/c848bc28c252236e4cf1ae00655ec333b13b1506))
+* **server:** keep unscored model labels unscored and make classifier examples optional ([#3757](https://github.com/lobu-ai/lobu/issues/3757)) ([8abdc81](https://github.com/lobu-ai/lobu/commit/8abdc81537f6f1ee730247db9cc70d8000d20dcd))
+* **server:** match classification filters against the label readers show ([#3760](https://github.com/lobu-ai/lobu/issues/3760)) ([0b456a0](https://github.com/lobu-ai/lobu/commit/0b456a040cdbedcd00f4141ef757530e21587746))
+* **server:** push metrics on connection-backed types down to backing_source ([#3799](https://github.com/lobu-ai/lobu/issues/3799)) ([ec61522](https://github.com/lobu-ai/lobu/commit/ec61522dc762ab58d7d00da6a2aff40aa0510003))
+* **server:** refuse wrongly-typed settings in PATCH /agents/:id/config ([#3790](https://github.com/lobu-ai/lobu/issues/3790)) ([d18f935](https://github.com/lobu-ai/lobu/commit/d18f93543255cee800180b178fea5b881f2af941))
+* **server:** reject empty/whitespace network domain entries on agent config PATCH ([#3792](https://github.com/lobu-ai/lobu/issues/3792)) ([d978447](https://github.com/lobu-ai/lobu/commit/d978447c5980182fa9859f76a34db28cb24074f6))
+* **server:** reject oversized connector origin_id with a typed 422 ([#3783](https://github.com/lobu-ai/lobu/issues/3783)) ([62fca42](https://github.com/lobu-ai/lobu/commit/62fca42a2273bc24957fb8d827f3955124850bb4))
+* **server:** run HTTP operations without credentials when the connector declares no auth ([#3753](https://github.com/lobu-ai/lobu/issues/3753)) ([11e3634](https://github.com/lobu-ai/lobu/commit/11e36342d51fca13d3703e6780144ee8fbca077a))
+* **server:** scope Google Chat space installations ([#3768](https://github.com/lobu-ai/lobu/issues/3768)) ([cdded91](https://github.com/lobu-ai/lobu/commit/cdded9107f35e6ec9d655d0c630745d249ffefa7))
+* **server:** skip unchanged MCP session refresh writes ([#3779](https://github.com/lobu-ai/lobu/issues/3779)) ([3435286](https://github.com/lobu-ai/lobu/commit/343528612790a22bdfb8e76b3a466f85b90ebfd6))
+* **server:** skip unchanged rows in the hourly connector definition refresh ([#3784](https://github.com/lobu-ai/lobu/issues/3784)) ([23bfa79](https://github.com/lobu-ai/lobu/commit/23bfa798313fc74ce9da79987f16b1e2fc756ce4))
+* **server:** start the next script window as soon as a truncated one completes ([#3764](https://github.com/lobu-ai/lobu/issues/3764)) ([410667e](https://github.com/lobu-ai/lobu/commit/410667e7f449aea9b9e599115b95e050878f1833))
+* **server:** stop rewriting unchanged rows on per-request touch paths ([#3777](https://github.com/lobu-ai/lobu/issues/3777)) ([e2640fe](https://github.com/lobu-ai/lobu/commit/e2640fe86aedc16f0206166bccd2d5e147584f3b))
+* **views:** ship attached views for derived records ([#3774](https://github.com/lobu-ai/lobu/issues/3774)) ([c5e89b3](https://github.com/lobu-ai/lobu/commit/c5e89b33e54b0456fc1beafc0c9e5c44d8b2389f))
+
+
+### Reverts
+
+* **entities:** stop storing identity rows for source-backed records ([#3800](https://github.com/lobu-ai/lobu/issues/3800)) ([fbeed8a](https://github.com/lobu-ai/lobu/commit/fbeed8a555ae021bd7fa9a2984be7b101d989332))
+
 ## [21.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v21.0.0...lobu-v21.1.0) (2026-09-29)
 
 
