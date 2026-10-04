@@ -2175,10 +2175,17 @@ routes.patch("/:agentId/config", async (c) => {
 		// repair path open while still refusing to accept a new bad one.
 		const storedModels = new Map<string, string>();
 		const storedInline = (storedSettings as {
-			guardrailsInline?: Array<{ name?: string; model?: string }>;
+			guardrailsInline?: Array<{
+				name?: string;
+				model?: string;
+				kind?: string;
+			}>;
 		} | null)?.guardrailsInline;
 		if (Array.isArray(storedInline)) {
 			for (const g of storedInline) {
+				// require-tool entries never ran a judge, so they grandfather nothing:
+				// converting one into a model-less judge is a NEW judge to validate.
+				if (g?.kind === "require-tool") continue;
 				if (g?.name) storedModels.set(g.name, (g.model ?? "").trim());
 			}
 		}
