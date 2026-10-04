@@ -19,7 +19,8 @@
  *    params } }`; the web host mirrors it into the address bar. Hosts without
  *    that capability keep params local to the frame.
  *
- * Read budget: every read runs on every render, on a user-facing path.
+ * Read budget: reads run on a user-facing path, when the host is ready and
+ * the query changes or `refetch()` is called.
  * `query_sql` runs in a read-only, org-scoped transaction with a 5 second
  * statement timeout and returns at most 500 rows; `useQuery` reports a hit as
  * `errorCode: "UPSTREAM_TIMEOUT"` or `truncated: true`, so render those
@@ -28,11 +29,11 @@
  * `LIKE` over `events` (or any other table that grows with history). History
  * grows; the answer a view shows does not.
  *
- * "Latest state" views have one supported pattern. Compute the state at write
- * time: an Automation bound to the entity declares a keyed event output
+ * For "latest state" views, compute state at write time. One event-based
+ * pattern is an Automation bound to the entity declaring a keyed event output
  * (`outputs: { status: { event: "account_status", key: ["account"] } }`), so
- * each run supersedes the previous event with the same key and exactly one
- * current row exists. The view reads that row by index with `read_knowledge`
+ * each emitted update supersedes the previous event with the same output
+ * identity. The view reads current events with `read_knowledge`
  * (registry-marked `readOnlyHint`, so the host lets a view call it), which
  * skips superseded rows:
  *
@@ -282,8 +283,6 @@ export function queryResult<T>(
   kind: "sql" | "sdk" | "tool",
   result: ToolResult
 ): Pick<QueryState<T>, "data" | "error" | "errorCode" | "truncated"> {
-  const err = resultError(result);
-  if (err) return { data: null, error: err, errorCode: null, truncated: false };
   // structuredContent when the tool declares an outputSchema (query_sql,
   // query_sdk, every read tool on MCP hosts); otherwise the text body.
   const sc = (result.structuredContent ??
@@ -309,6 +308,19 @@ export function queryResult<T>(
         typeof message === "string" && message
           ? message
           : "Query script failed",
+      errorCode: typeof code === "string" ? code : null,
+      truncated: false,
+    };
+  }
+  // MCP also marks resolved SQL/SDK failures isError; decode their envelopes
+  // above before falling back to the host's text and thrown-error metadata.
+  const err = resultError(result);
+  if (err) {
+    const e = sc.error as { code?: unknown } | null | undefined;
+    const code = typeof e === "object" ? e?.code : undefined;
+    return {
+      data: null,
+      error: err,
       errorCode: typeof code === "string" ? code : null,
       truncated: false,
     };

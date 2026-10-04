@@ -236,6 +236,52 @@ describe("queryResult guardrails", () => {
     });
   });
 
+  test.each([
+    "sql",
+    "sdk",
+  ] as const)("%s preserves typed failures when MCP marks them isError", (kind) => {
+    const body =
+      kind === "sql"
+        ? { rows: [], error: "slow", error_code: "UPSTREAM_TIMEOUT" }
+        : {
+            success: false,
+            error: { name: "Error", message: "slow", code: "UPSTREAM_TIMEOUT" },
+          };
+    for (const structuredContent of [body, undefined]) {
+      expect(
+        queryResult(kind, {
+          isError: true,
+          structuredContent,
+          content: [{ type: "text", text: JSON.stringify(body) }],
+        })
+      ).toEqual({
+        data: null,
+        error: "slow",
+        errorCode: "UPSTREAM_TIMEOUT",
+        truncated: false,
+      });
+    }
+  });
+
+  test.each([
+    "sql",
+    "sdk",
+    "tool",
+  ] as const)("%s preserves a thrown MCP tool error's structured code", (kind) => {
+    expect(
+      queryResult(kind, {
+        isError: true,
+        structuredContent: { error: { code: "FORBIDDEN", retryable: false } },
+        content: [{ type: "text", text: "denied" }],
+      })
+    ).toEqual({
+      data: null,
+      error: "denied",
+      errorCode: "FORBIDDEN",
+      truncated: false,
+    });
+  });
+
   test("a query script's typed code and output cap come through", () => {
     expect(
       queryResult("sdk", {

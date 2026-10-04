@@ -1,6 +1,6 @@
 /**
  * The guardrails a view's `useQuery(sql`…`)` read runs under. `@lobu/views`
- * calls `query_sql` with `limit: 500` on every render; this drives the real
+ * calls `query_sql` with `limit: 500` for each SQL read; this drives the real
  * handler against real Postgres with that exact argument shape and pins the
  * two bounds the view runtime surfaces: the 500-row page cap is reported as
  * `has_more` (the guest's `truncated`), and the statement timeout comes back
