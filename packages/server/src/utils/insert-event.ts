@@ -7,6 +7,7 @@
 
 import { retryWithBackoff } from '@lobu/core';
 import { type DbClient, getDb, parsePgNumberArray } from '../db/client';
+import { notifyEventContentChanged } from '../events/emitter';
 import { stripIdentityScopeProjectionMetadata } from '../identity/scope-projection';
 import { getActingAutomationScope } from './acting-automation-context';
 import {
@@ -804,6 +805,7 @@ export async function insertEvent(
               params,
               activeSql
             );
+            if (stateWritten) await notifyEventContentChanged(activeSql, existingRow.id);
             const settled = {
               ...existingRow,
               change: (stateWritten ? 'state_updated' : 'unchanged') as
@@ -1014,6 +1016,10 @@ export async function insertEvent(
     }
 
     await upsertEmbedding(inserted.id, params.embedding, params.embeddingModel, sql);
+    // Every event write funnels through here, so this is the one place that
+    // tells browsers on any replica to refetch content. Same handle as the
+    // INSERT: inside a transaction it is delivered on commit, never on rollback.
+    await notifyEventContentChanged(sql, inserted.id);
     const persisted: InsertedEvent = {
       ...inserted,
       change: supersedesEventId === null ? 'inserted' : 'superseded',

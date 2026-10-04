@@ -4,6 +4,7 @@
  */
 
 import { getDb } from '../../../db/client';
+import { notifyEventContentChanged } from '../../../events/emitter';
 import { parseJsonObject } from '@lobu/core';
 import { ToolUserError } from '../../../utils/errors';
 import type { ToolContext } from '../../registry';
@@ -182,6 +183,7 @@ export async function handleSubmitFeedback(
         RETURNING id
       `;
       ids.push(Number(row.id));
+      await notifyEventContentChanged(tx, Number(row.id));
     }
 
     await tx`

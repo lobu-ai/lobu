@@ -149,6 +149,8 @@ interface ViewRuntime {
   params: Params;
   setParams: (patch: Partial<Params>) => void;
   theme: "light" | "dark";
+  /** Bumped when the host reports a workspace data change; reads re-run. */
+  dataVersion: number;
   callTool: (
     name: string,
     args: Record<string, unknown>
@@ -370,6 +372,12 @@ export function useQuery<T = unknown>(
     loading: query !== null,
   });
   const [tick, setTick] = useState(0);
+  // A host data change re-reads the same query in the background: the rows
+  // already on screen stay until the fresh ones land, so a live view never
+  // flashes its loading state on every write.
+  const lastRead = useRef<{ key: string | null; dataVersion: number } | null>(
+    null
+  );
   const key =
     query === null
       ? null
@@ -378,7 +386,7 @@ export function useQuery<T = unknown>(
         : query.kind === "tool"
           ? `tool:${query.name}:${JSON.stringify(query.args)}`
           : `sql:${query.text}`;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable and tick is the intentional refetch trigger.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable; tick and rt.dataVersion are the intentional refetch triggers.
   useEffect(() => {
     // A skipped query is idle, even when the previous request is in flight.
     if (key === null) {
@@ -388,7 +396,11 @@ export function useQuery<T = unknown>(
     // Queries still wait for the host to seed scope and params.
     if (!rt.ready) return;
     let cancelled = false;
-    setState((s) => ({ ...s, loading: true }));
+    const background =
+      lastRead.current?.key === key &&
+      lastRead.current.dataVersion !== rt.dataVersion;
+    lastRead.current = { key, dataVersion: rt.dataVersion };
+    if (!background) setState((s) => ({ ...s, loading: true }));
     const q = query as SqlQuery | ToolQuery | string;
     const call =
       typeof q === "string"
@@ -418,7 +430,7 @@ export function useQuery<T = unknown>(
     return () => {
       cancelled = true;
     };
-  }, [key, rt.ready, tick]);
+  }, [key, rt.ready, tick, rt.dataVersion]);
   const refetch = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refetch };
 }
@@ -547,6 +559,7 @@ export function Provider({
   const [scope, setScope] = useState<Scope>({});
   const [params, setParamsState] = useState<Params>(() => defaultsFor(def));
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [dataVersion, setDataVersion] = useState(0);
   const bridgeRef = useRef<ViewBridge | null>(bridge ?? null);
   if (bridge) bridgeRef.current = bridge;
   if (bridgeRef.current === null) bridgeRef.current = new ViewBridge();
@@ -567,6 +580,7 @@ export function Provider({
       setTheme(next);
       applyTheme(next);
     });
+    const offData = b.onDataChanged(() => setDataVersion((v) => v + 1));
     b.connect()
       .then((ctx) => {
         const next = themeFromContext(ctx);
@@ -580,6 +594,7 @@ export function Provider({
     return () => {
       offInput();
       offCtx();
+      offData();
     };
   }, [def]);
 
@@ -620,9 +635,20 @@ export function Provider({
       params,
       setParams,
       theme,
+      dataVersion,
       callTool,
     }),
-    [def, connected, ready, scope, params, setParams, theme, callTool]
+    [
+      def,
+      connected,
+      ready,
+      scope,
+      params,
+      setParams,
+      theme,
+      dataVersion,
+      callTool,
+    ]
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
