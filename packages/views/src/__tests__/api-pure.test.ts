@@ -140,13 +140,23 @@ describe("queryResult", () => {
       queryResult("sql", {
         structuredContent: { rows: [], error: "Unknown table 'entity_types'" },
       })
-    ).toEqual({ data: null, error: "Unknown table 'entity_types'" });
+    ).toEqual({
+      data: null,
+      error: "Unknown table 'entity_types'",
+      errorCode: null,
+      truncated: false,
+    });
   });
 
   test("rows come back when the statement ran", () => {
     expect(
       queryResult("sql", { structuredContent: { rows: [{ n: 1 }] } })
-    ).toEqual({ data: [{ n: 1 }], error: null });
+    ).toEqual({
+      data: [{ n: 1 }],
+      error: null,
+      errorCode: null,
+      truncated: false,
+    });
   });
 
   test("a failed query script is an error", () => {
@@ -157,12 +167,12 @@ describe("queryResult", () => {
           error: { name: "E", message: "boom" },
         },
       })
-    ).toEqual({ data: null, error: "boom" });
+    ).toEqual({ data: null, error: "boom", errorCode: null, truncated: false });
     expect(
       queryResult("sdk", {
         structuredContent: { success: true, return_value: 3 },
       })
-    ).toEqual({ data: 3, error: null });
+    ).toEqual({ data: 3, error: null, errorCode: null, truncated: false });
   });
 
   test("a named tool's body is data, even one with an error field", () => {
@@ -170,6 +180,8 @@ describe("queryResult", () => {
     expect(queryResult("tool", { structuredContent: body })).toEqual({
       data: body,
       error: null,
+      errorCode: null,
+      truncated: false,
     });
   });
 
@@ -179,7 +191,70 @@ describe("queryResult", () => {
         isError: true,
         content: [{ type: "text", text: "denied" }],
       })
-    ).toEqual({ data: null, error: "denied" });
+    ).toEqual({
+      data: null,
+      error: "denied",
+      errorCode: null,
+      truncated: false,
+    });
+  });
+});
+
+describe("queryResult guardrails", () => {
+  test("a capped query_sql page is flagged truncated, never silently short", () => {
+    // query_sql caps a page at 500 rows and reports the rest via has_more.
+    const rows = Array.from({ length: 500 }, (_, i) => ({ n: i }));
+    const out = queryResult("sql", {
+      structuredContent: { rows, has_more: true, total_count: 1200 },
+    });
+    expect(out.data).toEqual(rows);
+    expect(out.truncated).toBe(true);
+    expect(out.errorCode).toBeNull();
+  });
+
+  test("a complete query_sql page is not truncated", () => {
+    const out = queryResult("sql", {
+      structuredContent: { rows: [{ n: 1 }], has_more: false, total_count: 1 },
+    });
+    expect(out.truncated).toBe(false);
+  });
+
+  test("a statement timeout carries its typed code", () => {
+    const out = queryResult("sql", {
+      structuredContent: {
+        rows: [],
+        error: "Query exceeded the 5 second timeout.",
+        error_code: "UPSTREAM_TIMEOUT",
+        retryable: true,
+      },
+    });
+    expect(out).toEqual({
+      data: null,
+      error: "Query exceeded the 5 second timeout.",
+      errorCode: "UPSTREAM_TIMEOUT",
+      truncated: false,
+    });
+  });
+
+  test("a query script's typed code and output cap come through", () => {
+    expect(
+      queryResult("sdk", {
+        structuredContent: {
+          success: false,
+          error: { name: "E", message: "slow", code: "UPSTREAM_TIMEOUT" },
+        },
+      }).errorCode
+    ).toBe("UPSTREAM_TIMEOUT");
+    const capped = queryResult("sdk", {
+      structuredContent: {
+        success: true,
+        return_value_preview: '[{"n":1',
+        return_truncated: { total_bytes: 900000, kept_bytes: 1000 },
+      },
+    });
+    expect(capped.data).toBeNull();
+    expect(capped.error).toBeNull();
+    expect(capped.truncated).toBe(true);
   });
 });
 
