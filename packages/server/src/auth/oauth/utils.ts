@@ -201,9 +201,9 @@ export function calculateExpiry(lifetimeSeconds: number): Date {
 /**
  * Parse scope string into array
  */
-export function parseScopes(scope: string | null | undefined): string[] {
+export function parseScopes(scope: string | null | undefined, allowedScopes: readonly string[] = AVAILABLE_SCOPES): string[] {
   if (!scope) return [...DEFAULT_SCOPES];
-  return scope.split(' ').filter((s) => (AVAILABLE_SCOPES as readonly string[]).includes(s));
+  return scope.split(' ').filter((s) => allowedScopes.includes(s));
 }
 
 // ============================================

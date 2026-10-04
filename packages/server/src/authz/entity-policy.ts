@@ -1105,9 +1105,18 @@ async function writeActionEffects(
 	}
 }
 
+/** One database lock covers both individual edits and whole-list replacements. */
+export function withConnectorPolicyTransaction<T>(organizationId: string, write: (tx: DbClient) => Promise<T>): Promise<T> {
+	return getDb().begin(async (tx) => {
+		await tx`SELECT id FROM organization WHERE id = ${organizationId} FOR UPDATE`;
+		return write(tx);
+	});
+}
+
 export async function upsertEntityApprovalPolicy(
 	organizationId: string,
 	input: EntityApprovalPolicyInput,
+	transaction?: DbClient,
 ): Promise<EntityApprovalPolicy> {
 	const resourceClass = normalizeResourceClass(input.resourceClass);
 	const principalKind = normalizePrincipalKind(input.principalKind);
@@ -1187,7 +1196,7 @@ export async function upsertEntityApprovalPolicy(
        approval_channel_name
     `;
 
-	const row = await sql.begin(async (tx) => {
+	const write = async (tx: DbClient) => {
 		let header = (await applyUpdate(tx))[0] ?? null;
 
 		if (!header) {
@@ -1220,7 +1229,9 @@ export async function upsertEntityApprovalPolicy(
 		header.effects = {};
 		for (const { action, effect } of effectSet) header.effects[action] = effect;
 		return header;
-	});
+	};
+	const row = transaction ? await write(transaction) : resourceClass === "connector_action"
+		? await withConnectorPolicyTransaction(organizationId, write) : await sql.begin(write);
 	if (!row) throw new Error("Failed to save entity approval policy");
 	return rowToPolicy(row);
 }
@@ -1235,7 +1246,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	entityTypeSlug?: string | null;
 	fieldPath?: string | null;
 	entityId?: number | null;
-}): Promise<boolean> {
+}, transaction?: DbClient): Promise<boolean> {
 	const resourceClass = normalizeResourceClass(args.resourceClass);
 	const principalKind = normalizePrincipalKind(args.principalKind);
 	const principalId = principalKind ? args.principalId?.trim() || null : null;
@@ -1266,8 +1277,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	) {
 		return false;
 	}
-	const sql = getDb();
-	const rows = await sql<{ id: number }>`
+	const remove = (sql: DbClient) => sql<{ id: number }>`
     DELETE FROM write_approval_policies
     WHERE organization_id = ${args.organizationId}
       AND resource_class = ${resourceClass}
@@ -1283,6 +1293,8 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
       AND entity_id IS NOT DISTINCT FROM ${entityId}
     RETURNING id
   `;
+	const rows = transaction ? await remove(transaction) : resourceClass === "connector_action"
+		? await withConnectorPolicyTransaction(args.organizationId, remove) : await remove(getDb());
 	return rows.length > 0;
 }
 

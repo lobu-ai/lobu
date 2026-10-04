@@ -50,6 +50,9 @@ export const DISCOVERY_SCOPES = AVAILABLE_SCOPES.filter(
 /** Default scopes for MCP access */
 export const DEFAULT_SCOPES = ['mcp:read', 'mcp:write'] as const;
 
+/** Human-minted, org-bound deployment authority; never an OAuth/MCP grant. */
+export const POLICY_WRITE_SCOPE = 'policies:write';
+
 /**
  * Scopes a Personal Access Token may be minted with (POST /api/:orgSlug/tokens).
  *
@@ -65,6 +68,7 @@ export const AVAILABLE_PAT_SCOPES = [
   'mcp:admin',
   'profile:read',
   'connections:token',
+  POLICY_WRITE_SCOPE,
 ] as const;
 
 /**
