@@ -76,3 +76,15 @@ export function parseJsonObject(
   }
   return parsed as Record<string, unknown>;
 }
+
+/**
+ * Extra guidance for a failed tool call. A 405 on `POST /api/{org}/{tool}` means
+ * the request reached a host that does not serve the tool API. The usual cause
+ * is a context with no `memoryUrl`: the CLI then falls back to the default cloud
+ * MCP host instead of the context's own `url`, and that host answers 405 with an
+ * empty body, which on its own gives no hint about the wrong host.
+ */
+export function wrongHostHint(status: number): string {
+  if (status !== 405) return "";
+  return " A 405 usually means this host does not serve the tool API. If the active context has no memoryUrl, the CLI used the default https://lobu.ai/mcp host; set memoryUrl on the context to the host that serves /api/{org}/{tool}.";
+}

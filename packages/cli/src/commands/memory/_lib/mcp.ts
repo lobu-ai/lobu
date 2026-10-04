@@ -1,6 +1,6 @@
 import { MCP_PROTOCOL_VERSION } from "@lobu/core";
 import { extractApiError } from "../../../internal/http.js";
-import { ApiError } from "./errors.js";
+import { ApiError, wrongHostHint } from "./errors.js";
 import {
   getUsableToken,
   orgFromMcpUrl,
@@ -137,7 +137,7 @@ async function mcpFetch(
     const hint =
       res.status === 401
         ? `${authContext}. Try --context <name> or run \`lobu context use <name>\`.`
-        : authContext;
+        : `${authContext}${wrongHostHint(res.status)}`;
     throw new ApiError(
       `MCP request failed via ${usedUrl}: ${res.status} ${res.statusText}${hint}`,
       res.status
@@ -300,7 +300,7 @@ async function restCall<T>(
     const hint =
       res.status === 401
         ? `${authContext}. Try --context <name> or run \`lobu context use <name>\`.`
-        : authContext;
+        : `${authContext}${wrongHostHint(res.status)}`;
     throw new ApiError(
       `${opts.failureLabel} failed via ${usedUrl}: ${message}${hint}`,
       res.status
