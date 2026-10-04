@@ -9,26 +9,53 @@ import {
   macDeviceConnectorRegistry,
 } from "../mac.js";
 
-const expectedManifestHashes: Record<string, string> = {
-  "apple.calendar":
+// Every shipped manifest identity, keyed by `key@version`. The gateway stores
+// one artifact per key@version and the last device to advertise it wins, so
+// two builds shipping different bytes under one version lock each other out
+// (lobu-ai/owletto#1139 changed apple.computer_use and os.shell in place and
+// the released Mac app's pinned connections stopped dispatching). Changing a
+// manifest therefore means a new version and a NEW entry here; never edit an
+// existing entry's hash. Released versions stay listed so content can never
+// drift back under an old version either.
+const pinnedManifestHashes: Record<string, string> = {
+  "apple.calendar@0.2.0":
     "934f8866eae6b13db330ec784e9f731ac57684726fa9c8d1f57f4de07aa09adc",
-  "apple.computer_use":
-    "55808965e90a73210c69b1f91af7cbc15a989f1cb629f843b93125c9e3ed8791",
-  "apple.health":
+  "apple.computer_use@0.1.0":
+    "965fe77a4c08c06d6903a2f62540e19fb9f25c2b90c0db7b0de3c7cc973f0de5",
+  "apple.computer_use@0.1.1":
+    "a1c1b8eb1bb0fe249f9e66e485833750b75beb1c6b4df9839796cb74e2e6e8a4",
+  "apple.health@0.2.0":
     "95d01cbd942d6af5f201656e2b6ed320e3e6559723ad3f9de619b524451f70e4",
-  "apple.photos":
+  "apple.photos@0.1.1":
     "0e140bd9a6d8f88fd1a750033a54b3157961c2046d0d18de08e16a9a566718e5",
-  "apple.reminders":
+  "apple.reminders@0.2.0":
     "ccaf18f1c403ce2ae125388a7d5a720f33a0ef656c69a2a4bde45d7b364c5de1",
-  "apple.screen_time":
+  "apple.screen_time@0.2.0":
     "882dc20d30bfa79387b6fc88dfa0a97719823bf29ea9dacb6e53fd881198e084",
-  "apple.system_audio":
+  "apple.system_audio@0.2.0":
     "f6c7024f9a9c82b124ece768b8a30b255de0a6d3d0e57fbf20c6044daf035766",
-  "local.directory":
+  "local.directory@0.2.0":
     "6846173d4a56d58677375f654cb10f04844b275280ec1cfb18d4d24b0fca89ee",
-  "os.shell":
-    "bf32689f95dba6dc9355d6626a1d39abd5ca116cbb97809bdd52349015764634",
+  "os.shell@0.3.0":
+    "6b099c370806197f55f1c69776b3e2fff84f6522e4172aa1cd0445911e46e2df",
+  "os.shell@0.3.1":
+    "d29e78b873f4b1b1b512b38dd4ead5a9eb0c2a69d06cb6de154884409da8c195",
 };
+
+function expectPinnedIdentity(
+  manifest: { key: string; version: string },
+  hash: string
+) {
+  const identity = `${manifest.key}@${manifest.version}`;
+  const pinned = pinnedManifestHashes[identity];
+  if (pinned !== hash) {
+    throw new Error(
+      pinned
+        ? `${identity} content changed without a version bump: bump ${manifest.key}'s version and pin the new key@version (${hash}); leave ${identity} as it is.`
+        : `${identity} is not pinned: add "${identity}": "${hash}".`
+    );
+  }
+}
 
 describe("Mac device connector registry", () => {
   test("is sorted, unique, and excludes the retired Mac WhatsApp connector", () => {
@@ -36,14 +63,18 @@ describe("Mac device connector registry", () => {
     expect(keys).toEqual([...keys].sort());
     expect(new Set(keys).size).toBe(keys.length);
     expect(macDeviceConnectorRegistry["whatsapp.local"]).toBeUndefined();
-    expect(keys).toEqual(Object.keys(expectedManifestHashes).sort());
+    expect(keys).toEqual(
+      [
+        ...new Set(
+          Object.keys(pinnedManifestHashes).map((id) => id.split("@")[0])
+        ),
+      ].sort()
+    );
   });
 
   test("pins the manifest identities and preserves semantic metadata", () => {
     for (const manifest of macDeviceConnectorManifests) {
-      expect(deviceManifestHash(manifest)).toBe(
-        expectedManifestHashes[manifest.key]
-      );
+      expectPinnedIdentity(manifest, deviceManifestHash(manifest));
       expect(manifest.runtime.platforms).toContain("macos");
       // Nothing about HOW an endpoint implements the contract may enter the
       // manifest: it is hashed, so it would fork the identity per platform.
