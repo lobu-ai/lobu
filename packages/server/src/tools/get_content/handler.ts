@@ -6,60 +6,72 @@
  * Omit `query` to list all content with filters.
  */
 
-import type { ContentItem } from '@lobu/connector-sdk';
+import type { ContentItem } from "@lobu/connector-sdk";
 import {
   evaluateEntityMutation,
   resolveActingPrincipal,
-} from '../../authz/entity-policy';
-import { hasRequiredMcpScope } from '../../auth/tool-access';
-import { isInProcessSystemCall } from '../../tools/access-control';
-import { createDbClientFromEnv, type DbClient, getDb, pgBigintArray } from '../../db/client';
-import { AUTOMATION_RUN_SOURCE } from '../../gateway/automation-run-session';
-import { ArtifactStore } from '../../gateway/files/artifact-store';
-import { parseAutomationRunConversationId } from '../../gateway/permissions/automation-run-intent';
-import type { Env } from '../../index';
+} from "../../authz/entity-policy";
+import { hasRequiredMcpScope } from "../../auth/tool-access";
+import { isInProcessSystemCall } from "../../tools/access-control";
+import {
+  createDbClientFromEnv,
+  type DbClient,
+  getDb,
+  pgBigintArray,
+} from "../../db/client";
+import { AUTOMATION_RUN_SOURCE } from "../../gateway/automation-run-session";
+import { ArtifactStore } from "../../gateway/files/artifact-store";
+import { parseAutomationRunConversationId } from "../../gateway/permissions/automation-run-intent";
+import type { Env } from "../../index";
 import {
   canIssueTemplateActionCapability,
   issueTemplateActionCapabilityWindow,
   TEMPLATE_ACTION_CAPABILITY_META_KEY,
-} from '../../interactions/template-action-capability';
-import { getLobuCoreServices } from '../../lobu/gateway';
-import { authzScopeFromToolContext } from '../../authz/scope';
-import { ToolUserError } from '../../utils/errors';
-import { readSourceRecordActivity } from '../../utils/source-record-reads';
+} from "../../interactions/template-action-capability";
+import { getLobuCoreServices } from "../../lobu/gateway";
+import { authzScopeFromToolContext } from "../../authz/scope";
+import { ToolUserError } from "../../utils/errors";
+import { readSourceRecordActivity } from "../../utils/source-record-reads";
 import {
   getNormalizedScoreContent,
   getNormalizedScoreContentCount,
-} from '../../utils/content-scoring';
-import { searchContentByText } from '../../utils/content-search';
-import { parseDateAlias, toEndOfDay } from '../../utils/date-aliases';
-import logger from '../../utils/logger';
-import { requireReadAccess } from '../../utils/organization-access';
-import { resolvePublicGatewayUrl } from '../../utils/public-origin';
-import { rewriteQueries } from '../../utils/query-rewriter';
+} from "../../utils/content-scoring";
+import { searchContentByText } from "../../utils/content-search";
+import { parseDateAlias, toEndOfDay } from "../../utils/date-aliases";
+import logger from "../../utils/logger";
+import {
+  requireOrgReadAccess,
+  requireReadAccess,
+} from "../../utils/organization-access";
+import { resolvePublicGatewayUrl } from "../../utils/public-origin";
+import { rewriteQueries } from "../../utils/query-rewriter";
 import {
   buildContentUrl,
   type EntityInfo,
   getOrganizationSlug,
   getPublicWebUrl,
-} from '../../utils/url-builder';
-import type { ToolContext } from '../registry';
-import { attachMcpResultMeta } from '../mcp-result-meta';
+} from "../../utils/url-builder";
+import type { ToolContext } from "../registry";
+import { attachMcpResultMeta } from "../mcp-result-meta";
 import {
   fetchByContentIds,
   fetchClassificationStats,
   fetchIncludeSuperseded,
-} from './query';
+} from "./query";
 import {
   buildContentItems,
   hydrateToolInvocationRequests,
   refreshEventArtifactDownloadUrls,
-} from './render';
-import { GetContentSchema, type GetContentArgs, getIncludeSupersededValidationErrors } from './schema';
-import type { ContentRow, GetContentResult, IdRow } from './types';
-import { handleAutomationMode } from './automation-mode';
-import { resolveMcpActivitySessionIds } from './mcp-activity-filter';
-import { withValidatedArgs } from '../validate-args';
+} from "./render";
+import {
+  GetContentSchema,
+  type GetContentArgs,
+  getIncludeSupersededValidationErrors,
+} from "./schema";
+import type { ContentRow, GetContentResult, IdRow } from "./types";
+import { handleAutomationMode } from "./automation-mode";
+import { resolveMcpActivitySessionIds } from "./mcp-activity-filter";
+import { withValidatedArgs } from "../validate-args";
 
 const MAX_EXACT_CONTENT_IDS = 2000;
 
@@ -67,9 +79,15 @@ function interactiveEventIds(items: ContentItem[]): number[] {
   return items.flatMap((item) => {
     if (item.is_superseded) return [];
     const template = item.payload_template;
-    if (!template || typeof template !== 'object' || Array.isArray(template)) return [];
+    if (!template || typeof template !== "object" || Array.isArray(template))
+      return [];
     const interactions = (template as Record<string, unknown>).interactions;
-    if (!interactions || typeof interactions !== 'object' || Array.isArray(interactions)) return [];
+    if (
+      !interactions ||
+      typeof interactions !== "object" ||
+      Array.isArray(interactions)
+    )
+      return [];
     return Object.keys(interactions).length > 0 ? [item.id] : [];
   });
 }
@@ -115,7 +133,9 @@ async function loadClaimedAutomationWindow(
     windowStart: new Date(run.window_start).toISOString(),
     windowEnd: new Date(run.window_end).toISOString(),
     templateVersionId: run.version_id == null ? null : Number(run.version_id),
-    ...(run.expires_at ? { leaseExpiresAt: new Date(run.expires_at).toISOString() } : {}),
+    ...(run.expires_at
+      ? { leaseExpiresAt: new Date(run.expires_at).toISOString() }
+      : {}),
   };
 }
 
@@ -150,7 +170,7 @@ export function resolveAutomationVisibilityUserId(
     verifiedAutomationId !== Number(requestedAutomationId)
   ) {
     throw new ToolUserError(
-      'An Automation run may only call knowledge.read for its own automation_id.',
+      "An Automation run may only call knowledge.read for its own automation_id.",
       403
     );
   }
@@ -173,9 +193,9 @@ async function stampPendingProposalCounts(
 ): Promise<void> {
   const runIds = new Set<number>();
   for (const item of items) {
-    if (item.semantic_type !== 'change_set') continue;
+    if (item.semantic_type !== "change_set") continue;
     const runId = item.run_id;
-    if (typeof runId === 'number') runIds.add(runId);
+    if (typeof runId === "number") runIds.add(runId);
   }
   if (runIds.size === 0) return;
 
@@ -189,13 +209,14 @@ async function stampPendingProposalCounts(
     GROUP BY parent_run_id
   `;
   const pendingByRun = new Map<number, number>();
-  for (const r of rows) pendingByRun.set(Number(r.parent_run_id), Number(r.pending));
+  for (const r of rows)
+    pendingByRun.set(Number(r.parent_run_id), Number(r.pending));
 
   for (const item of items) {
-    if (item.semantic_type !== 'change_set') continue;
+    if (item.semantic_type !== "change_set") continue;
     const metadata = (item.metadata ?? {}) as Record<string, unknown>;
     const runId = item.run_id;
-    if (typeof runId !== 'number') continue;
+    if (typeof runId !== "number") continue;
     item.metadata = {
       ...metadata,
       pending_proposal_count: pendingByRun.get(runId) ?? 0,
@@ -207,7 +228,11 @@ async function stampPendingProposalCounts(
 // Main Function
 // ============================================
 
-export const getContent = withValidatedArgs('read_knowledge', GetContentSchema, getContentImpl);
+export const getContent = withValidatedArgs(
+  "read_knowledge",
+  GetContentSchema,
+  getContentImpl
+);
 
 async function getContentImpl(
   args: GetContentArgs,
@@ -220,9 +245,12 @@ async function getContentImpl(
   // (they're gated by member role + public-readability at the query level), which
   // mirrors how extractAuthContext assigns scopes: real scopes for oauth/pat, a
   // not-applicable sentinel otherwise.
-  const isMcpTokenCaller = ctx.tokenType === 'oauth' || ctx.tokenType === 'pat';
-  if (isMcpTokenCaller && !hasRequiredMcpScope('read', ctx.scopes)) {
-    throw new ToolUserError('read_knowledge requires an MCP session with read access.', 403);
+  const isMcpTokenCaller = ctx.tokenType === "oauth" || ctx.tokenType === "pat";
+  if (isMcpTokenCaller && !hasRequiredMcpScope("read", ctx.scopes)) {
+    throw new ToolUserError(
+      "read_knowledge requires an MCP session with read access.",
+      403
+    );
   }
 
   // Workspace-identity audit events record member/invitation lifecycle
@@ -231,8 +259,8 @@ async function getContentImpl(
   // runs: userId=null, isAuthenticated=true) — the $member read policy
   // reserves that lifecycle data for owner/admin.
   const excludeWorkspaceAudit =
-    ctx.memberRole !== 'owner' &&
-    ctx.memberRole !== 'admin' &&
+    ctx.memberRole !== "owner" &&
+    ctx.memberRole !== "admin" &&
     !isInProcessSystemCall(ctx);
 
   // Dual client: PG for auth, PG for data
@@ -240,11 +268,8 @@ async function getContentImpl(
   const sql = getDb();
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
 
-  if (args.record) {
-    return readRecordContent(args, ctx);
-  }
-  if (args.record_cursor) {
-    throw new ToolUserError('record_cursor requires record.', 400);
+  if (args.record_cursor && !args.record) {
+    throw new ToolUserError("record_cursor requires record.", 400);
   }
 
   // Validate entity access if entity_id provided (auth query stays on PG)
@@ -254,17 +279,17 @@ async function getContentImpl(
 
   const hasMcpActivityId = args.mcp_activity_id !== undefined;
   if (hasMcpActivityId && !args.client_ids?.length) {
-    throw new ToolUserError('mcp_activity_id requires client_ids.', 400);
+    throw new ToolUserError("mcp_activity_id requires client_ids.", 400);
   }
   if (hasMcpActivityId && args.automation_id) {
     throw new ToolUserError(
-      'mcp_activity_id cannot be combined with automation_id.',
+      "mcp_activity_id cannot be combined with automation_id.",
       400
     );
   }
   if (hasMcpActivityId && args.content_ids?.length) {
     throw new ToolUserError(
-      'mcp_activity_id cannot be combined with content_ids.',
+      "mcp_activity_id cannot be combined with content_ids.",
       400
     );
   }
@@ -284,11 +309,12 @@ async function getContentImpl(
       agentId: ctx.agentId,
       sessionAutomationId: ctx.actingAutomationId ?? null,
     });
-    if (actor.kind !== 'user') {
+    if (actor.kind !== "user") {
       const typeSlugs = new Set<string>();
+      if (args.record) typeSlugs.add(args.record.type);
       if (args.entity_types?.length) {
         for (const t of args.entity_types) {
-          if (typeof t === 'string' && t.trim()) typeSlugs.add(t.trim());
+          if (typeof t === "string" && t.trim()) typeSlugs.add(t.trim());
         }
       }
       if (args.entity_id) {
@@ -333,7 +359,7 @@ async function getContentImpl(
         `;
         for (const row of eventTypeRows) {
           // Unbound events use the workspace-wide $member policy envelope.
-          typeSlugs.add(row.entity_type ? String(row.entity_type) : '$member');
+          typeSlugs.add(row.entity_type ? String(row.entity_type) : "$member");
         }
       }
       for (const slug of typeSlugs) {
@@ -343,18 +369,23 @@ async function getContentImpl(
           principalId: actor.id,
           ownerAgentId: actor.ownerAgentId,
           ownerResolved: actor.ownerResolved,
-          action: 'read',
+          action: "read",
           entityTypeSlug: slug,
           sql: getDb(),
         });
-        if (decision === 'deny') {
+        if (decision === "deny") {
           throw new ToolUserError(
             `Policy denies reading entities of type '${slug}' for this principal.`,
-            403,
+            403
           );
         }
       }
     }
+  }
+
+  if (args.record) {
+    await requireOrgReadAccess(pgSql, ctx);
+    return readRecordContent(args, ctx);
   }
 
   // Resolve the existing composite identity after every caller-specific read
@@ -374,9 +405,9 @@ async function getContentImpl(
   // (the Atlas events page used to set this unconditionally, which fired a heavy
   // `WITH matching_content` CTE on every first paint — including empty entities).
   const includeClassificationSummary = !!args.include_classification
-    ?.split(',')
+    ?.split(",")
     .map((v) => v.trim())
-    .includes('summary');
+    .includes("summary");
 
   const limit = args.limit || 50;
   const offset = args.offset || 0;
@@ -391,7 +422,7 @@ async function getContentImpl(
       // workspace-audit rows (handled inside automation mode).
       if (ctx.memberRole === null && !isInProcessSystemCall(ctx)) {
         throw new ToolUserError(
-          'Automation read mode requires workspace membership.',
+          "Automation read mode requires workspace membership.",
           403
         );
       }
@@ -400,7 +431,11 @@ async function getContentImpl(
         : null;
       const claimedWindow =
         runIdentity && runIdentity.automationId === args.automation_id
-          ? await loadClaimedAutomationWindow(sql, runIdentity.runId, args.automation_id)
+          ? await loadClaimedAutomationWindow(
+              sql,
+              runIdentity.runId,
+              args.automation_id
+            )
           : undefined;
       return await handleAutomationMode(args, env, sql, {
         organizationId: ctx.organizationId,
@@ -420,7 +455,9 @@ async function getContentImpl(
 
     const entityId = args.entity_id;
     const sinceDate = args.since ? parseDateAlias(args.since).date : null;
-    const untilDate = args.until ? toEndOfDay(parseDateAlias(args.until).date) : null;
+    const untilDate = args.until
+      ? toEndOfDay(parseDateAlias(args.until).date)
+      : null;
 
     // Run org-slug lookup and entity-info lookup in parallel — they're
     // independent and on a high-RTT DB the serial form pays the round-trip
@@ -466,30 +503,42 @@ async function getContentImpl(
     // connections, then find visible connections" round-trip is gone; events
     // with `connection_id IS NULL` (system events) stay visible to authed and
     // unauthed callers alike.
-    const visibilityScope = { organizationId: ctx.organizationId, userId: ctx.userId };
+    const visibilityScope = {
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+    };
 
     // Log incoming classification filters for debugging
     if (args.classification_filters) {
       logger.debug(
         { classification_filters: args.classification_filters },
-        '[get_content] Received classification_filters'
+        "[get_content] Received classification_filters"
       );
     }
 
     const classificationFilters = args.classification_filters
       ? Object.entries(args.classification_filters).flatMap(([slug, values]) =>
-          values.map((value) => ({ classifier_slug: String(slug), value: String(value) }))
+          values.map((value) => ({
+            classifier_slug: String(slug),
+            value: String(value),
+          }))
         )
       : undefined;
 
-    const platformFilters = (args.platforms ?? []).map((p) => String(p).trim()).filter(Boolean);
+    const platformFilters = (args.platforms ?? [])
+      .map((p) => String(p).trim())
+      .filter(Boolean);
 
-    let effectiveConnectionIds = args.connection_ids ? [...args.connection_ids] : undefined;
+    let effectiveConnectionIds = args.connection_ids
+      ? [...args.connection_ids]
+      : undefined;
 
     let didPlatformFilter = false;
     if (platformFilters.length > 0) {
       didPlatformFilter = true;
-      const placeholders = platformFilters.map((_, index) => `$${index + 2}`).join(', ');
+      const placeholders = platformFilters
+        .map((_, index) => `$${index + 2}`)
+        .join(", ");
       // When entity_id is provided, filter connections by feeds targeting that entity.
       // Otherwise, filter by organization.
       const platformQuery = entityId
@@ -523,9 +572,11 @@ async function getContentImpl(
       }
     }
 
-    const effectivePlatform = platformFilters.length === 1 ? platformFilters[0] : undefined;
+    const effectivePlatform =
+      platformFilters.length === 1 ? platformFilters[0] : undefined;
     const shouldReturnEmpty =
-      didPlatformFilter && (!effectiveConnectionIds || effectiveConnectionIds.length === 0);
+      didPlatformFilter &&
+      (!effectiveConnectionIds || effectiveConnectionIds.length === 0);
 
     // Determine query strategy:
     // 0. If content_ids provided -> simple direct query by IDs (bypasses other filters except entity_id)
@@ -539,7 +590,7 @@ async function getContentImpl(
     // can distinguish "how many rows" (`total`) from "how many things I asked
     // resolved to" (`chain_total`).
     let chainTotal: number | undefined;
-    let pageInfo: GetContentResult['page'] = {
+    let pageInfo: GetContentResult["page"] = {
       limit,
       offset,
       has_more: false,
@@ -576,7 +627,7 @@ async function getContentImpl(
       const validationErrors = getIncludeSupersededValidationErrors(args);
       if (validationErrors.length > 0) {
         throw new Error(
-          `include_superseded is only supported for entity-scoped chronological listings: ${validationErrors.join('; ')}`
+          `include_superseded is only supported for entity-scoped chronological listings: ${validationErrors.join("; ")}`
         );
       }
     }
@@ -612,11 +663,15 @@ async function getContentImpl(
         limit,
         offset,
       }));
-    } else if (args.sort_by === 'score' && entityId) {
-      logger.info('[get_content] Using sophisticated multi-signal score ranking');
+    } else if (args.sort_by === "score" && entityId) {
+      logger.info(
+        "[get_content] Using sophisticated multi-signal score ranking"
+      );
 
       const filters: Parameters<typeof getNormalizedScoreContent>[3] = {
-        ...(effectiveConnectionIds?.length && { connection_ids: effectiveConnectionIds }),
+        ...(effectiveConnectionIds?.length && {
+          connection_ids: effectiveConnectionIds,
+        }),
         ...(args.feed_ids?.length && { feed_ids: args.feed_ids }),
         ...(args.run_ids?.length && { run_ids: args.run_ids }),
         ...(args.agent_id && { agent_id: args.agent_id }),
@@ -625,8 +680,12 @@ async function getContentImpl(
         ...(effectivePlatform && { platform: effectivePlatform }),
         ...(sinceDate && { since: sinceDate }),
         ...(untilDate && { until: untilDate }),
-        ...(args.engagement_min !== undefined && { engagement_min: args.engagement_min }),
-        ...(args.engagement_max !== undefined && { engagement_max: args.engagement_max }),
+        ...(args.engagement_min !== undefined && {
+          engagement_min: args.engagement_min,
+        }),
+        ...(args.engagement_max !== undefined && {
+          engagement_max: args.engagement_max,
+        }),
         ...(args.run_id !== undefined && { run_id: args.run_id }),
         ...(args.analyzed_by_automation_id !== undefined && {
           analyzed_by_automation_id: args.analyzed_by_automation_id,
@@ -637,10 +696,16 @@ async function getContentImpl(
         ...(args.produced_by_automation_id !== undefined && {
           produced_by_automation_id: args.produced_by_automation_id,
         }),
-        ...(classificationFilters?.length && { classification_filters: classificationFilters }),
-        ...(args.classification_source && { classification_source: args.classification_source }),
+        ...(classificationFilters?.length && {
+          classification_filters: classificationFilters,
+        }),
+        ...(args.classification_source && {
+          classification_source: args.classification_source,
+        }),
         ...(args.semantic_type && { semantic_type: args.semantic_type }),
-        ...(args.interaction_status && { interaction_status: args.interaction_status }),
+        ...(args.interaction_status && {
+          interaction_status: args.interaction_status,
+        }),
         ...(excludeWorkspaceAudit && {
           exclude_workspace_audit: true,
         }),
@@ -660,7 +725,9 @@ async function getContentImpl(
         has_more: offset + rawContent.length < total,
       };
     } else {
-      logger.info(`[get_content] ${args.query ? 'Search query provided' : 'Listing content'}`);
+      logger.info(
+        `[get_content] ${args.query ? "Search query provided" : "Listing content"}`
+      );
 
       const searchOptions = {
         entity_id: args.entity_id,
@@ -699,9 +766,11 @@ async function getContentImpl(
         // (text + vector). Defaulting to 'date' here quietly bypasses semantic ranking
         // and orders results newest-first, which is not what most semantic callers want.
         // Callers can still request chronological by passing sort_by='date' explicitly.
-        sort_by: args.sort_by || (args.query ? 'score' : 'date'),
+        sort_by: args.sort_by || (args.query ? "score" : "date"),
         sort_order: args.sort_order,
-        ...(args.vector_weight !== undefined && { vector_weight: args.vector_weight }),
+        ...(args.vector_weight !== undefined && {
+          vector_weight: args.vector_weight,
+        }),
         before_occurred_at: args.before_occurred_at,
         before_id: args.before_id,
         after_occurred_at: args.after_occurred_at,
@@ -710,7 +779,11 @@ async function getContentImpl(
 
       // Primary single-query search. A capable agent already phrases its own
       // search query, so this is the path the vast majority of calls take.
-      const result = await searchContentByText(args.query ?? null, searchOptions, env);
+      const result = await searchContentByText(
+        args.query ?? null,
+        searchOptions,
+        env
+      );
       rawContent = result.content;
       total = result.total;
       pageInfo = result.page;
@@ -727,7 +800,7 @@ async function getContentImpl(
       const fallbackEligible =
         rawContent.length === 0 &&
         !!args.query &&
-        (args.sort_by ?? 'score') === 'score' &&
+        (args.sort_by ?? "score") === "score" &&
         !args.before_occurred_at &&
         !args.after_occurred_at &&
         offset === 0 &&
@@ -742,8 +815,15 @@ async function getContentImpl(
         // ranking), capped so a large caller limit can't fan out into tens of
         // thousands of rows. The raw query already returned nothing, so only the
         // variants are searched here.
-        const fetchLimit = Math.min(Math.max(limit * 4, 40), FALLBACK_FETCH_CAP);
-        const fusionOptions = { ...searchOptions, limit: fetchLimit, offset: 0 };
+        const fetchLimit = Math.min(
+          Math.max(limit * 4, 40),
+          FALLBACK_FETCH_CAP
+        );
+        const fusionOptions = {
+          ...searchOptions,
+          limit: fetchLimit,
+          offset: 0,
+        };
 
         // candidate pool: event id -> best (max-score) row seen across variants.
         const pool = new Map<number, { row: ContentRow; score: number }>();
@@ -762,22 +842,34 @@ async function getContentImpl(
         // and deep pages must not be reported as exhausted.
         let poolTruncated = false;
         for (const variant of variants) {
-          const variantResult = await searchContentByText(variant, fusionOptions, env);
+          const variantResult = await searchContentByText(
+            variant,
+            fusionOptions,
+            env
+          );
           fuseInto(variantResult.content);
           poolTruncated ||= variantResult.content.length >= fetchLimit;
         }
 
-        const ranked = [...pool.values()].sort((a, b) => b.score - a.score).map((c) => c.row);
+        const ranked = [...pool.values()]
+          .sort((a, b) => b.score - a.score)
+          .map((c) => c.row);
 
         // The caller's limit pages out of the FUSED ranking (offset is 0 here).
         rawContent = ranked.slice(0, limit);
         total = ranked.length;
-        pageInfo = { limit, offset: 0, has_more: poolTruncated || ranked.length > limit };
+        pageInfo = {
+          limit,
+          offset: 0,
+          has_more: poolTruncated || ranked.length > limit,
+        };
       }
     }
 
     // Optionally fetch classification statistics (aggregated across ALL matching content, not just paginated results)
-    let classificationStats: GetContentResult['classification_stats'] | undefined;
+    let classificationStats:
+      | GetContentResult["classification_stats"]
+      | undefined;
     if (includeClassificationSummary) {
       classificationStats = await fetchClassificationStats({
         args,
@@ -855,7 +947,12 @@ async function getContentImpl(
     }
 
     // Entity summary: when searching org-wide (query provided, no entity_id/automation_id)
-    if (args.query && !args.entity_id && !args.automation_id && contentItems.length > 0) {
+    if (
+      args.query &&
+      !args.entity_id &&
+      !args.automation_id &&
+      contentItems.length > 0
+    ) {
       const entityCountMap = new Map<number, number>();
       for (const item of contentItems) {
         for (const eid of item.entity_ids) {
@@ -865,7 +962,7 @@ async function getContentImpl(
 
       if (entityCountMap.size > 1) {
         const uniqueEntityIds = Array.from(entityCountMap.keys());
-        const idList = `{${uniqueEntityIds.join(',')}}`;
+        const idList = `{${uniqueEntityIds.join(",")}}`;
         const entityRows = await sql`
           SELECT e.id, e.name, et.slug AS entity_type
           FROM entities e
@@ -890,10 +987,14 @@ async function getContentImpl(
     // Hints for the client
     const hints: string[] = [];
     if (offset + contentItems.length < total) {
-      hints.push(`${total - (offset + contentItems.length)} more results available.`);
+      hints.push(
+        `${total - (offset + contentItems.length)} more results available.`
+      );
     }
     if (result.entity_summary) {
-      hints.push(`Results span ${result.entity_summary.length} entities. Use entity_id to focus.`);
+      hints.push(
+        `Results span ${result.entity_summary.length} entities. Use entity_id to focus.`
+      );
     }
     if (hints.length > 0) result.hints = hints;
 
@@ -903,7 +1004,7 @@ async function getContentImpl(
       if (!issued) {
         result.hints = [
           ...(result.hints ?? []),
-          'Interactive actions could not be enabled for this page: this host\'s session identifiers leave no room for the capability token.',
+          "Interactive actions could not be enabled for this page: this host's session identifiers leave no room for the capability token.",
         ];
         return result;
       }
@@ -919,7 +1020,7 @@ async function getContentImpl(
     }
     return result;
   } catch (error) {
-    logger.error({ err: error }, 'get_content error:');
+    logger.error({ err: error }, "get_content error:");
     throw error;
   }
 }
@@ -928,25 +1029,47 @@ async function getContentImpl(
  * A source-backed record's events, read live. The record has no stored row,
  * so no other read_knowledge filter applies to it.
  */
-async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promise<GetContentResult> {
+async function readRecordContent(
+  args: GetContentArgs,
+  ctx: ToolContext
+): Promise<GetContentResult> {
   const { record, record_cursor, limit, ...rest } = args;
   // Schema defaults arrive filled in; anything else the caller set is a filter
   // this read cannot honor, and is refused rather than silently ignored.
-  const defaulted = new Set(['offset', 'min_similarity', 'sort_by', 'sort_order', 'include_superseded']);
-  const extra = Object.entries(rest).filter(([key, value]) => value !== undefined && !defaulted.has(key));
+  const extra = Object.entries(rest).filter(([key, value]) => {
+    const schema =
+      GetContentSchema.properties[
+        key as keyof typeof GetContentSchema.properties
+      ];
+    return (
+      value !== undefined &&
+      (!schema || !("default" in schema) || value !== schema.default)
+    );
+  });
   if (extra.length > 0) {
-    throw new ToolUserError(`record cannot be combined with ${extra.map(([key]) => key).join(', ')}.`, 400);
+    throw new ToolUserError(
+      `record cannot be combined with ${extra.map(([key]) => key).join(", ")}.`,
+      400
+    );
   }
   const pageLimit = Math.max(1, Math.min(100, Math.trunc(limit ?? 50)));
-  const result = await readSourceRecordActivity(authzScopeFromToolContext(ctx), record!, {
-    limit: pageLimit,
-    cursor: record_cursor,
-    signal: ctx.abortSignal,
-  });
+  const result = await readSourceRecordActivity(
+    authzScopeFromToolContext(ctx),
+    record!,
+    {
+      limit: pageLimit,
+      cursor: record_cursor,
+      signal: ctx.abortSignal,
+    }
+  );
   return {
     content: result.events,
     total: result.events.length,
-    page: { limit: pageLimit, offset: 0, has_more: Boolean(result.next_cursor) },
+    page: {
+      limit: pageLimit,
+      offset: 0,
+      has_more: Boolean(result.next_cursor),
+    },
     ...(result.next_cursor ? { record_cursor: result.next_cursor } : {}),
     ...(result.failures.length ? { record_failures: result.failures } : {}),
   };
