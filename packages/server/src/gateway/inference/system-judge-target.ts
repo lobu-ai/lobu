@@ -154,33 +154,3 @@ export async function resolveSystemJudgeTarget(
     },
   };
 }
-
-/**
- * Boot-time preflight for the operator's default judge model.
- *
- * `EGRESS_JUDGE_MODEL` is only consulted when a judged request actually
- * arrives, so a bare id or an anthropic-protocol ref used to surface as the
- * judge denying all judged egress — correct (it fails closed) but discovered at
- * the worst possible moment, with the reason buried in a per-request log line.
- *
- * Deliberately NOT fatal: the judge is optional, and a misconfigured optional
- * control must not turn into a gateway outage. Returns the problem so callers
- * can surface it however suits them, and logs it loudly for the operator.
- */
-export async function checkConfiguredJudgeModel(): Promise<string | null> {
-  const configured = process.env.EGRESS_JUDGE_MODEL?.trim();
-  if (!configured) return null;
-
-  const resolved = await resolveSystemJudgeTarget(configured);
-  if (resolved.ok) {
-    logger.info(
-      { model: configured },
-      "EGRESS_JUDGE_MODEL resolved against an operator-keyed provider"
-    );
-    return null;
-  }
-
-  const detail = `EGRESS_JUDGE_MODEL="${configured}" cannot be resolved: ${resolved.detail}. Every judged egress request will be DENIED until this is fixed. Use a "<provider>/<model>" ref whose provider has a system key set and speaks the OpenAI-compatible protocol.`;
-  logger.error({ model: configured, reason: resolved.reason }, detail);
-  return detail;
-}

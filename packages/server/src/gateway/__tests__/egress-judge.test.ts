@@ -33,7 +33,7 @@ describe("EgressJudge.decide", () => {
       verdict: "allow",
       reason: "within policy",
     }));
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const decision = await judge.decide(
       { agentId: "agent-a", hostname: "api.github.com" },
       rule()
@@ -49,7 +49,7 @@ describe("EgressJudge.decide", () => {
       verdict: "deny",
       reason: "unknown repo",
     }));
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const decision = await judge.decide(
       { agentId: "agent-a", hostname: "api.github.com" },
       rule()
@@ -63,7 +63,7 @@ describe("EgressJudge.decide", () => {
       verdict: "allow",
       reason: "ok",
     }));
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const req = { agentId: "agent-a", hostname: "api.github.com" };
     const r = rule();
     await judge.decide(req, r);
@@ -77,7 +77,7 @@ describe("EgressJudge.decide", () => {
       verdict: "allow",
       reason: "ok",
     }));
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const req = { agentId: "agent-a", hostname: "api.github.com" };
     await judge.decide(req, rule({ policyHash: "h1" }));
     await judge.decide(req, rule({ policyHash: "h2" }));
@@ -94,7 +94,7 @@ describe("EgressJudge.decide", () => {
           resolveOne = resolve;
         })
     );
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const req = { agentId: "agent-a", hostname: "api.github.com" };
     const r = rule();
     const a = judge.decide(req, r);
@@ -110,7 +110,7 @@ describe("EgressJudge.decide", () => {
     const client = new StubClient(async () => {
       throw new Error("boom");
     });
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const decision = await judge.decide(
       { agentId: "agent-a", hostname: "api.github.com" },
       rule()
@@ -127,7 +127,7 @@ describe("EgressJudge.decide", () => {
     });
     const judge = new EgressJudge({
       client,
-      defaultModel: "judge-test-model",
+      resolveOrgDefaultModel: async () => "judge-test-model",
       breakerFailureThreshold: 2,
       breakerCooldownMs: 60_000,
     });
@@ -150,7 +150,7 @@ describe("EgressJudge.decide", () => {
     }));
     const judge = new EgressJudge({
       client,
-      defaultModel: "default-model",
+      resolveOrgDefaultModel: async () => "default-model",
     });
     await judge.decide(
       { agentId: "agent-a", hostname: "x.com" },

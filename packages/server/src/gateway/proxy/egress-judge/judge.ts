@@ -42,8 +42,10 @@ export class EgressJudge extends JudgeRunner<JudgeDecision> {
     return this.run({
       cacheKey,
       policyHash: rule.policyHash,
-      // Per-rule model, from the egress guardrail's own `model` field.
+      // Per-rule model from the egress guardrail's own `model` field; unset
+      // falls back to the org's default provider model.
       model: rule.judgeModel,
+      orgId: request.organizationId,
       logFields: { hostname: request.hostname },
       buildPrompts: () => ({
         systemPrompt: buildSystemPrompt(),

@@ -37,7 +37,7 @@ function rule(overrides: Partial<ResolvedJudgeRule> = {}): ResolvedJudgeRule {
 describe("EgressJudge timeout", () => {
   test("a hung judge call fails closed within ~timeout", async () => {
     const client = new HangingClient();
-    const judge = new EgressJudge({ client, judgeTimeoutMs: 30, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, judgeTimeoutMs: 30, resolveOrgDefaultModel: async () => "judge-test-model" });
     const started = Date.now();
     const decision = await judge.decide(
       { agentId: "agent-a", organizationId: "org-1", hostname: "api.github.com" },
@@ -56,7 +56,7 @@ describe("EgressJudge timeout", () => {
     const judge = new EgressJudge({
       client,
       judgeTimeoutMs: 20,
-      defaultModel: "judge-test-model",
+      resolveOrgDefaultModel: async () => "judge-test-model",
       breakerFailureThreshold: 2,
       breakerCooldownMs: 60_000,
     });
@@ -86,7 +86,7 @@ describe("EgressJudge timeout", () => {
     process.env.EGRESS_JUDGE_TIMEOUT_MS = "25";
     try {
       const client = new HangingClient();
-      const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+      const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
       const started = Date.now();
       const decision = await judge.decide(
         { agentId: "agent-a", organizationId: "org-1", hostname: "api.github.com" },
