@@ -9,10 +9,17 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { Env } from "../../../index";
+import { executeTool, type AuthContext } from "../../../tools/execute";
 import { insertEvent } from "../../../utils/insert-event";
+import { initWorkspaceProvider } from "../../../workspace";
 import { streamInvalidationEvents } from "../../../events/sse";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestOrganization } from "../../setup/test-fixtures";
+import {
+	addUserToOrganization,
+	createTestOrganization,
+	createTestUser,
+} from "../../setup/test-fixtures";
 
 interface OpenStream {
 	frames: string[];
@@ -109,6 +116,7 @@ process.exit(0);`;
 describe("cross-replica content invalidation", () => {
 	beforeAll(async () => {
 		await getTestDb()`SELECT 1`;
+		await initWorkspaceProvider();
 	});
 	beforeEach(async () => {
 		await cleanupTestDatabase();
@@ -181,4 +189,41 @@ describe("cross-replica content invalidation", () => {
 			stream.close();
 		}
 	}, 60_000);
+
+	it("does not invalidate content for the audit row a read writes, so a refetch cannot loop", async () => {
+		// Every tool call, reads included, appends a tool-invocation audit event.
+		// If that row invalidated content, each refetch would trigger the next.
+		const org = await createTestOrganization({ name: "Invalidation Read Org" });
+		const user = await createTestUser({ email: "invalidation-read@test.com" });
+		await addUserToOrganization(user.id, org.id, "owner");
+		const ctx: AuthContext = {
+			organizationId: org.id,
+			tokenOrganizationId: org.id,
+			userId: user.id,
+			memberRole: "owner",
+			agentId: null,
+			requestedAgentId: null,
+			isAuthenticated: true,
+			clientId: null,
+			scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+			tokenType: "oauth",
+			requestUrl: `http://localhost/api/${org.id}`,
+			baseUrl: "",
+			scopedToOrg: true,
+			allowCrossOrg: false,
+		};
+		const env = { ENVIRONMENT: "test", DATABASE_URL: process.env.DATABASE_URL } as Env;
+		const stream = await openStream(org.id);
+		try {
+			await executeTool("read_knowledge", { limit: 5 }, env, ctx);
+			const audits = await getTestDb()`
+				SELECT id FROM events
+				WHERE organization_id = ${org.id} AND origin_type = 'tool_invocation'
+			`;
+			expect(audits.length).toBeGreaterThan(0);
+			expect(await stream.waitFor(isContentInvalidation, 1_000)).toBeNull();
+		} finally {
+			stream.close();
+		}
+	}, 30_000);
 });
