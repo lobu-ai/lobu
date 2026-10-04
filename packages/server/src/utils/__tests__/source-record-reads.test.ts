@@ -30,9 +30,10 @@ const feed = {
     },
   },
 };
+let feeds: Array<typeof feed> = [feed];
 const sql = Object.assign(
   vi.fn(async () => [{ backing_sql: "SELECT 1" }]),
-  { unsafe: vi.fn(async () => [feed]) }
+  { unsafe: vi.fn(async () => feeds) }
 );
 const scope = {
   organizationId: "record-test-org",
@@ -53,7 +54,10 @@ beforeAll(async () => {
   }));
   reads = await import("../source-record-reads");
 });
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  feeds = [feed];
+});
 afterAll(() => {
   vi.doUnmock("../../db/client");
   vi.doUnmock("../../lib/source-feed-page");
@@ -139,4 +143,85 @@ it("keeps a failed stream in the continuation so a retry resumes it", async () =
   );
   expect(retried.events.map((event) => event.origin_id)).toEqual(["valid"]);
   expect(retried.next_cursor).toBeUndefined();
+});
+
+const linked = (origin_id: string, occurred_at: string, contact_id = "c1") => ({
+  origin_id,
+  origin_type: "linked",
+  occurred_at,
+  metadata: { account_id: "a1", contact_id },
+});
+
+/** A source that pages its rows by offset, at most two per page. */
+function pagedSource(rowsByFeed: Record<number, Array<Record<string, unknown>>>) {
+  readPage.mockImplementation(
+    async (read: { feed_id: number; limit: number; cursor?: string }) => {
+      const rows = rowsByFeed[read.feed_id] ?? [];
+      const offset = read.cursor ? Number(read.cursor) : 0;
+      const page = rows.slice(offset, offset + Math.min(read.limit, 2));
+      const end = offset + page.length;
+      return { rows: page, ...(end < rows.length ? { next_cursor: String(end) } : {}) };
+    }
+  );
+}
+
+it("pages newest first across feeds without exceeding the limit or skipping rows", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  pagedSource({
+    1: [linked("jan10", "2026-01-10T00:00:00Z"), linked("jan9", "2026-01-09T00:00:00Z")],
+    2: [linked("jan2", "2026-01-02T00:00:00Z"), linked("jan1", "2026-01-01T00:00:00Z")],
+  });
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 6; page += 1) {
+    const result = await reads.readSourceRecordActivity(scope, record, { limit: 1, cursor });
+    expect(result.events.length).toBeLessThanOrEqual(1);
+    seen.push(...result.events.map((event) => String(event.origin_id)));
+    cursor = result.next_cursor;
+    if (!cursor) break;
+  }
+  expect(seen).toEqual(["jan10", "jan9", "jan2", "jan1"]);
+  expect(cursor).toBeUndefined();
+});
+
+it("does not return rows past a stream that has more pages but no rows left", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  pagedSource({
+    1: [linked("old", "2026-01-01T00:00:00Z")],
+    2: [
+      linked("b5", "2026-01-05T00:00:00Z"),
+      linked("b4", "2026-01-04T00:00:00Z"),
+      linked("b3", "2026-01-03T00:00:00Z"),
+    ],
+  });
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 5 });
+  expect(first.events.map((event) => event.origin_id)).toEqual(["b5", "b4"]);
+  const second = await reads.readSourceRecordActivity(scope, record, {
+    limit: 5,
+    cursor: first.next_cursor,
+  });
+  expect(second.events.map((event) => event.origin_id)).toEqual(["b3", "old"]);
+  expect(second.next_cursor).toBeUndefined();
+});
+
+it("finds a relationship declared only on a later source page", async () => {
+  pagedSource({
+    1: [
+      { origin_id: "x", origin_type: "other", occurred_at: "2026-01-09T00:00:00Z", metadata: { account_id: "a1" } },
+      { origin_id: "y", origin_type: "other", occurred_at: "2026-01-08T00:00:00Z", metadata: { account_id: "a1" } },
+      linked("rel", "2026-01-01T00:00:00Z", "c7"),
+    ],
+  });
+  const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
+  expect(result.failures).toEqual([]);
+  expect(result.links.map((link) => link.key)).toEqual(["c7"]);
+});
+
+it("reports a relationship read that hits its page cap instead of an empty list", async () => {
+  readPage.mockResolvedValue({ rows: [], next_cursor: "more" });
+  const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
+  expect(result.links).toEqual([]);
+  expect(result.failures).toEqual([
+    { feed_id: 1, error: expect.stringMatching(/were not read/) },
+  ]);
 });

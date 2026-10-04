@@ -20,8 +20,9 @@ import { ToolUserError } from "./errors";
 import { getValueAtPath } from "./object-path";
 
 const READ_TIMEOUT_MS = 20_000;
-/** Cursor value for a stream that must be re-read from its first page. */
-const FROM_START = "start";
+/** Source pages a relationship read follows per stream before reporting it incomplete. */
+const MAX_LINK_PAGES = 10;
+const LINK_PAGE_SIZE = 200;
 
 type EventKinds = Record<
   string,
@@ -123,9 +124,18 @@ async function loadSourceFeeds(
     );
 }
 
+/**
+ * Where one stream resumes: the source cursor of the page it is in (none for
+ * the first page) and how many rows of that page were already returned.
+ */
+interface StreamPosition {
+  c?: string;
+  s: number;
+}
+
 function decodeCursor(
   cursor: string | undefined
-): Record<string, string> | null {
+): Record<string, StreamPosition> | null {
   if (!cursor) return null;
   try {
     const parsed = JSON.parse(
@@ -137,10 +147,16 @@ function decodeCursor(
       !Array.isArray(parsed) &&
       Object.keys(parsed).length > 0 &&
       Object.values(parsed).every(
-        (value) => typeof value === "string" && value.length > 0
+        (value) =>
+          value &&
+          typeof value === "object" &&
+          Number.isSafeInteger(value.s) &&
+          value.s >= 0 &&
+          (value.c === undefined ||
+            (typeof value.c === "string" && value.c.length > 0))
       )
     ) {
-      return parsed as Record<string, string>;
+      return parsed as Record<string, StreamPosition>;
     }
   } catch {}
   throw new ToolUserError("Invalid record activity cursor", 400);
@@ -152,10 +168,33 @@ function occurredAt(row: Record<string, unknown>): string {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
+/** The read streams of a record: one per feed and matchable identity path. */
+function activityStreams(feeds: SourceFeed[], type: string) {
+  return feeds.flatMap((feed) => {
+    const paths = new Set<string>();
+    for (const kind of Object.values(feed.eventKinds)) {
+      for (const rule of kind.attributions ?? []) {
+        const path =
+          rule.target.entityType === type
+            ? matchablePath(rule, feed.matchPaths)
+            : null;
+        if (path) paths.add(path);
+      }
+    }
+    return [...paths].map((path) => ({
+      feed,
+      path,
+      stream: `${feed.feedId}:${path}`,
+    }));
+  });
+}
+
 /**
  * One page of a record's events across every attributing read feed, newest
- * first. The cursor carries each feed's own continuation, so a page never
- * skips a row; a failing feed is reported, never shown as "no activity".
+ * first and at most `limit` long. Streams are merged by occurred_at; the
+ * cursor keeps each stream's position, including rows it read but did not
+ * return, so no row is skipped. A failing feed is reported, never shown as
+ * "no activity", and resumes where it stopped.
  */
 export async function readSourceRecordActivity(
   scope: AuthzScope,
@@ -164,84 +203,104 @@ export async function readSourceRecordActivity(
 ) {
   const feeds = await loadSourceFeeds(scope, record.type);
   const resume = decodeCursor(options.cursor);
-  const reads = feeds
-    .flatMap((feed) => {
-      const paths = new Set<string>();
-      for (const kind of Object.values(feed.eventKinds)) {
-        for (const rule of kind.attributions ?? []) {
-          const path =
-            rule.target.entityType === record.type
-              ? matchablePath(rule, feed.matchPaths)
-              : null;
-          if (path) paths.add(path);
-        }
-      }
-      return [...paths].map((path) => ({
-        feed,
-        path,
-        stream: `${feed.feedId}:${path}`,
-      }));
-    })
-    .filter((read) => !resume || resume[read.stream] !== undefined);
+  const reads = activityStreams(feeds, record.type).flatMap((read) => {
+    const position = resume ? resume[read.stream] : { s: 0 };
+    return position ? [{ ...read, position }] : [];
+  });
 
   const failures: SourceReadFailure[] = [];
-  const next: Record<string, string> = {};
+  const next: Record<string, StreamPosition> = {};
+  const pages = (
+    await Promise.all(
+      reads.map(async ({ feed, path, stream, position }) => {
+        try {
+          const page = await readSourceFeedPage(
+            {
+              feed_id: feed.feedId,
+              match: { path, values: [record.key] },
+              limit: position.s + options.limit,
+              cursor: position.c,
+            },
+            READ_TIMEOUT_MS,
+            scope,
+            options.signal
+          );
+          return [{ feed, path, stream, position, page, taken: position.s }];
+        } catch (error) {
+          failures.push({
+            feed_id: feed.feedId,
+            error: getErrorMessage(error),
+          });
+          next[stream] = position;
+          return [];
+        }
+      })
+    )
+  ).flat();
+
+  const keeps = (
+    feed: SourceFeed,
+    path: string,
+    row: Record<string, unknown>
+  ) =>
+    (feed.eventKinds[String(row.origin_type ?? "")]?.attributions ?? []).some(
+      (rule) =>
+        rule.target.entityType === record.type &&
+        matchablePath(rule, feed.matchPaths) === path
+    );
+
+  // k-way merge over each stream's rows in source order. It stops once a
+  // stream with more pages runs out of read rows: its next row could be
+  // newer than anything left in the others.
   const events: Array<Record<string, unknown>> = [];
   const seen = new Set<string>();
-  await Promise.all(
-    reads.map(async ({ feed, path, stream }) => {
-      try {
-        const page = await readSourceFeedPage(
-          {
-            feed_id: feed.feedId,
-            match: { path, values: [record.key] },
-            limit: options.limit,
-            cursor:
-              resume?.[stream] === FROM_START ? undefined : resume?.[stream],
-          },
-          READ_TIMEOUT_MS,
-          scope,
-          options.signal
-        );
-        if (page.next_cursor) next[stream] = page.next_cursor;
-        for (const row of page.rows) {
-          const kind = feed.eventKinds[String(row.origin_type ?? "")];
-          if (
-            !(kind?.attributions ?? []).some(
-              (rule) =>
-                rule.target.entityType === record.type &&
-                matchablePath(rule, feed.matchPaths) === path
-            )
-          )
-            continue;
-          const originId = String(row.origin_id ?? "");
-          const dedupe = `${feed.feedId}:${originId}`;
-          if (originId && seen.has(dedupe)) continue;
-          seen.add(dedupe);
-          events.push({
-            feed_id: feed.feedId,
-            platform: feed.connectorKey,
-            origin_id: originId,
-            origin_type: row.origin_type ?? null,
-            title: row.title ?? null,
-            payload_text: row.payload_text ?? null,
-            author_name: row.author_name ?? null,
-            source_url: row.source_url ?? null,
-            occurred_at: occurredAt(row),
-            metadata: row.metadata ?? {},
-          });
-        }
-      } catch (error) {
-        failures.push({ feed_id: feed.feedId, error: getErrorMessage(error) });
-        // A failed stream stays in the continuation, so a retry resumes it
-        // where it stopped instead of silently dropping its remaining rows.
-        next[stream] = resume?.[stream] ?? FROM_START;
+  while (events.length < options.limit) {
+    let best: (typeof pages)[number] | null = null;
+    let blocked = false;
+    for (const stream of pages) {
+      while (
+        stream.taken < stream.page.rows.length &&
+        !keeps(stream.feed, stream.path, stream.page.rows[stream.taken])
+      ) {
+        stream.taken += 1;
       }
-    })
-  );
-  events.sort((a, b) =>
-    String(b.occurred_at).localeCompare(String(a.occurred_at))
-  );
+      if (stream.taken >= stream.page.rows.length) {
+        if (stream.page.next_cursor) blocked = true;
+        continue;
+      }
+      if (
+        !best ||
+        occurredAt(stream.page.rows[stream.taken]) >
+          occurredAt(best.page.rows[best.taken])
+      ) {
+        best = stream;
+      }
+    }
+    if (!best || blocked) break;
+    const row = best.page.rows[best.taken];
+    best.taken += 1;
+    const originId = String(row.origin_id ?? "");
+    const dedupe = `${best.feed.feedId}:${originId}`;
+    if (originId && seen.has(dedupe)) continue;
+    seen.add(dedupe);
+    events.push({
+      feed_id: best.feed.feedId,
+      platform: best.feed.connectorKey,
+      origin_id: originId,
+      origin_type: row.origin_type ?? null,
+      title: row.title ?? null,
+      payload_text: row.payload_text ?? null,
+      author_name: row.author_name ?? null,
+      source_url: row.source_url ?? null,
+      occurred_at: occurredAt(row),
+      metadata: row.metadata ?? {},
+    });
+  }
+
+  for (const { stream, position, page, taken } of pages) {
+    if (taken < page.rows.length) next[stream] = { c: position.c, s: taken };
+    else if (page.next_cursor) next[stream] = { c: page.next_cursor, s: 0 };
+  }
   return {
     events,
     failures,
@@ -318,17 +377,30 @@ export async function readSourceRecordLinks(
   await Promise.all(
     reads.map(async (read) => {
       try {
-        const page = await readSourceFeedPage(
-          {
-            feed_id: read.feed.feedId,
-            match: { path: read.path, values: [record.key] },
-            limit: options.limit,
-          },
-          READ_TIMEOUT_MS,
-          scope,
-          options.signal
-        );
-        for (const row of page.rows) {
+        const rows: Array<Record<string, unknown>> = [];
+        let cursor: string | undefined;
+        for (let pageNumber = 0; ; pageNumber += 1) {
+          if (pageNumber === MAX_LINK_PAGES) {
+            throw new Error(
+              `more than ${MAX_LINK_PAGES * LINK_PAGE_SIZE} events; relationships beyond them were not read`
+            );
+          }
+          const page = await readSourceFeedPage(
+            {
+              feed_id: read.feed.feedId,
+              match: { path: read.path, values: [record.key] },
+              limit: LINK_PAGE_SIZE,
+              cursor,
+            },
+            READ_TIMEOUT_MS,
+            scope,
+            options.signal
+          );
+          rows.push(...page.rows);
+          cursor = page.next_cursor;
+          if (!cursor) break;
+        }
+        for (const row of rows) {
           if (row.origin_type !== read.kind) continue;
           const otherKey = (read.other.target.identities ?? [])
             .map((identity) => getValueAtPath(row, identity.eventPath))
@@ -362,9 +434,9 @@ export async function readSourceRecordLinks(
     })
   );
   return {
-    links: [...links.values()].sort((a, b) =>
-      b.occurred_at.localeCompare(a.occurred_at)
-    ),
+    links: [...links.values()]
+      .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))
+      .slice(0, options.limit),
     failures,
   };
 }
