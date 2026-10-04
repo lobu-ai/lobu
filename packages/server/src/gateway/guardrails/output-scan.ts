@@ -73,7 +73,10 @@ export async function runOutputGuardrailScan(
     const resolved = resolveAgentGuardrails(
       settings ?? { guardrails: [] },
       registry,
-      { inline: enabledInlineGuardrails(settings) }
+      {
+        inline: enabledInlineGuardrails(settings),
+        organizationId: ctx.organizationId,
+      }
     );
     // Enrichment guardrails (e.g. suggest-followups) never trip and must not
     // see the reply until blocking scans have passed — exclude them here.

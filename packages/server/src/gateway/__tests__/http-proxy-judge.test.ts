@@ -68,7 +68,7 @@ beforeAll(async () => {
 
   setProxyPolicyStore(policyStore);
   setProxyEgressJudge(
-    new EgressJudge({ client: fakeClient, defaultModel: "judge-test-model" })
+    new EgressJudge({ client: fakeClient, resolveOrgDefaultModel: async () => "judge-test-model" })
   );
 
   // Ask the OS for a free port and retry on collision instead of gambling on a

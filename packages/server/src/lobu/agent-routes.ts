@@ -68,6 +68,7 @@ import {
 	listInferenceProviders,
 	rotateInferenceProviderKey,
 	setInferenceProviderDefault,
+	getOrgDefaultModel,
 	softDeleteInferenceProvider,
 	updateInferenceProviderCapabilities,
 	updateInferenceProviderCoreFields,
@@ -1855,13 +1856,15 @@ routes.get("/:agentId/guardrail-trips", async (c) => {
 
 // ── Judge model default (for custom guardrail authoring) ─────────────────────
 //
-// Custom guardrails are LLM judges. There is no hardcoded judge model: the
-// operator sets one via `EGRESS_JUDGE_MODEL`. The create/edit UI uses this to
-// either show the configured default (model optional) or require a per-guardrail
-// model (when unset). Returns null when no gateway default is configured.
+// Custom guardrails are LLM judges. There is no deployment-wide judge model:
+// a guardrail names its own, else the org's default provider model applies.
+// The create/edit UI uses this to either show that default (model optional) or
+// require a per-guardrail model (when the org has none). Returns null when the
+// org has no default model.
 routes.get("/:agentId/guardrail-judge-default", async (c) => {
+	const orgId = c.get("organizationId") as string;
 	return c.json({
-		defaultModel: process.env.EGRESS_JUDGE_MODEL?.trim() || null,
+		defaultModel: (await getOrgDefaultModel(orgId).catch(() => null)) || null,
 	});
 });
 
@@ -2120,11 +2123,15 @@ routes.patch("/:agentId/config", async (c) => {
 	// may carry only one of `guardrailsInline` / `networkConfig`.
 	const storedSettings = await configStore.getSettings(agentId);
 
-	// Judge-kind custom guardrails need a model. With no gateway default
-	// (`EGRESS_JUDGE_MODEL` unset), every judge entry must carry its own
-	// `model` — otherwise it would fail closed at runtime with no model to call.
-	// require-tool entries never call a model.
-	const judgeDefault = process.env.EGRESS_JUDGE_MODEL?.trim();
+	// Judge-kind custom guardrails need a model. With no org default provider
+	// model, every judge entry must carry its own `model` — otherwise it would
+	// fail closed at runtime with no model to call. require-tool entries never
+	// call a model.
+	const judgeDefault = (
+		await getOrgDefaultModel(c.get("organizationId") as string).catch(
+			() => null
+		)
+	)?.trim();
 	if (
 		Array.isArray((updates as { guardrailsInline?: unknown }).guardrailsInline)
 	) {
@@ -2146,7 +2153,7 @@ routes.patch("/:agentId/config", async (c) => {
 				return c.json(
 					{
 						error: "guardrail_model_required",
-						error_description: `Custom guardrail "${missing.name ?? "(unnamed)"}" needs a model: the gateway has no default judge model (EGRESS_JUDGE_MODEL is unset).`,
+						error_description: `Custom guardrail "${missing.name ?? "(unnamed)"}" needs a model: this organization has no default provider model.`,
 					},
 					400
 				);
@@ -2168,27 +2175,36 @@ routes.patch("/:agentId/config", async (c) => {
 		// repair path open while still refusing to accept a new bad one.
 		const storedModels = new Map<string, string>();
 		const storedInline = (storedSettings as {
-			guardrailsInline?: Array<{ name?: string; model?: string }>;
+			guardrailsInline?: Array<{
+				name?: string;
+				model?: string;
+				kind?: string;
+			}>;
 		} | null)?.guardrailsInline;
 		if (Array.isArray(storedInline)) {
 			for (const g of storedInline) {
-				if (g?.name && typeof g.model === "string") {
-					storedModels.set(g.name, g.model.trim());
-				}
+				// require-tool entries never ran a judge, so they grandfather nothing:
+				// converting one into a model-less judge is a NEW judge to validate.
+				if (g?.kind === "require-tool") continue;
+				if (g?.name) storedModels.set(g.name, (g.model ?? "").trim());
 			}
 		}
 
 		for (const g of inline) {
 			if (g?.kind === "require-tool") continue;
-			const model = g?.model?.trim();
+			const ownModel = g?.model?.trim();
+			// A model-less guardrail runs on the org default, so that default must
+			// be runnable by the judge too (a deployment system key, OpenAI-compatible
+			// protocol). Otherwise it would save and then deny every covered request.
+			const model = ownModel || judgeDefault;
 			if (!model) continue;
-			if (g?.name && storedModels.get(g.name) === model) continue;
+			if (g?.name && storedModels.get(g.name) === (ownModel ?? "")) continue;
 			const resolved = await resolveSystemJudgeTarget(model);
 			if (!resolved.ok) {
 				return c.json(
 					{
 						error: "guardrail_model_unresolvable",
-						error_description: `Custom guardrail "${g?.name ?? "(unnamed)"}" names judge model "${model}", which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
+						error_description: `Custom guardrail "${g?.name ?? "(unnamed)"}" ${ownModel ? `names judge model "${model}"` : `has no model, so it uses this organization's default model "${model}"`}, which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
 					},
 					400
 				);

@@ -21,7 +21,6 @@ import "./utils/assert-node-version";
 
 // Sentry must init before any other imports for auto-instrumentation.
 import "./instrument";
-import { checkConfiguredJudgeModel } from "./gateway/inference/system-judge-target";
 import { checkJudgeShadowingAllowlist } from "./gateway/config/network-allowlist";
 
 import dotenv from "dotenv";
@@ -224,11 +223,15 @@ async function main(): Promise<void> {
 					process.exit(1);
 				}
 			},
-			// Surface an unusable EGRESS_JUDGE_MODEL at boot rather than at the
-			// first denied request. Not fatal: the judge is optional, and a
-			// misconfigured optional control must not become a gateway outage.
-			async () => {
-				await checkConfiguredJudgeModel();
+			// EGRESS_JUDGE_MODEL was removed: the judge model is the guardrail's
+			// own, else the org default provider model. Say so once rather than
+			// silently ignoring an operator's leftover setting.
+			() => {
+				if (process.env.EGRESS_JUDGE_MODEL?.trim()) {
+					logger.warn(
+						"EGRESS_JUDGE_MODEL is no longer read and has no effect: set a model on the guardrail or an org default provider model instead"
+					);
+				}
 			},
 			// The other way every judge dies silently: an unrestricted global
 			// allowlist answers before the judge is consulted, and that path is

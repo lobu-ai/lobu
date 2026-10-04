@@ -310,7 +310,10 @@ export class McpProxy {
 			const resolved = resolveAgentGuardrails(
 				settings ?? { guardrails: [] },
 				this.guardrailRegistry,
-				{ inline: enabledInlineGuardrails(settings) },
+				{
+					inline: enabledInlineGuardrails(settings),
+					organizationId: tokenData.organizationId,
+				},
 			);
 			const list = resolved.byStage["pre-tool"];
 			if (list.length === 0) return false;

@@ -110,7 +110,7 @@ describe("egress judge deny → guardrail-trip audit", () => {
     };
     setProxyPolicyStore(policyStoreReturning(rule));
     setProxyEgressJudge(
-      new EgressJudge({ client: new DenyClient(), defaultModel: "judge-test" })
+      new EgressJudge({ client: new DenyClient(), resolveOrgDefaultModel: async () => "judge-test" })
     );
 
     const decision = await __testOnly.checkDomainAccess(
@@ -153,7 +153,7 @@ describe("egress judge deny → guardrail-trip audit", () => {
         client: {
           judge: async () => ({ verdict: "allow", reason: "ok" }),
         },
-        defaultModel: "judge-test",
+        resolveOrgDefaultModel: async () => "judge-test",
       })
     );
 

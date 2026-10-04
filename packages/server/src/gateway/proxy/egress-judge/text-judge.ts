@@ -78,7 +78,7 @@ export class TextJudge extends JudgeRunner<{ allow: boolean; reason: string }> {
   async decide(
     policy: string,
     text: string,
-    options: { model?: string } = {}
+    options: { model?: string; orgId?: string } = {}
   ): Promise<{ allow: boolean; reason: string }> {
     const policyHash = hashPolicy(policy);
     const cacheKey = VerdictCache.key({
@@ -95,6 +95,7 @@ export class TextJudge extends JudgeRunner<{ allow: boolean; reason: string }> {
       cacheKey,
       policyHash,
       model: options.model,
+      orgId: options.orgId,
       buildPrompts: () => ({
         systemPrompt: TEXT_JUDGE_SYSTEM_PROMPT,
         userPrompt: buildUserPrompt(policy, text),

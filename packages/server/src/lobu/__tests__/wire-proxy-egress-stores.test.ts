@@ -132,7 +132,7 @@ describe("wireProxyEgressStores — boot wiring of the HTTP egress proxy", () =>
       },
     };
     setProxyEgressJudge(
-      new EgressJudge({ client: denyClient, defaultModel: "judge-test" })
+      new EgressJudge({ client: denyClient, resolveOrgDefaultModel: async () => "judge-test" })
     );
 
     const config = denyAllConfig();

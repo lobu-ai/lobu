@@ -578,7 +578,7 @@ describe("CRLF injection prevention in judge-provided reason", () => {
     setProxyEgressJudge(
       new EgressJudge({
         client: new InjectingJudgeClient(),
-        defaultModel: "judge-test-model",
+        resolveOrgDefaultModel: async () => "judge-test-model",
       })
     );
 
@@ -979,7 +979,7 @@ describe("EgressJudge — additional policy coverage", () => {
       },
     };
 
-    const judge = new EgressJudge({ client, defaultModel: "configured-default" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "configured-default" });
     await judge.decide(
       { agentId: "a", organizationId: "org-1", hostname: "example.com" },
       rule({ policyHash: "unique-model-1" })
@@ -1016,7 +1016,7 @@ describe("EgressJudge — additional policy coverage", () => {
       },
     };
 
-    const judge = new EgressJudge({ client, defaultModel: "default-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "default-model" });
     await judge.decide(
       { agentId: "a", organizationId: "org-1", hostname: "example.com" },
       rule({ policyHash: "unique-model-2", judgeModel: "override-model" })
@@ -1034,7 +1034,7 @@ describe("EgressJudge — additional policy coverage", () => {
     };
     const judge = new EgressJudge({
       client,
-      defaultModel: "judge-test-model",
+      resolveOrgDefaultModel: async () => "judge-test-model",
       breakerFailureThreshold: 1,
       breakerCooldownMs: 60_000,
     });
@@ -1062,7 +1062,7 @@ describe("EgressJudge — additional policy coverage", () => {
         return { verdict: "allow", reason: "ok" };
       },
     };
-    const judge = new EgressJudge({ client, defaultModel: "judge-test-model" });
+    const judge = new EgressJudge({ client, resolveOrgDefaultModel: async () => "judge-test-model" });
     const req = { agentId: "a", organizationId: "org-1", hostname: "example.com" };
     const r = rule({ policyHash: "p-cache-meta", judgeName: "my-judge" });
 
@@ -1084,7 +1084,7 @@ describe("EgressJudge — additional policy coverage", () => {
     // High threshold — one failure must not trip the breaker
     const judge = new EgressJudge({
       client,
-      defaultModel: "judge-test-model",
+      resolveOrgDefaultModel: async () => "judge-test-model",
       breakerFailureThreshold: 5,
     });
 

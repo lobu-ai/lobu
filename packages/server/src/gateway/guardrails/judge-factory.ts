@@ -55,6 +55,12 @@ interface JudgeGuardrailOptions {
   name?: string;
   /** Override the shared TextJudge — primarily for tests. */
   judge?: TextJudge;
+  /**
+   * Organization whose default provider model applies when `model` is unset.
+   * Callers pass the org they already authenticated; agent ids are only unique
+   * per org, so it is never derived from the agent id. Unset = fail closed.
+   */
+  orgId?: string;
   /** Optional judge model override (per-call). */
   model?: string;
   /**
@@ -108,7 +114,10 @@ export function createJudgeGuardrail<S extends GuardrailStage>(
         includeToolName: true,
         throwOnUnknown: true,
       });
-      const verdict = await judge.decide(policy, text, { model: options.model });
+      const verdict = await judge.decide(policy, text, {
+        model: options.model,
+        orgId: options.orgId,
+      });
       if (verdict.allow) {
         return { tripped: false };
       }

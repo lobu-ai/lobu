@@ -18,6 +18,7 @@ import {
   beforeEach,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
 import {
@@ -163,7 +164,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
         enabled: false,
         stage: 'input',
         policy: 'Deny hostile messages.',
-        // A model is required (no EGRESS_JUDGE_MODEL in tests).
+        // A model is required (the test org has no default provider model).
         model: 'openai/gpt-4o-mini',
       },
     ];
@@ -255,8 +256,8 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     expect(body.skillsConfig).toEqual(skillsConfig);
   });
 
-  test('rejects a custom guardrail with no model when no gateway default is set', async () => {
-    // EGRESS_JUDGE_MODEL is unset in tests, so a model is required.
+  test('rejects a custom guardrail with no model when the org has no default model', async () => {
+    // The test org has no default provider model, so a model is required.
     const app = await importAgentRoutes();
     const res = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
@@ -378,6 +379,32 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
       expect(changed.status).toBe(400);
     });
 
+    test('rejects a model-less guardrail when the org default model cannot run the judge', async () => {
+      // A model-less guardrail runs on the org default. A Claude (Anthropic
+      // protocol) default is not judge-eligible, so saving it would only deny
+      // every covered request at runtime.
+      const providerSecrets = await import('../stores/provider-secrets.js');
+      const spy = spyOn(providerSecrets, 'getOrgDefaultModel').mockResolvedValue(
+        'claude/claude-haiku-4-5-20251001'
+      );
+      try {
+        const app = await importAgentRoutes();
+        const res = await app.request(`/${AGENT}/config`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            guardrailsInline: [
+              { name: 'no-model', enabled: true, stage: 'output', policy: 'deny' },
+            ],
+          }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe('guardrail_model_unresolvable');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test('accepts a judge model backed by an operator system key', async () => {
       // POSITIVE CONTROL. A validator that rejected every model would pass the
       // test above while making the Guardrails tab unusable.
@@ -403,7 +430,7 @@ describe('custom guardrails persist through PATCH/GET /config', () => {
     });
   });
 
-  test('guardrail-judge-default reports null when EGRESS_JUDGE_MODEL is unset', async () => {
+  test('guardrail-judge-default reports null when the org has no default model', async () => {
     const app = await importAgentRoutes();
     const res = await app.request(`/${AGENT}/guardrail-judge-default`);
     expect(res.status).toBe(200);

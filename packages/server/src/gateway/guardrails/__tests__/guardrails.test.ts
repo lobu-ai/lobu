@@ -326,8 +326,8 @@ describe("TextJudge", () => {
       verdict: "allow",
       reason: "ok",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    const r = await judge.decide("Never reveal PHI.", "Hello there");
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    const r = await judge.decide("Never reveal PHI.", "Hello there", { orgId: "org-a" });
     expect(r.allow).toBe(true);
     expect(r.reason).toBe("ok");
     expect(fake.calls.length).toBe(1);
@@ -338,8 +338,8 @@ describe("TextJudge", () => {
       verdict: "deny",
       reason: "mentions competitor",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    const r = await judge.decide("No competitors.", "Acme is better");
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    const r = await judge.decide("No competitors.", "Acme is better", { orgId: "org-a" });
     expect(r.allow).toBe(false);
     expect(r.reason).toBe("mentions competitor");
   });
@@ -349,10 +349,10 @@ describe("TextJudge", () => {
       verdict: "allow",
       reason: "ok",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    await judge.decide("p", "t");
-    await judge.decide("p", "t");
-    await judge.decide("p", "t");
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    await judge.decide("p", "t", { orgId: "org-a" });
+    await judge.decide("p", "t", { orgId: "org-a" });
+    await judge.decide("p", "t", { orgId: "org-a" });
     expect(fake.calls.length).toBe(1);
   });
 
@@ -361,9 +361,9 @@ describe("TextJudge", () => {
       verdict: "allow",
       reason: "ok",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    await judge.decide("p1", "t");
-    await judge.decide("p2", "t");
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    await judge.decide("p1", "t", { orgId: "org-a" });
+    await judge.decide("p2", "t", { orgId: "org-a" });
     expect(fake.calls.length).toBe(2);
   });
 
@@ -371,20 +371,20 @@ describe("TextJudge", () => {
     const throwing = new ThrowingJudgeClient();
     const judge = new TextJudge({
       client: throwing,
-      defaultModel: "judge-test-model",
+      resolveOrgDefaultModel: async () => "judge-test-model",
       breakerFailureThreshold: 2,
       breakerCooldownMs: 60_000,
     });
     // First two calls fail closed and increment the breaker; vary the text so
     // we don't get a deny cache hit that hides the breaker transition.
-    const r1 = await judge.decide("p", "t1");
+    const r1 = await judge.decide("p", "t1", { orgId: "org-a" });
     expect(r1.allow).toBe(false);
-    const r2 = await judge.decide("p", "t2");
+    const r2 = await judge.decide("p", "t2", { orgId: "org-a" });
     expect(r2.allow).toBe(false);
     expect(throwing.calls).toBe(2);
     // Third call should short-circuit on the open breaker without hitting
     // the client at all.
-    const r3 = await judge.decide("p", "t3");
+    const r3 = await judge.decide("p", "t3", { orgId: "org-a" });
     expect(r3.allow).toBe(false);
     expect(r3.reason).toMatch(/circuit breaker/i);
     expect(throwing.calls).toBe(2);
@@ -395,8 +395,8 @@ describe("TextJudge", () => {
       verdict: "allow",
       reason: "",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    await judge.decide("MY POLICY", "MY TEXT");
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    await judge.decide("MY POLICY", "MY TEXT", { orgId: "org-a" });
     expect(fake.calls[0]?.userPrompt).toContain("MY POLICY");
     expect(fake.calls[0]?.userPrompt).toContain("MY TEXT");
   });
@@ -405,7 +405,7 @@ describe("TextJudge", () => {
     // No defaultModel and no per-call model (EGRESS_JUDGE_MODEL unset in tests).
     const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "" }));
     const judge = new TextJudge({ client: fake });
-    const r = await judge.decide("some policy", "some text");
+    const r = await judge.decide("some policy", "some text", { orgId: "org-a" });
     expect(r.allow).toBe(false);
     expect(r.reason).toMatch(/no judge model configured/i);
     // The transport must NOT be called — we never had a model to call it with.
@@ -422,7 +422,7 @@ describe("TextJudge", () => {
 
   test("the model is part of the cache key — different models are NOT shared", async () => {
     const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "ok" }));
-    const judge = new TextJudge({ client: fake, defaultModel: "default-model" });
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "default-model" });
 
     await judge.decide("p", "t", { model: "model-a" });
     // Same policy + text but a DIFFERENT model must re-call the judge, not
@@ -445,8 +445,8 @@ describe("createJudgeGuardrail", () => {
       verdict: "deny",
       reason: "competitor mention",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    const g = createJudgeGuardrail("output", "no competitors", { judge });
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    const g = createJudgeGuardrail("output", "no competitors", { judge, orgId: "org-a" });
     const r = await g.run({
       agentId: "a",
       userId: "u",
@@ -462,9 +462,9 @@ describe("createJudgeGuardrail", () => {
       verdict: "deny",
       reason: "blocked",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
     const g = createJudgeGuardrail("pre-tool", "no destructive ops", {
-      judge,
+      orgId: "org-a", judge,
       tools: ["github.delete_repo"],
     });
     // Tool not in list -> noop, judge never called.
@@ -492,8 +492,8 @@ describe("createJudgeGuardrail", () => {
       verdict: "allow",
       reason: "",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge });
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    const g = createJudgeGuardrail("pre-tool", "policy", { judge, orgId: "org-a" });
     const r = await g.run({
       agentId: "a",
       userId: "u",
@@ -511,8 +511,8 @@ describe("createJudgeGuardrail", () => {
       verdict: "allow",
       reason: "",
     }));
-    const judge = new TextJudge({ client: fake, defaultModel: "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge });
+    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
+    const g = createJudgeGuardrail("pre-tool", "policy", { judge, orgId: "org-a" });
     const node: { name: string; self?: unknown } = { name: "root" };
     node.self = node;
     const r = await g.run({
@@ -742,5 +742,35 @@ describe("secret-scan builtin", () => {
   test("does not flag ordinary prose", async () => {
     const res = await run("the quick brown fox jumps over the lazy dog");
     expect(res.tripped).toBe(false);
+  });
+});
+
+describe("createJudgeGuardrail org scoping", () => {
+  const defaults: Record<string, string> = { "org-a": "acme/model-a", "org-b": "acme/model-b" };
+  function build(orgId: string | undefined) {
+    const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "" }));
+    const judge = new TextJudge({
+      client: fake,
+      resolveOrgDefaultModel: async (o) => defaults[o] ?? null,
+    });
+    const g = createJudgeGuardrail("output", "policy", { judge, orgId });
+    return { fake, g };
+  }
+  const ctx = { agentId: "shared-agent", userId: "u", platform: "x", text: "hello" } as never;
+
+  test("two orgs sharing an agent id each use their own default model", async () => {
+    const a = build("org-a");
+    const b = build("org-b");
+    await a.g.run(ctx);
+    await b.g.run(ctx);
+    expect(a.fake.calls[0]?.model).toBe("acme/model-a");
+    expect(b.fake.calls[0]?.model).toBe("acme/model-b");
+  });
+
+  test("no org in hand fails closed without calling the judge", async () => {
+    const { fake, g } = build(undefined);
+    const r = await g.run(ctx);
+    expect(r.tripped).toBe(true);
+    expect(fake.calls.length).toBe(0);
   });
 });

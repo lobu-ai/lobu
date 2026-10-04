@@ -9,8 +9,8 @@ import {
   JudgeConfigurationError,
 } from "./gateway-judge-client.js";
 import type { JudgeClient, JudgeVerdict } from "./types.js";
+import { getOrgDefaultModel } from "../../../lobu/stores/provider-secrets.js";
 import {
-  DEFAULT_JUDGE_MODEL,
   DEFAULT_JUDGE_TIMEOUT_MS,
   JudgeTimeoutError,
   envTimeoutMs,
@@ -25,7 +25,11 @@ import {
  */
 export interface JudgeRunnerOptions {
   client?: JudgeClient;
-  defaultModel?: string;
+  /**
+   * Injection seam for tests; production reads the org's default provider
+   * model from `inference_providers`.
+   */
+  resolveOrgDefaultModel?: (orgId: string) => Promise<string | null>;
   cacheTtlMs?: number;
   cacheMaxEntries?: number;
   breakerFailureThreshold?: number;
@@ -60,8 +64,13 @@ export interface JudgeRunInput<TResult> {
   cacheKey: string;
   /** Circuit-breaker key — trips independently per policy. */
   policyHash: string;
-  /** Model override for this call; falls back to the runner default. */
+  /** Model override for this call (the guardrail's own `model`). */
   model?: string;
+  /**
+   * Organization whose default provider model applies when `model` is unset.
+   * With neither a model nor an org default the judge fails closed.
+   */
+  orgId?: string;
   /**
    * Extra structured fields the subclass wants in its warn/error logs
    * (e.g. `hostname` for egress). Merged into the fail-closed log records.
@@ -100,8 +109,9 @@ export interface JudgeRunInput<TResult> {
 export abstract class JudgeRunner<TResult> {
   private readonly cache: VerdictCache;
   private readonly breaker: CircuitBreaker;
-  /** Undefined when EGRESS_JUDGE_MODEL is unset — callers must pass a model. */
-  private readonly defaultModel: string | undefined;
+  private readonly resolveOrgDefaultModel: (
+    orgId: string
+  ) => Promise<string | null>;
   private readonly judgeTimeoutMs: number;
   private readonly inFlight = new Map<string, Promise<TResult>>();
   private readonly logger: ReturnType<typeof createLogger>;
@@ -119,7 +129,8 @@ export abstract class JudgeRunner<TResult> {
       options.breakerFailureThreshold ?? 5,
       options.breakerCooldownMs ?? 30_000
     );
-    this.defaultModel = options.defaultModel ?? DEFAULT_JUDGE_MODEL;
+    this.resolveOrgDefaultModel =
+      options.resolveOrgDefaultModel ?? getOrgDefaultModel;
     this.judgeTimeoutMs =
       options.judgeTimeoutMs ?? envTimeoutMs() ?? DEFAULT_JUDGE_TIMEOUT_MS;
     this._client = options.client;
@@ -145,9 +156,9 @@ export abstract class JudgeRunner<TResult> {
     // The verdict depends on the model, so the cache + in-flight keys must
     // include the effective model — otherwise two calls with the same
     // policy/text but different models (or the same guardrail after a model
-    // edit) would reuse a verdict computed by the OTHER model. All default-model
-    // calls share a bucket; explicit models each get their own.
-    const model = input.model ?? this.defaultModel;
+    // edit) would reuse a verdict computed by the OTHER model. The org default
+    // is resolved first, so changing it changes the key.
+    const model = await this.effectiveModel(input);
     const key = `${input.cacheKey}model:${model ?? ""}`;
 
     const cached = this.cache.get(key);
@@ -158,11 +169,41 @@ export abstract class JudgeRunner<TResult> {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
-    const pending = this.runLiveJudge(input, key).finally(() => {
+    const pending = this.runLiveJudge(input, key, model).finally(() => {
       this.inFlight.delete(key);
     });
     this.inFlight.set(key, pending);
     return pending;
+  }
+
+  /**
+   * The model this call runs on: the guardrail's own `model`, else the org's
+   * default provider model. Resolved BEFORE the cache key is built, so editing
+   * the org default cannot serve a verdict computed by the previous model.
+   * A failed lookup is treated as "no model": the caller fails closed.
+   */
+  private async effectiveModel(
+    input: JudgeRunInput<TResult>
+  ): Promise<string | undefined> {
+    const own = input.model?.trim();
+    if (own) return own;
+    if (!input.orgId) return undefined;
+    try {
+      // Inside the judge's own time budget: a stalled lookup must fail closed,
+      // not hang the request.
+      return (
+        (await withTimeout(
+          this.resolveOrgDefaultModel(input.orgId),
+          this.judgeTimeoutMs
+        )) ?? undefined
+      );
+    } catch (err) {
+      this.logger.error("org default judge model lookup failed", {
+        orgId: input.orgId,
+        error: getErrorMessage(err),
+      });
+      return undefined;
+    }
   }
 
   /**
@@ -172,15 +213,14 @@ export abstract class JudgeRunner<TResult> {
    */
   private async runLiveJudge(
     input: JudgeRunInput<TResult>,
-    cacheKey: string
+    cacheKey: string,
+    model: string | undefined
   ): Promise<TResult> {
     const { logPrefix, separator, deniedSuffix } = this.labels;
 
-    // No model resolvable (EGRESS_JUDGE_MODEL unset and no per-call model).
-    // This is a misconfiguration, not a transient fault, so fail closed
-    // WITHOUT touching the breaker — the UI/API require a model up front, so
-    // this is a defensive backstop.
-    const model = input.model ?? this.defaultModel;
+    // No model resolvable (no per-call model and no org default provider
+    // model). This is a misconfiguration, not a transient fault, so fail closed
+    // WITHOUT touching the breaker.
     if (!model) {
       this.logger.warn(
         `${logPrefix} no judge model configured ${separator} failing closed`,
@@ -189,7 +229,7 @@ export abstract class JudgeRunner<TResult> {
       return input.decorate(
         {
           verdict: "deny",
-          reason: `No judge model configured (set EGRESS_JUDGE_MODEL or specify a model); ${deniedSuffix}`,
+          reason: `No judge model configured (set a model on the guardrail or an org default provider); ${deniedSuffix}`,
         },
         { source: "judge-error", latencyMs: 0 }
       );

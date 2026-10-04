@@ -484,7 +484,10 @@ export class MessageConsumer {
           const resolved = resolveAgentGuardrails(
             settings ?? { guardrails: [] },
             this.guardrailRegistry,
-            { inline: enabledInlineGuardrails(settings) }
+            {
+              inline: enabledInlineGuardrails(settings),
+              organizationId: data.organizationId,
+            }
           );
           const list = resolved.byStage.input;
           if (list.length > 0) {
