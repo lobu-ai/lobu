@@ -115,7 +115,7 @@ function optionalId(value: unknown, name: string): number | null {
 	return id;
 }
 
-function parsePolicy(input: Record<string, unknown>, deleting: boolean): EntityApprovalPolicyInput {
+export function parsePolicy(input: Record<string, unknown>, deleting: boolean): EntityApprovalPolicyInput {
 	const resourceClass =
 		deleting && typeof input.resource_class === "string"
 			? input.resource_class.trim()
@@ -171,6 +171,44 @@ function parsePolicy(input: Record<string, unknown>, deleting: boolean): EntityA
 	return policy;
 }
 
+export async function validateConnectorPolicyTarget(
+	organizationId: string,
+	policy: EntityApprovalPolicyInput,
+	discoveryUserId: string | null,
+): Promise<string | null> {
+	const sql = getDb();
+	if (policy.connectorKey) {
+		const rows = await sql`SELECT key FROM connector_definitions
+        WHERE organization_id = ${organizationId} AND key = ${policy.connectorKey} AND status = 'active' LIMIT 1`;
+		if (!rows.length) return "Connector not found in this workspace.";
+	}
+	if (policy.connectionId) {
+		const rows = await sql`SELECT c.id FROM connections c
+        JOIN connector_definitions cd ON cd.organization_id = c.organization_id AND cd.key = c.connector_key AND cd.status = 'active'
+        WHERE c.organization_id = ${organizationId} AND c.id = ${policy.connectionId} AND c.deleted_at IS NULL LIMIT 1`;
+		if (!rows.length) return "Connection not found in this workspace.";
+	}
+	if (policy.operationKey) {
+		const catalog = await listOperations({
+			organizationId,
+			discoveryUserId,
+			connectorKey: policy.connectorKey ?? undefined,
+			connectionId: policy.connectionId ?? undefined,
+			includeInputSchema: false,
+			includeOutputSchema: false,
+			limit: Number.MAX_SAFE_INTEGER,
+		});
+		if (
+			!catalog.operations.some(
+				(op) => qualifiedOperationKey(op.connector_key, op.operation_key) === policy.operationKey,
+			)
+		) {
+			return `Unknown connector operation '${policy.operationKey}' for this workspace.`;
+		}
+	}
+	return null;
+}
+
 /** Both org and agent policy writes share validation, authority, and persistence. */
 export async function writePermissionPolicy(c: Context) {
 	const authError = await requireOrganizationSettingsAdmin(c);
@@ -222,38 +260,8 @@ export async function writePermissionPolicy(c: Context) {
 		if (policy.targetAgentId && !(await agentExists(organizationId, policy.targetAgentId))) {
 			return invalid(c, `Unknown target agent '${policy.targetAgentId}' for this workspace.`);
 		}
-		if (policy.connectorKey) {
-			const rows = await getDb()`SELECT key FROM connector_definitions
-        WHERE organization_id = ${organizationId} AND key = ${policy.connectorKey} AND status = 'active' LIMIT 1`;
-			if (!rows.length) return invalid(c, "Connector not found in this workspace.");
-		}
-		if (policy.connectionId) {
-			const rows = await getDb()`SELECT c.id FROM connections c
-        JOIN connector_definitions cd ON cd.organization_id = c.organization_id AND cd.key = c.connector_key AND cd.status = 'active'
-        WHERE c.organization_id = ${organizationId} AND c.id = ${policy.connectionId} AND c.deleted_at IS NULL LIMIT 1`;
-			if (!rows.length) return invalid(c, "Connection not found in this workspace.");
-		}
-		if (policy.operationKey) {
-			const catalog = await listOperations({
-				organizationId,
-				discoveryUserId: c.get("user")?.id ?? null,
-				connectorKey: policy.connectorKey ?? undefined,
-				connectionId: policy.connectionId ?? undefined,
-				includeInputSchema: false,
-				includeOutputSchema: false,
-				limit: Number.MAX_SAFE_INTEGER,
-			});
-			if (
-				!catalog.operations.some(
-					(op) => qualifiedOperationKey(op.connector_key, op.operation_key) === policy.operationKey,
-				)
-			) {
-				return invalid(
-					c,
-					`Unknown connector operation '${policy.operationKey}' for this workspace.`,
-				);
-			}
-		}
+		const targetError = await validateConnectorPolicyTarget(organizationId, policy, c.get("user")?.id ?? null);
+		if (targetError) return invalid(c, targetError);
 	}
 	const result = deleting
 		? {

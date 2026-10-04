@@ -20,7 +20,7 @@ import { findExistingPersonalOrg } from './personal-org-provisioning';
 import { hostOnlyExpiry } from './session-cookie-scope';
 import { OAuthClientsStore } from './oauth/clients';
 import { OAuthProvider } from './oauth/provider';
-import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES_STRING } from './oauth/scopes';
+import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES_STRING, POLICY_WRITE_SCOPE } from './oauth/scopes';
 import { PersonalAccessTokenService } from './tokens';
 
 const credentialRoutes = new Hono<{ Bindings: Env }>();
@@ -197,9 +197,14 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
   const patService = new PersonalAccessTokenService(sql);
 
   try {
+    const scope = normalizePatScope(body.scope);
+    if (scope?.split(' ').includes(POLICY_WRITE_SCOPE) &&
+      (c.get('authSource') !== 'session' || c.get('mcpAuthInfo'))) {
+      return c.json({ error: 'Granting policy management requires an owner/admin web session' }, 403);
+    }
     const token = await patService.create(authorized.user.id, authorized.organizationId, name, {
       ...(description ? { description } : {}),
-      scope: normalizePatScope(body.scope),
+      scope,
       expiresInDays: normalizeExpiryDays(body.expiresInDays),
     });
     return c.json({ token }, 201);

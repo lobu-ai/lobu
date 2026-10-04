@@ -229,6 +229,26 @@ automatic execution is intended. OpenAPI-imported POST operations remain writes,
 even for side-effect-free APIs such as classification; an explicit Auto policy
 authorizes those calls without provider-specific runtime code.
 
+Organization connector rules can also be managed as a collection at
+`/api/<workspace>/write-permissions/connector-actions`. `GET` returns only saved
+organization rules and an opaque `revision`; `PUT` accepts `{ revision, rules }`
+and replaces that collection atomically. A stale revision returns HTTP 409.
+Agent restrictions and other policy classes are preserved. An empty `rules`
+array removes organization connector rules, so unmatched actions require Ask.
+
+Each rule has an `effect` (`auto`, `approval`, or `deny`) and optional scope:
+`connector_key` or `connection_id`, plus `operation_category` or `operation_key`
+(`connector::action`). Omitted scope fields match all targets/actions. Categories
+are `read`, `write`, `destructive`, `non_destructive`, and `unknown`. Array order
+does not change precedence; duplicate scopes are rejected.
+
+Collection access requires a human owner/admin web session or an organization-
+bound PAT with the explicit `policies:write` scope. Only an owner/admin web
+session can mint that scope through the existing token-creation API. Ordinary
+OAuth/MCP admin tokens cannot grant it, and worker/agent identities cannot use
+it. Policy tokens do not approve pending operation runs. `lobu.config.js` and
+`lobu apply` do not yet manage this collection.
+
 For binary inputs, use `fileInputSchema` from `@lobu/connector-sdk` on the
 file-valued field, for example `image: fileInputSchema({ maxBytes: 5 * 1024 *
 1024, contentTypes: ["image/png", "image/jpeg"] })`. Callers pass a reusable

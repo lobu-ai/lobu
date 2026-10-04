@@ -145,7 +145,7 @@ export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 
 /**
  * A header row from write_approval_policies, with its child action→effect rows
- * attached in `effects` by {@link attachEffects}. The header no longer carries
+ * read together in `effects`, or attached by {@link attachEffects}. The header no longer carries
  * mode columns; every per-action decision reads `effects`.
  */
 type EntityApprovalPolicyRow = {
@@ -168,7 +168,7 @@ type EntityApprovalPolicyRow = {
 	approval_channel_id: string | null;
 	approval_team_id: string | null;
 	approval_channel_name: string | null;
-	/** Populated post-query from write_policy_action_effects; empty until attached. */
+	/** Child rows from write_policy_action_effects. */
 	effects: Partial<Record<WriteAction, EntityMutationMode>>;
 };
 
@@ -185,8 +185,7 @@ export function isEntityMutationMode(
 /**
  * Coerce user INPUT to a caller-chosen default when it isn't a legal mode.
  * (Stored effects READ from the DB fail closed differently — see
- * {@link attachEffects}, which drops an illegal (action, effect) tuple so the
- * resolver falls back to the class default rather than reading it as `allow`.)
+ * {@link normalizeStoredEffect}, which pins an illegal stored effect to `deny`.)
  */
 function normalizeMode(
 	value: unknown,
@@ -687,18 +686,15 @@ async function attachEffects(
 	for (const e of effects) {
 		const row = byId.get(Number(e.policy_id));
 		if (!row || !isWriteAction(e.action)) continue;
-		const legal =
-			isEntityMutationMode(e.effect) &&
-			isLegalActionEffect(
-				normalizeResourceClass(row.resource_class),
-				e.action,
-				e.effect,
-			);
-		// Pin an unknown/illegal stored effect to `deny` (fail closed), never drop.
-		row.effects[e.action] =
-			legal && isEntityMutationMode(e.effect) ? e.effect : "deny";
+		row.effects[e.action] = normalizeStoredEffect(row.resource_class, e.action, e.effect);
 	}
 	return rows;
+}
+
+/** Unknown/illegal stored effects deny; absent actions remain sparse overrides. */
+function normalizeStoredEffect(resourceClass: string, action: WriteAction, effect: unknown): EntityMutationMode {
+	return isEntityMutationMode(effect) && isLegalActionEffect(normalizeResourceClass(resourceClass), action, effect)
+		? effect : "deny";
 }
 
 function isWriteAction(value: unknown): value is WriteAction {
@@ -1018,8 +1014,10 @@ export async function listEntityApprovalPolicies(
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
        approval_connection_id, approval_channel_id, approval_team_id,
-       approval_channel_name
-    FROM write_approval_policies
+       approval_channel_name,
+       COALESCE((SELECT jsonb_object_agg(e.action, e.effect)
+         FROM write_policy_action_effects e WHERE e.policy_id = p.id), '{}'::jsonb) AS effects
+    FROM write_approval_policies p
     WHERE organization_id = ${organizationId}
       AND (${resourceClass ?? null}::text IS NULL OR resource_class = ${resourceClass ?? null})
     ORDER BY
@@ -1037,8 +1035,13 @@ export async function listEntityApprovalPolicies(
       field_path ASC NULLS FIRST,
       id ASC
   `;
-	await attachEffects(sql, [...rows]);
-	return rows.map(rowToPolicy);
+	// Read headers and effects in one snapshot: a concurrent replacement cannot mix versions.
+	return rows.map(row => {
+		row.effects = Object.fromEntries(Object.entries(row.effects)
+			.filter(([action]) => isWriteAction(action))
+			.map(([action, effect]) => [action, normalizeStoredEffect(row.resource_class, action as WriteAction, effect)]));
+		return rowToPolicy(row);
+	});
 }
 
 /**
@@ -1105,9 +1108,18 @@ async function writeActionEffects(
 	}
 }
 
+/** One database lock covers both individual edits and whole-list replacements. */
+export function withConnectorPolicyTransaction<T>(organizationId: string, write: (tx: DbClient) => Promise<T>): Promise<T> {
+	return getDb().begin(async (tx) => {
+		await tx`SELECT id FROM organization WHERE id = ${organizationId} FOR UPDATE`;
+		return write(tx);
+	});
+}
+
 export async function upsertEntityApprovalPolicy(
 	organizationId: string,
 	input: EntityApprovalPolicyInput,
+	transaction?: DbClient,
 ): Promise<EntityApprovalPolicy> {
 	const resourceClass = normalizeResourceClass(input.resourceClass);
 	const principalKind = normalizePrincipalKind(input.principalKind);
@@ -1187,7 +1199,7 @@ export async function upsertEntityApprovalPolicy(
        approval_channel_name
     `;
 
-	const row = await sql.begin(async (tx) => {
+	const write = async (tx: DbClient) => {
 		let header = (await applyUpdate(tx))[0] ?? null;
 
 		if (!header) {
@@ -1220,7 +1232,9 @@ export async function upsertEntityApprovalPolicy(
 		header.effects = {};
 		for (const { action, effect } of effectSet) header.effects[action] = effect;
 		return header;
-	});
+	};
+	const row = transaction ? await write(transaction) : resourceClass === "connector_action"
+		? await withConnectorPolicyTransaction(organizationId, write) : await sql.begin(write);
 	if (!row) throw new Error("Failed to save entity approval policy");
 	return rowToPolicy(row);
 }
@@ -1235,7 +1249,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	entityTypeSlug?: string | null;
 	fieldPath?: string | null;
 	entityId?: number | null;
-}): Promise<boolean> {
+}, transaction?: DbClient): Promise<boolean> {
 	const resourceClass = normalizeResourceClass(args.resourceClass);
 	const principalKind = normalizePrincipalKind(args.principalKind);
 	const principalId = principalKind ? args.principalId?.trim() || null : null;
@@ -1266,8 +1280,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	) {
 		return false;
 	}
-	const sql = getDb();
-	const rows = await sql<{ id: number }>`
+	const remove = (sql: DbClient) => sql<{ id: number }>`
     DELETE FROM write_approval_policies
     WHERE organization_id = ${args.organizationId}
       AND resource_class = ${resourceClass}
@@ -1283,6 +1296,8 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
       AND entity_id IS NOT DISTINCT FROM ${entityId}
     RETURNING id
   `;
+	const rows = transaction ? await remove(transaction) : resourceClass === "connector_action"
+		? await withConnectorPolicyTransaction(args.organizationId, remove) : await remove(getDb());
 	return rows.length > 0;
 }
 

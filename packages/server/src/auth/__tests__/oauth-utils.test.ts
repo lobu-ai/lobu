@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, test } from "vitest";
+import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES, DISCOVERY_SCOPES, normalizeOAuthScopeRequest, POLICY_WRITE_SCOPE } from "../oauth/scopes";
 import {
   generatePAT,
   generateUserCode,
@@ -124,6 +125,14 @@ describe("verifyCodeChallenge — plain", () => {
 // ─── parseScopes ─────────────────────────────────────────────────────────────
 
 describe("parseScopes", () => {
+  test("policy management is explicitly mintable on PATs, never on OAuth or default grants", () => {
+    expect(AVAILABLE_PAT_SCOPES).toContain(POLICY_WRITE_SCOPE);
+    expect(DEFAULT_SCOPES).not.toContain(POLICY_WRITE_SCOPE);
+    expect(DISCOVERY_SCOPES).not.toContain(POLICY_WRITE_SCOPE);
+    expect(normalizeOAuthScopeRequest(POLICY_WRITE_SCOPE)).toBeNull();
+    expect(parseScopes(POLICY_WRITE_SCOPE)).toEqual([]);
+    expect(parseScopes(POLICY_WRITE_SCOPE, AVAILABLE_PAT_SCOPES)).toEqual([POLICY_WRITE_SCOPE]);
+  });
   test("null/undefined → default scopes (at least one scope)", () => {
     const defaults = parseScopes(null);
     expect(Array.isArray(defaults)).toBe(true);
