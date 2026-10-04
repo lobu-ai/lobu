@@ -47,9 +47,11 @@ describe("manage_entity union contract", () => {
 		expect(messageOf(() => validate({ action: "create", entity_type: "company" }))).toMatch(
 			/name/,
 		);
-		for (const action of ["update", "get", "delete", "list_links", "unmerge"]) {
+		for (const action of ["update", "get", "delete", "unmerge"]) {
 			expect(messageOf(() => validate({ action }))).toMatch(/entity_id/);
 		}
+		// list_links takes entity_id or a source-backed record; the handler
+		// refuses a call with neither.
 		expect(
 			messageOf(() => validate({ action: "link", from_entity_id: 1, to_entity_id: 2 })),
 		).toMatch(/relationship_type_slug/);
