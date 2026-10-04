@@ -1,5 +1,22 @@
 # Changelog
 
+## [21.2.1](https://github.com/lobu-ai/lobu/compare/lobu-v21.2.0...lobu-v21.2.1) (2026-10-04)
+
+
+### Features
+
+* **authz:** reconcile connector policy rules atomically ([#3809](https://github.com/lobu-ai/lobu/issues/3809)) ([e7cc2ef](https://github.com/lobu-ai/lobu/commit/e7cc2ef2e95eb88a8be9dc8436bb0b0ba26d1928))
+
+
+### Bug Fixes
+
+* **guardrails:** judge model from guardrail or org default; drop EGRESS_JUDGE_MODEL ([#3806](https://github.com/lobu-ai/lobu/issues/3806)) ([558f2b8](https://github.com/lobu-ai/lobu/commit/558f2b8e6967ecc2e0123b393800a46c22da15a5))
+
+
+### Miscellaneous Chores
+
+* release 21.2.1 ([#3808](https://github.com/lobu-ai/lobu/issues/3808)) ([5fbb4d7](https://github.com/lobu-ai/lobu/commit/5fbb4d791b49667d4c892d4a06f4113b0451069e))
+
 ## [21.2.0](https://github.com/lobu-ai/lobu/compare/lobu-v21.1.0...lobu-v21.2.0) (2026-10-04)
 
 
