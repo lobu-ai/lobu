@@ -18,13 +18,6 @@ export const BackingInputSchema = Type.Object(
           "Optional connection slug. When set, the view runs LIVE against that connection’s external database (read-only, no copy) instead of internal tables. Stored verbatim; resolved to the connection at read time.",
       })
     ),
-    identity: Type.Optional(
-      Type.String({
-        minLength: 1,
-        description:
-          "Optional identity namespace whose identifier IS the view's slug/id (the source canonical key). Requires `connection`. Records referenced by attributed events then keep a stored identity row (slug = source key, name) so Activity, Relationships, views and permissions work; attributes stay live from the source.",
-      })
-    ),
   },
   { additionalProperties: false }
 );
@@ -238,8 +231,6 @@ export const EntityTypeRowSchema = Type.Object({
   backing_sql: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   /** Connection slug an external-backed derived view runs against; null ⇒ internal. */
   backing_source: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  /** Identity namespace of the source key; set ⇒ referenced records keep stored identity rows. */
-  backing_identity: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   /** Declared metric contract (eventSets/measures/dimensions/segments), stored verbatim; null ⇒ none. */
   metrics_config: Type.Optional(
     Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()])

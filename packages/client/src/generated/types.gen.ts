@@ -1927,10 +1927,6 @@ export type ManageEntitySchemaData = {
        * Optional connection slug. When set, the view runs LIVE against that connection’s external database (read-only, no copy) instead of internal tables. Stored verbatim; resolved to the connection at read time.
        */
       connection?: string;
-      /**
-       * Optional identity namespace whose identifier IS the view's slug/id (the source canonical key). Requires `connection`. Records referenced by attributed events then keep a stored identity row (slug = source key, name) so Activity, Relationships, views and permissions work; attributes stay live from the source.
-       */
-      identity?: string;
     };
     /**
      * [entity_type: create/update] Declared metric contract (eventSets/measures/dimensions/segments — see @lobu/connector-sdk) stored verbatim. The metric compiler lowers it into backing SQL. `null` clears it; omit to leave unchanged.
@@ -2022,7 +2018,6 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
-          backing_identity?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2076,7 +2071,6 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
-          backing_identity?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2122,7 +2116,6 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
-          backing_identity?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
@@ -2225,7 +2218,6 @@ export type ManageEntitySchemaResponses = {
           } | null;
           backing_sql?: string | null;
           backing_source?: string | null;
-          backing_identity?: string | null;
           metrics_config?: {
             [key: string]: unknown;
           } | null;
