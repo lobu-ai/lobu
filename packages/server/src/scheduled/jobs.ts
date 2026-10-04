@@ -583,7 +583,13 @@ function registerMaintenanceTasks(
       `;
       userIds = rows.map((r) => r.userId);
     }
-    if (userIds.length === 0) return;
+    if (userIds.length === 0) {
+      logger.warn(
+        { organizationId: orgId, recipients },
+        '[task] send_notification resolved no recipients; nothing delivered'
+      );
+      return;
+    }
     await createNotificationForUsers(userIds, {
       organizationId: orgId,
       type: (p.type as 'agent_message') ?? 'agent_message',
