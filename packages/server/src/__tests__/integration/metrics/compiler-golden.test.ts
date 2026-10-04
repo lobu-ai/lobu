@@ -19,6 +19,7 @@ import { getTestDb } from '../../setup/test-db';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY } from '../../../identity/scope-projection';
+import { compileMetricSql } from '../../../metrics/compiler';
 import { runMetric } from '../../../metrics/run-metric';
 
 const METRICS = {
@@ -74,6 +75,29 @@ const TENANT_IDENTITY_METRICS = {
       agg: 'count',
       description: 'Count customer activity events within one tenant identity scope.',
     },
+  },
+};
+
+// A synthetic type whose segment filters the RESOLVED entity, not the event:
+// `tier` lives on the entity's metadata and on no event.
+const ENTITY_SEGMENT_METRICS = {
+  eventSets: {
+    orders: {
+      by: 'alias',
+      field: "metadata->>'vendor'",
+      against: 'aliases',
+      where: "connector_key='synthetic-orders'",
+    },
+  },
+  segments: {
+    gold_tier: {
+      description: 'Vendors on the gold tier.',
+      where: "metadata->>'tier' = 'gold'",
+      on: 'entity',
+    },
+  },
+  measures: {
+    orders: { eventSet: 'orders', agg: 'count', description: 'Orders per vendor.' },
   },
 };
 
@@ -159,6 +183,133 @@ describe('metric compiler — alias resolver golden', () => {
     const byCur = Object.fromEntries(rows.map((r) => [r.currency as string, Number(r.charges)]));
     expect(byCur.GBP).toBe(2); // Claude.ai 78.35 + Anthropic 20.00 (dup collapsed)
     expect(byCur.USD).toBe(1);
+  });
+
+  it('applies an on:"entity" segment to the resolved entity, not the events', async () => {
+    const owner = await TestApiClient.for({
+      organizationId: orgId,
+      userId: (await createTestUser({ email: 'metric-entity-seg@test.com' })).id,
+      memberRole: 'owner',
+    });
+    await owner.entity_schema.createType({
+      slug: 'synthetic-vendor',
+      name: 'Synthetic vendor',
+      metrics_config: ENTITY_SEGMENT_METRICS,
+    });
+    const sql = getTestDb();
+    const vendor = async (name: string, tier: string) => {
+      const created = await createTestEntity({
+        name,
+        entity_type: 'synthetic-vendor',
+        organization_id: orgId,
+      });
+      await sql`
+        UPDATE entities SET metadata = ${sql.json({ aliases: [name], tier })}
+        WHERE id = ${created.id}
+      `;
+      return created;
+    };
+    const gold = await vendor('vendor-gold', 'gold');
+    const silver = await vendor('vendor-silver', 'silver');
+    const order = (name: string) =>
+      createTestEvent({
+        organization_id: orgId,
+        content: 'order',
+        connector_key: 'synthetic-orders',
+        metadata: { vendor: name },
+      });
+    await order('vendor-gold');
+    await order('vendor-gold');
+    await order('vendor-silver');
+
+    const all = await runMetric({
+      organizationId: orgId,
+      entityType: 'synthetic-vendor',
+      measure: 'orders',
+      excludeMemberEntities: false,
+    });
+    expect(Object.fromEntries(all.map((r) => [Number(r.entity_id), Number(r.orders)]))).toEqual({
+      [gold.id]: 2,
+      [silver.id]: 1,
+    });
+
+    const goldOnly = await runMetric({
+      organizationId: orgId,
+      entityType: 'synthetic-vendor',
+      measure: 'orders',
+      segment: 'gold_tier',
+      excludeMemberEntities: false,
+    });
+    expect(Object.fromEntries(goldOnly.map((r) => [Number(r.entity_id), Number(r.orders)]))).toEqual({
+      [gold.id]: 2,
+    });
+  });
+
+  it('places an event segment before or after dedupe per appliedBefore', () => {
+    const compile = (appliedBefore: 'dedupe' | 'aggregate' | undefined) =>
+      compileMetricSql({
+        entityTypeId: 1,
+        metrics: {
+          ...METRICS,
+          segments: { outflow: { ...METRICS.segments.outflow, appliedBefore } },
+        } as never,
+        measure: 'spend',
+      });
+    const outflow = "metadata->>'direction'='out'";
+    // The pre-dedupe filter is the WHERE of the events relation the DISTINCT reads.
+    const eventsWhere = (sqlText: string) =>
+      sqlText.match(/FROM events WHERE ([\s\S]*?)\) evt/)?.[1] ?? '';
+
+    const beforeDedupe = compile('dedupe');
+    expect(eventsWhere(beforeDedupe)).toContain(outflow);
+    expect(beforeDedupe).not.toContain('__seg0');
+
+    for (const sqlText of [compile('aggregate'), compile(undefined)]) {
+      expect(eventsWhere(sqlText)).not.toContain(outflow);
+      expect(sqlText).toContain(`(${outflow}) AS __seg0`);
+      expect(sqlText).toMatch(/\) resolved\s+WHERE resolved\.__seg0\s+GROUP BY/);
+    }
+
+    // No dedupeKey ⇒ no dedupe step: the default stays in the events WHERE, so
+    // a dedupe-free measure compiles exactly as before.
+    const noDedupe = compileMetricSql({
+      entityTypeId: 1,
+      metrics: {
+        ...METRICS,
+        eventSets: { charges: { ...METRICS.eventSets.charges, dedupeKey: undefined } },
+        segments: { outflow: { ...METRICS.segments.outflow, appliedBefore: undefined } },
+      } as never,
+      measure: 'spend',
+    });
+    expect(eventsWhere(noDedupe)).toContain(outflow);
+    expect(noDedupe).not.toContain('__seg0');
+  });
+
+  it('sums the same deduped outflow when the segment applies after dedupe', async () => {
+    const sql = getTestDb();
+    await sql`
+      UPDATE entity_types
+      SET metrics_config = jsonb_set(metrics_config, '{segments,outflow,appliedBefore}', '"aggregate"')
+      WHERE slug = 'company' AND organization_id = ${orgId}
+    `;
+    try {
+      const rows = await runMetric({
+        organizationId: orgId,
+        entityType: 'company',
+        measure: 'spend',
+        by: ['currency'],
+        excludeMemberEntities: false,
+      });
+      const byCur = Object.fromEntries(rows.map((r) => [r.currency as string, Number(r.spend)]));
+      expect(byCur.GBP).toBeCloseTo(98.35, 2);
+      expect(byCur.USD).toBeCloseTo(23.93, 2);
+    } finally {
+      await sql`
+        UPDATE entity_types
+        SET metrics_config = jsonb_set(metrics_config, '{segments,outflow,appliedBefore}', '"dedupe"')
+        WHERE slug = 'company' AND organization_id = ${orgId}
+      `;
+    }
   });
 
   it('matches equal identifiers only within the event tenant scope', async () => {
