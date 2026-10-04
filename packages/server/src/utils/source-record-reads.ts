@@ -89,8 +89,18 @@ async function loadSourceFeeds(
      JOIN LATERAL (
        SELECT cd0.feeds_schema -> f.feed_key AS feed_schema
        FROM connector_definitions cd0
-       WHERE cd0.key = c.connector_key AND cd0.organization_id = $1 AND cd0.status = 'active'
-       ORDER BY cd0.updated_at DESC, cd0.id DESC
+       WHERE cd0.key = c.connector_key AND cd0.organization_id = $1
+         AND (
+           (f.pinned_version IS NULL AND cd0.status = 'active')
+           OR (f.pinned_version IS NOT NULL
+               AND (cd0.version = f.pinned_version OR cd0.status = 'active'))
+         )
+       -- The same definition precedence as readSourceFeed, so discovery and
+       -- the read agree on a pinned feed's matchPaths and event kinds.
+       ORDER BY (cd0.version = f.pinned_version) DESC,
+                (cd0.status = 'active') DESC,
+                cd0.updated_at DESC,
+                cd0.id DESC
        LIMIT 1
      ) cd ON TRUE
      WHERE f.organization_id = $1

@@ -145,6 +145,13 @@ describe('source-backed record reads', () => {
     expect(await counts()).toEqual(before);
   }, 60_000);
 
+  it('ends when the last page exactly fills the limit', async () => {
+    const page = await getContent({ record: { type: 'company', key: 'c1' }, limit: 3 }, {} as Env, owner);
+    expect(page.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e4', 'e2', 'e1']);
+    expect(page.page.has_more).toBe(false);
+    expect(page.record_cursor).toBeUndefined();
+  }, 60_000);
+
   it('reads relationships both ways from the declaring event kind', async () => {
     const companyLinks = await manageEntity(
       { action: 'list_links', record: { type: 'company', key: 'c1' } },

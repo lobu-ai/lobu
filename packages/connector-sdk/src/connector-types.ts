@@ -1038,7 +1038,10 @@ export interface FeedReadContext<F = Record<string, unknown>> {
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
-  /** Exact-value filter on one of the feed's declared `matchPaths`. */
+  /**
+   * Exact-value filter on one of the feed's declared `matchPaths`. A matched
+   * read pages only by `nextCursor`: a result without one is the last page.
+   */
   match?: FeedReadMatch;
 }
 

@@ -165,6 +165,9 @@ export async function readSourceFeedPage(
     if (read.window && result.hasMore && !result.nextCursor) {
       throw new Error('Windowed source reader reported more results without a continuation cursor.');
     }
+    if (read.match && result.hasMore && !result.nextCursor) {
+      throw new Error('Matched source reader reported more results without a continuation cursor.');
+    }
     if (result.nextCursor && result.nextCursor === page.sourceCursor) {
       throw new Error('Source reader returned a non-advancing cursor.');
     }
@@ -175,7 +178,9 @@ export async function readSourceFeedPage(
     let hasMore: boolean;
     if (result.nextCursor !== undefined) {
       hasMore = true;
-    } else if (page.sourceCursor !== undefined) {
+    } else if (page.sourceCursor !== undefined || read.match) {
+      // A matched read pages only by its own cursor (see FeedReadContext.match):
+      // an invented offset would be ignored and re-read the same page forever.
       hasMore = false;
     } else if (result.hasMore !== undefined) {
       hasMore = result.hasMore;

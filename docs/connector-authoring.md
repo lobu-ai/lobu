@@ -331,7 +331,7 @@ declaring `matchPaths`, the event paths it can filter by exact value. Lobu then
 reads every such feed whose `eventKinds` attribute to the record's type, passing
 `FeedReadContext.match = { path, values }` on the attribution's identity
 `eventPath`. Return EventEnvelope-shaped rows (`origin_id`, `origin_type`,
-`title`, `occurred_at`, `source_url`, `metadata`), newest first, with the native
-`nextCursor`. Relationships come from the event kind's `relationships`: the
+`title`, `occurred_at`, `source_url`, `metadata`), newest first, paged only by
+`nextCursor`: a matched page without one is the last. Relationships come from the event kind's `relationships`: the
 other attribution's identity is the peer's key and its `titlePath` the peer's
 name. A path not in `matchPaths` is rejected, never filtered after the read.
