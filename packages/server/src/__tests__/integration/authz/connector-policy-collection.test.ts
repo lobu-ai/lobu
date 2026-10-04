@@ -77,9 +77,9 @@ describe("connector policy collection", () => {
     expect((await snapshot()).rules).toEqual([]);
   });
 
-  it("rejects a stale plan after a single-rule UI edit", async () => {
+  it("rejects a stale plan after another collection edit", async () => {
     const before = await snapshot();
-    expect((await request("PUT", `/api/${org.slug}/write-permissions`, { resource_class: "connector_action", effects: { execute: "deny" } })).status).toBe(200);
+    expect((await request("PUT", path(), { revision: before.revision, rules: [{ effect: "deny" }] })).status).toBe(200);
     const stale = await request("PUT", path(), { revision: before.revision, rules: [] });
     expect(stale.status).toBe(409);
     expect(await stale.json()).toMatchObject({ error: "policy_conflict" });
@@ -165,6 +165,7 @@ describe("connector policy collection", () => {
 
   it("reports catalog storage failures as server errors on both write paths", async () => {
     const before = await snapshot();
+    await createTestAgent({ organizationId: org.id, agentId: "policy-storage-fixture" });
     const sql = dbClient.getDb();
     const failingSql = new Proxy(sql, {
       apply(target, thisArg, args) {
@@ -178,7 +179,7 @@ describe("connector policy collection", () => {
     try {
       for (const [route, body] of [
         [path(), { revision: before.revision, rules: [{ connector_key: "policy-fixture", effect: "auto" }] }],
-        [`/api/${org.slug}/write-permissions`, { resource_class: "connector_action", connector_key: "policy-fixture", effects: { execute: "auto" } }],
+        [`/api/${org.slug}/agent/policy-storage-fixture/permissions`, { resource_class: "connector_action", connector_key: "policy-fixture", effects: { execute: "auto" } }],
       ] as const) {
         expect((await request("PUT", route, body)).status).toBe(500);
       }

@@ -244,6 +244,9 @@ export async function writePermissionPolicy(c: Context) {
 		);
 	}
 	const agentId = c.req.param("agentId") ?? null;
+	if (policy.resourceClass === "connector_action" && !agentId) {
+		return invalid(c, "Manage organization connector rules through /write-permissions/connector-actions.");
+	}
 	policy.principalKind = agentId ? "agent" : null;
 	policy.principalId = agentId;
 	// Deletes must remain possible after a target disappears from the catalog.
