@@ -363,9 +363,12 @@ plus optional `title`, `metadata`, `author`, `source_url`, `occurred_at`,
 `idempotency_key` when the same real-world source must emit at most once across
 runs. A row's `entity_ids` replace the Automation's bound entities for that
 row, so one run can link each event to its own record; omit it to keep the
-bound linkage. Every id must be an entity in the same workspace, or the run
-fails. `entity_ids` are not part of an event output `key`, so key on the
-record's id when each record keeps its own current event. Omit `triggers` for a manual-only Automation.
+bound linkage. When supplied, the array must contain distinct positive integer
+IDs and cannot be empty. Every id must be an entity in the same workspace that
+the completing identity may write, or completion fails. `entity_ids` are not
+part of an event output `key`, so include the record's id in a metadata key
+field when each record keeps its own current event. Omit `triggers` for a
+manual-only Automation.
 
 ### Wire it together
 

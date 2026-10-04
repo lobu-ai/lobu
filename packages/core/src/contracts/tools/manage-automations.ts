@@ -255,14 +255,14 @@ export type AutomationEntityOutput = Static<
  * "exactly one current per key" is a unique-index guarantee rather than a
  * convention two concurrent runs can silently break. Rows carrying no identity
  * are inert — never a supersede target — so a keyed output cannot capture an
- * unrelated event that happens to share metadata. *
+ * unrelated event that happens to share metadata.
+ *
  * A row may carry `entity_ids` to link that event to its own records instead
- * of the Automation's bound entities (replace, not add — the same full-linkage
- * meaning as `save_memory`'s `entity_ids`). Linkage is not part of the key:
- * the identity is the key values alone, so a later version of a key carries
- * its own row's `entity_ids`, and one run cannot emit the same key twice even
- * for different entities. Put the record's id in a key field when each record
- * needs its own current event.
+ * of the Automation's bound entities (replace, not add). Linkage is not part
+ * of the identity, so a later version of a key carries its own row's
+ * `entity_ids`. One output array cannot emit the same key twice even for
+ * different entities. Put the record's id in a metadata key field when each
+ * record needs its own current event.
  */
 export const AutomationEventOutputSchema = Type.Object(
   {

@@ -3,9 +3,8 @@
  *
  * One run can write each output event onto its own record (a weekly digest
  * linking "renewal risk: Red" to company A and another to company B). A row's
- * `entity_ids` REPLACE the Automation's bound entities for that row, exactly as
- * `save_memory`'s `entity_ids` name the full linkage; a row without the field
- * keeps today's bound-entity linkage. Each id goes through `requireWriteAccess`,
+ * `entity_ids` replace the Automation's bound entities for that row; omitting
+ * the field keeps the bound-entity linkage. Each id goes through `requireWriteAccess`,
  * the same gate `save_memory` uses, and a bad id fails the completion with a
  * typed 403 instead of being dropped.
  */
@@ -31,14 +30,28 @@ interface Harness {
   agentId: string;
 }
 
-async function setup(outputs: Record<string, unknown>): Promise<Harness> {
+async function setup(
+  outputs: Record<string, unknown>,
+  boundEventKinds?: Record<string, unknown>
+): Promise<Harness> {
   const sql = getTestDb();
   const workspace = await TestWorkspace.create({ name: 'Output Entity Ids Org' });
   await ensureMemberEntityType(workspace.org.id);
   const ownerUserId = workspace.users.owner.id;
   const make = (name: string) =>
     createTestEntity({ name, organization_id: workspace.org.id, created_by: ownerUserId });
-  const bound = await make('Portfolio');
+  const bound = await createTestEntity({
+    name: 'Portfolio',
+    entity_type: 'portfolio',
+    organization_id: workspace.org.id,
+    created_by: ownerUserId,
+  });
+  if (boundEventKinds) {
+    await sql`
+      UPDATE entity_types SET event_kinds = ${sql.json(boundEventKinds)}
+      WHERE organization_id = ${workspace.org.id} AND slug = 'portfolio'
+    `;
+  }
   const companyA = await make('Company A');
   const companyB = await make('Company B');
   const agent = await createTestAgent({
@@ -158,6 +171,47 @@ describe('Automation event output entity_ids', () => {
       ['portfolio summary', [h.bound.id]],
       ['company B only', [h.companyB.id]],
     ]);
+  });
+
+  it('validates a custom event kind against the row links instead of the bound entity', async () => {
+    const h = await setup({ risks: { event: 'renewal_risk' } }, {
+      renewal_risk: {
+        metadataSchema: {
+          type: 'object',
+          properties: { portfolio: { type: 'boolean' } },
+          required: ['portfolio'],
+        },
+      },
+    });
+    const typed = await createTestEntity({
+      name: 'Typed company',
+      entity_type: 'renewal-account',
+      organization_id: h.workspace.org.id,
+      created_by: h.workspace.users.owner.id,
+    });
+    await h.sql`
+      UPDATE entity_types
+      SET event_kinds = ${h.sql.json({ renewal_risk: { description: 'Renewal risk' } })}
+      WHERE organization_id = ${h.workspace.org.id} AND slug = 'renewal-account'
+    `;
+
+    await completeRun(h, {
+      risks: [{
+        content: 'renewal risk: Red',
+        metadata: { risk: 'red' },
+        entity_ids: [h.companyA.id, typed.id],
+      }],
+    });
+    const rows = await outputRows(h);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].entity_ids).toEqual([h.companyA.id, typed.id]);
+
+    await expect(
+      completeRun(h, {
+        risks: [{ content: 'untyped company', entity_ids: [h.companyA.id] }],
+      })
+    ).rejects.toThrow(/Invalid event in outputs\.risks\[0\]/);
+    expect(await outputRows(h)).toEqual(rows);
   });
 
   it('rejects an entity from another organization and writes nothing', async () => {

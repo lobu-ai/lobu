@@ -214,10 +214,8 @@ export async function persistAutomationEventOutput(
       );
     }
 
-    // A row's own `entity_ids` REPLACE the bound entities for that row, the
-    // way `save_memory`'s `entity_ids` name an event's whole linkage. Each id
-    // passes the same write gate `save_memory` applies, and a bad id fails the
-    // completion rather than being dropped.
+    // Explicit linkage uses the same write gate as save_memory; a denied id
+    // fails the entire completion rather than silently dropping that link.
     const entityIds = draft.entity_ids ?? params.boundEntityIds;
     if (draft.entity_ids) {
       for (const entityId of draft.entity_ids) {

@@ -4,12 +4,36 @@ import {
   AutomationEventOutputSchema,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { Value } from '@sinclair/typebox/value';
+import Ajv from 'ajv';
+import addFormats from 'ajv-formats';
 import { assertOutputsShape, parseJsonInput } from '../../tools/admin/manage_automations/shared';
+import { AutomationEventDraftSchema } from '../../utils/automation-extraction-schema';
 
 const valid = {
   items: { entity: 'social-signal', key: ['source_origin_id'] },
   alerts: { event: 'social_signal' },
 };
+
+describe('Automation event draft entity_ids', () => {
+  const ajv = new Ajv({ allErrors: true, strict: false, removeAdditional: true });
+  addFormats(ajv);
+  const validate = ajv.compile(AutomationEventDraftSchema);
+
+  it('preserves explicit links and allows the bound-entity fallback', () => {
+    const draft = { content: 'renewal risk', entity_ids: [101, 102] };
+    expect(validate(draft)).toBe(true);
+    expect(draft.entity_ids).toEqual([101, 102]);
+    expect(validate({ content: 'portfolio summary' })).toBe(true);
+  });
+
+  it.each([null, [], [0], [-1], [1.5], ['101'], [101, 101], 101].map((value) => [value]))(
+    'rejects malformed linkage %j',
+    (entityIds) => {
+      expect(validate({ content: 'renewal risk', entity_ids: entityIds })).toBe(false);
+      expect(validate.errors?.some((error) => error.instancePath.startsWith('/entity_ids'))).toBe(true);
+    }
+  );
+});
 
 describe('assertOutputsShape', () => {
   it('accepts entity and event outputs together', () => {
