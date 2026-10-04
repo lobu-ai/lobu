@@ -136,11 +136,31 @@ async function loadSourceFeeds(
 
 /**
  * Where one stream resumes: the source cursor of the page it is in (none for
- * the first page) and how many rows of that page were already returned.
+ * the first page), the last row of that page already consumed (`a`), and how
+ * many rows that was (`s`, only a hint for how much to re-read). The page is
+ * re-read, so resuming keys on the row, not the count: a row inserted or
+ * deleted since the last request neither repeats nor skips one.
  */
 interface StreamPosition {
   c?: string;
   s: number;
+  a?: { t: string; id: string };
+}
+
+/** Index of the first row after `after` in a re-read page. */
+function resumeIndex(
+  rows: Array<Record<string, unknown>>,
+  after: StreamPosition["a"]
+): number {
+  if (!after) return 0;
+  const anchor = after.id
+    ? rows.findIndex((row) => String(row.origin_id ?? "") === after.id)
+    : -1;
+  if (anchor >= 0) return anchor + 1;
+  // The anchor row is gone: resume at the first row not newer than it. A
+  // tie may repeat, but no unread row is skipped.
+  const index = rows.findIndex((row) => occurredAt(row) <= after.t);
+  return index < 0 ? rows.length : index;
 }
 
 function decodeCursor(
@@ -163,7 +183,12 @@ function decodeCursor(
           Number.isSafeInteger(value.s) &&
           value.s >= 0 &&
           (value.c === undefined ||
-            (typeof value.c === "string" && value.c.length > 0))
+            (typeof value.c === "string" && value.c.length > 0)) &&
+          (value.a === undefined ||
+            (value.a &&
+              typeof value.a === "object" &&
+              typeof value.a.t === "string" &&
+              typeof value.a.id === "string"))
       )
     ) {
       return parsed as Record<string, StreamPosition>;
@@ -235,7 +260,16 @@ export async function readSourceRecordActivity(
             scope,
             options.signal
           );
-          return [{ feed, path, stream, position, page, taken: position.s }];
+          return [
+            {
+              feed,
+              path,
+              stream,
+              position,
+              page,
+              taken: resumeIndex(page.rows, position.a),
+            },
+          ];
         } catch (error) {
           failures.push({
             feed_id: feed.feedId,
@@ -318,7 +352,16 @@ export async function readSourceRecordActivity(
   }
 
   for (const { stream, position, page, taken } of pages) {
-    if (taken < page.rows.length) next[stream] = { c: position.c, s: taken };
+    if (taken < page.rows.length) {
+      const last = taken > 0 ? page.rows[taken - 1] : undefined;
+      next[stream] = {
+        c: position.c,
+        s: taken,
+        ...(last
+          ? { a: { t: occurredAt(last), id: String(last.origin_id ?? "") } }
+          : {}),
+      };
+    }
     else if (page.next_cursor) next[stream] = { c: page.next_cursor, s: 0 };
   }
   return {

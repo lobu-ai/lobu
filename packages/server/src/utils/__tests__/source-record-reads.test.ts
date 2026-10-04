@@ -302,3 +302,29 @@ it("filters relationships by type and direction before the limit", async () => {
   });
   expect(new Set(outgoing.links.map((link) => link.relationship_type))).toEqual(new Set(["knows"]));
 });
+
+it("neither repeats nor skips a row when the source changes between pages", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  const a = [linked("a10", "2026-01-10T00:00:00Z"), linked("a8", "2026-01-08T00:00:00Z")];
+  const b = [linked("b9", "2026-01-09T00:00:00Z"), linked("b7", "2026-01-07T00:00:00Z")];
+  // A keyset-like source: every read returns the current rows from the top.
+  readPage.mockImplementation(async (read: { feed_id: number; limit: number }) => ({
+    rows: (read.feed_id === 1 ? a : b).slice(0, read.limit),
+  }));
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
+  expect(first.events.map((event) => event.origin_id)).toEqual(["a10", "b9"]);
+
+  a.unshift(linked("a11", "2026-01-11T00:00:00Z"));
+  const afterInsert = await reads.readSourceRecordActivity(scope, record, {
+    limit: 2,
+    cursor: first.next_cursor,
+  });
+  expect(afterInsert.events.map((event) => event.origin_id)).toEqual(["a8", "b7"]);
+
+  a.splice(0, 2);
+  const deleted = await reads.readSourceRecordActivity(scope, record, {
+    limit: 2,
+    cursor: first.next_cursor,
+  });
+  expect(deleted.events.map((event) => event.origin_id)).toEqual(["a8", "b7"]);
+});
