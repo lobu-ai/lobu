@@ -18,6 +18,7 @@ import {
   addUserToOrganization,
   createTestOrganization,
   createTestUser,
+  createTestAgent,
   ownerToolContext,
 } from '../../setup/test-fixtures';
 import { TestApiClient } from '../../setup/test-mcp-client';
@@ -289,6 +290,27 @@ describe('remote-native records', () => {
     expect(row.entity_refs).toBe('{renewal:k:3}');
   });
 
+  it("applies a remote type's read policy to its events read by content id or by ref", async () => {
+    const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId, agentId: 'remote-records-reader' });
+    const saved = await brief('broken:k:3', 'Policy-guarded brief', '2026-01-06T00:00:00.000Z');
+    const [policy] = await getTestDb()<{ id: number }>`
+      INSERT INTO write_approval_policies
+        (organization_id, resource_class, principal_kind, principal_id, entity_type_slug)
+      VALUES (${orgId}, 'entity', 'agent', ${agent.agentId}, 'broken')
+      RETURNING id`;
+    await getTestDb()`INSERT INTO write_policy_action_effects (policy_id, action, effect)
+      VALUES (${policy.id}, 'read', 'deny')`;
+    const agentCtx = { ...ctx(), agentId: agent.agentId } as ToolContext;
+    await expect(getContent({ content_ids: [saved.id] }, env, agentCtx)).rejects.toThrow(
+      /Policy denies reading entities of type 'broken'/
+    );
+    await expect(getContent({ entity: 'broken:k:3' }, env, agentCtx)).rejects.toThrow(
+      /Policy denies reading entities of type 'broken'/
+    );
+    // The owner, acting as a user, still reads it.
+    expect((await getContent({ content_ids: [saved.id] }, env, ctx())).content).toHaveLength(1);
+  });
+
   it('rejects a cursor replayed against another ref', async () => {
     const page = await getContent({ entity: 'account:k:1', limit: 2 }, env, ctx());
     expect(page.next_cursor).toBeTruthy();
@@ -344,7 +366,7 @@ describe('remote-native records', () => {
     ).rejects.toMatchObject({ httpStatus: 400 });
   });
 
-  it('preserves source keys and reports the next page at the query row cap', async () => {
+  it('canonicalizes edge keys like record keys and reports the next page at the query row cap', async () => {
     const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
     await api.entity_schema.createRelType({
       slug: 'many-contacts',
@@ -366,10 +388,10 @@ describe('remote-native records', () => {
     }, env, ctx()) as Promise<{ edges: Array<{ to: string }>; streams: Array<{ has_more: boolean }> }>;
     const first = await read(0);
     expect(first.edges).toHaveLength(500);
-    expect.soft(first.edges[0].to).toBe('contact: c-0001 ');
+    expect.soft(first.edges[0].to).toBe('contact:c-0001');
     expect.soft(first.streams[0].has_more).toBe(true);
     const last = await read(500);
-    expect(last.edges.map((edge) => edge.to)).toEqual(['contact: c-0501 ']);
+    expect(last.edges.map((edge) => edge.to)).toEqual(['contact:c-0501']);
     expect(last.streams[0].has_more).toBe(false);
   });
 

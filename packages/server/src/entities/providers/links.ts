@@ -13,9 +13,14 @@ import { listBackedRelationshipTypes, readRemoteByKey, type ResolvedRemoteRef } 
 
 const EDGE_COLUMNS = new Set(['from_key', 'to_key', 'from_name', 'to_name']);
 
+/**
+ * Endpoint keys are canonicalized exactly as a record's routing key is
+ * (`derivedRowSlug` trims), so an edge's ref resolves through resolve_path
+ * and the trimmed exact-match lookup.
+ */
 function text(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
-  const s = String(value);
+  const s = String(value).trim();
   return s === '' ? undefined : s;
 }
 

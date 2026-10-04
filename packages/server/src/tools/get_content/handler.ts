@@ -376,6 +376,19 @@ async function getContentImpl(
           // Unbound events use the workspace-wide $member policy envelope.
           typeSlugs.add(row.entity_type ? String(row.entity_type) : '$member');
         }
+        // Remote records are linked by ref, not id: their types gate the read
+        // the same way. Refs are only written on this org's own events.
+        const refRows = await sql<{ ref: string }>`
+          SELECT DISTINCT unnest(ev.entity_refs) AS ref
+          FROM events ev
+          WHERE ev.id = ANY(${pgBigintArray(args.content_ids)}::bigint[])
+            AND ev.organization_id = ${ctx.organizationId}
+            AND ev.entity_refs IS NOT NULL
+        `;
+        for (const row of refRows) {
+          const refType = parseEntityRef(String(row.ref))?.type;
+          if (refType) typeSlugs.add(refType);
+        }
       }
       for (const slug of typeSlugs) {
         const decision = await evaluateEntityMutation({
