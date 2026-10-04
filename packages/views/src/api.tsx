@@ -18,6 +18,36 @@
  *  - `setParams` → `ui/update-model-context` `{ structuredContent: { view,
  *    params } }`; the web host mirrors it into the address bar. Hosts without
  *    that capability keep params local to the frame.
+ *
+ * Read budget: reads run on a user-facing path, when the host is ready and
+ * the query changes or `refetch()` is called.
+ * `query_sql` runs in a read-only, org-scoped transaction with a 5 second
+ * statement timeout and returns at most 500 rows; `useQuery` reports a hit as
+ * `errorCode: "UPSTREAM_TIMEOUT"` or `truncated: true`, so render those
+ * states instead of an empty or partial table. Never aggregate history in a
+ * view: no `GROUP BY`, `DISTINCT ON`, per-row regexp, or leading-wildcard
+ * `LIKE` over `events` (or any other table that grows with history). History
+ * grows; the answer a view shows does not.
+ *
+ * For "latest state" views, compute state at write time. One event-based
+ * pattern is an Automation bound to the entity declaring a keyed event output
+ * (`outputs: { status: { event: "account_status", key: ["account"] } }`), so
+ * each emitted update supersedes the previous event with the same output
+ * identity. The view reads current events with `read_knowledge`
+ * (registry-marked `readOnlyHint`, so the host lets a view call it), which
+ * skips superseded rows:
+ *
+ * ```tsx
+ * const { entity } = useScope();
+ * const status = useQuery<{ content: Array<{ title: string | null;
+ *   metadata: Record<string, unknown> }> }>(
+ *   typeof entity === "number"
+ *     ? tool("read_knowledge", { entity_id: entity,
+ *         semantic_type: "account_status", sort_by: "date", limit: 1 })
+ *     : null
+ * );
+ * const current = status.data?.content[0];
+ * ```
  */
 
 import {
@@ -245,30 +275,54 @@ function parseTextJson(result: ToolResult): unknown {
  * result: `query_sql` answers a rejected statement (unknown table, bad column)
  * with a normal result carrying `error` beside `rows: []`, and `query_sdk`
  * reports a thrown script as `success: false` — both would otherwise render as
- * "no rows".
+ * "no rows". The server's typed code rides along as `errorCode`, and a capped
+ * result (`query_sql`'s `has_more`, `query_sdk`'s `return_truncated`) is
+ * flagged `truncated` instead of passing as the whole answer.
  */
 export function queryResult<T>(
   kind: "sql" | "sdk" | "tool",
   result: ToolResult
-): { data: T | null; error: string | null } {
-  const err = resultError(result);
-  if (err) return { data: null, error: err };
+): Pick<QueryState<T>, "data" | "error" | "errorCode" | "truncated"> {
   // structuredContent when the tool declares an outputSchema (query_sql,
   // query_sdk, every read tool on MCP hosts); otherwise the text body.
   const sc = (result.structuredContent ??
     parseTextJson(result) ??
     {}) as Record<string, unknown>;
   if (kind === "sql" && typeof sc.error === "string" && sc.error)
-    return { data: null, error: sc.error };
+    return {
+      data: null,
+      error: sc.error,
+      errorCode: typeof sc.error_code === "string" ? sc.error_code : null,
+      truncated: false,
+    };
   if (kind === "sdk" && sc.success === false) {
-    const e = sc.error as { message?: unknown } | string | undefined;
+    const e = sc.error as
+      | { message?: unknown; code?: unknown }
+      | string
+      | undefined;
     const message = typeof e === "string" ? e : e?.message;
+    const code = typeof e === "object" ? e?.code : undefined;
     return {
       data: null,
       error:
         typeof message === "string" && message
           ? message
           : "Query script failed",
+      errorCode: typeof code === "string" ? code : null,
+      truncated: false,
+    };
+  }
+  // MCP also marks resolved SQL/SDK failures isError; decode their envelopes
+  // above before falling back to the host's text and thrown-error metadata.
+  const err = resultError(result);
+  if (err) {
+    const e = sc.error as { code?: unknown } | null | undefined;
+    const code = typeof e === "object" ? e?.code : undefined;
+    return {
+      data: null,
+      error: err,
+      errorCode: typeof code === "string" ? code : null,
+      truncated: false,
     };
   }
   // query_sdk → { success, return_value }, query_sql → { rows }, a named
@@ -276,12 +330,24 @@ export function queryResult<T>(
   const data = (
     kind === "sdk" ? sc.return_value : kind === "tool" ? sc : sc.rows
   ) as T;
-  return { data: data ?? null, error: null };
+  const truncated =
+    kind === "sql"
+      ? sc.has_more === true
+      : kind === "sdk" && sc.return_truncated != null;
+  return { data: data ?? null, error: null, errorCode: null, truncated };
 }
 
 export interface QueryState<T> {
   data: T | null;
   error: string | null;
+  /** The server's typed code for a failed read, e.g. `UPSTREAM_TIMEOUT` when
+   *  the statement ran past `query_sql`'s 5 second timeout. Branch on this,
+   *  never on `error` text. Null on success or when the host gave no code. */
+  errorCode: string | null;
+  /** True when the server capped the answer: `query_sql` returns at most 500
+   *  rows (fewer past its response-size ceiling) and `query_sdk` drops an
+   *  oversized return value. `data` is then not the whole result. */
+  truncated: boolean;
   loading: boolean;
   refetch: () => void;
 }
@@ -299,6 +365,8 @@ export function useQuery<T = unknown>(
   const [state, setState] = useState<Omit<QueryState<T>, "refetch">>({
     data: null,
     error: null,
+    errorCode: null,
+    truncated: false,
     loading: query !== null,
   });
   const [tick, setTick] = useState(0);
@@ -342,6 +410,8 @@ export function useQuery<T = unknown>(
         setState({
           data: null,
           error: e instanceof Error ? e.message : String(e),
+          errorCode: null,
+          truncated: false,
           loading: false,
         });
       });

@@ -11,29 +11,31 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { defineView, Provider, tool, useQuery } from "../api.js";
+import { defineView, Provider, sql, tool, useQuery } from "../api.js";
 import { ViewBridge } from "../bridge.js";
 
 interface Seen {
   loading: boolean;
   data: unknown;
   error: unknown;
+  errorCode: string | null;
+  truncated: boolean;
 }
 
 let latest: Seen | null = null;
 let refetchFn: (() => void) | null = null;
 
-function StringProbe({ script }: { script: string }) {
-  const res = useQuery(script);
-  latest = { loading: res.loading, data: res.data, error: res.error };
-  refetchFn = res.refetch;
+function QueryProbe({ query }: { query: Parameters<typeof useQuery>[0] }) {
+  const { refetch, ...state } = useQuery(query);
+  latest = state;
+  refetchFn = refetch;
   return null;
 }
 
 function NamedProbe() {
-  const res = useQuery(tool("some_tool", { a: 1 }));
-  latest = { loading: res.loading, data: res.data, error: res.error };
-  refetchFn = res.refetch;
+  const { refetch, ...state } = useQuery(tool("some_tool", { a: 1 }));
+  latest = state;
+  refetchFn = refetch;
   return null;
 }
 
@@ -105,11 +107,13 @@ afterEach(async () => {
   dom.window.close();
 });
 
-async function ready(): Promise<void> {
+async function ready(
+  query: Parameters<typeof useQuery>[0] = "return 1"
+): Promise<void> {
   await act(async () => {
     root?.render(
       <Provider def={DEF} bridge={bridge ?? undefined}>
-        <StringProbe script="return 1" />
+        <QueryProbe query={query} />
       </Provider>
     );
     await tick();
@@ -202,6 +206,8 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       loading: false,
       data: null,
       error: "SDK_BOOM",
+      errorCode: "INTERNAL",
+      truncated: false,
     });
   });
 
@@ -223,6 +229,8 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       loading: false,
       data: { count: 7 },
       error: null,
+      errorCode: null,
+      truncated: false,
     });
   });
 
@@ -244,6 +252,8 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       loading: false,
       data: null,
       error: "Query script failed",
+      errorCode: null,
+      truncated: false,
     });
   });
 
@@ -272,6 +282,8 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       loading: false,
       data: null,
       error: "TEXT_JSON_BOOM",
+      errorCode: null,
+      truncated: false,
     });
   });
 
@@ -315,6 +327,8 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       loading: false,
       data: { count: 7 },
       error: null,
+      errorCode: null,
+      truncated: false,
     });
   });
 
@@ -332,6 +346,112 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       await tick();
     });
     // Whole-response semantics preserved: body delivered as data, no error.
-    expect(latest).toEqual({ loading: false, data: body, error: null });
+    expect(latest).toEqual({
+      loading: false,
+      data: body,
+      error: null,
+      errorCode: null,
+      truncated: false,
+    });
+  });
+});
+
+describe("useQuery guardrails through the host bridge", () => {
+  test.each([
+    "sql",
+    "sdk",
+  ] as const)("%s preserves guardrails and resets them on recovery or transport failure", async (kind) => {
+    await ready(kind === "sql" ? sql`SELECT 1` : "return 1");
+    expect(latest).toEqual({
+      loading: true,
+      data: null,
+      error: null,
+      errorCode: null,
+      truncated: false,
+    });
+    expect(parent.toolsCalls()[0]?.params).toEqual({
+      name: kind === "sql" ? "query_sql" : "query_sdk",
+      arguments:
+        kind === "sql"
+          ? { sql: "SELECT 1", limit: 500 }
+          : { script: "return 1" },
+    });
+
+    const responses = [
+      {
+        result: {
+          isError: true,
+          structuredContent:
+            kind === "sql"
+              ? { rows: [], error: "slow", error_code: "UPSTREAM_TIMEOUT" }
+              : {
+                  success: false,
+                  error: { message: "slow", code: "UPSTREAM_TIMEOUT" },
+                },
+        },
+        expected: {
+          data: null,
+          error: "slow",
+          errorCode: "UPSTREAM_TIMEOUT",
+          truncated: false,
+        },
+      },
+      {
+        result: {
+          structuredContent:
+            kind === "sql"
+              ? { rows: [{ n: 1 }], has_more: true }
+              : {
+                  success: true,
+                  return_value_preview: "[",
+                  return_truncated: { total_bytes: 900000, kept_bytes: 1 },
+                },
+        },
+        expected: {
+          data: kind === "sql" ? [{ n: 1 }] : null,
+          error: null,
+          errorCode: null,
+          truncated: true,
+        },
+      },
+      {
+        error: { code: -32603, message: "Host unavailable" },
+        expected: {
+          data: null,
+          error: "Host unavailable",
+          errorCode: null,
+          truncated: false,
+        },
+      },
+      {
+        result: {
+          structuredContent:
+            kind === "sql"
+              ? { rows: [{ n: 2 }], has_more: false }
+              : { success: true, return_value: [{ n: 2 }] },
+        },
+        expected: {
+          data: [{ n: 2 }],
+          error: null,
+          errorCode: null,
+          truncated: false,
+        },
+      },
+    ];
+    for (const [index, { expected, ...response }] of responses.entries()) {
+      if (index > 0) {
+        await act(async () => {
+          refetchFn?.();
+          await tick();
+        });
+      }
+      expect(parent.toolsCalls()).toHaveLength(index + 1);
+      const call = parent.toolsCalls()[index] as { id: number };
+      await act(async () => {
+        hostSend({ jsonrpc: "2.0", id: call.id, ...response });
+        await tick();
+      });
+      expect(latest).toEqual({ loading: false, ...expected });
+    }
   });
 });
