@@ -126,7 +126,7 @@ describe('mac computer_use action poll', () => {
         organization_id, run_type, connection_id, connector_key, connector_version,
         connector_artifact_hash, action_key, action_input, approval_status, status, created_at, policy_principal_kind
       ) VALUES (
-        ${orgId}, 'action', ${connRows[0].id}, ${CONNECTOR_KEY}, '0.1.0',
+        ${orgId}, 'action', ${connRows[0].id}, ${CONNECTOR_KEY}, ${String(manifest.version)},
         ${deviceManifestHash(manifest as unknown as DeviceConnectorManifest)},
         ${OPERATION_KEY}, ${sql.json({})}, 'auto', 'pending', current_timestamp, 'user'
       )

@@ -23,7 +23,7 @@ import type { DeviceConnectorSpec } from "@lobu/connector-sdk";
  */
 export const osShellDeviceConnector: DeviceConnectorSpec = {
   key: "os.shell",
-  version: "0.3.0",
+  version: "0.3.1",
   name: "Shell",
   description:
     "Run shell commands on this device through Lobu. Returns structured stdout/stderr/exit_code. Same trust tier as computer use — commands see the device's real filesystem and PATH. On a Mac they run as the signed-in user in that user's environment; on a headless host they run in a minimal environment with no profile and no inherited secrets. Gate with approval.",
