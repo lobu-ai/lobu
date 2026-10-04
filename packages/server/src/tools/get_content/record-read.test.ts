@@ -107,16 +107,8 @@ describe("record read admission", () => {
     expect(readLinks).not.toHaveBeenCalled();
   });
 
-  it("honors relationship direction and type", async () => {
-    readLinks.mockResolvedValue({
-      links: [
-        { relationship_type: "owns", direction: "outgoing", key: "a" },
-        { relationship_type: "owns", direction: "incoming", key: "b" },
-        { relationship_type: "knows", direction: "outgoing", key: "c" },
-      ],
-      failures: [],
-    });
-    const result = await manageEntity(
+  it("passes relationship direction and type to the source read", async () => {
+    await manageEntity(
       {
         action: "list_links",
         record,
@@ -126,6 +118,10 @@ describe("record read admission", () => {
       {} as Env,
       ctx
     );
-    expect(result).toMatchObject({ record_links: [{ key: "a" }] });
+    expect(readLinks).toHaveBeenCalledWith(
+      expect.anything(),
+      record,
+      expect.objectContaining({ relationshipType: "owns", direction: "outgoing" })
+    );
   });
 });

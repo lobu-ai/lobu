@@ -2303,19 +2303,21 @@ async function handleListLinks(
 		const result = await readSourceRecordLinks(
 			authzScopeFromToolContext(ctx),
 			args.record,
-			{ limit: Math.min(Math.max(args.limit ?? 100, 1), 500), signal: ctx.abortSignal },
+			{
+				limit: Math.min(Math.max(args.limit ?? 100, 1), 500),
+				relationshipType: args.relationship_type_slug,
+				direction:
+					args.direction === "outbound"
+						? "outgoing"
+						: args.direction === "inbound"
+							? "incoming"
+							: undefined,
+				signal: ctx.abortSignal,
+			},
 		);
 		return {
 			action: "list_links",
-			record_links: result.links.filter(
-				(link) =>
-					(!args.relationship_type_slug ||
-						link.relationship_type === args.relationship_type_slug) &&
-					(!args.direction ||
-						args.direction === "both" ||
-						link.direction ===
-							(args.direction === "outbound" ? "outgoing" : "incoming")),
-			),
+			record_links: result.links,
 			record_failures: result.failures,
 		};
 	}

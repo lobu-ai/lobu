@@ -238,22 +238,35 @@ export async function readSourceRecordActivity(
     )
   ).flat();
 
+  // A row belongs to the first of its kind's paths that holds this record's
+  // key. An event reachable through two paths is then returned by one stream
+  // only, so it appears once across all pages.
   const keeps = (
     feed: SourceFeed,
     path: string,
     row: Record<string, unknown>
-  ) =>
-    (feed.eventKinds[String(row.origin_type ?? "")]?.attributions ?? []).some(
-      (rule) =>
-        rule.target.entityType === record.type &&
-        matchablePath(rule, feed.matchPaths) === path
+  ) => {
+    const paths = (
+      feed.eventKinds[String(row.origin_type ?? "")]?.attributions ?? []
+    )
+      .map((rule) =>
+        rule.target.entityType === record.type
+          ? matchablePath(rule, feed.matchPaths)
+          : null
+      )
+      .filter((candidate): candidate is string => candidate !== null);
+    if (!paths.includes(path)) return false;
+    const owner = paths.find(
+      (candidate) =>
+        String(getValueAtPath(row, candidate) ?? "").trim() === record.key
     );
+    return (owner ?? path) === path;
+  };
 
   // k-way merge over each stream's rows in source order. It stops once a
   // stream with more pages runs out of read rows: its next row could be
   // newer than anything left in the others.
   const events: Array<Record<string, unknown>> = [];
-  const seen = new Set<string>();
   while (events.length < options.limit) {
     let best: (typeof pages)[number] | null = null;
     let blocked = false;
@@ -280,9 +293,6 @@ export async function readSourceRecordActivity(
     const row = best.page.rows[best.taken];
     best.taken += 1;
     const originId = String(row.origin_id ?? "");
-    const dedupe = `${best.feed.feedId}:${originId}`;
-    if (originId && seen.has(dedupe)) continue;
-    seen.add(dedupe);
     events.push({
       feed_id: best.feed.feedId,
       platform: best.feed.connectorKey,
@@ -328,7 +338,12 @@ export interface SourceRecordLink {
 export async function readSourceRecordLinks(
   scope: AuthzScope,
   record: SourceRecordRef,
-  options: { limit: number; signal?: AbortSignal }
+  options: {
+    limit: number;
+    relationshipType?: string;
+    direction?: "outgoing" | "incoming";
+    signal?: AbortSignal;
+  }
 ) {
   const feeds = await loadSourceFeeds(scope, record.type);
   const reads: Array<{
@@ -347,6 +362,11 @@ export async function readSourceRecordLinks(
           .map((rule) => [rule.name!, rule])
       );
       for (const relationship of spec.relationships ?? []) {
+        if (
+          options.relationshipType &&
+          relationship.type !== options.relationshipType
+        )
+          continue;
         const from = byName.get(relationship.from);
         const to = byName.get(relationship.to);
         if (!from || !to) continue;
@@ -358,7 +378,7 @@ export async function readSourceRecordLinks(
             self.target.entityType === record.type
               ? matchablePath(self, feed.matchPaths)
               : null;
-          if (path)
+          if (path && (!options.direction || options.direction === direction))
             reads.push({
               feed,
               kind,

@@ -225,3 +225,80 @@ it("reports a relationship read that hits its page cap instead of an empty list"
     { feed_id: 1, error: expect.stringMatching(/were not read/) },
   ]);
 });
+
+it("returns an event reachable through two of the record's paths once across pages", async () => {
+  const twoPaths = {
+    ...feed,
+    feed_schema: {
+      matchPaths: ["metadata.account_id", "metadata.parent_id"],
+      eventKinds: {
+        linked: {
+          attributions: [
+            account,
+            {
+              name: "parent",
+              target: {
+                entityType: "account",
+                identities: [{ namespace: "account", eventPath: "metadata.parent_id" }],
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+  feeds = [twoPaths as typeof feed];
+  const both = {
+    origin_id: "both",
+    origin_type: "linked",
+    occurred_at: "2026-01-05T00:00:00Z",
+    metadata: { account_id: "a1", parent_id: "a1" },
+  };
+  readPage.mockImplementation(async (read: { match: { path: string } }) => ({
+    rows: read.match.path === "metadata.parent_id"
+      ? [both, { ...both, origin_id: "parent-only", occurred_at: "2026-01-01T00:00:00Z", metadata: { account_id: "a9", parent_id: "a1" } }]
+      : [both],
+  }));
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 5; page += 1) {
+    const result = await reads.readSourceRecordActivity(scope, record, { limit: 1, cursor });
+    seen.push(...result.events.map((event) => String(event.origin_id)));
+    cursor = result.next_cursor;
+    if (!cursor) break;
+  }
+  expect(seen).toEqual(["both", "parent-only"]);
+});
+
+it("filters relationships by type and direction before the limit", async () => {
+  feeds = [
+    {
+      ...feed,
+      feed_schema: {
+        ...feed.feed_schema,
+        eventKinds: {
+          linked: {
+            attributions: [account, contact],
+            relationships: [
+              { type: "knows", from: "account", to: "contact" },
+              { type: "owns", from: "contact", to: "account" },
+            ],
+          },
+        },
+      },
+    },
+  ];
+  pagedSource({
+    1: [linked("new", "2026-01-09T00:00:00Z", "c-new"), linked("old", "2026-01-01T00:00:00Z", "c-old")],
+  });
+  const owns = await reads.readSourceRecordLinks(scope, record, {
+    limit: 1,
+    relationshipType: "owns",
+  });
+  expect(owns.links.map((link) => [link.relationship_type, link.direction])).toEqual([["owns", "incoming"]]);
+  const outgoing = await reads.readSourceRecordLinks(scope, record, {
+    limit: 5,
+    direction: "outgoing",
+  });
+  expect(new Set(outgoing.links.map((link) => link.relationship_type))).toEqual(new Set(["knows"]));
+});
