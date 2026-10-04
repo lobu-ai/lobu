@@ -515,6 +515,9 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
             ...(entity.backing.connection
               ? { connection: entity.backing.connection }
               : {}),
+            ...(entity.backing.activity
+              ? { activity: { sql: entity.backing.activity.sql } }
+              : {}),
           },
         }
       : {}),
@@ -538,6 +541,14 @@ function mapRelationshipType(rel: RelationshipType): DesiredRelationshipType {
     // metadata is carried for config-API compat (defineRelationshipType
     // consumers may attach it) but is neither diffed nor sent to the server.
     ...(rel.metadata ? { metadata: rel.metadata } : {}),
+    ...(rel.backing
+      ? {
+          backing: {
+            sql: rel.backing.sql,
+            connection: rel.backing.connection,
+          },
+        }
+      : {}),
   };
 }
 

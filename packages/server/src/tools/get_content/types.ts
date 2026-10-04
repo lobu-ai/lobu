@@ -153,6 +153,24 @@ export const GetContentResultSchema = Type.Object({
     )
   ),
   hints: Type.Optional(Type.Array(Type.String())),
+  /**
+   * `entity` (remote record) reads only. Each merged stream's status: `source`
+   * (the type's activity SQL) and `lobu` (events saved with this ref). A failed
+   * stream is reported here, never as an empty success.
+   */
+  streams: Type.Optional(
+    Type.Array(
+      Type.Object({
+        stream: Type.Union([Type.Literal('source'), Type.Literal('lobu')]),
+        ok: Type.Boolean(),
+        error: Type.Optional(Type.String()),
+        error_code: Type.Optional(Type.String()),
+        retryable: Type.Optional(Type.Boolean()),
+      })
+    )
+  ),
+  /** `entity` reads only: opaque cursor for the next page; absent on the last page. */
+  next_cursor: Type.Optional(Type.String()),
 });
 export type GetContentResult = Static<typeof GetContentResultSchema>;
 

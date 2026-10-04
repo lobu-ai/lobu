@@ -875,10 +875,10 @@ async function compileRulesOrThrow(source: string | null): Promise<string | null
 }
 
 const ENTITY_TYPE_COLUMNS =
-  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, backing_source, metrics_config, rules_source, created_by, organization_id, created_at, updated_at';
+  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, backing_source, backing_activity_sql, metrics_config, rules_source, created_by, organization_id, created_at, updated_at';
 
 const ENTITY_TYPE_COLUMNS_WITH_ORG = `et.id, et.slug, et.name, et.description, et.icon, et.color,
-  et.metadata_schema, et.event_kinds, et.backing_sql, et.backing_source, et.metrics_config,
+  et.metadata_schema, et.event_kinds, et.backing_sql, et.backing_source, et.backing_activity_sql, et.metrics_config,
   et.rules_source,
   et.created_by, et.organization_id,
   et.created_at, et.updated_at,
@@ -1070,6 +1070,27 @@ function assertValidBacking(backing: ManageEntitySchemaArgs['backing']): void {
   // slug that resolves to no connection, failing only at read time.
   if (backing && typeof backing.connection === 'string' && backing.connection.trim() === '') {
     throw invalidSchema('backing.connection cannot be empty');
+  }
+  // Activity is read from the same source by exact record key.
+  if (backing?.activity) {
+    if (backing.activity.sql.trim() === '') throw invalidSchema('backing.activity.sql cannot be empty');
+    if (!backing.connection) throw invalidSchema('backing.activity requires backing.connection');
+  }
+}
+
+/**
+ * A backed relationship type reads its edges live from one connection, so it
+ * needs both halves. The entity-type-only `activity` is
+ * refused rather than silently ignored.
+ */
+function assertValidRelationshipBacking(backing: ManageEntitySchemaArgs['backing']): void {
+  if (!backing) return;
+  if (backing.sql.trim() === '') throw invalidSchema('backing.sql cannot be empty');
+  if (!backing.connection || backing.connection.trim() === '') {
+    throw invalidSchema('a relationship type backing requires backing.connection');
+  }
+  if (backing.activity !== undefined) {
+    throw invalidSchema('a relationship type backing takes only sql and connection');
   }
 }
 
@@ -1315,7 +1336,7 @@ async function etHandleCreate(
     INSERT INTO entity_types (
       slug, name, description, icon, color,
       metadata_schema, event_kinds,
-      backing_sql, backing_source, metrics_config,
+      backing_sql, backing_source, backing_activity_sql, metrics_config,
       rules_source, rules_compiled,
       organization_id, created_by,
       created_at, updated_at
@@ -1329,6 +1350,7 @@ async function etHandleCreate(
       ${eventKinds},
       ${args.backing?.sql ?? null},
       ${args.backing?.connection ?? null},
+      ${args.backing?.activity?.sql ?? null},
       ${metricsConfig},
       ${args.rules_source ?? null},
       ${rulesCompiled},
@@ -1486,6 +1508,10 @@ async function etHandleUpdate(
       backing_source = CASE
         WHEN ${hasBacking} THEN ${args.backing?.connection ?? null}::text
         ELSE backing_source
+      END,
+      backing_activity_sql = CASE
+        WHEN ${hasBacking} THEN ${args.backing?.activity?.sql ?? null}::text
+        ELSE backing_activity_sql
       END,
       metrics_config = CASE
         WHEN ${hasMetricsConfig} THEN ${metricsConfigJson}
@@ -1821,6 +1847,7 @@ async function rtHandleList(
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
       rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
+      rt.backing_sql, rt.backing_source,
       rt.status, rt.purpose, rt.created_at, rt.updated_at, rt.deleted_at,
       o.slug AS organization_slug,
       COALESCE(rc.relationship_count, 0) as relationship_count
@@ -1869,6 +1896,7 @@ async function rtHandleGet(
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
       rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
+      rt.backing_sql, rt.backing_source,
       rt.status, rt.purpose, rt.created_at, rt.updated_at, rt.deleted_at,
       o.slug AS organization_slug
     FROM entity_relationship_types rt
@@ -1927,6 +1955,8 @@ async function rtHandleCreate(
     );
   }
 
+  assertValidRelationshipBacking(args.backing);
+
   let inverseTypeId: number | null = null;
   let inverseOwnedByCaller = false;
   if (args.inverse_type_slug) {
@@ -1941,6 +1971,7 @@ async function rtHandleCreate(
     INSERT INTO entity_relationship_types (
       slug, name, description, organization_id, created_by,
       metadata_schema, metadata, is_symmetric, inverse_type_id, status,
+      backing_sql, backing_source,
       created_at, updated_at
     ) VALUES (
       ${args.slug},
@@ -1953,6 +1984,8 @@ async function rtHandleCreate(
       ${args.is_symmetric ?? false},
       ${inverseTypeId},
       ${args.status ?? 'active'},
+      ${args.backing?.sql ?? null},
+      ${args.backing?.connection ?? null},
       current_timestamp,
       current_timestamp
     )
@@ -1988,6 +2021,7 @@ async function rtHandleCreate(
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
       rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
+      rt.backing_sql, rt.backing_source,
       rt.status, rt.purpose, rt.created_at, rt.updated_at
     FROM entity_relationship_types rt
     LEFT JOIN entity_relationship_types inv ON rt.inverse_type_id = inv.id
@@ -2047,6 +2081,23 @@ async function rtHandleUpdate(
     );
   }
 
+  assertValidRelationshipBacking(args.backing);
+  // Backing is set as a unit, like an entity type's: an object backs the type,
+  // null reverts it to stored edges, omitted leaves it unchanged.
+  const hasBacking = args.backing !== undefined;
+  if (args.backing) {
+    const stored = await sql`
+      SELECT 1 FROM entity_relationships
+      WHERE relationship_type_id = ${typeId} AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    if (stored.length > 0) {
+      throw invalidSchema(
+        `Relationship type '${args.slug}' has stored relationships; delete them before backing it with a connection`
+      );
+    }
+  }
+
   let inverseTypeId: number | null | undefined;
   if (args.inverse_type_slug !== undefined) {
     if (args.inverse_type_slug === null || args.inverse_type_slug === '') {
@@ -2075,6 +2126,14 @@ async function rtHandleUpdate(
         ELSE inverse_type_id
       END,
       status = COALESCE(${args.status ?? null}, status),
+      backing_sql = CASE
+        WHEN ${hasBacking} THEN ${args.backing?.sql ?? null}::text
+        ELSE backing_sql
+      END,
+      backing_source = CASE
+        WHEN ${hasBacking} THEN ${args.backing?.connection ?? null}::text
+        ELSE backing_source
+      END,
       updated_at = current_timestamp
     WHERE id = ${typeId}
   `;
@@ -2084,6 +2143,7 @@ async function rtHandleUpdate(
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
       rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
+      rt.backing_sql, rt.backing_source,
       rt.status, rt.purpose, rt.created_at, rt.updated_at
     FROM entity_relationship_types rt
     LEFT JOIN entity_relationship_types inv ON rt.inverse_type_id = inv.id
@@ -2096,6 +2156,7 @@ async function rtHandleUpdate(
     ...(args.metadata_schema !== undefined ? ['metadata_schema'] : []),
     ...(args.inverse_type_slug !== undefined ? ['inverse_type_id'] : []),
     ...(args.status !== undefined ? ['status'] : []),
+    ...(hasBacking ? ['backing'] : []),
   ];
   await insertToolConfigChange(
     ctx,

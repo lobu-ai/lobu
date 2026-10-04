@@ -91,6 +91,8 @@ import {
 	previewMerge,
 } from "../../utils/entity-merge";
 import { ToolUserError } from "../../utils/errors";
+import { resolveRemoteRef } from "../../entities/providers";
+import { remoteLinks } from "../../entities/providers/links";
 import {
 	EntityPolicyDenialError,
 	type EntityWriteDenialDescription,
@@ -2260,6 +2262,50 @@ async function handleListLinks(
 	args: Static<typeof ListLinksAction>,
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
+	const direction = args.direction ?? "both";
+	const limit = Math.min(Math.max(args.limit ?? 100, 1), 500);
+	const offset = Math.max(args.offset ?? 0, 0);
+	if ((args.entity_id === undefined) === (args.entity === undefined)) {
+		throw new ToolUserError(
+			"list_links takes exactly one of entity_id (a stored record) or entity (a '<type>:<key>' ref)",
+			400,
+		);
+	}
+	if (args.entity !== undefined) {
+		// A remote record: its edges are read live from backed relationship
+		// types; nothing is stored, so the stored-edge filters do not apply.
+		if (args.source || args.confidence_min !== undefined || args.include_deleted) {
+			throw new ToolUserError(
+				"source, confidence_min and include_deleted filter stored relationships; they do not apply to entity",
+				400,
+			);
+		}
+		const resolved = await resolveRemoteRef(args.entity, ctx);
+		await assertEntityReadAllowed(args, ctx, resolved.parsed.type);
+		const { edges, streams } = await remoteLinks(
+			resolved,
+			{
+				direction,
+				relationshipTypeSlug: args.relationship_type_slug,
+				limit,
+				offset,
+			},
+			ctx,
+		);
+		return {
+			action: "list_links",
+			relationships: [],
+			counts_by_type: [],
+			metadata: {
+				total: edges.length,
+				limit,
+				offset,
+				has_more: streams.some((s) => s.has_more),
+			},
+			edges,
+			streams,
+		};
+	}
 	const sql = getDb();
 	const typeRows = await sql<{ entity_type: string }>`
 		SELECT et.slug AS entity_type
@@ -2274,10 +2320,7 @@ async function handleListLinks(
 	}
 	await assertEntityReadAllowed(args, ctx, typeRows[0].entity_type);
 
-	const direction = args.direction ?? "both";
 	const includeDeleted = args.include_deleted ?? false;
-	const limit = Math.min(Math.max(args.limit ?? 100, 1), 500);
-	const offset = Math.max(args.offset ?? 0, 0);
 
 	const conditions: string[] = ["r.organization_id = $1"];
 	const params: unknown[] = [ctx.organizationId];

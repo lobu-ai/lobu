@@ -36,6 +36,7 @@ import {
   type AutomationSource,
   type EntityBacking,
   isRecord,
+  type RelationshipBacking,
   type RelationshipRule,
 } from "./shared.js";
 
@@ -96,6 +97,8 @@ export interface DesiredRelationshipType {
   description?: string;
   rules?: RelationshipRule[];
   metadata?: Record<string, unknown>;
+  /** Present only for a connection-backed type; absent ⇒ stored edges. */
+  backing?: RelationshipBacking;
 }
 
 export interface DesiredAutomation {

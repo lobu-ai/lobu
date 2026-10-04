@@ -941,3 +941,97 @@ describe("ApplyClient — deployment baseline read", () => {
     await expect(client.getLatestDeployment()).rejects.toThrow(/boom/);
   });
 });
+
+describe("ApplyClient — remote-native records", () => {
+  function recordingClient(
+    respond: (body: Record<string, unknown>) => unknown = () => ({
+      success: true,
+    })
+  ) {
+    const calls: Array<Record<string, unknown>> = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        calls.push(body);
+        return new Response(JSON.stringify(respond(body)), { status: 200 });
+      }) as typeof fetch
+    );
+    return { client, calls };
+  }
+
+  test("upsertEntityType sends backing.activity and listEntityTypes hoists it", async () => {
+    const { client, calls } = recordingClient((body) =>
+      body.action === "list"
+        ? {
+            entity_types: [
+              {
+                slug: "account",
+                backing_sql: "SELECT 'a' AS slug",
+                backing_source: "warehouse",
+                backing_activity_sql: "SELECT 1 AS key",
+              },
+            ],
+          }
+        : { success: true }
+    );
+    await client.upsertEntityType({
+      slug: "account",
+      backing: {
+        sql: "SELECT 'a' AS slug",
+        connection: "warehouse",
+        activity: { sql: "SELECT 1 AS key" },
+      },
+    });
+    expect(calls[0]?.backing).toEqual({
+      sql: "SELECT 'a' AS slug",
+      connection: "warehouse",
+      activity: { sql: "SELECT 1 AS key" },
+    });
+    const [type] = await client.listEntityTypes();
+    expect(type?.backing).toEqual({
+      sql: "SELECT 'a' AS slug",
+      connection: "warehouse",
+      activity: { sql: "SELECT 1 AS key" },
+    });
+  });
+
+  test("relationship backing is sent, hoisted, and cleared only when it was set", async () => {
+    const { client, calls } = recordingClient((body) =>
+      body.action === "list"
+        ? {
+            relationship_types: [
+              {
+                slug: "has-contact",
+                backing_sql: "SELECT 1 AS from_key, 2 AS to_key",
+                backing_source: "warehouse",
+              },
+              { slug: "stored", backing_sql: null, backing_source: null },
+            ],
+          }
+        : body.action === "list_rules"
+          ? { rules: [] }
+          : { success: true }
+    );
+    const types = await client.listRelationshipTypes();
+    expect(types.map((t) => t.backing)).toEqual([
+      { sql: "SELECT 1 AS from_key, 2 AS to_key", connection: "warehouse" },
+      undefined,
+    ]);
+    await client.upsertRelationshipType({
+      slug: "has-contact",
+      backing: {
+        sql: "SELECT 1 AS from_key, 2 AS to_key",
+        connection: "warehouse",
+      },
+    });
+    await client.upsertRelationshipType({ slug: "has-contact" }, true);
+    await client.upsertRelationshipType({ slug: "stored" });
+    const creates = calls.filter((c) => c.action === "create");
+    expect(creates.map((c) => c.backing)).toEqual([
+      { sql: "SELECT 1 AS from_key, 2 AS to_key", connection: "warehouse" },
+      null,
+      undefined,
+    ]);
+  });
+});

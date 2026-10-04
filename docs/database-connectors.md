@@ -43,6 +43,74 @@ federation and ambient cross-source fan-out are intentionally absent. Agents
 decompose explicitly: search local knowledge, inspect its coverage, then query
 selected sources with `client.feeds.readMany`.
 
+## Remote-native records: activity and relationships
+
+A connection-backed entity type's records live in the source. Remote activity
+and relationship reads store no source rows: Postgres stores their
+configuration plus Lobu-authored events (briefs, notes) that point at a record
+by ref. Each record's activity or relationship read is backing SQL plus an
+exact match on one key column, pushed down through `query_sql({ connection })`.
+
+A record is addressed by the ref `<type>:<key>` (`formatEntityRef` /
+`parseEntityRef` in `@lobu/core/contracts/entity-ref`; the split is on the first
+`:`, so keys may contain `:`). `resolve_path` returns it as `entity.ref` with
+`entity.capabilities: { activity, relationships }`. A ref's type resolves
+against the caller org's own entity types only.
+
+```ts
+const account = defineEntityType({
+  key: "account",
+  backing: {
+    connection: "warehouse",
+    sql: "SELECT account_key AS slug, account_name AS name, plan FROM accounts",
+    // Activity: read with an exact match on `key`, ordered by `sort_key` desc.
+    activity: {
+      sql: `SELECT account_key AS key, touch_id AS origin_id, touched_at AS occurred_at,
+                   subject AS title, to_char(touched_at, 'YYYYMMDDHH24MISSUS') || touch_id AS sort_key,
+                   link AS url, channel AS kind, notes AS summary, owner AS actor
+            FROM touches`,
+    },
+  },
+});
+const contact = defineEntityType({
+  key: "contact",
+  backing: { connection: "warehouse", sql: "SELECT contact_key AS slug, full_name AS name FROM contacts" },
+});
+defineRelationshipType({
+  key: "has_contact",
+  rules: [{ source: account, target: contact }],
+  backing: {
+    connection: "warehouse",
+    sql: "SELECT account_key AS from_key, contact_key AS to_key, role FROM account_contacts",
+  },
+});
+```
+
+- **Activity SQL** must project `key` (the record key), `origin_id`,
+  `occurred_at`, `title` and `sort_key`, a string giving a total order with the
+  newest greatest. Optional: `url`, `kind`, `summary`, `actor`; other columns
+  come back as `metadata`. `read_knowledge({ entity: "account:a-1" })` merges
+  that stream with Lobu events saved with the ref (`save_memory` /
+  `knowledge.save` `entity_refs`, at most 50), newest first. Page with the
+  opaque `next_cursor` passed back as `cursor`; it is bound to its ref.
+  Remote activity accepts `entity`, `cursor` and `limit`; other knowledge
+  filters are rejected. Source offset paging assumes the source remains
+  unchanged between pages.
+  `streams` reports `source` and `lobu` separately, so a failing source is an
+  error next to the Lobu rows, never an empty success.
+- **Backed relationship SQL** must project `from_key` and `to_key`; `from_name`
+  and `to_name` are optional and every other column is an edge attribute.
+  `manage_entity({ action: "list_links", entity: "<type>:<key>" })` reads every
+  backed type whose rules name the record's type: as the rule's source by
+  `from_key`, as its target by `to_key`. Each (type, direction) is paged by
+  `limit`/`offset` and reported in `streams`. Edges are
+  `{ type, from, to, from_name?, to_name?, attributes, source: "remote" }`. A
+  backed relationship type rejects stored edges, and one rule per direction is
+  required.
+- `open_view` takes the record key in `scope.entity` together with `scope.type`.
+- The postgres connector rejects `:name` anywhere in the SQL, including inside
+  string literals, so write time formats without `HH:MM` spelling.
+
 ## Agent-facing live feed reads
 
 Agents can batch live feed reads through `manage_feeds({ action: 'read_feeds' })`

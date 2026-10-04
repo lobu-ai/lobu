@@ -18,6 +18,7 @@ import { requireWorkspaceContext } from "./access-control";
 import { getContent } from "./get_content/handler";
 import type { AccountToolContext, ToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
+import { getRecordProvider, loadOwnEntityType } from "../entities/providers";
 
 const ParamValueSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean()]);
 
@@ -30,7 +31,10 @@ export const OpenViewSchema = Type.Object(
 					Type.String({ minLength: 1, description: "Entity-type slug the view opens for." })
 				),
 				entity: Type.Optional(
-					Type.Integer({ description: "Entity id the view opens for." })
+					Type.Union([Type.Integer(), Type.String({ minLength: 1, maxLength: 1024 })], {
+						description:
+							"Entity id the view opens for, or, for a record of a connection-backed type, its key (with scope.type naming the type).",
+					})
 				),
 				event: Type.Optional(
 					Type.Integer({
@@ -55,7 +59,7 @@ export const OpenViewResultSchema = Type.Object({
 	view: Type.String(),
 	scope: Type.Object({
 		type: Type.Optional(Type.String()),
-		entity: Type.Optional(Type.Integer()),
+		entity: Type.Optional(Type.Union([Type.Integer(), Type.String()])),
 		event: Type.Optional(Type.Integer()),
 	}),
 	params: Type.Record(Type.String(), ParamValueSchema),
@@ -179,12 +183,39 @@ async function resolveEventViewPath(
  */
 async function resolveViewPath(
 	view: StoredView,
-	scope: { type?: string; entity?: number },
+	scope: { type?: string; entity?: number | string },
 	orgSlug: string,
 	organizationId: string
 ): Promise<{ pathname: string; card: boolean }> {
 	const suffix = viewPathSuffix(view.key);
 	const sql = getDb();
+	if (typeof scope.entity === "string") {
+		// A remote record has no stored id: its type plus source key name it.
+		const key = scope.entity;
+		if (scope.type === undefined) {
+			throw new ToolUserError("scope.entity as a record key needs scope.type", 400);
+		}
+		const type = await loadOwnEntityType(organizationId, scope.type, sql);
+		const provider = type ? getRecordProvider(type) : null;
+		if (provider?.kind !== "remote" || !provider.connectionBacked) {
+			throw new ToolUserError(
+				`Entity type '${scope.type}' is not connection-backed; pass its record's entity id`,
+				400
+			);
+		}
+		const record = { type: scope.type, id: 0, slug: key, parentId: null };
+		const recordPath = `/${orgSlug}/${scope.type}/${encodeURIComponent(key)}`;
+		if (view.attach.some((a) => matchesRecord(a, record, "tab"))) {
+			return { pathname: `${recordPath}${suffix}`, card: false };
+		}
+		if (view.attach.some((a) => matchesRecord(a, record, "overview"))) {
+			return { pathname: recordPath, card: true };
+		}
+		throw new ToolUserError(
+			`View '${view.key}' is not attached to ${scope.type} '${key}'`,
+			400
+		);
+	}
 	if (scope.entity !== undefined) {
 		const rows = await sql<{
 			entity_type: string;

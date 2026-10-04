@@ -183,6 +183,28 @@ async function getEntityTypeEventKinds(
   });
 }
 
+/** event_kinds of an org-owned entity type by slug (a remote record's type). */
+async function getEntityTypeSlugEventKinds(
+  orgId: string,
+  typeSlug: string
+): Promise<Record<string, EventKindDefinition> | null> {
+  return eventKindsCache.getOrSet(`${orgId}:type:${typeSlug}`, async () => {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT event_kinds
+      FROM entity_types
+      WHERE organization_id = ${orgId}
+        AND slug = ${typeSlug}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const eventKinds = rows[0]?.event_kinds;
+    return eventKinds && typeof eventKinds === 'object'
+      ? (eventKinds as Record<string, EventKindDefinition>)
+      : null;
+  });
+}
+
 /**
  * Fetch event_kinds from connector_definitions for a specific feed.
  * Returns null if connector or feed not found, or eventKinds not defined.
@@ -301,9 +323,18 @@ export async function validateSaveContentSemanticType(
   semanticType: string,
   metadata: Record<string, unknown> | undefined | null,
   orgId: string,
-  entityIds?: number[]
+  entityIds?: number[],
+  /** Types of the remote records the event points at by ref. */
+  refTypeSlugs?: string[]
 ): Promise<KindValidationResult> {
   const memberKinds = await getMemberEventKinds(orgId);
+
+  for (const typeSlug of refTypeSlugs ?? []) {
+    const typeKinds = await getEntityTypeSlugEventKinds(orgId, typeSlug);
+    if (!typeKinds) continue;
+    const result = validateKindAgainstDefinitions(semanticType, metadata, typeKinds);
+    if (result.valid) return result;
+  }
 
   // An event can be linked to several entity types. Accept a custom kind when
   // any linked type declares it; array order must not change authorability.

@@ -65,6 +65,15 @@ export interface EntityBacking {
    * tables that exist in the bound connection's database.
    */
   connection?: string;
+  /**
+   * A record's live activity (requires `connection`). `sql` runs on the same
+   * connection and is read with an exact match on `key`. It must project `key`
+   * (the record key a row belongs to), `origin_id`, `occurred_at`, `title` and
+   * `sort_key` (a string giving a total order, newest greatest, e.g. ISO time
+   * plus origin_id). Optional: `url`, `kind`, `summary`, `actor`; any other
+   * column is returned as metadata. Nothing is copied into Lobu.
+   */
+  activity?: { sql: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +435,13 @@ export interface RelationshipType {
   /** Allowed source/target entity types (handle or slug). */
   rules?: Array<{ source: EntityType | string; target: EntityType | string }>;
   metadata?: Record<string, unknown>;
+  /**
+   * Read this relationship's edges LIVE from a connection instead of storing
+   * them. `sql` projects `from_key` and `to_key` (record keys of the rule's
+   * source and target types), optionally `from_name`/`to_name`; every other
+   * column is an edge attribute. Use one rule per direction.
+   */
+  backing?: { sql: string; connection: string };
 }
 
 export function defineRelationshipType(

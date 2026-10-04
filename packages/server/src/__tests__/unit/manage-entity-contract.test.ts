@@ -47,9 +47,15 @@ describe("manage_entity union contract", () => {
 		expect(messageOf(() => validate({ action: "create", entity_type: "company" }))).toMatch(
 			/name/,
 		);
-		for (const action of ["update", "get", "delete", "list_links", "unmerge"]) {
+		for (const action of ["update", "get", "delete", "unmerge"]) {
 			expect(messageOf(() => validate({ action }))).toMatch(/entity_id/);
 		}
+		// list_links addresses a stored record by entity_id OR a remote one by
+		// its `entity` ref; the handler requires exactly one of them.
+		expect(validate({ action: "list_links", entity: "account:k-1" })).toEqual({
+			action: "list_links",
+			entity: "account:k-1",
+		});
 		expect(
 			messageOf(() => validate({ action: "link", from_entity_id: 1, to_entity_id: 2 })),
 		).toMatch(/relationship_type_slug/);

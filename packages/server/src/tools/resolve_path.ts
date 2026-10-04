@@ -15,6 +15,8 @@ import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
 import { entityLinkMatchSql } from '../utils/content-search';
 import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
+import { formatEntityRef } from '@lobu/core/contracts/entity-ref';
+import { getRecordProvider, loadOwnEntityType, remoteCapabilities } from '../entities/providers';
 import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import {
   derivedRowName,
@@ -121,6 +123,15 @@ export const ResolvedEntityDetailsSchema = Type.Intersect([
     // row; `measure_columns` are its aggregate columns. Stored entities omit both.
     is_derived: Type.Optional(Type.Boolean()),
     measure_columns: Type.Optional(Type.Array(Type.String())),
+    /**
+     * Connection-backed (remote) records only: the `<type>:<key>` ref that
+     * read_knowledge `entity`, list_links `entity` and save `entity_refs` take,
+     * and which of those reads the type declares.
+     */
+    ref: Type.Optional(Type.String()),
+    capabilities: Type.Optional(
+      Type.Object({ activity: Type.Boolean(), relationships: Type.Boolean() })
+    ),
     /** Tombstoned source rows currently forwarded to this canonical entity. */
     merged_records: Type.Optional(Type.Array(MergedRecordSchema)),
   }),
@@ -890,18 +901,12 @@ async function resolveDerivedLeaf(
   workspace: ResolvedWorkspace,
   segment: { entity_type: string; slug: string }
 ): Promise<ResolvedEntityDetails | null> {
-  const etRows = await sql`
-    SELECT backing_sql, backing_source
-    FROM entity_types
-    WHERE slug = ${segment.entity_type}
-      AND organization_id = ${workspace.id}
-      AND deleted_at IS NULL
-    LIMIT 1
-  `;
-  const backingSql = etRows[0]?.backing_sql as string | null | undefined;
-  if (!backingSql) return null;
+  const type = await loadOwnEntityType(workspace.id, segment.entity_type, sql);
+  const provider = type ? getRecordProvider(type) : null;
+  if (!type || provider?.kind !== 'remote') return null;
+  const backingSql = type.backing_sql as string;
 
-  const backingSource = (etRows[0]?.backing_source as string | null | undefined) ?? undefined;
+  const backingSource = type.backing_source ?? undefined;
   // measure_columns isn't stored — it's inferred from the backing SQL (same as
   // `get_type`), so the detail view can right-align/badge aggregate columns.
   const measures = inferMeasureColumns(backingSql);
@@ -919,7 +924,14 @@ async function resolveDerivedLeaf(
   }
   // Confirm canonical identity even when a connector implements the filter.
   const row = exact.rows.find((r) => derivedRowSlug(r) === segment.slug);
-  return row ? buildDerivedLeaf(row, measures, segment) : null;
+  if (!row) return null;
+  const leaf = buildDerivedLeaf(row, measures, segment);
+  if (!provider.connectionBacked) return leaf;
+  return {
+    ...leaf,
+    ref: formatEntityRef({ type: segment.entity_type, key: segment.slug }),
+    capabilities: await remoteCapabilities(workspace.id, type),
+  };
 }
 
 /** Shape one derived row into the read-only entity both lookup paths return. */

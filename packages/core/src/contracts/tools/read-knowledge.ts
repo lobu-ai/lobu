@@ -26,6 +26,21 @@ export const GetContentSchema = Type.Object({
         "Entity ID to filter by. Required unless automation_id is provided.",
     })
   ),
+  entity: Type.Optional(
+    Type.String({
+      minLength: 3,
+      maxLength: 1024,
+      description:
+        "Record ref `<type>:<key>` of a connection-backed (remote) entity type, as resolve_path returns in `ref`. Reads that record's activity: its source rows merged with Lobu events saved with this ref in `entity_refs`, newest first. Page with `cursor`; `streams` reports each stream's status. Stored records use entity_id.",
+    })
+  ),
+  cursor: Type.Optional(
+    Type.String({
+      maxLength: 4096,
+      description:
+        "[entity] Opaque `next_cursor` from the previous page of the same `entity` read.",
+    })
+  ),
   automation_id: Type.Optional(
     Type.Number({
       description:
