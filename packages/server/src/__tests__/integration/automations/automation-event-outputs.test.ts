@@ -20,6 +20,15 @@ import { computePendingWindow } from '../../../utils/window-utils';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestAgent, createTestEntity, createTestEvent } from '../../setup/test-fixtures';
 import { TestApiClient, TestWorkspace } from '../../setup/test-mcp-client';
+import type { ToolContext } from '../../../tools/registry';
+
+// Only consulted to authorize a row's own `entity_ids`; none of these rows carry any.
+const UNLINKED_ROWS_CTX = {
+  organizationId: 'unused',
+  userId: null,
+  memberRole: null,
+  isAuthenticated: true,
+} as ToolContext;
 
 async function createResultRun(
   sql: DbClient,
@@ -552,6 +561,7 @@ describe('Automation event outputs', () => {
         organizationId: workspace.org.id,
         runId: laterRun.runId,
         boundEntityIds: [parent.id],
+        ctx: UNLINKED_ROWS_CTX,
         validContentIds: new Set([source.id]),
         occurredAt: pending.windowEnd.toISOString(),
         createdBy: ownerUserId,
@@ -575,6 +585,7 @@ describe('Automation event outputs', () => {
           organizationId: workspace.org.id,
           runId: laterRun.runId,
           boundEntityIds: [parent.id],
+          ctx: UNLINKED_ROWS_CTX,
           validContentIds: new Set([source.id]),
           occurredAt: pending.windowEnd.toISOString(),
           createdBy: ownerUserId,
@@ -618,6 +629,7 @@ describe('Automation event outputs', () => {
       automationId,
       organizationId: workspace.org.id,
       boundEntityIds: [parent.id],
+      ctx: UNLINKED_ROWS_CTX,
       validContentIds: new Set<number>(),
       occurredAt: new Date().toISOString(),
       createdBy: ownerUserId,
@@ -826,6 +838,7 @@ describe('Automation event outputs', () => {
           organizationId: workspace.org.id,
           runId,
           boundEntityIds: [parent.id],
+          ctx: UNLINKED_ROWS_CTX,
           validContentIds: new Set(),
           occurredAt: new Date().toISOString(),
           createdBy: ownerUserId,
@@ -894,6 +907,7 @@ describe('Automation event outputs', () => {
           organizationId: workspace.org.id,
           runId,
           boundEntityIds: [parent.id],
+          ctx: UNLINKED_ROWS_CTX,
           validContentIds: new Set<number>(),
           occurredAt: new Date().toISOString(),
           createdBy: ownerUserId,

@@ -106,6 +106,12 @@ export const AutomationEventDraftSchema: Record<string, unknown> = {
     parent_event_id: { type: 'integer', minimum: 1 },
     payload_type: { enum: ['text', 'markdown'] },
     idempotency_key: { type: 'string', minLength: 1, maxLength: 255 },
+    entity_ids: {
+      type: 'array',
+      items: { type: 'integer', minimum: 1 },
+      minItems: 1,
+      uniqueItems: true,
+    },
   },
   required: ['content'],
   additionalProperties: false,

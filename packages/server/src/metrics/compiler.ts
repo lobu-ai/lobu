@@ -98,10 +98,15 @@ export function compileMetricSql(input: CompileMetricInput): string {
   // ── Resolve segments (measure's own + the caller's override) ──────────────
   const segNames = [...(measure.segments ?? []), ...(input.segment ? [input.segment] : [])];
   const segWheres: string[] = [];
+  const entitySegWheres: string[] = [];
   for (const name of segNames) {
     const seg = metrics.segments?.[name];
     if (!seg) throw new MetricCompileError(`segment "${name}" is not declared`);
-    segWheres.push(`(${seg.where})`);
+    if (seg.on === "entity") {
+      entitySegWheres.push(entitySegmentPredicate("ent.id", entityTypeId, seg.where));
+    } else {
+      segWheres.push(`(${seg.where})`);
+    }
   }
 
   // ── Dimensions to group by ────────────────────────────────────────────────
@@ -131,6 +136,7 @@ export function compileMetricSql(input: CompileMetricInput): string {
   //    tuple, including the event-side tenant projection. ───────────────────
   const entWhere = [`ent.entity_type_id = ${Number(entityTypeId)}`, `ent.deleted_at IS NULL`];
   if (input.entityId !== undefined) entWhere.push(`ent.id = ${Number(input.entityId)}`);
+  entWhere.push(...entitySegWheres);
   const identityNamespace = metadataKeyFromAliasField(eventSet.field);
   const identityNamespaceSql = identityNamespace ? sqlString(identityNamespace) : null;
   const flatAliases = `SELECT ent.id AS entity_id, a.alias,
@@ -199,6 +205,22 @@ export function compileMetricSql(input: CompileMetricInput): string {
   return `SELECT ${selectCols}
      FROM (${resolved}) resolved
      GROUP BY ${groupCols.join(", ")}`;
+}
+
+/**
+ * The one lowering of an `on: "entity"` segment: membership of `idColumn` in
+ * the type's entities matching the org-authored predicate. The predicate runs
+ * against a single-table `entities` scope so its unqualified columns
+ * (`metadata`, `name`, …) resolve to the entity row. The caller passes the
+ * whole statement through `validateAndScopeQuery`, which org-scopes the inner
+ * `entities` reference like any other.
+ */
+export function entitySegmentPredicate(
+  idColumn: string,
+  entityTypeId: number,
+  where: string,
+): string {
+  return `${idColumn} IN (SELECT id FROM entities WHERE entity_type_id = ${Number(entityTypeId)} AND (${where}))`;
 }
 
 /**

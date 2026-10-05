@@ -23,6 +23,7 @@ interface StreamOptions {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30000;
+const CONNECTED_FRAME = 'event: connected\ndata: {}\n\n';
 
 export function streamInvalidationEvents(
   c: Context,
@@ -48,10 +49,15 @@ export function streamInvalidationEvents(
   };
 
   const stream = new ReadableStream({
-    start(controller) {
-      // If the client already aborted between handler invocation and stream
-      // start, bail out immediately rather than registering a leaking listener.
-      if (requestSignal?.aborted) {
+    async start(controller) {
+      // Subscribe this replica to peer NOTIFYs before telling the client it is
+      // connected: the client re-reads durable state on `connected`, so any
+      // write after that read must reach this stream.
+      await invalidationEmitter.ensureInvalidationListener();
+
+      // If the client already aborted or cancelled between handler invocation
+      // and here, bail out immediately rather than registering a leaking listener.
+      if (requestSignal?.aborted || cleanedUp) {
         try {
           controller.close();
         } catch {
@@ -60,9 +66,19 @@ export function streamInvalidationEvents(
         return;
       }
 
-      controller.enqueue(encoder.encode('event: connected\ndata: {}\n\n'));
+      controller.enqueue(encoder.encode(CONNECTED_FRAME));
 
       const unsubscribe = invalidationEmitter.subscribe(organizationId, (event) => {
+        if (event.resync) {
+          // This replica's listener reconnected and may have missed
+          // invalidations; `connected` makes the client re-read.
+          try {
+            controller.enqueue(encoder.encode(CONNECTED_FRAME));
+          } catch {
+            // Controller closed — abort/cancel will tear down.
+          }
+          return;
+        }
         const forwarded = options.filter ? options.filter(event) : event;
         if (!forwarded) return;
         try {

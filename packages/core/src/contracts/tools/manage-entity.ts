@@ -210,6 +210,12 @@ export const ListEntitiesAction = Type.Object({
   category: Type.Optional(EntityFields.category),
   main_market: Type.Optional(EntityFields.main_market),
   market: Type.Optional(EntityFields.market),
+  segment: Type.Optional(
+    Type.String({
+      description:
+        "[list] Name of an on:'entity' segment declared on entity_type (metrics_config.segments). Narrows the list to entities matching its predicate. Requires entity_type.",
+    })
+  ),
   ...paginationFields(100),
   sort_by: Type.Optional(
     Type.String({

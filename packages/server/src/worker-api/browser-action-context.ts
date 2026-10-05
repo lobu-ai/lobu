@@ -6,8 +6,13 @@ import type { ToolContext } from '../tools/registry';
 export const BROWSER_GROUP_TITLE_PREFIX = 'Lobu';
 const TITLE_HEAD = `${BROWSER_GROUP_TITLE_PREFIX} · `;
 
+/**
+ * Who is acting in the browser, stamped on every Chrome action. The extension
+ * labels the tabs it opens with `title` (the agent) and `flow_id` (the
+ * session), which navigate's reuse and busy_by read. Identity is flow_id +
+ * kind; the title is display only.
+ */
 export type BrowserActionContext = {
-  id: string;
   title: string;
   flow_id: string;
   kind: 'automation' | 'conversation' | 'mcp' | 'run';
@@ -29,37 +34,7 @@ export function runScopedBrowserActionContext(runIdValue: unknown): BrowserActio
   const runId = positiveRunId(runIdValue);
   if (runId == null) throw new Error('Browser action context requires a positive run id.');
   return {
-    id: `run:${runId}`,
     title: `${TITLE_HEAD}Browser task · ${runId}`,
-    flow_id: String(runId),
-    kind: 'run',
-  };
-}
-
-/**
- * Shared container for standalone Chrome actions that belong to no richer
- * context. Without this, every unparented action fell back to its own run id as
- * the context key, so ten SDK navigates produced ten visible tab groups.
- *
- * The key is derived from server-held provenance (organization + browser
- * connection) — never from caller input, which `trustedChromeActionInput`
- * strips precisely so an agent cannot address another flow's group. Two
- * unrelated actions therefore share the visible GROUP while each tab keeps its
- * own per-run flow lease, so they display together without either being able
- * to close or drive the other's tab.
- */
-export function standaloneBrowserActionContext(
-  organizationId: string | null,
-  connectionId: number | null,
-  runIdValue: unknown
-): BrowserActionContext | null {
-  const runId = positiveRunId(runIdValue);
-  if (runId == null || !organizationId || connectionId == null) return null;
-  const digest = shortDigest([organizationId, String(connectionId)]);
-  return {
-    id: `run:standalone-${digest}`,
-    title: `${TITLE_HEAD}Browser actions`,
-    // The flow stays per-run: shared group, unshared ownership.
     flow_id: String(runId),
     kind: 'run',
   };
@@ -82,8 +57,6 @@ export function browserActionContextFromMetadata(
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   if (
-    typeof record.id !== 'string' ||
-    !record.id ||
     typeof record.title !== 'string' ||
     !record.title ||
     typeof record.flow_id !== 'string' ||
@@ -93,7 +66,6 @@ export function browserActionContextFromMetadata(
     return null;
   }
   return {
-    id: record.id,
     title: record.title,
     flow_id: record.flow_id,
     kind: record.kind as BrowserActionContext['kind'],
@@ -111,7 +83,6 @@ export function deriveSdkBrowserActionContext(ctx: ToolContext): BrowserActionCo
     .update(JSON.stringify([ctx.organizationId, ctx.userId, ctx.sdkBrowserInvocation.nonce]))
     .digest('hex');
   return {
-    id: `run:sdk-${digest}`,
     flow_id: `sdk-${digest}`,
     title: browserTitle(ctx, 'Browser task', digest.slice(0, 12)),
     kind: 'run',
@@ -123,7 +94,6 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
   const actingRunId = positiveRunId(ctx.actingRunId);
   if (automationId != null && actingRunId != null) {
     return {
-      id: `automation:${actingRunId}`,
       title: browserTitle(ctx, `Automation ${automationId}`, `Run ${actingRunId}`),
       flow_id: String(actingRunId),
       kind: 'automation',
@@ -140,11 +110,9 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
       ctx.sourceContext?.channelId,
       sourceConversationId,
     ]);
-    const id = `conversation:${digest}`;
     return {
-      id,
       title: browserTitle(ctx, 'Conversation', digest),
-      flow_id: id,
+      flow_id: `conversation:${digest}`,
       kind: 'conversation',
     };
   }
@@ -157,11 +125,9 @@ export function deriveBrowserActionContext(ctx: ToolContext): BrowserActionConte
       activity.activityKind,
       activity.activityId,
     ]);
-    const id = `mcp:${digest}`;
     return {
-      id,
       title: browserTitle(ctx, 'MCP activity', digest),
-      flow_id: id,
+      flow_id: `mcp:${digest}`,
       kind: 'mcp',
     };
   }
@@ -176,6 +142,8 @@ export function trustedChromeActionInput(
   activationTargetUrls: string[] = []
 ): Record<string, unknown> {
   const trusted = { ...input };
+  // No longer sent, but still stripped: the 0.8 extension keys tab ownership on
+  // it, so a caller-supplied copy would let an agent address another flow's tabs.
   delete trusted.browser_context_id;
   delete trusted.browser_context_title;
   delete trusted.browser_flow_id;
@@ -190,7 +158,6 @@ export function trustedChromeActionInput(
   delete trusted.activation_target_urls;
   return {
     ...trusted,
-    browser_context_id: context.id,
     browser_context_title: context.title,
     browser_flow_id: context.flow_id,
     ...(Number.isInteger(activationTabId) && (activationTabId as number) > 0

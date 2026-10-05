@@ -1169,6 +1169,10 @@ export type ManageEntityData = {
          */
         market?: string;
         /**
+         * [list] Name of an on:'entity' segment declared on entity_type (metrics_config.segments). Narrows the list to entities matching its predicate. Requires entity_type.
+         */
+        segment?: string;
+        /**
          * Page size (default: 100, max: 500)
          */
         limit?: number;
@@ -5090,7 +5094,7 @@ export type ManageAutomationsData = {
       context?: boolean;
     }>;
     /**
-     * [create/create_version] Named durable outputs for window execution. `{ entity, key, name? }` validates and upserts entities; `{ event }` appends standard event drafts. The object key is the top-level extracted_data array name. Event rows require content and may include title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, and idempotency_key. Event triggers on an Automation with outputs must use execution="window". Pass null on create_version to remove all declared outputs.
+     * [create/create_version] Named durable outputs for window execution. `{ entity, key, name? }` validates and upserts entities; `{ event }` appends standard event drafts. The object key is the top-level extracted_data array name. Event rows require content and may include title, metadata, author, source_url, occurred_at, parent_event_id, payload_type, idempotency_key, and entity_ids. entity_ids on a row replace the bound entities of the Automation for that row (omit to keep them); each id must be an entity in the same workspace the run may write, or the completion fails. Event triggers on an Automation with outputs must use execution="window". Pass null on create_version to remove all declared outputs.
      */
     outputs?:
       | string
@@ -5116,7 +5120,7 @@ export type ManageAutomationsData = {
                  */
                 event: string;
                 /**
-                 * One to four metadata fields whose exact values compose each draft's stable identity across Automation runs (e.g. channel + mode for per-channel voice profiles). Every key field must be present in every draft's `metadata` and be a non-blank string, safe integer, or boolean — the type is part of the identity, so 3 and "3" are different keys. Changing the fields, their order, or the semantic type changes identity and starts a new chain. When set, each run supersedes the current event carrying the same key values.
+                 * One to four metadata fields whose exact values compose each draft's stable identity across Automation runs (e.g. channel + mode for per-channel voice profiles). Every key field must be present in every draft's `metadata` and be a non-blank string, safe integer, or boolean — the type is part of the identity, so 3 and "3" are different keys. Changing the fields, their order, or the semantic type changes identity and starts a new chain. When set, each run supersedes the current event carrying the same key values. Row `entity_ids` are not part of the identity: include a record id in the key when each record needs its own current event.
                  */
                 key?: Array<string>;
               };
@@ -5930,7 +5934,7 @@ export type GetAutomationResponses = {
                */
               event: string;
               /**
-               * One to four metadata fields whose exact values compose each draft's stable identity across Automation runs (e.g. channel + mode for per-channel voice profiles). Every key field must be present in every draft's `metadata` and be a non-blank string, safe integer, or boolean — the type is part of the identity, so 3 and "3" are different keys. Changing the fields, their order, or the semantic type changes identity and starts a new chain. When set, each run supersedes the current event carrying the same key values.
+               * One to four metadata fields whose exact values compose each draft's stable identity across Automation runs (e.g. channel + mode for per-channel voice profiles). Every key field must be present in every draft's `metadata` and be a non-blank string, safe integer, or boolean — the type is part of the identity, so 3 and "3" are different keys. Changing the fields, their order, or the semantic type changes identity and starts a new chain. When set, each run supersedes the current event carrying the same key values. Row `entity_ids` are not part of the identity: include a record id in the key when each record needs its own current event.
                */
               key?: Array<string>;
             };

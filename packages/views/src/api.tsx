@@ -149,6 +149,8 @@ interface ViewRuntime {
   params: Params;
   setParams: (patch: Partial<Params>) => void;
   theme: "light" | "dark";
+  /** Bumped when the host reports a workspace data change; reads re-run. */
+  dataVersion: number;
   callTool: (
     name: string,
     args: Record<string, unknown>
@@ -370,6 +372,18 @@ export function useQuery<T = unknown>(
     loading: query !== null,
   });
   const [tick, setTick] = useState(0);
+  // A host data change re-reads the same query in the background: the rows
+  // already on screen stay until the fresh ones land, so a live view never
+  // flashes its loading state on every write.
+  const lastRead = useRef<{ key: string | null; dataVersion: number } | null>(
+    null
+  );
+  // Reads are numbered so a newer read never discards an older one still in
+  // flight for the same key: under a steady stream of writes every re-read
+  // would be superseded before it answered. Only a key change, or a newer
+  // answer already on screen, drops a result.
+  const readSeq = useRef(0);
+  const shownSeq = useRef(0);
   const key =
     query === null
       ? null
@@ -378,17 +392,27 @@ export function useQuery<T = unknown>(
         : query.kind === "tool"
           ? `tool:${query.name}:${JSON.stringify(query.args)}`
           : `sql:${query.text}`;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable and tick is the intentional refetch trigger.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable; tick and rt.dataVersion are the intentional refetch triggers.
   useEffect(() => {
     // A skipped query is idle, even when the previous request is in flight.
     if (key === null) {
+      lastRead.current = null;
       setState((s) => (s.loading ? { ...s, loading: false } : s));
       return;
     }
     // Queries still wait for the host to seed scope and params.
     if (!rt.ready) return;
-    let cancelled = false;
-    setState((s) => ({ ...s, loading: true }));
+    const seq = ++readSeq.current;
+    const show = (next: Omit<QueryState<T>, "refetch">) => {
+      if (lastRead.current?.key !== key || seq < shownSeq.current) return;
+      shownSeq.current = seq;
+      setState(next);
+    };
+    const background =
+      lastRead.current?.key === key &&
+      lastRead.current.dataVersion !== rt.dataVersion;
+    lastRead.current = { key, dataVersion: rt.dataVersion };
+    if (!background) setState((s) => ({ ...s, loading: true }));
     const q = query as SqlQuery | ToolQuery | string;
     const call =
       typeof q === "string"
@@ -398,16 +422,14 @@ export function useQuery<T = unknown>(
           : rt.callTool("query_sql", { sql: q.text, limit: 500 });
     call
       .then((result) => {
-        if (cancelled) return;
         const out = queryResult<T>(
           typeof q === "string" ? "sdk" : q.kind === "tool" ? "tool" : "sql",
           result
         );
-        setState({ ...out, loading: false });
+        show({ ...out, loading: false });
       })
       .catch((e: unknown) => {
-        if (cancelled) return;
-        setState({
+        show({
           data: null,
           error: e instanceof Error ? e.message : String(e),
           errorCode: null,
@@ -415,10 +437,7 @@ export function useQuery<T = unknown>(
           loading: false,
         });
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [key, rt.ready, tick]);
+  }, [key, rt.ready, tick, rt.dataVersion]);
   const refetch = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refetch };
 }
@@ -547,6 +566,7 @@ export function Provider({
   const [scope, setScope] = useState<Scope>({});
   const [params, setParamsState] = useState<Params>(() => defaultsFor(def));
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [dataVersion, setDataVersion] = useState(0);
   const bridgeRef = useRef<ViewBridge | null>(bridge ?? null);
   if (bridge) bridgeRef.current = bridge;
   if (bridgeRef.current === null) bridgeRef.current = new ViewBridge();
@@ -567,6 +587,7 @@ export function Provider({
       setTheme(next);
       applyTheme(next);
     });
+    const offData = b.onDataChanged(() => setDataVersion((v) => v + 1));
     b.connect()
       .then((ctx) => {
         const next = themeFromContext(ctx);
@@ -580,6 +601,7 @@ export function Provider({
     return () => {
       offInput();
       offCtx();
+      offData();
     };
   }, [def]);
 
@@ -620,9 +642,20 @@ export function Provider({
       params,
       setParams,
       theme,
+      dataVersion,
       callTool,
     }),
-    [def, connected, ready, scope, params, setParams, theme, callTool]
+    [
+      def,
+      connected,
+      ready,
+      scope,
+      params,
+      setParams,
+      theme,
+      dataVersion,
+      callTool,
+    ]
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

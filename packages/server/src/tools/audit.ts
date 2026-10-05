@@ -340,6 +340,10 @@ export async function recordToolInvocationAudit(
       },
       createdBy: params.ctx.userId ?? null,
       clientId: params.ctx.clientId ?? null,
+    }, {
+      // Reads are tool calls too; invalidating content for their audit row
+      // would make each client refetch trigger the next one.
+      notifyContentChange: false,
     });
   } catch (auditError) {
     logger.warn(
