@@ -651,8 +651,9 @@ function governingIdentities(identities: ResolvedIdentity[]): ResolvedIdentity[]
  * cross-channel WhatsApp/email matching relies on this).
  *
  * This is the single definition of that rule. It is deliberately shared by both
- * resolution sites: the ordinary lookup AND the orphan-recovery re-resolution
- * after a lost auto-create race. Those two used to carry separate copies and the
+ * resolution sites: the ordinary lookup AND the re-resolution in
+ * `createEntityWithIdentities` after a lost auto-create claim, on both the event
+ * and sender lanes. Those used to carry separate copies and the
  * recovery copy was tier-blind, which mis-resolved whenever a primary's owner
  * was soft-deleted while a live entity held a recycled secondary claim — the
  * link landed on the recycled-claim holder. `member_of` is a read ACL, so that
@@ -808,9 +809,16 @@ async function createEntityWithIdentities(
         identities: persisted,
       });
       const claimedKeys = new Set(claimed.map(identityKey));
-      if (claimed.length === 0 || governingIdentities(params.identities).some(
+      const missing = governingIdentities(params.identities).filter(
         (id) => !id.matchOnly && !claimedKeys.has(identityKey(id))
-      )) throw lostClaim;
+      );
+      if (claimed.length === 0 || missing.some((id) => id.primary)) throw lostClaim;
+      // Equal-weight identities can still belong to a deleted entity. A fresh
+      // claim may establish its replacement, but a live rival must win recovery.
+      if (missing.length > 0 && (await lookupMatches(sp, {
+        orgId: params.orgId,
+        identities: [missing],
+      })).size > 0) throw lostClaim;
       return claimed;
     });
   } catch (error) {
@@ -823,8 +831,8 @@ async function createEntityWithIdentities(
   if (attached.length === 0) {
     // A secondary claim does not make a create successful when a concurrent
     // writer won its primary. Drop this turn's provisional row and its claims,
-    // then apply the ordinary tier rule to the committed owners. Deleted or
-    // ambiguous owners fail closed; a recycled secondary never wins a primary.
+    // then apply the ordinary tier rule to the committed live owners. A missing
+    // or ambiguous winner fails closed; a recycled secondary never wins a primary.
     await hardDeleteEntityRows({ tx: sql, ids: [entityId] });
     let matches = await lookupMatches(sql, {
       orgId: params.orgId,
@@ -1191,9 +1199,10 @@ async function resolveLinksByKind(
 
     for (const { index, item, link } of entries) {
       // Tier semantics are defined once in `resolveIdentityTier` and shared
-      // with the orphan-recovery re-resolution below. A present primary that
-      // matched nothing resolves to null here on purpose: the create path then
-      // mints a new entity keyed on it instead of absorbing a stale
+      // with the lost-claim recovery in `createEntityWithIdentities`. A present
+      // primary that matched nothing resolves to null here on purpose: the
+      // create path then claims it for a new entity (or fails closed when a
+      // deleted entity still holds it) instead of absorbing a stale
       // secondary's owner.
       const tier = resolveIdentityTier(link.identities, matches);
       const ambiguous = tier === 'ambiguous';

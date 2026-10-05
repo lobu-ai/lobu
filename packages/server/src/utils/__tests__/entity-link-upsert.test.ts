@@ -842,6 +842,69 @@ describe('applyEventAttributions', () => {
   });
 
   it.each([
+    { lane: 'event', primary: false },
+    { lane: 'sender', primary: false },
+    { lane: 'event', primary: true },
+    { lane: 'sender', primary: true },
+  ])('handles a deleted identity owner: $lane primary=$primary', async ({ lane, primary }) => {
+    const { org } = await setupOrg('deleted identity owner org');
+    const sql = getTestDb();
+    const rule: TestAttributionRule = {
+      entityType: '$member',
+      autoCreate: true,
+      identities: [
+        { namespace: 'email', eventPath: 'metadata.email', primary },
+        { namespace: 'actor_handle', eventPath: 'metadata.handle' },
+      ],
+    };
+    const resolve = (handle: string) => sql.begin(async (tx) => {
+      if (lane === 'sender') {
+        return resolveSenderIdentity(tx as unknown as DbClient, {
+          connectorKey: 'synthetic-actors',
+          orgId: org.id,
+          mintEntityType: '$member',
+          identities: [
+            { namespace: 'email', identifier: 'person@example.test', primary },
+            { namespace: 'actor_handle', identifier: handle },
+          ],
+        });
+      }
+      const result = await applyEventAttributions({
+        connectorKey: 'synthetic-actors',
+        orgId: org.id,
+        items: [{ origin_type: 'msg', metadata: { email: 'person@example.test', handle } }],
+        rules: { msg: [rule] },
+      }, tx as unknown as DbClient);
+      return result.entityIdsByItem.get(0)?.[0] ?? null;
+    });
+    const original = await resolve('old-handle');
+    expect(original).not.toBeNull();
+    await sql`UPDATE entities SET deleted_at = now() WHERE id = ${original!}`;
+
+    const replacement = await resolve('new-handle');
+    if (primary) {
+      expect(replacement).toBeNull();
+    } else {
+      expect(replacement).not.toBeNull();
+      expect(replacement).not.toBe(original);
+    }
+    expect(await resolve('new-handle')).toBe(replacement);
+    const claims = await sql<{ entity_id: number; identifier: string }[]>`
+      SELECT entity_id, identifier FROM entity_identities
+      WHERE organization_id = ${org.id} AND deleted_at IS NULL ORDER BY identifier
+    `;
+    expect(claims.map((claim) => [Number(claim.entity_id), claim.identifier])).toEqual([
+      ...(!primary ? [[replacement, 'new-handle']] : []),
+      [original, 'old-handle'],
+      [original, 'person@example.test'],
+    ]);
+    const live = await sql<{ id: number }[]>`
+      SELECT id FROM entities WHERE organization_id = ${org.id} AND deleted_at IS NULL
+    `;
+    expect(live.map((row) => Number(row.id))).toEqual(primary ? [] : [replacement]);
+  });
+
+  it.each([
     { lane: 'event', primary: true, tenant: false },
     { lane: 'event', primary: false, tenant: true },
     { lane: 'sender', primary: true, tenant: false },
