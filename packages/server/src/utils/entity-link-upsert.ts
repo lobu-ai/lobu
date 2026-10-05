@@ -637,6 +637,11 @@ async function lookupMatches(
   return out;
 }
 
+function governingIdentities(identities: ResolvedIdentity[]): ResolvedIdentity[] {
+  const primaries = identities.filter((i) => i.primary);
+  return primaries.length > 0 ? primaries : identities;
+}
+
 /**
  * Resolve a link's identities onto at most one entity, honouring identity tiers.
  *
@@ -647,8 +652,9 @@ async function lookupMatches(
  * cross-channel WhatsApp/email matching relies on this).
  *
  * This is the single definition of that rule. It is deliberately shared by both
- * resolution sites: the ordinary lookup AND the orphan-recovery re-resolution
- * after a lost auto-create race. Those two used to carry separate copies and the
+ * resolution sites: the ordinary lookup AND the re-resolution in
+ * `createEntityWithIdentities` after a lost auto-create claim, on both the event
+ * and sender lanes. Those used to carry separate copies and the
  * recovery copy was tier-blind, which mis-resolved whenever a primary's owner
  * was soft-deleted while a live entity held a recycled secondary claim — the
  * link landed on the recycled-claim holder. `member_of` is a read ACL, so that
@@ -663,11 +669,9 @@ function resolveIdentityTier(
   identities: ResolvedIdentity[],
   matches: Map<string, number>
 ): number | null | 'ambiguous' {
-  const primaries = identities.filter((i) => i.primary);
   // A present primary governs alone; otherwise every identity votes equally.
-  const governing = primaries.length > 0 ? primaries : identities;
   const hits = new Set<number>();
-  for (const id of governing) {
+  for (const id of governingIdentities(identities)) {
     const h = matches.get(identityKey(id));
     if (h !== undefined) hits.add(h);
   }
@@ -699,7 +703,11 @@ async function createEntityWithIdentities(
     traits: Map<string, unknown>;
     creatorUserId: string;
   }
-): Promise<{ entityId: number; attached: AttachedIdentity[] } | null> {
+): Promise<{
+  entityId: number;
+  attached: AttachedIdentity[];
+  eventOnlyIdentities: AttachedIdentity[];
+} | null> {
   const persisted = params.identities.filter((i) => !i.matchOnly);
   if (persisted.length === 0) return null;
 
@@ -789,20 +797,88 @@ async function createEntityWithIdentities(
   }
   if (entityId === null) return null;
 
-  const attached = await insertIdentities(sql, {
-    orgId: params.orgId,
-    entityId,
-    connectorKey: params.connectorKey,
-    connectionId: params.connectionId,
-    identities: persisted,
-  });
+  const provisionalId = entityId;
+  let attached: AttachedIdentity[] = [];
+  const lostClaim = new Error('Concurrent identity claim');
+  try {
+    attached = await sql.savepoint(async (sp) => {
+      const claimed = await insertIdentities(sp, {
+        orgId: params.orgId,
+        entityId: provisionalId,
+        connectorKey: params.connectorKey,
+        connectionId: params.connectionId,
+        identities: persisted,
+      });
+      const claimedKeys = new Set(claimed.map(identityKey));
+      const missing = governingIdentities(params.identities).filter(
+        (id) => !id.matchOnly && !claimedKeys.has(identityKey(id))
+      );
+      if (claimed.length === 0 || missing.some((id) => id.primary)) throw lostClaim;
+      // Equal-weight identities can still belong to a deleted entity. A fresh
+      // claim may establish its replacement, but a live rival must win recovery.
+      if (missing.length > 0 && (await lookupMatches(sp, {
+        orgId: params.orgId,
+        identities: [missing],
+      })).size > 0) throw lostClaim;
+      return claimed;
+    });
+  } catch (error) {
+    if (error !== lostClaim) throw error;
+    // Rollback releases BOTH rival identity locks and provisional secondary
+    // claims before recovery locks the winner. Deleting rows alone retains
+    // those locks and can deadlock an ordinary entity-first update.
+  }
+  const eventOnlyIdentities: AttachedIdentity[] = [];
+  if (attached.length === 0) {
+    // A secondary claim does not make a create successful when a concurrent
+    // writer won its primary. Drop this turn's provisional row and its claims,
+    // then apply the ordinary tier rule to the committed live owners. A missing
+    // or ambiguous winner fails closed; a recycled secondary never wins a primary.
+    await hardDeleteEntityRows({ tx: sql, ids: [entityId] });
+    let matches = await lookupMatches(sql, {
+      orgId: params.orgId,
+      identities: [params.identities],
+    });
+    const winner = resolveIdentityTier(params.identities, matches);
+    if (typeof winner !== 'number') return null;
+    entityId = winner;
+    // Match the normal update path's entity-before-identity lock order.
+    const owner = await sql<{ id: number }>`
+      SELECT id FROM entities
+      WHERE id = ${entityId} AND organization_id = ${params.orgId}
+        AND deleted_at IS NULL
+      FOR UPDATE
+    `;
+    if (owner.length === 0) return null;
+    matches = await lookupMatches(sql, {
+      orgId: params.orgId,
+      identities: [params.identities],
+    });
+    if (resolveIdentityTier(params.identities, matches) !== winner) return null;
+    attached = await insertIdentities(sql, {
+      orgId: params.orgId,
+      entityId,
+      connectorKey: params.connectorKey,
+      connectionId: params.connectionId,
+      identities: persisted,
+    });
+    for (const id of params.identities) {
+      if (matches.get(identityKey(id)) === entityId) {
+        appendIdentityIfMissing(id.matchOnly ? eventOnlyIdentities : attached, {
+          namespace: id.namespace,
+          identifier: id.identifier,
+          scopeKey: id.scopeKey ?? null,
+        });
+      }
+    }
+  }
   // Only organization-scoped identities enter the legacy flat alias surface.
   await ensureAliases(sql, {
     orgId: params.orgId,
     entityId,
     identities: attached,
   });
-  return { entityId, attached };
+  return { entityId, attached, eventOnlyIdentities };
 }
 
 /**
@@ -871,7 +947,6 @@ async function applyTraits(
     entityId: number;
     rule: ResolvedEventAttributionRule;
     traits: Map<string, unknown>;
-    isCreate: boolean;
   }
 ): Promise<void> {
   if (!params.rule.traits || params.traits.size === 0) return;
@@ -1138,14 +1213,14 @@ async function resolveLinksByKind(
 
     for (const { index, item, link } of entries) {
       // Tier semantics are defined once in `resolveIdentityTier` and shared
-      // with the orphan-recovery re-resolution below. A present primary that
-      // matched nothing resolves to null here on purpose: the create path then
-      // mints a new entity keyed on it instead of absorbing a stale
+      // with the lost-claim recovery in `createEntityWithIdentities`. A present
+      // primary that matched nothing resolves to null here on purpose: the
+      // create path then claims it for a new entity (or fails closed when a
+      // deleted entity still holds it) instead of absorbing a stale
       // secondary's owner.
       const tier = resolveIdentityTier(link.identities, matches);
       const ambiguous = tier === 'ambiguous';
       let entityId: number | null = ambiguous ? null : tier;
-      let isCreate = false;
 
       if (ambiguous) {
         logger.warn(
@@ -1227,42 +1302,10 @@ async function resolveLinksByKind(
           traits: link.traits,
           creatorUserId,
         });
-        if (created !== null && created.attached.length > 0) {
+        if (created !== null) {
           entityId = created.entityId;
           attached = created.attached;
-          isCreate = true;
-        } else if (created !== null) {
-          // Concurrent auto-create lost the identity race: every identifier went
-          // to the winner via ON CONFLICT, so the row we just inserted is an
-          // identity-less orphan. Hard-delete it (no events reference a row born
-          // this turn) and re-resolve to the winning entity.
-          await hardDeleteEntityRows({ tx: sql, ids: [created.entityId] });
-          const winner = await lookupMatches(sql, {
-            orgId: params.orgId,
-            identities: [link.identities],
-          });
-          // Re-resolve through the SAME tier rule as the ordinary lookup. A
-          // tier-blind union here mis-resolved when the primary's owner was
-          // soft-deleted (so the primary matched nothing) while a live entity
-          // still held a recycled secondary claim: the union saw exactly one
-          // hit and adopted the recycled-claim holder. `member_of` is a read
-          // ACL, so that granted one person another person's channel access.
-          // Unmatched-primary and ambiguous both leave entityId null → skip,
-          // which fails closed (no edge) rather than guessing an owner.
-          const winnerTier = resolveIdentityTier(link.identities, winner);
-          if (typeof winnerTier === 'number') {
-            entityId = winnerTier;
-            for (const id of link.identities) {
-              if (winner.get(identityKey(id)) === entityId) {
-                const matched = {
-                  namespace: id.namespace,
-                  identifier: id.identifier,
-                  scopeKey: id.scopeKey ?? null,
-                };
-                appendIdentityIfMissing(id.matchOnly ? eventOnlyIdentities : attached, matched);
-              }
-            }
-          }
+          eventOnlyIdentities.push(...created.eventOnlyIdentities);
         }
       }
 
@@ -1273,7 +1316,6 @@ async function resolveLinksByKind(
         entityId,
         rule,
         traits: link.traits,
-        isCreate,
       });
 
       recordResolved(index, entityId, rule);
@@ -1441,20 +1483,5 @@ async function resolveSenderIdentityInTransaction(
     traits: new Map(),
     creatorUserId,
   });
-  if (created !== null && created.attached.length > 0) {
-    return created.entityId;
-  }
-  // Lost the identity create-race (a concurrent ingest minted it first): drop
-  // the identity-less orphan and resolve to the winner instead.
-  if (created !== null) {
-    await hardDeleteEntityRows({ tx: sql, ids: [created.entityId] });
-    return firstIdentityHit(
-      params.identities,
-      await lookupMatches(sql, {
-        orgId: params.orgId,
-        identities: [params.identities],
-      })
-    );
-  }
-  return null;
+  return created?.entityId ?? null;
 }

@@ -1,6 +1,7 @@
 import type { EntityIdentitySpec, EntityLinkPredicate, EntityTraitSpec, EventAttributionRule } from '@lobu/connector-sdk';
 import GmailConnector from '@lobu/connectors/google_gmail';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { DbClient } from '../../db/client';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
 import {
   addUserToOrganization,
@@ -838,6 +839,221 @@ describe('applyEventAttributions', () => {
       SELECT metadata FROM entities WHERE id = ${withIdentity[0].id}
     `;
     expect(winner[0].metadata.push_name).toBe('Casey');
+  });
+
+  it.each([
+    { lane: 'event', primary: false },
+    { lane: 'sender', primary: false },
+    { lane: 'event', primary: true },
+    { lane: 'sender', primary: true },
+  ])('handles a deleted identity owner: $lane primary=$primary', async ({ lane, primary }) => {
+    const { org } = await setupOrg('deleted identity owner org');
+    const sql = getTestDb();
+    const rule: TestAttributionRule = {
+      entityType: '$member',
+      autoCreate: true,
+      identities: [
+        { namespace: 'email', eventPath: 'metadata.email', primary },
+        { namespace: 'actor_handle', eventPath: 'metadata.handle' },
+      ],
+    };
+    const resolve = (handle: string) => sql.begin(async (tx) => {
+      if (lane === 'sender') {
+        return resolveSenderIdentity(tx as unknown as DbClient, {
+          connectorKey: 'synthetic-actors',
+          orgId: org.id,
+          mintEntityType: '$member',
+          identities: [
+            { namespace: 'email', identifier: 'person@example.test', primary },
+            { namespace: 'actor_handle', identifier: handle },
+          ],
+        });
+      }
+      const result = await applyEventAttributions({
+        connectorKey: 'synthetic-actors',
+        orgId: org.id,
+        items: [{ origin_type: 'msg', metadata: { email: 'person@example.test', handle } }],
+        rules: { msg: [rule] },
+      }, tx as unknown as DbClient);
+      return result.entityIdsByItem.get(0)?.[0] ?? null;
+    });
+    const original = await resolve('old-handle');
+    expect(original).not.toBeNull();
+    await sql`UPDATE entities SET deleted_at = now() WHERE id = ${original!}`;
+
+    const replacement = await resolve('new-handle');
+    if (primary) {
+      expect(replacement).toBeNull();
+    } else {
+      expect(replacement).not.toBeNull();
+      expect(replacement).not.toBe(original);
+    }
+    expect(await resolve('new-handle')).toBe(replacement);
+    const claims = await sql<{ entity_id: number; identifier: string }[]>`
+      SELECT entity_id, identifier FROM entity_identities
+      WHERE organization_id = ${org.id} AND deleted_at IS NULL ORDER BY identifier
+    `;
+    expect(claims.map((claim) => [Number(claim.entity_id), claim.identifier])).toEqual([
+      ...(!primary ? [[replacement, 'new-handle']] : []),
+      [original, 'old-handle'],
+      [original, 'person@example.test'],
+    ]);
+    const live = await sql<{ id: number }[]>`
+      SELECT id FROM entities WHERE organization_id = ${org.id} AND deleted_at IS NULL
+    `;
+    expect(live.map((row) => Number(row.id))).toEqual(primary ? [] : [replacement]);
+  });
+
+  it.each([
+    { lane: 'event', primary: true, tenant: false },
+    { lane: 'event', primary: false, tenant: true },
+    { lane: 'sender', primary: true, tenant: false },
+    { lane: 'sender', primary: false, tenant: true },
+  ])('re-resolves a partial create race: $lane primary=$primary tenant=$tenant', async ({ lane, primary, tenant }) => {
+    const { org } = await setupOrg('partial primary claim org');
+    const sql = getTestDb();
+    const scope = tenant ? { scope: 'tenant' as const, scopeKeyPath: 'metadata.tenant' } : {};
+    const rule: TestAttributionRule = {
+      entityType: '$member',
+      autoCreate: true,
+      identities: [
+        { namespace: 'stable_actor_id', eventPath: 'metadata.actor_id', primary, ...scope },
+        { namespace: 'actor_handle', eventPath: 'metadata.handle', ...scope },
+      ],
+    };
+    const resolve = async (tx: DbClient, handle: string) => {
+      if (lane === 'sender') {
+        return resolveSenderIdentity(tx, {
+          connectorKey: 'synthetic-actors',
+          orgId: org.id,
+          mintEntityType: '$member',
+          identities: [
+            { namespace: 'stable_actor_id', identifier: 'actor-1', primary, scopeKey: tenant ? 'tenant-a' : null },
+            { namespace: 'actor_handle', identifier: handle, scopeKey: tenant ? 'tenant-a' : null },
+          ],
+        });
+      }
+      const item = {
+        origin_type: 'msg',
+        metadata: { actor_id: 'actor-1', handle, tenant: 'tenant-a' } as Record<string, unknown>,
+      };
+      const result = await applyEventAttributions({
+        connectorKey: 'synthetic-actors',
+        orgId: org.id,
+        items: [item],
+        rules: { msg: [rule] },
+      }, tx);
+      expect(item.metadata.actor_handle).toBe(handle);
+      return result.entityIdsByItem.get(0)?.[0] ?? null;
+    };
+
+    let signalInserted!: () => void;
+    const inserted = new Promise<void>((resolve) => { signalInserted = resolve; });
+    let releaseFirst!: () => void;
+    const mayCommit = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const first = sql.begin(async (tx) => {
+      const result = await resolve(tx as unknown as DbClient, 'first-handle');
+      signalInserted();
+      await mayCommit;
+      return result;
+    });
+    await Promise.race([inserted, first]);
+    let signalSecondInserted!: () => void;
+    let secondInsertObserved = false;
+    const secondInserted = new Promise<void>((resolve) => { signalSecondInserted = resolve; });
+    let releaseSecond!: () => void;
+    const mayRecover = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const second = sql.begin((tx) => {
+      let firstInsert = true;
+      const observe = (client: DbClient): DbClient => new Proxy(client, {
+        apply(target, receiver, args) {
+          const query = Reflect.apply(target, receiver, args);
+          if (firstInsert && Array.isArray(args[0]) && args[0].join('').includes('INSERT INTO entity_identities')) {
+            firstInsert = false;
+            return Promise.resolve(query).then(async (rows) => {
+              secondInsertObserved = true;
+              signalSecondInserted();
+              await mayRecover;
+              return rows;
+            });
+          }
+          return query;
+        },
+        get(target, property, receiver) {
+          if (property === 'savepoint') {
+            return (fn: (sp: DbClient) => Promise<unknown>) => target.savepoint((sp) => fn(observe(sp)));
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      return resolve(observe(tx as unknown as DbClient), 'second-handle');
+    });
+    // Observe B waiting on A's uncommitted identity. This proves B's lookup
+    // missed the primary, rather than hoping Promise.all happens to race.
+    const settled = Promise.all([first, second]);
+    settled.catch(() => {});
+    let third: Promise<unknown> | undefined;
+    try {
+      let blocked = false;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const [activity] = await sql<{ blocked: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock'
+              AND query ILIKE '%INSERT INTO entity_identities%'
+          ) AS blocked
+        `;
+        if (activity.blocked) { blocked = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(blocked, 'second transaction must reach the conflicting identity insert').toBe(true);
+      releaseFirst();
+      const owner = await first;
+      await Promise.race([secondInserted, second]);
+      expect(secondInsertObserved).toBe(true);
+      // C is an ordinary existing-owner update: it locks the entity before
+      // identities. B's recovery must use that order too, without retaining a
+      // lock on A's identity from its failed claim attempt.
+      let signalThirdLocked!: () => void;
+      const thirdLocked = new Promise<void>((resolve) => { signalThirdLocked = resolve; });
+      third = sql.begin(async (tx) => {
+        await tx`SELECT id FROM entities WHERE id = ${owner!} FOR UPDATE`;
+        signalThirdLocked();
+        return applyEventAttributions({
+          connectorKey: 'synthetic-actors', orgId: org.id,
+          items: [{ origin_type: 'msg', metadata: { actor_id: 'actor-1', handle: 'second-handle', tenant: 'tenant-a' } }],
+          rules: { msg: [rule] },
+        }, tx as unknown as DbClient);
+      });
+      third.catch(() => {});
+      await Promise.race([thirdLocked, third]);
+    } finally {
+      releaseFirst();
+      releaseSecond();
+      await Promise.allSettled([first, second, third]);
+    }
+    const [owner, recovered] = await settled;
+    await third;
+    expect(owner).not.toBeNull();
+    expect(recovered).toBe(owner);
+
+    const claims = await sql<{ entity_id: number; identifier: string; scope_key: string | null }[]>`
+      SELECT entity_id, identifier, scope_key FROM entity_identities
+      WHERE organization_id = ${org.id} AND deleted_at IS NULL
+        AND namespace IN ('stable_actor_id', 'actor_handle')
+      ORDER BY identifier
+    `;
+    expect(claims.map((claim) => claim.identifier)).toEqual(['actor-1', 'first-handle', 'second-handle']);
+    expect(claims.every((claim) => Number(claim.entity_id) === owner)).toBe(true);
+    expect(claims.every((claim) => claim.scope_key === (tenant ? 'tenant-a' : null))).toBe(true);
+    const [entities] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM entities
+      WHERE organization_id = ${org.id} AND deleted_at IS NULL
+        AND name = 'actor-1'
+    `;
+    expect(entities.count).toBe(1);
   });
 
   it('locks existing entities in one order across reversed concurrent batches', async () => {

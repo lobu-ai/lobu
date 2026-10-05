@@ -6,8 +6,8 @@
  *
  *   1. A soft-DELETED entity still owns its identity rows (an ordinary delete
  *      does not tombstone them the way a merge repoints them). Resolving onto it
- *      writes edges to a dead entity and never mints a replacement, so the member
- *      silently drops out of the audience.
+ *      writes edges to a dead entity. A replacement holding only a secondary
+ *      would split the account, so an occupied primary must fail closed.
  *   2. A member whose identities match DIFFERENT entities is ambiguous. Picking
  *      by identity-array order is undefined semantics on an access-control path:
  *      a stale or shared secondary claim (an old email, a recycled login) would
@@ -166,10 +166,10 @@ describe('access graph member resolution', () => {
     // edge to it silently removes the member from the audience.
     expect(edgeFroms).not.toContain(dead.id);
 
-    // A live replacement person must exist and own the edge instead.
-    const persons = await livePersons(org.id);
-    expect(persons).toHaveLength(1);
-    expect(edgeFroms).toEqual([persons[0].id]);
+    // The deleted owner still holds the primary claim. A fresh secondary
+    // cannot justify a replacement person or an ACL edge without that primary.
+    expect(await livePersons(org.id)).toHaveLength(0);
+    expect(edgeFroms).toEqual([]);
   });
 
   it('does not construct ACL edges from a tenant-scoped lookalike claim', async () => {
