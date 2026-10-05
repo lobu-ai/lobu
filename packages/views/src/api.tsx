@@ -378,6 +378,12 @@ export function useQuery<T = unknown>(
   const lastRead = useRef<{ key: string | null; dataVersion: number } | null>(
     null
   );
+  // Reads are numbered so a newer read never discards an older one still in
+  // flight for the same key: under a steady stream of writes every re-read
+  // would be superseded before it answered. Only a key change, or a newer
+  // answer already on screen, drops a result.
+  const readSeq = useRef(0);
+  const shownSeq = useRef(0);
   const key =
     query === null
       ? null
@@ -390,12 +396,18 @@ export function useQuery<T = unknown>(
   useEffect(() => {
     // A skipped query is idle, even when the previous request is in flight.
     if (key === null) {
+      lastRead.current = null;
       setState((s) => (s.loading ? { ...s, loading: false } : s));
       return;
     }
     // Queries still wait for the host to seed scope and params.
     if (!rt.ready) return;
-    let cancelled = false;
+    const seq = ++readSeq.current;
+    const show = (next: Omit<QueryState<T>, "refetch">) => {
+      if (lastRead.current?.key !== key || seq < shownSeq.current) return;
+      shownSeq.current = seq;
+      setState(next);
+    };
     const background =
       lastRead.current?.key === key &&
       lastRead.current.dataVersion !== rt.dataVersion;
@@ -410,16 +422,14 @@ export function useQuery<T = unknown>(
           : rt.callTool("query_sql", { sql: q.text, limit: 500 });
     call
       .then((result) => {
-        if (cancelled) return;
         const out = queryResult<T>(
           typeof q === "string" ? "sdk" : q.kind === "tool" ? "tool" : "sql",
           result
         );
-        setState({ ...out, loading: false });
+        show({ ...out, loading: false });
       })
       .catch((e: unknown) => {
-        if (cancelled) return;
-        setState({
+        show({
           data: null,
           error: e instanceof Error ? e.message : String(e),
           errorCode: null,
@@ -427,9 +437,6 @@ export function useQuery<T = unknown>(
           loading: false,
         });
       });
-    return () => {
-      cancelled = true;
-    };
   }, [key, rt.ready, tick, rt.dataVersion]);
   const refetch = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refetch };

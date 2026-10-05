@@ -14,9 +14,11 @@ import { executeTool, type AuthContext } from "../../../tools/execute";
 import { insertEvent } from "../../../utils/insert-event";
 import { initWorkspaceProvider } from "../../../workspace";
 import { streamInvalidationEvents } from "../../../events/sse";
+import { handleWebhookIngest } from "../../../gateway/connections/webhook-ingest";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
+	createTestEntity,
 	createTestOrganization,
 	createTestUser,
 } from "../../setup/test-fixtures";
@@ -137,6 +139,51 @@ describe("cross-replica content invalidation", () => {
 			otherStream.close();
 		}
 	}, 60_000);
+
+	it("notifies a workspace newly linked by webhook actor attribution", async () => {
+		const owner = await createTestOrganization({ name: "Webhook owner" });
+		const linked = await createTestOrganization({ name: "Webhook linked" });
+		const unrelated = await createTestOrganization({ name: "Webhook unrelated" });
+		const actor = await createTestEntity({
+			name: "Synthetic webhook actor",
+			entity_type: "synthetic-actor",
+			organization_id: linked.id,
+		});
+		const stream = await openStream(linked.id);
+		const otherStream = await openStream(unrelated.id);
+		try {
+			const token = "synthetic-webhook-token";
+			const stored = {
+				id: "synthetic-invalidation-webhook",
+				platform: "webhook",
+				agentId: "synthetic-agent",
+				organizationId: owner.id,
+				config: { platform: "webhook", token },
+				settings: { allowGroups: true },
+				metadata: {},
+				status: "active",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+			} as Parameters<typeof handleWebhookIngest>[0];
+			const response = await handleWebhookIngest(
+				stored,
+				new Request("http://gateway.test/webhook", {
+					method: "POST",
+					headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+					body: JSON.stringify({ text: "Synthetic activity" }),
+				}),
+				{ get: async () => null } as Parameters<typeof handleWebhookIngest>[2],
+				null,
+				{ resolveActor: async () => ({ entityIds: [actor.id] }) },
+			);
+			expect(response.status).toBe(202);
+			expect(await stream.waitFor(isContentInvalidation)).not.toBeNull();
+			expect(await otherStream.waitFor(isContentInvalidation, 500)).toBeNull();
+		} finally {
+			stream.close();
+			otherStream.close();
+		}
+	}, 30_000);
 
 	it("publishes on commit and drops the notification when the write rolls back", async () => {
 		const org = await createTestOrganization({ name: "Invalidation Tx Org" });

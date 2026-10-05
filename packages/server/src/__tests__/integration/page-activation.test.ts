@@ -139,6 +139,7 @@ describe("page-activated operation runs", () => {
 		});
 		const chrome = {
 			storage: { local: area(local), session: area({}) },
+			debugger: { getTargets: async () => [{ type: "page", tabId: 17, id: "synthetic-target" }] },
 			action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {}, setTitle: async () => {} },
 			tabs: { query: async () => [], get: async (id: number) => ({ id, groupId: -1, windowId: 1 }) },
 			tabGroups: { query: async () => [] },

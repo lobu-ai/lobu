@@ -41,6 +41,7 @@ import {
 	dispatchAutomationRunsBestEffort,
 } from "../../automations/activation.js";
 import { type DbClient, getDb } from "../../db/client.js";
+import { notifyEventContentChanged } from "../../events/emitter.js";
 import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection.js";
 import { constantTimeEqual } from "../../utils/constant-time-equal.js";
 import { insertEvent } from "../../utils/insert-event.js";
@@ -797,6 +798,9 @@ export async function handleWebhookIngest(
 					    )
 					WHERE id = ${inserted.id}
 				`;
+				// insertEvent notified the orgs linked at insert time; attribution
+				// can link more. Same tx, so the owner's repeat payload collapses.
+				await notifyEventContentChanged(tx as unknown as DbClient, inserted.id);
 			}
 
 			// Persisted event + matching Automation runs commit together. Connector

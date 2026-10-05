@@ -1025,9 +1025,10 @@ export async function insertEvent(
     }
 
     await upsertEmbedding(inserted.id, params.embedding, params.embeddingModel, sql);
-    // Every event write funnels through here, so this is the one place that
-    // tells browsers on any replica to refetch content. Same handle as the
+    // Tell browsers on every replica to refetch content. Same handle as the
     // INSERT: inside a transaction it is delivered on commit, never on rollback.
+    // Writers outside this funnel (the feedback INSERT, webhook attribution's
+    // re-link) call notifyEventContentChanged themselves.
     if (notifyContentChange) await notifyEventContentChanged(sql, inserted.id);
     const persisted: InsertedEvent = {
       ...inserted,
