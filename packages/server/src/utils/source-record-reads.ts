@@ -352,6 +352,14 @@ export async function readSourceRecordActivity(
   }
 
   for (const { stream, position, page, taken } of pages) {
+    const anchor = position.a;
+    const pastAnchor =
+      !anchor ||
+      page.rows.some(
+        (row) =>
+          String(row.origin_id ?? "") === anchor.id ||
+          occurredAt(row) <= anchor.t
+      );
     if (taken < page.rows.length) {
       const last = taken > 0 ? page.rows[taken - 1] : undefined;
       next[stream] = {
@@ -362,7 +370,15 @@ export async function readSourceRecordActivity(
           : {}),
       };
     }
-    else if (page.next_cursor) next[stream] = { c: page.next_cursor, s: 0 };
+    else if (page.next_cursor) {
+      // A page holding only rows newer than the anchor did not reach it yet;
+      // the next page keeps skipping until it does.
+      next[stream] = {
+        c: page.next_cursor,
+        s: 0,
+        ...(pastAnchor ? {} : { a: anchor }),
+      };
+    }
   }
   return {
     events,

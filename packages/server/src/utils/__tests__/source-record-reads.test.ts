@@ -328,3 +328,29 @@ it("neither repeats nor skips a row when the source changes between pages", asyn
   });
   expect(deleted.events.map((event) => event.origin_id)).toEqual(["a8", "b7"]);
 });
+
+it("keeps its place when new rows push the last returned row past the re-read page", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  const rows: Record<number, Array<Record<string, unknown>>> = {
+    1: [linked("a10", "2026-01-10T00:00:00Z"), linked("a8", "2026-01-08T00:00:00Z"), linked("a6", "2026-01-06T00:00:00Z")],
+    2: [linked("b9", "2026-01-09T00:00:00Z"), linked("b7", "2026-01-07T00:00:00Z")],
+  };
+  // Offset pages over the source's current rows, re-read from the top.
+  pagedSource(rows);
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
+  expect(first.events.map((event) => event.origin_id)).toEqual(["a10", "b9"]);
+  rows[1].unshift(
+    linked("a13", "2026-01-13T00:00:00Z"),
+    linked("a12", "2026-01-12T00:00:00Z"),
+    linked("a11", "2026-01-11T00:00:00Z")
+  );
+  const seen = first.events.map((event) => String(event.origin_id));
+  let cursor = first.next_cursor;
+  for (let page = 0; cursor && page < 20; page += 1) {
+    const result = await reads.readSourceRecordActivity(scope, record, { limit: 2, cursor });
+    seen.push(...result.events.map((event) => String(event.origin_id)));
+    cursor = result.next_cursor;
+  }
+  expect(cursor).toBeUndefined();
+  expect(seen).toEqual(["a10", "b9", "a8", "b7", "a6"]);
+});
