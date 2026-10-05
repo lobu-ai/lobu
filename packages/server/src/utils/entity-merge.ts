@@ -38,6 +38,7 @@ import {
 import { assertResolutionFingerprintCurrent } from "../entity-resolution/staleness";
 import {
 	EntityRowValidationError,
+	type EntityRowValidationVerdict,
 	validateEntityRowMergeGrantingApprovedFields,
 } from "../authz/entity-row-validation";
 import { transitionEntityMergeRows } from "./entity-management";
@@ -107,16 +108,16 @@ export interface ApplyMergeGroupParams {
  * construction, and `applyMergeInTransaction` re-asks it under lock. This is
  * the same exemption `deleteEntity`'s dry run takes.
  *
- * Waives nothing: `approvedFields` is empty, so an escalate reports as
- * "approval required" exactly as it would refuse a real merge with no card
- * behind it.
+ * Waives nothing: `approvedFields` is empty. Returns the typed verdict (null
+ * when the rules allow the merge) so callers can tell a refusal from a
+ * reviewable escalation exactly as execution does.
  */
 export async function previewMerge(
 	params: { loserIds: number[]; winnerId: number },
 	db: DbClient = getDb(),
-): Promise<{ refused: boolean; reason: string | null }> {
+): Promise<EntityRowValidationVerdict | null> {
 	const loserIds = [...new Set(params.loserIds)].sort((a, b) => a - b);
-	if (loserIds.length === 0) return { refused: false, reason: null };
+	if (loserIds.length === 0) return null;
 	try {
 		await validateEntityRowMergeGrantingApprovedFields({
 			tx: db,
@@ -126,9 +127,9 @@ export async function previewMerge(
 		});
 	} catch (err) {
 		if (!(err instanceof EntityRowValidationError)) throw err;
-		return { refused: true, reason: err.verdict.reason };
+		return err.verdict;
 	}
-	return { refused: false, reason: null };
+	return null;
 }
 
 /**
