@@ -192,6 +192,8 @@ function bridgeJob(job: PollResponse): Record<string, unknown> {
     connector_key: job.connector_key,
     connector_version: job.connector_version,
     connector_manifest_hash: job.connector_manifest_hash,
+    source_attribution: job.source_attribution,
+    source_url: job.source_url,
     feed_key: job.feed_key,
     feed_id: job.feed_id,
     config: job.config ?? {},

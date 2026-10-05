@@ -804,6 +804,7 @@ export async function dispatchChromeActionToExtension(params: {
         parentRunId,
         runMetadata: {
           browser_context: browserContext,
+          source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
         },
         db: tx,

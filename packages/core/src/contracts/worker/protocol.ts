@@ -30,6 +30,29 @@ import { type Static, Type } from "@sinclair/typebox";
 export const CONNECTOR_HTTP_AUTH_CAPABILITY = "http_auth";
 export const CONNECTOR_HTTP_MAX_BYTES = 4 * 1024 * 1024;
 
+/** Source identity for device controls, named like the operations activity feed fields. */
+export const SourceAttributionSchema = Type.Object(
+  {
+    platform: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    connection_id: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
+    connection_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    feed_id: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
+    feed_key: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    feed_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    automation_id: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
+    automation_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    agent_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    agent_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    client_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    client_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    device_worker_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    device_label: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    device_platform: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  },
+  { additionalProperties: false }
+);
+export type SourceAttribution = Static<typeof SourceAttributionSchema>;
+
 export const ConnectorHttpRequestSchema = Type.Object(
   {
     url: Type.String({ maxLength: 16_384 }),
@@ -707,6 +730,10 @@ export type FeedSourceAck = Static<typeof FeedSourceAckSchema>;
 
 /** `POST /api/workers/poll` response body (a claimed run, or a poll-again). */
 export const PollResponseSchema = Type.Object({
+  /** Server-owned display identity. Never sourced from action_input. */
+  source_attribution: Type.Optional(SourceAttributionSchema),
+  /** Existing run permalink, built by the server for this admitted operation. */
+  source_url: Type.Optional(Type.String()),
   next_poll_seconds: Type.Optional(Type.Number()),
   feed_notification_receipts: Type.Optional(
     Type.Array(
