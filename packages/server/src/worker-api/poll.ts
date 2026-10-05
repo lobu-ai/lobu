@@ -39,6 +39,7 @@ import {
   transcriptText,
 } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
+import { buildResourcePermalink } from '../utils/url-builder';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
 import {
   announceFeedAutoPause,
@@ -64,6 +65,7 @@ import {
   materializeDueFeeds,
 } from '../scheduled/check-due-feeds';
 import { reconcileDeviceCapabilities } from './device-reconcile';
+import { deviceSourceAttributionForRun } from './device-source-attribution';
 import { sourceFeedContextForRun, receiveFeedNotifications } from '../runs/feed-notifications';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCode } from '../utils/ensure-connector-installed';
@@ -2123,6 +2125,14 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     ? await sourceFeedContextForRun(sql, row.parent_run_id, deviceWorkerId, row.organization_id)
     : undefined;
 
+  const sourceAttribution = deviceWorkerId
+    ? await deviceSourceAttributionForRun(sql, row.run_id, row.organization_id, deviceWorkerId).catch((err) => {
+        // Display-only provenance must not strand an already claimed run.
+        logger.warn({ runId: row.run_id, err: errorMessage(err) }, 'Device source attribution unavailable');
+        return undefined;
+      })
+    : undefined;
+
   return c.json({
     ...pollMetadata,
     run_id: row.run_id,
@@ -2165,6 +2175,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     operation_key: row.action_key ?? undefined,
     action_input: actionInput,
     feed_context: sourceFeedContext,
+    source_attribution: sourceAttribution,
+    source_url: sourceAttribution
+      ? buildResourcePermalink(row.organization_slug, { kind: 'run', runId: row.run_id }, resolvePublicOrigin(c.req.url))
+      : undefined,
     auth_profile_id: deliverConnectionAuth ? (row.run_auth_profile_id ?? undefined) : undefined,
     previous_credentials: previousCredentials,
   });

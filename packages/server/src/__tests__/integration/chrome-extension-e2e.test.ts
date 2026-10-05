@@ -8,6 +8,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { generateSecureToken, hashToken } from "../../auth/oauth/utils";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { createConnectorOperationRun } from "../../runs/queue-service";
+import { requestSourceAttribution } from "../../worker-api/device-source-attribution";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import { createTestConnection, seedOwnerContext } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
@@ -139,13 +140,29 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 			const device = await until(async () => {
 				const [row] = await sql<
 					{ id: string }[]
-				>`SELECT id FROM device_workers WHERE worker_id = ${workerId} AND connector_manifests ? 'chrome'`;
+				>`SELECT d.id FROM device_workers d
+          WHERE d.worker_id = ${workerId} AND d.connector_manifests ? 'chrome'
+            AND EXISTS (
+              SELECT 1 FROM connector_definitions cd
+              WHERE cd.organization_id = ${org.id} AND cd.key = 'chrome' AND cd.status = 'active'
+                AND cd.version = d.connector_manifests->'chrome'->'manifest'->>'version'
+            )`;
 				return row;
 			}, `${suffix} authenticated registration and manifest ingestion`);
 			return { browser, control, workerId, deviceId: device.id };
 		}
 		const selected = await pair("selected");
 		const other = await pair("other");
+		await sql`INSERT INTO agents (id, organization_id, name) VALUES ('synthetic-controller', ${org.id}, 'Research agent')`;
+		await sql`INSERT INTO oauth_clients (id, client_name, redirect_uris)
+      VALUES ('synthetic-mcp-client', 'Registered MCP client', ARRAY['https://client.example/callback'])`;
+		await sql`UPDATE device_workers SET label = 'Selected browser' WHERE id = ${selected.deviceId}::uuid`;
+		let sourceAttribution = requestSourceAttribution({
+			isAuthenticated: true,
+			tokenType: "oauth",
+			agentId: "synthetic-controller",
+			clientId: "synthetic-mcp-client",
+		});
 		const connection = await createTestConnection({
 			organization_id: org.id,
 			connector_key: "chrome",
@@ -173,6 +190,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 				approvalMode: "device",
 				createdByUserId: user.id,
 				policyPrincipalKind: "user",
+				runMetadata: { source_attribution: sourceAttribution },
 				sdkBrowserContext: { ...context, flow_id: flowId },
 			});
 			return until(async () => {
@@ -233,6 +251,37 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 			"completed",
 		);
 		expect(shared.action_output.value).toBe(1);
+		// The real worker receives server-owned provenance and the real sidepanel
+		// shows it while an admitted tool is executing, then clears on completion.
+		const panel = await selected.browser.newPage();
+		await panel.goto(new URL("./sidepanel.html", selected.control.url()).href);
+		const inFlight = action("evaluate", {
+			tab_id: tabId,
+			expression: "new Promise(resolve => setTimeout(() => resolve(window.clicks), 5000))",
+			await_promise: true,
+			source_attribution: { agent_name: "Impersonated owner" },
+		});
+		await until(async () => {
+			const text = await panel.locator("#control-activity").textContent();
+			return text?.includes("Managed agent: Research agent") ? text : undefined;
+		}, "authenticated agent visible in the actual extension sidepanel");
+		const activeText = await panel.locator("#control-activity").textContent();
+		expect(activeText).toContain("via Registered MCP client");
+		expect(activeText).toContain("Executing on Selected browser");
+		expect(activeText).not.toContain("Impersonated owner");
+		expect((await inFlight).status).toBe("completed");
+		await until(async () => await panel.locator("#control-activity").isHidden() ? true : undefined, "completion clears the control indicator");
+		sourceAttribution = requestSourceAttribution({
+			isAuthenticated: true,
+			tokenType: "oauth",
+			clientId: "synthetic-mcp-client",
+		});
+		const clientFlight = action("evaluate", {
+			tab_id: tabId, expression: "new Promise(resolve => setTimeout(() => resolve(1), 3000))", await_promise: true,
+		});
+		await until(async () => (await panel.locator("#control-activity").textContent())?.includes("MCP client: Registered MCP client") ? true : undefined, "MCP-only requester has its own label");
+		expect((await clientFlight).status).toBe("completed");
+		await panel.close();
 		// A tab the user opened is readable but not mutable without the grant,
 		// and a caller cannot launder it through an activation id of its own.
 		const userTab = await selected.control.evaluate(
