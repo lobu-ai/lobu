@@ -95,26 +95,17 @@ export function compileMetricSql(input: CompileMetricInput): string {
     throw new MetricCompileError(`alias eventSet "${measure.eventSet}" needs a "field"`);
   }
 
-  // ── Resolve segments (measure's own + the caller's override) at their
-  //    declared grain. `on: "entity"` filters the RESOLVED entity (a predicate
-  //    over `entities`, applied in alias resolution); `on: "event"` filters the
-  //    event rows — before dedupe, or (the default) after it, just before the
-  //    aggregate. Without a dedupeKey there is no dedupe step, so both event
-  //    orderings land in the pre-resolution WHERE. ───────────────────────────
-  const hasDedupe = (eventSet.dedupeKey ?? []).length > 0;
+  // ── Resolve segments (measure's own + the caller's override) ──────────────
   const segNames = [...(measure.segments ?? []), ...(input.segment ? [input.segment] : [])];
-  const preDedupeSegWheres: string[] = [];
-  const postDedupeSegWheres: string[] = [];
+  const segWheres: string[] = [];
   const entitySegWheres: string[] = [];
   for (const name of segNames) {
     const seg = metrics.segments?.[name];
     if (!seg) throw new MetricCompileError(`segment "${name}" is not declared`);
     if (seg.on === "entity") {
       entitySegWheres.push(entitySegmentPredicate(entityTypeId, seg.where));
-    } else if (hasDedupe && (seg.appliedBefore ?? "aggregate") === "aggregate") {
-      postDedupeSegWheres.push(seg.where);
     } else {
-      preDedupeSegWheres.push(`(${seg.where})`);
+      segWheres.push(`(${seg.where})`);
     }
   }
 
@@ -134,12 +125,9 @@ export function compileMetricSql(input: CompileMetricInput): string {
     readsWhere ? `(${readsWhere})` : null,
     eventSet.where ? `(${eventSet.where})` : null,
     measure.where ? `(${measure.where})` : null,
-    ...preDedupeSegWheres,
+    ...segWheres,
   ].filter(Boolean);
-  // Evaluate authored predicates where `events` is still in scope, then carry
-  // their flags through dedupe so qualified and unqualified columns both work.
-  const segFlagCols = postDedupeSegWheres.map((w, i) => `(${w}) AS __seg${i}`);
-  const evt = `SELECT ${["*", ...segFlagCols].join(", ")} FROM events${
+  const evt = `SELECT * FROM events${
     innerWhere.length ? ` WHERE ${innerWhere.join(" AND ")}` : ""
   }`;
 
@@ -172,15 +160,12 @@ export function compileMetricSql(input: CompileMetricInput): string {
   const dedupeCols = (eventSet.dedupeKey ?? []).map((e, i) => `(${e}) AS __dk${i}`);
   const measureExprSel = measure.expr ? `(${measure.expr}) AS __m` : null;
   const dimSels = dims.map((d) => `(${d.expr}) AS ${d.col}`);
-  const distinct = hasDedupe ? "DISTINCT " : "";
-  // Post-dedupe segment flags ride next to the dedupe tuple and are filtered
-  // on the deduped relation (the event columns are gone by then).
+  const distinct = eventSet.dedupeKey && eventSet.dedupeKey.length > 0 ? "DISTINCT " : "";
   const relationCols = [
     "ea.entity_id",
     ...dimSels,
     ...(measureExprSel ? [measureExprSel] : []),
     ...dedupeCols,
-    ...postDedupeSegWheres.map((_, i) => `evt.__seg${i}`),
   ].join(", ");
   const fieldExpr = `evt.${eventSet.field}`;
   const aliasMatch = identityNamespaceSql
@@ -217,12 +202,8 @@ export function compileMetricSql(input: CompileMetricInput): string {
   const aggExpr = aggregateExpr(measure.agg, measure.expr ? "__m" : null, measureName);
   const groupCols = ["entity_id", ...dims.map((d) => d.col)];
   const selectCols = [...groupCols, aggExpr].join(", ");
-  const postDedupeWhere = postDedupeSegWheres.length
-    ? `
-     WHERE ${postDedupeSegWheres.map((_, i) => `resolved.__seg${i}`).join(" AND ")}`
-    : "";
   return `SELECT ${selectCols}
-     FROM (${resolved}) resolved${postDedupeWhere}
+     FROM (${resolved}) resolved
      GROUP BY ${groupCols.join(", ")}`;
 }
 
