@@ -15,6 +15,7 @@ import { createSlackWebApi } from "../slack-web.js";
 import { isSlackConfig } from "../types.js";
 import type { PlatformConnection } from "../types.js";
 import { postFileToChatTarget, streamToBuffer } from "./shared.js";
+import { withSlackDeliveryErrors } from "./slack-adapter.js";
 import type {
   ChatPlatformDescriptor,
   ChatPlatformInstance,
@@ -159,10 +160,9 @@ export const slackPlatform: ChatPlatformDescriptor = {
   ),
   requiredConfigKeys: ["botToken", "signingSecret"],
 
-  // Pre-existing lazy adapter factory, moved verbatim from the manager's
-  // ADAPTER_FACTORIES map (adapter SDKs stay lazy-loaded per platform).
+  // Keep the SDK lazy-loaded per platform, with Slack-owned error normalization.
   createAdapter: async (c) =>
-    (await import("@chat-adapter/slack")).createSlackAdapter(c),
+    withSlackDeliveryErrors((await import("@chat-adapter/slack")).createSlackAdapter(c)),
 
   extractRoutingInfo: (body) => {
     const slack = body.slack as
