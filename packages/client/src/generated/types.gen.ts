@@ -1230,7 +1230,7 @@ export type ManageEntityData = {
          */
         force_delete_tree?: boolean;
         /**
-         * [delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: report whether the type's write rules would refuse it. Mutates nothing and never queues an approval.
+         * [delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1431,7 +1431,7 @@ export type ManageEntityData = {
          */
         merge_rationale?: string;
         /**
-         * [delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: report whether the type's write rules would refuse it. Mutates nothing and never queues an approval.
+         * [delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1777,6 +1777,13 @@ export type ManageEntityResponses = {
         moved_identities: number;
         repointed_edges: number;
         dry_run?: boolean;
+        /**
+         * Dry-run prediction from current evidence, rejection memory, and write rules. Execution rechecks under lock.
+         */
+        preview?: {
+          outcome: "apply" | "review" | "suppressed" | "refused";
+          reason: string;
+        };
         resolution?: {
           decision: "auto_merge" | "human";
           reason: string;

@@ -52,6 +52,7 @@ import {
 } from "../../authz/entity-mutation-gate";
 import {
 	EntityRowValidationError,
+	type EntityRowValidationVerdict,
 	RESERVED_COLUMN_NAMES,
 } from "../../authz/entity-row-validation";
 import {
@@ -967,26 +968,30 @@ async function handleMerge(
 		});
 	}
 
-	// Preflight: report the rule verdict without mutating and without queuing.
-	// Placed after the role gate (a principal who may not merge gets no preview)
-	// and before the review branch below — a dry run must never create an
-	// approval, exactly as on the delete path.
-	if (args.dry_run) {
-		const preview = await previewMerge({ loserIds, winnerId });
-		return {
-			action: "merge",
-			success: true,
-			message: preview.refused
-				? `Dry run: the merge would NOT be applied — ${preview.reason}`
-				: "Dry run: the merge would be applied",
-			winner_entity_id: winnerId,
-			loser_entity_id: loserIds[0],
-			loser_entity_ids: loserIds,
-			moved_identities: 0,
-			repointed_edges: 0,
-			dry_run: true,
-		};
-	}
+	const previewResponse = (
+		outcome: "apply" | "review" | "suppressed" | "refused",
+		reason: string,
+	): ManageEntityResult => ({
+		action: "merge",
+		success: true,
+		message: {
+			apply: "Dry run: the merge would be applied",
+			review: `Dry run: the merge would require human review — ${reason}`,
+			suppressed: "Dry run: this unchanged candidate was already rejected; review would be suppressed",
+			refused: `Dry run: the merge would NOT be applied — ${reason}`,
+		}[outcome],
+		winner_entity_id: winnerId,
+		loser_entity_id: loserIds[0],
+		loser_entity_ids: loserIds,
+		moved_identities: 0,
+		repointed_edges: 0,
+		dry_run: true,
+		preview: { outcome, reason },
+	});
+	const isReviewableMergeRule = (verdict: EntityRowValidationVerdict) =>
+		verdict.outcome === "escalate" &&
+		verdict.fields.length === 1 &&
+		verdict.fields[0] === RESERVED_COLUMN_NAMES.mergedInto;
 
 	/**
 	 * Send this merge to a human instead of applying it. Two deciders reach here
@@ -1001,19 +1006,22 @@ async function handleMerge(
 	 *
 	 * They are different questions, so the second can override a policy that was
 	 * sure: certainty about identity is not consent to the write. `reason` is
-	 * whichever decider spoke, so the card says why it is waiting.
+	 * whichever decider spoke, so the card says why it is waiting. A dry run
+	 * reports the review (or its suppression) and never queues a card.
 	 */
 	const queueMergeForReview = async (
 		policy: NonNullable<typeof resolution>,
 		reason: string,
 	): Promise<ManageEntityResult> => {
 		const attribution = attributionFor(actor);
-		if (
-			await wasResolutionRejected(sql, {
-				organizationId: ctx.organizationId,
-				fingerprint: policy.fingerprint,
-			})
-		) {
+		const rejected = await wasResolutionRejected(sql, {
+			organizationId: ctx.organizationId,
+			fingerprint: policy.fingerprint,
+		});
+		if (args.dry_run) {
+			return previewResponse(rejected ? "suppressed" : "review", reason);
+		}
+		if (rejected) {
 			return {
 				action: "merge",
 				approval_suppressed: true,
@@ -1072,6 +1080,19 @@ async function handleMerge(
 		return await queueMergeForReview(resolution, resolution.reason);
 	}
 
+	// Follow the same policy-first ordering as execution. The kernel rechecks
+	// write rules under lock when applying; preview does not enforce or write.
+	if (args.dry_run) {
+		const verdict = await previewMerge({ loserIds, winnerId });
+		if (resolution && verdict && isReviewableMergeRule(verdict)) {
+			return await queueMergeForReview(resolution, verdict.reason);
+		}
+		return previewResponse(
+			verdict ? "refused" : "apply",
+			verdict?.reason ?? resolution?.reason ?? "A workspace administrator may confirm this merge.",
+		);
+	}
+
 	let result: Awaited<ReturnType<typeof applyMergeGroup>>;
 	try {
 		result = await applyMergeGroup({
@@ -1125,9 +1146,7 @@ async function handleMerge(
 			actor.kind !== "user" &&
 			resolution &&
 			err instanceof EntityRowValidationError &&
-			err.verdict.outcome === "escalate" &&
-			err.verdict.fields.length === 1 &&
-			err.verdict.fields[0] === RESERVED_COLUMN_NAMES.mergedInto
+			isReviewableMergeRule(err.verdict)
 		) {
 			return await queueMergeForReview(resolution, err.verdict.reason);
 		}

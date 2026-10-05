@@ -266,7 +266,7 @@ describe("manage_entity merge action", () => {
 		expect(rows).toHaveLength(0);
 	}, 30_000);
 
-	it("rejects a non-admin member (403)", async () => {
+	it.each([false, true])("rejects a non-admin member (403), dry_run=%s", async (dry_run) => {
 		const org = await createTestOrganization({ name: "Gate Org" });
 		const user = await createTestUser();
 		await addUserToOrganization(user.id, org.id, "member");
@@ -274,14 +274,14 @@ describe("manage_entity merge action", () => {
 
 		await expect(
 			manageEntity(
-				{ action: "merge", entity_id: loser.id, winner_entity_id: winner.id },
+				{ action: "merge", entity_id: loser.id, winner_entity_id: winner.id, dry_run },
 				env,
 				ctx(org.id, user.id, "member"),
 			),
 		).rejects.toThrow(/admin or owner/i);
 	});
 
-	it("rejects a cross-type merge before queuing approval", async () => {
+	it.each([false, true])("rejects a cross-type merge before queuing approval, dry_run=%s", async (dry_run) => {
 		const org = await createTestOrganization({ name: "Cross Type Tool Org" });
 		const user = await createTestUser();
 		await addUserToOrganization(user.id, org.id, "owner");
@@ -304,6 +304,7 @@ describe("manage_entity merge action", () => {
 					action: "merge",
 					entity_id: person.id,
 					winner_entity_id: company.id,
+					dry_run,
 				},
 				env,
 				ctx(org.id, user.id, "owner"),
@@ -311,7 +312,7 @@ describe("manage_entity merge action", () => {
 		).rejects.toThrow(/same entity type/i);
 	});
 
-	it("rejects a winner from another org (org fence, 404)", async () => {
+	it.each([false, true])("rejects a winner from another org (org fence, 404), dry_run=%s", async (dry_run) => {
 		const orgA = await createTestOrganization({ name: "Org A" });
 		const orgB = await createTestOrganization({ name: "Org B" });
 		const userA = await createTestUser();
@@ -337,6 +338,7 @@ describe("manage_entity merge action", () => {
 					action: "merge",
 					entity_id: loser.id,
 					winner_entity_id: foreignWinner.id,
+					dry_run,
 				},
 				env,
 				ctx(orgA.id, userA.id, "owner"),
@@ -1236,6 +1238,144 @@ export default (row) => {
 		return Number(rows[0]?.n ?? 0);
 	}
 
+	const previewCases: Array<{
+		name: string;
+		outcome: "apply" | "review" | "suppressed" | "refused";
+		human?: boolean;
+		policy?: "missing" | "review" | "conflict";
+		rule?: string;
+		rejected?: boolean;
+	}> = [
+		{ name: "certain agent match", outcome: "apply" },
+		{ name: "human confirmation without policy", human: true, policy: "missing", outcome: "apply" },
+		{ name: "missing policy", policy: "missing", outcome: "review" },
+		{ name: "review-only policy", policy: "review", outcome: "review" },
+		{ name: "conflicting unique keys", policy: "conflict", outcome: "review" },
+		{ name: "rejected policy evidence", policy: "review", rejected: true, outcome: "suppressed" },
+		{ name: "merge escalation", rule: ESCALATE_MERGE_RULE, outcome: "review" },
+		{ name: "rejected merge escalation", rule: ESCALATE_MERGE_RULE, rejected: true, outcome: "suppressed" },
+		{ name: "human merge escalation", human: true, rule: ESCALATE_MERGE_RULE, outcome: "refused" },
+		{
+			name: "write denial",
+			rule: 'export default row => { if (row.changed("$merged_into")) row.deny("merge frozen"); };',
+			outcome: "refused",
+		},
+		{
+			name: "policy review before write denial",
+			policy: "review",
+			rule: 'export default row => { if (row.changed("$merged_into")) row.deny("merge frozen"); };',
+			outcome: "review",
+		},
+		{
+			name: "escalation the merge card cannot grant",
+			rule: 'export default row => { if (row.changed("$merged_into")) row.escalate(["$merged_into", "status"], "confirm status"); };',
+			outcome: "refused",
+		},
+		{
+			name: "empty escalation grant",
+			rule: 'export default row => { if (row.changed("$merged_into")) row.escalate([], "confirm change"); };',
+			outcome: "refused",
+		},
+	];
+
+	it.each(previewCases)("merge preview matches execution: $name", async (scenario) => {
+		const { org, user, sql, winner, loser, agentCtx } =
+			await autoMergeCandidateWithRule(
+				`Preview ${scenario.name}`,
+				scenario.rule ?? "export default () => {};",
+				6090,
+			);
+		if (scenario.policy) {
+			const rules = scenario.policy === "missing" ? [] : [{
+				fields: ["email"], normalizer: "email",
+				onMatch: scenario.policy === "review" ? "review" : "auto_merge",
+			}, ...(scenario.policy === "conflict" ? [{
+				fields: ["phone"], normalizer: "phone", onMatch: "auto_merge",
+			}] : [])];
+			await sql`
+				UPDATE entity_types SET metadata_schema = ${sql.json({
+					type: "object",
+					...(rules.length ? { "x-lobu-resolution": { rules } } : {}),
+				})}
+				WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${winner.id})
+			`;
+			if (scenario.policy === "conflict") {
+				await sql`
+					UPDATE entities SET metadata = metadata || '{"phone":"+447700900123"}'::jsonb
+					WHERE id IN (${winner.id}, ${loser.id})
+				`;
+				await sql`
+					UPDATE entities SET metadata = metadata || '{"email":"different@example.test"}'::jsonb
+					WHERE id = ${loser.id}
+				`;
+			}
+		}
+		const toolCtx = scenario.human ? ctx(org.id, user.id, "owner") : agentCtx;
+		const input = { action: "merge" as const, entity_id: loser.id, winner_entity_id: winner.id };
+		if (scenario.rejected) {
+			// Seed completed rejection memory with the production fingerprint, so
+			// a prior proposal's asynchronous notification cannot race our snapshot.
+			const rows = await sql`
+				SELECT e.id, e.metadata, et.slug, et.metadata_schema FROM entities e
+				JOIN entity_types et ON et.id = e.entity_type_id
+				WHERE e.id IN (${winner.id}, ${loser.id}) ORDER BY e.id
+			`;
+			const assessment = assessEntityResolution({
+				metadataSchema: rows[0].metadata_schema,
+				entityTypeSlug: rows[0].slug,
+				winner: { id: winner.id, metadata: rows.find(row => Number(row.id) === winner.id)!.metadata },
+				losers: [{ id: loser.id, metadata: rows.find(row => Number(row.id) === loser.id)!.metadata }],
+			});
+			await sql`
+				INSERT INTO runs (run_type, status, organization_id, action_key, approval_status, action_input)
+				VALUES ('internal', 'cancelled', ${org.id}, 'entity_change', 'rejected', ${sql.json({
+					operation: "merge", resolution_fingerprint: assessment.fingerprint,
+				})})
+			`;
+		}
+
+		const readState = () => Promise.all([
+			sql`SELECT * FROM entities WHERE organization_id = ${org.id} ORDER BY id`,
+			sql`SELECT * FROM entity_identities WHERE entity_id IN (${winner.id}, ${loser.id}) ORDER BY id`,
+			sql`SELECT * FROM entity_relationships WHERE organization_id = ${org.id} ORDER BY id`,
+			sql`SELECT * FROM events WHERE organization_id = ${org.id} ORDER BY id`,
+			sql`SELECT * FROM runs WHERE organization_id = ${org.id} ORDER BY id`,
+			sql`SELECT * FROM entity_merge_operations WHERE organization_id = ${org.id} ORDER BY id`,
+		]);
+		const before = await readState();
+		const preview = await manageEntity({ ...input, dry_run: true }, env, toolCtx);
+		expect(await readState()).toEqual(before);
+		if (scenario.outcome === "review" || scenario.outcome === "suppressed") {
+			expect((preview as { message: string }).message).not.toBe("Dry run: the merge would be applied");
+		}
+		expect(preview).toMatchObject({
+			dry_run: true,
+			preview: { outcome: scenario.outcome, reason: expect.any(String) },
+			moved_identities: 0,
+			repointed_edges: 0,
+		});
+		expect(preview).not.toHaveProperty("approval_run_id");
+		expect(preview).not.toHaveProperty("approval_queued");
+		const execution = manageEntity(input, env, toolCtx);
+		if (scenario.outcome === "refused") {
+			await expect(execution).rejects.toThrow(/Merge failed:/);
+		} else {
+			const result = await execution;
+			if (scenario.outcome === "apply") {
+				expect(result).toMatchObject({ success: true, winner_entity_id: winner.id });
+				const [row] = await sql`SELECT merged_into FROM entities WHERE id = ${loser.id}`;
+				expect(Number(row.merged_into)).toBe(winner.id);
+			} else {
+				expect(result).toHaveProperty(
+					scenario.outcome === "review" ? "approval_queued" : "approval_suppressed", true,
+				);
+				expect((preview as { preview: { reason: string } }).preview.reason).toBe(
+					(result as { resolution: { reason: string } }).resolution.reason,
+				);
+			}
+		}
+	});
+
 	/**
 	 * The case the escalate-to-card work deliberately left uncovered: a NON-USER
 	 * actor whose deterministic identity rule says `auto_merge`, on a type whose
@@ -1675,6 +1815,10 @@ export default (row) => {
 			ctx(org.id, user.id, "owner"),
 		);
 
+		expect(await manageEntity(
+			{ action: "merge", entity_id: loser.id, winner_entity_id: winner.id, dry_run: true },
+			env, automationCtx,
+		)).toMatchObject({ preview: { outcome: "suppressed" } });
 		const unchanged = await manageEntity(
 			{ action: "merge", entity_id: loser.id, winner_entity_id: winner.id },
 			env,
@@ -1706,6 +1850,10 @@ export default (row) => {
 			})}
 			WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${winner.id})
 		`;
+		expect(await manageEntity(
+			{ action: "merge", entity_id: loser.id, winner_entity_id: winner.id, dry_run: true },
+			env, automationCtx,
+		)).toMatchObject({ preview: { outcome: "review" } });
 		const changed = await manageEntity(
 			{ action: "merge", entity_id: loser.id, winner_entity_id: winner.id },
 			env,

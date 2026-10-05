@@ -92,7 +92,7 @@ const AutomationSource = Type.Object(
 
 const DryRun = Type.Boolean({
   description:
-    "[delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: report whether the type's write rules would refuse it. Mutates nothing and never queues an approval.",
+    "[delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.",
 });
 
 const IncludeDeleted = Type.Boolean({
@@ -635,9 +635,26 @@ export const ManageEntityResultSchema = Type.Union([
       loser_entity_ids: Type.Optional(Type.Array(Type.Integer())),
       moved_identities: Type.Integer(),
       repointed_edges: Type.Integer(),
-      // Preflight only. A dry run reports the rule verdict and writes nothing,
+      // Preflight only. A dry run reports the policy/review outcome and writes nothing,
       // so moved_identities/repointed_edges are 0 and mean "not attempted".
       dry_run: Type.Optional(Type.Boolean()),
+      preview: Type.Optional(
+        Type.Object(
+          {
+            outcome: Type.Union([
+              Type.Literal("apply"),
+              Type.Literal("review"),
+              Type.Literal("suppressed"),
+              Type.Literal("refused"),
+            ]),
+            reason: Type.String(),
+          },
+          {
+            description:
+              "Dry-run prediction from current evidence, rejection memory, and write rules. Execution rechecks under lock.",
+          }
+        )
+      ),
       resolution: Type.Optional(
         Type.Object({
           decision: Type.Union([
