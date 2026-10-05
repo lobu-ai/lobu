@@ -78,6 +78,9 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
+    env:
+      # Match the smoke build's Swift 6.2 toolchain for the embedded Peekaboo engine.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     if: >-
       github.event_name == 'workflow_dispatch'
       || startsWith(github.event.release.tag_name, 'lobu-v')
