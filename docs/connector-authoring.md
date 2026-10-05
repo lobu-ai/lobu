@@ -233,6 +233,8 @@ Manage organization connector rules as a collection at
 `/api/<workspace>/write-permissions/connector-actions`. `GET` returns only saved
 organization rules and an opaque `revision`; `PUT` accepts `{ revision, rules }`
 and replaces that collection atomically. A stale revision returns HTTP 409.
+Unchanged saved rules can be retained or removed after their targets disappear;
+new rules and changed decisions require valid targets.
 The generic single-rule write endpoint no longer accepts organization connector
 rules. Agent restrictions and other policy classes retain their existing APIs
 and are preserved by collection replacements. An empty `rules` array removes

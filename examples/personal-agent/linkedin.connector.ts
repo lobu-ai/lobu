@@ -3540,7 +3540,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Read my activity",
         description:
           "Read the signed-in member's own recent LinkedIn posts and comments from their profile activity pages in the paired Chrome browser, and return them without storing any events. Read-only.",
-        requiresApproval: false,
         kind: "read",
         annotations: {
           openWorldHint: true,

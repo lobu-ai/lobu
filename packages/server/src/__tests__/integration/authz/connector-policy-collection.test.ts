@@ -86,6 +86,41 @@ describe("connector policy collection", () => {
     expect((await snapshot()).rules).toContainEqual({ effect: "deny" });
   });
 
+  it.each(["action", "connection", "connector"] as const)("preserves unchanged rules for a removed %s without accepting new grants", async target => {
+    await createTestConnectorDefinition({ organization_id: org.id, key: "policy-retired", name: "Retired policy fixture" });
+    const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-retired" });
+    await getTestDb()`UPDATE connector_definitions SET supports_execute = true,
+      actions_schema = '{"inspect":{"name":"Inspect","kind":"read"}}'::jsonb
+      WHERE organization_id = ${org.id} AND key = 'policy-retired'`;
+    const scope = target === "connection" ? { connection_id: connection.id }
+      : target === "connector" ? { connector_key: "policy-retired" }
+      : { operation_key: "policy-retired::inspect" };
+    const initial = await snapshot();
+    const created = await request("PUT", path(), { revision: initial.revision, rules: [{ ...scope, effect: "auto" }] });
+    expect(created.status).toBe(200);
+    const before = await created.json();
+    if (target === "connection") await getTestDb()`UPDATE connections SET deleted_at = now() WHERE id = ${connection.id}`;
+    else if (target === "connector") await getTestDb()`UPDATE connector_definitions SET status = 'archived' WHERE organization_id = ${org.id} AND key = 'policy-retired'`;
+    else await getTestDb()`UPDATE connector_definitions SET actions_schema = '{}'::jsonb WHERE organization_id = ${org.id} AND key = 'policy-retired'`;
+
+    const edited = await request("PUT", path(), { revision: before.revision, rules: [...before.rules, { effect: "deny" }] });
+    expect(edited.status).toBe(200);
+    const after = await edited.json();
+    expect(after.rules).toEqual(expect.arrayContaining([...before.rules, { effect: "deny" }]));
+    const changed = await request("PUT", path(), { revision: after.revision, rules: [{ ...scope, effect: "approval" }, { effect: "deny" }] });
+    expect(changed.status).toBe(400);
+    expect(await snapshot()).toEqual(after);
+    const removed = await request("PUT", path(), { revision: after.revision, rules: [{ effect: "deny" }] });
+    expect(removed.status).toBe(200);
+    const withoutRetired = await removed.json();
+    expect(withoutRetired.rules).toEqual([{ effect: "deny" }]);
+    const stale = await request("PUT", path(), { revision: after.revision, rules: after.rules });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: "policy_conflict" });
+    expect((await request("PUT", path(), { revision: withoutRetired.revision, rules: [...before.rules, { effect: "deny" }] })).status).toBe(400);
+    expect(await snapshot()).toEqual(withoutRetired);
+  });
+
   it("serializes competing replacements so only one can use a revision", async () => {
     const before = await snapshot();
     const results = await Promise.all(["auto", "deny"].map(effect => request("PUT", path(), { revision: before.revision, rules: [{ effect }] })));

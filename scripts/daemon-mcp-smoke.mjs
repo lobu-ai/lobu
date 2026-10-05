@@ -428,14 +428,21 @@ async function main() {
   });
   // A disposable local owner's real web session authorizes subsequent tests.
   // Tokens never change connector policies or approve operations.
-  await json(`/api/${org.slug}/write-permissions`, {
+  const policyPath = `/api/${org.slug}/write-permissions/connector-actions`;
+  const policies = await json(policyPath, { headers: sessionHeaders });
+  await json(policyPath, {
     method: "PUT",
     headers: sessionHeaders,
     body: {
-      resource_class: "connector_action",
-      connection_id: connection.connection_id,
-      operation_key: "os.shell::run",
-      effects: { execute: "auto" },
+      revision: policies.revision,
+      rules: [
+        ...policies.rules,
+        {
+          connection_id: connection.connection_id,
+          operation_key: "os.shell::run",
+          effect: "auto",
+        },
+      ],
     },
   });
   await scenario(

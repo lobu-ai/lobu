@@ -89,8 +89,13 @@ export async function replaceConnectorPolicyCollection(c: Context) {
   } catch (error) {
     return c.json({ error: "invalid_request", message: (error as Error).message }, 400);
   }
+  const current = await readSnapshot(org);
+  if (revision !== current.revision) return c.json({ error: "policy_conflict", message: "Policies changed. Reload and review the current rules before applying." }, 409);
+  const unchanged = new Map(current.policies.map(policy => [scopeKey(policy), policy.effects.execute]));
+  // Retained rules survive catalog removal; new grants still need a live target.
   // Discovery may contact connector providers; never hold a database lock during it.
   for (const policy of policies) {
+    if (unchanged.get(scopeKey(policy)) === policy.effects?.execute) continue;
     const targetError = await validateConnectorPolicyTarget(org, policy, c.get("user")!.id);
     if (targetError) return c.json({ error: "invalid_request", message: targetError }, 400);
   }
