@@ -8,6 +8,7 @@
  */
 
 import { extendHeartbeatedTurnMarker, lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
+import { isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import type {
 	CompleteActionRequest,
 	CompleteAuthRequest,
@@ -2499,14 +2500,18 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 
 		const sql = getDb();
 		const isBrowserAction = await runUsesBrowserConnector(sql, req.run_id);
+		const [provenance] = await sql`SELECT run_metadata FROM runs WHERE id = ${req.run_id}`;
+		const sourceRead = isSourceFeedRead(provenance?.run_metadata);
 		if (isBrowserAction) {
 			req.action_output = sanitizeBrowserActionOutput(req.action_output);
 			req.error_message = sanitizeBrowserText(req.error_message) ?? undefined;
 		}
-		const materializedActionOutput = req.action_output
+		const materializedActionOutput = req.action_output && !sourceRead
 			? await materializeActionOutputAttachments(req.run_id, req.action_output)
 			: undefined;
-		const actionOutput = materializedActionOutput?.output;
+		// Source rows travel through the run to its waiter; attachments must not
+		// become durable artifacts before the transient payload is scrubbed.
+		const actionOutput = sourceRead ? req.action_output : materializedActionOutput?.output;
 		publishedActionArtifactIds =
 			materializedActionOutput?.publishedArtifactIds ?? [];
 
@@ -2541,7 +2546,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			const cardBearingRun =
 				approvalStatus === "approved" ||
 				((rows[0] as any)?.run_type === "action" && approvalStatus === "auto");
-			if (organizationId && cardBearingRun) {
+			if (organizationId && cardBearingRun && !sourceRead) {
 				const newStatus = req.status === "success" ? "completed" : "failed";
 				const eventId = await supersedeActionEvent(
 					req.run_id,

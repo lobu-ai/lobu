@@ -338,6 +338,9 @@ export async function handleClaimNextWindow(
       {
         organizationId: ctx.organizationId,
         userId: ctx.userId,
+        agentId: ctx.agentId,
+        actingAutomationId: ctx.actingAutomationId,
+        abortSignal: ctx.abortSignal,
         excludeWorkspaceAudit: ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin',
         claimedWindow: {
           runId: claimedWindow.runId,

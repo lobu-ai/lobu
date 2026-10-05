@@ -624,7 +624,7 @@ async function handleReadFeeds(
     args.reads.slice(0, 10).map(async (read) => {
       try {
         const { window: _window, sourceRevision: _revision, ...result } =
-          await readSourceFeedPage(read, timeoutMs, authzScopeFromToolContext(ctx), ctx.abortSignal);
+          await readSourceFeedPage(read, timeoutMs, authzScopeFromToolContext(ctx), ctx.abortSignal, ctx.actingAutomationId);
         return result;
       } catch (err) {
         const error_code = sourceErrorCode(err);

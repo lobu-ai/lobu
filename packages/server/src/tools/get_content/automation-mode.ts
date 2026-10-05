@@ -43,6 +43,7 @@ import {
   normalizeAutomationSources,
 } from '../../automations/source-refs';
 import type { GetContentArgs } from './schema';
+import type { ToolContext } from '../registry';
 import type { GetContentResult } from './types';
 import { parseJson, parseRecordArray } from './types';
 import { stableJson } from '../../utils/insert-event';
@@ -51,7 +52,7 @@ import { stableJson } from '../../utils/insert-event';
 // Content Query (inlined from automation-content-query)
 // ============================================
 
-interface ContentQueryParams {
+interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> {
   sources: AutomationSource[];
   /** Already-resolved source set when the caller must make one atomic routing decision. */
   normalizedSources?: NormalizedAutomationSource[];
@@ -451,7 +452,9 @@ async function queryContentData(
           window: { start: params.window_start, end: params.window_end },
           cursor: params.sourcePage?.next_cursor,
           sourceRevision: params.sourcePage?.revision,
-        }, 30_000, { organizationId: params.organizationId, principal: params.userId }),
+        }, 30_000, {
+          organizationId: params.organizationId, principal: params.userId, agentId: params.agentId,
+        }, params.abortSignal, params.actingAutomationId),
       })));
     for (const { source, result } of livePages) {
       results[source.name] = result.rows;
@@ -603,7 +606,7 @@ export async function handleAutomationMode(
   args: GetContentArgs,
   env: Env,
   sql: DbClient,
-  context: {
+  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> & {
     organizationId: string;
     /** Verified caller, or null when the read is a headless Automation run. */
     userId: string | null;
@@ -856,6 +859,10 @@ export async function handleAutomationMode(
     window_end: windowEndIso,
     organizationId: automation.organization_id as string,
     userId: visibilityUserId,
+    // The requested Automation selects sources, never the caller's authority.
+    agentId: context.agentId,
+    actingAutomationId: context.actingAutomationId,
+    abortSignal: context.abortSignal,
     entityIds: automationEntityIds,
     query:
       triggerContentIds.length > 0

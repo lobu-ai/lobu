@@ -35,6 +35,8 @@ import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { createConnectorOperationRun } from '../runs/queue-service';
+import { isSourceFeedRead, SOURCE_FEED_READ_METADATA_KEY } from '../lib/device-feed-read-protocol';
+import { scrubSourceReadRun } from '../lib/source-read-run';
 import { normalizePageActivationUrl } from '../runs/page-activation';
 import {
   browserActionContextFromMetadata,
@@ -669,6 +671,7 @@ export async function dispatchChromeActionToExtension(params: {
     };
   }
   const parent = parentRows[0];
+  const sourceRead = isSourceFeedRead(parent.run_metadata);
   if (parent.status !== 'running' || !['auto', 'approved'].includes(parent.approval_status)
     || !['sync', 'action'].includes(parent.run_type)) {
     return { status: 'failed', error_message: 'The parent connector run is no longer authorized to execute.' };
@@ -789,6 +792,16 @@ export async function dispatchChromeActionToExtension(params: {
   let runId: number;
   try {
     const claim = await sql.begin(async (tx) => {
+      // Serialize with source-read cancellation. A bridge call already in flight
+      // may not enqueue fresh work after its waiter has closed the parent.
+      let sourceDeadline: Date | undefined;
+      if (sourceRead) {
+        const [live] = await tx`SELECT expires_at FROM runs WHERE id = ${parentRunId}
+          AND organization_id = ${organizationId} AND status = 'running'
+          AND expires_at > current_timestamp FOR UPDATE`;
+        if (!live || abortSignal?.aborted) throw new Error('The source read is no longer active.');
+        sourceDeadline = live.expires_at;
+      }
       const child = await createConnectorOperationRun({
         organizationId,
         connectionId: chromeConnection.connectionId,
@@ -806,9 +819,11 @@ export async function dispatchChromeActionToExtension(params: {
           browser_context: browserContext,
           source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
+          ...(sourceRead ? { [SOURCE_FEED_READ_METADATA_KEY]: true } : {}),
         },
         db: tx,
       });
+      if (sourceDeadline) await tx`UPDATE runs SET expires_at = ${sourceDeadline} WHERE id = ${child.runId}`;
       if (child.status === 'pending') {
         await applyRunConnectorPolicyAtClaim({ organizationId, runId: child.runId, sql: tx });
       }
@@ -839,15 +854,19 @@ export async function dispatchChromeActionToExtension(params: {
     '[dispatchChromeAction] dispatched'
   );
 
-  const result = await waitForDeviceActionRun(runId, organizationId, abortSignal);
-  if (result.status === 'pending_approval') {
-    return { status: 'failed', error_message: 'The delegated browser step no longer has parent approval.' };
+  try {
+    const result = await waitForDeviceActionRun(runId, organizationId, abortSignal);
+    if (result.status === 'pending_approval') {
+      return { status: 'failed', error_message: 'The delegated browser step no longer has parent approval.' };
+    }
+    const output =
+      result.output && typeof result.output === 'object' && !Array.isArray(result.output)
+        ? (result.output as Record<string, unknown>)
+        : undefined;
+    return { ...result, status: result.status, output };
+  } finally {
+    if (sourceRead) await scrubSourceReadRun(runId, organizationId);
   }
-  const output =
-    result.output && typeof result.output === 'object' && !Array.isArray(result.output)
-      ? (result.output as Record<string, unknown>)
-      : undefined;
-  return { ...result, status: result.status, output };
 }
 
 export async function dispatchChromeAction(c: Context<{ Bindings: Env }>) {

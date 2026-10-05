@@ -68,6 +68,7 @@ import { reconcileAutomationRuns, sweepStaleAutomationRuns } from '../automation
 import {
   DEVICE_FEED_READ_ACTION_KEY,
   DEVICE_FEED_READ_SCRUB_GRACE_SECONDS,
+  SOURCE_FEED_READ_METADATA_KEY,
 } from '../lib/device-feed-read-protocol';
 import { buildStaleRunWhereSql } from './stale-run-sweeper';
 import { sweepStaleAgentTurnRuns } from '../worker-api/agent-turn';
@@ -128,9 +129,14 @@ const FEED_READ_ORPHAN_MESSAGE =
  * that will scrub it itself, and sweeping instantly would turn an ordinary read
  * into an empty result.
  *
- * Idempotent: a scrubbed row no longer matches (no output, and its input
- * carries the `scrubbed` marker), so repeat ticks are no-ops. Fenced to the
- * reserved action key, so no real operation's input or output is ever touched.
+ * Compiled source-read parents and their marked browser children also expire
+ * while running: their persisted request deadline, not a worker heartbeat,
+ * bounds how long transient source data may survive a gateway crash.
+ *
+ * Idempotent: a terminal scrubbed row no longer matches (no output and only
+ * the scrub receipt remains), so repeat ticks are no-ops. Fenced to the
+ * reserved action key or server-owned source-read provenance, so ordinary
+ * operations retain their input and output.
  */
 export async function sweepAbandonedDeviceFeedReadRuns(
   sql: Pick<DbClient, 'unsafe'>
@@ -138,26 +144,31 @@ export async function sweepAbandonedDeviceFeedReadRuns(
   const result = await sql.unsafe(
     `UPDATE runs
      SET action_output = NULL,
-         -- Keep the feed key: it is protocol, not user content, and it is the
-         -- only thing that makes the surviving audit row legible.
-         action_input = jsonb_build_object(
+         -- Native transport owns feed_key. Browser step arguments are opaque
+         -- source input, even if they happen to use a protocol-looking key.
+         action_input = CASE WHEN run_metadata->>$5 = 'true' THEN '{"scrubbed":true}'::jsonb
+           ELSE jsonb_build_object(
            'scrubbed', true,
            'feed_key', action_input->>'feed_key'
-         ),
+         ) END,
          status = CASE WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
                     THEN 'timeout' ELSE status END,
          outcome = CASE WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
                      THEN $2 ELSE outcome END,
          completed_at = CASE WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
                           THEN current_timestamp ELSE completed_at END,
-         error_message = CASE WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
+         error_message = CASE WHEN run_metadata->>$5 = 'true' THEN NULL
+                           WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
                            THEN $3 ELSE error_message END
      WHERE run_type = 'action'
-       AND action_key = $1
+       AND (action_key = $1 OR run_metadata->>$5 = 'true')
        -- Already-clean rows must not match, or every tick would rewrite them.
        AND (
          action_output IS NOT NULL
-         OR (action_input IS NOT NULL AND NOT jsonb_exists(action_input, 'scrubbed'))
+         OR (action_input IS NOT NULL AND action_input - 'feed_key' <> '{"scrubbed":true}'::jsonb)
+         OR (run_metadata->>$5 = 'true' AND action_input <> '{"scrubbed":true}'::jsonb)
+         OR (run_metadata->>$5 = 'true'
+           AND (error_message IS NOT NULL OR status IN ${FEED_READ_IN_FLIGHT_STATUSES}))
        )
        AND (
          (status NOT IN ${FEED_READ_IN_FLIGHT_STATUSES}
@@ -166,12 +177,14 @@ export async function sweepAbandonedDeviceFeedReadRuns(
          OR (status = ${FEED_READ_EXPIRABLE_STATUS}
              AND expires_at IS NOT NULL
              AND expires_at <= current_timestamp)
+         OR (run_metadata->>$5 = 'true' AND expires_at <= current_timestamp)
        )`,
     [
       DEVICE_FEED_READ_ACTION_KEY,
       classifyRunOutcome({ status: 'timeout' }),
       FEED_READ_ORPHAN_MESSAGE,
       DEVICE_FEED_READ_SCRUB_GRACE_SECONDS,
+      SOURCE_FEED_READ_METADATA_KEY,
     ]
   );
   return Number(result.count ?? 0);

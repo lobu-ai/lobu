@@ -21,6 +21,13 @@
  */
 export const DEVICE_FEED_READ_ACTION_KEY = '__lobu_feed_read';
 
+/** Server-owned provenance for a compiled source read and its browser steps. */
+export const SOURCE_FEED_READ_METADATA_KEY = 'source_feed_read';
+
+export function isSourceFeedRead(metadata: Record<string, unknown> | null | undefined): boolean {
+  return metadata?.[SOURCE_FEED_READ_METADATA_KEY] === true;
+}
+
 /**
  * How long a TERMINAL source-read run keeps its payload before the reaper sweeps
  * it, when the in-process cleanup never ran (gateway crash, pod eviction).

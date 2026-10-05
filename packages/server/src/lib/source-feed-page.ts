@@ -104,6 +104,7 @@ export async function readSourceFeedPage(
   timeoutMs: number,
   scope: AuthzScope,
   signal?: AbortSignal,
+  automationId?: number | null,
 ) {
   const page = decodeSourceCursor(
     read.cursor,
@@ -121,6 +122,7 @@ export async function readSourceFeedPage(
   const limit = Math.max(1, Math.min(500, Math.trunc(read.limit ?? 50)));
   const pending = readSourceFeed({
     scope: scope,
+    automationId,
     feedId: read.feed_id,
     query: read.query,
     cursor: page.sourceCursor,

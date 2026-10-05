@@ -20,13 +20,18 @@ import {
 } from '@lobu/core';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import type { AuthzScope } from '../authz/scope';
+import { resolveActingPrincipal } from '../authz/entity-policy';
 import { getDb } from '../db/client';
+import { createConnectorOperationRun } from '../runs/queue-service';
+import { dispatchChromeActionToExtension } from '../worker-api/dispatch-chrome-action';
 import { dbEgressConfig } from '../utils/cloud-mode';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from './device-feed-read-protocol';
+import { scrubSourceReadRun } from './source-read-run';
 
 interface ConnectorQueryParams {
   /** The ACL gate — tenant + principal. Its `organizationId`/`principal` drive
@@ -185,6 +190,8 @@ export interface ReadSourceFeedParams {
    * private connection they own. A `null` principal (headless) sees org-only.
    */
   scope: AuthzScope;
+  /** Trusted execution provenance, never a caller-supplied source attribution. */
+  automationId?: number | null;
   /** The configured feed to read directly from its source. */
   feedId: number;
   /** Optional source-native filter/search expression. */
@@ -508,38 +515,107 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     ...dbEgressConfig(),
   };
 
-  const timeoutMs = remainingReadMs(p);
-  const result = await executeCompiledConnector({
-    compiledCode,
-    job: {
-      mode: 'read',
-      feedId: feed.id,
-      feedKey: feed.feed_key,
-      query: p.query,
-      cursor: p.cursor,
-      window: p.window,
-      config,
-      env: dbEgressConfig(),
-      sessionState,
-      credentials,
-      httpAuth,
-      limit: p.limit,
-      offset: p.offset,
-      sort: p.sort,
-    },
-    hooks: { onHttpFetch },
-    timeoutMs,
-  });
+  const timeoutMs = remainingReadMs(p) ?? 30_000;
+  const deadlineAt = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  p.signal?.addEventListener('abort', onAbort, { once: true });
+  if (p.signal?.aborted) onAbort();
+  const timer = setTimeout(onAbort, timeoutMs);
+  let parent: Promise<number> | undefined;
+  const dispatches = new Set<Promise<unknown>>();
+  let status: 'completed' | 'failed' | 'timeout' = 'failed';
+  const createParent = async (): Promise<number> => {
+    const actor = await resolveActingPrincipal(sql, {
+      organizationId: p.scope.organizationId, userId: p.scope.principal,
+      agentId: p.scope.agentId, sessionAutomationId: p.automationId,
+    });
+    if (!actor.ownerResolved) throw new ToolError('PERMISSION', 'Source reader has no valid requesting principal.');
+    return sql.begin(async (tx) => {
+      const run = await createConnectorOperationRun({
+        organizationId: p.scope.organizationId, connectionId: Number(feed.connection_id),
+        connectorKey: feed.connector_key, operationKey: DEVICE_FEED_READ_ACTION_KEY,
+        operationInput: { feed_key: feed.feed_key }, approvalMode: 'inline',
+        policyPrincipalKind: actor.kind, policyPrincipalId: actor.id,
+        createdByUserId: p.scope.principal, automationId: p.automationId,
+        runMetadata: { [SOURCE_FEED_READ_METADATA_KEY]: true }, db: tx,
+      });
+      await tx`UPDATE runs SET feed_id = ${feed.id}, expires_at = ${new Date(deadlineAt)},
+        connector_version = ${feed.pinned_version ?? feed.definition_version},
+        connector_artifact_hash = ${feed.selected_artifact_hash}
+        WHERE id = ${run.runId} AND organization_id = ${p.scope.organizationId}`;
+      return run.runId;
+    });
+  };
+  try {
+    const result = await executeCompiledConnector({
+      compiledCode,
+      job: {
+        mode: 'read',
+        feedId: feed.id,
+        feedKey: feed.feed_key,
+        query: p.query,
+        cursor: p.cursor,
+        window: p.window,
+        config,
+        env: dbEgressConfig(),
+        sessionState,
+        credentials,
+        httpAuth,
+        limit: p.limit,
+        offset: p.offset,
+        sort: p.sort,
+      },
+      hooks: {
+        onHttpFetch, signal: controller.signal,
+        onChromeDispatch: (actionKey, actionInput) => {
+          const pending = (async () => {
+            if (controller.signal.aborted) throw deadlineError(p.feedId);
+            const parentRunId = await (parent ??= createParent());
+            if (controller.signal.aborted) throw deadlineError(p.feedId);
+            const result = await dispatchChromeActionToExtension({
+              organizationId: p.scope.organizationId, actionKey, actionInput, parentRunId,
+              parentConnectionId: Number(feed.connection_id), visibilityUserId: p.scope.principal,
+              abortSignal: controller.signal,
+            });
+            if (result.status !== 'completed') throw new Error(result.error_message ?? `Browser source step ${result.status}`);
+            return result.output ?? {};
+          })();
+          dispatches.add(pending);
+          pending.finally(() => dispatches.delete(pending)).catch(() => {});
+          return pending;
+        },
+      },
+      timeoutMs,
+    });
 
-  if (result.mode !== 'read') {
-    throw new Error(`Expected read result, got mode=${result.mode}`);
+    if (result.mode !== 'read') {
+      throw new Error(`Expected read result, got mode=${result.mode}`);
+    }
+    const page = finish({
+      rows: result.rows,
+      columns: result.columns ?? [],
+      total: result.total,
+      nextCursor: result.nextCursor,
+      hasMore: result.hasMore,
+      window: result.window,
+    });
+    status = 'completed';
+    return page;
+  } catch (error) {
+    // The isolate reports signal termination as a crash; this controller owns
+    // the source-read deadline and caller cancellation, so preserve that cause.
+    if (controller.signal.aborted) throw deadlineError(p.feedId);
+    throw error;
+  } finally {
+    if (controller.signal.aborted) status = 'timeout';
+    controller.abort();
+    clearTimeout(timer);
+    p.signal?.removeEventListener('abort', onAbort);
+    await Promise.allSettled(dispatches);
+    if (parent) {
+      const runId = await parent.catch(() => undefined);
+      if (runId !== undefined) await scrubSourceReadRun(runId, p.scope.organizationId, feed.feed_key, status);
+    }
   }
-  return finish({
-    rows: result.rows,
-    columns: result.columns ?? [],
-    total: result.total,
-    nextCursor: result.nextCursor,
-    hasMore: result.hasMore,
-    window: result.window,
-  });
 }

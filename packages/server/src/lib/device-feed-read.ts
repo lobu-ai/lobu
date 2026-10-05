@@ -36,13 +36,12 @@
  */
 
 import { ToolError } from '@lobu/core';
-import { getDb, pgTextArray } from '../db/client';
+import { getDb } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
-import { classifyRunOutcome } from '../runs/run-outcome';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
+import logger from '../utils/logger';
 import { describeMissingBrowserExecutionPin, hashlessManifestArtifactMayBeClaimed } from '../utils/connector-execution-placement';
 import { DEVICE_ONLINE_WINDOW_SECONDS, describeDeviceLastSeen } from '../utils/device-liveness';
-import logger from '../utils/logger';
 import {
   DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
   describeDeviceConnectorSetupRequired,
@@ -50,6 +49,7 @@ import {
   loadDeviceConnectorReadiness,
 } from '../worker-api/device-connector-readiness';
 import { DEVICE_FEED_READ_ACTION_KEY } from './device-feed-read-protocol';
+import { scrubSourceReadRun } from './source-read-run';
 
 /**
  * The waiter this module calls. Production always uses the imported one; the
@@ -452,65 +452,7 @@ export async function readDeviceFeed(
   try {
     return deliver(p, await deviceActionWaiter(run.runId, p.organizationId, p.signal));
   } finally {
-    await scrubFeedReadRunPayload(run.runId, p.organizationId, p.feedKey);
-  }
-}
-
-/** Statuses from which a source-read run can still be claimed or completed. */
-const NON_TERMINAL_RUN_STATUSES = ['pending', 'claimed', 'running'] as const;
-
-/**
- * Blank the caller's filters and the device's rows off a source-feed run, and
- * close it if it is still in flight. The run row itself survives as the audit
- * trail that a source read happened, with no trace of what was read.
- *
- * One statement, so scrubbing and terminalizing cannot interleave with a device
- * claiming the run. An ALREADY-terminal run keeps its status, outcome, and
- * timing untouched — the read's verdict is the caller's to report, not this
- * cleanup's to overwrite.
- *
- * Fenced to the reserved action key (plus org + run id) so it can never touch a
- * real operation's output. Never throws — failing to scrub must be logged, not
- * turned into a failed read the caller retries, which would only create another
- * unscrubbed run.
- */
-async function scrubFeedReadRunPayload(
-  runId: number,
-  organizationId: string,
-  feedKey: string
-): Promise<void> {
-  const sql = getDb();
-  const inFlight = pgTextArray([...NON_TERMINAL_RUN_STATUSES]);
-  try {
-    await sql`
-      UPDATE runs
-      SET action_output = NULL,
-          action_input = ${sql.json({ scrubbed: true, feed_key: feedKey })},
-          status = CASE WHEN status = ANY(${inFlight}::text[]) THEN 'timeout' ELSE status END,
-          outcome = CASE
-            WHEN status = ANY(${inFlight}::text[])
-              THEN ${classifyRunOutcome({ status: 'timeout' })}
-            ELSE outcome
-          END,
-          completed_at = CASE
-            WHEN status = ANY(${inFlight}::text[]) THEN current_timestamp
-            ELSE completed_at
-          END,
-          error_message = CASE
-            WHEN status = ANY(${inFlight}::text[])
-              THEN ${`Feed '${feedKey}' source read was abandoned before the device answered.`}
-            ELSE error_message
-          END
-      WHERE id = ${runId}
-        AND organization_id = ${organizationId}
-        AND run_type = 'action'
-        AND action_key = ${DEVICE_FEED_READ_ACTION_KEY}
-    `;
-  } catch (err) {
-    logger.error(
-      { runId, organizationId, feedKey, err: err instanceof Error ? err.message : String(err) },
-      '[device-feed-read] failed to scrub source-read payload off the run row'
-    );
+    await scrubSourceReadRun(run.runId, p.organizationId, p.feedKey);
   }
 }
 
