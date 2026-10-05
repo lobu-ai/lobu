@@ -16,13 +16,14 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
 import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
 import type { AuthProfilesManager } from '../../gateway/auth/settings/auth-profiles-manager';
 import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
+import { ChatResponseBridge } from '../../gateway/connections/chat-response-bridge';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurn,
   cancelAgentTurn,
@@ -486,6 +487,80 @@ describe('agent turn producer', () => {
         expect(requests[1].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true);
       }
       expect((await runRow(Number(run.id))).status).toBe('completed');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 30_000);
+
+  it('delivers an empty provider response as a Slack error through the isolate and durable outbox', async () => {
+    const serverErrors: string[] = [];
+    const completions: Array<Record<string, unknown>> = [];
+    let providerRequests = 0;
+    const server = createServer(async (req, res) => {
+      try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/compatible/')) {
+          providerRequests++;
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(`data: ${JSON.stringify({ id: 'synthetic-empty', object: 'chat.completion.chunk', created: 1,
+            model: 'compatible-model', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+          })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
+        if (path.endsWith('/complete-agent-turn')) completions.push(body);
+        const response = await post(path, { body, headers: { authorization: req.headers.authorization ?? '' },
+          env: { WORKER_API_TOKEN: 'synthetic-empty-fleet' } });
+        res.writeHead(response.status, { 'content-type': 'application/json' });
+        res.end(await response.text());
+      } catch (error) {
+        serverErrors.push(String(error));
+        res.writeHead(500).end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const org = await createTestOrganization();
+      const channelId = 'slack:C_SYNTHETIC';
+      const message: MessagePayload = { ...messageFor(org.id), platform: 'slack', channelId, conversationId: channelId,
+        platformMetadata: { connectionId: 'synthetic-slack', chatId: channelId },
+        agentOptions: { model: 'compatible/compatible-model' } };
+      const provider = new ApiKeyProviderModule({ providerId: 'compatible', providerDisplayName: 'Synthetic provider',
+        providerIconUrl: '', envVarName: 'SYNTHETIC_PROVIDER_API_KEY', sdkCompat: 'openai',
+        upstreamBaseUrl: 'https://provider.example.test/v1' });
+      await enqueueMessage(message, { agentSettings: settingsStore, gatewayUrl: `${origin}/lobu`, catalog: catalogFor(provider) });
+      const [run] = await agentTurnRuns();
+      const client = new WorkerClient({ apiUrl: origin, workerId: 'synthetic-empty-worker',
+        authToken: 'synthetic-empty-fleet', capabilities: { agent_turn: true } });
+      const job = await client.poll();
+      expect(job.run_id).toBe(Number(run.id));
+      const result = await executeRun(client, job, {}, {
+        executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }), timeoutMs: 20_000,
+      });
+      const error = 'The model returned no response. Please try again.';
+      expect(serverErrors).toEqual([]);
+      expect(providerRequests).toBe(1);
+      expect(result.error).toBe(error);
+      expect(completions).toHaveLength(1);
+      expect(completions[0]).toMatchObject({ status: 'failed', error });
+      expect(await runRow(Number(run.id))).toMatchObject({ status: 'failed', error_message: error });
+      const replies = await threadResponsesGlobal();
+      expect(replies).toHaveLength(1);
+      expect(replies[0]).toMatchObject({ platform: 'slack', channelId, error });
+      expect(replies[0]).not.toHaveProperty('finalText');
+
+      // A fresh renderer has no pod-local stream. Only the persisted terminal
+      // payload carries the error across replicas; fake the outbound SDK post.
+      const postMessage = vi.fn(async () => ({ id: 'synthetic-error-message' }));
+      const bridge = new ChatResponseBridge({ getInstance: () => ({
+        connection: { platform: 'slack' }, chat: { channel: () => ({ post: postMessage }) },
+      }) } as never);
+      await bridge.handleError(replies[0] as unknown as ThreadResponsePayload, 'synthetic-session');
+      expect(postMessage).toHaveBeenCalledExactlyOnceWith(`Error: ${error}`);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

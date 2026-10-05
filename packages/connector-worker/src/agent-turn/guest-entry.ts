@@ -746,7 +746,13 @@ export async function runAgentTurn(
     // but a spent budget or an asked question is a deliberate stop, and the
     // text streamed before it is a real answer worth delivering — throwing
     // here would turn it into a failed turn with nothing shown.
-    const ended = guardStopped ? null : agent.state.errorMessage;
+    settleAnswer();
+    const finalText = ownerAnswer ?? ownerText;
+    // Tool-only turns can already have delivered their reply. Reject only a
+    // provider-only turn with nothing to show, after native recovery settles.
+    const ended = (guardStopped ? null : agent.state.errorMessage) ||
+      (!finalText.trim() && toolsUsed.size === 0 && steeredToolsUsed.size === 0
+        ? 'The model returned no response. Please try again.' : null);
 
     // Capture BEFORE returning, and await it. `agentEnd` itself only starts the
     // write; this isolate is disposed the moment this function resolves, so an
@@ -762,7 +768,6 @@ export async function runAgentTurn(
     }
 
     if (ended) throw new Error(ended);
-    settleAnswer();
 
     return {
       // The answer is the last assistant message WITH TEXT after each user
@@ -786,7 +791,7 @@ export async function runAgentTurn(
       // aborted mid-answer still owes the user what it managed to say. The
       // fallback is the owner's only: a steered input without its own settled
       // answer fails below rather than borrowing a sibling's text.
-      text: ownerAnswer ?? ownerText,
+      text: finalText,
       stopReason,
       usage,
       sessionJsonl: nativeSessionJsonl(session),
