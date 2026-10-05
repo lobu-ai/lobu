@@ -354,3 +354,29 @@ it("keeps its place when new rows push the last returned row past the re-read pa
   expect(cursor).toBeUndefined();
   expect(seen).toEqual(["a10", "b9", "a8", "b7", "a6"]);
 });
+
+/** A keyset source: the cursor is the last returned origin_id. */
+function keysetSource(rows: Array<Record<string, unknown>>) {
+  readPage.mockImplementation(async (read: { limit: number; cursor?: string }) => {
+    const start = read.cursor ? rows.findIndex((row) => row.origin_id === read.cursor) + 1 : 0;
+    const page = rows.slice(start, start + Math.min(read.limit, 2));
+    return {
+      rows: page,
+      ...(start + page.length < rows.length ? { next_cursor: String(page[page.length - 1].origin_id) } : {}),
+    };
+  });
+}
+
+it.each([
+  ["a newer row is inserted", (rows: Array<Record<string, unknown>>) => rows.unshift(linked("e5", "2026-01-05T00:00:00Z"))],
+  ["a returned row is deleted", (rows: Array<Record<string, unknown>>) => rows.shift()],
+])("pages a keyset source exactly once across a full page boundary when %s", async (_case, mutate) => {
+  const rows = ["e4", "e3", "e2", "e1"].map((id, index) => linked(id, `2026-01-0${4 - index}T00:00:00Z`));
+  keysetSource(rows);
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
+  expect(first.events.map((event) => event.origin_id)).toEqual(["e4", "e3"]);
+  mutate(rows);
+  const second = await reads.readSourceRecordActivity(scope, record, { limit: 2, cursor: first.next_cursor });
+  expect(second.events.map((event) => event.origin_id)).toEqual(["e2", "e1"]);
+  expect(second.next_cursor).toBeUndefined();
+});

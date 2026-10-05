@@ -22,7 +22,8 @@ import {
 const CONNECTOR_KEY = 'record_source_test';
 
 // Event-shaped rows, newest first. The connector filters them by ctx.match and
-// pages with an offset cursor, as a warehouse connector would in SQL.
+// pages with a keyset cursor (the last returned origin_id), as a warehouse
+// connector would in SQL.
 const SOURCE = `
   import { defineConnector } from '@lobu/connector-sdk';
   const ROWS = [
@@ -56,10 +57,10 @@ const SOURCE = `
         },
         read: async (ctx) => {
           const matched = ROWS.filter((row) => !ctx.match || ctx.match.values.includes(String(at(row, ctx.match.path))));
-          const offset = Number(ctx.cursor ?? 0);
-          const page = matched.slice(offset, offset + (ctx.limit ?? 50));
-          const next = offset + page.length;
-          return { rows: page, ...(next < matched.length ? { nextCursor: String(next) } : {}) };
+          const start = ctx.cursor ? matched.findIndex((row) => row.origin_id === ctx.cursor) + 1 : 0;
+          const page = matched.slice(start, start + (ctx.limit ?? 50));
+          const more = start + page.length < matched.length;
+          return { rows: page, ...(more ? { nextCursor: page[page.length - 1].origin_id } : {}) };
         },
       },
     },

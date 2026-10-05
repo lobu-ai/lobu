@@ -332,6 +332,9 @@ reads every such feed whose `eventKinds` attribute to the record's type, passing
 `FeedReadContext.match = { path, values }` on the attribution's identity
 `eventPath`. Return EventEnvelope-shaped rows (`origin_id`, `origin_type`,
 `title`, `occurred_at`, `source_url`, `metadata`), newest first, paged only by
-`nextCursor`: a matched page without one is the last. Relationships come from the event kind's `relationships`: the
+`nextCursor`: a matched page without one is the last. Make it a keyset cursor
+(resume strictly after the page's last row, e.g. its `occurred_at` and
+`origin_id`), not an offset: an offset shifts when the source changes between
+requests and repeats or skips rows at page boundaries. Relationships come from the event kind's `relationships`: the
 other attribution's identity is the peer's key and its `titlePath` the peer's
 name. A path not in `matchPaths` is rejected, never filtered after the read.

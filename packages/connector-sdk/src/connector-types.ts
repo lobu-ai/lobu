@@ -1041,6 +1041,9 @@ export interface FeedReadContext<F = Record<string, unknown>> {
   /**
    * Exact-value filter on one of the feed's declared `matchPaths`. A matched
    * read pages only by `nextCursor`: a result without one is the last page.
+   * Make it a keyset cursor (resume strictly after the page's last row in the
+   * feed's order), not an offset, so a source changing between requests
+   * neither repeats nor skips a row.
    */
   match?: FeedReadMatch;
 }
