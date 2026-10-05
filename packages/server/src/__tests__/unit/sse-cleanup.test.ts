@@ -25,8 +25,13 @@ describe('streamInvalidationEvents cleanup', () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const activeTimers = new Set<unknown>();
+  let restoreListener = () => {};
 
   beforeEach(() => {
+    // This suite exercises socket cleanup; cross-process subscription and
+    // failure/retry paths have their own tests.
+    const listener = spyOn(invalidationEmitter, 'ensureInvalidationListener').mockResolvedValue(undefined);
+    restoreListener = () => listener.mockRestore();
     activeTimers.clear();
     globalThis.setInterval = ((fn: () => void, ms: number) => {
       const handle = originalSetInterval(fn, ms);
@@ -40,6 +45,7 @@ describe('streamInvalidationEvents cleanup', () => {
   });
 
   afterEach(() => {
+    restoreListener();
     for (const handle of activeTimers) {
       originalClearInterval(handle as Parameters<typeof clearInterval>[0]);
     }

@@ -7,6 +7,7 @@
 
 import { retryWithBackoff } from '@lobu/core';
 import { type DbClient, getDb, parsePgNumberArray } from '../db/client';
+import { notifyEventContentChanged } from '../events/emitter';
 import { stripIdentityScopeProjectionMetadata } from '../identity/scope-projection';
 import { getActingAutomationScope } from './acting-automation-context';
 import {
@@ -666,6 +667,12 @@ export async function insertEvent(
      * server-owned identity-scope projection keys from durable identities.
      */
     trustedIdentityScopeProjections?: boolean;
+    /**
+     * False only for rows written as a side effect of serving a read (the
+     * tool-invocation audit): a content invalidation there makes every
+     * client refetch write the row that invalidates the next refetch.
+     */
+    notifyContentChange?: boolean;
   }
 ): Promise<InsertedEvent> {
   if (params.organizationId === null && options?.afterPersist) {
@@ -682,6 +689,7 @@ export async function insertEvent(
     };
   }
   const sourceOriginId = stripNul(options?.sourceOriginId ?? params.originId);
+  const notifyContentChange = options?.notifyContentChange !== false;
   const sql = options?.sql ?? getDb();
   // Explicit successors inherit connector lineage from their predecessor even
   // when the caller omits (or disagrees about) connectorKey.
@@ -804,6 +812,9 @@ export async function insertEvent(
               params,
               activeSql
             );
+            if (stateWritten && notifyContentChange) {
+              await notifyEventContentChanged(activeSql, existingRow.id);
+            }
             const settled = {
               ...existingRow,
               change: (stateWritten ? 'state_updated' : 'unchanged') as
@@ -1014,6 +1025,11 @@ export async function insertEvent(
     }
 
     await upsertEmbedding(inserted.id, params.embedding, params.embeddingModel, sql);
+    // Tell browsers on every replica to refetch content. Same handle as the
+    // INSERT: inside a transaction it is delivered on commit, never on rollback.
+    // Writers outside this funnel (the feedback INSERT, webhook attribution's
+    // re-link) call notifyEventContentChanged themselves.
+    if (notifyContentChange) await notifyEventContentChanged(sql, inserted.id);
     const persisted: InsertedEvent = {
       ...inserted,
       change: supersedesEventId === null ? 'inserted' : 'superseded',

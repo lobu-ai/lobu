@@ -70,6 +70,9 @@ interface Pending {
 }
 
 const PROTOCOL_VERSION = "2026-01-26";
+/** Lobu host → guest: workspace data changed, re-read. Not an MCP Apps
+ *  method; hosts that do not speak it simply never send it. */
+const DATA_CHANGED_NOTIFICATION = "lobu/notifications/data-changed";
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -96,6 +99,7 @@ export class ViewBridge {
   private toolResultListeners = new Set<(result: ToolResult) => void>();
   private toolCancelledListeners = new Set<(reason: string | null) => void>();
   private hostContextListeners = new Set<(ctx: HostContext) => void>();
+  private dataChangedListeners = new Set<() => void>();
   /** Set by the first `tool-input` and never cleared: queries must not fire
    *  before it (the host seeds scope + params there; anything read earlier
    *  runs against defaults and double-fetches). */
@@ -175,6 +179,13 @@ export class ViewBridge {
   onHostContext(listener: (ctx: HostContext) => void): () => void {
     this.hostContextListeners.add(listener);
     return () => this.hostContextListeners.delete(listener);
+  }
+
+  /** The host saw workspace data change (Lobu hosts only; other hosts never
+   *  send it, and reads then refresh on their own triggers). */
+  onDataChanged(listener: () => void): () => void {
+    this.dataChangedListeners.add(listener);
+    return () => this.dataChangedListeners.delete(listener);
   }
 
   /**
@@ -407,6 +418,10 @@ export class ViewBridge {
         const snapshot = this.getHostContext();
         for (const listener of [...this.hostContextListeners])
           listener(snapshot);
+        break;
+      }
+      case DATA_CHANGED_NOTIFICATION: {
+        for (const listener of [...this.dataChangedListeners]) listener();
         break;
       }
       default:
