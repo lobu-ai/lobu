@@ -1,5 +1,5 @@
 import { type DbClient, getDb } from '../db/client';
-import { DEVICE_FEED_READ_ACTION_KEY } from '../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import { getOperationForConnection } from '../operations/connector-operations';
 import { supersedeActionEvent } from '../tools/admin/approval-events';
 import { connectorApprovalMetadata } from '../operations/operation-run-card';
@@ -7,6 +7,7 @@ import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } fr
 import { insertEvent } from '../utils/insert-event';
 import type { ConnectorPolicyResult } from './connector-policy';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
+import { compileConnectionRowVisibility } from './connection-visibility';
 
 /** Only the server's connector-to-browser bridge writes this marker. */
 export const CONNECTOR_PARENT_RUN_METADATA_KEY = 'connector_parent_run_id';
@@ -18,6 +19,8 @@ type PolicyRun = {
   approval_status: string;
   claimed_by: string | null;
   connection_id: number | null;
+  feed_id: number | null;
+  expires_at: Date | null;
   connector_key: string | null;
   action_key: string | null;
   action_input: Record<string, unknown> | null;
@@ -37,7 +40,7 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
   const [run] = await sql<PolicyRun>`
     SELECT id, run_type, status, approval_status, claimed_by, connection_id, connector_key,
            action_key, action_input, policy_principal_kind, policy_principal_id,
-           created_by_user_id, automation_id, parent_run_id, run_metadata
+           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at
     FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}
     ${lock ? sql`FOR UPDATE` : sql``}
   `;
@@ -54,6 +57,24 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
   return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql });
 }
 
+async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
+  const visibility = compileConnectionRowVisibility({ organizationId, principal: run.created_by_user_id }, 'c');
+  const feeds = await sql.unsafe(`
+    SELECT f.id FROM feeds f JOIN connections c ON c.id = f.connection_id
+    WHERE f.id = $1 AND f.organization_id = $2 AND f.connection_id = $3
+      AND f.status = 'active' AND f.deleted_at IS NULL
+      AND c.connector_key = $4 AND c.status = 'active' AND c.deleted_at IS NULL
+      ${visibility}
+      AND (SELECT cd.feeds_schema->f.feed_key->'operations' ? 'read' FROM connector_definitions cd
+        WHERE cd.key = c.connector_key AND cd.organization_id = f.organization_id
+          AND ((f.pinned_version IS NULL AND cd.status = 'active')
+            OR (f.pinned_version IS NOT NULL AND (cd.version = f.pinned_version OR cd.status = 'active')))
+        ORDER BY (cd.version = f.pinned_version) DESC, (cd.status = 'active') DESC,
+          cd.updated_at DESC, cd.id DESC LIMIT 1)
+  `, [run.feed_id, organizationId, run.connection_id, run.connector_key]);
+  return feeds.length > 0;
+}
+
 /** Resolve execution authority from persisted provenance, never from the worker's input. */
 export async function resolveRunConnectorPolicy(params: {
   organizationId: string;
@@ -63,6 +84,15 @@ export async function resolveRunConnectorPolicy(params: {
   const sql = params.sql ?? getDb();
   const run = await loadPolicyRun(sql, params.organizationId, params.runId);
   if (!run) return unavailable();
+  if (run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)) {
+    if (run.run_type !== 'action' || run.parent_run_id !== null || run.status !== 'running'
+      || !['auto', 'approved'].includes(run.approval_status)
+      || !run.expires_at || new Date(run.expires_at).getTime() <= Date.now()) return unavailable();
+    const actor = await resolveStoredActingPrincipal(sql, params.organizationId, run.policy_principal_kind, run.policy_principal_id);
+    if (!actor.ownerResolved) return unavailable();
+    return await isSourceReadFeedStillReadable(sql, params.organizationId, run)
+      ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
+  }
   // This reserved action is the transport for an already-authorized source feed
   // read. It is deliberately absent from the public connector action catalog.
   if (run.run_type === 'action' && run.action_key === DEVICE_FEED_READ_ACTION_KEY
@@ -151,7 +181,7 @@ export async function applyRunConnectorPolicyAtClaim(params: {
       title, content: message, semanticType: 'operation', runId,
       connectorKey: run.connector_key, connectionId: run.connection_id,
       interactionType: 'approval', interactionStatus: blocked ? 'rejected' : 'pending',
-      interactionInput: run.action_input,
+      interactionInput: isSourceFeedRead(run.run_metadata) ? null : run.action_input,
       metadata: { ...metadata, status, run_id: runId, action_key: run.action_key, operation_key: run.action_key },
     }, { sql });
     cardId = Number(event.id);

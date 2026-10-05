@@ -401,6 +401,9 @@ async function getContentImpl(
         // otherwise a same-org worker could pass another Automation's id and
         // inherit that author's private feeds.
         userId: resolveAutomationVisibilityUserId(ctx, args.automation_id),
+        agentId: ctx.agentId,
+        actingAutomationId: ctx.actingAutomationId,
+        abortSignal: ctx.abortSignal,
         excludeWorkspaceAudit,
         claimedWindow,
       });

@@ -8,6 +8,7 @@
  */
 
 import { extendHeartbeatedTurnMarker, lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
+import { isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import type {
 	CompleteActionRequest,
 	CompleteAuthRequest,
@@ -155,14 +156,17 @@ async function finalizeRun(
   `) as unknown as Array<Record<string, unknown>>;
 }
 
-async function runUsesBrowserConnector(
+async function readRunCompletionFlags(
 	sql: DbClient,
 	runId: number
-): Promise<boolean> {
+): Promise<{ browser: boolean; sourceRead: boolean }> {
 	const rows = (await sql`
-    SELECT connector_key FROM runs WHERE id = ${runId} LIMIT 1
-  `) as unknown as Array<{ connector_key: string | null }>;
-	return isBrowserConnectorKey(rows[0]?.connector_key);
+    SELECT connector_key, run_metadata FROM runs WHERE id = ${runId} LIMIT 1
+  `) as unknown as Array<{ connector_key: string | null; run_metadata: Record<string, unknown> | null }>;
+	return {
+		browser: isBrowserConnectorKey(rows[0]?.connector_key),
+		sourceRead: isSourceFeedRead(rows[0]?.run_metadata),
+	};
 }
 
 /**
@@ -1234,7 +1238,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 				409
 			);
 		}
-		const isBrowserRun = await runUsesBrowserConnector(sql, req.run_id);
+		const { browser: isBrowserRun } = await readRunCompletionFlags(sql, req.run_id);
 		if (isBrowserRun) {
 			req.error_message = sanitizeBrowserText(req.error_message) ?? undefined;
 			req.output_tail = sanitizeBrowserText(req.output_tail) ?? undefined;
@@ -2373,7 +2377,7 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 		if (denied) return denied;
 
 		const sql = getDb();
-		const isBrowserAuth = await runUsesBrowserConnector(sql, req.run_id);
+		const { browser: isBrowserAuth } = await readRunCompletionFlags(sql, req.run_id);
 		if (isBrowserAuth) {
 			req.error_message = sanitizeBrowserText(req.error_message) ?? undefined;
 			req.output_tail = sanitizeBrowserText(req.output_tail) ?? undefined;
@@ -2498,15 +2502,17 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 		if (denied) return denied;
 
 		const sql = getDb();
-		const isBrowserAction = await runUsesBrowserConnector(sql, req.run_id);
+		const { browser: isBrowserAction, sourceRead } = await readRunCompletionFlags(sql, req.run_id);
 		if (isBrowserAction) {
 			req.action_output = sanitizeBrowserActionOutput(req.action_output);
 			req.error_message = sanitizeBrowserText(req.error_message) ?? undefined;
 		}
-		const materializedActionOutput = req.action_output
+		const materializedActionOutput = req.action_output && !sourceRead
 			? await materializeActionOutputAttachments(req.run_id, req.action_output)
 			: undefined;
-		const actionOutput = materializedActionOutput?.output;
+		// Source rows travel through the run to its waiter; attachments must not
+		// become durable artifacts before the transient payload is scrubbed.
+		const actionOutput = sourceRead ? req.action_output : materializedActionOutput?.output;
 		publishedActionArtifactIds =
 			materializedActionOutput?.publishedArtifactIds ?? [];
 
@@ -2541,7 +2547,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			const cardBearingRun =
 				approvalStatus === "approved" ||
 				((rows[0] as any)?.run_type === "action" && approvalStatus === "auto");
-			if (organizationId && cardBearingRun) {
+			if (organizationId && cardBearingRun && !sourceRead) {
 				const newStatus = req.status === "success" ? "completed" : "failed";
 				const eventId = await supersedeActionEvent(
 					req.run_id,

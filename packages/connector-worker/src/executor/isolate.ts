@@ -318,7 +318,7 @@ const GUEST_RUNNER = String.raw`
       var readResult = await instance.read({
         feedId: job.feedId === null ? undefined : job.feedId, feedKey: job.feedKey, query: job.query, cursor: job.cursor,
         window: job.window,
-        config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState,
+        config: mergedConfig, credentials: job.credentials, sessionState: withDispatcher(job.sessionState),
         limit: job.limit, offset: job.offset, sort: job.sort
       });
       return {

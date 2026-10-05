@@ -27,6 +27,7 @@ import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed'
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
+import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
 
 interface ConnectorQueryParams {
   /** The ACL gate — tenant + principal. Its `organizationId`/`principal` drive
@@ -185,6 +186,8 @@ export interface ReadSourceFeedParams {
    * private connection they own. A `null` principal (headless) sees org-only.
    */
   scope: AuthzScope;
+  /** Trusted execution provenance, never a caller-supplied source attribution. */
+  automationId?: number | null;
   /** The configured feed to read directly from its source. */
   feedId: number;
   /** Optional source-native filter/search expression. */
@@ -198,10 +201,10 @@ export interface ReadSourceFeedParams {
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
-  /** Caller cancellation, threaded into device and HTTP transports. */
+  /** Caller cancellation, threaded into device, HTTP, and compiled-connector transports. */
   signal?: AbortSignal;
   /** Absolute wall-clock deadline. Compiled connectors are killed at this deadline. */
-  deadlineAt?: number;
+  deadlineAt: number;
 }
 
 /** Result from {@link readSourceFeed} — live rows, never persisted. */
@@ -215,17 +218,10 @@ export interface ReadSourceFeedResult {
   sourceRevision?: string;
 }
 
-function deadlineError(feedId: number): Error & { exitReason: 'timeout' } {
-  return Object.assign(new Error(`source read for feed '${feedId}' timed out`), {
-    exitReason: 'timeout' as const,
-  });
-}
-
-function remainingReadMs(p: ReadSourceFeedParams): number | undefined {
-  if (p.signal?.aborted) throw deadlineError(p.feedId);
-  if (p.deadlineAt === undefined) return undefined;
+function remainingReadMs(p: ReadSourceFeedParams): number {
+  if (p.signal?.aborted) throw sourceReadDeadlineError(p.feedId);
   const remaining = Math.trunc(p.deadlineAt - Date.now());
-  if (remaining <= 0) throw deadlineError(p.feedId);
+  if (remaining <= 0) throw sourceReadDeadlineError(p.feedId);
   return remaining;
 }
 
@@ -509,37 +505,61 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   };
 
   const timeoutMs = remainingReadMs(p);
-  const result = await executeCompiledConnector({
-    compiledCode,
-    job: {
-      mode: 'read',
-      feedId: feed.id,
-      feedKey: feed.feed_key,
-      query: p.query,
-      cursor: p.cursor,
-      window: p.window,
-      config,
-      env: dbEgressConfig(),
-      sessionState,
-      credentials,
-      httpAuth,
-      limit: p.limit,
-      offset: p.offset,
-      sort: p.sort,
-    },
-    hooks: { onHttpFetch },
-    timeoutMs,
-  });
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  p.signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(onAbort, timeoutMs);
+  const browser = createSourceReadBridge(feed, p, controller.signal);
+  let status: 'completed' | 'failed' | 'timeout' = 'failed';
+  try {
+    const result = await executeCompiledConnector({
+      compiledCode,
+      job: {
+        mode: 'read',
+        feedId: feed.id,
+        feedKey: feed.feed_key,
+        query: p.query,
+        cursor: p.cursor,
+        window: p.window,
+        config,
+        env: dbEgressConfig(),
+        sessionState,
+        credentials,
+        httpAuth,
+        limit: p.limit,
+        offset: p.offset,
+        sort: p.sort,
+      },
+      hooks: {
+        onHttpFetch, signal: controller.signal,
+        onChromeDispatch: browser.onChromeDispatch,
+      },
+      timeoutMs,
+    });
 
-  if (result.mode !== 'read') {
-    throw new Error(`Expected read result, got mode=${result.mode}`);
+    if (result.mode !== 'read') {
+      throw new Error(`Expected read result, got mode=${result.mode}`);
+    }
+    const page = finish({
+      rows: result.rows,
+      columns: result.columns ?? [],
+      total: result.total,
+      nextCursor: result.nextCursor,
+      hasMore: result.hasMore,
+      window: result.window,
+    });
+    status = 'completed';
+    return page;
+  } catch (error) {
+    // The isolate reports signal termination as a crash; this controller owns
+    // the source-read deadline and caller cancellation, so preserve that cause.
+    if (controller.signal.aborted) throw sourceReadDeadlineError(p.feedId);
+    throw error;
+  } finally {
+    if (controller.signal.aborted) status = 'timeout';
+    controller.abort();
+    clearTimeout(timer);
+    p.signal?.removeEventListener('abort', onAbort);
+    await browser.settle(status);
   }
-  return finish({
-    rows: result.rows,
-    columns: result.columns ?? [],
-    total: result.total,
-    nextCursor: result.nextCursor,
-    hasMore: result.hasMore,
-    window: result.window,
-  });
 }
