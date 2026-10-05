@@ -257,7 +257,8 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		await panel.goto(new URL("./sidepanel.html", selected.control.url()).href);
 		const inFlight = action("evaluate", {
 			tab_id: tabId,
-			expression: "new Promise(resolve => setTimeout(() => resolve(window.clicks), 5000))",
+			expression:
+				"new Promise(resolve => setTimeout(() => resolve(window.clicks), 5000))",
 			await_promise: true,
 			source_attribution: { agent_name: "Impersonated owner" },
 		});
@@ -270,16 +271,25 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		expect(activeText).toContain("Executing on Selected browser");
 		expect(activeText).not.toContain("Impersonated owner");
 		expect((await inFlight).status).toBe("completed");
-		await until(async () => await panel.locator("#control-activity").isHidden() ? true : undefined, "completion clears the control indicator");
+		await until(
+			async () =>
+				(await panel.locator("#control-activity").isHidden()) ? true : undefined,
+			"completion clears the control indicator",
+		);
 		sourceAttribution = requestSourceAttribution({
 			isAuthenticated: true,
 			tokenType: "oauth",
 			clientId: "synthetic-mcp-client",
 		});
 		const clientFlight = action("evaluate", {
-			tab_id: tabId, expression: "new Promise(resolve => setTimeout(() => resolve(1), 3000))", await_promise: true,
+			tab_id: tabId,
+			expression: "new Promise(resolve => setTimeout(() => resolve(1), 3000))",
+			await_promise: true,
 		});
-		await until(async () => (await panel.locator("#control-activity").textContent())?.includes("MCP client: Registered MCP client") ? true : undefined, "MCP-only requester has its own label");
+		await until(async () => {
+			const text = await panel.locator("#control-activity").textContent();
+			return text?.includes("MCP client: Registered MCP client") ? text : undefined;
+		}, "MCP-only requester has its own label");
 		expect((await clientFlight).status).toBe("completed");
 		await panel.close();
 		// A tab the user opened is readable but not mutable without the grant,
