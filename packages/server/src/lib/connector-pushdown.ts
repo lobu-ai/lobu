@@ -518,7 +518,6 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   p.signal?.addEventListener('abort', onAbort, { once: true });
-  if (p.signal?.aborted) onAbort();
   const timer = setTimeout(onAbort, timeoutMs);
   let parent: Promise<number> | undefined;
   const dispatches = new Set<Promise<unknown>>();
