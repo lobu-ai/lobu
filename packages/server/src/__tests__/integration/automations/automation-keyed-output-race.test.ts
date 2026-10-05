@@ -18,6 +18,15 @@ import type { DbClient } from '../../../db/client';
 import { persistAutomationEventOutput } from '../../../utils/persist-automation-event-output';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { TestWorkspace } from '../../setup/test-mcp-client';
+import type { ToolContext } from '../../../tools/registry';
+
+// Only consulted to authorize a row's own `entity_ids`; none of these rows carry any.
+const UNLINKED_ROWS_CTX = {
+  organizationId: 'unused',
+  userId: null,
+  memberRole: null,
+  isAuthenticated: true,
+} as ToolContext;
 
 const KEYED_OUTPUT = {
   event: 'voice_profile',
@@ -112,6 +121,7 @@ describe('Automation keyed event outputs > concurrent runs', () => {
         organizationId,
         runId,
         boundEntityIds: [],
+        ctx: UNLINKED_ROWS_CTX,
         validContentIds: new Set<number>(),
         occurredAt: new Date().toISOString(),
       });
@@ -216,6 +226,7 @@ describe('Automation keyed event outputs > concurrent runs', () => {
         organizationId,
         runId,
         boundEntityIds: [],
+        ctx: UNLINKED_ROWS_CTX,
         validContentIds: new Set<number>(),
         occurredAt: new Date().toISOString(),
       });
