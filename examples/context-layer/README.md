@@ -42,7 +42,7 @@ because the definition change actually changed *which cancellations count*.
 | **Business events** | `business-event` entities | The dated, sourced *why* behind an anomaly — a data incident, a definition change, an external shock. Each carries a `source_link` (Linear ticket, decision doc, Slack thread), a human `expected_effect`, and — for a data incident — a machine-usable structured `adjustment` (e.g. `{op:"subtract_reason", cancel_reason:"billing_migration_artifact"}`) that `compose.ts` applies. |
 | **Definition changelog** | `metric-definition` entity + a supersede chain of `definition` events | The versioned meaning of the metric. Each version carries a machine-usable `governing_predicate` (v1: count everything; v2: exclude payment-failures inside the 28-day dunning grace). A new version **supersedes** the previous one, so the current definition is the one unsuperseded event and the whole chain is the changelog — append-only, never edited. |
 | **Governed composition over a live warehouse** | `compose.ts` → a `run_sdk` read + a generated `query_sql` pushdown | Phase 1 reads the context layer (definitions + events) via the sandbox. Phase 2 **generates** the rollup SQL *from* those predicates + adjustments and runs it **live** against the warehouse through the stock `query_sql` connection pushdown — nothing copied into Lobu. The definition version in effect for a month picks that month's `WHERE`, and a data-incident subtracts exactly the rows it names. The definition **governs the query**, it does not merely label the output. No LLM. |
-| **Agent eval** | `eval.ts` | Asks a real agent the March question twice — WITH the governed context pushed vs a WITHOUT baseline — and asserts the pushed context changed the answer (cites the migration, corrects ~550 → ~50). Runs a live agent when a model provider is configured; falls back to a labelled deterministic proxy when the local install has no model. |
+| **Context eval** | `eval.ts` | Checks the live context bundles deterministically: the governed arm carries the migration citation and correction (550 → 50); the baseline does not. A separate integration fixture runs these inputs through the real Lobu runtime with a synthetic provider to verify isolation. Neither measures live-model answer quality. |
 | **Verified-query drift canary** | `verified-query` entity + `drift-check.ts` | A human-approved answer (the exact SQL + the rows it produced at approval time) is pinned. Re-running the query and diffing against the pinned answer is the canary: a mismatch means the warehouse (or a definition) moved and the answer needs re-verification — *before* someone repeats a stale number in a board deck. |
 
 The connection, auth profile, the source-readable churn-rollup feed, and the entity
@@ -56,11 +56,12 @@ context-layer/
 ├── lobu.config.ts              # agent, entity types, warehouse connection + auth profile + source-readable feed
 ├── IDENTITY.md                 # the analyst agent's identity
 ├── env.example                 # copy to .env
+├── evals/context-isolation.integration.ts # real runtime, synthetic provider
 └── scripts/
     ├── seed-warehouse.ts        # provision the fake warehouse (deterministic; incl. payment-failure cohort)
     ├── seed.ts                  # seed the context layer (definitions+predicates, events+adjustments, pinned answer)
     ├── compose.ts               # THE MONEY SHOT — governed adjusted-churn narrative (definition governs the SQL)
-    ├── eval.ts                  # agent eval — does pushing the context change the answer? (real agent or labelled proxy)
+    ├── eval.ts                  # deterministic check of the live context bundles
     ├── simulate-drift.ts        # mutate the warehouse so the canary has something to catch
     ├── drift-check.ts           # re-run the pinned query, diff vs the approved answer
     └── lib/{env,gateway}.ts     # shared env + a tiny local-gateway client
@@ -85,7 +86,7 @@ bunx @lobu/cli run
 bun run seed:warehouse   # provision the fake Kelder warehouse (~2000 subscriptions)
 bun run seed             # seed the context layer on top of it
 bun run compose          # compose the governed adjusted-churn narrative  ← the money shot
-bun run eval             # prove pushing the context changes an agent's answer
+bun run eval             # check that only the governed bundle contains the correction
 bun run drift:simulate   # add one cancellation so the canary has drift to catch
 bun run drift            # re-run the pinned query and report the drift
 ```
@@ -144,18 +145,32 @@ governed predicates + adjustments and runs it live against the warehouse.
 
 ### `bun run eval`
 
-Asks the March question WITH the governed context pushed vs a WITHOUT baseline
-and asserts the pushed context changed the answer. When the local install has a
-model provider wired, both arms are real agent turns: the WITH arm runs the
-`analyst` agent (governed context in the prompt), the WITHOUT arm runs the
-`baseline` agent — declared in `lobu.config.ts` with `tools: { allowed: [],
-strict: true }` so it *cannot* retrieve the withheld context, making the A/B a
-real isolation of the variable. With no model provider it runs the labelled
-deterministic proxy (below) — asserting the pushed context bundle carries the
-migration citation + corrected number and the baseline does not.
+Reads the governed context and warehouse numbers from the running gateway.
+The warehouse's adjusted March count must be 50, and the WITH bundle must contain
+the migration citation and corrected number; the WITHOUT baseline must contain
+neither. The command is always deterministic and never invokes a model, even
+when the gateway has a configured provider.
+The former live-model A/B mode and its production baseline agent have been
+removed; this command no longer measures model answer quality.
+
+The example-owned integration fixture checks the same inputs through Lobu's real
+isolate and native session runtime using a synthetic streaming provider. Both
+arms have fresh sessions and no tools or memory. It checks the outgoing requests
+and native transcripts for retrieval or prior-session leakage. Run it from a
+built repository checkout:
+
+```sh
+cd packages/server
+SKIP_TEST_DB_SETUP=1 bun run test -- run ../../examples/context-layer/evals/context-isolation.integration.ts
+```
+
+The fixture tests runtime isolation, not live-model answer quality. Its responses
+are scripted and it uses no provider credentials.
+
+Abbreviated output:
 
 ```
-=== Agent eval (deterministic-proxy) ===
+=== Context eval (deterministic context check) ===
 
 (A) WITH context layer:
     GOVERNED CONTEXT (business events affecting churn_rate):
@@ -163,17 +178,16 @@ migration citation + corrected number and the baseline does not.
         Repair 2026-03: ~500 cancellations … are migration artifacts …
         structured adjustment: {"op":"subtract_reason","cancel_reason":"billing_migration_artifact"}
     Composed adjusted series for 2026-03: raw 550, adjusted 50 (billing_migration_artifact rows subtracted).
-  → cites migration + corrects to ~50? YES ✅
+  → cites migration? YES; corrects to ~50? YES ⇒ PASS ✅
 
 (B) WITHOUT context layer (baseline):
     The warehouse reports 550 cancellations for 2026-03. No other context is available.
-  → correctly LACKS the governed correction? YES ✅
+  → cites migration? NO; corrects the number? NO ⇒ correctly has neither? PASS ✅
 
-PASS ✅ — pushing the context layer changed the answer.
+PASS ✅ — the governed correction is present only in the WITH context.
 ```
 
-The proxy is honest about being a proxy: wire a model provider
-(`lobu agents inference-providers`) and re-run for the live-agent version.
+No model was called. This checks the live context bundle, not model answer quality.
 
 ### `bun run drift:simulate` then `bun run drift`
 
@@ -214,13 +228,11 @@ The pinned answer is stale. Re-verify before quoting either side.
 - Runs on **stock Lobu**. `compose.ts` reads the context layer via the standard
   `run_sdk` sandbox (`client.entities.list`, `client.knowledge.read`) and runs
   the governed rollup live through the stock `query_sql` connection pushdown —
-  no server changes, nothing copied into Lobu. `eval.ts` invokes a real agent
-  through `lobu chat` when a model provider is configured.
-- The **agent eval falls back to a labelled deterministic proxy** when the local
-  install has no model provider (the default `lobu run` ships none). The proxy
-  proves the pushed context carries the governed correction and the baseline
-  does not; running it against a real model (wire one via
-  `lobu agents inference-providers`) is the honest next step.
+  no server changes, nothing copied into Lobu. `eval.ts` checks those live
+  inputs without invoking a model.
+- The deterministic context check and synthetic-provider runtime fixture cover
+  context contents and isolation. A live-model quality evaluation remains
+  separate work; configuring a model provider does not change this command.
 - The warehouse is deterministic — re-running `bun run seed:warehouse` resets it
   to the approved state (and clears any simulated drift).
 - The context-layer seed is idempotent: it refuses to double-seed. To reseed,

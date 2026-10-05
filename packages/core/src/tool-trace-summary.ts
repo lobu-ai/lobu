@@ -9,7 +9,7 @@
  *
  * Pure by construction: no Node builtin, no `@lobu/core` barrel import. The
  * isolate lane bundles this into its guest, under the same standing rule as
- * `agent-tooling.ts` and `tool-policy.ts`.
+ * `agent-tooling.ts` and `shell-safety.ts`.
  */
 
 /** Retrieval evidence a client can join back to the agent's answer. */

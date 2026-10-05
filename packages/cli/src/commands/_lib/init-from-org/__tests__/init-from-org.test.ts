@@ -95,7 +95,6 @@ function fullOrgRoutes(): Record<
         allowedDomains: ["github.com", ".github.com"],
         deniedDomains: ["evil.com"],
       },
-      toolsConfig: { allowedTools: ["Read"], strictMode: true },
       guardrails: ["secret-scan"],
       nixConfig: { packages: ["jq", "ffmpeg"] },
       skillsConfig: {
@@ -351,10 +350,7 @@ describe("lobu init --from-org", () => {
       allowedDomains: ["github.com", ".github.com"],
       deniedDomains: ["evil.com"],
     });
-    expect(agent?.settings.toolsConfig).toEqual({
-      allowedTools: ["Read"],
-      strictMode: true,
-    });
+    expect(agent?.settings).not.toHaveProperty("toolsConfig");
     expect(
       state.connectors.connections.find((c) => c.slug === "team-slack")
     ).toMatchObject({

@@ -136,7 +136,6 @@ export function entryFromAgentConfig(agent: AgentConfig): DeclaredAgentEntry {
     userMd: settings.userMd,
     identityMd: settings.identityMd,
     skillsConfig: settings.skillsConfig,
-    toolsConfig: settings.toolsConfig,
     guardrails: settings.guardrails,
     guardrailsInline: settings.guardrailsInline,
     sandboxId: settings.sandboxId,

@@ -347,26 +347,6 @@ function emitAgent(
     }
   }
 
-  // tools ← toolsConfig.
-  const tools = settings?.toolsConfig;
-  if (
-    tools?.allowedTools?.length ||
-    tools?.deniedTools?.length ||
-    tools?.strictMode !== undefined
-  ) {
-    const toolFields: string[] = [];
-    if (tools?.allowedTools?.length) {
-      toolFields.push(`allowed: ${emitValue(tools.allowedTools, 2)}`);
-    }
-    if (tools?.deniedTools?.length) {
-      toolFields.push(`denied: ${emitValue(tools.deniedTools, 2)}`);
-    }
-    if (tools?.strictMode !== undefined) {
-      toolFields.push(`strict: ${tools.strictMode}`);
-    }
-    fields.push(`tools: ${objectLiteral(toolFields, 1)}`);
-  }
-
   // guardrails ← guardrails[].
   if (settings?.guardrails?.length) {
     fields.push(`guardrails: ${emitValue(settings.guardrails, 1)}`);

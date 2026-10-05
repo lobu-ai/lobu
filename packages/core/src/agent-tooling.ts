@@ -8,7 +8,7 @@
  * importing the barrel is what made those packages unbundleable, not anything
  * in the tools themselves.
  *
- * Everything re-exported here is pure. Same standing rule as `tool-policy.ts`:
+ * Everything re-exported here is pure. Same standing rule as `shell-safety.ts`:
  * never grow a Node import or a root `@lobu/core` import in this module or the
  * modules it names, or the isolate lane loses its gateway tools with no
  * compile error to say so — `assertIsolateEligible` catches it at run time.

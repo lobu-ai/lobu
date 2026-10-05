@@ -93,7 +93,7 @@ interface McpFixture {
 }
 
 /** An MCP surface with one server publishing three tools and an instruction block. */
-function mcpFixture(options: { fail?: boolean; serverId?: string } = {}): McpFixture {
+function mcpFixture(options: { fail?: boolean; serverId?: string; empty?: boolean } = {}): McpFixture {
   const listed: McpFixture['listed'] = [];
   const configService = {
     getMcpStatus: async () => [
@@ -106,7 +106,7 @@ function mcpFixture(options: { fail?: boolean; serverId?: string } = {}): McpFix
       if (options.fail) throw new Error('upstream MCP is down');
       return {
         instructions: 'Use query_sdk before run_sdk.',
-        tools: [
+        tools: options.empty ? [] : [
           { name: 'query_sdk', description: 'Read data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'run_sdk', description: 'Write data', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
           { name: 'query_sql', inputSchema: undefined },
@@ -881,20 +881,16 @@ describe('agent turn producer', () => {
         `Current date: ${new Date().toISOString().slice(0, 10)}`
     );
     expect(envelope.turn.session_jsonl).toBe('');
-    // With no tool policy every workspace tool is admitted, bash with the
-    // default package-manager denylist and no allowlist.
+    // Standard workspace tools are present; fixed shell safety lives in the guest.
     const tools = envelope.turn.tools as {
       definitions: unknown[];
       media: string[];
       builtin: string[];
-      bash_policy: { allow_all: boolean; allow_prefixes: string[]; deny_prefixes: string[] };
     };
     expect(tools.definitions).toEqual([]);
     expect(tools.media).toEqual(['upload_file', 'generate_image', 'generate_audio']);
     expect(tools.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
-    expect(tools.bash_policy.allow_all).toBe(false);
-    expect(tools.bash_policy.allow_prefixes).toEqual([]);
-    expect(tools.bash_policy.deny_prefixes).toContain('pip install ');
+    expect(tools).not.toHaveProperty('bash_policy');
 
     // The credential rides OUTSIDE the turn so the poll can lift it onto the
     // response's `credentials` and the worker can conceal it before the guest
@@ -907,23 +903,6 @@ describe('agent turn producer', () => {
     expect(claims).toMatchObject({ runId: rows[0].id });
     expect(claims).not.toHaveProperty('executionMode');
     expect(JSON.stringify(envelope.turn)).not.toContain('lobu_secret_');
-  });
-
-  it('omits file-delivery instructions when upload_file is denied', async () => {
-    const org = await createTestOrganization();
-    const message = messageFor(org.id);
-    message.agentOptions = { ...message.agentOptions, disallowedTools: 'upload_file' };
-    await enqueueMessage(message, {
-      agentSettings: settingsStore,
-      catalog: catalogFor(claudeModule()),
-      gatewayUrl: GATEWAY_URL,
-    });
-    const [run] = await agentTurnRuns();
-    const turn = run.action_input.turn;
-    expect(turn.tools.media).toEqual(['generate_image', 'generate_audio']);
-    expect(turn.tools.builtin).toContain('write');
-    expect(turn.system_prompt).not.toContain('### Share Created Files');
-    expect(turn.system_prompt).not.toContain('call upload_file before the turn ends');
   });
 
   it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
@@ -1010,15 +989,11 @@ describe('agent turn producer', () => {
     expect(turn.skills).toEqual([{ name: 'frozen', content: 'Frozen instructions.' }]);
   });
 
-  it('does not advertise seeded inputs when a strict bash policy rejects cat', async () => {
+  it('advertises seeded inputs with the standard workspace tools', async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
     message.platformMetadata = {
       files: [{ id: 'art-doc', name: 'report.pdf', mimetype: 'application/pdf' }],
-    };
-    message.agentOptions = {
-      model: 'claude/claude-opus-4-8',
-      toolsConfig: { strictMode: true, allowedTools: ['Bash(git:*)'] },
     };
     await enqueueMessage(message, {
       agentSettings: settingsStore,
@@ -1029,9 +1004,9 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const turn = run.action_input.turn;
-    expect(turn.tools.builtin).toEqual(['bash']);
+    expect(turn.tools.builtin).toContain('read');
     expect(turn.message_files[0].data).toBe(Buffer.from('%PDF').toString('base64'));
-    expect(turn.system_prompt).not.toContain('/workspace/input');
+    expect(turn.system_prompt).toContain('/workspace/input');
   });
 
   it('hands the turn its tools, its one credential being a worker token both gateway routes accept', async () => {
@@ -1105,6 +1080,17 @@ describe('agent turn producer', () => {
     )).toBe(true);
   });
 
+  it('omits instructions from an MCP server with no tools', async () => {
+    const org = await createTestOrganization();
+    expect(await enqueueMessage(messageFor(org.id), {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture({ empty: true }).mcp, gatewayUrl: GATEWAY_URL,
+    })).toBeUndefined();
+    const [run] = await agentTurnRuns();
+    expect(run.action_input.turn.tools.definitions).toEqual([]);
+    expect(run.action_input.turn.system_prompt).not.toContain('Use query_sdk before run_sdk.');
+  });
+
   async function automationMessage(execution: 'window' | 'turn' = 'window') {
     const sql = getTestDb();
     const org = await createTestOrganization();
@@ -1131,22 +1117,18 @@ describe('agent turn producer', () => {
     };
   }
 
-  it.each([
-    { policy: { strictMode: true }, missing: 'query_sdk, run_sdk' },
-    { policy: { strictMode: true, allowedTools: ['query_sdk'] }, missing: 'run_sdk' },
-    { policy: { allowedTools: ['*'], deniedTools: ['run_sdk'] }, missing: 'run_sdk' },
-  ])('rejects a window before inference when policy excludes $missing', async ({ policy, missing }) => {
+  it.each(['toolsConfig', 'allowedTools', 'disallowedTools'])('rejects retired %s settings before inference', async (key) => {
     const message = await automationMessage();
-    message.agentOptions = { ...message.agentOptions, toolsConfig: policy };
+    message.agentOptions = { ...message.agentOptions, [key]: {} };
     const result = await enqueueMessage(message, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
     });
-    expect(result).toEqual({ error: expect.stringContaining(`tool policy excludes ${missing}`) });
+    expect(result).toEqual({ error: expect.stringContaining(`${key} was removed`) });
     expect(await agentTurnRuns()).toEqual([]);
   });
 
-  it('distinguishes failed Automation discovery from excluded tools', async () => {
+  it('reports failed Automation tool discovery', async () => {
     const result = await enqueueMessage(await automationMessage(), {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture({ fail: true }).mcp, gatewayUrl: GATEWAY_URL,
@@ -1164,91 +1146,29 @@ describe('agent turn producer', () => {
     expect(await agentTurnRuns()).toEqual([]);
   });
 
-  it.each(['ordinary', 'turn'] as const)('preserves intentional tool-free %s execution', async (kind) => {
+  it.each(['ordinary', 'turn'] as const)('provides standard tools for %s execution', async (kind) => {
     const message = kind === 'turn' ? await automationMessage('turn') : messageFor((await createTestOrganization()).id);
-    message.agentOptions = { ...message.agentOptions, toolsConfig: { strictMode: true } };
     expect(await enqueueMessage(message, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
     })).toBeUndefined();
     const [run] = await agentTurnRuns();
-    expect(run.action_input.turn.tools).toBeUndefined();
+    expect(run.action_input.turn.tools.definitions.map((tool: { name: string }) => tool.name)).toEqual(['query_sdk', 'run_sdk', 'query_sql']);
+    expect(run.action_input.turn.tools.builtin).toContain('read');
+    expect(run.action_input.turn.tools.builtin).toContain('bash');
   });
 
-  it('admits a window with explicitly eligible memory tools', async () => {
+  it('admits a window with discovered memory tools', async () => {
     const message = await automationMessage();
-    message.agentOptions = { ...message.agentOptions, toolsConfig: { strictMode: true, allowedTools: ['query_sdk', 'run_sdk'] } };
     expect(await enqueueMessage(message, {
       agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
       mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
     })).toBeUndefined();
     const [run] = await agentTurnRuns();
-    expect(run.action_input.turn.tools.definitions.map((tool: { name: string }) => tool.name)).toEqual(['query_sdk', 'run_sdk']);
+    expect(run.action_input.turn.tools.definitions.map((tool: { name: string }) => tool.name)).toEqual(['query_sdk', 'run_sdk', 'query_sql']);
   });
 
-  it('filters the tools through the agent tool policy', async () => {
-    const org = await createTestOrganization();
-    const message = messageFor(org.id);
-    message.agentOptions = {
-      model: 'claude/claude-opus-4-8',
-      toolsConfig: { strictMode: true, allowedTools: ['query_*'] },
-      disallowedTools: 'query_sql',
-    };
-    await enqueueMessage(message, {
-      agentSettings: settingsStore,
-      catalog: catalogFor(tokenEchoingModule()),
-      mcp: mcpFixture().mcp,
-      gatewayUrl: GATEWAY_URL,
-    });
-
-    const [run] = await agentTurnRuns();
-    const turn = run.action_input.turn as {
-      tools?: { definitions: Array<{ name: string }>; builtin?: string[]; bash_policy?: unknown };
-      system_prompt: string;
-    };
-    expect(turn.tools?.definitions.map((tool) => tool.name)).toEqual(['query_sdk']);
-    // Strict mode admits only what the allowlist names, and `query_*` names
-    // no workspace tool — so there is no workspace, no bash policy to carry,
-    // and no workspace section in the prompt.
-    expect(turn.tools?.builtin).toBeUndefined();
-    expect(turn.tools?.bash_policy).toBeUndefined();
-    expect(turn.system_prompt).not.toContain('## Workspace');
-  });
-
-  it('carries the bash prefix policy with the workspace, and drops the tools the policy denies', async () => {
-    const org = await createTestOrganization();
-    const message = messageFor(org.id);
-    message.agentOptions = {
-      model: 'claude/claude-opus-4-8',
-      toolsConfig: { allowedTools: ['Bash(git:*)', 'Bash(ls:*)'], deniedTools: ['write', 'Bash(rm:*)'] },
-    };
-    await enqueueMessage(message, {
-      agentSettings: settingsStore,
-      catalog: catalogFor(tokenEchoingModule()),
-      gatewayUrl: GATEWAY_URL,
-    });
-
-    const [run] = await agentTurnRuns();
-    const turn = run.action_input.turn as {
-      tools?: {
-        definitions: unknown[];
-        builtin: string[];
-        bash_policy: { allow_all: boolean; allow_prefixes: string[]; deny_prefixes: string[] };
-      };
-    };
-    expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
-    // No MCP surface wired, yet the workspace still ships: the two halves of
-    // the manifest are independent.
-    expect(turn.tools?.definitions).toEqual([]);
-    // `write` is denied; `edit` is a different tool and stays.
-    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'edit', 'grep', 'ls', 'find']);
-    expect(turn.tools?.bash_policy.allow_all).toBe(false);
-    expect(turn.tools?.bash_policy.allow_prefixes).toEqual(['git', 'ls']);
-    expect(turn.tools?.bash_policy.deny_prefixes.slice(-1)).toEqual(['rm']);
-    expect(turn.tools?.bash_policy.deny_prefixes).toContain('npm install ');
-  });
-
-  it('hands the turn the conversation tools its policy admits, addressed at this conversation', async () => {
+  it('hands the turn standard conversation tools addressed at this conversation', async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
     await enqueueMessage(message, {
@@ -1262,7 +1182,7 @@ describe('agent turn producer', () => {
       tools?: { gateway?: string[]; conversation?: Record<string, string> };
     };
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
-    // With no policy every conversation tool is admitted. Names only: the
+    // Standard conversation tools travel as names only: the
     // routing and the schemas live in `@lobu/plugin-conversations`, which the
     // guest runs directly, so nothing about the tools crosses this wire.
     expect(turn.tools?.gateway).toEqual([
@@ -1286,27 +1206,7 @@ describe('agent turn producer', () => {
     });
   });
 
-  it('denies a conversation tool the agent policy denies, on the same patterns the subprocess lane reads', async () => {
-    const org = await createTestOrganization();
-    const message = messageFor(org.id);
-    message.agentOptions = {
-      model: 'claude/claude-opus-4-8',
-      toolsConfig: { deniedTools: ['ask_user', 'send_message'] },
-    };
-    await enqueueMessage(message, {
-      agentSettings: settingsStore,
-      catalog: catalogFor(tokenEchoingModule()),
-      gatewayUrl: GATEWAY_URL,
-    });
-
-    const [run] = await agentTurnRuns();
-    const turn = run.action_input.turn as { tools?: { gateway?: string[] } };
-    expect(turn.tools?.gateway).not.toContain('ask_user');
-    expect(turn.tools?.gateway).not.toContain('send_message');
-    expect(turn.tools?.gateway).toContain('suggest_actions');
-  });
-
-  it('runs the turn without tools when it cannot honour them, and still enqueues it', async () => {
+  it('retains workspace tools when MCP is unavailable', async () => {
     const org = await createTestOrganization();
     const base = {
       agentSettings: settingsStore,
@@ -1314,15 +1214,13 @@ describe('agent turn producer', () => {
       gatewayUrl: GATEWAY_URL,
     };
     let produced = 0;
-    const toolless = async () => {
+    const standardToolsOnly = async () => {
       const rows = await agentTurnRuns();
       produced += 1;
       expect(rows).toHaveLength(produced);
       const turn = rows[produced - 1].action_input.turn as { tools?: { definitions: unknown[]; builtin?: string[] } };
-      // The workspace tools are the policy's business, not the MCP surface's:
-      // they ship regardless, with no MCP definitions beside them.
-      // No tools means no gateway URL for the memory hooks either, so the
-      // envelope promises no memory it cannot deliver.
+      // Workspace tools ship independently of MCP discovery.
+      // No memory server is configured, so recall/capture hooks stay absent.
       expect((turn as { memory?: unknown }).memory).toBeUndefined();
       expect(turn.tools?.definitions).toEqual([]);
       expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
@@ -1330,27 +1228,7 @@ describe('agent turn producer', () => {
 
     // No MCP surface wired.
     await enqueueMessage(messageFor(org.id), base);
-    await toolless();
-
-    // An unrecognised `toolsConfig` key must not cost the agent its tools. The
-    // retired `mcpExposure: 'cli'` setting is what made this worth asserting:
-    // its only implementation lived in the deleted worker package, and a
-    // producer that treated an unknown presentation preference as "no tools"
-    // would disable a working agent over a field it simply does not read.
-    const extra = messageFor(org.id);
-    extra.agentOptions = {
-      model: 'claude/claude-opus-4-8',
-      // A key the producer does not read at all — `mcpExposure` was exactly
-      // this shape once its implementation was deleted. Not `strictMode`,
-      // which really does filter the tool list.
-      toolsConfig: { mcpPresentation: 'shell' } as never,
-    };
-    await enqueueMessage(extra, { ...base, mcp: mcpFixture().mcp });
-    produced += 1;
-    const extraRows = await agentTurnRuns();
-    expect(extraRows).toHaveLength(produced);
-    const extraTurn = extraRows[produced - 1].action_input.turn as { tools?: { definitions?: Array<{ name: string }> } };
-    expect(extraTurn.tools?.definitions?.map((tool) => tool.name)).toContain('query_sdk');
+    await standardToolsOnly();
 
     // A separate placeholder cannot enforce the signed capture policy.
     const before = (await agentTurnRuns()).length;
@@ -1361,9 +1239,9 @@ describe('agent turn producer', () => {
     });
     expect(await agentTurnRuns()).toHaveLength(before);
 
-    // Discovery failed: nothing to hand the turn, but the turn itself runs.
+    // Discovery failed: the turn still receives the standard tools.
     await enqueueMessage(messageFor(org.id), { ...base, mcp: mcpFixture({ fail: true }).mcp });
-    await toolless();
+    await standardToolsOnly();
   });
 
   it('uses provider-owned metadata for a model missing from the bundled registry', async () => {
@@ -2112,7 +1990,6 @@ describe('agent turn producer', () => {
     ['conversation', { conversationId: 'other-conversation' }],
     ['user', { userId: 'other-user' }],
     ['model', { agentOptions: { model: 'claude/different-model' } }],
-    ['tools', { agentOptions: { model: 'claude/claude-opus-4-8', disallowedTools: ['write'] } }],
     ['routing', { channelId: 'different-channel' }],
     ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
     ['packages', { nixConfig: { packages: ['git'] } }],
@@ -2854,7 +2731,7 @@ describe('agent turn producer', () => {
     const sql = getTestDb();
     const message = kind === 'model' ? messageFor((await createTestOrganization()).id) : await automationMessage();
     const organizationId = message.organizationId!;
-    message.agentOptions = kind === 'model' ? {} : { ...message.agentOptions, toolsConfig: { strictMode: true } };
+    message.agentOptions = kind === 'model' ? {} : message.agentOptions;
     const deploymentName = 'agent-turn-unrunnable-fixture';
 
     // Exactly the sequence `handleMessage` runs: arm the liveness marker, then
@@ -2888,7 +2765,7 @@ describe('agent turn producer', () => {
       gatewayUrl: GATEWAY_URL,
     });
     expect(unrunnable).toEqual(kind === 'model' ? AgentErrorCode.NO_MODEL_CONFIGURED
-      : { error: expect.stringContaining('tool policy excludes query_sdk, run_sdk') });
+      : { error: expect.stringContaining('required tools are unavailable') });
     expect(await agentTurnRuns()).toHaveLength(0);
 
     // The consumer discharges the marker it armed, with the producer's reason.
@@ -2912,7 +2789,7 @@ describe('agent turn producer', () => {
       ...(kind === 'model' ? { errorCode: AgentErrorCode.NO_MODEL_CONFIGURED } : {}),
     });
     expect(delivered[0]!.errorCode).not.toBe(AgentErrorCode.WORKER_UNRESPONSIVE);
-    expect(String(delivered[0]!.error)).toContain(kind === 'model' ? 'model' : 'tool policy excludes');
+    expect(String(delivered[0]!.error)).toContain(kind === 'model' ? 'model' : 'required tools are unavailable');
   });
 
   it('stays silent when no turn is owed a reply at all', async () => {

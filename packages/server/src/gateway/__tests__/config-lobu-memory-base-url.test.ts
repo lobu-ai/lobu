@@ -11,6 +11,8 @@ import { McpConfigService } from "../auth/mcp/config-service.js";
 import { buildGatewayConfig } from "../config/index.js";
 
 const ORIGINAL_ENV = {
+  ALLOWED_TOOLS: process.env.ALLOWED_TOOLS,
+  DISALLOWED_TOOLS: process.env.DISALLOWED_TOOLS,
   DATABASE_URL: process.env.DATABASE_URL,
   DISPATCHER_URL: process.env.DISPATCHER_URL,
   PORT: process.env.PORT,
@@ -93,6 +95,13 @@ describe("McpConfigService lobu-memory upstream", () => {
 });
 
 describe("buildGatewayConfig embedded overrides", () => {
+  test.each(["ALLOWED_TOOLS", "DISALLOWED_TOOLS"])("rejects retired %s instead of ignoring a restriction", (key) => {
+    delete process.env.ALLOWED_TOOLS;
+    delete process.env.DISALLOWED_TOOLS;
+    process.env[key] = "read";
+    expect(() => buildGatewayConfig()).toThrow(`${key} was removed`);
+  });
+
   test("normalizes PUBLIC_GATEWAY_URL for webhook and artifact URLs", () => {
     process.env.DATABASE_URL = "postgres://localhost/lobu";
     process.env.PUBLIC_GATEWAY_URL = "https://public.example.com";

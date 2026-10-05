@@ -52,7 +52,6 @@ const AGENT_SETTINGS_FIELD_POLICY = {
   userMd: "post-load",
   identityMd: "post-load",
   skillsConfig: "post-load",
-  toolsConfig: "mapped",
   guardrails: "mapped",
   guardrailsInline: "unsupported",
   sandboxId: "unsupported",
@@ -341,19 +340,6 @@ function mapAgent(
     };
   }
 
-  if (agent.tools) {
-    const toolsConfig: NonNullable<AgentSettings["toolsConfig"]> = {};
-    if (agent.tools.allowed?.length) {
-      toolsConfig.allowedTools = [...new Set(agent.tools.allowed)];
-    }
-    if (agent.tools.denied?.length) {
-      toolsConfig.deniedTools = [...new Set(agent.tools.denied)];
-    }
-    if (agent.tools.strict !== undefined)
-      toolsConfig.strictMode = agent.tools.strict;
-    if (Object.keys(toolsConfig).length > 0) settings.toolsConfig = toolsConfig;
-  }
-
   if (agent.guardrails?.length) {
     settings.guardrails = [...new Set(agent.guardrails)];
   }
@@ -406,7 +392,6 @@ function mapAgent(
     userMd: settings.userMd,
     identityMd: settings.identityMd,
     skillsConfig: settings.skillsConfig,
-    toolsConfig: settings.toolsConfig,
     guardrails: settings.guardrails,
     guardrailsInline: settings.guardrailsInline,
     sandboxId: settings.sandboxId,

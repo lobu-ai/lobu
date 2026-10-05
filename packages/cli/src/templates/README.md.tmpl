@@ -46,7 +46,7 @@ Declare chat integrations as project-level `defineConnection(...)` entries in `l
 Worker execution is controlled by:
 
 - Install MCP-backed services as connectors so they inherit connection auth, approval, and audit semantics.
-- `defineAgent({ tools: { allowed, denied, strict } })` — configure tool visibility. Connector approvals are managed in Settings → Policies.
+- Action permissions and connector approvals are managed in Settings → Policies.
 - `defineAgent({ nixPackages })` — pulls binaries onto the `PATH` of the sandbox your agent's `bash` runs in. Shell commands execute in a remote sandbox provisioned per turn, not on the gateway host, so they are isolated from the machine running Lobu.
 
 ## Learn More

@@ -2040,6 +2040,9 @@ export function validateSettingsPatch(updates: unknown): string | null {
 	if (updates === null || typeof updates !== "object" || Array.isArray(updates)) {
 		return "request body must be a JSON object";
 	}
+	if (Object.hasOwn(updates, "toolsConfig")) {
+		return "toolsConfig was removed. Configure action permissions in Settings → Policies.";
+	}
 	const properties = AgentSettingsStoredSchema.properties as Record<
 		string,
 		Parameters<typeof Value.Check>[0]

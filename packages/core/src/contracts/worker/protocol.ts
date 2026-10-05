@@ -588,7 +588,7 @@ export const AgentTurnPollPayloadSchema = Type.Object({
           })
         ),
         /**
-         * The workspace tools the agent's tool policy admits. They run against
+         * The workspace tools available for this turn. They run against
          * a per-turn in-memory filesystem inside the isolate: local `bash` is
          * just-bash, the rest are pi's file tools over the same filesystem.
          * Absent or empty → no workspace tools.
@@ -616,16 +616,8 @@ export const AgentTurnPollPayloadSchema = Type.Object({
         remote_runtime: Type.Optional(
           Type.Object({ provider_id: Type.String({ minLength: 1 }) })
         ),
-        /** The agent's bash prefix policy, enforced before a command runs. */
-        bash_policy: Type.Optional(
-          Type.Object({
-            allow_all: Type.Boolean(),
-            allow_prefixes: Type.Array(Type.String()),
-            deny_prefixes: Type.Array(Type.String()),
-          })
-        ),
         /**
-         * The gateway tools the agent's tool policy admits, by NAME only —
+         * The gateway tools available for this turn, by NAME only —
          * `ask_user`, `send_message`, `suggest_actions` and the rest of
          * `@lobu/plugin-conversations`. The guest runs that package's own
          * implementation, so the route, the request body and the schema live
@@ -637,7 +629,7 @@ export const AgentTurnPollPayloadSchema = Type.Object({
          */
         gateway: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
         /**
-         * The media tools the agent's tool policy admits, by NAME only —
+         * The media tools available for this turn, by NAME only —
          * `upload_file`, `generate_image`, `generate_audio` from
          * `@lobu/plugin-media`. Same contract as `gateway` above: the guest
          * runs that package's own implementation, so the routes and schemas

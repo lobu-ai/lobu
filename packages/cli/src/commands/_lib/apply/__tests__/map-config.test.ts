@@ -1359,14 +1359,9 @@ describe("mapProjectToDesiredState", () => {
     expect(net?.deniedDomains).toEqual(["evil.example.com"]);
   });
 
-  test("maps tools, guardrails, nix packages", () => {
+  test("maps guardrails and nix packages", () => {
     const agent = defineAgent({
       id: "a",
-      tools: {
-        allowed: ["Bash", "Bash"],
-        denied: ["Delete"],
-        strict: true,
-      },
       guardrails: ["secret-scan", "secret-scan", "pii-scan"],
       nixPackages: ["ffmpeg", "ffmpeg", "python311"],
     });
@@ -1374,11 +1369,6 @@ describe("mapProjectToDesiredState", () => {
       defineConfig({ agents: [agent] }),
       env
     ).agents[0]?.settings;
-    expect(settings?.toolsConfig).toEqual({
-      allowedTools: ["Bash"],
-      deniedTools: ["Delete"],
-      strictMode: true,
-    });
     expect(settings?.guardrails).toEqual(["secret-scan", "pii-scan"]);
     expect(settings?.nixConfig).toEqual({ packages: ["ffmpeg", "python311"] });
   });

@@ -45,11 +45,11 @@
       "import": "./dist/tool-trace-summary.js",
       "require": "./dist/tool-trace-summary.js"
     },
-    "./tool-policy": {
-      "types": "./dist/tool-policy.d.ts",
-      "bun": "./src/tool-policy.ts",
-      "import": "./dist/tool-policy.js",
-      "require": "./dist/tool-policy.js"
+    "./shell-safety": {
+      "types": "./dist/shell-safety.d.ts",
+      "bun": "./src/shell-safety.ts",
+      "import": "./dist/shell-safety.js",
+      "require": "./dist/shell-safety.js"
     },
     "./memory-flush": {
       "types": "./dist/memory-flush.d.ts",

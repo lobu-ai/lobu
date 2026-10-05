@@ -110,10 +110,6 @@ describe("Lobu Team configuration", () => {
     expect(digest?.agent).toMatchObject({
       id: "product-ops",
       providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
-      tools: {
-        allowed: [],
-        strict: true,
-      },
     });
     expect(digest?.executor).toMatchObject({
       kind: "scriptSource",

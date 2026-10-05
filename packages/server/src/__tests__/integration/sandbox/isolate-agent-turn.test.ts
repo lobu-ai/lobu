@@ -823,7 +823,6 @@ describe("agent turn on the isolate lane", () => {
 					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
 					definitions: [],
 					builtin: ["bash", "read", "write", "ls", "find"],
-					bashPolicy: { allowAll: false, allowPrefixes: [], denyPrefixes: ["rm "] },
 				},
 			}),
 		);
@@ -866,7 +865,6 @@ describe("agent turn on the isolate lane", () => {
 					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
 					definitions: [],
 					builtin: ["bash", "read", "ls"],
-					bashPolicy: { allowAll: false, allowPrefixes: [], denyPrefixes: ["rm "] },
 				},
 			}),
 		);
@@ -960,8 +958,7 @@ describe("agent turn on the isolate lane", () => {
 				tools: {
 					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
 					definitions: [],
-					builtin: ["bash"],
-					bashPolicy: { allowAll: false, allowPrefixes: ["git "], denyPrefixes: [] },
+					builtin: ["ls"],
 				},
 			}),
 		);
@@ -998,40 +995,6 @@ describe("agent turn on the isolate lane", () => {
 			{
 				onRuntimeExec: async () => ({ status: 200, stdout: "", exitCode: 0 }),
 			},
-		);
-
-		const sent = JSON.stringify(
-			(JSON.parse(hits[0]?.body ?? "{}") as { messages?: unknown }).messages,
-		);
-		expect(sent).toContain("report.csv");
-		expect(sent).toContain("cannot open");
-		expect(sent).not.toContain("/workspace/input/report.csv");
-	}, 120_000);
-
-	it("does not offer a workspace path when bash is present but its policy forbids reading", async () => {
-		hits = [];
-		toolScript = [];
-		armFirstDeltaGate();
-		// `bash` IS admitted, so a tool-name check would call this readable. But
-		// the allowlist admits only `echo`, so no seeded file can actually be
-		// opened, and the prompt must not claim otherwise.
-		await runTurn(
-			turnJob({
-				userMessage: "summarize this",
-				files: [
-					{
-						name: "report.csv",
-						mimeType: "text/csv",
-						data: Buffer.from("a,b\n1,2\n").toString("base64"),
-					},
-				],
-				tools: {
-					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
-					definitions: [],
-					builtin: ["bash"],
-					bashPolicy: { allowAll: false, allowPrefixes: ["echo "], denyPrefixes: [] },
-				},
-			}),
 		);
 
 		const sent = JSON.stringify(
@@ -2263,10 +2226,10 @@ describe("agent turn on the isolate lane", () => {
 		}
 	}, 120_000);
 
-	it("enforces the bash policy inside the guest and starts every turn from an empty workspace", async () => {
+	it("blocks package installation inside the guest and starts every turn from an empty workspace", async () => {
 		hits = [];
 		toolScript = [
-			{ id: "toolu_b2", name: "bash", input: { command: "rm -rf /workspace" } },
+			{ id: "toolu_b2", name: "bash", input: { command: "pip install requests" } },
 			{ id: "toolu_l1", name: "ls", input: {} },
 		];
 		armFirstDeltaGate();
@@ -2276,13 +2239,12 @@ describe("agent turn on the isolate lane", () => {
 					gatewayUrl: `http://127.0.0.1:${port}/lobu`,
 					definitions: [],
 					builtin: ["bash", "ls"],
-					bashPolicy: { allowAll: false, allowPrefixes: [], denyPrefixes: ["rm "] },
 				},
 			}),
 		);
 		const ends = run.events.filter((e) => e.type === "tool_call_end") as Array<{ name: string; isError: boolean; output: string }>;
 		expect(ends[0]).toMatchObject({ name: "bash", isError: true });
-		expect(ends[0]?.output).toContain("Bash command denied by policy");
+		expect(ends[0]?.output).toContain("DIRECT PACKAGE INSTALL BLOCKED");
 		// The previous test wrote notes.txt; this turn's workspace never saw it.
 		expect(ends[1]).toEqual({ type: "tool_call_end", toolCallId: "toolu_l1", name: "ls", isError: false, output: "(empty directory)" });
 	}, 120_000);

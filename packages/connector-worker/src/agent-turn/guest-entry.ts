@@ -24,7 +24,6 @@ import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
-import { enforceBashCommandPolicy } from '@lobu/core/tool-policy';
 import { isRetrievalTool, summarizeToolTrace } from '@lobu/core/tool-trace-summary';
 import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
 import { MAX_TOOL_CALLS_PER_TURN } from './types.js';
@@ -138,7 +137,7 @@ function buildTools(
   // the host; file tools stay on the in-memory workspace.
   const remote = tools.remoteRuntime && runtimeExec ? { exec: runtimeExec } : undefined;
   const workspace: AgentWorkspace | null =
-    tools.builtin && tools.builtin.length > 0 ? createWorkspace(tools.builtin, tools.bashPolicy, remote) : null;
+    tools.builtin && tools.builtin.length > 0 ? createWorkspace(tools.builtin, remote) : null;
   const gateway =
     tools.gateway && tools.gateway.length > 0 && tools.conversation
       ? createGatewayTools(tools.gateway, {
@@ -172,18 +171,8 @@ function buildTools(
       details: {},
     }),
   }));
-  // `read` opens a seeded file directly. `bash` counts only when its command
-  // policy admits `cat`; a strict bash allowlist can expose the tool while
-  // still making every seeded file unreachable.
-  let bashCanRead = false;
-  if ((tools.builtin ?? []).includes('bash') && !tools.remoteRuntime) {
-    try {
-      if (tools.bashPolicy) enforceBashCommandPolicy('cat input/attachment', tools.bashPolicy);
-      bashCanRead = true;
-    } catch {
-      // The prompt must not advertise a path this turn cannot open.
-    }
-  }
+  // Remote bash cannot open the isolate's seeded files.
+  const bashCanRead = (tools.builtin ?? []).includes('bash') && !tools.remoteRuntime;
   const canReadFiles =
     workspace !== null && ((tools.builtin ?? []).includes('read') || bashCanRead);
   return {

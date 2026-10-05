@@ -11,6 +11,10 @@ installRouteTestMocks();
 const { validateSettingsPatch } = await import("../agent-routes.js");
 
 describe("validateSettingsPatch", () => {
+  test.each([{}, null, { strictMode: true }, { allowedTools: ["query_sdk"] }])("rejects removed tool settings (%j)", (toolsConfig) => {
+    expect(validateSettingsPatch({ toolsConfig })).toContain("toolsConfig was removed");
+  });
+
   test("accepts a correctly-typed patch", () => {
     expect(
       validateSettingsPatch({ verboseLogging: true, soulMd: "hi" })

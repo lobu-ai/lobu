@@ -33,25 +33,6 @@ const analyst = defineAgent({
 });
 
 /**
- * The eval's BASELINE agent — deliberately context-starved. `tools.strict` with
- * an empty `allowed` list rejects every tool call, so this agent CANNOT retrieve
- * business-event records or the metric-definition changelog. It answers only
- * from the message it is handed. This is what makes the live-agent A/B eval a
- * real isolation of the variable: the WITH arm (analyst + governed context in
- * the prompt) versus the WITHOUT arm (this agent, no context, no tools to fetch
- * it). Without this the baseline could just look the context up itself.
- */
-const baseline = defineAgent({
-  id: "baseline",
-  dir: ".",
-  name: "baseline",
-  description:
-    "Answers strictly from the information in the message. Has no access to " +
-    "business-event records, metric definitions, or any other stored context.",
-  tools: { allowed: [], strict: true },
-});
-
-/**
  * The warehouse connection, declared as config (config-as-constructor). `lobu
  * run` applies this: it installs the bundled `postgres` connector, creates an
  * authenticated, read-only connection to the fake Kelder warehouse, AND creates
@@ -318,7 +299,7 @@ export default defineConfig({
   orgName: "Kelder Coffee",
   orgDescription:
     "Fictional coffee-subscription company demonstrating Lobu as an org-level context layer",
-  agents: [analyst, baseline],
+  agents: [analyst],
   entities: [businessEvent, metricDefinition, verifiedQuery],
   authProfiles: [warehouseAuth],
   connections: [warehouse],

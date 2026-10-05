@@ -4,7 +4,7 @@
  * Split out of `types.ts` because this cluster is PURE: no import, no Node
  * builtin, no logger. That is what lets the isolate guest reach it through
  * `@lobu/core/agent-tooling` while `types.ts` itself keeps pulling the rest of
- * core in. Same rule as `tool-policy.ts`: never grow a Node import or a root
+ * core in. Same rule as `shell-safety.ts`: never grow a Node import or a root
  * `@lobu/core` import here.
  */
 

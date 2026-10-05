@@ -23,10 +23,10 @@ import {
   DEFAULT_MAX_BYTES as MAX_BYTES, DEFAULT_MAX_LINES as MAX_LINES,
   formatSize, truncateHead, truncateLine, truncateTail,
 } from '@mariozechner/pi-coding-agent';
-import { enforceBashCommandPolicy, isDirectPackageInstallCommand } from '@lobu/core/tool-policy';
+import { isDirectPackageInstallCommand } from '@lobu/core/shell-safety';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { Bash, InMemoryFs } from 'just-bash/browser';
-import type { AgentTurnBashPolicy, AgentTurnBuiltinTool, RuntimeExecRequest, RuntimeExecResult } from './types.js';
+import type { AgentTurnBuiltinTool, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 
 /** Where a turn's files live; also the shell's working directory. */
 export const WORKSPACE_ROOT = '/workspace';
@@ -279,7 +279,6 @@ async function runRemoteBash(remote: RemoteRuntime, command: string, timeout: nu
  */
 export function createWorkspace(
   names: readonly AgentTurnBuiltinTool[],
-  bashPolicy?: AgentTurnBashPolicy,
   remote?: RemoteRuntime
 ): AgentWorkspace {
   const fs = new InMemoryFs();
@@ -417,7 +416,6 @@ export function createWorkspace(
       execute: async (_id, args) => {
         const command = requireString(args, 'command');
         const timeout = optionalNumber(args, 'timeout');
-        if (bashPolicy) enforceBashCommandPolicy(command, bashPolicy);
         if (isDirectPackageInstallCommand(command)) {
           throw new Error(
             remote
