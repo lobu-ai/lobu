@@ -220,9 +220,14 @@ describe("connection-scoped MCP catalog", () => {
 			expect((await picker.json()).connector_operations).toMatchObject([{
 				operation_key: `${KEY}::private_write`,
 			}]);
-			const saved = await app.request(path, {
+			const orgCollection = path.endsWith("write-permissions");
+			const writePath = orgCollection ? `${path}/connector-actions` : path;
+			const snapshot = orgCollection ? await (await app.request(writePath, { headers }, env)).json() : null;
+			const saved = await app.request(writePath, {
 				method: "PUT", headers,
-				body: JSON.stringify({ resource_class: "connector_action", operation_key: `${KEY}::private_write`, effects: { execute: "approval" } }),
+				body: JSON.stringify(orgCollection
+					? { revision: snapshot.revision, rules: [{ operation_key: `${KEY}::private_write`, effect: "approval" }] }
+					: { resource_class: "connector_action", operation_key: `${KEY}::private_write`, effects: { execute: "approval" } }),
 			}, env);
 			expect(saved.status).toBe(200);
 		}

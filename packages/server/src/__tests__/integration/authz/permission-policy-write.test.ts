@@ -7,6 +7,7 @@ import {
 	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
+import { readConnectorPolicyCollection, replaceConnectorPolicyCollection } from "../../../http/connector-policy-collection";
 import { explainPermissionPolicy, permissionPolicyCatalog, writePermissionPolicy } from "../../../http/permission-policy-write";
 import type { Env } from "../../../index";
 import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
@@ -43,6 +44,8 @@ app.on(
 	writePermissionPolicy,
 );
 app.get("/api/:orgSlug/write-permissions/explain", mcpAuth, explainPermissionPolicy);
+app.get("/api/:orgSlug/write-permissions/connector-actions", mcpAuth, readConnectorPolicyCollection);
+app.put("/api/:orgSlug/write-permissions/connector-actions", mcpAuth, replaceConnectorPolicyCollection);
 const connectorPolicy = {
 	resource_class: "connector_action",
 	effects: { execute: "approval" },
@@ -83,6 +86,13 @@ function request(
 	);
 }
 
+async function orgRules(rules: Record<string, unknown>[]) {
+	const url = `http://localhost/api/${org.slug}/write-permissions/connector-actions`;
+	const headers = { Cookie: cookie, "Content-Type": "application/json", Origin: "http://localhost" };
+	const current = await (await app.fetch(new Request(url, { headers }), env)).json();
+	return app.fetch(new Request(url, { method: "PUT", headers, body: JSON.stringify({ revision: current.revision, rules }) }), env);
+}
+
 beforeAll(async () => {
 	await initWorkspaceProvider();
 });
@@ -106,10 +116,8 @@ beforeEach(async () => {
 });
 
 describe("permission policy HTTP writes", () => {
-	it.each([
-		undefined,
-		agentId,
-	])("requires a human session for connector policy writes and deletes (agent=%s)", async (agent) => {
+	it("requires a human session for agent connector restriction writes and deletes", async () => {
+		const agent = agentId;
 		expect((await request("PUT", connectorPolicy, { agent })).status).toBe(200);
 		for (const token of [oauth, pat]) {
 			const headers = { Authorization: `Bearer ${token}` };
@@ -148,6 +156,16 @@ describe("permission policy HTTP writes", () => {
 		).toEqual({ deleted: true });
 	});
 
+	it("rejects org connector writes through the single-rule path without changing saved rules", async () => {
+		expect((await orgRules([{ effect: "deny" }])).status).toBe(200);
+		for (const method of ["PUT", "DELETE"]) {
+			const response = await request(method, connectorPolicy);
+			expect(response.status).toBe(400);
+			expect((await response.json()).message).toContain("connector-actions");
+		}
+		expect((await listEntityApprovalPolicies(org.id, "connector_action"))[0].effects.execute).toBe("deny");
+	});
+
 	it("preserves OAuth admin access for other policy classes", async () => {
 		const headers = { Authorization: `Bearer ${oauth}` };
 		for (const resource_class of ["entity", "entity_schema", "agent_config"]) {
@@ -170,7 +188,7 @@ describe("permission policy HTTP writes", () => {
 
 	it("requires org membership and an owner/admin session", async () => {
 		expect(
-			(await request("PUT", connectorPolicy, { headers: {} })).status,
+			(await request("PUT", connectorPolicy, { agent: agentId, headers: {} })).status,
 		).toBe(401);
 		for (const role of ["member", "admin"]) {
 			const user = await createTestUser();
@@ -179,7 +197,7 @@ describe("permission policy HTTP writes", () => {
 			expect(
 				(
 					await request("PUT", connectorPolicy, {
-						headers: { Cookie: session.cookieHeader },
+						agent: agentId, headers: { Cookie: session.cookieHeader },
 					})
 				).status,
 			).toBe(role === "admin" ? 200 : 403);
@@ -189,7 +207,7 @@ describe("permission policy HTTP writes", () => {
 		expect(
 			(
 				await request("PUT", connectorPolicy, {
-					headers: { Cookie: session.cookieHeader },
+					agent: agentId, headers: { Cookie: session.cookieHeader },
 				})
 			).status,
 		).toBe(403);
@@ -198,10 +216,7 @@ describe("permission policy HTTP writes", () => {
 	it("keeps org floors binding after an agent override is written or removed", async () => {
 		expect(
 			(
-				await request("PUT", {
-					...connectorPolicy,
-					effects: { execute: "deny" },
-				})
+				await orgRules([{ effect: "deny" }])
 			).status,
 		).toBe(200);
 		expect(
@@ -232,10 +247,8 @@ describe("permission policy HTTP writes", () => {
 		expect(await resolve()).toBe("deny");
 	});
 
-	it.each([
-		undefined,
-		agentId,
-	])("rejects malformed updates/deletes without erasing rules (agent=%s)", async (agent) => {
+	it("rejects malformed agent restriction updates/deletes without erasing rules", async () => {
+		const agent = agentId;
 		expect((await request("PUT", connectorPolicy, { agent })).status).toBe(200);
 		for (const body of [
 			null,
@@ -375,7 +388,7 @@ describe("permission policy HTTP writes", () => {
 			qualifiedOperationKey("missing-connector", "classify"),
 		]) {
 			expect(
-				(await request("PUT", { ...connectorPolicy, operation_key: invalid }))
+				(await request("PUT", { ...connectorPolicy, operation_key: invalid }, { agent: agentId }))
 					.status,
 			).toBe(400);
 		}
@@ -385,7 +398,7 @@ describe("permission policy HTTP writes", () => {
 					...connectorPolicy,
 					operation_key: key,
 					effects: { execute: "deny" },
-				})
+				}, { agent: agentId })
 			).status,
 		).toBe(200);
 		const resolve = async (connectorKey: string) => (await resolveConnectorPolicy({
@@ -402,15 +415,15 @@ describe("permission policy HTTP writes", () => {
 			...connectorPolicy,
 			operation_key: qualifiedOperationKey("policy-fixture-a", "read"),
 			effects: { execute: "auto" },
-		})).status).toBe(200);
-		expect((await request("DELETE", { resource_class: "connector_action", operation_key: "unqualified" })).status).toBe(400);
+		}, { agent: agentId })).status).toBe(200);
+		expect((await request("DELETE", { resource_class: "connector_action", operation_key: "unqualified" }, { agent: agentId })).status).toBe(400);
 		await sql`UPDATE connector_definitions SET actions_schema = '{}'::jsonb WHERE organization_id = ${org.id}`;
 		expect(
 			await (
 				await request("DELETE", {
 					resource_class: "connector_action",
 					operation_key: key,
-				})
+				}, { agent: agentId })
 			).json(),
 		).toEqual({ deleted: true });
 	});
@@ -420,17 +433,17 @@ describe("permission policy HTTP writes", () => {
 		const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-http" });
 		await getTestDb()`UPDATE connector_definitions SET actions_schema = '{"classify":{"name":"Classify","kind":"write"}}'::jsonb WHERE organization_id = ${org.id} AND key = 'policy-http'`;
 		const scope = { resource_class: "connector_action", connection_id: connection.id, operation_category: "write" };
-		const saved = await request("PUT", { ...scope, effects: { execute: "auto" } });
+		const saved = await orgRules([{ connection_id: connection.id, operation_category: "write", effect: "auto" }]);
 		expect(saved.status).toBe(200);
-		const { policy } = await saved.json();
-		expect(policy).toMatchObject({ ...scope, connector_key: null, operation_key: null });
+		expect((await saved.json()).rules).toEqual([{ connection_id: connection.id, operation_category: "write", effect: "auto" }]);
+		const policy = (await listEntityApprovalPolicies(org.id, "connector_action")).find(row => row.connectionId === connection.id)!;
 		const input = { connection_id: String(connection.id), operation_key: "classify", agent_id: agentId };
 		const inspect = () => request("GET", input, { explain: true });
 		expect(await (await inspect()).json()).toEqual({ effect: "auto", rule_ids: [policy.id], reason: "matched_rule" });
 		expect((await request("PUT", { ...scope, effects: { execute: "deny" } }, { agent: agentId })).status).toBe(200);
 		expect(await (await inspect()).json()).toMatchObject({ effect: "deny", reason: "matched_rule" });
 		expect(await (await request("DELETE", scope, { agent: agentId })).json()).toEqual({ deleted: true });
-		expect(await (await request("DELETE", scope)).json()).toEqual({ deleted: true });
+		expect((await orgRules([])).status).toBe(200);
 		expect(await (await inspect()).json()).toEqual({ effect: "approval", rule_ids: [], reason: "default_approval" });
 	});
 
@@ -456,24 +469,23 @@ describe("permission policy HTTP writes", () => {
 			{ connection_id: Number.MAX_SAFE_INTEGER + 1 },
 			{ operation_category: "invalid" },
 			{ effects: { execute: "disabled" } },
-		]) expect((await request("PUT", { ...connectorPolicy, ...scope })).status).toBe(400);
+		]) expect((await request("PUT", { ...connectorPolicy, ...scope }, { agent: agentId })).status).toBe(400);
 		for (const resource_class of ["entity", "entity_schema", "agent_config"]) {
 			for (const scope of [{ connection_id: connection.id }, { connector_key: "policy-scope-a" }, { operation_category: "read" }]) {
 				expect((await request("PUT", { resource_class, ...scope, effects: {} })).status).toBe(400);
 			}
 		}
 		const scope = { resource_class: "connector_action", connection_id: connection.id, operation_category: "read" };
-		expect((await request("PUT", { ...scope, effects: { execute: "deny" } })).status).toBe(200);
+		expect((await request("PUT", { ...scope, effects: { execute: "deny" } }, { agent: agentId })).status).toBe(200);
 		await getTestDb()`UPDATE connections SET deleted_at = NOW() WHERE organization_id = ${org.id} AND id = ${connection.id}`;
-		expect(await (await request("DELETE", scope)).json()).toEqual({ deleted: true });
+		expect(await (await request("DELETE", scope, { agent: agentId })).json()).toEqual({ deleted: true });
 	});
 
 	it("lets admins inspect Blocked operations without trusting caller-supplied classification", async () => {
 		await createTestConnectorDefinition({ key: "policy-inspect", name: "Inspect", organization_id: org.id });
 		const connection = await createTestConnection({ organization_id: org.id, connector_key: "policy-inspect" });
 		await getTestDb()`UPDATE connector_definitions SET actions_schema = '{"classify":{"name":"Classify","kind":"write"},"read":{"name":"Read","kind":"read","annotations":{"destructiveHint":false}}}'::jsonb WHERE organization_id = ${org.id} AND key = 'policy-inspect'`;
-		await request("PUT", { ...connectorPolicy, effects: { execute: "deny" } });
-		await request("PUT", { ...connectorPolicy, operation_category: "read", effects: { execute: "auto" } });
+		expect((await orgRules([{ effect: "deny" }, { operation_category: "read", effect: "auto" }])).status).toBe(200);
 		const query = { connection_id: String(connection.id), operation_key: "classify", kind: "read", destructive: "false" };
 		expect(await (await request("GET", query, { explain: true })).json()).toMatchObject({ effect: "deny" });
 		const catalog = await permissionPolicyCatalog(org.id);
