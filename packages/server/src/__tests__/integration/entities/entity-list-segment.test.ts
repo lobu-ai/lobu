@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addUserToOrganization,
+  createTestEntity,
   createTestOrganization,
   createTestSession,
   createTestUser,
@@ -16,6 +17,7 @@ import {
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { post } from '../../setup/test-helpers';
+import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 
 interface ListResult {
   entities?: Array<{ id: number; name: string }>;
@@ -54,11 +56,17 @@ const METRICS = {
       where: "setval('entity_list_segment_probe', 100) > 0",
       on: 'entity',
     },
+    member_probe: {
+      description: 'A predicate reading protected member metadata.',
+      where: "metadata->>'tier' = 'gold' AND EXISTS (SELECT 1 FROM entities protected WHERE protected.entity_type = '$member' AND protected.metadata->>'email' = 'private-member@test.example.com')",
+      on: 'entity',
+    },
   },
 };
 
 describe('entity list segment filter', () => {
   let owner: TestApiClient;
+  let member: TestApiClient;
   let orgSlug: string;
   let cookie: string;
 
@@ -74,6 +82,25 @@ describe('entity list segment filter', () => {
       userId: user.id,
       memberRole: 'owner',
     });
+    const ordinaryUser = await createTestUser({ email: 'segment-reader@test.example.com' });
+    await addUserToOrganization(ordinaryUser.id, org.id, 'member');
+    member = await TestApiClient.for({
+      organizationId: org.id,
+      userId: ordinaryUser.id,
+      memberRole: 'member',
+    });
+    await ensureMemberEntityType(org.id);
+    const protectedMember = await createTestEntity({
+      organization_id: org.id,
+      entity_type: '$member',
+      name: 'Private member',
+      created_by: user.id,
+    });
+    const sql = getTestDb();
+    await sql`
+      UPDATE entities SET metadata = ${sql.json({ email: 'private-member@test.example.com', role: 'owner' })}
+      WHERE id = ${protectedMember.id}
+    `;
 
     await owner.entity_schema.createType({
       slug: 'synthetic-vendor',
@@ -154,6 +181,15 @@ describe('entity list segment filter', () => {
     expect(page.entities?.map((e) => e.name)).toEqual(['vendor-c']);
   });
 
+  it('applies the metric SQL member-privacy boundary inside segment predicates', async () => {
+    const args = { entity_type: 'synthetic-vendor', segment: 'member_probe' };
+    const privileged = (await owner.entities.list(args)) as ListResult;
+    expect(privileged.metadata?.total_count).toBe(2);
+    const restricted = (await member.entities.list(args)) as ListResult;
+    expect(restricted.entities).toEqual([]);
+    expect(restricted.metadata?.total_count).toBe(0);
+  });
+
   it.each(['name', 'total_content'])('preserves predicate literals when sorting by %s', async (sort_by) => {
     const result = (await owner.entities.list({
       entity_type: 'synthetic-vendor', segment: 'literal_label', sort_by,
@@ -166,9 +202,13 @@ describe('entity list segment filter', () => {
     const sql = getTestDb();
     await sql`CREATE SEQUENCE entity_list_segment_probe START 41`;
     try {
-      await expect(owner.entities.list({
+      const { status, text } = await listOverHttp({
         entity_type: 'synthetic-vendor', segment: 'sequence_write',
-      })).rejects.toThrow();
+      });
+      expect(status).toBe(400);
+      const body = JSON.parse(text) as { error?: string; code?: string };
+      expect(body.code).toBe('VALIDATION');
+      expect(body.error).toContain('read-only transaction');
       const [sequence] = await sql`SELECT last_value, is_called FROM entity_list_segment_probe`;
       expect(Number(sequence.last_value)).toBe(41);
       expect(sequence.is_called).toBe(false);

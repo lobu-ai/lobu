@@ -7,7 +7,8 @@
  */
 
 import { deriveToolActorSource } from './apply-context';
-import { slugify } from "@lobu/core";
+import type { EntityMetrics } from "@lobu/connector-sdk";
+import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import type {
@@ -32,8 +33,9 @@ import {
 	automationIdFromPrincipalId,
 } from "../authz/entity-policy";
 import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
-import type { EntityMetrics } from "@lobu/connector-sdk";
 import type { Env } from "../index";
+import { entitySegmentPredicate } from "../metrics/compiler";
+import { isAdminOrOwnerRole, isInProcessSystemCall } from "../tools/access-control";
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
 import { entityLinkMatchSql } from "./content-search";
@@ -48,10 +50,9 @@ import {
 	type EntityTransactionHookContext,
 	getEntityHooks,
 } from "./entity-hooks";
-import { ToolUserError } from "./errors";
-import { validateAndScopeQuery } from "./execute-data-sources";
-import { entitySegmentPredicate } from "../metrics/compiler";
+import { ToolUserError, toolErrorHttpStatus } from "./errors";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
+import { validateAndScopeQuery } from "./execute-data-sources";
 import logger from "./logger";
 import { requireWriteAccess } from "./organization-access";
 import { RESERVED_ENTITY_TYPE_SLUGS } from "./reserved";
@@ -2390,11 +2391,23 @@ export async function listEntities(
   // Parsing and scoping do not prevent function side effects or expensive
   // expressions. Run authored predicates with the SQL tools' execution limits.
   const { totalCountResult, result } = segmentFilter
-    ? await sql.begin(async (tx) => {
-        await tx.unsafe('SET TRANSACTION READ ONLY');
-        await tx.unsafe("SET LOCAL statement_timeout = '5s'");
-        return fetchPage(tx);
-      })
+    ? await sql
+        .begin(async (tx) => {
+          await tx.unsafe('SET TRANSACTION READ ONLY');
+          await tx.unsafe("SET LOCAL statement_timeout = '5s'");
+          return fetchPage(tx);
+        })
+        .catch((error: unknown) => {
+          // A SQLSTATE fault (bad cast, read-only violation, timeout) is the
+          // authored predicate's, not the server's; anything else rethrows.
+          const code = classifyToolError({ pgCode: (error as { code?: string } | null)?.code });
+          if (code !== 'VALIDATION' && code !== 'UPSTREAM_TIMEOUT') throw error;
+          throw new ToolUserError(
+            `Segment '${filters.segment}' failed: ${getErrorMessage(error)}`,
+            toolErrorHttpStatus(code),
+            code,
+          );
+        })
     : await fetchPage(sql);
 
   const hasMore = result.length > limit;
@@ -2444,9 +2457,9 @@ function compileEntitySegmentFilter(
 			ctx.organizationId,
 			{
 				userId: ctx.userId ?? null,
-				// Author-driven predicate (schema config), like a declared metric;
-				// the list's own type gate already decided who may read this type.
-				excludeMemberEntities: false,
+				// Match metric SQL: the outer type gate does not authorize nested
+				// predicates to read protected member metadata.
+				excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
 			},
 		);
 	} catch (error) {
