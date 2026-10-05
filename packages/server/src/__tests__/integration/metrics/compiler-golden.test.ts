@@ -77,6 +77,29 @@ const TENANT_IDENTITY_METRICS = {
   },
 };
 
+// A synthetic type whose segment filters the RESOLVED entity, not the event:
+// `tier` lives on the entity's metadata and on no event.
+const ENTITY_SEGMENT_METRICS = {
+  eventSets: {
+    orders: {
+      by: 'alias',
+      field: "metadata->>'vendor'",
+      against: 'aliases',
+      where: "connector_key='synthetic-orders'",
+    },
+  },
+  segments: {
+    gold_tier: {
+      description: 'Vendors on the gold tier.',
+      where: "metadata->>'tier' = 'gold'",
+      on: 'entity',
+    },
+  },
+  measures: {
+    orders: { eventSet: 'orders', agg: 'count', description: 'Orders per vendor.' },
+  },
+};
+
 describe('metric compiler — alias resolver golden', () => {
   let orgId: string;
 
@@ -159,6 +182,77 @@ describe('metric compiler — alias resolver golden', () => {
     const byCur = Object.fromEntries(rows.map((r) => [r.currency as string, Number(r.charges)]));
     expect(byCur.GBP).toBe(2); // Claude.ai 78.35 + Anthropic 20.00 (dup collapsed)
     expect(byCur.USD).toBe(1);
+  });
+
+  it.each(['aliases', 'identities'])('applies an on:"entity" segment to entities resolved through %s', async (resolver) => {
+    const owner = await TestApiClient.for({
+      organizationId: orgId,
+      userId: (await createTestUser({ email: `metric-entity-seg-${resolver}@test.com` })).id,
+      memberRole: 'owner',
+    });
+    await owner.entity_schema.createType({
+      slug: `synthetic-vendor-${resolver}`,
+      name: 'Synthetic vendor',
+      metrics_config: ENTITY_SEGMENT_METRICS,
+    });
+    const sql = getTestDb();
+    const vendor = async (name: string, tier: string) => {
+      const created = await createTestEntity({
+        name: `${resolver}-${name}`,
+        entity_type: `synthetic-vendor-${resolver}`,
+        organization_id: orgId,
+      });
+      await sql`
+        UPDATE entities SET metadata = ${sql.json({ aliases: resolver === 'aliases' ? [`${resolver}-${name}`] : [], tier })}
+        WHERE id = ${created.id}
+      `;
+      if (resolver === 'identities') {
+        await sql`
+          INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, source_connector)
+          VALUES (${orgId}, ${created.id}, 'vendor', ${`${resolver}-${name}`}, 'connector:synthetic-orders')
+        `;
+      }
+      return created;
+    };
+    const gold = await vendor('vendor-gold', 'gold');
+    const silver = await vendor('vendor-silver', 'silver');
+    const order = (name: string) =>
+      createTestEvent({
+        organization_id: orgId,
+        content: 'order',
+        connector_key: 'synthetic-orders',
+        metadata: {
+          vendor: `${resolver}-${name}`,
+          ...(resolver === 'identities'
+            ? { [IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY]: { vendor: null } }
+            : {}),
+        },
+      });
+    await order('vendor-gold');
+    await order('vendor-gold');
+    await order('vendor-silver');
+
+    const all = await runMetric({
+      organizationId: orgId,
+      entityType: `synthetic-vendor-${resolver}`,
+      measure: 'orders',
+      excludeMemberEntities: false,
+    });
+    expect(Object.fromEntries(all.map((r) => [Number(r.entity_id), Number(r.orders)]))).toEqual({
+      [gold.id]: 2,
+      [silver.id]: 1,
+    });
+
+    const goldOnly = await runMetric({
+      organizationId: orgId,
+      entityType: `synthetic-vendor-${resolver}`,
+      measure: 'orders',
+      segment: 'gold_tier',
+      excludeMemberEntities: false,
+    });
+    expect(Object.fromEntries(goldOnly.map((r) => [Number(r.entity_id), Number(r.orders)]))).toEqual({
+      [gold.id]: 2,
+    });
   });
 
   it('matches equal identifiers only within the event tenant scope', async () => {
