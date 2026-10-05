@@ -393,7 +393,12 @@ export async function buildRuntimeComponents() {
       delete vendorManifest.scripts;
       delete vendorManifest.devDependencies;
       writeJson(vendorManifestPath, vendorManifest);
-      manifest.dependencies[name] = `file:vendor/${targetName}`;
+      // npm does not install transitive dependencies of a linked local package.
+      manifest.dependencies = {
+        ...vendorManifest.dependencies,
+        ...manifest.dependencies,
+        [name]: `file:vendor/${targetName}`,
+      };
       for (const [path, pkg] of vendorManifests) {
         if (pkg.dependencies?.[name])
           pkg.dependencies[name] = `file:../${targetName}`;

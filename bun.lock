@@ -36,7 +36,7 @@
         "marked": "^17.0.4",
         "marked-terminal": "^7.3.0",
         "open": "^10.1.0",
-        "ora": "^8.0.1",
+        "ora": "8.2.0",
         "postgres": "^3.4.7",
         "proper-lockfile": "4.1.2",
         "tar": "^7.4.3",
@@ -452,6 +452,7 @@
     },
   },
   "patchedDependencies": {
+    "ora@8.2.0": "patches/ora@8.2.0.patch",
     "postgres@3.4.9": "patches/postgres@3.4.9.patch",
   },
   "overrides": {

@@ -1,0 +1,12 @@
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -187,7 +187,7 @@ class Ora {
+ 	}
+ 
+ 	#updateLineCount() {
+-		const columns = this.#stream.columns ?? 80;
++		const columns = this.#stream.columns || 80;
+ 		const fullPrefixText = this.#getFullPrefixText(this.#prefixText, '-');
+ 		const fullSuffixText = this.#getFullSuffixText(this.#suffixText, '-');
+ 		const fullText = ' '.repeat(this.#indent) + fullPrefixText + '--' + this.#text + '--' + fullSuffixText;

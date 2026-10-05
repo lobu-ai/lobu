@@ -184,6 +184,12 @@ describe("publish loop (subprocess, stub npm)", () => {
       join(REPO_ROOT, "package.json"),
       join(scratch, "package.json")
     );
+    // The CLI publish manifest lists the vendored Ora's dependencies.
+    mkdirSync(join(scratch, "node_modules/ora"), { recursive: true });
+    copyFileSync(
+      join(REPO_ROOT, "node_modules/ora/package.json"),
+      join(scratch, "node_modules/ora/package.json")
+    );
     for (const entry of readdirSync(join(REPO_ROOT, "packages"))) {
       const source = join(REPO_ROOT, "packages", entry, "package.json");
       if (!existsSync(source)) continue;
