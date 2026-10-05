@@ -12,6 +12,7 @@
 
 import type { EventAttributionRule } from "@lobu/connector-sdk";
 import { getErrorMessage } from "@lobu/core";
+import type { GetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
 import type { AuthzScope } from "../authz/scope";
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
 import { getDb } from "../db/client";
@@ -34,6 +35,7 @@ type EventKinds = Record<
 
 interface SourceFeed {
   feedId: number;
+  connectionId: number;
   connectorKey: string;
   matchPaths: string[];
   eventKinds: EventKinds;
@@ -83,7 +85,7 @@ async function loadSourceFeeds(
   // Bounded config tables only. The same visibility compiler as every other
   // source read, so a caller never sees a feed of a connection they cannot see.
   const rows = (await sql.unsafe(
-    `SELECT f.id AS feed_id, c.connector_key, cd.feed_schema
+    `SELECT f.id AS feed_id, c.id AS connection_id, c.connector_key, cd.feed_schema
      FROM feeds f
      JOIN connections c ON c.id = f.connection_id
      JOIN LATERAL (
@@ -113,12 +115,14 @@ async function loadSourceFeeds(
     [scope.organizationId]
   )) as unknown as Array<{
     feed_id: number;
+    connection_id: number;
     connector_key: string;
     feed_schema: { matchPaths?: string[]; eventKinds?: EventKinds };
   }>;
   return rows
     .map((row) => ({
       feedId: Number(row.feed_id),
+      connectionId: Number(row.connection_id),
       connectorKey: row.connector_key,
       matchPaths: row.feed_schema.matchPaths ?? [],
       eventKinds: row.feed_schema.eventKinds ?? {},
@@ -134,20 +138,26 @@ async function loadSourceFeeds(
     );
 }
 
-/** One exact source cursor per stream; null means its first page. */
+/** One exact source cursor per stream, bound to its record and source selection. */
 function decodeCursor(
-  cursor: string | undefined
+  cursor: string | undefined,
+  request: string
 ): Record<string, string | null> | null {
   if (!cursor) return null;
+  let parsed;
   try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    if (
-      parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
-      Object.keys(parsed).length > 0 &&
-      Object.values(parsed).every((value) => value === null || (typeof value === "string" && value.length > 0))
-    ) return parsed;
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
   } catch {}
-  throw new ToolUserError("Invalid record activity cursor", 400);
+  if (
+    !parsed || typeof parsed.request !== "string" ||
+    !parsed.streams || typeof parsed.streams !== "object" || Array.isArray(parsed.streams) ||
+    Object.keys(parsed.streams).length === 0 ||
+    !Object.values(parsed.streams).every((value) => value === null || (typeof value === "string" && value.length > 0))
+  ) throw new ToolUserError("Invalid record activity cursor", 400);
+  if (parsed.request !== request) {
+    throw new ToolUserError("Record activity cursor does not match this record or filters. Restart from the first page.", 400);
+  }
+  return parsed.streams;
 }
 
 function occurredAt(row: Record<string, unknown>): string {
@@ -186,10 +196,21 @@ function activityStreams(feeds: SourceFeed[], type: string) {
 export async function readSourceRecordActivity(
   scope: AuthzScope,
   record: SourceRecordRef,
-  options: { limit: number; cursor?: string; signal?: AbortSignal; automationId?: number | null }
+  options: { limit: number; cursor?: string; signal?: AbortSignal; automationId?: number | null } &
+    Pick<GetContentArgs, "platforms" | "connection_ids" | "feed_ids">
 ) {
-  const feeds = await loadSourceFeeds(scope, record.type);
-  const resume = decodeCursor(options.cursor);
+  const platforms = [...new Set(options.platforms?.map((value) => value.trim()).filter(Boolean))].sort();
+  const connections = [...new Set(options.connection_ids)].sort((a, b) => a - b);
+  const selectedFeeds = [...new Set(options.feed_ids)].sort((a, b) => a - b);
+  const request = JSON.stringify([scope.organizationId, record.type, record.key, platforms, connections, selectedFeeds]);
+  const resume = decodeCursor(options.cursor, request);
+  // Discovery already enforces connection visibility. Selection only narrows
+  // that bounded config set and never starts a read for an excluded feed.
+  const feeds = (await loadSourceFeeds(scope, record.type)).filter((feed) =>
+    (!platforms.length || platforms.includes(feed.connectorKey)) &&
+    (!connections.length || connections.includes(feed.connectionId)) &&
+    (!selectedFeeds.length || selectedFeeds.includes(feed.feedId))
+  );
   const reads = activityStreams(feeds, record.type).flatMap((read) => {
     const cursor = resume ? resume[read.stream] : null;
     return cursor !== undefined ? [{ ...read, cursor }] : [];
@@ -310,7 +331,7 @@ export async function readSourceRecordActivity(
     events,
     failures,
     next_cursor: Object.keys(next).length
-      ? Buffer.from(JSON.stringify(next), "utf8").toString("base64url")
+      ? Buffer.from(JSON.stringify({ request, streams: next }), "utf8").toString("base64url")
       : undefined,
   };
 }

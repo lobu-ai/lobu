@@ -6095,7 +6095,7 @@ export type ReadKnowledgeData = {
      */
     entity_id?: number;
     /**
-     * A record of a source-backed entity type. Reads its events live from every read feed attributing to the type; stores nothing. Combine only with limit and record_cursor.
+     * A record of a source-backed entity type. Reads its events live from every read feed attributing to the type; stores nothing. Combine with platforms, connection_ids, feed_ids, limit, and record_cursor. Source filters intersect before reading; empty arrays mean no restriction.
      */
     record?: {
       /**
@@ -6108,7 +6108,7 @@ export type ReadKnowledgeData = {
       key: string;
     };
     /**
-     * record_cursor from the preceding record read, to continue it.
+     * record_cursor from the preceding record read, to continue the same record and source filters. Restart pagination when filters change.
      */
     record_cursor?: string;
     /**
@@ -6124,7 +6124,7 @@ export type ReadKnowledgeData = {
      */
     connection_ids?: Array<number>;
     /**
-     * Feed IDs to filter by (events.feed_id)
+     * Feed IDs to filter by (events.feed_id, or live source feeds with record)
      */
     feed_ids?: Array<number>;
     /**

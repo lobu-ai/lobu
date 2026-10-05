@@ -41,14 +41,14 @@ export const GetContentSchema = Type.Object({
       },
       {
         description:
-          "A record of a source-backed entity type. Reads its events live from every read feed attributing to the type; stores nothing. Combine only with limit and record_cursor.",
+          "A record of a source-backed entity type. Reads its events live from every read feed attributing to the type; stores nothing. Combine with platforms, connection_ids, feed_ids, limit, and record_cursor. Source filters intersect before reading; empty arrays mean no restriction.",
       }
     )
   ),
   record_cursor: Type.Optional(
     Type.String({
       description:
-        "record_cursor from the preceding record read, to continue it.",
+        "record_cursor from the preceding record read, to continue the same record and source filters. Restart pagination when filters change.",
     })
   ),
   automation_id: Type.Optional(
@@ -70,7 +70,8 @@ export const GetContentSchema = Type.Object({
   ),
   feed_ids: Type.Optional(
     Type.Array(Type.Number(), {
-      description: "Feed IDs to filter by (events.feed_id)",
+      description:
+        "Feed IDs to filter by (events.feed_id, or live source feeds with record)",
     })
   ),
   run_ids: Type.Optional(
