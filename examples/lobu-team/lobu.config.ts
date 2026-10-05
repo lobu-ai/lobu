@@ -273,8 +273,8 @@ const productOps = defineAgent({
     "Summarizes Lobu production activity from organization-owned read-only feeds",
   providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
   tools: {
-    // Script execution uses SDK permissions directly; interactive turns stay tool-free.
-    allowed: [],
+    // Slack follow-ups need read-only diagnostics; the digest runs as a script.
+    allowed: ["search_sdk", "query_sdk", "query_sql", "search_memory"],
     strict: true,
   },
 });

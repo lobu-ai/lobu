@@ -111,7 +111,7 @@ describe("Lobu Team configuration", () => {
       id: "product-ops",
       providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
       tools: {
-        allowed: [],
+        allowed: ["search_sdk", "query_sdk", "query_sql", "search_memory"],
         strict: true,
       },
     });
