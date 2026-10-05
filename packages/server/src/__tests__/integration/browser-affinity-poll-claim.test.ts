@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { generateSecureToken } from '../../auth/oauth/utils';
 import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
+import { BROWSER_GROUP_TITLE_PREFIX } from '../../worker-api/browser-action-context';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestConnectorDefinition } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -565,7 +566,6 @@ describe('browser-affinity poll claim', () => {
     expect(body.action_input).toEqual({
       url: 'https://approved.example/path',
       normal: 'preserved',
-      browser_context_id: 'conversation:abc123def456',
       browser_context_title: 'Owletto · Conversation abc123def456',
       browser_flow_id: 'conversation:abc123def456',
     });
@@ -711,12 +711,11 @@ describe('browser-affinity poll claim', () => {
   });
 
   // Two unparented chrome actions with no stored browser_context: the SDK
-  // path. They must share one visible group (one standalone context id per
-  // organization+connection) while keeping separate per-run flow ids, so ten
-  // SDK navigates are one group with ten independently leased tabs rather than
-  // ten groups. Helper-level coverage cannot see the poll wiring that decides
-  // this, which is the only place the fallback chain is actually exercised.
-  it('gives unparented chrome actions a shared standalone context with per-run flows', async () => {
+  // path. Each is its own actor (its run), so the extension labels their tabs
+  // per run and no group key is sent: tabs are grouped only when an agent asks.
+  // Helper-level coverage cannot see the poll wiring that decides this, which
+  // is the only place the fallback chain is actually exercised.
+  it('stamps unparented chrome actions with their own run as the actor', async () => {
     const { userId, orgId } = await seedOrg();
     await createTestConnectorDefinition({
       key: 'chrome',
@@ -762,18 +761,18 @@ describe('browser-affinity poll claim', () => {
     const first = await pollOne('https://a.example/');
     const second = await pollOne('https://b.example/');
 
-    // One visible group: same context id, in the standalone shape (not run:<id>,
-    // which would mint a group per run — ten SDK navigates, ten groups).
-    expect(first.input.browser_context_id).toBe(second.input.browser_context_id);
-    expect(String(first.input.browser_context_id)).toMatch(/^run:standalone-/);
-    expect(first.input.browser_context_title).toBe(second.input.browser_context_title);
+    // No group key: grouping is the agent's choice (navigate's `group`).
+    expect(first.input).not.toHaveProperty('browser_context_id');
+    expect(first.input.browser_context_title).toBe(
+      `${BROWSER_GROUP_TITLE_PREFIX} · Browser task · ${first.runId}`,
+    );
 
-    // Unshared ownership: each run leases its own tabs under its own flow.
+    // Each run is its own session on the tabs it opens.
     expect(first.input.browser_flow_id).toBe(String(first.runId));
     expect(second.input.browser_flow_id).toBe(String(second.runId));
     expect(first.input.browser_flow_id).not.toBe(second.input.browser_flow_id);
-    // Authorization is the flow lease alone. The gateway sends no holder
-    // mirror, so nothing but browser_flow_id can vouch for a tab.
+    // The gateway sends no holder mirror, so nothing but browser_flow_id names
+    // the session.
     expect(first.input).not.toHaveProperty('holder_run_id');
   });
 });

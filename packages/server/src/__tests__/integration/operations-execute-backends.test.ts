@@ -595,12 +595,12 @@ describe("operations.execute backend lifecycle", () => {
 				actionOrigin: { kind: "automation", label: "Operation provenance automation" },
 			},
 			browser_context: {
-				id: `automation:${sourceRunId}`,
 				title: `${BROWSER_GROUP_TITLE_PREFIX} · Automation ${automationId} · Run ${sourceRunId}`,
 				flow_id: String(sourceRunId),
 				kind: "automation",
 			},
 		});
+		expect(run.run_metadata.browser_context).not.toHaveProperty("id");
 		const reactions = await sql`
 			SELECT run_id FROM automation_reactions
 			WHERE automation_id = ${automationId}

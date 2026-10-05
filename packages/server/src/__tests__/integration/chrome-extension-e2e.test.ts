@@ -155,7 +155,6 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		});
 		let connectionId = connection.id;
 		const context = {
-			id: "run:synthetic-e2e",
 			title: "Lobu · Gateway fixture",
 			kind: "run" as const,
 			flow_id: "synthetic-flow-a",

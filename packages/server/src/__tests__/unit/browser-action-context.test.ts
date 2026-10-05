@@ -5,7 +5,6 @@ import {
   deriveBrowserActionContext,
   deriveSdkBrowserActionContext,
   runScopedBrowserActionContext,
-  standaloneBrowserActionContext,
   trustedChromeActionInput,
 } from '../../worker-api/browser-action-context';
 import type { ToolContext } from '../../tools/registry';
@@ -34,7 +33,6 @@ describe('deriveBrowserActionContext', () => {
         })
       )
     ).toEqual({
-      id: 'automation:42',
       title: `${BROWSER_GROUP_TITLE_PREFIX} · Automation 7 · Run 42`,
       flow_id: '42',
       kind: 'automation',
@@ -63,8 +61,7 @@ describe('deriveBrowserActionContext', () => {
 
     expect(first).toEqual(second);
     expect(first).toMatchObject({ kind: 'conversation' });
-    expect(first?.id).toMatch(/^conversation:[a-f0-9]{12}$/);
-    expect(first?.flow_id).toBe(first?.id);
+    expect(first?.flow_id).toMatch(/^conversation:[a-f0-9]{12}$/);
     expect(JSON.stringify(first)).not.toContain('C123:thread:1712345.678');
   });
 
@@ -96,7 +93,7 @@ describe('deriveBrowserActionContext', () => {
 
     expect(fromHostA).toEqual(fromHostB);
     expect(fromHostA).toMatchObject({ kind: 'mcp' });
-    expect(fromHostA?.id).not.toBe(fromTransport?.id);
+    expect(fromHostA?.flow_id).not.toBe(fromTransport?.flow_id);
     expect(JSON.stringify(fromHostA)).not.toContain(rawHostConversationId);
     expect(fromHostA?.title).not.toContain(rawHostConversationId);
   });
@@ -113,7 +110,7 @@ describe('SDK browser invocation', () => {
     const first = deriveSdkBrowserActionContext(ctx);
     expect(first).not.toBeNull();
     expect(deriveSdkBrowserActionContext({ ...ctx })).toEqual(first);
-    expect(first?.id).toMatch(/^run:sdk-[a-f0-9]{64}$/);
+    expect(first?.flow_id).toMatch(/^sdk-[a-f0-9]{64}$/);
     expect(first?.title).toMatch(
       new RegExp(`^${escapeRe(BROWSER_GROUP_TITLE_PREFIX)} · Check notifications · [a-f0-9]{12}$`)
     );
@@ -185,9 +182,22 @@ describe('SDK browser invocation', () => {
       )
     ).toEqual({
       tab_id: 123,
-      browser_context_id: browser.id,
       browser_context_title: browser.title,
       browser_flow_id: browser.flow_id,
+    });
+  });
+
+  it('reads a context stored before it lost its id, ignoring the id', () => {
+    const stored = {
+      id: 'run:standalone-abc123def456',
+      title: `${BROWSER_GROUP_TITLE_PREFIX} · Browser actions`,
+      flow_id: '1001',
+      kind: 'run',
+    };
+    expect(browserActionContextFromMetadata({ browser_context: stored })).toEqual({
+      title: stored.title,
+      flow_id: '1001',
+      kind: 'run',
     });
   });
 
@@ -239,98 +249,6 @@ describe('page-activation trust stamp', () => {
         trustedChromeActionInput({ tab_id: 7 }, browser, bad)
       ).not.toHaveProperty('activation_tab_id');
     }
-  });
-});
-
-// The gateway is the only party that formats a context title; the extension
-// passes a supplied title through untouched and only bounds its length. So
-// every fixed server fallback must already carry the visible namespace and fit
-// inside the extension's code-point bound.
-//
-// Pinned as a LITERAL on purpose: deriving it from the server's own constant
-// would make the assertion tautological, and this prefix is what users see on
-// every Lobu group. Changing it must fail here rather than silently rebrand.
-const EXTENSION_TITLE_PREFIX = 'Lobu · ';
-const EXTENSION_MAX_TITLE_POINTS = 64;
-
-describe('extension title pass-through contract', () => {
-  const titles = [
-    runScopedBrowserActionContext(Number.MAX_SAFE_INTEGER).title,
-    deriveSdkBrowserActionContext(
-      context({
-        sdkBrowserInvocation: { nonce: 'synthetic-default-title', title: '' },
-      })
-    )!.title,
-    deriveBrowserActionContext(
-      context({
-        actingAutomationId: Number.MAX_SAFE_INTEGER,
-        actingRunId: Number.MAX_SAFE_INTEGER,
-      })
-    )!.title,
-    deriveBrowserActionContext(
-      context({
-        sourceContext: {
-          platform: 'slack',
-          connectionId: 'conn_1',
-          channelId: 'chan_1',
-          conversationId: 'conv_1',
-        },
-      })
-    )!.title,
-    deriveBrowserActionContext(
-      context({
-        tokenType: 'oauth',
-        clientId: 'synthetic-client',
-        mcpSessionId: 'synthetic-session',
-      })
-    )!.title,
-  ];
-
-  it('keeps fixed server titles unchanged by the extension', () => {
-    for (const title of titles) {
-      expect(title).toStartWith(EXTENSION_TITLE_PREFIX);
-      expect([...title].length).toBeLessThanOrEqual(
-        EXTENSION_MAX_TITLE_POINTS
-      );
-    }
-  });
-});
-
-describe('standaloneBrowserActionContext', () => {
-  it('shares one group across unrelated actions on the same browser connection', () => {
-    const first = standaloneBrowserActionContext('org_1', 432, 1001);
-    const second = standaloneBrowserActionContext('org_1', 432, 1002);
-    // Same visible container...
-    expect(first?.id).toBe(second?.id);
-    expect(first?.title).toBe(`${BROWSER_GROUP_TITLE_PREFIX} · Browser actions`);
-    // ...but each run keeps its own flow lease, so neither owns the other's tab.
-    expect(first?.flow_id).toBe('1001');
-    expect(second?.flow_id).toBe('1002');
-  });
-
-  it('separates organizations and connections', () => {
-    const a = standaloneBrowserActionContext('org_1', 432, 1);
-    const b = standaloneBrowserActionContext('org_2', 432, 1);
-    const c = standaloneBrowserActionContext('org_1', 999, 1);
-    expect(new Set([a?.id, b?.id, c?.id]).size).toBe(3);
-  });
-
-  it('carries no raw identifier in the group key', () => {
-    const ctxId = standaloneBrowserActionContext('org_secret', 432, 1)?.id ?? '';
-    expect(ctxId).not.toContain('org_secret');
-    expect(ctxId).toMatch(/^run:standalone-[0-9a-f]{12}$/);
-  });
-
-  it('declines when provenance is missing, so the caller falls back to run scope', () => {
-    expect(standaloneBrowserActionContext(null, 432, 1)).toBeNull();
-    expect(standaloneBrowserActionContext('org_1', null, 1)).toBeNull();
-    expect(standaloneBrowserActionContext('org_1', 432, 0)).toBeNull();
-  });
-
-  it('stays inside the extension title contract', () => {
-    const title = standaloneBrowserActionContext('org_1', 432, 1)?.title ?? '';
-    expect(title.startsWith(EXTENSION_TITLE_PREFIX)).toBe(true);
-    expect([...title].length).toBeLessThanOrEqual(EXTENSION_MAX_TITLE_POINTS);
   });
 });
 
