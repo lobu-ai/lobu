@@ -19,6 +19,7 @@
 
 import { validateEntityRowInsert, validateEntityRowPatch } from '../authz/entity-row-validation';
 import { randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   ACL_RESOURCE_TYPE_SLUG,
   type EntityIdentitySpec,
@@ -893,8 +894,11 @@ async function applyTraits(
 
   // Serialize the metadata read-modify-write with aliases and traits
   // from concurrent connector transactions.
-  const rows = await sql<{ metadata: Record<string, unknown> | null }>`
-    SELECT metadata
+  const rows = await sql<{
+    metadata: Record<string, unknown> | null;
+    field_controls: Record<string, unknown> | null;
+  }>`
+    SELECT metadata, field_controls
     FROM entities
     WHERE id = ${params.entityId}
       AND organization_id = ${params.orgId}
@@ -904,13 +908,23 @@ async function applyTraits(
   if (rows.length === 0) return;
   const current = rows[0].metadata ?? {};
 
-  const next: Record<string, unknown> = { ...current, ...overwrite };
+  const fields: Record<string, unknown> = { ...overwrite };
   for (const [key, value] of Object.entries(preferNonEmpty)) {
     const existing = current[key];
     if (existing === undefined || existing === null || existing === '') {
-      next[key] = value;
+      fields[key] = value;
     }
   }
+
+  // Connector traits obey the same human ownership markers as other automated
+  // writes, including explicitly cleared values. The source event retains the
+  // observation; this ingestion transaction does not create approval proposals.
+  const controls = rows[0].field_controls ?? {};
+  const writableFields = Object.fromEntries(
+    Object.entries(fields).filter(([key]) => !Object.hasOwn(controls, key))
+  );
+  const next = { ...current, ...writableFields };
+  if (isDeepStrictEqual(current, next)) return;
 
   await patchEntityRows({
     tx: sql,
