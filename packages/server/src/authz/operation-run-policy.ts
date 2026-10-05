@@ -57,6 +57,24 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
   return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql });
 }
 
+async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
+  const visibility = compileConnectionRowVisibility({ organizationId, principal: run.created_by_user_id }, 'c');
+  const feeds = await sql.unsafe(`
+    SELECT f.id FROM feeds f JOIN connections c ON c.id = f.connection_id
+    WHERE f.id = $1 AND f.organization_id = $2 AND f.connection_id = $3
+      AND f.status = 'active' AND f.deleted_at IS NULL
+      AND c.connector_key = $4 AND c.status = 'active' AND c.deleted_at IS NULL
+      ${visibility}
+      AND (SELECT cd.feeds_schema->f.feed_key->'operations' ? 'read' FROM connector_definitions cd
+        WHERE cd.key = c.connector_key AND cd.organization_id = f.organization_id
+          AND ((f.pinned_version IS NULL AND cd.status = 'active')
+            OR (f.pinned_version IS NOT NULL AND (cd.version = f.pinned_version OR cd.status = 'active')))
+        ORDER BY (cd.version = f.pinned_version) DESC, (cd.status = 'active') DESC,
+          cd.updated_at DESC, cd.id DESC LIMIT 1)
+  `, [run.feed_id, organizationId, run.connection_id, run.connector_key]);
+  return feeds.length > 0;
+}
+
 /** Resolve execution authority from persisted provenance, never from the worker's input. */
 export async function resolveRunConnectorPolicy(params: {
   organizationId: string;
@@ -72,21 +90,8 @@ export async function resolveRunConnectorPolicy(params: {
       || !run.expires_at || new Date(run.expires_at).getTime() <= Date.now()) return unavailable();
     const actor = await resolveStoredActingPrincipal(sql, params.organizationId, run.policy_principal_kind, run.policy_principal_id);
     if (!actor.ownerResolved) return unavailable();
-    const visibility = compileConnectionRowVisibility({ organizationId: params.organizationId, principal: run.created_by_user_id }, 'c');
-    const feeds = await sql.unsafe(`
-      SELECT f.id FROM feeds f JOIN connections c ON c.id = f.connection_id
-      WHERE f.id = $1 AND f.organization_id = $2 AND f.connection_id = $3
-        AND f.status = 'active' AND f.deleted_at IS NULL
-        AND c.connector_key = $4 AND c.status = 'active' AND c.deleted_at IS NULL
-        ${visibility}
-        AND (SELECT cd.feeds_schema->f.feed_key->'operations' ? 'read' FROM connector_definitions cd
-          WHERE cd.key = c.connector_key AND cd.organization_id = f.organization_id
-            AND ((f.pinned_version IS NULL AND cd.status = 'active')
-              OR (f.pinned_version IS NOT NULL AND (cd.version = f.pinned_version OR cd.status = 'active')))
-          ORDER BY (cd.version = f.pinned_version) DESC, (cd.status = 'active') DESC,
-            cd.updated_at DESC, cd.id DESC LIMIT 1)
-    `, [run.feed_id, params.organizationId, run.connection_id, run.connector_key]);
-    return feeds.length ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
+    return await isSourceReadFeedStillReadable(sql, params.organizationId, run)
+      ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
   }
   // This reserved action is the transport for an already-authorized source feed
   // read. It is deliberately absent from the public connector action catalog.
