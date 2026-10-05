@@ -1,4 +1,8 @@
 import type { DeviceConnectorSpec } from "@lobu/connector-sdk";
+import {
+  macComputerUseActions,
+  withComputerUseStatus,
+} from "./mac-computer-use.js";
 
 /**
  * Canonical TypeScript source for the Mac-only device connector metadata. The
@@ -644,7 +648,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   },
   {
     key: "apple.computer_use",
-    version: "0.1.1",
+    version: "0.2.2",
     name: "Mac Computer Use",
     description:
       "Observe and control this Mac through Lobu for Mac. Uses native macOS Screen Recording and Accessibility APIs in-process. Screenshots/UI trees stay on-device until an explicit action returns them.",
@@ -661,7 +665,8 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
       ],
     },
     feeds: {},
-    actions: {
+    actions: withComputerUseStatus({
+      ...macComputerUseActions,
       permissions: {
         key: "permissions",
         kind: "read",
@@ -1184,6 +1189,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
           additionalProperties: true,
         },
       },
-    },
+    }),
   },
 ];

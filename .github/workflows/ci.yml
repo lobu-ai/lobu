@@ -1786,6 +1786,9 @@ jobs:
     needs: optional-smoke-filter
     if: needs.optional-smoke-filter.outputs.mac == 'true'
     runs-on: macos-15
+    env:
+      # Peekaboo requires Swift 6.2; macos-15 defaults to Xcode 16.4 (Swift 6.1).
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

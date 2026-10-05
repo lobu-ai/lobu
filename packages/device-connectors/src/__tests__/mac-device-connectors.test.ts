@@ -24,6 +24,8 @@ const pinnedManifestHashes: Record<string, string> = {
     "965fe77a4c08c06d6903a2f62540e19fb9f25c2b90c0db7b0de3c7cc973f0de5",
   "apple.computer_use@0.1.1":
     "a1c1b8eb1bb0fe249f9e66e485833750b75beb1c6b4df9839796cb74e2e6e8a4",
+  "apple.computer_use@0.2.2":
+    "3e9bd95c39e1f3c85d6fd19db5e8a2e5be5896a582716bdd05748d3c4d46ab2d",
   "apple.health@0.2.0":
     "95d01cbd942d6af5f201656e2b6ed320e3e6559723ad3f9de619b524451f70e4",
   "apple.photos@0.1.1":
