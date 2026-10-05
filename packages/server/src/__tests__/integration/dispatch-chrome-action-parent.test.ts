@@ -183,8 +183,8 @@ describe('dispatchChromeAction parent run authorization', () => {
       });
       expect(child.run_metadata).toEqual({
         [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
+        // The parent was stored with the retired `id`; the child is not.
         browser_context: {
-          id: 'automation:700',
           title: 'Owletto · Automation 700',
           flow_id: String(parentRunId),
           kind: 'automation',

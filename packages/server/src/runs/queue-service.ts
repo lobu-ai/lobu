@@ -1563,10 +1563,12 @@ export async function createConnectorOperationRun(params: {
         ? prior.run_metadata.browser_context
         : null;
     const requestedBrowserContext = params.runMetadata?.browser_context ?? null;
-    // Display titles are not identity: the same flow may re-request with a new subject.
+    // A browser context's identity is its flow and kind. The title is display
+    // only (the same flow may re-request with a new subject), and runs stored
+    // before the context lost its `id` still carry one.
     const browserIdentity = (context: unknown) => {
-      const { title: _title, ...identity } = context as Record<string, unknown>;
-      return stableJson(identity);
+      const { flow_id, kind } = context as Record<string, unknown>;
+      return stableJson({ flow_id, kind });
     };
     const compatibleBrowserContext =
       priorBrowserContext == null ||
@@ -1595,7 +1597,10 @@ export async function createConnectorOperationRun(params: {
           ? sql`TRUE`
           : sql`(
               run_metadata->'browser_context' IS NULL
-              OR ((run_metadata->'browser_context') - 'title') = (${sql.json(requestedBrowserContext)}::jsonb - 'title')
+              OR (
+                run_metadata->'browser_context'->'flow_id' = ${sql.json(requestedBrowserContext)}::jsonb->'flow_id'
+                AND run_metadata->'browser_context'->'kind' = ${sql.json(requestedBrowserContext)}::jsonb->'kind'
+              )
             )`;
       const hydrated = await sql`
         UPDATE runs
