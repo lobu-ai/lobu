@@ -104,29 +104,32 @@ function onResubscribed(): void {
 }
 
 /**
- * Start this replica's LISTEN once. Resolves after the subscription is live
- * (or after it failed — local `emit()` delivery still works then), so a
- * stream that awaits it before telling its client "connected" cannot miss a
- * NOTIFY between the client's initial read and the subscription.
+ * Start this replica's LISTEN once. Resolves only after the subscription is
+ * live, so a stream that awaits it before telling its client "connected"
+ * cannot miss a NOTIFY between the client's initial read and the
+ * subscription. Rejects when LISTEN fails, and the next caller retries.
  */
 export function ensureInvalidationListener(): Promise<void> {
-  listening ??= (async () => {
-    let subscribed = false;
-    try {
-      await getDbListener().listen(CHANNEL, onNotify, () => {
+  let subscribed = false;
+  // `.then` defers getDbListener(), so even a synchronous throw reaches the
+  // reset below only after `listening` was assigned, and the reset sticks.
+  listening ??= Promise.resolve()
+    .then(() =>
+      getDbListener().listen(CHANNEL, onNotify, () => {
         // postgres-js calls this on the first subscribe and again after every
         // reconnect; only the reconnect crossed a gap.
         if (subscribed) onResubscribed();
         subscribed = true;
-      });
-    } catch (err) {
-      listening = null;
-      logger.error(
-        { err },
-        'Invalidation LISTEN failed; cross-replica cache invalidation disabled on this replica'
-      );
-    }
-  })();
+      })
+    )
+    .then(
+      () => undefined,
+      (err: unknown) => {
+        listening = null;
+        logger.error({ err }, 'Invalidation LISTEN failed; failing the stream so the client retries');
+        throw err;
+      }
+    );
   return listening;
 }
 
