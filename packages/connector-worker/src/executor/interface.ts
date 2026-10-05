@@ -150,6 +150,7 @@ export type ExecutorResult =
   | {
       mode: 'read';
       rows: Record<string, unknown>[];
+      rowCursors?: string[];
       columns?: { name: string; type: string }[];
       total?: number;
       nextCursor?: string;

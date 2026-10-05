@@ -1041,9 +1041,8 @@ export interface FeedReadContext<F = Record<string, unknown>> {
   /**
    * Exact-value filter on one of the feed's declared `matchPaths`. A matched
    * read pages only by `nextCursor`: a result without one is the last page.
-   * Make it a keyset cursor (resume strictly after the page's last row in the
-   * feed's order), not an offset, so a source changing between requests
-   * neither repeats nor skips a row.
+   * Source-native page tokens are supported. Merged record activity also
+   * needs `FeedReadResult.rowCursors` to resume a partially consumed page.
    */
   match?: FeedReadMatch;
 }
@@ -1055,6 +1054,13 @@ export interface FeedReadMatch {
 
 export interface FeedReadResult {
   rows: Record<string, unknown>[];
+  /**
+   * Optional exact resume token after each row, in the same order as `rows`.
+   * Supply only when the source can seek past a stable row key even if that
+   * row is deleted. Enables merging partially consumed pages across feeds.
+   * Ordinary page-token readers omit this; never synthesize it from offsets.
+   */
+  rowCursors?: string[];
   columns?: { name: string; type: string }[];
   total?: number;
   /** Source-native continuation token. The platform wraps this before exposing it. */

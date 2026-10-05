@@ -8,6 +8,7 @@ import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { manageEntity } from '../../../tools/admin/manage_entity';
+import { manageFeeds } from '../../../tools/admin/manage_feeds';
 import { getContent } from '../../../tools/get_content';
 import type { ToolContext } from '../../../tools/registry';
 import { compileConnectorSource, extractConnectorMetadata } from '../../../utils/connector-compiler';
@@ -57,10 +58,10 @@ const SOURCE = `
         },
         read: async (ctx) => {
           const matched = ROWS.filter((row) => !ctx.match || ctx.match.values.includes(String(at(row, ctx.match.path))));
-          const start = ctx.cursor ? matched.findIndex((row) => row.origin_id === ctx.cursor) + 1 : 0;
-          const page = matched.slice(start, start + (ctx.limit ?? 50));
-          const more = start + page.length < matched.length;
-          return { rows: page, ...(more ? { nextCursor: page[page.length - 1].origin_id } : {}) };
+          const remaining = matched.filter((row) => !ctx.cursor || row.origin_id < ctx.cursor);
+          const page = remaining.slice(0, ctx.limit ?? 50);
+          const more = page.length < remaining.length;
+          return { rows: page, rowCursors: page.map((row) => row.origin_id), ...(more ? { nextCursor: page[page.length - 1].origin_id } : {}) };
         },
       },
     },
@@ -72,6 +73,7 @@ describe('source-backed record reads', () => {
   let owner: ToolContext;
   let member: ToolContext;
   let privateConnectionId: number;
+  let feedId: number;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -105,10 +107,12 @@ describe('source-backed record reads', () => {
       RETURNING id
     `;
     privateConnectionId = Number(connection.id);
-    await sql`
+    const [feed] = await sql`
       INSERT INTO feeds (organization_id, connection_id, feed_key, display_name, status, config, created_at, updated_at)
       VALUES (${orgId}, ${privateConnectionId}, 'timeline', 'Timeline', 'active', ${sql.json({})}, NOW(), NOW())
+      RETURNING id
     `;
+    feedId = Number(feed.id);
     for (const slug of ['company', 'person']) {
       await sql`
         INSERT INTO entity_types (organization_id, slug, name, backing_sql, created_at, updated_at)
@@ -151,6 +155,16 @@ describe('source-backed record reads', () => {
     expect(page.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e4', 'e2', 'e1']);
     expect(page.page.has_more).toBe(false);
     expect(page.record_cursor).toBeUndefined();
+  }, 60_000);
+
+  it('keeps internal row checkpoints out of the public feed-read response', async () => {
+    const result = await manageFeeds({
+      action: 'read_feeds',
+      reads: [{ feed_id: feedId, limit: 2, match: { path: 'metadata.company_id', values: ['c1'] } }],
+    }, {} as Env, owner);
+    expect(result).toMatchObject({ results: [{ ok: true, rows: [{ origin_id: 'e4' }, { origin_id: 'e2' }] }] });
+    expect(result).not.toHaveProperty('results.0.row_cursors');
+    expect(result).not.toHaveProperty('results.0.rowCursors');
   }, 60_000);
 
   it('reads relationships both ways from the declaring event kind', async () => {

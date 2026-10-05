@@ -214,6 +214,7 @@ export interface ReadSourceFeedParams {
 /** Result from {@link readSourceFeed} — live rows, never persisted. */
 export interface ReadSourceFeedResult {
   rows: Record<string, unknown>[];
+  rowCursors?: string[];
   columns: { name: string; type: string }[];
   total?: number;
   nextCursor?: string;
@@ -563,6 +564,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     }
     const page = finish({
       rows: result.rows,
+      rowCursors: result.rowCursors,
       columns: result.columns ?? [],
       total: result.total,
       nextCursor: result.nextCursor,

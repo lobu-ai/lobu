@@ -134,65 +134,18 @@ async function loadSourceFeeds(
     );
 }
 
-/**
- * Where one stream resumes: the source cursor of the page it is in (none for
- * the first page), the last row of that page already consumed (`a`), and how
- * many rows that was (`s`, only a hint for how much to re-read). The page is
- * re-read, so resuming keys on the row, not the count: a row inserted or
- * deleted since the last request neither repeats nor skips one.
- */
-interface StreamPosition {
-  c?: string;
-  s: number;
-  a?: { t: string; id: string };
-}
-
-/** Index of the first row after `after` in a re-read page. */
-function resumeIndex(
-  rows: Array<Record<string, unknown>>,
-  after: StreamPosition["a"]
-): number {
-  if (!after) return 0;
-  const anchor = after.id
-    ? rows.findIndex((row) => String(row.origin_id ?? "") === after.id)
-    : -1;
-  if (anchor >= 0) return anchor + 1;
-  // The anchor row is gone: resume at the first row not newer than it. A
-  // tie may repeat, but no unread row is skipped.
-  const index = rows.findIndex((row) => occurredAt(row) <= after.t);
-  return index < 0 ? rows.length : index;
-}
-
+/** One exact source cursor per stream; null means its first page. */
 function decodeCursor(
   cursor: string | undefined
-): Record<string, StreamPosition> | null {
+): Record<string, string | null> | null {
   if (!cursor) return null;
   try {
-    const parsed = JSON.parse(
-      Buffer.from(cursor, "base64url").toString("utf8")
-    ) as unknown;
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
     if (
-      parsed &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
+      parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
       Object.keys(parsed).length > 0 &&
-      Object.values(parsed).every(
-        (value) =>
-          value &&
-          typeof value === "object" &&
-          Number.isSafeInteger(value.s) &&
-          value.s >= 0 &&
-          (value.c === undefined ||
-            (typeof value.c === "string" && value.c.length > 0)) &&
-          (value.a === undefined ||
-            (value.a &&
-              typeof value.a === "object" &&
-              typeof value.a.t === "string" &&
-              typeof value.a.id === "string"))
-      )
-    ) {
-      return parsed as Record<string, StreamPosition>;
-    }
+      Object.values(parsed).every((value) => value === null || (typeof value === "string" && value.length > 0))
+    ) return parsed;
   } catch {}
   throw new ToolUserError("Invalid record activity cursor", 400);
 }
@@ -227,9 +180,9 @@ function activityStreams(feeds: SourceFeed[], type: string) {
 /**
  * One page of a record's events across every attributing read feed, newest
  * first and at most `limit` long. Streams are merged by occurred_at; the
- * cursor keeps each stream's position, including rows it read but did not
- * return, so no row is skipped. A failing feed is reported, never shown as
- * "no activity", and resumes where it stopped.
+ * cursor resumes each stream after its last consumed row. Unconsumed rows
+ * stay at the source; no page buffers or deleted-anchor recovery are needed.
+ * A failing feed is reported, never shown as "no activity", and resumes where it stopped.
  */
 export async function readSourceRecordActivity(
   scope: AuthzScope,
@@ -239,43 +192,37 @@ export async function readSourceRecordActivity(
   const feeds = await loadSourceFeeds(scope, record.type);
   const resume = decodeCursor(options.cursor);
   const reads = activityStreams(feeds, record.type).flatMap((read) => {
-    const position = resume ? resume[read.stream] : { s: 0 };
-    return position ? [{ ...read, position }] : [];
+    const cursor = resume ? resume[read.stream] : null;
+    return cursor !== undefined ? [{ ...read, cursor }] : [];
   });
 
   const failures: SourceReadFailure[] = [];
-  const next: Record<string, StreamPosition> = {};
+  const next: Record<string, string | null> = {};
   const pages = (
     await Promise.all(
-      reads.map(async ({ feed, path, stream, position }) => {
+      reads.map(async ({ feed, path, stream, cursor }) => {
         try {
           const page = await readSourceFeedPage(
             {
               feed_id: feed.feedId,
               match: { path, values: [record.key] },
-              limit: position.s + options.limit,
-              cursor: position.c,
+              limit: options.limit,
+              cursor: cursor ?? undefined,
             },
             READ_TIMEOUT_MS,
             scope,
             options.signal
           );
-          return [
-            {
-              feed,
-              path,
-              stream,
-              position,
-              page,
-              taken: resumeIndex(page.rows, position.a),
-            },
-          ];
+          if (page.rows.length > 0 && !page.row_cursors) {
+            throw new Error("This feed cannot resume after individual rows; merged record activity requires exact row cursors.");
+          }
+          return [{ feed, path, stream, cursor, page, taken: 0 }];
         } catch (error) {
           failures.push({
             feed_id: feed.feedId,
             error: getErrorMessage(error),
           });
-          next[stream] = position;
+          next[stream] = cursor;
           return [];
         }
       })
@@ -351,33 +298,12 @@ export async function readSourceRecordActivity(
     });
   }
 
-  for (const { stream, position, page, taken } of pages) {
-    const anchor = position.a;
-    const pastAnchor =
-      !anchor ||
-      page.rows.some(
-        (row) =>
-          String(row.origin_id ?? "") === anchor.id ||
-          occurredAt(row) <= anchor.t
-      );
+  for (const { stream, cursor, page, taken } of pages) {
     if (taken < page.rows.length) {
-      const last = taken > 0 ? page.rows[taken - 1] : undefined;
-      next[stream] = {
-        c: position.c,
-        s: taken,
-        ...(last
-          ? { a: { t: occurredAt(last), id: String(last.origin_id ?? "") } }
-          : {}),
-      };
-    }
-    else if (page.next_cursor) {
-      // A page holding only rows newer than the anchor did not reach it yet;
-      // the next page keeps skipping until it does.
-      next[stream] = {
-        c: page.next_cursor,
-        s: 0,
-        ...(pastAnchor ? {} : { a: anchor }),
-      };
+      next[stream] = taken > 0 ? page.row_cursors![taken - 1] : cursor;
+    } else if (page.next_cursor) {
+      // Provider page tokens may use offsets even when exact row checkpoints exist.
+      next[stream] = taken > 0 ? page.row_cursors![taken - 1] : page.next_cursor;
     }
   }
   return {

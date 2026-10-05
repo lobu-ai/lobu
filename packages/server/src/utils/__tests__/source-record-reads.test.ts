@@ -66,6 +66,7 @@ afterAll(() => {
 
 it("does not attribute another event kind just because it shares an identity path", async () => {
   readPage.mockResolvedValue({
+    row_cursors: ["valid", "unrelated"],
     rows: [
       {
         origin_id: "valid",
@@ -103,7 +104,7 @@ it("does not invent relationships for an event with no declaring kind", async ()
 it.each([
   {},
   { "1:metadata.account_id": 1 },
-  { "1:metadata.account_id": null },
+  { "1:metadata.account_id": {} },
 ])("rejects malformed cursor streams: %j", async (cursor) => {
   await expect(
     reads.readSourceRecordActivity(scope, record, {
@@ -123,6 +124,7 @@ it("keeps a failed stream in the continuation so a retry resumes it", async () =
   expect(failed.next_cursor).toBeDefined();
 
   readPage.mockResolvedValueOnce({
+    row_cursors: ["valid"],
     rows: [
       {
         origin_id: "valid",
@@ -152,16 +154,22 @@ const linked = (origin_id: string, occurred_at: string, contact_id = "c1") => ({
   metadata: { account_id: "a1", contact_id },
 });
 
-/** A source that pages its rows by offset, at most two per page. */
+/** A source-native keyset remains valid after its last row is deleted. */
+function sourcePage(rows: Array<Record<string, unknown>>, limit: number, cursor?: string) {
+  const key = (row: Record<string, unknown>) => [String(row.occurred_at ?? ""), String(row.origin_id)];
+  const after = cursor ? JSON.parse(Buffer.from(cursor, "base64url").toString()) as string[] : null;
+  const remaining = rows.filter((row) => {
+    const [time, id] = key(row);
+    return !after || time < after[0] || (time === after[0] && id < after[1]);
+  });
+  const page = remaining.slice(0, Math.min(limit, 2));
+  const cursors = page.map((row) => Buffer.from(JSON.stringify(key(row))).toString("base64url"));
+  return { rows: page, row_cursors: cursors, ...(remaining.length > page.length ? { next_cursor: cursors.at(-1) } : {}) };
+}
+
 function pagedSource(rowsByFeed: Record<number, Array<Record<string, unknown>>>) {
-  readPage.mockImplementation(
-    async (read: { feed_id: number; limit: number; cursor?: string }) => {
-      const rows = rowsByFeed[read.feed_id] ?? [];
-      const offset = read.cursor ? Number(read.cursor) : 0;
-      const page = rows.slice(offset, offset + Math.min(read.limit, 2));
-      const end = offset + page.length;
-      return { rows: page, ...(end < rows.length ? { next_cursor: String(end) } : {}) };
-    }
+  readPage.mockImplementation(async (read: { feed_id: number; limit: number; cursor?: string }) =>
+    sourcePage(rowsByFeed[read.feed_id] ?? [], read.limit, read.cursor)
   );
 }
 
@@ -254,11 +262,11 @@ it("returns an event reachable through two of the record's paths once across pag
     occurred_at: "2026-01-05T00:00:00Z",
     metadata: { account_id: "a1", parent_id: "a1" },
   };
-  readPage.mockImplementation(async (read: { match: { path: string } }) => ({
-    rows: read.match.path === "metadata.parent_id"
+  readPage.mockImplementation(async (read: { match: { path: string }; limit: number; cursor?: string }) => sourcePage(
+    read.match.path === "metadata.parent_id"
       ? [both, { ...both, origin_id: "parent-only", occurred_at: "2026-01-01T00:00:00Z", metadata: { account_id: "a9", parent_id: "a1" } }]
-      : [both],
-  }));
+      : [both], read.limit, read.cursor,
+  ));
   const seen: string[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < 5; page += 1) {
@@ -307,10 +315,7 @@ it("neither repeats nor skips a row when the source changes between pages", asyn
   feeds = [feed, { ...feed, feed_id: 2 }];
   const a = [linked("a10", "2026-01-10T00:00:00Z"), linked("a8", "2026-01-08T00:00:00Z")];
   const b = [linked("b9", "2026-01-09T00:00:00Z"), linked("b7", "2026-01-07T00:00:00Z")];
-  // A keyset-like source: every read returns the current rows from the top.
-  readPage.mockImplementation(async (read: { feed_id: number; limit: number }) => ({
-    rows: (read.feed_id === 1 ? a : b).slice(0, read.limit),
-  }));
+  pagedSource({ 1: a, 2: b });
   const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
   expect(first.events.map((event) => event.origin_id)).toEqual(["a10", "b9"]);
 
@@ -335,7 +340,6 @@ it("keeps its place when new rows push the last returned row past the re-read pa
     1: [linked("a10", "2026-01-10T00:00:00Z"), linked("a8", "2026-01-08T00:00:00Z"), linked("a6", "2026-01-06T00:00:00Z")],
     2: [linked("b9", "2026-01-09T00:00:00Z"), linked("b7", "2026-01-07T00:00:00Z")],
   };
-  // Offset pages over the source's current rows, re-read from the top.
   pagedSource(rows);
   const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
   expect(first.events.map((event) => event.origin_id)).toEqual(["a10", "b9"]);
@@ -355,28 +359,71 @@ it("keeps its place when new rows push the last returned row past the re-read pa
   expect(seen).toEqual(["a10", "b9", "a8", "b7", "a6"]);
 });
 
-/** A keyset source: the cursor is the last returned origin_id. */
-function keysetSource(rows: Array<Record<string, unknown>>) {
-  readPage.mockImplementation(async (read: { limit: number; cursor?: string }) => {
-    const start = read.cursor ? rows.findIndex((row) => row.origin_id === read.cursor) + 1 : 0;
-    const page = rows.slice(start, start + Math.min(read.limit, 2));
-    return {
-      rows: page,
-      ...(start + page.length < rows.length ? { next_cursor: String(page[page.length - 1].origin_id) } : {}),
-    };
-  });
-}
-
 it.each([
   ["a newer row is inserted", (rows: Array<Record<string, unknown>>) => rows.unshift(linked("e5", "2026-01-05T00:00:00Z"))],
   ["a returned row is deleted", (rows: Array<Record<string, unknown>>) => rows.shift()],
 ])("pages a keyset source exactly once across a full page boundary when %s", async (_case, mutate) => {
   const rows = ["e4", "e3", "e2", "e1"].map((id, index) => linked(id, `2026-01-0${4 - index}T00:00:00Z`));
-  keysetSource(rows);
+  pagedSource({ 1: rows });
   const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
   expect(first.events.map((event) => event.origin_id)).toEqual(["e4", "e3"]);
   mutate(rows);
   const second = await reads.readSourceRecordActivity(scope, record, { limit: 2, cursor: first.next_cursor });
   expect(second.events.map((event) => event.origin_id)).toEqual(["e2", "e1"]);
   expect(second.next_cursor).toBeUndefined();
+});
+
+it("resumes a partially consumed stream after a deleted anchor among equal timestamps", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  const rows = {
+    1: ["a3", "a2", "a1"].map((id) => linked(id, "2026-01-01T00:00:00Z")),
+    2: [linked("b1", "2026-01-02T00:00:00Z")],
+  };
+  readPage.mockImplementation(async (read: { feed_id: 1 | 2; limit: number; cursor?: string }) => {
+    const remaining = rows[read.feed_id].filter((row) => !read.cursor || row.origin_id < read.cursor);
+    const page = remaining.slice(0, read.limit);
+    return {
+      rows: page,
+      row_cursors: page.map((row) => row.origin_id),
+      ...(remaining.length > page.length ? { next_cursor: page.at(-1)!.origin_id } : {}),
+    };
+  });
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 3 });
+  expect(first.events.map((event) => event.origin_id)).toEqual(["b1", "a3", "a2"]);
+  rows[1].splice(1, 1);
+  const second = await reads.readSourceRecordActivity(scope, record, { limit: 3, cursor: first.next_cursor });
+  expect(second.events.map((event) => event.origin_id)).toEqual(["a1"]);
+  expect(second.next_cursor).toBeUndefined();
+});
+
+it.each([
+  ["a newer row is inserted", (rows: Array<Record<string, unknown>>) => rows.unshift(linked("e5", "2026-01-05T00:00:00Z"))],
+  ["the last returned row is deleted", (rows: Array<Record<string, unknown>>) => rows.splice(1, 1)],
+])("uses row checkpoints instead of provider offsets at full page boundaries when %s", async (_case, mutate) => {
+  const rows = ["e4", "e3", "e2", "e1"].map((id, index) => linked(id, `2026-01-0${4 - index}T00:00:00Z`));
+  readPage.mockImplementation(async (read: { limit: number; cursor?: string }) => {
+    const remaining = read.cursor?.startsWith("offset:")
+      ? rows.slice(Number(read.cursor.slice("offset:".length)))
+      : rows.filter((row) => !read.cursor || row.origin_id < read.cursor);
+    const page = remaining.slice(0, read.limit);
+    return {
+      rows: page,
+      row_cursors: page.map((row) => row.origin_id),
+      ...(remaining.length > page.length ? { next_cursor: `offset:${rows.length - remaining.length + page.length}` } : {}),
+    };
+  });
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
+  expect(first.events.map((event) => event.origin_id)).toEqual(["e4", "e3"]);
+  mutate(rows);
+  const second = await reads.readSourceRecordActivity(scope, record, { limit: 2, cursor: first.next_cursor });
+  expect(second.events.map((event) => event.origin_id)).toEqual(["e2", "e1"]);
+  expect(second.next_cursor).toBeUndefined();
+});
+
+it("reports page-only feeds as unsupported for merged activity without breaking their read path", async () => {
+  readPage.mockResolvedValue({ rows: [linked("e1", "2026-01-01T00:00:00Z")], next_cursor: "provider-page-2" });
+  const result = await reads.readSourceRecordActivity(scope, record, { limit: 2 });
+  expect(result.events).toEqual([]);
+  expect(result.failures).toEqual([{ feed_id: 1, error: expect.stringContaining("exact row cursors") }]);
+  expect(result.next_cursor).toBeDefined();
 });

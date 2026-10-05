@@ -328,6 +328,7 @@ const GUEST_RUNNER = String.raw`
       });
       return {
         mode: 'read', rows: (readResult && readResult.rows) || [], columns: readResult && readResult.columns,
+        rowCursors: readResult && readResult.rowCursors,
         total: readResult && readResult.total, nextCursor: readResult && readResult.nextCursor, hasMore: readResult && readResult.hasMore,
         window: readResult && readResult.window
       };

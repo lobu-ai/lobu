@@ -158,6 +158,11 @@ export async function readSourceFeedPage(
       throw new Error('Source reader returned malformed rows.');
     }
     if (result.rows.length > limit) throw new Error('Source reader exceeded the requested page limit.');
+    if (result.rowCursors !== undefined && (
+      !Array.isArray(result.rowCursors) || result.rowCursors.length !== result.rows.length ||
+      result.rowCursors.some((cursor) => typeof cursor !== 'string' || !cursor.trim() || cursor === page.sourceCursor) ||
+      new Set(result.rowCursors).size !== result.rowCursors.length
+    )) throw new Error('Source reader returned malformed row cursors.');
     if (result.nextCursor !== undefined &&
         (typeof result.nextCursor !== 'string' || !result.nextCursor.trim())) {
       throw new Error('Source reader returned a malformed continuation cursor.');
@@ -193,6 +198,9 @@ export async function readSourceFeedPage(
       feed_id: read.feed_id,
       ok: true as const,
       rows: result.rows,
+      row_cursors: result.rowCursors?.map((cursor, index) => encodeSourceCursor(
+        read.feed_id, page.position + index + 1, read.query, read.sort, cursor, read.window, read.match,
+      )),
       columns: result.columns,
       window: result.window,
       sourceRevision: result.sourceRevision,
